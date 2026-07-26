@@ -741,10 +741,15 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   font-size: var(--kd-size-sm);
   font-weight: 700;
 }
+/* 统计是**次要**信息：它先缩、先出省略号，绝不占用主角的位置 */
 .kd-list-note {
   color: var(--kd-faint);
   font-size: var(--kd-size-xs);
+  flex: 0 1 auto;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* 搜索失败时这行摘要就地变成错误文案：另起一行会把列表顶得跳一下 */
 .kd-list-note[data-error="true"] {
@@ -753,6 +758,13 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
 .kd-list-tabs {
   display: flex;
   height: 100%;
+  /* 标签是这一行的**主角**（切曲库/搜索是最常用的动作）。
+     不许缩、不许换行——上一版没写，结果统计那串次要文字把整行吃满，
+     主角反而被压成「曲 库」「搜 索」两行竖排。 */
+  flex: none;
+}
+.kd-list-tabs > button {
+  white-space: nowrap;
 }
 .kd-list-tabs > button {
   height: 100%;
@@ -766,9 +778,14 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   cursor: pointer;
 }
 /* 激活态不再画红下划线：亮字 + 中性底就够了，红色留给动作按钮 */
+/* 选中态用红底白字，而不是原来那块灰。
+   曲库/搜索是这个软件最重要的一个开关——"我现在看的是本地还是网上"，
+   灰底和没选中几乎分不出来，看错一次就会对着搜索结果找自己的歌。
+   这里破一次"红色只给动作"：它标的是当前所在位置，重要性够格。 */
 .kd-list-tabs > button[aria-pressed="true"] {
-  color: var(--kd-text);
-  background: var(--kd-selected);
+  color: var(--kd-theme-ink);
+  background: var(--kd-theme);
+  font-weight: 700;
 }
 .kd-list-tabs > button:hover:not([aria-pressed="true"]) {
   color: var(--kd-text);
@@ -1444,43 +1461,11 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
 /* ============================================================
  * 账号行（登录弹窗用；整页设置已删除）
  * ========================================================== */
-.kd-set-row {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 1.5rem;
-  padding: 0.55rem 0;
-  border-bottom: 1px solid var(--kd-line-soft);
-}
-.kd-set-text {
-  flex: 1;
-  min-width: 0;
-}
-.kd-set-label {
-  color: var(--kd-text);
-  font-size: var(--kd-size-sm);
-}
-.kd-set-hint {
-  color: var(--kd-faint);
-  font-size: var(--kd-size-xs);
-  line-height: 1.4;
-}
-/* 未登录/过期用暖色提示，但只染这几个字，不做整块的彩色标签 */
-.kd-set-hint [data-state="expired"],
-.kd-set-hint [data-state="missing"] {
-  color: var(--kd-warn);
-}
-.kd-set-hint [data-state="valid"] {
-  color: var(--kd-ok, var(--kd-muted));
-}
-.kd-set-control {
-  flex: none;
-  width: 15rem;
-}
-.kd-set-control > .kd-input,
-.kd-set-control > .kd-select {
-  width: 100%;
-}
+/* `.kd-set-*` 那套整块删了。它是给已经删掉的「整页设置」写的，
+   右列写死 `width: 15rem`，而唯一还在用它的账号面板住在 ~350px 的详情栏里——
+   240px 一被右列吃掉，「网易云音乐」就被压成一列一个字。
+   只删那一行 width 是不够的：留着这套类，下一个人还会照着用，
+   然后在别的宽度里重演一遍。排版规则现在写在 AccountRow.tsx 的 settingRow 里。 */
 /* 头像位：是个常驻的占位块，有图才往里塞 <img>。
    登录前后左边留白一样宽，几行平台名不会因为谁有头像而错开。
    28px 比原来的 22px 大一点——两行文字（平台名 + 状态）的行高就是 28 上下，
@@ -2310,20 +2295,26 @@ textarea.kd-searchbar-input {
 }
 .kd-player-title[data-marquee="true"] > span {
   display: inline-block;
-  padding-right: 2.5rem; /* 尾巴和重新出现的头之间留一段，不然读起来是连着的 */
-  animation: kd-marquee 12s linear infinite;
+  /* 时长和位移都用 PlayerBar 量出来的真实溢出量（--kd-marquee-*）：
+     固定 12s 的话，570px 的曲名和 260px 的曲名速度差好几倍。
+     **不能再加 padding-right**——量出来的溢出量不含它，留着会多滚一截空白。 */
+  animation: kd-marquee var(--kd-marquee-time, 12s) linear infinite;
 }
 .kd-player-title[data-marquee="true"]:hover > span {
   animation-play-state: paused; /* 想看清全名时把鼠标停上去 */
 }
+/* 两端各停一会儿再走——停顿是留给人读字的，一直匀速滑没法看清开头 */
 @keyframes kd-marquee {
   0%,
-  12% {
+  15% {
     transform: translateX(0);
   }
-  88%,
+  50%,
+  65% {
+    transform: translateX(var(--kd-marquee-shift, 0));
+  }
   100% {
-    transform: translateX(calc(-100% + 100px));
+    transform: translateX(0);
   }
 }
 
@@ -2364,4 +2355,12 @@ textarea.kd-searchbar-input {
    PanelStack 之外的 .kd-panel 不该平白多一截缩进。 */
 .kd-panel-slot > .kd-panel > .kd-panel-head {
   padding-left: 1.35rem;
+}
+
+/* 圆形播放键。**整份样式唯一一处主动破"零圆角"的地方**：
+   零圆角是给面板和输入框定的调子，而播放键是一颗按钮形态的物件，
+   方的看着像个色块，圆的才读得出"这是可以按的"。
+   这条被改版误删过一次，删了的表现就是它变回红方块。 */
+.kd-player-go {
+  border-radius: 50% !important;
 }
