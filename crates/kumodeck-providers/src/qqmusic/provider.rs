@@ -24,8 +24,8 @@ use super::client::{new_search_id, Credential, QqClient, QqPlatform};
 use super::login;
 use crate::net::{host_is, AtomicDownload};
 use crate::provider::{
-    qr_data_url_from_png, remove_existing, Capabilities, DownloadJob, MusicProvider,
-    ProviderContext,
+    effective_limit, first_truthy, is_truthy, loose_int, qr_data_url_from_png, remove_existing,
+    str_field, Capabilities, DownloadJob, MusicProvider, ProviderContext,
 };
 use crate::tags;
 
@@ -147,27 +147,32 @@ impl QqMusicProvider {
                 .cloned()
                 .unwrap_or_default();
             if page == 0 {
-                if let Some(found) = data
-                    .get("dirinfo")
-                    .and_then(|info| info.get("title"))
-                    .or_else(|| data.get("dirinfo").and_then(|info| info.get("dirname")))
-                    .and_then(Value::as_str)
-                    .filter(|text| !text.is_empty())
-                {
+                // Python 是 `info.title or info.dirname or info.dissname or 默认`：
+                // 空串要继续往后退，不能停在第一个存在的键上。
+                if let Some(found) = data.get("dirinfo").and_then(|info| {
+                    str_field(info, "title")
+                        .or_else(|| str_field(info, "dirname"))
+                        .or_else(|| str_field(info, "dissname"))
+                }) {
                     title = found.to_string();
                 }
-                total = data
-                    .get("total_song_num")
-                    .or_else(|| data.get("total"))
-                    .and_then(Value::as_u64)
-                    .map(|value| value as usize);
+            }
+            // Python 每翻一页都刷新 total（`total = int(raw_total) if raw_total > 0 else total`）：
+            // 首页偶尔不带总数，只在 page==0 读会让"够了就停"这条终止条件永远失效。
+            let page_total = data
+                .get("total_song_num")
+                .or_else(|| data.get("total"))
+                .map(|value| loose_int(Some(value)))
+                .filter(|value| *value > 0)
+                .map(|value| value as usize);
+            if page_total.is_some() {
+                total = page_total;
             }
             let empty = songs.is_empty();
-            tracks.extend(
-                songs
-                    .into_iter()
-                    .filter(|song| song.get("mid").is_some() || song.get("id").is_some()),
-            );
+            // Python 是 `if song.get("mid") or song.get("id")`——**真值判断**。
+            // 用 `is_some()` 的话 `{"mid": ""}` 这种占位条目会被留下，
+            // 归一化后 key 是空串，那首歌点下载必然失败。
+            tracks.extend(songs.into_iter().filter(has_song_key));
 
             let hasmore = data
                 .get("hasmore")
@@ -374,17 +379,36 @@ impl MusicProvider for QqMusicProvider {
     }
 
     async fn account(&self) -> Account {
-        let credential = self.client.credential();
+        let mut credential = self.client.credential();
         if !credential.is_present() {
             return Account::new(Platform::Qqm, LABEL, AccountState::Missing, "未登录");
         }
-        if credential.is_expired() {
+        // 接口已经明说过这份凭证死了，别再显示"已登录"
+        if self.client.credential_invalid() {
             return Account::new(
                 Platform::Qqm,
                 LABEL,
                 AccountState::Expired,
-                "登录凭证已过期，请重新扫码",
+                "登录凭证已失效，请重新扫码",
             );
+        }
+        if credential.is_expired() {
+            // 本地判断过期先静默刷一次，刷不动才算真掉线
+            match self.client.refresh_credential().await {
+                Ok(refreshed) => {
+                    *self.profile.lock().unwrap() = None;
+                    credential = refreshed;
+                }
+                Err(err) => {
+                    tracing::warn!("刷新 QQ 音乐凭证失败：{err:#}");
+                    return Account::new(
+                        Platform::Qqm,
+                        LABEL,
+                        AccountState::Expired,
+                        "登录凭证已过期，请重新扫码",
+                    );
+                }
+            }
         }
         let (nickname, avatar) = self.fetch_profile().await;
         let mut account = Account::new(
@@ -485,7 +509,7 @@ impl MusicProvider for QqMusicProvider {
         if keyword.is_empty() {
             return Ok(Vec::new());
         }
-        let limit = limit.max(1);
+        let limit = effective_limit(limit, 20);
         let data = self
             .client
             .call(
@@ -517,7 +541,7 @@ impl MusicProvider for QqMusicProvider {
         if !Self::is_qq_link(&text) {
             return Ok(None);
         }
-        let limit = limit.max(1);
+        let limit = effective_limit(limit, 500);
 
         if let Some(song_key) = parse_song(&text) {
             let song = self.query_song(&song_key).await?;
@@ -703,19 +727,34 @@ fn parse_song(text: &str) -> Option<String> {
 }
 
 /// 找 `playlist/12345` 或 `playlist=12345`。
+///
+/// 要扫过 **所有** `marker` 出现的位置，不能只看第一处：Python 那边是
+/// `re.search(r"playlist[/=](\d+)", blob)`，正则会一路往后找。只看第一处的话，
+/// `/n/ryqq/playlist_v2/playlist/123` 这种路径会卡在 `playlist_v2` 上直接放弃。
 fn digits_after_separator(haystack: &str, marker: &str) -> Option<String> {
-    let start = haystack.find(marker)? + marker.len();
-    let rest = haystack.get(start..)?;
-    let mut chars = rest.chars();
-    if !matches!(chars.next(), Some('/') | Some('=')) {
-        return None;
+    let mut offset = 0usize;
+    while let Some(found) = haystack.get(offset..)?.find(marker) {
+        offset = offset + found + marker.len();
+        let rest = haystack.get(offset..)?;
+        let mut chars = rest.chars();
+        if !matches!(chars.next(), Some('/') | Some('=')) {
+            continue;
+        }
+        let digits: String = chars.take_while(char::is_ascii_digit).collect();
+        if !digits.is_empty() {
+            return Some(digits);
+        }
     }
-    let digits: String = chars.take_while(char::is_ascii_digit).collect();
-    if digits.is_empty() {
-        None
-    } else {
-        Some(digits)
-    }
+    None
+}
+
+/// 歌单条目里有没有可用的下载键。
+///
+/// Python 是 `if song.get("mid") or song.get("id")`——**真值判断**。
+/// 写成 `song.get("mid").is_some()` 的话 `{"mid": ""}` 这种占位条目会被留下，
+/// 归一化后 `key` 是空串，那首歌在列表里看得见、点下载必然失败。
+fn has_song_key(song: &Value) -> bool {
+    is_truthy(song.get("mid")) || is_truthy(song.get("id"))
 }
 
 fn media_mid_of(raw: &Value, fallback: &str) -> String {
@@ -753,17 +792,15 @@ fn album_mid_of(raw: &Value) -> String {
 }
 
 fn to_source(song: &Value) -> SongSource {
-    let title = song
-        .get("name")
-        .or_else(|| song.get("title"))
-        .or_else(|| song.get("songname"))
-        .and_then(Value::as_str)
+    // 三组别名来自不同年代的接口，空串要继续往后退（Python 的 `or` 链）：
+    // 歌单接口的条目常常同时有 `name`（空）和 `songname`（真值）。
+    let title = str_field(song, "name")
+        .or_else(|| str_field(song, "title"))
+        .or_else(|| str_field(song, "songname"))
         .unwrap_or("Unknown")
         .to_string();
-    let mid = song
-        .get("mid")
-        .or_else(|| song.get("songmid"))
-        .or_else(|| song.get("id"))
+    // mid 是下载用的 key，退化链断在空串上会让整首歌下不下来
+    let mid = first_truthy(song, &["mid", "songmid", "id"])
         .map(|value| match value {
             Value::String(text) => text.clone(),
             other => other.to_string(),
@@ -788,11 +825,8 @@ fn to_source(song: &Value) -> SongSource {
         .filter(|value| *value > 0.0);
 
     let file = song.get("file");
-    let size_of = |key: &str| {
-        file.and_then(|file| file.get(key))
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-    };
+    // Python 是 `int(file_info.get("size_flac") or 0)`：字符串体积也要能转
+    let size_of = |key: &str| loose_int(file.and_then(|file| file.get(key)));
     let max_quality = if size_of("size_flac") > 0 {
         Some(Quality::Flac)
     } else if size_of("size_320mp3") > 0 {
@@ -803,12 +837,9 @@ fn to_source(song: &Value) -> SongSource {
         None
     };
     let pay = song.get("pay");
-    let vip = ["pay_play", "pay_down", "pay_month"].iter().any(|key| {
-        pay.and_then(|pay| pay.get(*key))
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            == 1
-    });
+    let vip = ["pay_play", "pay_down", "pay_month"]
+        .iter()
+        .any(|key| loose_int(pay.and_then(|pay| pay.get(*key))) == 1);
 
     SongSource {
         platform: Platform::Qqm,
@@ -816,8 +847,7 @@ fn to_source(song: &Value) -> SongSource {
         title,
         artists,
         album: album
-            .and_then(|album| album.get("name").or_else(|| album.get("title")))
-            .and_then(Value::as_str)
+            .and_then(|album| str_field(album, "name").or_else(|| str_field(album, "title")))
             .unwrap_or_default()
             .to_string(),
         duration,
@@ -875,6 +905,57 @@ mod tests {
             parse_playlist("https://i.y.qq.com/v8/playsong.html?songid=1&id=2"),
             None
         );
+    }
+
+    #[test]
+    fn playlist_marker_is_searched_past_the_first_occurrence() {
+        // Python 用 `re.search`，会一路往后找；只看第一处会卡在 `playlist_v2` 上
+        assert_eq!(
+            digits_after_separator("/n/ryqq/playlist_v2/playlist/8674642290", "playlist"),
+            Some("8674642290".into())
+        );
+        assert_eq!(
+            parse_playlist("https://y.qq.com/n/ryqq/playlist_v2/playlist/8674642290"),
+            Some("8674642290".into())
+        );
+        assert_eq!(digits_after_separator("/n/ryqq/playlist_v2/x", "playlist"), None);
+    }
+
+    #[test]
+    fn empty_aliases_fall_through_like_the_python_or_chain() {
+        // 歌单接口的条目常常 name 为空、真名在 songname 上；mid 为空时要退到 id
+        let song = json!({
+            "name": "", "title": "", "songname": "真名",
+            "mid": "", "songmid": "", "id": 4321,
+            "album": {"name": "", "title": "专辑别名"}
+        });
+        let source = to_source(&song);
+        assert_eq!(source.title, "真名");
+        assert_eq!(source.key, "4321", "空 mid 必须退到 id，否则这首歌下不下来");
+        assert_eq!(source.album, "专辑别名");
+    }
+
+    #[test]
+    fn playlist_entries_without_a_usable_key_are_dropped() {
+        // Python 的过滤是真值判断，空串占位条目要丢掉——留下来的话
+        // 前端能看见这一行、点下载必然失败
+        assert!(has_song_key(&json!({"mid": "001abc"})));
+        assert!(has_song_key(&json!({"id": 4321})));
+        assert!(!has_song_key(&json!({"mid": ""})));
+        assert!(!has_song_key(&json!({"mid": "", "id": 0})));
+        assert!(!has_song_key(&json!({"mid": null, "id": null})));
+        assert!(!has_song_key(&json!({})));
+        // 空 mid + 真 id 仍然可用（to_source 会退到 id）
+        assert!(has_song_key(&json!({"mid": "", "id": 4321})));
+    }
+
+    #[test]
+    fn file_sizes_and_pay_flags_accept_string_numbers() {
+        // Python 是 `int(file_info.get("size_flac") or 0)` / `int(pay.get(k) or 0)`
+        let song = json!({"file": {"size_flac": "30000000"}, "pay": {"pay_play": "1"}});
+        let source = to_source(&song);
+        assert_eq!(source.max_quality, Some(Quality::Flac));
+        assert!(source.vip);
     }
 
     #[test]

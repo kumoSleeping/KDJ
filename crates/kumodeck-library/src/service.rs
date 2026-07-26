@@ -10,7 +10,7 @@ use kumodeck_analysis::engine::AnalysisResult;
 use kumodeck_core::models::{
     HarmonicMatch, HarmonicRelation, LibraryStats, Track, TrackPage, TrackPatch,
 };
-use kumodeck_providers::tags::read_tags;
+use kumodeck_providers::tags::{read_tags, write_cover, write_metadata, MetadataEdit};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::Row;
 
@@ -194,7 +194,13 @@ impl LibraryService {
     pub fn list_tracks(&self, query: &TrackQuery) -> Result<TrackPage> {
         let conn = self.db.conn()?;
         let (clause, params) = self.build_where(query);
-        let limit = query.limit.clamp(1, 2000);
+        // limit=0 当"没传"，退回默认 200（v0.1.0 是 `limit or 200`）。
+        // 夹成 1 的话，没显式给 limit 的调用只会回一条，看着像曲库空了。
+        let limit = if query.limit == 0 {
+            200
+        } else {
+            query.limit.clamp(1, 2000)
+        };
         let offset = query.offset.max(0);
 
         let total: i64 = conn.query_row(
@@ -350,6 +356,7 @@ impl LibraryService {
             ("artist = ?", patch.artist.as_ref()),
             ("album = ?", patch.album.as_ref()),
             ("genre = ?", patch.genre.as_ref()),
+            ("year = ?", patch.year.as_ref()),
         ] {
             if let Some(value) = value {
                 assignments.push(name);
@@ -394,7 +401,71 @@ impl LibraryService {
             }
         }
 
+        // 先还连接再读回：`get` 要从池里再借一条，握着不放的话
+        // 并发的 patch 会把池占满，表现是随机的"获取曲库连接失败"
+        drop(conn);
         self.get(track_id)?.context("刚更新的曲目查不到了")
+    }
+
+    /// 重新 stat 文件，把 `file_mtime` / `size` 对齐到磁盘上的现状。
+    ///
+    /// **凡是我们自己动过音频文件的地方（写标签、换封面）都必须调它。**
+    /// `upsert_file` 拿 `(file_mtime, size)` 做增量跳过：库里还是写之前那份 mtime 的话，
+    /// 下一次扫描会认定"文件被外部改过"，于是重读标签、按文件里的值覆盖回库里——
+    /// 用户刚改的东西要么被冲掉，要么每次扫描都白重读一遍。
+    pub fn sync_file_stat(&self, track_id: i64) -> Result<()> {
+        let conn = self.db.conn()?;
+        let path: String = conn.query_row(
+            "SELECT path FROM tracks WHERE id = ?",
+            [track_id],
+            |row| row.get(0),
+        )?;
+        let meta = std::fs::metadata(&path).with_context(|| format!("无法读取文件: {path}"))?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        conn.execute(
+            "UPDATE tracks SET file_mtime = ?, size = ? WHERE id = ?",
+            rusqlite::params![mtime, meta.len() as i64, track_id],
+        )?;
+        Ok(())
+    }
+
+    /// 把这次 patch 里用户动过的文本字段写回文件标签。
+    ///
+    /// 只写 patch 里出现过的字段，不拿库里那份整体覆盖：库里读标签失败退化成空串的
+    /// 字段（怪文件很常见）会把文件里好好的标签清掉。
+    /// 备注 / 评分 / 颜色 / cue 是这个 App 自己的东西，不往文件里写。
+    pub fn write_patch_to_file(&self, track_id: i64, patch: &TrackPatch) -> Result<()> {
+        let edit = MetadataEdit {
+            title: patch.title.as_deref(),
+            artist: patch.artist.as_deref(),
+            album: patch.album.as_deref(),
+            genre: patch.genre.as_deref(),
+            year: patch.year.as_deref(),
+        };
+        if edit.is_empty() {
+            return Ok(());
+        }
+        let track = self.get(track_id)?.context("曲目不存在")?;
+        self.after_file_write(track_id, write_metadata(Path::new(&track.path), &edit))
+    }
+
+    /// 换封面。返回后 `GET /api/library/cover/{id}` 立刻就是新图。
+    pub fn write_cover_to_file(&self, track_id: i64, data: &[u8]) -> Result<()> {
+        let track = self.get(track_id)?.context("曲目不存在")?;
+        self.after_file_write(track_id, write_cover(Path::new(&track.path), data))
+    }
+
+    /// 写文件之后一律同步一次 stat，**哪怕写失败**：
+    /// lofty 是"改完再落盘"，失败点可能在落盘之后，那时 mtime 已经变了。
+    /// 只在成功路径上同步的话，这条失败会留下一个错的 mtime 埋在库里。
+    fn after_file_write(&self, track_id: i64, outcome: Result<()>) -> Result<()> {
+        let synced = self.sync_file_stat(track_id);
+        outcome.and(synced)
     }
 
     pub fn delete(&self, track_id: i64, delete_file: bool) -> Result<bool> {
@@ -718,7 +789,9 @@ impl LibraryService {
             return Ok(Vec::new());
         }
         let tolerance = if bpm_tolerance > 0.0 { bpm_tolerance } else { 6.0 };
-        let limit = limit.clamp(1, 500);
+        // limit=0 当"没传"，退回默认 50（和 v0.1.0 的 `limit or 50` 一致）；
+        // 夹成 1 会让传 0 的客户端只拿到一首，看着像推荐算法坏了
+        let limit = if limit == 0 { 50 } else { limit.min(500) };
 
         let conn = self.db.conn()?;
         let placeholders = vec!["?"; relations.len()].join(",");
@@ -926,6 +999,8 @@ impl LibraryService {
             "UPDATE tracks SET path = ?, filename = ?, modified_at = ? WHERE id = ?",
             rusqlite::params![key_path, filename, now_iso(), track_id],
         )?;
+        // 同 patch：读回之前先把连接还回池里
+        drop(conn);
         self.get(track_id)?.context("曲目不存在")
     }
 
@@ -1077,5 +1152,573 @@ fn row_to_track(row: &Row) -> Track {
         analysis_error: text(row, "analysis_error"),
         tags: Vec::new(),
         path,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kumodeck_core::models::HarmonicRelation;
+
+    /// 直接写行，不碰文件系统：这一层要验的是 SQL 和排序规则，
+    /// 走 `upsert_file` 反而会把测试绑在标签解析上。
+    struct Row<'a> {
+        path: &'a str,
+        title: &'a str,
+        camelot: &'a str,
+        bpm: Option<f64>,
+        analyzed: bool,
+    }
+
+    impl Default for Row<'_> {
+        fn default() -> Self {
+            Row {
+                path: "/lib/a.mp3",
+                title: "",
+                camelot: "",
+                bpm: None,
+                analyzed: false,
+            }
+        }
+    }
+
+    fn service() -> LibraryService {
+        LibraryService::new(Database::open_in_memory().unwrap())
+    }
+
+    fn insert(service: &LibraryService, row: Row<'_>) -> i64 {
+        let conn = service.db().conn().unwrap();
+        let filename = Path::new(row.path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        conn.execute(
+            "INSERT INTO tracks (path, filename, title, camelot, bpm, analyzed_at, added_at, \
+             modified_at) VALUES (?, ?, ?, ?, ?, ?, 'now', 'now')",
+            rusqlite::params![
+                row.path,
+                filename,
+                row.title,
+                row.camelot,
+                row.bpm,
+                if row.analyzed { Some("2024-01-01T00:00:00Z") } else { None },
+            ],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn query(folder: &str, deep: bool) -> TrackQuery {
+        TrackQuery {
+            folder: folder.to_string(),
+            folder_deep: deep,
+            limit: 200,
+            ..Default::default()
+        }
+    }
+
+    fn paths(page: &TrackPage) -> Vec<String> {
+        page.items.iter().map(|t| t.path.clone()).collect()
+    }
+
+    #[test]
+    fn folder_filter_shows_only_this_level_unless_deep() {
+        let service = service();
+        let root = format!("{}lib", SEP);
+        insert(
+            &service,
+            Row { path: &format!("{root}{SEP}a.mp3"), ..Default::default() },
+        );
+        insert(
+            &service,
+            Row { path: &format!("{root}{SEP}set1{SEP}b.mp3"), ..Default::default() },
+        );
+        insert(
+            &service,
+            Row { path: &format!("{root}-evil{SEP}c.mp3"), ..Default::default() },
+        );
+
+        let shallow = service.list_tracks(&query(&root, false)).unwrap();
+        assert_eq!(shallow.total, 1);
+        assert!(paths(&shallow)[0].ends_with("a.mp3"), "子目录和同前缀兄弟目录都不算");
+
+        let deep = service.list_tracks(&query(&root, true)).unwrap();
+        assert_eq!(deep.total, 2, "打开开关才连子目录一起看");
+    }
+
+    #[test]
+    fn folder_filter_escapes_like_wildcards_in_the_path() {
+        // 目录名里带 % / _ 是合法的，不转义的话 `%` 会匹配到任意别的目录
+        let service = service();
+        let tricky = format!("{}lib{}100%_mix", SEP, SEP);
+        insert(&service, Row { path: &format!("{tricky}{SEP}a.mp3"), ..Default::default() });
+        insert(
+            &service,
+            Row { path: &format!("{}lib{}100XYmix{}b.mp3", SEP, SEP, SEP), ..Default::default() },
+        );
+
+        let page = service.list_tracks(&query(&tricky, false)).unwrap();
+        assert_eq!(page.total, 1);
+        assert!(paths(&page)[0].ends_with("a.mp3"));
+    }
+
+    #[test]
+    fn search_text_escapes_like_wildcards() {
+        // 用户搜 "50%" 不该变成匹配一切
+        let service = service();
+        insert(&service, Row { path: "/lib/a.mp3", title: "50% off", ..Default::default() });
+        insert(&service, Row { path: "/lib/b.mp3", title: "完全无关", ..Default::default() });
+
+        let page = service
+            .list_tracks(&TrackQuery { q: "50%".into(), limit: 200, ..Default::default() })
+            .unwrap();
+        assert_eq!(page.total, 1);
+    }
+
+    #[test]
+    fn analyzed_filter_splits_the_library_in_two() {
+        let service = service();
+        insert(&service, Row { path: "/lib/a.mp3", analyzed: true, ..Default::default() });
+        insert(&service, Row { path: "/lib/b.mp3", ..Default::default() });
+
+        let done = service
+            .list_tracks(&TrackQuery { analyzed: Some(true), limit: 200, ..Default::default() })
+            .unwrap();
+        assert_eq!(done.total, 1);
+        let todo = service
+            .list_tracks(&TrackQuery { analyzed: Some(false), limit: 200, ..Default::default() })
+            .unwrap();
+        assert_eq!(todo.total, 1);
+        assert!(paths(&todo)[0].ends_with("b.mp3"));
+    }
+
+    #[test]
+    fn camelot_sort_is_numeric_and_nulls_sink_in_both_directions() {
+        let service = service();
+        insert(&service, Row { path: "/lib/a.mp3", camelot: "10A", ..Default::default() });
+        insert(&service, Row { path: "/lib/b.mp3", camelot: "8A", ..Default::default() });
+        insert(&service, Row { path: "/lib/c.mp3", ..Default::default() });
+
+        let ascending = service
+            .list_tracks(&TrackQuery {
+                sort: "camelot".into(),
+                order: "asc".into(),
+                limit: 200,
+                ..Default::default()
+            })
+            .unwrap();
+        let codes: Vec<&str> = ascending.items.iter().map(|t| t.camelot.as_str()).collect();
+        assert_eq!(codes, vec!["8A", "10A", ""], "字符串排序会把 10A 排到 8A 前面");
+
+        let descending = service
+            .list_tracks(&TrackQuery {
+                sort: "camelot".into(),
+                order: "desc".into(),
+                limit: 200,
+                ..Default::default()
+            })
+            .unwrap();
+        let codes: Vec<&str> = descending.items.iter().map(|t| t.camelot.as_str()).collect();
+        assert_eq!(codes, vec!["10A", "8A", ""], "空值升降序都垫底");
+    }
+
+    #[test]
+    fn custom_sort_follows_the_folder_manifest() {
+        let service = service();
+        let dir = std::env::temp_dir().join(format!("kumodeck-custom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let folder = normalize_path(&dir);
+
+        for name in ["a.mp3", "b.mp3", "c.mp3"] {
+            insert(
+                &service,
+                Row { path: &format!("{folder}{SEP}{name}"), ..Default::default() },
+            );
+        }
+        // 清单只列了两首，没列的那首按文件名排在后面
+        crate::folders::write_manifest(Path::new(&folder), &["c.mp3".into(), "a.mp3".into()]);
+
+        let page = service
+            .list_tracks(&TrackQuery {
+                folder: folder.clone(),
+                sort: "custom".into(),
+                limit: 200,
+                ..Default::default()
+            })
+            .unwrap();
+        let names: Vec<&str> = page.items.iter().map(|t| t.filename.as_str()).collect();
+        assert_eq!(names, vec!["c.mp3", "a.mp3", "b.mp3"]);
+        assert_eq!(page.total, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn paging_clamps_limit_and_offset() {
+        let service = service();
+        for index in 0..5 {
+            insert(
+                &service,
+                Row { path: &format!("/lib/{index}.mp3"), ..Default::default() },
+            );
+        }
+        let page = service
+            .list_tracks(&TrackQuery { limit: 2, offset: 4, ..Default::default() })
+            .unwrap();
+        assert_eq!(page.total, 5);
+        assert_eq!(page.items.len(), 1, "最后一页只剩一条");
+        assert_eq!(page.limit, 2);
+        assert_eq!(page.offset, 4);
+
+        let clamped = service
+            .list_tracks(&TrackQuery { limit: 99_999, offset: -3, ..Default::default() })
+            .unwrap();
+        assert_eq!(clamped.limit, 2000);
+        assert_eq!(clamped.offset, 0);
+    }
+
+    #[test]
+    fn limit_zero_means_the_default_page_not_a_single_row() {
+        // v0.1.0 是 `max(1, min(limit or 200, 2000))`：0 当"没传"。
+        // 夹成 1 的话，没显式给 limit 的调用只回一条，看着像曲库空了
+        let service = service();
+        for index in 0..3 {
+            insert(
+                &service,
+                Row { path: &format!("/lib/{index}.mp3"), ..Default::default() },
+            );
+        }
+        let page = service.list_tracks(&TrackQuery::default()).unwrap();
+        assert_eq!(page.limit, 200);
+        assert_eq!(page.items.len(), 3);
+    }
+
+    #[test]
+    fn patch_clamps_rating_and_normalizes_tags() {
+        let service = service();
+        let id = insert(&service, Row::default());
+        let track = service
+            .patch(
+                id,
+                &TrackPatch {
+                    rating: Some(99),
+                    tags: Some(vec![
+                        "  house ".into(),
+                        "house".into(),
+                        "".into(),
+                        "  ".into(),
+                        "techno".into(),
+                    ]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(track.rating, 5);
+        assert_eq!(track.tags, vec!["house", "techno"], "去空白、去重、按字母排");
+        assert!(service.patch(id + 999, &TrackPatch::default()).is_err(), "不存在的 id 要报错");
+    }
+
+    #[test]
+    fn patch_writes_year_to_the_year_column() {
+        // year 是后加进 TrackPatch 的字段；漏在 SQL 里的话前端存了不报错、刷新就没了
+        let service = service();
+        let id = insert(&service, Row::default());
+        let track = service
+            .patch(id, &TrackPatch { year: Some("2021-05-17".into()), ..Default::default() })
+            .unwrap();
+        assert_eq!(track.year, "2021-05-17", "整串日期要原样存住，不能截成 2021");
+    }
+
+    /// 造一个 2 秒静音 WAV，用来做"真的写标签"的测试。
+    fn wav_bytes() -> Vec<u8> {
+        const RATE: u32 = 8000;
+        let data_len = RATE * 2;
+        let mut out = Vec::with_capacity(44 + data_len as usize);
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data_len).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&1u16.to_le_bytes()); // 单声道
+        out.extend_from_slice(&RATE.to_le_bytes());
+        out.extend_from_slice(&RATE.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&8u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data_len.to_le_bytes());
+        out.resize(44 + data_len as usize, 128);
+        out
+    }
+
+    fn scratch_track(name: &str) -> (LibraryService, i64, PathBuf) {
+        let dir = std::env::temp_dir()
+            .join(format!("kumodeck-meta-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = std::fs::canonicalize(&dir).unwrap().join("song.wav");
+        std::fs::write(&path, wav_bytes()).unwrap();
+
+        let service = service();
+        let id = service.upsert_file(&path, "local", "").unwrap();
+        (service, id, path)
+    }
+
+    /// 库里记的 file_mtime。
+    fn stored_mtime(service: &LibraryService, path: &Path) -> f64 {
+        service.file_index().unwrap()[&normalize_path(path)].1
+    }
+
+    fn disk_mtime(path: &Path) -> f64 {
+        std::fs::metadata(path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+    }
+
+    #[test]
+    fn writing_tags_back_keeps_the_stored_mtime_in_step_with_the_file() {
+        let (service, id, path) = scratch_track("mtime");
+        let before = stored_mtime(&service, &path);
+
+        let patch = TrackPatch {
+            title: Some("手改的标题".into()),
+            artist: Some("手改的艺人".into()),
+            year: Some("2019".into()),
+            // 备注是 App 自己的字段，不写文件，也不该因此触发一次文件重写
+            comment: Some("三段前放".into()),
+            ..Default::default()
+        };
+        service.patch(id, &patch).unwrap();
+        service.write_patch_to_file(id, &patch).unwrap();
+
+        let tags = read_tags(&path);
+        assert_eq!(tags.title, "手改的标题", "文件里也得改了，不然 Rekordbox 那边看不到");
+        assert_eq!(tags.year, "2019");
+
+        let after = stored_mtime(&service, &path);
+        assert!(after > before, "写标签一定会改 mtime：{before} → {after}");
+        assert!(
+            (after - disk_mtime(&path)).abs() < 1e-6,
+            "库里记的 mtime 必须等于磁盘上的现状，否则下次扫描会重读标签"
+        );
+        // size 也要跟上：增量跳过是 mtime + size 一起判的
+        assert_eq!(
+            service.get(id).unwrap().unwrap().size,
+            std::fs::metadata(&path).unwrap().len() as i64
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_rescan_after_writing_tags_does_not_re_read_and_overwrite() {
+        let (service, id, path) = scratch_track("rescan");
+        let patch = TrackPatch { title: Some("手改的标题".into()), ..Default::default() };
+        service.patch(id, &patch).unwrap();
+        service.write_patch_to_file(id, &patch).unwrap();
+
+        // 埋一个只存在于库里的哨兵：`upsert_file` 走重读那条路时会拿文件里的
+        // 标题把它盖掉，走增量跳过则原样留着。这就是 mtime 有没有同步的照妖镜。
+        let conn = service.db().conn().unwrap();
+        conn.execute("UPDATE tracks SET title = '库里的哨兵' WHERE id = ?", [id]).unwrap();
+        drop(conn);
+
+        assert_eq!(service.upsert_file(&path, "local", "").unwrap(), id);
+        assert_eq!(
+            service.get(id).unwrap().unwrap().title,
+            "库里的哨兵",
+            "mtime 同步过了就该走增量跳过，不该重读标签"
+        );
+
+        // 反证：把 mtime 拨回同步之前，同一次扫描就会把哨兵冲掉——
+        // 说明上面那条断言不是碰巧成立的
+        let conn = service.db().conn().unwrap();
+        conn.execute("UPDATE tracks SET file_mtime = 1.0 WHERE id = ?", [id]).unwrap();
+        drop(conn);
+        service.upsert_file(&path, "local", "").unwrap();
+        assert_eq!(service.get(id).unwrap().unwrap().title, "手改的标题");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn changing_the_cover_also_syncs_the_stored_mtime() {
+        let (service, id, path) = scratch_track("cover");
+        let before = stored_mtime(&service, &path);
+
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&[0, 0, 0, 13, b'I', b'H', b'D', b'R']);
+        png.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89]);
+        png.extend_from_slice(&[0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82]);
+        service.write_cover_to_file(id, &png).unwrap();
+
+        assert_eq!(
+            kumodeck_providers::tags::read_cover(&path).unwrap().0,
+            png,
+            "换完封面立刻就该能读回新图"
+        );
+        let after = stored_mtime(&service, &path);
+        assert!(after > before && (after - disk_mtime(&path)).abs() < 1e-6);
+
+        // 认不出格式的图要挡在写之前；此时文件没动过，mtime 也不该变
+        let steady = stored_mtime(&service, &path);
+        assert!(service.write_cover_to_file(id, b"GIF89a").is_err());
+        assert!((stored_mtime(&service, &path) - steady).abs() < 1e-6);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_patch_without_file_backed_fields_never_touches_the_file() {
+        // 打个星、写句备注就重写一遍音频文件的话，每次都要连带重算波形缓存，
+        // 而且 mtime 一变，别的 DJ 软件也会跟着重扫
+        let (service, id, path) = scratch_track("untouched");
+        let before = disk_mtime(&path);
+        let patch = TrackPatch {
+            rating: Some(4),
+            comment: Some("备注".into()),
+            tags: Some(vec!["house".into()]),
+            ..Default::default()
+        };
+        service.patch(id, &patch).unwrap();
+        service.write_patch_to_file(id, &patch).unwrap();
+        assert!((disk_mtime(&path) - before).abs() < 1e-6);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn pending_analysis_keeps_the_callers_order_and_skips_analyzed() {
+        let service = service();
+        let a = insert(&service, Row { path: "/lib/a.mp3", ..Default::default() });
+        let b = insert(&service, Row { path: "/lib/b.mp3", analyzed: true, ..Default::default() });
+        let c = insert(&service, Row { path: "/lib/c.mp3", ..Default::default() });
+
+        // 前端选中的顺序 = 用户期望的分析顺序；重复的 id 只算一次
+        let pending = service
+            .pending_analysis_ids(Some(&[c, a, b, c]), false)
+            .unwrap();
+        assert_eq!(pending, vec![c, a], "已分析的被挡在外面");
+
+        let forced = service.pending_analysis_ids(Some(&[c, a, b]), true).unwrap();
+        assert_eq!(forced, vec![c, a, b], "force 时不看 analyzed_at");
+
+        let all = service.pending_analysis_ids(None, false).unwrap();
+        assert_eq!(all, vec![a, c], "不传 id 时按 id 排");
+        assert!(service.pending_analysis_ids(Some(&[]), false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn harmonic_limit_zero_falls_back_to_the_default_instead_of_one() {
+        let service = service();
+        let source = insert(
+            &service,
+            Row { path: "/lib/src.mp3", camelot: "8A", bpm: Some(128.0), ..Default::default() },
+        );
+        for index in 0..3 {
+            insert(
+                &service,
+                Row {
+                    path: &format!("/lib/m{index}.mp3"),
+                    title: &format!("m{index}"),
+                    camelot: "8A",
+                    bpm: Some(128.0),
+                    analyzed: true,
+                },
+            );
+        }
+        let matches = service.harmonic_matches(source, 6.0, 0, true).unwrap();
+        assert_eq!(matches.len(), 3, "limit=0 当没传，不该只给一首");
+        assert!(matches.iter().all(|m| m.relation == HarmonicRelation::Same));
+        assert_eq!(service.harmonic_matches(source, 6.0, 2, true).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn harmonic_drops_duplicates_and_candidates_without_a_bpm() {
+        let service = service();
+        let source = insert(
+            &service,
+            Row { path: "/lib/src.mp3", title: "src", camelot: "8A", bpm: Some(128.0), ..Default::default() },
+        );
+        // 同一首歌在两个 set 里各一份（硬链接），推荐列表里只该出现一次
+        insert(
+            &service,
+            Row { path: "/lib/set1/x.mp3", title: "EMOTION", camelot: "9A", bpm: Some(128.0), ..Default::default() },
+        );
+        insert(
+            &service,
+            Row { path: "/lib/set2/x.mp3", title: "EMOTION", camelot: "9A", bpm: Some(128.0), ..Default::default() },
+        );
+        // 本曲有 BPM、候选没有：对不上拍，排除
+        insert(
+            &service,
+            Row { path: "/lib/nobpm.mp3", title: "nobpm", camelot: "8A", ..Default::default() },
+        );
+        // 调号不兼容
+        insert(
+            &service,
+            Row { path: "/lib/far.mp3", title: "far", camelot: "3B", bpm: Some(128.0), ..Default::default() },
+        );
+
+        let matches = service.harmonic_matches(source, 6.0, 50, false).unwrap();
+        let titles: Vec<&str> = matches.iter().map(|m| m.track.title.as_str()).collect();
+        assert_eq!(titles, vec!["EMOTION"]);
+        assert_eq!(matches[0].relation, HarmonicRelation::EnergyUp);
+
+        // 半速也算能接：64 BPM 折算成 128
+        insert(
+            &service,
+            Row { path: "/lib/half.mp3", title: "half", camelot: "8A", bpm: Some(64.0), ..Default::default() },
+        );
+        let matches = service.harmonic_matches(source, 6.0, 50, false).unwrap();
+        let half = matches.iter().find(|m| m.track.title == "half").unwrap();
+        assert_eq!(half.tempo_ratio, 2.0);
+        assert_eq!(half.bpm_delta, 0.0);
+        // 同调同速排在倍速前面
+        assert!(matches[0].track.title == "EMOTION" || matches[0].track.title == "half");
+    }
+
+    #[test]
+    fn stats_group_by_wheel_and_bucket_order() {
+        let service = service();
+        insert(
+            &service,
+            Row { path: "/lib/a.mp3", camelot: "10a", bpm: Some(128.0), analyzed: true, ..Default::default() },
+        );
+        insert(
+            &service,
+            Row { path: "/lib/b.mp3", camelot: "8A", bpm: Some(60.0), ..Default::default() },
+        );
+
+        let stats = service.stats().unwrap();
+        assert_eq!(stats.total, 2);
+        assert_eq!(stats.analyzed, 1);
+        assert_eq!(stats.by_camelot.get("10A"), Some(&1), "小写也归到同一格");
+        assert_eq!(stats.by_camelot.get("8A"), Some(&1));
+        assert_eq!(stats.by_bpm_bucket.get("120-129"), Some(&1));
+        assert_eq!(stats.by_bpm_bucket.get("<90"), Some(&1));
+        assert_eq!(stats.by_platform.get("local"), Some(&2), "空来源算 local");
+    }
+
+    #[test]
+    fn rebase_replaces_only_the_prefix() {
+        // SQL 的 replace 会替换每一处匹配，`/lib/set1/set1/a.mp3` 就会被改坏
+        let service = service();
+        let id = insert(
+            &service,
+            Row {
+                path: &format!("{}lib{}set1{}set1{}a.mp3", SEP, SEP, SEP, SEP),
+                ..Default::default()
+            },
+        );
+        let old = format!("{}lib{}set1", SEP, SEP);
+        let new = format!("{}lib{}set2", SEP, SEP);
+        let moved = service
+            .rebase_paths(Path::new(&old), Path::new(&new))
+            .unwrap();
+        assert_eq!(moved, vec![id]);
+        assert_eq!(
+            service.get(id).unwrap().unwrap().path,
+            format!("{}lib{}set2{}set1{}a.mp3", SEP, SEP, SEP, SEP)
+        );
     }
 }

@@ -23,12 +23,18 @@
 | M3 QQ 音乐 / B 站 / SoundCloud | ✅ 真机验证 | `--example smoke_qq / smoke_bili / smoke_sc` |
 | M5 分析管线（tempo/key/loudness/decode） | ✅ 40 首真机对拍：调号 98%、能量 100% | `docs/rust-port/03` |
 | M1 曲库 SQLite 层 + 文件夹 + 扫描 | ✅ 真实 1379 首曲库集成测试 | `docs/rust-port/04` |
-| M4 下载队列 + WS 事件 | ⬜ 未开始 | |
+| M4 下载队列 + WS 事件 | ✅ 队列/取消/进度 + `/ws` 实连收到事件 | `crates/kumodeck-server/downloads.rs`、`ws.rs` |
 | M6 曲库写操作（scan/folders/manifest） | ✅ 含 move/link/清单顺序 | `crates/kumodeck-library` |
-| M7 axum server + Tauri 壳 + 前端接线 | ⬜ 未开始 | |
-| M8 安卓 APK | ⬜ 未开始 | |
+| M7 axum server + Tauri 壳 + 前端接线 | ✅ 34 条路由 + `/ws`；6 条 Tauri 命令；`bridge.ts` 运行时探测壳 | `crates/kumodeck-server`、`src-tauri`、`src/lib/bridge.ts` |
+| M8 安卓 APK | ⬜ 未开始（CI 骨架已就位，没在真机上跑过） | `.github/workflows/rust-android.yml` |
+| CI：桌面三平台 + 安卓骨架 | ✅ YAML 就位（未在 GitHub 上真跑过） | `docs/rust-port/05` |
 
-跑一遍全部测试：`cargo test --workspace`（当前 223 个）。
+跑一遍全部测试：`cargo test --workspace`（当前 275 个）。
+
+前端和壳这一侧的验收命令：`npx tsc --noEmit`、`npm run tauri:web:build`。
+`src-tauri` 已经是 workspace 成员，所以 `cargo build --workspace` 会把壳一起编——
+**不需要**先跑前端构建：不带 `custom-protocol` feature 时 `generate_context!` 不去读
+`dist-tauri/`，CI 里"先 cargo test 再 npm ci"的顺序因此是成立的（已实测）。
 
 曲库层另有一组**跑在用户真实曲库上**的集成测试，默认跳过：
 
@@ -62,6 +68,7 @@ cargo run -p kumodeck-providers --example smoke_sc       -- lofi
 | B 站搜索空结果 | `code=0` 但 `data` 只有 `v_voucher` | UA 里的 `Chrome/131.0` 不是真实版本号，要 `131.0.0.0` |
 | 网易云偶发登录失败 | 约 1/256 概率 | RSA 结果没左补零到 128 字节 |
 | 网易云接口不认 | 间歇性 | weapi 的 base64 必须按 76 列换行且结尾带换行 |
+| `/ws` 一律 401 | 进度条永远不动，页面其余部分全正常 | Starlette 的 `@app.middleware("http")` 根本不作用于 websocket 作用域，Python 版的 `/ws` 是**隐式**绕过鉴权中间件的；axum 这边升级请求就是普通 GET，会实打实过中间件，而 token 只能放 query（浏览器 `new WebSocket()` 带不了自定义头）。修在 `auth.rs::accepts_query_token` |
 
 **共同点：三次都是"接口说成功但结果是空的"。** 遇到这种现象，
 正确做法是**逐因素二分对拍**（把 Python 版的真实请求头抓出来，一个变量一个变量换），
@@ -106,12 +113,23 @@ cargo run -p kumodeck-providers --example smoke_sc       -- lofi
 3. **安卓**：范围要诚实——下载 + 播放 + 已下载曲目的分析；
    多根曲库目录扫描和文件夹拖拽排序是桌面专属。
 
-## 6.1 曲库层必须落实的一条约束
+## 6.1 关于重新分析：用户已明确放行
 
-分析任务默认**只挑 `analyzed_at IS NULL` 的曲目**，只有用户显式「强制重新分析」
-才覆盖已有结果。理由见 `03-analysis-pipeline.md`：Rust 版和 Python 版的 BPM
-有约 10% 会选到不同的倍数（算法本身在这些曲子上就是平局），
-不重算就等于零影响，重算就会把用户 1379 首的和声推荐打乱。
+**曾经**有一条约束是"绝不能重算已分析的曲目"，理由是 Rust 版和 Python 版的 BPM
+有约 10% 会选到不同的倍数（见 `03-analysis-pipeline.md`），重算会打乱已有的和声推荐。
+
+**这条约束已经作废。** 用户原话：
+
+> 其实可以把本地的清理一下，然后重算都是没有问题的。
+> 已经算好的其实都无所谓，反正现在新算法应该也挺快的。
+
+所以：
+
+- `force = true` 是**正当的用户选项**，UI 上要给入口，不要藏着。
+- 全库重算反而是**更好的终局**：现在库里 1217 首是 Python 算的、新下载的是 Rust 算的，
+  两套算法混在一起，BPM 的可比性反而更差。统一重算一次就干净了。
+- 后台自动分析仍然默认只挑 `analyzed_at IS NULL`——那是为了**省时间**，不再是为了安全。
+- 耗时参考：实测 40 首约 100 秒（2 worker），1379 首约 30 分钟，可以当后台任务跑。
 
 ## 7. 目录速查
 
@@ -123,10 +141,19 @@ crates/kumodeck-analysis/   dsp.rs decode.rs tempo.rs key.rs loudness.rs engine.
                             examples/golden.rs  ← 对拍工具
 crates/kumodeck-library/    db.rs camelot.rs service.rs folders.rs scan.rs
                             tests/real_library.rs  ← 真库集成测试
-crates/kumodeck-server/     （空，待做）
+crates/kumodeck-analysis/   ……waveform.rs（波形，给 /api/library/waveform）
+crates/kumodeck-server/     routes.rs(34 条路由) ws.rs auth.rs downloads.rs jobs.rs aggregate.rs
+                            bin/kumodeck-server.rs  ← 开发用独立进程，端口 8788 / token dev-token
+src-tauri/                  Tauri 壳：lib.rs 里 6 条命令 + 进程内起 axum；main.rs 只转调
 sidecar/                    Python 原版，**保留着当参照物**，最后再删
 src/                        现有 React 前端，保留
+src/lib/bridge.ts           运行时探测壳（Tauri / Electron / 浏览器），装回 window.kumodeck
+vite.tauri.config.ts        Tauri 专用前端构建（端口 5275、产物 dist-tauri/、剥 index.html 的 CSP meta）
 docs/rust-port/             本目录，每步一份
+.github/workflows/
+  build.yml / test.yml      旧的 Electron + PyInstaller 线，**不许动**
+  rust-build.yml            Tauri 桌面三平台（src-tauri 不存在时自动只跑测试）
+  rust-android.yml          安卓 APK 骨架，风险写在 YAML 注释里
 ```
 
 `sidecar/` 现在还是可运行的参照实现，对拍完之前不要删。

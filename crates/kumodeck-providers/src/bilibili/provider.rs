@@ -31,7 +31,8 @@ use super::{login, qn_for_height};
 use crate::ffmpeg;
 use crate::net::{ensure_media_url, AtomicDownload};
 use crate::provider::{
-    qr_data_url_from_text, Capabilities, DownloadJob, MusicProvider, ProgressSink, ProviderContext,
+    effective_limit, qr_data_url_from_text, str_field, Capabilities, DownloadJob, MusicProvider,
+    ProgressSink, ProviderContext,
 };
 
 const LABEL: &str = "哔哩哔哩";
@@ -83,16 +84,9 @@ impl BilibiliProvider {
         let playurl = self.client.playurl(&target.bvid, cid, 127, true).await?;
 
         Ok(VideoInfo {
-            bvid: info
-                .get("bvid")
-                .and_then(Value::as_str)
-                .unwrap_or(&target.bvid)
-                .to_string(),
-            title: info
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or(&target.bvid)
-                .to_string(),
+            // 空串要退回请求里的 BV 号（Python 的 `str(info.get("bvid") or target.bvid)`）
+            bvid: str_field(&info, "bvid").unwrap_or(&target.bvid).to_string(),
+            title: str_field(&info, "title").unwrap_or(&target.bvid).to_string(),
             author: info
                 .pointer("/owner/name")
                 .and_then(Value::as_str)
@@ -546,7 +540,8 @@ impl MusicProvider for BilibiliProvider {
         if keyword.is_empty() {
             return Ok(Vec::new());
         }
-        let limit = limit.clamp(1, 50);
+        // Python 是 `max(1, min(int(limit or 20), 50))`：0 退回默认 20，再夹到 50
+        let limit = effective_limit(limit, 20).min(50);
         let results = self.client.search_videos(keyword).await?;
         Ok(results
             .iter()
@@ -566,14 +561,15 @@ impl MusicProvider for BilibiliProvider {
                 Some(SongSource {
                     platform: Platform::Bilibili,
                     key: bvid.to_string(),
-                    title: strip_search_markup(
-                        item.get("title").and_then(Value::as_str).unwrap_or(bvid),
-                    ),
+                    // 空标题要退回 BV 号（Python 的 `item.get("title") or bvid`），
+                    // 否则搜索结果里会出现一行没有名字的条目
+                    title: strip_search_markup(str_field(item, "title").unwrap_or(bvid)),
                     artists: if author.is_empty() { vec![] } else { vec![author] },
                     album: String::new(),
-                    duration: parse_clock(
-                        item.get("duration").and_then(Value::as_str).unwrap_or_default(),
-                    ),
+                    // Python 是 `_parse_clock(str(item.get("duration") or ""))`：
+                    // 搜索接口一般给 "3:52" 这种钟面串，但也见过直接给秒数（数字）。
+                    // 只认字符串的话那些条目在列表里就没有时长。
+                    duration: parse_clock(&stringify_duration(item.get("duration"))),
                     cover: normalize_pic(item.get("pic").and_then(Value::as_str).unwrap_or_default()),
                     max_quality: None,
                     vip: false,
@@ -614,6 +610,19 @@ impl MusicProvider for BilibiliProvider {
 
 // ---------------------------------------------------------------- 纯函数
 
+/// 搜索结果的 `duration` 摊成字符串，对应 Python 的 `str(item.get("duration") or "")`。
+///
+/// 假值（null / 0 / 空串）一律变空串，交给 `parse_clock` 判成"没有时长"。
+fn stringify_duration(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Number(number)) if number.as_f64().is_some_and(|v| v != 0.0) => {
+            number.to_string()
+        }
+        _ => String::new(),
+    }
+}
+
 fn cid_at(info: &Value, pages: &[Value], index: usize) -> i64 {
     pages
         .get(index)
@@ -624,11 +633,7 @@ fn cid_at(info: &Value, pages: &[Value], index: usize) -> i64 {
 }
 
 fn compose_title(info: &Value, pages: &[Value], index: usize, bvid: &str) -> String {
-    let title = info
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or(bvid)
-        .to_string();
+    let title = str_field(info, "title").unwrap_or(bvid).to_string();
     if pages.len() <= 1 {
         return title;
     }
@@ -686,6 +691,25 @@ mod tests {
         let info = json!({"title": "教程"});
         let pages = vec![json!({}), json!({"part": "  "})];
         assert_eq!(compose_title(&info, &pages, 1, "BV1"), "教程 - P2");
+    }
+
+    #[test]
+    fn an_empty_title_falls_back_to_the_bvid() {
+        // Python 是 `str(info.get("title") or bvid)`：空串也要退回 BV 号，
+        // 否则文件名会被净化成 "track.mp4"
+        assert_eq!(compose_title(&json!({"title": ""}), &[], 0, "BV1"), "BV1");
+    }
+
+    #[test]
+    fn search_durations_survive_both_the_clock_string_and_a_raw_number() {
+        // Python 走 `str(...)`，两种形状都能进 _parse_clock
+        assert_eq!(parse_clock(&stringify_duration(Some(&json!("3:52")))), Some(232.0));
+        assert_eq!(parse_clock(&stringify_duration(Some(&json!(232)))), Some(232.0));
+        // 假值一律当"没有时长"，别把 0 当成 0 秒
+        assert_eq!(stringify_duration(Some(&json!(0))), "");
+        assert_eq!(stringify_duration(Some(&json!(null))), "");
+        assert_eq!(stringify_duration(None), "");
+        assert_eq!(parse_clock(&stringify_duration(None)), None);
     }
 
     #[test]

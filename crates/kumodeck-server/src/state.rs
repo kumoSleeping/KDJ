@@ -29,6 +29,9 @@ pub struct AppState {
     /// B 站的视频接口不在 `MusicProvider` trait 上（那是音乐管线的形状），
     /// 单独留一份具体类型的引用给 `/api/video/*` 用。
     pub bilibili: Arc<BilibiliProvider>,
+    /// 正在跑的分析批次，供「停止分析」用。挂在这里而不是做成模块级 static：
+    /// static 会被同进程里的多个 AppState（测试、将来的多实例）串在一起。
+    pub analysis: crate::jobs::AnalysisRegistry,
 }
 
 impl AppState {
@@ -54,6 +57,7 @@ impl AppState {
             library,
             providers,
             bilibili,
+            analysis: Default::default(),
         }))
     }
 

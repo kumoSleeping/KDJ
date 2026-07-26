@@ -20,17 +20,69 @@ pub const AUDIO_EXTENSIONS: &[&str] = &[
     "mp3", "flac", "m4a", "mp4", "aac", "ogg", "opus", "wav", "aiff", "aif", "wma", "alac",
 ];
 
+/// 视频容器也进曲库：现场素材、MV 常常只有视频版。
+/// 分析和播放都只取它的音轨（播放期由 `/api/library/audio` 先抽轨缓存），
+/// 文件本身永远保留完整画面。
+pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
+
 pub fn is_audio_extension(ext: &str) -> bool {
     let lower = ext.trim_start_matches('.').to_ascii_lowercase();
     AUDIO_EXTENSIONS.contains(&lower.as_str())
 }
 
-fn cover_mime(data: &[u8]) -> MimeType {
-    if data.starts_with(b"\x89PNG") {
-        MimeType::Png
+/// 曲库扫描认的后缀 = 音频 ∪ 视频。
+///
+/// 扫描和文件夹树的"磁盘上有几个"必须用同一份，否则树上显示 3 个待入库、
+/// 扫完还是 3 个，用户会一直点「扫描」。
+pub fn is_media_extension(ext: &str) -> bool {
+    let lower = ext.trim_start_matches('.').to_ascii_lowercase();
+    AUDIO_EXTENSIONS.contains(&lower.as_str()) || VIDEO_EXTENSIONS.contains(&lower.as_str())
+}
+
+/// 按魔数认封面格式。认不出来返回 None——**不要**默认成 JPEG：
+/// 用户挑一张 webp/gif 进来时，标成 image/jpeg 写下去，各家播放器只会显示破图，
+/// 而且是"写成功了但看不见"这种最难查的失败。
+fn sniff_cover(data: &[u8]) -> Option<MimeType> {
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(MimeType::Png)
+    } else if data.starts_with(b"\xff\xd8\xff") {
+        Some(MimeType::Jpeg)
     } else {
-        MimeType::Jpeg
+        None
     }
+}
+
+/// 下载管线内部用：封面是各平台 CDN 给的，除了 PNG 就是 JPEG，
+/// 认不出来时退回 JPEG 比丢掉封面强。用户手动换封面走 `write_cover`，那条路要严。
+fn cover_mime(data: &[u8]) -> MimeType {
+    sniff_cover(data).unwrap_or(MimeType::Jpeg)
+}
+
+/// 把封面塞进 tag，替换掉原有的所有图片。
+fn replace_pictures(tag: &mut lofty::tag::Tag, data: &[u8], mime: MimeType) {
+    let picture = Picture::unchecked(data.to_vec())
+        .pic_type(PictureType::CoverFront)
+        .mime_type(mime)
+        .description("Cover")
+        .build();
+    // 先清掉旧封面，否则某些容器会累积成一堆图片
+    while tag.pictures().first().is_some() {
+        tag.remove_picture(0);
+    }
+    tag.push_picture(picture);
+}
+
+/// 打开文件并拿到可写的主 tag。没有 tag 的文件先补一个空的。
+fn open_for_write(path: &Path) -> Result<lofty::file::TaggedFile> {
+    let mut tagged = Probe::open(path)
+        .with_context(|| format!("打开音频文件失败：{}", path.display()))?
+        .read()
+        .with_context(|| format!("解析音频文件失败：{}", path.display()))?;
+    let tag_type = tagged.primary_tag_type();
+    if tagged.primary_tag_mut().is_none() {
+        tagged.insert_tag(lofty::tag::Tag::new(tag_type));
+    }
+    Ok(tagged)
 }
 
 /// 写入标题 / 艺人 / 专辑 / 封面。
@@ -43,15 +95,7 @@ pub fn embed_metadata(
     album: &str,
     cover: Option<&[u8]>,
 ) -> Result<()> {
-    let mut tagged = Probe::open(path)
-        .with_context(|| format!("打开音频文件失败：{}", path.display()))?
-        .read()
-        .with_context(|| format!("解析音频文件失败：{}", path.display()))?;
-
-    let tag_type = tagged.primary_tag_type();
-    if tagged.primary_tag_mut().is_none() {
-        tagged.insert_tag(lofty::tag::Tag::new(tag_type));
-    }
+    let mut tagged = open_for_write(path)?;
     let tag = tagged.primary_tag_mut().expect("刚插入过一定存在");
 
     tag.set_title(title.to_string());
@@ -68,16 +112,7 @@ pub fn embed_metadata(
 
     if let Some(data) = cover {
         if !data.is_empty() {
-            let picture = Picture::unchecked(data.to_vec())
-                .pic_type(PictureType::CoverFront)
-                .mime_type(cover_mime(data))
-                .description("Cover")
-                .build();
-            // 先清掉旧封面，否则某些容器会累积成一堆图片
-            while tag.pictures().first().is_some() {
-                tag.remove_picture(0);
-            }
-            tag.push_picture(picture);
+            replace_pictures(tag, data, cover_mime(data));
         }
     }
 
@@ -86,9 +121,102 @@ pub fn embed_metadata(
     Ok(())
 }
 
+/// 用户手改的文本元数据。
+///
+/// 每个字段都是 `Option`，语义是**这次有没有动过**——`None` 一律不碰文件里原有的值。
+/// 不能拿库里那份整体覆盖：库里读失败退化成空串的字段（怪文件很常见）
+/// 会把文件里好好的标签清掉。`Some("")` 才是"用户明确清空"。
+#[derive(Debug, Clone, Default)]
+pub struct MetadataEdit<'a> {
+    pub title: Option<&'a str>,
+    pub artist: Option<&'a str>,
+    pub album: Option<&'a str>,
+    pub genre: Option<&'a str>,
+    pub year: Option<&'a str>,
+}
+
+impl MetadataEdit<'_> {
+    /// 一个字段都没动 → 调用方可以整个跳过，别白白重写一遍文件（那会改 mtime）。
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.artist.is_none()
+            && self.album.is_none()
+            && self.genre.is_none()
+            && self.year.is_none()
+    }
+}
+
+/// 把用户改过的文本元数据写回文件标签。
+///
+/// DJ 会把这些文件直接拖进 Rekordbox / Serato，那边只认文件里的标签——
+/// 只改数据库的话，改动一出这个 App 就没了。
+pub fn write_metadata(path: &Path, edit: &MetadataEdit<'_>) -> Result<()> {
+    if edit.is_empty() {
+        return Ok(());
+    }
+    let mut tagged = open_for_write(path)?;
+    let tag = tagged.primary_tag_mut().expect("刚插入过一定存在");
+
+    for (key, value) in [
+        (ItemKey::TrackTitle, edit.title),
+        (ItemKey::TrackArtist, edit.artist),
+        (ItemKey::AlbumTitle, edit.album),
+        (ItemKey::Genre, edit.genre),
+        // 年份统一写 RecordingDate：ID3v2 的映射表里根本没有 Year 这个键，
+        // 写 ItemKey::Year 在 mp3 上会被静默丢弃。`read_tags` 两个键都读，对得上。
+        (ItemKey::RecordingDate, edit.year),
+    ] {
+        let Some(value) = value else { continue };
+        let value = value.trim();
+        if value.is_empty() {
+            tag.remove_key(key);
+        } else {
+            tag.insert_text(key, value.to_string());
+        }
+    }
+    // Vorbis/APE 里 YEAR 和 DATE 是两个键，留着旧的 YEAR 会让读回来的是老值
+    if edit.year.is_some() {
+        tag.remove_key(ItemKey::Year);
+        if let Some(year) = edit.year.map(str::trim).filter(|value| !value.is_empty()) {
+            // RecordingDate 在这个容器里没有对应键时（少数格式）退回 Year，别让年份整个丢掉
+            if tag.get_string(ItemKey::RecordingDate).is_none() {
+                tag.insert_text(ItemKey::Year, year.to_string());
+            }
+        }
+    }
+
+    tag.save_to_path(path, WriteOptions::default())
+        .with_context(|| format!("写标签失败：{}", path.display()))?;
+    Ok(())
+}
+
+/// 换封面：把 `data` 写成文件里唯一的正封面。
+///
+/// 只收 JPEG / PNG。转码需要一整个图像库，而这两种覆盖了所有实际场景
+/// （截图是 PNG，网上扒的图是 JPEG），认不出来时明确报错比写一张打不开的图好。
+pub fn write_cover(path: &Path, data: &[u8]) -> Result<()> {
+    anyhow::ensure!(!data.is_empty(), "封面数据是空的");
+    let mime = sniff_cover(data).context("封面只支持 JPEG / PNG")?;
+
+    let mut tagged = open_for_write(path)?;
+    let tag = tagged.primary_tag_mut().expect("刚插入过一定存在");
+    replace_pictures(tag, data, mime);
+    tag.save_to_path(path, WriteOptions::default())
+        .with_context(|| format!("写封面失败：{}", path.display()))?;
+    Ok(())
+}
+
 /// 读时长（秒）。用于"试听片段"检测和曲库扫描。
+///
+/// **必须按内容嗅探格式，不能只信扩展名。** `Probe::open` 是从路径猜 `FileType` 的，
+/// 而"试听片段"检测跑在 commit 之前，那时文件还叫 `xxx.flac.partial`——
+/// 扩展名是 `partial`，猜不出格式，`read()` 直接报 UnknownFormat，
+/// 于是时长永远读不到、检测退化成只看文件大小，30 秒的 VIP 试听片段就混进曲库了。
 pub fn read_duration_secs(path: &Path) -> Option<f64> {
-    let tagged = Probe::open(path).ok()?.read().ok()?;
+    let probe = Probe::open(path).ok()?;
+    // guess_file_type 失败时会保留从路径猜出来的类型，所以这一步只会更准
+    let probe = probe.guess_file_type().ok()?;
+    let tagged = probe.read().ok()?;
     let secs = tagged.properties().duration().as_secs_f64();
     if secs > 0.0 {
         Some(secs)
@@ -215,7 +343,7 @@ pub fn read_cover(path: &Path) -> Option<(Vec<u8>, String)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -228,8 +356,140 @@ mod tests {
     }
 
     #[test]
+    fn media_extensions_cover_video_containers_too() {
+        // 曲库扫描按 MEDIA（音频 ∪ 视频）判定，和 v0.1.0 的 tagging.py 一致
+        for ext in ["mkv", "mov", "webm", "m4v", "mp4"] {
+            assert!(is_media_extension(ext), "{ext} 应当算曲库媒体");
+        }
+        assert!(is_media_extension("FLAC"));
+        assert!(!is_media_extension("txt"));
+        assert!(!is_media_extension("jpg"));
+    }
+
+    /// 造一个 8000Hz / 8bit / 单声道的静音 WAV，用来测时长读取。
+    pub(crate) fn silent_wav(seconds: u32) -> Vec<u8> {
+        const RATE: u32 = 8000;
+        let data_len = RATE * seconds;
+        let mut out = Vec::with_capacity(44 + data_len as usize);
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data_len).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk 大小
+        out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&1u16.to_le_bytes()); // 单声道
+        out.extend_from_slice(&RATE.to_le_bytes());
+        out.extend_from_slice(&RATE.to_le_bytes()); // byte rate
+        out.extend_from_slice(&1u16.to_le_bytes()); // block align
+        out.extend_from_slice(&8u16.to_le_bytes()); // bits per sample
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data_len.to_le_bytes());
+        out.resize(44 + data_len as usize, 128);
+        out
+    }
+
+    #[test]
+    fn duration_is_readable_even_when_the_extension_is_partial() {
+        // 试听片段检测跑在 commit 之前，那时文件还叫 `xxx.flac.partial`。
+        // 只按扩展名猜格式的话这里会返回 None，检测就形同虚设。
+        let dir = std::env::temp_dir().join(format!("kumodeck-dur-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("song.flac.partial");
+        std::fs::write(&path, silent_wav(30)).unwrap();
+
+        let secs = read_duration_secs(&path).expect("扩展名不认识也要能读出时长");
+        assert!((secs - 30.0).abs() < 1.0, "读到 {secs} 秒");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn cover_mime_is_sniffed_from_magic_bytes_not_the_url() {
         assert!(matches!(cover_mime(b"\x89PNG\r\n\x1a\n"), MimeType::Png));
         assert!(matches!(cover_mime(b"\xff\xd8\xff\xe0"), MimeType::Jpeg));
+        assert!(sniff_cover(b"RIFF....WEBPVP8 ").is_none(), "webp 认不出来就该说认不出来");
+    }
+
+    /// 造一张最小的合法 PNG（1x1），只用来验证"写进去能读回来"。
+    fn tiny_png() -> Vec<u8> {
+        let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        out.extend_from_slice(&[0, 0, 0, 13, b'I', b'H', b'D', b'R']);
+        out.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89]);
+        out.extend_from_slice(&[0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82]);
+        out
+    }
+
+    /// 每个测试自己一个目录：写标签会改文件，共用一份会互相踩。
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("kumodeck-tags-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("song.wav");
+        std::fs::write(&path, silent_wav(2)).unwrap();
+        path
+    }
+
+    #[test]
+    fn write_metadata_only_touches_the_fields_the_user_changed() {
+        let path = scratch("partial");
+        write_metadata(
+            &path,
+            &MetadataEdit {
+                title: Some("原标题"),
+                artist: Some("原艺人"),
+                album: Some("原专辑"),
+                genre: Some("Techno"),
+                year: Some("2021"),
+            },
+        )
+        .unwrap();
+
+        // 只改标题：其余字段没传 = 没动过，文件里那份必须原样留着
+        write_metadata(&path, &MetadataEdit { title: Some("新标题"), ..Default::default() }).unwrap();
+        let tags = read_tags(&path);
+        assert_eq!(tags.title, "新标题");
+        assert_eq!(tags.artist, "原艺人");
+        assert_eq!(tags.album, "原专辑");
+        assert_eq!(tags.genre, "Techno");
+        assert_eq!(tags.year, "2021", "年份要能被 read_tags 读回来，否则等于没写");
+
+        // Some("") 是"用户明确清空"，和 None 不是一回事
+        write_metadata(&path, &MetadataEdit { album: Some("  "), ..Default::default() }).unwrap();
+        let tags = read_tags(&path);
+        assert_eq!(tags.album, "");
+        assert_eq!(tags.artist, "原艺人", "清空一个字段不该顺手清掉别的");
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn empty_edit_is_a_no_op_so_the_file_is_not_rewritten() {
+        // 空编辑照样重写文件的话 mtime 会变，扫描的增量跳过就白做了
+        let path = scratch("noop");
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        write_metadata(&path, &MetadataEdit::default()).unwrap();
+        let after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(before, after);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn write_cover_replaces_the_old_one_and_rejects_unknown_formats() {
+        let path = scratch("cover");
+        write_cover(&path, &tiny_png()).unwrap();
+        let (data, mime) = read_cover(&path).expect("写进去就该读得回来");
+        assert_eq!(mime, "image/png");
+        assert_eq!(data, tiny_png());
+
+        // 换第二张：文件里只该剩一张，不然容器会越堆越大
+        let jpeg = b"\xff\xd8\xff\xe0 fake jpeg".to_vec();
+        write_cover(&path, &jpeg).unwrap();
+        let tagged = Probe::open(&path).unwrap().read().unwrap();
+        let tag = tagged.primary_tag().or_else(|| tagged.first_tag()).unwrap();
+        assert_eq!(tag.pictures().len(), 1);
+        assert_eq!(read_cover(&path).unwrap().0, jpeg);
+
+        assert!(write_cover(&path, b"GIF89a....").is_err(), "认不出来的格式要挡掉");
+        assert!(write_cover(&path, b"").is_err());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

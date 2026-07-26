@@ -1,14 +1,9 @@
+import { useState } from "react";
 import { Activity, FolderPlus, RotateCcw, Square } from "lucide-react";
+import { forgetQueuedAnalysis } from "../../lib/autoAnalyze";
 import { CAMELOT_ORDER, camelotToLabel } from "../../lib/camelot";
-import { useAppStore } from "../../stores/appStore";
-import { useLibraryStore, type AnalyzedFilter } from "../../stores/libraryStore";
-import { Button, ProgressBar } from "../common";
-
-const ANALYZED_OPTIONS: ReadonlyArray<{ id: AnalyzedFilter; label: string }> = [
-  { id: "all", label: "全部" },
-  { id: "yes", label: "已分析" },
-  { id: "no", label: "未分析" },
-];
+import { selectAnalyzing, useLibraryStore } from "../../stores/libraryStore";
+import { Button, InlineNotice, ProgressBar } from "../common";
 
 /** 输入框里的数字：空串 → null，非法 → 保持原值不动。 */
 function parseNumber(raw: string): number | null | undefined {
@@ -24,36 +19,46 @@ export function LibraryToolbar() {
   const startScan = useLibraryStore((state) => state.startScan);
   const startAnalyze = useLibraryStore((state) => state.startAnalyze);
   const cancelAnalyze = useLibraryStore((state) => state.cancelAnalyze);
+  const setAutoAnalyzeSuspended = useLibraryStore((state) => state.setAutoAnalyzeSuspended);
   const scan = useLibraryStore((state) => state.scan);
   const analyze = useLibraryStore((state) => state.analyze);
+  const analyzing = useLibraryStore(selectAnalyzing);
   const stats = useLibraryStore((state) => state.stats);
-  const pushToast = useAppStore((state) => state.pushToast);
-  const autoAnalyze = useAppStore((state) => state.settings?.auto_analyze ?? true);
+  /** 出错就地贴在工具条下面。原来是弹窗，可弹窗飘走之后用户就不知道刚才哪一步没成了。 */
+  const [notice, setNotice] = useState("");
 
   const scanning = scan !== null && scan.phase !== "done";
-  const analyzing = analyze !== null && (analyze.total === 0 || analyze.done < analyze.total);
   const pending = stats ? stats.total - stats.analyzed : 0;
 
-  const pickAndScan = async () => {
+  /**
+   * 「添加文件夹」是一个动作，不是一次作业：选完目录之后登记曲库根、扫描、
+   * 把新曲目排进分析队列这三件事全在后台自动做完，用户不需要再点第二下。
+   * 所以 analyze 恒为 true——它是这个动作语义的一部分，不是可选项。
+   */
+  const addFolders = async () => {
     const paths = await window.kumodeck?.pickFolders();
     if (!paths || paths.length === 0) return;
+    setNotice("");
     try {
-      const response = await startScan(paths, autoAnalyze);
-      pushToast("info", `开始扫描 ${paths.length} 个目录，发现 ${response.found} 个文件`);
+      await startScan(paths, true);
     } catch (error) {
-      pushToast("error", `扫描失败：${(error as Error).message}`);
+      setNotice(`添加文件夹失败：${(error as Error).message}`);
     }
   };
 
+  /**
+   * 平时不用点这里：选中、播放、以及空闲时的后台补齐已经在自动排队了。
+   * 这个按钮是「现在就全部排上」的快捷方式，同时也是按过「停止」之后
+   * 把自动化重新点亮的开关——所以要先清掉排过队的记号，被取消的那些才排得回去。
+   */
   const analyzePending = async () => {
+    setNotice("");
+    forgetQueuedAnalysis();
+    setAutoAnalyzeSuspended(false);
     try {
-      const response = await startAnalyze(null, false);
-      pushToast(
-        response.queued > 0 ? "info" : "warn",
-        response.queued > 0 ? `已排队分析 ${response.queued} 首` : "没有待分析的曲目",
-      );
+      await startAnalyze(null, false);
     } catch (error) {
-      pushToast("error", `分析失败：${(error as Error).message}`);
+      setNotice(`分析失败：${(error as Error).message}`);
     }
   };
 
@@ -122,18 +127,10 @@ export function LibraryToolbar() {
           />
         </span>
 
-        <div className="kd-segment" role="group" aria-label="分析状态">
-          {ANALYZED_OPTIONS.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              aria-pressed={filter.analyzed === option.id}
-              onClick={() => setFilter({ analyzed: option.id })}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
+        {/* 「已分析 / 未分析」筛选已删除：分析是后台自动跑完的，
+            没有哪个 DJ 会想按"这首分析过了没"来找歌。
+            `AnalyzedFilter` 类型和 store 里的字段保留着——
+            后台补齐队列仍然要靠它查未分析的曲目。 */}
 
         <Button variant="ghost" size="sm" iconOnly aria-label="重置筛选" onClick={resetFilter}>
           <RotateCcw size={12} />
@@ -141,45 +138,39 @@ export function LibraryToolbar() {
 
         <span className="kd-toolbar-gap" />
 
-        <Button onClick={() => void pickAndScan()} disabled={scanning}>
+        <Button
+          onClick={() => void addFolders()}
+          disabled={scanning}
+          title="选一个文件夹加进曲库，导入和分析都在后台自动做完"
+        >
           <FolderPlus size={13} />
-          扫描目录
+          添加文件夹
         </Button>
-        {analyzing ? (
-          // 分析上千首要跑很久，中途改主意必须能停下来——不给出口的话
-          // 只能关掉整个 app，正在写的那一行还可能写坏。
-          <Button
-            variant="danger"
-            onClick={() => {
-              void cancelAnalyze()
-                .then(() => pushToast("info", "已停止分析"))
-                .catch((error: unknown) => pushToast("error", (error as Error).message));
-            }}
-            title="停止批量分析。正在跑的那一首会跑完"
-          >
-            <Square size={11} fill="currentColor" />
-            停止分析
-          </Button>
-        ) : (
-          // 不用红色：它和顶上的「搜索」会叠成两个常亮的红块。
-          // 分析是曲库的日常动作，中性按钮 + 数字够醒目了。
-          <Button
-            onClick={() => void analyzePending()}
-            disabled={pending <= 0}
-            title="分析所有还没跑过的曲目"
-          >
-            <Activity size={13} />
-            分析{pending > 0 ? `（${pending}）` : ""}
-          </Button>
-        )}
+        {/* 停止不在这儿：它就贴在下面那条分析进度条旁边——要停的是那根进度条，
+            按钮离它一行远的话，得先确认"我停的是哪个"。
+            这里也不用红色：它和顶上的「搜索」会叠成两个常亮的红块。 */}
+        <Button
+          onClick={() => void analyzePending()}
+          disabled={pending <= 0 || analyzing}
+          title="立刻把所有还没跑过的曲目全排上（平时它们会在空闲时慢慢补齐）"
+        >
+          <Activity size={13} />
+          分析{pending > 0 ? `（${pending}）` : ""}
+        </Button>
       </div>
 
-      {(scanning || analyzing) && (
+      {/* 用 analyze !== null 而不是 analyzing：后台补齐是一批 20 首连着跑的，
+          跑完一批到下一批排上之间有个空档，按"在跑"算的话这一整行会闪一下，
+          底下的曲目表跟着跳一次高度。跑完的那一批先停在 100% 上，
+          确认后面没有下一批了才由 autoAnalyze 收走。 */}
+      {(scanning || analyze !== null || notice) && (
         <div className="kd-toolbar" style={{ gap: "0.75rem" }}>
+          <InlineNotice className="kd-grow" text={notice} onDismiss={() => setNotice("")} />
           {scanning && scan && (
             <span className="kd-row kd-grow" style={{ gap: "0.5rem", minWidth: 0 }}>
+              {/* 用户点的是「添加文件夹」，进度条上就不该冒出一个他没听说过的"扫描" */}
               <span className="kd-chip" data-tone="theme">
-                扫描
+                导入
               </span>
               <ProgressBar
                 className="kd-grow"
@@ -194,7 +185,7 @@ export function LibraryToolbar() {
               </span>
             </span>
           )}
-          {analyzing && analyze && (
+          {analyze !== null && (
             <span className="kd-row kd-grow" style={{ gap: "0.5rem", minWidth: 0 }}>
               <span className="kd-chip" data-tone="theme">
                 分析
@@ -210,6 +201,27 @@ export function LibraryToolbar() {
               <span className="kd-truncate kd-faint" style={{ maxWidth: "14rem" }} title={analyze.current}>
                 {analyze.current}
               </span>
+              {/* 分析上千首要跑很久，中途改主意必须能停下来——不给出口的话
+                  只能关掉整个 app，正在写的那一行还可能写坏。
+                  就地贴在进度条尾巴上：停的是眼前这根条，不用再去别处找按钮。
+                  这一行唯一的红色，而且只在真的有东西在跑时才出现。 */}
+              {analyzing && (
+                <Button
+                  variant="danger"
+                  size="sm"
+                  iconOnly
+                  aria-label="停止分析"
+                  title="停止分析。正在跑的那一首会跑完，之后也不再自动补齐"
+                  onClick={() => {
+                    forgetQueuedAnalysis();
+                    void cancelAnalyze().catch((error: unknown) =>
+                      setNotice((error as Error).message),
+                    );
+                  }}
+                >
+                  <Square size={10} fill="currentColor" />
+                </Button>
+              )}
             </span>
           )}
         </div>

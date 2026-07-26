@@ -10,7 +10,7 @@ import {
   type TrackSort,
 } from "../../stores/libraryStore";
 import type { IntakeItem, Platform, Quality, SongSource } from "../../types";
-import { Button, EmptyState } from "../common";
+import { Button, EmptyState, InlineNotice } from "../common";
 import { QueuePanel } from "../download/QueuePanel";
 import { ResultTable, selectionKey } from "../download/ResultTable";
 import { DEFAULT_PRIORITY, SearchBar, SearchPlatforms } from "../download/SearchBar";
@@ -44,7 +44,6 @@ const BILI_RE = /bilibili\.com|b23\.tv|^\s*(?:BV[0-9A-Za-z]{10}|av\d+)\s*$/i;
  */
 export function Workspace() {
   const settings = useAppStore((state) => state.settings);
-  const pushToast = useAppStore((state) => state.pushToast);
   const listMode = useAppStore((state) => state.listMode);
   const hasResults = useAppStore((state) => state.hasResults);
   const setListMode = useAppStore((state) => state.setListMode);
@@ -80,6 +79,14 @@ export function Workspace() {
   const [busy, setBusy] = useState(false);
   const [items, setItems] = useState<IntakeItem[] | null>(null);
   const [note, setNote] = useState("");
+  /**
+   * 三处失败各有各的现场，所以分成三条，不合并成一个全局的错误：
+   * 搜索失败要顶在结果列表的摘要位、入队失败要贴在「加入队列」旁边、
+   * 拖动排序失败要出现在曲目表上方。合成一条就总有两处放错地方。
+   */
+  const [searchError, setSearchError] = useState("");
+  const [queueError, setQueueError] = useState("");
+  const [reorderError, setReorderError] = useState("");
 
   const [chosen, setChosen] = useState<Set<string>>(new Set());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -107,6 +114,8 @@ export function Workspace() {
   const closeResults = useCallback(() => {
     setItems(null);
     setNote("");
+    setSearchError("");
+    setQueueError("");
     setChosen(new Set());
     useAppStore.getState().setHasResults(false);
   }, []);
@@ -129,6 +138,7 @@ export function Workspace() {
     setExpandedGroups(new Set());
     setCollapsedItems(new Set());
     setSourceIndex({});
+    setSearchError("");
     // 平台顺序 = 拖出来的优先级，决定同一首歌默认从哪家下。
     // 哔哩哔哩也参与关键词搜索。视频就是视频：下载保留完整视频文件，
     // 只在播放时取音轨（曲库对视频文件的统一行为）。
@@ -158,11 +168,13 @@ export function Workspace() {
       setItems([]);
       setHasResults(true);
       setNote("");
-      pushToast("error", `处理失败：${errorText(error)}`);
+      // 结果列表这时是空的，那条摘要位就腾出来写原因——
+      // 另起一行会把列表顶下去，切来切去整块面板都在跳
+      setSearchError(`处理失败：${errorText(error)}`);
     } finally {
       setBusy(false);
     }
-  }, [query, platforms, merge, batch, settings, pushToast, setHasResults]);
+  }, [query, platforms, merge, batch, settings, setHasResults]);
 
   const toggleSelect = useCallback((key: string) => {
     setChosen((current) => {
@@ -244,15 +256,17 @@ export function Workspace() {
 
   const addToQueue = useCallback(async () => {
     if (chosenSources.length === 0) return;
+    setQueueError("");
     try {
-      const tasks = await enqueue(chosenSources, { quality: quality === "" ? null : quality });
-      pushToast("info", `已加入 ${tasks.length} 个下载任务`);
+      // 不报"已加入 N 个任务"：右边那栏就是队列，任务当场排进去，
+      // 而且勾选被清空、这条动作栏跟着收起来，做成了看得一清二楚
+      await enqueue(chosenSources, { quality: quality === "" ? null : quality });
       setChosen(new Set());
       void refreshStats();
     } catch (error) {
-      pushToast("error", `加入队列失败：${errorText(error)}`);
+      setQueueError(`加入队列失败：${errorText(error)}`);
     }
-  }, [chosenSources, quality, enqueue, pushToast, refreshStats]);
+  }, [chosenSources, quality, enqueue, refreshStats]);
 
   /**
    * 本地列表里拖动换位：把整个文件夹的曲目顺序写回它的 .kumodeck.json。
@@ -262,6 +276,7 @@ export function Workspace() {
     async (ids: number[], targetId: number, before: boolean) => {
       const folder = filter.folder;
       if (!folder) return;
+      setReorderError("");
       try {
         const page = await api.tracks({
           folder,
@@ -283,10 +298,11 @@ export function Workspace() {
         // 手排完立刻按手排顺序看；setFilter 的防抖会触发 refresh
         setFilter({ sort: "custom" });
       } catch (error) {
-        pushToast("error", `排序失败：${errorText(error)}`);
+        // 拖完之后列表会自己弹回原来的顺序，得说清楚这不是"拖歪了"
+        setReorderError(`排序失败：${errorText(error)}`);
       }
     },
-    [filter.folder, filter.sort, filter.order, setFilter, pushToast],
+    [filter.folder, filter.sort, filter.order, setFilter],
   );
 
   const libraryNote =
@@ -295,6 +311,10 @@ export function Workspace() {
     (stats
       ? ` · 已分析 ${stats.analyzed} · ${formatDuration(stats.total_duration)} · ${formatBytes(stats.total_size)}`
       : "");
+
+  /** 标签行右边那条摘要：搜索出错时由原因顶替，其余时候是统计。 */
+  const headNote =
+    listMode === "library" ? libraryNote : listMode === "search" ? searchError || note : "";
 
   const sortBy = (column: TrackSort) => {
     // 点同一列切升降序，点新列默认降序（新加入、BPM 高的先看）
@@ -360,8 +380,14 @@ export function Workspace() {
                   视频
                 </button>
               </nav>
-              <span className="kd-list-note kd-truncate">
-                {listMode === "library" ? libraryNote : listMode === "search" ? note : ""}
+              {/* 搜索失败时这条摘要就地变成失败原因（data-error 让它换个颜色），
+                  不另起一行——列表上头多一条会把整块面板顶得跳一下 */}
+              <span
+                className="kd-list-note kd-truncate"
+                data-error={listMode === "search" && searchError ? "true" : undefined}
+                title={headNote || undefined}
+              >
+                {headNote}
               </span>
               <span className="kd-toolbar-gap" />
               {hasResults && listMode === "search" && (
@@ -391,6 +417,14 @@ export function Workspace() {
               <div className="kd-toolbar" style={{ color: "var(--kd-danger)" }}>
                 {libError}
               </div>
+            )}
+            {/* 拖动排序失败：贴在曲目表正上方，就是刚才拖的那张表 */}
+            {listMode === "library" && (
+              <InlineNotice
+                text={reorderError}
+                onDismiss={() => setReorderError("")}
+                block
+              />
             )}
 
             {listMode === "video" ? (
@@ -438,6 +472,8 @@ export function Workspace() {
                   清除
                 </Button>
                 <span className="kd-toolbar-gap" />
+                {/* 入队失败就摆在这颗按钮左边：勾选还在，重按一次就是重试 */}
+                <InlineNotice text={queueError} onDismiss={() => setQueueError("")} />
                 <Button variant="primary" onClick={() => void addToQueue()}>
                   <Download size={13} />
                   加入队列

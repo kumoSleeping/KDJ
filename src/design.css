@@ -664,7 +664,10 @@ textarea {
 /* ============================================================
  * 表格
  * ========================================================== */
+/* 容器查询的锚点：列表面板夹在文件夹树和详情栏中间，真实可用宽度远小于窗口宽度，
+   所以要按**这个面板**的宽度决定砍哪列，而不是按视口。 */
 .kd-table-wrap {
+  container-type: inline-size;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -697,6 +700,10 @@ textarea {
   color: var(--kd-faint);
   font-size: var(--kd-size-xs);
   min-width: 0;
+}
+/* 搜索失败时这行摘要就地变成错误文案：另起一行会把列表顶得跳一下 */
+.kd-list-note[data-error="true"] {
+  color: var(--kd-danger);
 }
 .kd-list-tabs {
   display: flex;
@@ -737,6 +744,11 @@ textarea {
   width: 100%;
   border-collapse: collapse;
   font-variant-numeric: tabular-nums;
+  /* fixed 布局：写了 width 的列拿走各自的份额，**没写 width 的标题列吃掉剩余**。
+     用默认的 auto 布局时，配上下面 td 的 `max-width: 0`（省略号必需），
+     浏览器会把没写宽度的列压到最小——结果就是标题被压成 "[..." 而
+     整列都是 "—" 的专辑却稳稳占着 14%。列宽优先级见 TrackTable.tsx 的注释。 */
+  table-layout: fixed;
 }
 .kd-table thead th {
   position: sticky;
@@ -789,7 +801,10 @@ textarea {
 }
 /* 白天模式的列表面板铺白底：默认透出去的是 --kd-bg 灰底，
    一整屏结果看起来发灰发沉，其实内容没问题，是底色的锅 */
-:root[data-theme="light"] .kd-table-wrap {
+:root[data-theme="light"] /* 容器查询的锚点：列表面板夹在文件夹树和详情栏中间，真实可用宽度远小于窗口宽度，
+   所以要按**这个面板**的宽度决定砍哪列，而不是按视口。 */
+.kd-table-wrap {
+  container-type: inline-size;
   background: var(--kd-panel);
 }
 /* 搜索结果里的小封面位。尺寸固定，图片有没有都不会让标题跳位。 */
@@ -1006,32 +1021,35 @@ textarea {
 }
 
 /* ============================================================
- * Toast
+ * 就地提示（InlineNotice）
+ * ------------------------------------------------------------
+ * 右下角的浮层通知已经删掉：它盖在内容上、5 秒就自己跑了，
+ * 出错时人往往正盯着别处，回头看已经什么都没有了。
+ * 失败改成留在**出事的那个地方**——按钮旁边、面板里的一行小字，
+ * 不会自己消失，做下一次同样的操作时才清掉。
+ *
+ * 不用红：红色只给"动作"（加入队列 / 停止分析 / 移出曲库），
+ * 一个区域里再多一块红，那个真正要被按的按钮就不显眼了。
+ * 也没有左侧竖条一类的装饰，就是一枚芯片加一行字。
  * ========================================================== */
-.kd-toasts {
-  position: fixed;
-  right: 1rem;
-  bottom: calc(var(--kd-player-h) + 1rem);
-  z-index: 200;
+.kd-notice {
   display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  pointer-events: none;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  font-size: var(--kd-size-xs);
+  line-height: 1.4;
 }
-.kd-toast {
-  position: relative;
-  min-width: 15rem;
-  max-width: 26rem;
-  padding: 0.6rem 0.75rem;
-  border: 1px solid var(--kd-line);
-  border-left: 3px solid var(--kd-info);
-  background: var(--kd-panel-raised);
-  box-shadow: var(--kd-shadow-float);
-  font-size: var(--kd-size-sm);
-  pointer-events: auto;
+.kd-notice-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.kd-toast[data-level="warn"] { border-left-color: var(--kd-warn); }
-.kd-toast[data-level="error"] { border-left-color: var(--kd-danger); }
+/* 独占一行时（面板底部、按钮下面）自己撑开一点内边距 */
+.kd-notice[data-block="true"] {
+  padding: 0.3rem 0.5rem;
+}
 
 /* ============================================================
  * 对话框
@@ -1106,6 +1124,10 @@ textarea {
 .kd-player-meta {
   min-width: 0;
   flex: 0 0 200px;
+}
+/* 挂着"放不了"这条说明时才放宽：200px 里塞不下一句完整的话 */
+.kd-player-meta[data-notice="true"] {
+  flex: 1 1 200px;
 }
 .kd-player-title {
   font-weight: 700;
@@ -1436,6 +1458,12 @@ textarea {
 .kd-folder-more:hover {
   color: var(--kd-text);
 }
+/* 文件夹栏里的 InlineNotice 只需要一条上边框把它和树分开；
+   竖线之类的装饰不加，这一栏本来就窄。 */
+.kd-folder-notice {
+  border-top: 1px solid var(--kd-line);
+}
+
 .kd-folder-foot {
   display: flex;
   gap: 0.25rem;

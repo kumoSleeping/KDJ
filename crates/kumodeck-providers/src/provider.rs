@@ -262,6 +262,72 @@ pub fn remove_existing(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
+/// 取一个字符串字段，**空串等同于缺失**。
+///
+/// Python 版的归一化到处是 `str(data.get("a") or data.get("b") or "Unknown")` 这种
+/// 真值链：`""` 是假值，会继续往后退。直译成 `get(..).and_then(as_str)` 时
+/// `Some("")` 是"有值"，退化链就断在第一个空串上——搜索结果里标题/mid 偶尔就是空串，
+/// 于是曲目标题变成空白、key 变成空字符串（后续下载必然失败）。
+pub fn str_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.is_empty())
+}
+
+/// `data.get("a") or data.get("b")` 的字段级真值链：跳过 null / 0 / 空串 / 空数组 / 空对象。
+///
+/// 直译成 `get("a").or_else(|| get("b"))` 是错的——`Some(Null)` 会让链条停在第一个键上。
+/// 网易云的 `ar`/`artists`、`dt`/`duration` 两组别名就是这么错位的。
+pub fn first_truthy<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a serde_json::Value> {
+    keys.iter()
+        .map(|key| value.get(*key))
+        .find(|found| is_truthy(*found))
+        .flatten()
+}
+
+/// `int(data.get("x") or 0)` 的宽松整数读取。
+///
+/// 直译成 `as_i64()` 会漏掉两种真实回包：接口偶尔把码率/文件大小写成**字符串**
+/// （`"999000"`），也偶尔写成浮点（`999000.0`）。Python 的 `int(...)` 两种都吃，
+/// `as_i64()` 两种都返回 None → 退化成 0，于是"无损"被判成"没有音质信息"。
+pub fn loose_int(value: Option<&serde_json::Value>) -> i64 {
+    match value {
+        Some(serde_json::Value::Number(number)) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|v| v as i64))
+            .unwrap_or(0),
+        // Python 的 `int("999000")` 成立、`int("abc")` 抛异常被兜成 0
+        Some(serde_json::Value::String(text)) => text.trim().parse::<i64>().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// `limit` 的归一化：Python 那边一律是 `max(1, int(limit or 20))`——
+/// **0 是假值，会退回默认条数**，而不是被夹成 1。
+///
+/// 直译成 `limit.max(1)` 时 `{"limit": 0}` 会只返回 1 条结果，
+/// 前端看到的是"搜索几乎没结果"，很难联想到是 limit 被夹坏了。
+pub fn effective_limit(limit: usize, default: usize) -> usize {
+    if limit == 0 {
+        default
+    } else {
+        limit
+    }
+}
+
+/// Python `if song.get("sq"):` 的真值判断：`null` / `0` / `""` / `[]` / `{}` 全是假。
+pub fn is_truthy(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(flag)) => *flag,
+        Some(serde_json::Value::Number(number)) => number.as_f64().is_some_and(|v| v != 0.0),
+        Some(serde_json::Value::String(text)) => !text.is_empty(),
+        Some(serde_json::Value::Array(list)) => !list.is_empty(),
+        Some(serde_json::Value::Object(map)) => !map.is_empty(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +394,53 @@ mod tests {
         assert_eq!(Platform::Qqm.download_dir_name(), "qqmusic");
         assert_eq!(Platform::Bilibili.download_dir_name(), "bilibili");
         assert_eq!(Platform::Soundcloud.download_dir_name(), "soundcloud");
+    }
+
+    #[test]
+    fn empty_strings_count_as_missing_like_pythons_or_chain() {
+        let value = serde_json::json!({"name": "", "title": "备用", "n": 0});
+        assert_eq!(str_field(&value, "name"), None, "空串要继续往后退");
+        assert_eq!(
+            str_field(&value, "name").or_else(|| str_field(&value, "title")),
+            Some("备用")
+        );
+        assert_eq!(str_field(&value, "nope"), None);
+        assert_eq!(str_field(&value, "n"), None, "非字符串也算缺失");
+    }
+
+    #[test]
+    fn truthiness_matches_python() {
+        use serde_json::json;
+        assert!(!is_truthy(None));
+        assert!(!is_truthy(Some(&json!(null))));
+        assert!(!is_truthy(Some(&json!(0))));
+        assert!(!is_truthy(Some(&json!(""))));
+        assert!(!is_truthy(Some(&json!([]))));
+        // 网易云偶尔回空对象占位，Python 那边是假值
+        assert!(!is_truthy(Some(&json!({}))));
+        assert!(is_truthy(Some(&json!({"br": 999000}))));
+        assert!(is_truthy(Some(&json!(1))));
+    }
+
+    #[test]
+    fn loose_int_reads_the_shapes_python_accepted() {
+        use serde_json::json;
+        assert_eq!(loose_int(Some(&json!(999000))), 999_000);
+        // 接口偶尔把码率/文件大小写成字符串或浮点，Python 的 int() 两种都吃
+        assert_eq!(loose_int(Some(&json!("999000"))), 999_000);
+        assert_eq!(loose_int(Some(&json!(999000.0))), 999_000);
+        assert_eq!(loose_int(Some(&json!("abc"))), 0);
+        assert_eq!(loose_int(Some(&json!(null))), 0);
+        assert_eq!(loose_int(None), 0);
+    }
+
+    #[test]
+    fn limit_zero_falls_back_to_the_python_default_not_to_one() {
+        // Python 是 `max(1, int(limit or 20))`：0 是假值，退回默认条数
+        assert_eq!(effective_limit(0, 20), 20);
+        assert_eq!(effective_limit(0, 500), 500);
+        assert_eq!(effective_limit(5, 20), 5);
+        assert_eq!(effective_limit(1, 20), 1);
     }
 
     #[test]

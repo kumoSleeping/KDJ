@@ -1,0 +1,178 @@
+# 纯 Rust + Tauri 的桌面三平台打包（macOS / Windows / Linux）。
+#
+# 和现有 build.yml 的关系：**两条独立的流水线，互不覆盖**。
+#   build.yml       = v0.1.0 那套 Electron + PyInstaller sidecar，仍然是 main 上的正式产物；
+#   rust-build.yml  = rust-rewrite 分支的 Tauri 产物。
+# 在用户点头把 rust-rewrite 扶正之前，旧的那条不许动（HANDOFF 铁律 1）。
+#
+# 触发：
+#   - push 到 rust-rewrite：跑测试 + 打包，产物只当 artifact；
+#   - 打 tag：v* 或 rust-v*，额外发 GitHub Release。
+#     **注意**：build.yml 也监听 v*，所以在正式切换之前请用 `rust-v0.2.0`
+#     这种前缀 tag——GitHub 的 ref 模式从头匹配，`v*` 不会命中 `rust-v*`，
+#     这样两条流水线不会往同一个 Release 里塞两套 155MB / 15MB 的包。
+name: rust-build
+
+on:
+  push:
+    branches: [rust-rewrite]
+    tags: ["v*", "rust-v*"]
+  workflow_dispatch:
+
+# 发 Release 需要写权限。默认的 GITHUB_TOKEN 是只读的——v0.1.0 首跑三平台
+# 包全打出来了、栽在最后一步上传，就是漏了这三行（见 docs/05-tabs-git-and-ci.md）。
+permissions:
+  contents: write
+
+# 同一分支上连续 push 时取消上一次：release 档 LTO + codegen-units=1 很慢，
+# 排队会把 runner 全占住。tag 的构建不能取消，所以 group 里带上 ref。
+concurrency:
+  group: rust-build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  desktop:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS runner 现在是 Apple Silicon。打 universal 二进制一次覆盖
+          # arm64 + x64（v0.1.0 是两个 DMG，Tauri 这边合成一个），
+          # 代价是要装两个 rust target 并编译两遍。
+          - os: macos-latest
+            label: macos-universal
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            tauri_args: --target universal-apple-darwin
+          - os: ubuntu-latest
+            label: linux-x86_64
+            rust_targets: ""
+            tauri_args: ""
+          - os: windows-latest
+            label: windows-x86_64
+            rust_targets: ""
+            tauri_args: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      # 缓存 target/ 与 ~/.cargo。symphonia + rustfft + rusqlite(bundled) 冷编
+      # 十几分钟，缓存命中后只重编本仓库的 5 个 crate。
+      - name: Rust 构建缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.label }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Tauri 在 Linux 上是壳，真正渲染的是系统 WebKitGTK，所以这些 -dev 包
+      # 是**编译期**依赖，缺一个就是 pkg-config 报错而不是运行期白屏。
+      #   libwebkit2gtk-4.1-dev  Tauri 2 用 4.1（Tauri 1 才是 4.0），
+      #                          会连带拖进 libsoup-3.0 / libjavascriptcoregtk-4.1
+      #   librsvg2-dev           托盘/图标的 SVG 渲染
+      #   patchelf               打 AppImage 时改 rpath
+      #   libxdo-dev             tauri-plugin 的全局快捷键/输入模拟
+      #   appindicator           托盘。Ubuntu 24.04 起 libappindicator3-dev 已被
+      #                          libayatana-appindicator3-dev 取代，装错名字会
+      #                          "E: Unable to locate package"——所以两个名字都试。
+      - name: 安装 Linux 系统依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl wget file \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev \
+            libssl-dev
+          sudo apt-get install -y libayatana-appindicator3-dev \
+            || sudo apt-get install -y libappindicator3-dev
+
+      # 注意：**不要**给 cargo 接 `| head -N` 之类的管道，读端提前关闭会给
+      # cargo 发 SIGPIPE 把编译打断，看起来像随机失败。
+      # 只跑 debug：release 档开了 lto + codegen-units=1，跑测试等于白等十分钟。
+      # 真库集成测试（tests/real_library.rs）靠 KUMODECK_TEST_DB 环境变量开关，
+      # CI 上没有这个变量，会自己跳过。
+      - name: Rust 全量测试
+        run: cargo test --workspace
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 前端类型检查
+        run: npm run typecheck
+
+      # M7（Tauri 壳）落地之前 src-tauri/ 还不完整。这里探测一下而不是硬跑，
+      # 让这条流水线在壳做好之前仍然能当"三平台 Rust 测试"用，红叉只留给真问题。
+      # 判据是 tauri.conf.json 而不是目录是否存在：壳在半成品状态下（只有
+      # icons/ 和 src/、还没写配置）目录就已经在了，按目录判会误触发打包。
+      - name: 探测 Tauri 壳
+        id: shell
+        shell: bash
+        run: |
+          if [ -f src-tauri/tauri.conf.json ] && [ -f src-tauri/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::src-tauri/tauri.conf.json 还不存在（M7 未完成），本次跳过打包，只跑测试。"
+          fi
+
+      # 脚本名以 package.json 为准：有 tauri:build 就用它（能带上项目自己的
+      # 前置步骤），没有就直接调 CLI。`npx tauri` 会去装 npm 上那个 v1 时代的
+      # 同名废弃包，所以必须写全 `@tauri-apps/cli@^2`。
+      - name: Tauri 打包
+        if: steps.shell.outputs.present == 'true'
+        shell: bash
+        env:
+          # macOS 上 Tauri 默认会找钥匙串里的签名证书；和 v0.1.0 一样不签名，
+          # 用户首次打开要右键 → 打开。
+          APPLE_SIGNING_IDENTITY: "-"
+          CI: "true"
+        run: |
+          set -euo pipefail
+          if node -e "process.exit((require('./package.json').scripts||{})['tauri:build']?0:1)"; then
+            npm run tauri:build -- ${{ matrix.tauri_args }}
+          else
+            npx --yes @tauri-apps/cli@^2 build ${{ matrix.tauri_args }}
+          fi
+
+      # 产物路径用宽松的 `**` 通配：src-tauri 是不是 workspace 成员会决定
+      # 产物落在 `target/` 还是 `src-tauri/target/`，加上 --target 又会多一层
+      # 三元组目录。与其猜，不如让 glob 兜住所有情况。
+      - name: 上传产物
+        if: steps.shell.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kumodeck-rust-${{ matrix.label }}
+          path: |
+            **/release/bundle/dmg/*.dmg
+            **/release/bundle/nsis/*.exe
+            **/release/bundle/msi/*.msi
+            **/release/bundle/appimage/*.AppImage
+            **/release/bundle/deb/*.deb
+            **/release/bundle/rpm/*.rpm
+          if-no-files-found: error
+
+      - name: 发布 Release（仅 tag）
+        if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            **/release/bundle/dmg/*.dmg
+            **/release/bundle/nsis/*.exe
+            **/release/bundle/msi/*.msi
+            **/release/bundle/appimage/*.AppImage
+            **/release/bundle/deb/*.deb
+            **/release/bundle/rpm/*.rpm
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

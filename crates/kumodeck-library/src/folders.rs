@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use kumodeck_core::models::{FolderNode, FolderTree};
-use kumodeck_providers::tags::is_audio_extension;
+use kumodeck_providers::tags::is_media_extension;
 
 /// 每个受管目录里放一份清单文件，记这一层的**子目录显示顺序**。
 ///
@@ -157,18 +157,22 @@ pub fn infer_roots(track_paths: &[String]) -> Vec<PathBuf> {
 
 // ------------------------------------------------------------------ 目录清单
 
-/// 读目录里的 `.kumodeck.json` 的 order 列表。
+/// 读目录里的 `.kumodeck.json`。读不出来一律当成空清单。
 ///
-/// 读不出来一律当成空清单：清单只影响显示顺序，坏了不该让整棵树打不开。
+/// 清单只影响显示顺序，坏了不该让整棵树打不开——所以这里吞掉所有异常，
 /// 最坏情况是退回按名字排序，用户看到的是"顺序被重置了"，而不是白屏。
-pub fn read_manifest_order(directory: &Path) -> Vec<String> {
+fn read_manifest(directory: &Path) -> serde_json::Map<String, serde_json::Value> {
     let Ok(text) = std::fs::read_to_string(directory.join(MANIFEST_NAME)) else {
-        return Vec::new();
+        return Default::default();
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Vec::new();
-    };
-    value
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => Default::default(),
+    }
+}
+
+pub fn read_manifest_order(directory: &Path) -> Vec<String> {
+    read_manifest(directory)
         .get("order")
         .and_then(serde_json::Value::as_array)
         .map(|list| {
@@ -180,8 +184,18 @@ pub fn read_manifest_order(directory: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 清单文件在不在。`init_manifests` 用它决定要不要补一份，
+/// 判断的是**文件存在**——已经有的一律不动，哪怕内容坏了也不覆盖用户的顺序。
 pub fn has_manifest(directory: &Path) -> bool {
     directory.join(MANIFEST_NAME).is_file()
+}
+
+/// 这个目录的顺序是不是"受管的"。树上的 `managed` 字段走这一条。
+///
+/// 判据是**清单能解析成非空对象**，不只是文件存在：清单坏掉时读出来的顺序
+/// 是空的，树实际按名字排，这时报 managed=true 会让用户以为自己排的顺序丢了。
+fn manifest_is_managed(directory: &Path) -> bool {
+    !read_manifest(directory).is_empty()
 }
 
 pub fn write_manifest(directory: &Path, order: &[String]) {
@@ -242,7 +256,7 @@ pub fn count_audio_files(directory: &Path) -> i64 {
                 && Path::new(&name)
                     .extension()
                     .and_then(|ext| ext.to_str())
-                    .is_some_and(is_audio_extension)
+                    .is_some_and(is_media_extension)
         })
         .count() as i64
 }
@@ -323,7 +337,7 @@ pub fn build_tree(dirs: &[String], track_paths: &[String]) -> FolderTree {
 
 fn walk(directory: &Path, counts: &HashMap<String, i64>, depth: usize) -> FolderNode {
     let listed = read_manifest_order(directory);
-    let managed = has_manifest(directory);
+    let managed = manifest_is_managed(directory);
     let mut children: Vec<FolderNode> = Vec::new();
     if depth < MAX_DEPTH {
         // 顺序由目录自己的清单决定，不是字母序：DJ 的 set 目录是按演出顺序排的，
@@ -428,8 +442,55 @@ pub fn move_folder(
         "「{}」下已经有同名文件夹了",
         parent.file_name().unwrap_or_default().to_string_lossy()
     );
-    std::fs::rename(&source, &target).context("移动文件夹失败")?;
+    if std::fs::rename(&source, &target).is_err() {
+        // rename 跨卷会报 EXDEV。用户完全可能把外置硬盘上的一个 set 拖进内置盘的
+        // 曲库目录（两个都是已配置的曲库根），必须支持跨卷。
+        move_dir_across_volumes(&source, &target)?;
+    }
     Ok((source, target))
+}
+
+/// 跨卷搬目录：先整棵复制过去，**全部成功之后**才删源。
+///
+/// 中途失败就把半成品清掉、源目录原样留着——搬歌搬到一半两边都残缺是不可接受的。
+fn move_dir_across_volumes(source: &Path, target: &Path) -> Result<()> {
+    if let Err(err) = copy_dir_recursive(source, target) {
+        let _ = std::fs::remove_dir_all(target);
+        return Err(err.context("跨卷复制文件夹失败"));
+    }
+    std::fs::remove_dir_all(source).context("复制完成后删不掉源目录")
+}
+
+fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
+    std::fs::create_dir_all(target)
+        .with_context(|| format!("建目录失败：{}", target.display()))?;
+    for entry in std::fs::read_dir(source)
+        .with_context(|| format!("读目录失败：{}", source.display()))?
+    {
+        let entry = entry?;
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if kind.is_symlink() {
+            // 符号链接照原样重建，不把它指向的内容复制一份（等同 shutil.move 的
+            // symlinks=True）；跨卷时链接目标多半还在原来那个卷上，这是用户的意思。
+            #[cfg(unix)]
+            {
+                let dest = std::fs::read_link(&from)?;
+                std::os::unix::fs::symlink(dest, &to)?;
+            }
+            #[cfg(not(unix))]
+            {
+                std::fs::copy(&from, &to)?;
+            }
+        } else {
+            std::fs::copy(&from, &to)
+                .with_context(|| format!("复制失败：{}", from.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// 只删空目录。递归删会连带删掉音频文件，这个按钮不该有那么大的杀伤力。
@@ -683,6 +744,53 @@ mod tests {
 
         assert_eq!(count_audio_files(&dir), 2, "只数本层、只数音频、跳过隐藏文件");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn video_files_count_as_library_media() {
+        // 树上的"磁盘有几个"必须和扫描认的后缀是同一份，否则待入库数永远清不掉
+        let dir = scratch("count-video");
+        std::fs::write(dir.join("a.mkv"), b"x").unwrap();
+        std::fs::write(dir.join("b.mov"), b"x").unwrap();
+        std::fs::write(dir.join("c.mp3"), b"x").unwrap();
+        std::fs::write(dir.join("d.jpg"), b"x").unwrap();
+        assert_eq!(count_audio_files(&dir), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_broken_manifest_is_not_reported_as_managed() {
+        // 清单坏掉时树实际按名字排；这时报 managed=true 会让用户以为自己排的顺序丢了
+        let base = scratch("managed");
+        let root = base.join("lib");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(MANIFEST_NAME), "{ not json").unwrap();
+
+        let tree = build_tree(&[root.to_string_lossy().into_owned()], &[]);
+        assert!(!tree.roots[0].managed, "坏清单不算受管");
+
+        write_manifest(&root, &[]);
+        let tree = build_tree(&[root.to_string_lossy().into_owned()], &[]);
+        assert!(tree.roots[0].managed, "写过清单就是受管");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn cross_volume_move_copies_the_whole_tree_then_drops_the_source() {
+        // 真跨卷没法在测试里造，直接验搬运本身：整棵树过去、源目录清干净
+        let base = scratch("xdev");
+        let source = base.join("set1");
+        std::fs::create_dir_all(source.join("sub")).unwrap();
+        std::fs::write(source.join("a.mp3"), b"aaa").unwrap();
+        std::fs::write(source.join("sub/b.mp3"), b"bbb").unwrap();
+
+        let target = base.join("moved");
+        move_dir_across_volumes(&source, &target).unwrap();
+
+        assert!(!source.exists(), "源目录要清掉");
+        assert_eq!(std::fs::read(target.join("a.mp3")).unwrap(), b"aaa");
+        assert_eq!(std::fs::read(target.join("sub/b.mp3")).unwrap(), b"bbb");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

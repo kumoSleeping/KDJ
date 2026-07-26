@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { LoaderCircle, PlugZap, RefreshCw } from "lucide-react";
 import { TitleBar } from "./components/chrome/TitleBar";
-import { Button, EmptyState, Toasts } from "./components/common";
+import { Button, EmptyState } from "./components/common";
 import { Workspace } from "./components/workspace/Workspace";
 import { PlayerBar } from "./components/player/PlayerBar";
+import { startAutoAnalyze } from "./lib/autoAnalyze";
 import { bootAll, connectEvents, selectConnected, useAppStore } from "./stores/appStore";
 
 // 只有一个界面：工作台（曲库 + 搜索下载合一）。
@@ -21,6 +22,13 @@ export default function App() {
     void bootAll();
     return stop;
   }, []);
+
+  // 分析不该由人来推动：选中、播放、以及空闲时的后台补齐都自动排队。
+  // 挂在 connected 上而不是无条件挂——后端还没起来时轮询只会打出一串失败请求。
+  useEffect(() => {
+    if (!connected) return;
+    return startAutoAnalyze();
+  }, [connected]);
 
   const retry = useCallback(() => {
     setRetrying(true);
@@ -65,7 +73,6 @@ export default function App() {
 
       {/* 没连上时不渲染播放条：没有可播的曲目，留个空条只会占地方 */}
       {connected && <PlayerBar />}
-      <Toasts />
     </div>
   );
 }

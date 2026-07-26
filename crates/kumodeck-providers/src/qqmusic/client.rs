@@ -155,10 +155,31 @@ pub fn new_search_id() -> String {
     (t + n + r).to_string()
 }
 
+/// 接口明说"凭证失效"时才作废本地登录态，网络错误不算。
+/// 文案照抄 Python 版 `_invalidate_expired_credential` 的 marker 列表。
+const EXPIRED_MARKERS: [&str; 8] = [
+    "登录凭证已过期",
+    "登录凭证失效",
+    "凭证失效",
+    "登录过期",
+    "credential expired",
+    "credential has expired",
+    "not logged in",
+    "未登录",
+];
+
+pub fn looks_like_expired_credential(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    EXPIRED_MARKERS.iter().any(|marker| lower.contains(marker))
+}
+
 pub struct QqClient {
     http: reqwest::Client,
     session_path: PathBuf,
     credential: RwLock<Credential>,
+    /// 接口已经明确拒绝过这份凭证。Python 版是 `_credential_invalid`：
+    /// 置位之后 account() 报 expired，而不是继续显示"已登录"却每次操作都失败。
+    credential_invalid: RwLock<bool>,
     guid: String,
 }
 
@@ -173,6 +194,7 @@ impl QqClient {
             http,
             session_path: session_dir.join("qqmusic.json"),
             credential: RwLock::new(Credential::default()),
+            credential_invalid: RwLock::new(false),
             guid: new_guid(),
         };
         client.load_session();
@@ -193,6 +215,26 @@ impl QqClient {
 
     pub fn has_credential(&self) -> bool {
         self.credential.read().unwrap().is_present()
+    }
+
+    pub fn credential_invalid(&self) -> bool {
+        *self.credential_invalid.read().unwrap()
+    }
+
+    /// 接口明确拒绝了这份凭证：删掉落盘文件、置位标记。
+    ///
+    /// 只在错误文案命中 [`EXPIRED_MARKERS`] 时动手——网络抖动、限流都不算，
+    /// 否则一次断网就把用户踢下线了。
+    pub fn note_error(&self, message: &str) {
+        if !looks_like_expired_credential(message) {
+            return;
+        }
+        if *self.credential_invalid.read().unwrap() {
+            return;
+        }
+        *self.credential_invalid.write().unwrap() = true;
+        let _ = std::fs::remove_file(&self.session_path);
+        tracing::warn!("QQ 音乐凭证被接口拒绝，已作废：{message}");
     }
 
     fn load_session(&self) {
@@ -221,10 +263,12 @@ impl QqClient {
             Err(err) => tracing::warn!("序列化 QQ 音乐凭证失败：{err}"),
         }
         *self.credential.write().unwrap() = credential;
+        *self.credential_invalid.write().unwrap() = false;
     }
 
     pub fn clear_credential(&self) {
         *self.credential.write().unwrap() = Credential::default();
+        *self.credential_invalid.write().unwrap() = false;
         let _ = std::fs::remove_file(&self.session_path);
     }
 
@@ -301,8 +345,60 @@ impl QqClient {
         platform: QqPlatform,
         sign: bool,
     ) -> Result<Value> {
+        let outcome = self
+            .call_inner(module, method, param, platform, sign, None)
+            .await;
+        // 接口明说凭证死了就作废本地登录态，别让账号面板继续显示"已登录"
+        if let Err(err) = &outcome {
+            self.note_error(&format!("{err:#}"));
+        }
+        outcome
+    }
+
+    /// 刷新 musickey。
+    ///
+    /// 对应 Python 的 `client.login.refresh_credential`：QQ 的 musickey 有寿命，
+    /// 到点了先静默换一张新的，换不动才算真掉线——少了这一步用户每隔一段时间
+    /// 就得重新扫码一次。参数分支照抄 `qqmusic_api._build_refresh_param`。
+    pub async fn refresh_credential(&self) -> Result<Credential> {
+        let target = self.credential();
+        anyhow::ensure!(target.is_present(), "没有可刷新的 QQ 音乐凭证");
+        let param = refresh_param(&target);
+        let mut comm = self.build_comm(QqPlatform::Desktop);
+        comm.insert("tmeLoginType".into(), json!(target.login_type));
+
+        let data = self
+            .call_inner(
+                "music.login.LoginServer",
+                "Login",
+                param,
+                QqPlatform::Desktop,
+                false,
+                Some(comm),
+            )
+            .await
+            .inspect_err(|err| self.note_error(&format!("{err:#}")))?;
+        let refreshed: Credential =
+            serde_json::from_value(data).context("刷新回来的凭证字段不完整")?;
+        anyhow::ensure!(!refreshed.musickey.is_empty(), "刷新没有拿到新的 musickey");
+        self.store_credential(refreshed.clone());
+        Ok(refreshed)
+    }
+
+    async fn call_inner(
+        &self,
+        module: &str,
+        method: &str,
+        param: Value,
+        platform: QqPlatform,
+        sign: bool,
+        comm_override: Option<Map<String, Value>>,
+    ) -> Result<Value> {
         let mut payload = Map::new();
-        payload.insert("comm".into(), Value::Object(self.build_comm(platform)));
+        payload.insert(
+            "comm".into(),
+            Value::Object(comm_override.unwrap_or_else(|| self.build_comm(platform))),
+        );
         payload.insert(
             "req_0".into(),
             json!({ "module": module, "method": method, "param": bool_to_int(param) }),
@@ -347,6 +443,44 @@ impl QqClient {
             2001 => bail!("QQ 音乐请求过于频繁，请稍后再试"),
             other => bail!("QQ 音乐接口返回 code={other}"),
         }
+    }
+}
+
+/// 刷新凭证的请求参数。三条分支和 `qqmusic_api._build_refresh_param` 一一对应：
+/// login_type=1 是微信、2 是 QQ，其余（手机号等）走通用参数。
+fn refresh_param(target: &Credential) -> Value {
+    match target.login_type {
+        1 => json!({
+            "openid": target.openid,
+            "refresh_token": target.refresh_token,
+            "str_musicid": target.str_musicid(),
+            "musickey": target.musickey,
+            "unionid": target.unionid,
+            "refresh_key": target.refresh_key,
+            "loginMode": 2,
+        }),
+        2 => json!({
+            "openid": target.openid,
+            "access_token": target.access_token,
+            "refresh_token": target.refresh_token,
+            "expired_in": target.expired_at,
+            "musicid": target.musicid,
+            "musickey": target.musickey,
+            "refresh_key": target.refresh_key,
+            "loginMode": 2,
+        }),
+        _ => json!({
+            "openid": target.openid,
+            "access_token": target.access_token,
+            "refresh_token": target.refresh_token,
+            "expired_in": target.expired_at,
+            "str_musicid": target.str_musicid(),
+            "musicid": target.musicid,
+            "musickey": target.musickey,
+            "unionid": target.unionid,
+            "refresh_key": target.refresh_key,
+            "loginMode": 2,
+        }),
     }
 }
 
@@ -414,6 +548,82 @@ mod tests {
         assert!(!credential.is_expired(), "时长不能当成时间戳");
         credential.expired_at = now_secs() - 1;
         assert!(credential.is_expired());
+    }
+
+    #[test]
+    fn only_explicit_credential_rejections_invalidate_the_session() {
+        // 网络抖动 / 限流不能把用户踢下线
+        assert!(!looks_like_expired_credential("QQ 音乐请求失败：连接超时"));
+        assert!(!looks_like_expired_credential(
+            "QQ 音乐请求过于频繁，请稍后再试"
+        ));
+        assert!(looks_like_expired_credential("登录凭证已过期"));
+        assert!(looks_like_expired_credential("Credential Expired"));
+        assert!(looks_like_expired_credential("接口说：未登录"));
+    }
+
+    #[test]
+    fn a_rejected_credential_deletes_the_session_file_and_flips_the_flag() {
+        let dir = std::env::temp_dir().join(format!("kumodeck-qq-invalid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let client = QqClient::new(&dir).unwrap();
+        client.store_credential(Credential {
+            musicid: 1,
+            musickey: "k".into(),
+            ..Default::default()
+        });
+        assert!(dir.join("qqmusic.json").exists());
+        assert!(!client.credential_invalid());
+
+        client.note_error("QQ 音乐请求失败：网络不可达");
+        assert!(!client.credential_invalid(), "网络错误不该作废凭证");
+
+        client.note_error("登录凭证已过期");
+        assert!(client.credential_invalid());
+        assert!(!dir.join("qqmusic.json").exists(), "失效的凭证要从磁盘删掉");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refresh_param_branches_match_the_sdk() {
+        let wechat = Credential {
+            login_type: 1,
+            openid: "o".into(),
+            refresh_token: "rt".into(),
+            musicid: 7,
+            musickey: "mk".into(),
+            unionid: "u".into(),
+            refresh_key: "rk".into(),
+            ..Default::default()
+        };
+        let param = refresh_param(&wechat);
+        assert_eq!(param["str_musicid"], "7", "没有 str_musicid 就用 musicid");
+        assert_eq!(param["loginMode"], 2);
+        assert!(param.get("access_token").is_none(), "微信分支不带 access_token");
+
+        let qq = Credential {
+            login_type: 2,
+            expired_at: 1234,
+            musicid: 7,
+            musickey: "mk".into(),
+            ..Default::default()
+        };
+        let param = refresh_param(&qq);
+        assert_eq!(param["expired_in"], 1234);
+        assert_eq!(param["musicid"], 7);
+        assert!(param.get("str_musicid").is_none(), "QQ 分支不带 str_musicid");
+
+        // 手机号等其余类型走通用参数：两组字段都要在
+        let other = Credential {
+            login_type: 3,
+            musicid: 7,
+            musickey: "mk".into(),
+            ..Default::default()
+        };
+        let param = refresh_param(&other);
+        assert_eq!(param["str_musicid"], "7");
+        assert_eq!(param["musicid"], 7);
     }
 
     #[test]

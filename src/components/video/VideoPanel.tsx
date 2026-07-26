@@ -5,7 +5,7 @@ import { DASH, formatDuration } from "../../lib/format";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import type { VideoFormat, VideoInfo } from "../../types";
-import { Button, EmptyState } from "../common";
+import { Button, EmptyState, InlineNotice } from "../common";
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -20,7 +20,6 @@ function errorText(error: unknown): string {
  */
 export function VideoPanel({ query, busy }: { query: string; busy: boolean }) {
   const settings = useAppStore((state) => state.settings);
-  const pushToast = useAppStore((state) => state.pushToast);
   const saveSettings = useAppStore((state) => state.saveSettings);
   const mergeTasks = useDownloadStore((state) => state.mergeTasks);
 
@@ -30,29 +29,31 @@ export function VideoPanel({ query, busy }: { query: string; busy: boolean }) {
   const [pageIndex, setPageIndex] = useState(0);
   const [maxHeight, setMaxHeight] = useState<number | null>(null);
   const [audioOnly, setAudioOnly] = useState(false);
+  /** 解析失败的原因：没有 info 时整块面板是空的，得由它来解释为什么空。 */
+  const [resolveError, setResolveError] = useState("");
+  /** 入队失败的原因，贴在「加入队列」底下。 */
+  const [sendError, setSendError] = useState("");
 
   const effectiveHeight = maxHeight ?? settings?.video_max_height ?? 1080;
 
-  const resolve = useCallback(
-    async (text: string) => {
-      if (!text.trim()) return;
-      setResolving(true);
-      try {
-        const result = await api.videoResolve(text.trim());
-        setInfo(result);
-        setPageIndex(0);
-        if (!result.logged_in) {
-          pushToast("warn", "哔哩哔哩未登录，高清晰度和会员视频会拿不到，去设置里扫码登录");
-        }
-      } catch (error) {
-        setInfo(null);
-        pushToast("error", `解析失败：${errorText(error)}`);
-      } finally {
-        setResolving(false);
-      }
-    },
-    [pushToast],
-  );
+  const resolve = useCallback(async (text: string) => {
+    if (!text.trim()) return;
+    setResolving(true);
+    setResolveError("");
+    setSendError("");
+    try {
+      const result = await api.videoResolve(text.trim());
+      setInfo(result);
+      setPageIndex(0);
+      // 未登录不再弹一次窗：下面那行元信息里就写着"未登录"，
+      // 鼠标停上去有完整说明，说两遍反而像出了两件事
+    } catch (error) {
+      setInfo(null);
+      setResolveError(`解析失败：${errorText(error)}`);
+    } finally {
+      setResolving(false);
+    }
+  }, []);
 
   // 工作台按下搜索时会把 busy 打开，借这个沿触发解析——
   // 视频只有"解析"一种动作，没必要再单独给它一个按钮。
@@ -65,6 +66,7 @@ export function VideoPanel({ query, busy }: { query: string; busy: boolean }) {
   const download = useCallback(async () => {
     if (!info) return;
     setSending(true);
+    setSendError("");
     try {
       const task = await api.videoDownload({
         bvid: info.bvid,
@@ -73,21 +75,28 @@ export function VideoPanel({ query, busy }: { query: string; busy: boolean }) {
         audio_only: audioOnly,
         transcode: settings?.video_transcode ?? false,
       });
-      // 和音频走同一个队列 store，右边那栏是同一个 QueuePanel
+      // 和音频走同一个队列 store，右边那栏是同一个 QueuePanel——
+      // 任务当场出现在那里，就是"已加入队列"最好的回执
       mergeTasks([task]);
-      pushToast("info", "已加入下载队列");
     } catch (error) {
-      pushToast("error", `下载失败：${errorText(error)}`);
+      setSendError(`下载失败：${errorText(error)}`);
     } finally {
       setSending(false);
     }
-  }, [info, pageIndex, effectiveHeight, audioOnly, settings, mergeTasks, pushToast]);
+  }, [info, pageIndex, effectiveHeight, audioOnly, settings, mergeTasks]);
 
   if (resolving) {
     return <EmptyState icon={<LoaderCircle className="kd-spin" size={22} />} title="正在解析" />;
   }
   if (!info) {
-    return <EmptyState icon={<Clapperboard size={22} />} title="粘贴一个 B 站链接或 BV 号" />;
+    // 解析失败时这块空面板就是唯一的现场，原因写在这儿最省事
+    return (
+      <EmptyState
+        icon={<Clapperboard size={22} />}
+        title={resolveError ? "没解析出来" : "粘贴一个 B 站链接或 BV 号"}
+        hint={resolveError || undefined}
+      />
+    );
   }
 
   return (
@@ -113,7 +122,14 @@ export function VideoPanel({ query, busy }: { query: string; busy: boolean }) {
             <span>{info.author || DASH}</span>
             <span>{formatDuration(info.duration)}</span>
             <span className="kd-mono">{info.bvid}</span>
-            <span style={{ color: info.logged_in ? undefined : "var(--kd-warn)" }}>
+            <span
+              style={{ color: info.logged_in ? undefined : "var(--kd-warn)" }}
+              title={
+                info.logged_in
+                  ? undefined
+                  : "未登录：高清晰度和会员视频拿不到。去列表标签行最右边的「登录」扫码"
+              }
+            >
               {info.logged_in ? "已登录" : "未登录"}
             </span>
           </div>
@@ -195,6 +211,7 @@ export function VideoPanel({ query, busy }: { query: string; busy: boolean }) {
               加入队列
             </Button>
           </div>
+          <InlineNotice text={sendError} onDismiss={() => setSendError("")} />
         </div>
       </div>
     </div>

@@ -25,8 +25,8 @@ use tokio::io::AsyncWriteExt as _;
 use super::client::{expect_ok, payload, NeteaseClient};
 use crate::net::{host_is, AtomicDownload};
 use crate::provider::{
-    qr_data_url_from_text, remove_existing, Capabilities, DownloadJob, MusicProvider,
-    ProviderContext,
+    effective_limit, first_truthy, is_truthy, loose_int, qr_data_url_from_text, remove_existing,
+    str_field, Capabilities, DownloadJob, MusicProvider, ProviderContext,
 };
 use crate::tags;
 
@@ -133,11 +133,11 @@ impl NeteaseProvider {
         expect_ok(&body, "读取网易云歌单")?;
 
         let playlist = body.get("playlist").cloned().unwrap_or(Value::Null);
-        let title = playlist
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or(&format!("网易云歌单 {playlist_id}"))
-            .to_string();
+        // 空的 name 要退回默认标题（Python 是 `str(playlist.get("name") or default)`），
+        // 否则歌单卡片上会出现一个没有名字的标题栏。
+        let title = str_field(&playlist, "name")
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("网易云歌单 {playlist_id}"));
 
         let track_ids: Vec<String> = playlist
             .get("trackIds")
@@ -454,7 +454,7 @@ impl MusicProvider for NeteaseProvider {
         if keyword.is_empty() {
             return Ok(Vec::new());
         }
-        let limit = limit.max(1);
+        let limit = effective_limit(limit, 20);
         let body = self
             .client
             .eapi(
@@ -481,7 +481,7 @@ impl MusicProvider for NeteaseProvider {
         let Some((kind, key)) = self.parse_url(url).await else {
             return Ok(None);
         };
-        let limit = limit.max(1);
+        let limit = effective_limit(limit, 500);
         if kind == ResolveKind::Song {
             let songs = self.track_detail(std::slice::from_ref(&key)).await?;
             let Some(song) = songs.first() else {
@@ -561,17 +561,20 @@ impl MusicProvider for NeteaseProvider {
         }
         let path = guard.commit()?;
 
-        let cover_url = if source.cover.is_empty() {
-            source
-                .payload
-                .get("al")
-                .and_then(|al| al.get("picUrl"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string()
-        } else {
-            source.cover.clone()
-        };
+        // Python 在下载前会做一次 `if not song_info.get("al"): 回查详情`——那次回查
+        // **只为封面**。payload 里没有 al 时（前端手搓的请求、老版本存下来的队列条目）
+        // 直接跳过等于下下来的文件没有专辑封面，所以这一步不能省。
+        let mut cover_url = source.cover.clone();
+        if cover_url.is_empty() && needs_detail_for_cover(source) {
+            if let Ok(songs) = self.track_detail(std::slice::from_ref(&source.key)).await {
+                if let Some(found) = songs.first().and_then(cover_from_detail) {
+                    cover_url = found;
+                }
+            }
+        }
+        if cover_url.is_empty() {
+            cover_url = cover_from_detail(&Value::Object(source.payload.clone())).unwrap_or_default();
+        }
         let cover = self.fetch_cover(&cover_url).await;
         let artists = if source.artists.is_empty() {
             vec!["Unknown".to_string()]
@@ -665,6 +668,20 @@ fn digits_after(haystack: &str, marker: &str) -> Option<String> {
     }
 }
 
+/// 要不要为了封面回查一次详情。
+///
+/// 对应 Python 的 `if not song_info.get("al")`：`al` 缺失/为 null/为空对象都算"没有"。
+fn needs_detail_for_cover(source: &SongSource) -> bool {
+    !is_truthy(source.payload.get("al"))
+}
+
+/// 从一条曲目详情里取封面地址（`al.picUrl`）。
+fn cover_from_detail(song: &Value) -> Option<String> {
+    song.get("al")
+        .and_then(|album| str_field(album, "picUrl"))
+        .map(str::to_string)
+}
+
 fn first_audio_data(body: &Value) -> Option<(String, String, u64)> {
     let data = body.get("data")?;
     let entry = match data {
@@ -709,10 +726,8 @@ fn expected_duration(source: &SongSource) -> Option<f64> {
     if let Some(duration) = source.duration.filter(|d| *d > 0.0) {
         return Some(duration);
     }
-    let raw = source
-        .payload
-        .get("dt")
-        .or_else(|| source.payload.get("duration"))
+    let payload = Value::Object(source.payload.clone());
+    let raw = first_truthy(&payload, &["dt", "duration"])
         .and_then(Value::as_f64)
         .filter(|value| *value > 0.0)?;
     // dt 是毫秒；老接口的 duration 偶尔直接给秒
@@ -720,9 +735,9 @@ fn expected_duration(source: &SongSource) -> Option<f64> {
 }
 
 fn to_source(song: &Value) -> SongSource {
-    let artists = song
-        .get("ar")
-        .or_else(|| song.get("artists"))
+    // `ar` / `al` / `dt` 是新接口，`artists` / `album` / `duration` 是老接口。
+    // 这里必须用真值链：新字段是 null 或空数组时要真的退回老字段（Python 的 `or`）。
+    let artists = first_truthy(song, &["ar", "artists"])
         .and_then(Value::as_array)
         .map(|list| {
             list.iter()
@@ -732,15 +747,10 @@ fn to_source(song: &Value) -> SongSource {
                 .collect()
         })
         .unwrap_or_default();
-    let album = song
-        .get("al")
-        .or_else(|| song.get("album"))
-        .filter(|value| value.is_object());
+    let album = first_truthy(song, &["al", "album"]).filter(|value| value.is_object());
 
     // dt 是毫秒；老接口的 duration 偶尔直接给秒
-    let duration = song
-        .get("dt")
-        .or_else(|| song.get("duration"))
+    let duration = first_truthy(song, &["dt", "duration"])
         .and_then(Value::as_f64)
         .filter(|value| *value > 0.0)
         .map(|raw| if raw > 1000.0 { raw / 1000.0 } else { raw });
@@ -749,21 +759,15 @@ fn to_source(song: &Value) -> SongSource {
     SongSource {
         platform: Platform::Wyy,
         key: song.get("id").map(stringify_id).unwrap_or_default(),
-        title: song
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("Unknown")
-            .to_string(),
+        title: str_field(song, "name").unwrap_or("Unknown").to_string(),
         artists,
         album: album
-            .and_then(|al| al.get("name"))
-            .and_then(Value::as_str)
+            .and_then(|al| str_field(al, "name"))
             .unwrap_or_default()
             .to_string(),
         duration,
         cover: album
-            .and_then(|al| al.get("picUrl"))
-            .and_then(Value::as_str)
+            .and_then(|al| str_field(al, "picUrl"))
             .unwrap_or_default()
             .to_string(),
         max_quality,
@@ -774,8 +778,9 @@ fn to_source(song: &Value) -> SongSource {
 
 fn quality_and_vip(song: &Value) -> (Option<Quality>, bool) {
     let privilege = song.get("privilege").filter(|value| value.is_object());
-    // 详情接口给的是 sq/hr/h/m/l 五档音质对象，搜索接口只给 privilege.maxbr
-    let has = |key: &str| song.get(key).is_some_and(|value| !value.is_null());
+    // 详情接口给的是 sq/hr/h/m/l 五档音质对象，搜索接口只给 privilege.maxbr。
+    // 判断要和 Python 的 `if song.get("sq")` 一致：空对象也算"没有这一档"。
+    let has = |key: &str| is_truthy(song.get(key));
     let max_quality = if has("sq") || has("hr") {
         Some(Quality::Flac)
     } else if has("h") {
@@ -783,11 +788,16 @@ fn quality_and_vip(song: &Value) -> (Option<Quality>, bool) {
     } else if has("m") || has("l") {
         Some(Quality::Q128)
     } else {
-        let maxbr = privilege
-            .and_then(|p| p.get("maxbr"))
-            .or_else(|| song.get("maxbr"))
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
+        // Python 是 `privilege.get("maxbr") or song.get("maxbr") or 0`——**真值链**：
+        // privilege 里的 maxbr 是 0 时要真的退到顶层 maxbr。
+        // 写成 `.or_else()` 会停在 `Some(0)` 上，于是顶层带着 999000 的曲目
+        // 被判成"没有音质信息"，前端连音质角标都不显示。
+        let maxbr = loose_int(
+            privilege
+                .and_then(|p| p.get("maxbr"))
+                .filter(|value| is_truthy(Some(value)))
+                .or_else(|| song.get("maxbr")),
+        );
         if maxbr >= 999_000 {
             Some(Quality::Flac)
         } else if maxbr >= 320_000 {
@@ -798,11 +808,9 @@ fn quality_and_vip(song: &Value) -> (Option<Quality>, bool) {
             None
         }
     };
-    let fee = privilege
-        .and_then(|p| p.get("fee"))
-        .or_else(|| song.get("fee"))
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
+    // fee 这条**不是**真值链：Python 写的是 `privilege.get("fee", song.get("fee"))`，
+    // 带默认值的 get——privilege 里有 fee=0 就用 0，不往顶层退。
+    let fee = loose_int(privilege.and_then(|p| p.get("fee")).or_else(|| song.get("fee")));
     // fee: 1=VIP 专享 4=专辑付费 8=低音质免费（非会员只能听低码率）
     (max_quality, fee == 1 || fee == 4)
 }
@@ -909,6 +917,96 @@ mod tests {
     }
 
     #[test]
+    fn zero_maxbr_in_privilege_falls_through_to_the_top_level_one() {
+        // Python 是 `privilege.get("maxbr") or song.get("maxbr") or 0`（真值链）。
+        // 停在 `Some(0)` 上会让这首歌的音质角标整个消失。
+        let song = json!({"privilege": {"maxbr": 0, "fee": 0}, "maxbr": 999000});
+        assert_eq!(quality_and_vip(&song).0, Some(Quality::Flac));
+
+        // privilege 里有真值时不许被顶层覆盖
+        let both = json!({"privilege": {"maxbr": 128000}, "maxbr": 999000});
+        assert_eq!(quality_and_vip(&both).0, Some(Quality::Q128));
+    }
+
+    #[test]
+    fn maxbr_and_fee_accept_the_string_shapes_python_coerced() {
+        // Python 是 `int(maxbr)`：字符串码率照样能转
+        let song = json!({"privilege": {"maxbr": "999000", "fee": "1"}});
+        assert_eq!(quality_and_vip(&song), (Some(Quality::Flac), true));
+        assert_eq!(quality_and_vip(&json!({"privilege": {"maxbr": "x"}})).0, None);
+    }
+
+    #[test]
+    fn fee_is_a_default_get_not_a_truthy_chain() {
+        // Python 写的是 `privilege.get("fee", song.get("fee"))`：
+        // privilege 里 fee=0 就是 0，不能退到顶层的 fee=1
+        let song = json!({"privilege": {"maxbr": 320000, "fee": 0}, "fee": 1});
+        assert!(!quality_and_vip(&song).1);
+        // privilege 里压根没有 fee 时才用顶层的
+        let fallback = json!({"privilege": {"maxbr": 320000}, "fee": 1});
+        assert!(quality_and_vip(&fallback).1);
+    }
+
+    #[test]
+    fn cover_lookup_only_refetches_when_the_payload_has_no_album() {
+        let mut source = SongSource {
+            platform: Platform::Wyy,
+            key: "1".into(),
+            title: "t".into(),
+            artists: vec![],
+            album: String::new(),
+            duration: None,
+            cover: String::new(),
+            max_quality: None,
+            vip: false,
+            payload: Default::default(),
+        };
+        // payload 里没有 al：Python 会回查一次详情，只为拿封面
+        assert!(needs_detail_for_cover(&source));
+        // 空对象占位也算"没有"（Python 的 `if not song_info.get("al")`）
+        source.payload.insert("al".into(), json!({}));
+        assert!(needs_detail_for_cover(&source));
+
+        source
+            .payload
+            .insert("al".into(), json!({"picUrl": "https://p/x.jpg"}));
+        assert!(!needs_detail_for_cover(&source));
+        assert_eq!(
+            cover_from_detail(&Value::Object(source.payload.clone())).as_deref(),
+            Some("https://p/x.jpg")
+        );
+        assert_eq!(cover_from_detail(&json!({"al": {"picUrl": ""}})), None);
+    }
+
+    #[test]
+    fn empty_placeholder_quality_objects_do_not_claim_lossless() {
+        // 接口偶尔用空对象占位，Python 的 `if song.get("sq")` 判成假
+        let placeholder = json!({"sq": {}, "hr": null, "h": {"br": 320000}});
+        assert_eq!(quality_and_vip(&placeholder).0, Some(Quality::Q320));
+    }
+
+    #[test]
+    fn legacy_aliases_are_used_when_the_new_fields_are_null() {
+        // Python 是 `song.get("ar") or song.get("artists")`：新字段是 null/空要真的往后退
+        let legacy = json!({
+            "id": 5, "name": "老接口",
+            "ar": null, "artists": [{"name": "旧艺人"}],
+            "al": null, "album": {"name": "旧专辑", "picUrl": "https://p/x.jpg"},
+            "dt": 0, "duration": 210
+        });
+        let source = to_source(&legacy);
+        assert_eq!(source.artists, vec!["旧艺人"]);
+        assert_eq!(source.album, "旧专辑");
+        assert_eq!(source.cover, "https://p/x.jpg");
+        assert_eq!(source.duration, Some(210.0));
+    }
+
+    #[test]
+    fn empty_title_falls_back_to_unknown() {
+        assert_eq!(to_source(&json!({"id": 1, "name": ""})).title, "Unknown");
+    }
+
+    #[test]
     fn duration_handles_both_milliseconds_and_seconds() {
         let ms = to_source(&json!({"id": 1, "name": "x", "dt": 245000}));
         assert_eq!(ms.duration, Some(245.0));
@@ -972,6 +1070,46 @@ mod tests {
         source.duration = None;
         source.payload.insert("dt".into(), json!(245000));
         assert_eq!(expected_duration(&source), Some(245.0));
+    }
+
+    #[test]
+    fn a_thirty_second_preview_is_rejected_even_before_commit() {
+        // 这条盯的是真实回归：检测跑在 `.partial` 上，如果时长读不出来
+        // 就只剩"小于 100KB"这一个判据，30 秒的 VIP 试听片段（1MB 以上）会直接入库。
+        let dir =
+            std::env::temp_dir().join(format!("kumodeck-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let partial = dir.join("试听.flac.partial");
+        // 30 秒 8kHz 单声道 = 240KB，稳稳越过 100KB 的体积闸门
+        std::fs::write(&partial, crate::tags::tests::silent_wav(30)).unwrap();
+
+        let mut source = SongSource {
+            platform: Platform::Wyy,
+            key: "1".into(),
+            title: "t".into(),
+            artists: vec![],
+            album: String::new(),
+            duration: Some(245.0),
+            cover: String::new(),
+            max_quality: None,
+            vip: false,
+            payload: Default::default(),
+        };
+        assert!(
+            looks_like_preview_clip(&partial, &source),
+            "应有 245 秒却只有 30 秒，必须判成试听片段"
+        );
+
+        // 完整曲目不能误杀
+        let full = dir.join("完整.flac.partial");
+        std::fs::write(&full, crate::tags::tests::silent_wav(240)).unwrap();
+        assert!(!looks_like_preview_clip(&full, &source));
+
+        // 不知道应有时长时，只有短到 35 秒以内才算失败
+        source.duration = None;
+        assert!(!looks_like_preview_clip(&full, &source));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

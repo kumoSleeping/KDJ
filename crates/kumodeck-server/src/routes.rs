@@ -8,8 +8,9 @@ use std::sync::Arc;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
+use futures_util::StreamExt;
 use kumodeck_core::models::*;
 use kumodeck_core::Settings;
 use kumodeck_library::service::TrackQuery;
@@ -39,6 +40,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/accounts/{platform}/logout", post(logout))
         .route("/api/search", post(search))
         .route("/api/resolve", post(resolve))
+        .route("/api/intake", post(intake))
         .route("/api/downloads", get(list_downloads).post(enqueue))
         .route("/api/downloads/{id}/cancel", post(cancel_download))
         .route("/api/downloads/clear", post(clear_downloads))
@@ -61,8 +63,17 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/library/folders/apply", post(folder_apply))
         .route("/api/library/scan", post(library_scan))
         .route("/api/library/analyze", post(library_analyze))
+        .route("/api/library/analyze/cancel", post(library_analyze_cancel))
         .route("/api/library/audio/{id}", get(library_audio))
-        .route("/api/library/cover/{id}", get(library_cover))
+        .route(
+            "/api/library/cover/{id}",
+            get(library_cover)
+                .put(library_set_cover)
+                // axum 默认只收 2MB body，而随手挑的一张专辑封面动辄三五 MB，
+                // 超了返回的是 413 而不是我们的 detail，用户只会看到"换封面失败"
+                .layer(axum::extract::DefaultBodyLimit::max(COVER_MAX_BYTES)),
+        )
+        .route("/api/library/waveform/{id}", get(library_waveform))
         .layer(axum::Extension(ctx))
 }
 
@@ -91,6 +102,9 @@ async fn put_settings(
 ) -> Json<Settings> {
     let settings = state.config.apply_settings(payload);
     ctx.downloads.set_concurrency(settings.concurrent_downloads);
+    // 「自动下载」开关拨开的那一刻，把攒着的排队任务全放行——
+    // 开关本身就是"现在开始下"的动作，不必再多一个开始按钮。
+    ctx.downloads.set_auto_start(settings.auto_start_downloads);
     Json(settings)
 }
 
@@ -170,22 +184,179 @@ async fn search(
     Json(crate::aggregate::search(&state, &payload).await)
 }
 
-async fn resolve(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<ResolveRequest>,
-) -> ApiResult<Json<ResolveResponse>> {
-    // 挨个问 provider 认不认这个链接；不是自己的返回 Ok(None)
+/// 逐个平台试解析。返回 `(结果, 最后一次错误)`，结果为 None 表示没人认得这个链接。
+///
+/// **一家报错要接着试下一家**：网易云的分享链接过期时它会抛错，但同一条
+/// 短链有可能被 QQ 认走；在第一个错误上就断掉，用户看到的是"解析失败"，
+/// 而实际上换一家就能出结果。
+async fn resolve_core(
+    state: &Arc<AppState>,
+    url: &str,
+    limit: usize,
+) -> (Option<ResolveResponse>, String) {
+    let mut last_error = String::new();
     for platform in PLATFORMS {
         let Some(provider) = state.provider(platform) else {
             continue;
         };
-        match provider.resolve(&payload.url, payload.limit).await {
-            Ok(Some(response)) => return Ok(Json(response)),
+        match provider.resolve(url, limit).await {
+            Ok(Some(response)) => return (Some(response), last_error),
             Ok(None) => continue,
-            Err(err) => return Err(ApiError::bad_request(format!("{err:#}"))),
+            Err(err) => {
+                tracing::warn!("解析 {platform} 失败：{err:#}");
+                last_error = format!("{err:#}");
+            }
         }
     }
-    Err(ApiError::bad_request("没有平台认领这个链接"))
+    (None, last_error)
+}
+
+/// 没人认领时的错误文案。带上最后一次的原因，否则用户只知道"不行"而不知道为什么。
+fn unresolved_detail(last_error: &str) -> String {
+    if last_error.is_empty() {
+        "无法识别的链接".to_string()
+    } else {
+        format!("无法识别的链接：{last_error}")
+    }
+}
+
+async fn resolve(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ResolveRequest>,
+) -> ApiResult<Json<ResolveResponse>> {
+    let url = payload.url.trim();
+    if url.is_empty() {
+        return Err(ApiError::bad_request("链接不能为空"));
+    }
+    let (result, last_error) = resolve_core(&state, url, payload.limit).await;
+    result
+        .map(Json)
+        .ok_or_else(|| ApiError::bad_request(unresolved_detail(&last_error)))
+}
+
+/// 投喂里的链接一律按"这可能是个歌单"来取，条数和 `/api/resolve` 的默认值一致。
+/// 跟着 `limit`（那是**搜索**每平台的条数，默认 20）走的话，
+/// 粘一个 300 首的歌单进来只会解析出前 20 首。
+const INTAKE_RESOLVE_LIMIT: usize = 500;
+
+/// 外层并发度。和 Python 的 `INTAKE_WORKERS` 一致。
+const INTAKE_WORKERS: usize = 4;
+
+/// 单条 entry 的处理上限，和 Python 的 `INTAKE_TIMEOUT` 一致。
+const INTAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// 一条投喂失败时的形状。`kind=error` 是前端渲染红色错误行的依据。
+fn intake_error(entry: String, message: impl Into<String>) -> IntakeItem {
+    IntakeItem {
+        entry,
+        kind: IntakeKind::Error,
+        platform: None,
+        title: String::new(),
+        groups: Vec::new(),
+        errors: Default::default(),
+        error: message.into(),
+    }
+}
+
+/// 批量投喂：一大段文本进来，按行/逗号拆开，逐条决定是搜索还是解析链接。
+async fn intake(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<IntakeRequest>,
+) -> ApiResult<Json<IntakeResponse>> {
+    let started = std::time::Instant::now();
+    let (entries, skipped) =
+        crate::aggregate::split_intake_text(&payload.text, payload.max_entries);
+    if entries.is_empty() {
+        // 一条都没拆出来（纯空白/纯标点）说明这次提交是无效的，
+        // 回一份空结果的话前端会显示"0 条输入"，看着像后端把内容吃了
+        return Err(ApiError::bad_request("没有解析出任何关键词或链接"));
+    }
+
+    // 并发但收着点：每条 entry 自己还会再并发打各平台，外层再开大
+    // 就等于对平台接口发起几十路并发，非常容易被限流。`buffered` 保序。
+    let mut items: Vec<IntakeItem> = futures_util::stream::iter(entries.into_iter().map(|entry| {
+        let state = &state;
+        let payload = &payload;
+        async move {
+            match tokio::time::timeout(INTAKE_TIMEOUT, intake_one(state, &entry, payload)).await {
+                Ok(item) => item,
+                // 一条卡死不能把整批拖到浏览器超时，把它单独标成失败继续走
+                Err(_) => intake_error(entry, "处理超时"),
+            }
+        }
+    }))
+    .buffered(INTAKE_WORKERS)
+    .collect()
+    .await;
+    // 「已在库」角标：整批只查一次曲库
+    let known = crate::aggregate::library_source_keys(&state);
+    for item in &mut items {
+        crate::aggregate::mark_in_library(&mut item.groups, &known);
+    }
+    Ok(Json(IntakeResponse {
+        items,
+        skipped,
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+    }))
+}
+
+async fn intake_one(
+    state: &Arc<AppState>,
+    entry: &str,
+    payload: &IntakeRequest,
+) -> IntakeItem {
+    let mut item = IntakeItem {
+        entry: entry.to_string(),
+        kind: IntakeKind::Search,
+        platform: None,
+        title: String::new(),
+        groups: Vec::new(),
+        errors: Default::default(),
+        error: String::new(),
+    };
+
+    if crate::aggregate::is_url(entry) {
+        // 链接：挨个问 provider 认不认。一家报错继续问下一家，和 /api/resolve 同一条实现
+        let (result, last_error) = resolve_core(state, entry, INTAKE_RESOLVE_LIMIT).await;
+        let Some(response) = result else {
+            // 认不出来算这一条**失败**，不是"未知类型"：前端按 kind 分支渲染，
+            // unknown 会被当成一个空包展开，用户看不到失败原因
+            item.kind = IntakeKind::Error;
+            item.error = unresolved_detail(&last_error);
+            return item;
+        };
+        item.kind = match response.kind {
+            ResolveKind::Song => IntakeKind::Song,
+            ResolveKind::Playlist => IntakeKind::Playlist,
+            ResolveKind::Album => IntakeKind::Album,
+            ResolveKind::Unknown => IntakeKind::Unknown,
+        };
+        item.platform = Some(response.platform);
+        item.title = response.title;
+        // 歌单里的每一首各自成一组，前端可以逐条勾选
+        item.groups = response
+            .sources
+            .into_iter()
+            .map(crate::aggregate::singleton_group)
+            .collect();
+        return item;
+    }
+
+    // 关键词：走和 /api/search 同一条实现，避免两份逻辑漂移
+    let response = crate::aggregate::search(
+        state,
+        &SearchRequest {
+            query: entry.to_string(),
+            platforms: payload.platforms.clone(),
+            limit: payload.limit,
+            merge: payload.merge,
+        },
+    )
+    .await;
+    item.title = entry.to_string();
+    item.groups = response.groups;
+    item.errors = response.errors;
+    item
 }
 
 // ---------------------------------------------------------------- 下载
@@ -198,7 +369,12 @@ async fn enqueue(
     State(state): State<Arc<AppState>>,
     axum::Extension(ctx): axum::Extension<Ctx>,
     Json(payload): Json<DownloadRequest>,
-) -> Json<Vec<DownloadTask>> {
+) -> ApiResult<Json<Vec<DownloadTask>>> {
+    if payload.sources.is_empty() {
+        // 空数组回 200 + [] 的话，前端那句"已加入队列"照样会弹，
+        // 而队列里什么都没有——这是最容易被当成"下载坏了"的一种表现
+        return Err(ApiError::bad_request("没有要下载的曲目"));
+    }
     let settings = state.config.to_settings();
     let quality = payload.quality.unwrap_or(settings.default_quality);
     let analyze = payload.analyze.unwrap_or(settings.auto_analyze);
@@ -215,7 +391,9 @@ async fn enqueue(
             )
         })
         .collect();
-    Json(tasks)
+    // 整批入队后广播一次完整队列：超过上限被裁掉的旧条目只能靠这条事件让前端知道
+    ctx.downloads.broadcast_list();
+    Ok(Json(tasks))
 }
 
 async fn cancel_download(
@@ -236,6 +414,7 @@ async fn clear_downloads(axum::Extension(ctx): axum::Extension<Ctx>) -> Json<ser
 
 #[derive(Deserialize)]
 struct VideoResolveBody {
+    #[serde(default)]
     url: String,
 }
 
@@ -243,32 +422,41 @@ async fn video_resolve(
     State(state): State<Arc<AppState>>,
     Json(body): Json<VideoResolveBody>,
 ) -> ApiResult<Json<VideoInfo>> {
-    Ok(Json(state.bilibili.resolve_video(&body.url).await?))
+    let url = body.url.trim();
+    if url.is_empty() {
+        return Err(ApiError::bad_request("链接不能为空"));
+    }
+    Ok(Json(state.bilibili.resolve_video(url).await?))
+}
+
+/// 前端没显式给画质/转码时跟随全局设置。
+///
+/// 单独摘出来是为了能测：`max_height <= 0` 必须落回设置里的值，
+/// 否则会拿一个 0 去挑流，结果是"下下来的是最低画质"。
+fn apply_video_defaults(req: &mut VideoDownloadRequest, settings: &Settings) {
+    if req.max_height <= 0 {
+        req.max_height = settings.video_max_height;
+    }
+    if !req.transcode {
+        req.transcode = settings.video_transcode;
+    }
 }
 
 async fn video_download(
     State(state): State<Arc<AppState>>,
     axum::Extension(ctx): axum::Extension<Ctx>,
-    Json(payload): Json<VideoDownloadRequest>,
+    Json(mut payload): Json<VideoDownloadRequest>,
 ) -> ApiResult<Json<DownloadTask>> {
-    // 先解析一次拿标题，队列面板上才不是一个光秃秃的 BV 号
-    let probe = if payload.bvid.is_empty() {
-        payload.url.clone()
-    } else {
-        payload.bvid.clone()
-    };
-    let title = state
-        .bilibili
-        .resolve_video(&probe)
-        .await
-        .map(|info| info.title)
-        .unwrap_or_else(|_| probe.clone());
-    Ok(Json(enqueue_video(
-        state.clone(),
-        ctx.downloads.clone(),
-        payload,
-        title,
-    )))
+    if payload.url.trim().is_empty() && payload.bvid.trim().is_empty() {
+        return Err(ApiError::bad_request("缺少视频链接或 BV 号"));
+    }
+    apply_video_defaults(&mut payload, &state.config.to_settings());
+    // 立刻入队、立刻返回。真正的标题要向 B 站请求一次才知道，那一跳放在
+    // 下载任务自己的线程里做（见 `enqueue_video`）——在这里同步等的话，
+    // 点一次「下载」按钮要卡上几秒才有反应，限流时更久。
+    let task = enqueue_video(state.clone(), ctx.downloads.clone(), payload);
+    ctx.downloads.broadcast_list();
+    Ok(Json(task))
 }
 
 // ---------------------------------------------------------------- 曲库
@@ -331,10 +519,23 @@ async fn library_patch(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<i64>,
     Json(payload): Json<TrackPatch>,
-) -> ApiResult<Json<Track>> {
+) -> ApiResult<Json<TrackPatchResult>> {
     let track = state.library.patch(id, &payload)?;
+    // 写回文件标签是尽力而为：文件只读、被 DJ 软件占着都是常事，
+    // 让整次保存回滚的话用户白填一遍表单。数据库那份留着，把原因带回去自己判断。
+    let tag_write_error = state
+        .library
+        .write_patch_to_file(id, &payload)
+        .err()
+        .map(|err| format!("{err:#}"));
+    if let Some(reason) = &tag_write_error {
+        tracing::warn!("曲目 {id} 写回文件标签失败：{reason}");
+    }
     state.hub.publish_library_updated(&[id]);
-    Ok(Json(track))
+    Ok(Json(TrackPatchResult {
+        track,
+        tag_write_error,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -348,9 +549,13 @@ async fn library_delete(
     AxumPath(id): AxumPath<i64>,
     Query(params): Query<DeleteParams>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let ok = state.library.delete(id, params.delete_file)?;
+    // 删不存在的曲目要 404：回 200 + {"ok": false} 的话前端会当成删成功，
+    // 把那一行从列表里抹掉，刷新之后它又回来了
+    if !state.library.delete(id, params.delete_file)? {
+        return Err(ApiError::not_found("曲目不存在"));
+    }
     state.hub.publish_library_updated(&[id]);
-    Ok(Json(json!({ "ok": ok })))
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn write_tags(
@@ -377,10 +582,15 @@ async fn library_stats(State(state): State<Arc<AppState>>) -> ApiResult<Json<Lib
 
 #[derive(Deserialize)]
 struct HarmonicParams {
+    /// 默认容差从 ±6 放宽到 ±12 BPM：±6 在 128 BPM 上不到 5%，
+    /// 而现场 pitch 推 ±6% 是常规操作，卡在 ±6 会白白滤掉一大半能接的曲子。
     #[serde(default = "default_tolerance")]
     bpm_tolerance: f64,
     #[serde(default = "default_harmonic_limit")]
     limit: usize,
+    /// 放宽的关系集（相对小调、两步等）。默认开。
+    #[serde(default = "default_true")]
+    wide: bool,
 }
 fn default_tolerance() -> f64 {
     12.0
@@ -388,34 +598,83 @@ fn default_tolerance() -> f64 {
 fn default_harmonic_limit() -> usize {
     60
 }
+fn default_true() -> bool {
+    true
+}
 
 async fn library_harmonic(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<i64>,
     Query(params): Query<HarmonicParams>,
 ) -> ApiResult<Json<Vec<HarmonicMatch>>> {
+    // 曲目不存在和"这首没有调号所以没有推荐"是两回事，前者必须 404，
+    // 否则前端只会看到一张空列表，分不清是没歌还是这首被删了
+    if state.library.get(id)?.is_none() {
+        return Err(ApiError::not_found("曲目不存在"));
+    }
     Ok(Json(state.library.harmonic_matches(
         id,
         params.bpm_tolerance,
-        params.limit,
-        true,
+        // limit=0 会一首都不返回，几千的 limit 又会把整库塞给前端
+        params.limit.clamp(1, 200),
+        params.wide,
     )?))
 }
 
 // ---------------------------------------------------------------- 文件夹
 
-fn library_roots(state: &AppState) -> Vec<PathBuf> {
-    let settings = state.config.to_settings();
-    let roots = kumodeck_library::folders::resolve_roots(&settings.library_dirs);
-    if !roots.is_empty() {
-        return roots;
+/// 定曲库根目录，并决定要不要把反推结果写回设置。
+///
+/// 返回 `(根目录, 要写回设置的目录列表)`；第二项是 `Some` 才动设置。
+///
+/// **反推只在设置里一个目录都没配的时候做**（和 v0.1.0 的 `if config.library_dirs: return`
+/// 一致）。判据不能换成"解析出来的根为空"：外置硬盘没插时配好的目录同样解析不出来，
+/// 那时反推会把用户配的目录直接顶掉，硬盘插回去也回不来了。
+fn pick_library_roots(
+    configured: &[String],
+    track_paths: impl FnOnce() -> Vec<String>,
+) -> (Vec<PathBuf>, Option<Vec<String>>) {
+    if !configured.is_empty() {
+        return (kumodeck_library::folders::resolve_roots(configured), None);
     }
-    // 没配曲库目录时从已入库路径反推，否则文件夹树一片空白而歌明明都在
-    state
-        .library
-        .all_paths()
-        .map(|paths| kumodeck_library::folders::infer_roots(&paths))
-        .unwrap_or_default()
+    // 没配曲库目录时从已入库路径反推，否则文件夹树一片空白而歌明明都在。
+    //
+    // 反推出来的结果要**写回设置**：不写回的话设置页永远显示"还没有曲库目录"，
+    // 而文件夹树里歌都在，用户只能自己再加一遍同一个目录。
+    let inferred = kumodeck_library::folders::infer_roots(&track_paths());
+    if inferred.is_empty() {
+        return (inferred, None);
+    }
+    let dirs: Vec<String> = inferred
+        .iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect();
+    (inferred, Some(dirs))
+}
+
+fn library_roots(state: &AppState) -> Vec<PathBuf> {
+    let mut settings = state.config.to_settings();
+    let (roots, adopt) = pick_library_roots(&settings.library_dirs, || {
+        state.library.all_paths().unwrap_or_default()
+    });
+    if let Some(dirs) = adopt {
+        tracing::info!("从已入库路径反推曲库根目录：{dirs:?}");
+        settings.library_dirs = dirs;
+        state.config.apply_settings(settings);
+    }
+    roots
+}
+
+/// 会改动文件系统的文件夹操作都要先有根目录。
+///
+/// 没有根就没有"界内/界外"可言，`ensure_inside` 会一律拒绝，
+/// 报出来的是"目标目录不在曲库范围内"——真正的原因却是根本没配曲库目录。
+fn require_roots(state: &AppState) -> ApiResult<Vec<PathBuf>> {
+    let roots = library_roots(state);
+    if roots.is_empty() {
+        return Err(ApiError::bad_request("还没有配置曲库目录，去设置里加一个"));
+    }
+    Ok(roots)
 }
 
 fn folder_tree(state: &AppState) -> ApiResult<FolderTree> {
@@ -438,7 +697,7 @@ async fn folder_create(
     kumodeck_library::folders::create_folder(
         Path::new(&payload.parent),
         &payload.name,
-        &library_roots(&state),
+        &require_roots(&state)?,
     )?;
     Ok(Json(folder_tree(&state)?))
 }
@@ -447,12 +706,11 @@ async fn folder_rename(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<FolderRenameRequest>,
 ) -> ApiResult<Json<FolderTree>> {
-    let source = PathBuf::from(&payload.path);
-    let target = kumodeck_library::folders::rename_folder(
-        &source,
-        &payload.name,
-        &library_roots(&state),
-    )?;
+    let roots = require_roots(&state)?;
+    // 归一化之后再拿去 rebase：请求里可能带 `~` 或结尾的斜杠，
+    // 而库里存的是归一化路径，对不上就一首都改不到
+    let source = kumodeck_library::folders::ensure_inside(Path::new(&payload.path), &roots)?;
+    let target = kumodeck_library::folders::rename_folder(&source, &payload.name, &roots)?;
     // 目录改名后库里的 path 要跟着改，否则整批曲目会变成"文件不存在"
     let ids = state.library.rebase_paths(&source, &target)?;
     state.hub.publish_library_updated(&ids);
@@ -463,7 +721,7 @@ async fn folder_delete(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<FolderDeleteRequest>,
 ) -> ApiResult<Json<FolderTree>> {
-    kumodeck_library::folders::delete_folder(Path::new(&payload.path), &library_roots(&state))?;
+    kumodeck_library::folders::delete_folder(Path::new(&payload.path), &require_roots(&state)?)?;
     Ok(Json(folder_tree(&state)?))
 }
 
@@ -471,11 +729,15 @@ async fn folder_init(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<FolderInitRequest>,
 ) -> ApiResult<Json<FolderTree>> {
-    let roots = library_roots(&state);
+    let roots = require_roots(&state)?;
     let targets: Vec<PathBuf> = if payload.path.trim().is_empty() {
         roots.clone()
     } else {
-        vec![PathBuf::from(payload.path.trim())]
+        // 越界检查不能省：这条接口会往目标目录里写 .kumodeck.json
+        vec![kumodeck_library::folders::ensure_inside(
+            Path::new(payload.path.trim()),
+            &roots,
+        )?]
     };
     for target in targets {
         kumodeck_library::folders::init_manifests(&target, &roots)?;
@@ -490,11 +752,37 @@ async fn folder_move(
     let (old, new) = kumodeck_library::folders::move_folder(
         Path::new(&payload.path),
         Path::new(&payload.dest_parent),
-        &library_roots(&state),
+        &require_roots(&state)?,
     )?;
-    let ids = state.library.rebase_paths(&old, &new)?;
-    state.hub.publish_library_updated(&ids);
+    // 拖回原地时 old == new，rebase 一遍纯属白写库
+    if old != new {
+        let ids = state.library.rebase_paths(&old, &new)?;
+        state.hub.publish_library_updated(&ids);
+    }
     Ok(Json(folder_tree(&state)?))
+}
+
+/// 合并写清单：同一份 `.kumodeck.json` 里既有子目录名（文件夹树的顺序）
+/// 也有文件名（曲目手排）。拖文件夹时提交的是目录名、拖曲目时提交的是文件名，
+/// **整份覆盖会把另一类的顺序抹掉**——排好的 set 顺序会在拖一次文件夹之后消失。
+///
+/// 规则：没被这次提交涉及的名字按原相对顺序放前面。目录和文件从不在同一个
+/// 列表里渲染，两类之间的先后无所谓。
+fn merge_manifest_order(existing: &[String], submitted: &[String]) -> Vec<String> {
+    let submitted: Vec<String> = submitted
+        .iter()
+        .filter(|name| !name.is_empty())
+        .cloned()
+        .collect();
+    let touched: std::collections::HashSet<&str> =
+        submitted.iter().map(String::as_str).collect();
+    let mut merged: Vec<String> = existing
+        .iter()
+        .filter(|name| !touched.contains(name.as_str()))
+        .cloned()
+        .collect();
+    merged.extend(submitted);
+    merged
 }
 
 async fn folder_order(
@@ -503,9 +791,16 @@ async fn folder_order(
 ) -> ApiResult<Json<FolderTree>> {
     let target = kumodeck_library::folders::ensure_inside(
         Path::new(&payload.path),
-        &library_roots(&state),
+        &require_roots(&state)?,
     )?;
-    kumodeck_library::folders::write_manifest(&target, &payload.names);
+    if !target.is_dir() {
+        return Err(ApiError::bad_request("文件夹不存在"));
+    }
+    let existing = kumodeck_library::folders::read_manifest_order(&target);
+    kumodeck_library::folders::write_manifest(
+        &target,
+        &merge_manifest_order(&existing, &payload.names),
+    );
     Ok(Json(folder_tree(&state)?))
 }
 
@@ -513,7 +808,7 @@ async fn folder_apply(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<FolderOpRequest>,
 ) -> ApiResult<Json<FolderOpResult>> {
-    let roots = library_roots(&state);
+    let roots = require_roots(&state)?;
     let dest = kumodeck_library::folders::ensure_inside(Path::new(&payload.dest), &roots)?;
     if !dest.is_dir() {
         return Err(ApiError::bad_request("目标不是文件夹"));
@@ -529,6 +824,14 @@ async fn folder_apply(
             continue;
         };
         let source = PathBuf::from(&track.path);
+        if !source.is_file() {
+            errors.insert(id.to_string(), "文件已丢失".into());
+            continue;
+        }
+        // 拖回原地：静默跳过，不算错误也不算改动
+        if source.parent() == Some(dest.as_path()) {
+            continue;
+        }
         match payload.op {
             FileOp::Move => match kumodeck_library::folders::move_file(&source, &dest) {
                 Ok(target) => {
@@ -561,7 +864,10 @@ async fn folder_apply(
         }
     }
 
-    state.hub.publish_library_updated(&track_ids);
+    // 一条都没动时不发事件：白发一条 library.updated 会让前端整表刷一次
+    if !track_ids.is_empty() {
+        state.hub.publish_library_updated(&track_ids);
+    }
     Ok(Json(FolderOpResult {
         track_ids,
         op: payload.op,
@@ -572,22 +878,78 @@ async fn folder_apply(
 
 // ---------------------------------------------------------------- 扫描 / 分析
 
+/// 把显式传进来的目录登记成曲库根目录。
+///
+/// 不登记的话，用户「添加文件夹」加进来的歌在文件夹树里一个都看不见
+/// （树只认 `library_dirs`），还得再去设置里把同一个目录加第二遍——
+/// 而「添加文件夹」的语义就是一步到位，不该留这种尾巴。
+///
+/// 但**已经落在某个根下面的子目录不登记**：文件夹树里点一个子目录也会触发扫描
+/// （未入库的自动导入），每次都登记的话那个子目录会同时以"根"和"某根的子节点"
+/// 两个身份出现在树上，看着像凭空多出来一份。
+fn merge_library_roots(existing: &[String], paths: &[String]) -> Vec<String> {
+    let mut roots = kumodeck_library::folders::resolve_roots(existing);
+    let mut merged = existing.to_vec();
+    for item in paths {
+        let candidate = kumodeck_core::config::expand_user(item);
+        if !candidate.is_dir() {
+            continue;
+        }
+        if kumodeck_library::folders::ensure_inside(&candidate, &roots).is_ok() {
+            continue; // 已经在某个根里
+        }
+        let normalized = candidate.to_string_lossy().into_owned();
+        if !merged.contains(&normalized) {
+            merged.push(normalized);
+            // 新根可能把后面某个候选包住，重算一遍再判断下一个
+            roots = kumodeck_library::folders::resolve_roots(&merged);
+        }
+    }
+    merged
+}
+
+fn register_library_roots(state: &AppState, paths: &[String]) {
+    let mut settings = state.config.to_settings();
+    let merged = merge_library_roots(&settings.library_dirs, paths);
+    if merged != settings.library_dirs {
+        settings.library_dirs = merged;
+        state.config.apply_settings(settings);
+    }
+}
+
 async fn library_scan(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ScanRequest>,
 ) -> ApiResult<Json<ScanResponse>> {
+    // 空串要滤掉：前端的目录选择器取消时会塞一个空字符串进来，
+    // 留着它等于"扫描当前工作目录"
+    let requested: Vec<String> = payload
+        .paths
+        .iter()
+        .filter(|item| !item.trim().is_empty())
+        .cloned()
+        .collect();
     // 不传路径就扫全部曲库根
-    let paths = if payload.paths.is_empty() {
+    let paths = if requested.is_empty() {
         library_roots(&state)
             .into_iter()
             .map(|root| root.to_string_lossy().into_owned())
             .collect()
     } else {
-        payload.paths
+        register_library_roots(&state, &requested);
+        requested
     };
-    let found = kumodeck_library::scan::collect_files(&paths, payload.recursive).len();
+    if paths.is_empty() {
+        // 既没给目录、也没有曲库根：静默起一个扫 0 个文件的任务，
+        // 用户点了「扫描」却什么都没发生，只会以为按钮坏了
+        return Err(ApiError::bad_request("没有可扫描的目录"));
+    }
     let job_id = crate::jobs::spawn_scan(state.clone(), paths, payload.recursive, payload.analyze);
-    Ok(Json(ScanResponse { job_id, found }))
+    // `found` 恒为 0，真实数量走 `scan.progress` 的第一条事件（它已经带着总数）。
+    // 在这里先 collect_files 一遍拿准数看着更漂亮，代价是把整棵目录树**同步**走一遍：
+    // 大目录要几十秒，HTTP 请求会被拖到超时，而且那是在 async 执行器上做阻塞 IO。
+    // v0.1.0 就是为了这个才立刻返回的。
+    Ok(Json(ScanResponse { job_id, found: 0 }))
 }
 
 async fn library_analyze(
@@ -597,13 +959,95 @@ async fn library_analyze(
     let pending = state
         .library
         .pending_analysis_ids(payload.track_ids.as_deref(), payload.force)?;
-    let write_tags = state.config.to_settings().write_tags_after_analyze;
     let queued = pending.len();
-    let job_id = crate::jobs::spawn_analysis(state.clone(), pending, write_tags);
+    // `priority` 必须透传：前端「放到一首还没分析的歌」就是靠它插队的，
+    // 吞掉这个字段的话，那一首会跟着「停止分析」一起被掐掉（见 jobs.rs）
+    let job_id = crate::jobs::spawn_analysis(state.clone(), pending, payload.priority);
     Ok(Json(AnalyzeResponse { job_id, queued }))
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct AnalyzeCancelParams {
+    /// 前端停止按钮传的是它手里那个 job_id；不传（或传了个过期的）= 全停。
+    #[serde(default)]
+    job_id: String,
+}
+
+/// 停止分析。已经开始的那一首会跑完——半路掐断会在库里留下半写的行。
+async fn library_analyze_cancel(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<AnalyzeCancelParams>,
+) -> Json<crate::jobs::CancelReport> {
+    let report = state.analysis.cancel(&params.job_id);
+    // 本来就没任务在跑时不要弹 toast：用户点了一下什么也没发生，
+    // 再冒一句"已停止分析，剩下 0 首"只会让人以为出错了
+    if report.canceled > 0 {
+        state.hub.publish_toast(
+            "info",
+            &format!("已停止分析，剩下 {} 首不再处理", report.remaining),
+        );
+    }
+    Json(report)
+}
+
 // ---------------------------------------------------------------- 媒体
+
+/// 这些后缀是视频容器：播放时不给 `<audio>` 塞整个视频文件（mkv 根本放不了），
+/// 先用 ffmpeg 把音轨抽出来缓存成 m4a，再按普通音频伺服。
+const VIDEO_SUFFIXES: [&str; 5] = ["mp4", "m4v", "mov", "webm", "mkv"];
+
+fn is_video_container(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    VIDEO_SUFFIXES.contains(&ext.as_str())
+}
+
+/// 视频文件 → 音轨 m4a 缓存。remux（流拷贝）优先，编码不兼容再转码 AAC。
+///
+/// 缓存键带 mtime：文件被替换后旧缓存自动失效。半成品写 `.partial` 名，
+/// ffmpeg 中断不会留下能被下次请求误用的坏文件。
+async fn extracted_audio(path: &Path, track_id: i64, cache_dir: &Path) -> ApiResult<PathBuf> {
+    let mtime = std::fs::metadata(path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let target = cache_dir.join(format!("{track_id}-{mtime}.m4a"));
+    if std::fs::metadata(&target).map(|meta| meta.len() > 0).unwrap_or(false) {
+        return Ok(target);
+    }
+    if !kumodeck_providers::ffmpeg::available() {
+        return Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "系统里没有 ffmpeg，视频音轨播放不了",
+        ));
+    }
+    std::fs::create_dir_all(cache_dir)
+        .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("建缓存目录失败：{err}")))?;
+    let tmp = cache_dir.join(format!("{track_id}-{mtime}.partial.m4a"));
+    let log = cache_dir.join(format!("{track_id}-{mtime}.log"));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    // webm/mkv 里常见 opus/vorbis，塞不进 m4a 容器，copy 会失败 → 第二轮转码
+    for copy in [true, false] {
+        let args = kumodeck_providers::ffmpeg::extract_audio_args(path, &tmp, copy);
+        if kumodeck_providers::ffmpeg::run(&args, &log, &cancel).await.is_ok()
+            && std::fs::metadata(&tmp).map(|meta| meta.len() > 0).unwrap_or(false)
+        {
+            let _ = std::fs::rename(&tmp, &target);
+            let _ = std::fs::remove_file(&log);
+            return Ok(target);
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
+    Err(ApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "抽不出音轨（文件可能损坏或没有音频流）",
+    ))
+}
 
 /// 音频流。**必须支持 Range**，否则播放器拖不动进度条。
 async fn library_audio(
@@ -615,45 +1059,98 @@ async fn library_audio(
         .library
         .get(id)?
         .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
-    let path = PathBuf::from(&track.path);
-    let data = std::fs::read(&path)
-        .map_err(|err| ApiError::not_found(format!("读不到音频文件：{err}")))?;
-    let total = data.len() as u64;
-    let mime = mime_for(&path);
-
-    let range = headers
+    let mut path = PathBuf::from(&track.path);
+    if !path.is_file() {
+        return Err(ApiError::not_found("音频文件已丢失"));
+    }
+    if is_video_container(&path) {
+        path = extracted_audio(&path, track.id, &state.config.data_dir.join("audio-cache")).await?;
+    }
+    let total = tokio::fs::metadata(&path)
+        .await
+        .map_err(|err| ApiError::not_found(format!("读不到音频文件：{err}")))?
+        .len();
+    let raw_range = headers
         .get(header::RANGE)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| parse_range(value, total));
+        // 空的 Range 头等于没带，不能当成"不可满足"去回 416
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    audio_response(&path, total, mime_for(&path), raw_range.as_deref()).await
+}
 
-    let Some((start, end)) = range else {
-        return Ok((
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, mime),
-                (header::ACCEPT_RANGES, "bytes".to_string()),
-                (header::CONTENT_LENGTH, total.to_string()),
-            ],
-            data,
-        )
-            .into_response());
-    };
+/// 流式读的块大小。和 Python 版的 `STREAM_CHUNK` 一致。
+const STREAM_CHUNK: usize = 256 * 1024;
 
-    let slice = data[start as usize..=(end as usize)].to_vec();
-    Ok((
-        StatusCode::PARTIAL_CONTENT,
-        [
-            (header::CONTENT_TYPE, mime),
-            (header::ACCEPT_RANGES, "bytes".to_string()),
-            (
+/// 按 Range 头切一份响应出来。三种结果：整份 200 / 片段 206 / 不可满足 416。
+///
+/// **边读边发**，对齐 Python 版的 `_iter_file`：整份读进内存的话，一首 100 MB 的
+/// flac 每被 seek 一次就要多占 100 MB——桌面上的表现是"拖一下进度条卡一下"，
+/// 安卓上直接就是 OOM。DJ 的曲库里 flac 是常态，不是边角情况。
+async fn audio_response(
+    path: &Path,
+    total: u64,
+    mime: String,
+    raw_range: Option<&str>,
+) -> ApiResult<Response> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut headers: Vec<(header::HeaderName, String)> = vec![
+        (header::CONTENT_TYPE, mime),
+        (header::ACCEPT_RANGES, "bytes".to_string()),
+        (header::CACHE_CONTROL, "no-store".to_string()),
+    ];
+
+    let (status, start, length) = match raw_range {
+        None => (StatusCode::OK, 0, total),
+        Some(raw_range) => {
+            // 带了 Range 却不可满足：必须 416 并告知总长度。
+            // 回一份完整的 200 会让播放器以为"这次 seek 成功了"，
+            // 拿到的却是从头开始的数据——表现就是"进度条拖了等于没拖"
+            let Some((start, end)) = parse_range(raw_range, total) else {
+                return Ok((
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    [
+                        (header::CONTENT_RANGE, format!("bytes */{total}")),
+                        (header::ACCEPT_RANGES, "bytes".to_string()),
+                    ],
+                )
+                    .into_response());
+            };
+            headers.push((
                 header::CONTENT_RANGE,
                 format!("bytes {start}-{end}/{total}"),
-            ),
-            (header::CONTENT_LENGTH, (end - start + 1).to_string()),
-        ],
-        slice,
-    )
-        .into_response())
+            ));
+            (StatusCode::PARTIAL_CONTENT, start, end - start + 1)
+        }
+    };
+    headers.push((header::CONTENT_LENGTH, length.to_string()));
+
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|err| ApiError::not_found(format!("读不到音频文件：{err}")))?;
+    if start > 0 {
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(|err| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("定位到 {start} 失败：{err}"),
+                )
+            })?;
+    }
+    let stream =
+        tokio_util::io::ReaderStream::with_capacity(file.take(length), STREAM_CHUNK);
+
+    let mut response = axum::body::Body::from_stream(stream).into_response();
+    *response.status_mut() = status;
+    for (name, value) in headers {
+        // 头都是自己拼的字面量/数字，解析失败只可能是 mime 里混进了控制字符
+        if let Ok(value) = axum::http::HeaderValue::from_str(&value) {
+            response.headers_mut().insert(name, value);
+        }
+    }
+    Ok(response)
 }
 
 /// `bytes=0-1023` / `bytes=1024-` / `bytes=-500`
@@ -661,7 +1158,15 @@ fn parse_range(value: &str, total: u64) -> Option<(u64, u64)> {
     if total == 0 {
         return None;
     }
-    let spec = value.strip_prefix("bytes=")?.split(',').next()?.trim();
+    // 先 trim + 转小写，和 Python 版 `_parse_range` 的 `(header or "").strip().lower()` 一致。
+    // RFC 7233 的 range unit 是大小写无关的，裸比 "bytes=" 会把 `Bytes=0-` 判成
+    // 不可满足 → 416，表现是"某些播放器一拖进度条就报错"。
+    let normalized = value.trim().to_ascii_lowercase();
+    let spec = normalized
+        .strip_prefix("bytes=")?
+        .split(',')
+        .next()?
+        .trim();
     let (start_text, end_text) = spec.split_once('-')?;
     let (start, end) = match (start_text.trim(), end_text.trim()) {
         // 后缀式：最后 N 字节
@@ -716,6 +1221,108 @@ async fn library_cover(
         .into_response())
 }
 
+/// 换封面能收的最大图片。比这更大的多半是用户挑错了文件（原始 RAW / 长截图），
+/// 而且整张要塞进音频容器，写进去每次读标签都得跟着搬一遍。
+const COVER_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// `PUT /api/library/cover/{id}`：请求体就是图片二进制（JPEG / PNG）。
+///
+/// 不做 multipart：前端要么是 `<input type=file>` 的 File，要么是拖进来的 File，
+/// 两者都能直接当 body 发，多包一层 form 只是白绕。
+async fn library_set_cover(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i64>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<Track>> {
+    if body.is_empty() {
+        return Err(ApiError::bad_request("没有收到图片数据"));
+    }
+    state.library.write_cover_to_file(id, &body)?;
+    let track = state
+        .library
+        .get(id)?
+        .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
+    state.hub.publish_library_updated(&[id]);
+    Ok(Json(track))
+}
+
+#[derive(Deserialize)]
+struct WaveformParams {
+    #[serde(default = "default_buckets")]
+    buckets: usize,
+}
+fn default_buckets() -> usize {
+    640
+}
+
+/// 整轨彩色波形：每列一个高度 + 一个 RGB，前端直接一列一根柱子地画。
+///
+/// 结果按 `(id, buckets, mtime)` 缓存到 `data/waveform/`，第二次是秒开。
+async fn library_waveform(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i64>,
+    Query(params): Query<WaveformParams>,
+) -> ApiResult<Json<Waveform>> {
+    let buckets = params.buckets.clamp(64, 2000);
+    let track = state
+        .library
+        .get(id)?
+        .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
+    let path = PathBuf::from(&track.path);
+    if !path.is_file() {
+        return Err(ApiError::not_found("音频文件已丢失"));
+    }
+
+    let mtime = std::fs::metadata(&path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // v2 = 三条包络 → 每列一色的格式变更。不带版本号的话，旧缓存会以旧结构
+    // 被原样返回，前端拿到没有 amp 的对象只会画出一片空白。
+    let cache_dir = state.config.data_dir.join("waveform");
+    let cache_file = cache_dir.join(format!("{id}-v2-{buckets}-{mtime}.json"));
+    if let Ok(text) = std::fs::read_to_string(&cache_file) {
+        if let Ok(cached) = serde_json::from_str::<Waveform>(&text) {
+            return Ok(Json(cached));
+        }
+    }
+
+    // 解码 + STFT 是 CPU 密集的，别占着 async 执行器
+    let decode_path = path.clone();
+    let mut wave = tokio::task::spawn_blocking(move || {
+        let decoded = kumodeck_analysis::decode::decode_audio(
+            &decode_path,
+            kumodeck_analysis::waveform::WAVEFORM_SR,
+            None,
+        )?;
+        Ok::<_, anyhow::Error>(kumodeck_analysis::waveform::band_waveform(
+            &decoded.samples,
+            decoded.sample_rate as f64,
+            buckets,
+        ))
+    })
+    .await
+    .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("{err}")))?
+    .map_err(|err| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("解码失败：{err:#}")))?;
+
+    if wave.amp.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "文件没有可解码的音频",
+        ));
+    }
+    wave.track_id = id;
+
+    // 缓存写不了不影响这次结果
+    let _ = std::fs::create_dir_all(&cache_dir);
+    if let Ok(body) = serde_json::to_string(&wave) {
+        let _ = std::fs::write(&cache_file, body);
+    }
+    Ok(Json(wave))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,13 +1335,25 @@ mod tests {
     }
 
     #[test]
+    fn the_range_unit_is_case_insensitive_and_may_be_padded() {
+        // Python 版对整个头做 strip().lower() 之后才比 "bytes="。
+        // 少了这一步，`Bytes=` / ` bytes=` 会被判成不可满足 → 416，
+        // 播放器那边的表现是"一拖进度条就报错"
+        assert_eq!(parse_range("Bytes=0-9", 100), Some((0, 9)));
+        assert_eq!(parse_range("BYTES=0-9", 100), Some((0, 9)));
+        assert_eq!(parse_range("  bytes=0-9  ", 100), Some((0, 9)));
+        // 但单位名本身写错还是要拒
+        assert_eq!(parse_range("Items=0-9", 100), None);
+    }
+
+    #[test]
     fn range_end_is_clamped_to_the_file_length() {
         // 播放器经常请求一个超出末尾的 end，不能因此 500
         assert_eq!(parse_range("bytes=0-99999", 4096), Some((0, 4095)));
     }
 
     #[test]
-    fn malformed_or_unsatisfiable_ranges_fall_back_to_a_full_response() {
+    fn malformed_or_unsatisfiable_ranges_are_rejected() {
         assert_eq!(parse_range("bytes=5000-6000", 4096), None);
         assert_eq!(parse_range("items=0-10", 4096), None);
         assert_eq!(parse_range("bytes=abc", 4096), None);
@@ -743,10 +1362,193 @@ mod tests {
     }
 
     #[test]
+    fn a_request_without_range_gets_the_whole_file() {
+        let response = audio_response(vec![7; 100], "audio/mpeg".into(), None);
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = response.headers();
+        assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(headers[header::CONTENT_LENGTH], "100");
+    }
+
+    #[test]
+    fn a_satisfiable_range_gets_206_with_content_range() {
+        let response = audio_response(vec![7; 100], "audio/mpeg".into(), Some("bytes=10-19"));
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 10-19/100");
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "10");
+    }
+
+    #[test]
+    fn an_unsatisfiable_range_gets_416_not_the_whole_file() {
+        // 回 200 + 整份数据的话，播放器以为 seek 成功了，
+        // 拿到的却是从头开始的字节——表现是"进度条拖了等于没拖"
+        let response = audio_response(vec![7; 100], "audio/mpeg".into(), Some("bytes=500-600"));
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes */100");
+    }
+
+    #[test]
+    fn video_containers_go_through_the_audio_extraction_path() {
+        // mkv/webm 直接塞给 <audio> 是放不出来的，必须先抽音轨
+        assert!(is_video_container(Path::new("a.mkv")));
+        assert!(is_video_container(Path::new("a.MP4")));
+        assert!(is_video_container(Path::new("a.webm")));
+        assert!(!is_video_container(Path::new("a.flac")));
+        assert!(!is_video_container(Path::new("a.m4a")));
+    }
+
+    #[test]
+    fn unresolved_links_report_the_last_provider_error() {
+        // 前端把 detail 原样贴在界面上，只说"无法识别"排查不了任何东西
+        assert_eq!(unresolved_detail(""), "无法识别的链接");
+        assert_eq!(
+            unresolved_detail("分享链接已过期"),
+            "无法识别的链接：分享链接已过期"
+        );
+    }
+
+    #[test]
+    fn reordering_folders_keeps_the_track_order_in_the_same_manifest() {
+        // 同一份 .kumodeck.json 里既有目录名也有文件名：整份覆盖会把另一类抹掉，
+        // 表现是"拖了一次文件夹，手排好的曲目顺序全没了"
+        let existing = vec![
+            "a.mp3".to_string(),
+            "b.mp3".to_string(),
+            "温州".to_string(),
+            "杭州".to_string(),
+        ];
+        let merged = merge_manifest_order(&existing, &["杭州".into(), "温州".into()]);
+        assert_eq!(merged, vec!["a.mp3", "b.mp3", "杭州", "温州"]);
+
+        // 反过来拖曲目也一样，目录顺序要留着
+        let merged = merge_manifest_order(&merged, &["b.mp3".into(), "a.mp3".into()]);
+        assert_eq!(merged, vec!["杭州", "温州", "b.mp3", "a.mp3"]);
+    }
+
+    #[test]
+    fn empty_names_are_dropped_from_the_manifest() {
+        let merged = merge_manifest_order(&["a".into()], &["".into(), "b".into()]);
+        assert_eq!(merged, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn video_requests_fall_back_to_the_configured_quality() {
+        let mut settings = Settings::with_download_dir(Path::new("/tmp"));
+        settings.video_max_height = 720;
+        settings.video_transcode = true;
+
+        let mut req = VideoDownloadRequest {
+            bvid: "BV1".into(),
+            max_height: 0,
+            ..Default::default()
+        };
+        apply_video_defaults(&mut req, &settings);
+        assert_eq!(req.max_height, 720, "0 = 没指定，跟随设置");
+        assert!(req.transcode, "没显式要求转码时跟随设置");
+
+        // 显式给了就以请求为准
+        let mut req = VideoDownloadRequest {
+            bvid: "BV1".into(),
+            max_height: 1080,
+            ..Default::default()
+        };
+        apply_video_defaults(&mut req, &settings);
+        assert_eq!(req.max_height, 1080);
+    }
+
+    #[test]
     fn audio_mime_types_match_the_container() {
         assert_eq!(mime_for(Path::new("a.mp3")), "audio/mpeg");
         assert_eq!(mime_for(Path::new("a.FLAC")), "audio/flac");
         assert_eq!(mime_for(Path::new("a.m4a")), "audio/mp4");
         assert_eq!(mime_for(Path::new("a.xyz")), "application/octet-stream");
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kumodeck-roots-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // canonicalize 一次，免得 macOS 上 /var 与 /private/var 的差异干扰包含性判断
+        std::fs::canonicalize(&dir).unwrap()
+    }
+
+    #[test]
+    fn adding_a_folder_registers_it_as_a_library_root() {
+        // 「添加文件夹」必须一步到位：不登记的话加进来的歌在文件夹树里一个都看不见
+        let base = scratch("register");
+        let music = base.join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let merged = merge_library_roots(&[], &[music.to_string_lossy().into_owned()]);
+        assert_eq!(merged, vec![music.to_string_lossy().into_owned()]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_subdirectory_of_an_existing_root_is_not_registered_again() {
+        // 点文件夹树里的子目录也会触发扫描，每次都登记的话那个子目录会
+        // 同时以"根"和"某根的子节点"两个身份出现在树上
+        let base = scratch("subdir");
+        let sub = base.join("温州");
+        std::fs::create_dir_all(&sub).unwrap();
+        let existing = vec![base.to_string_lossy().into_owned()];
+        let merged = merge_library_roots(&existing, &[sub.to_string_lossy().into_owned()]);
+        assert_eq!(merged, existing, "已经在根里的子目录不再登记");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_unreachable_configured_root_is_never_replaced_by_an_inferred_one() {
+        // 外置硬盘没插时 resolve_roots 也返回空。这时候要是去反推，
+        // 用户配好的目录会被下载目录顶掉，硬盘插回去也回不来了
+        let base = scratch("unreachable");
+        let music = base.join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let configured = vec!["/Volumes/没插的移动硬盘/Music".to_string()];
+
+        let (roots, adopt) = pick_library_roots(&configured, || {
+            vec![music.join("a.mp3").to_string_lossy().into_owned()]
+        });
+        assert!(roots.is_empty(), "目录不可达就是没有根，不该悄悄换一个");
+        assert!(adopt.is_none(), "更不能把设置改掉");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_empty_configuration_adopts_the_inferred_roots() {
+        // 文件夹模式上线前扫过歌的库：library_dirs 是空的，但歌都在列表里摆着
+        let base = scratch("adopt");
+        let music = base.join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let (roots, adopt) = pick_library_roots(&[], || {
+            vec![music.join("a.mp3").to_string_lossy().into_owned()]
+        });
+        assert_eq!(roots.len(), 1);
+        assert_eq!(
+            adopt,
+            Some(vec![roots[0].to_string_lossy().into_owned()]),
+            "反推出来的要写回设置，否则设置页永远显示还没配目录"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_empty_library_infers_nothing_and_leaves_the_settings_alone() {
+        let (roots, adopt) = pick_library_roots(&[], Vec::new);
+        assert!(roots.is_empty());
+        assert!(adopt.is_none());
+    }
+
+    #[test]
+    fn nonexistent_paths_and_duplicates_are_ignored() {
+        let base = scratch("dedupe");
+        let music = base.join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let path = music.to_string_lossy().into_owned();
+        let merged = merge_library_roots(
+            &[path.clone()],
+            &[path.clone(), base.join("不存在").to_string_lossy().into_owned()],
+        );
+        assert_eq!(merged, vec![path], "重复的和不存在的都不该进去");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

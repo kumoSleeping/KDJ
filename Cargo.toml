@@ -6,6 +6,7 @@ members = [
     "crates/kumodeck-analysis",
     "crates/kumodeck-library",
     "crates/kumodeck-server",
+    "src-tauri",
 ]
 
 [workspace.package]

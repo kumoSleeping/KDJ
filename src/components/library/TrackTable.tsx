@@ -58,17 +58,30 @@ interface Column {
   label: string;
   width?: string;
   align?: "num";
+  /** 给 CSS / 测试用来定位这一列。 */
+  key: string;
 }
 
+/**
+ * 列宽策略：**标题永远不参与压缩，其余列按优先级让位——但都不消失**。
+ *
+ * 标题是唯一无法从别处推断的信息（BPM/KEY/时长都是数字，看一眼就知道），
+ * 所以标题是唯一**不写 width** 的列，在 `table-layout: fixed` 下自动吃掉剩余空间。
+ *
+ * 艺人和专辑用 `clamp(下限, 理想值, 上限)`：面板一窄就先缩到下限，
+ * 把省出来的宽度让给标题。下限故意留得能看见几个字 + 省略号——
+ * **让位不等于消失**，一列全空白和一列没有是两回事。
+ * 专辑的下限比艺人更小，所以挤压时它先让。
+ */
 const COLUMNS: Column[] = [
-  { id: "title", label: "标题" },
-  { id: "artist", label: "艺人", width: "18%" },
-  { id: "album", label: "专辑", width: "14%" },
-  { id: "bpm", label: "BPM", width: "4.5rem", align: "num" },
-  { id: "camelot", label: "KEY", width: "4rem" },
-  { id: "energy", label: "能量", width: "4.5rem" },
-  { id: "duration", label: "时长", width: "4.5rem", align: "num" },
-  { id: null, label: "格式", width: "4rem" },
+  { id: "title", label: "标题", key: "title" },
+  { id: "artist", label: "艺人", width: "clamp(4rem, 13%, 11rem)", key: "artist" },
+  { id: "album", label: "专辑", width: "clamp(3rem, 10%, 9rem)", key: "album" },
+  { id: "bpm", label: "BPM", width: "4.5rem", align: "num", key: "bpm" },
+  { id: "camelot", label: "KEY", width: "4rem", key: "camelot" },
+  { id: "energy", label: "能量", width: "4.5rem", key: "energy" },
+  { id: "duration", label: "时长", width: "4.5rem", align: "num", key: "duration" },
+  { id: null, label: "格式", width: "4rem", key: "format" },
 ];
 
 export interface TrackTableProps {
@@ -120,7 +133,7 @@ export function TrackTable({
       <EmptyState
         icon={<FolderSearch size={22} />}
         title="曲库是空的"
-        hint="点上方「扫描目录」把本地音乐加进来；下载完成的曲目会自动入库。"
+        hint="点上方「添加文件夹」把本地音乐加进来，导入和分析都在后台自动完成；下载好的曲目会自己入库。"
       />
     );
   }
@@ -141,6 +154,7 @@ export function TrackTable({
             {COLUMNS.map((column) => (
               <th
                 key={column.label}
+                data-col={column.key}
                 style={column.width ? { width: column.width } : undefined}
                 className={column.align === "num" ? "kd-td-num" : undefined}
                 data-sortable={column.id ? "true" : undefined}
@@ -212,7 +226,7 @@ export function TrackTable({
                   : undefined
               }
             >
-              <td className="kd-td-strong" title={track.title || track.filename}>
+              <td data-col="title" className="kd-td-strong" title={track.title || track.filename}>
                 {/* 内嵌封面缩略图。没图时 onError 藏掉 img，底下的灰格子当占位，
                     行高不会跳。lazy：一页 200 行，只拉滚到眼前的。 */}
                 <span className="kd-thumb">
@@ -237,19 +251,19 @@ export function TrackTable({
                 )}
                 {track.title || track.filename}
               </td>
-              <td title={track.artist}>{track.artist || DASH}</td>
-              <td className="kd-muted" title={track.album}>
+              <td data-col="artist" title={track.artist}>{track.artist || DASH}</td>
+              <td data-col="album" className="kd-muted" title={track.album}>
                 {track.album || DASH}
               </td>
-              <td className="kd-td-num">{formatBpm(track.bpm)}</td>
+              <td data-col="bpm" className="kd-td-num">{formatBpm(track.bpm)}</td>
               <td>
                 <CamelotChip code={track.camelot} />
               </td>
               <td>
                 <EnergyMeter value={track.energy} />
               </td>
-              <td className="kd-td-num">{formatDuration(track.duration)}</td>
-              <td className="kd-mono kd-muted">{track.format.toUpperCase() || DASH}</td>
+              <td data-col="duration" className="kd-td-num">{formatDuration(track.duration)}</td>
+              <td data-col="format" className="kd-mono kd-muted">{track.format.toUpperCase() || DASH}</td>
             </tr>
           ))}
         </tbody>

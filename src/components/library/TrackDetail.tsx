@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderOpen, Play, RefreshCw, Star, Tag, Trash2 } from "lucide-react";
+import { FolderOpen, Play, Star, Trash2 } from "lucide-react";
 import { api } from "../../lib/api";
+import { getBridge } from "../../lib/bridge";
 import { camelotToLabel } from "../../lib/camelot";
 import { DASH, formatBpm, formatBytes, formatDate, formatDuration } from "../../lib/format";
-import { useAppStore } from "../../stores/appStore";
 import { useLibraryStore } from "../../stores/libraryStore";
 import type { Track } from "../../types";
-import { Button, Panel } from "../common";
+import { Button, InlineNotice, Panel } from "../common";
 import { CamelotWheel } from "./CamelotWheel";
 import { HarmonicList } from "./HarmonicList";
 import { Waveform } from "./Waveform";
@@ -33,23 +33,27 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 export function TrackDetail({ track }: { track: Track }) {
-  const pushToast = useAppStore((state) => state.pushToast);
   const updateTrack = useLibraryStore((state) => state.updateTrack);
-  const writeTags = useLibraryStore((state) => state.writeTags);
   const removeTrack = useLibraryStore((state) => state.removeTrack);
-  const startAnalyze = useLibraryStore((state) => state.startAnalyze);
   const selectTrack = useLibraryStore((state) => state.selectTrack);
   const setFilter = useLibraryStore((state) => state.setFilter);
 
   const [comment, setComment] = useState(track.comment);
   const [position, setPosition] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * 这一栏里所有操作（在文件夹中显示 / 移出曲库 / 评分 / 备注）的失败原因。
+   * 就摆在按钮那一排底下——这些操作失败时界面上都是"什么都没发生"，
+   * 不说一声用户只会以为按钮点空了。
+   */
+  const [notice, setNotice] = useState("");
   const commentTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 切曲目时把草稿换成新曲目的备注，并取消上一首还没落盘的保存
   useEffect(() => {
     setComment(track.comment);
     setPosition(null);
+    setNotice("");
     if (commentTimer.current) {
       clearTimeout(commentTimer.current);
       commentTimer.current = null;
@@ -78,16 +82,20 @@ export function TrackDetail({ track }: { track: Track }) {
     commentTimer.current = setTimeout(() => {
       commentTimer.current = null;
       void updateTrack(track.id, { comment: value }).catch((error: unknown) =>
-        pushToast("error", `备注保存失败：${(error as Error).message}`),
+        setNotice(`备注保存失败：${(error as Error).message}`),
       );
     }, COMMENT_SAVE_DELAY_MS);
   };
 
+  /**
+   * 成功不报喜：
+   * 移出曲库连这一栏都没了——做成了的证据本来就在眼前。只有失败要留下来。
+   */
   const run = (label: string, action: () => Promise<unknown>) => () => {
     setBusy(true);
+    setNotice("");
     action()
-      .then(() => pushToast("info", `${label}完成`))
-      .catch((error: unknown) => pushToast("error", `${label}失败：${(error as Error).message}`))
+      .catch((error: unknown) => setNotice(`${label}失败：${(error as Error).message}`))
       .finally(() => setBusy(false));
   };
 
@@ -124,26 +132,20 @@ export function TrackDetail({ track }: { track: Track }) {
           <Play size={12} />
           播放
         </Button>
+        {/* 分析和写标签都不再摆按钮：分析由后台自动跑（播放/选中会插队），
+            写标签跟着分析一起做。手动按钮只会让人以为"不点就不会发生"。 */}
         <Button
           size="sm"
+          variant="ghost"
+          iconOnly
+          aria-label="在文件夹中显示"
+          title="在文件夹中显示"
           disabled={busy}
-          title="重新跑一遍 BPM / 调性 / 能量分析"
-          onClick={run("重新分析", () => startAnalyze([track.id], true))}
+          // 走 run() 而不是裸调用：以前是 `void window.kumodeck?.revealPath(...)`，
+          // 桥接没就位或系统调用失败时被 `?.` 和 `void` 一起吞掉，
+          // 表现就是"这个按钮点了没反应"。
+          onClick={run("在文件夹中显示", () => getBridge().revealPath(track.path))}
         >
-          <RefreshCw size={12} />
-          重新分析
-        </Button>
-        <Button
-          size="sm"
-          disabled={busy || !track.analyzed_at}
-          title="把 BPM / KEY 写进文件标签，Rekordbox、Serato、Traktor 都能直接读"
-          onClick={run("写入标签", () => writeTags(track.id))}
-        >
-          <Tag size={12} />
-          写标签
-        </Button>
-        <Button size="sm" variant="ghost" iconOnly aria-label="在文件夹中显示"
-          onClick={() => void window.kumodeck?.revealPath(track.path)}>
           <FolderOpen size={12} />
         </Button>
         <Button
@@ -158,6 +160,8 @@ export function TrackDetail({ track }: { track: Track }) {
           <Trash2 size={12} />
         </Button>
       </div>
+
+      <InlineNotice text={notice} onDismiss={() => setNotice("")} />
 
       <Panel heading="分析" padded dense>
         <div className="kd-stat-grid" data-dense="true" style={{ marginBottom: "0.5rem" }}>
@@ -237,7 +241,7 @@ export function TrackDetail({ track }: { track: Track }) {
               // 再点当前星级 = 清零，不然打错了没法撤
               onClick={() =>
                 void updateTrack(track.id, { rating: track.rating === value ? 0 : value }).catch(
-                  (error: unknown) => pushToast("error", `评分失败：${(error as Error).message}`),
+                  (error: unknown) => setNotice(`评分失败：${(error as Error).message}`),
                 )
               }
             >

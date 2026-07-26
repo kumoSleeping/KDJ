@@ -17,7 +17,8 @@ use tokio::io::AsyncWriteExt as _;
 
 use crate::net::{host_is, AtomicDownload};
 use crate::provider::{
-    no_login, remove_existing, Capabilities, DownloadJob, MusicProvider, ProviderContext,
+    effective_limit, no_login, remove_existing, str_field, Capabilities, DownloadJob, MusicProvider,
+    ProviderContext,
 };
 use crate::tags;
 
@@ -210,12 +211,13 @@ impl MusicProvider for SoundCloudProvider {
         if !self.ctx.soundcloud_enabled || keyword.is_empty() {
             return Ok(Vec::new());
         }
+        let limit = effective_limit(limit, 20);
         let body = self
             .api_get(
                 "/search/tracks",
                 &[
                     ("q", keyword.to_string()),
-                    ("limit", limit.max(1).to_string()),
+                    ("limit", limit.to_string()),
                     ("offset", "0".to_string()),
                 ],
             )
@@ -223,7 +225,7 @@ impl MusicProvider for SoundCloudProvider {
         Ok(body
             .get("collection")
             .and_then(Value::as_array)
-            .map(|list| list.iter().filter_map(to_source).take(limit.max(1)).collect())
+            .map(|list| list.iter().filter_map(to_source).take(limit).collect())
             .unwrap_or_default())
     }
 
@@ -234,7 +236,7 @@ impl MusicProvider for SoundCloudProvider {
             return Ok(None);
         }
         self.ensure_enabled()?;
-        let limit = limit.max(1);
+        let limit = effective_limit(limit, 500);
 
         let body = self
             .api_get("/resolve", &[("url", text.to_string())])
@@ -268,9 +270,7 @@ impl MusicProvider for SoundCloudProvider {
                         ResolveKind::Playlist
                     },
                     platform: Platform::Soundcloud,
-                    title: body
-                        .get("title")
-                        .and_then(Value::as_str)
+                    title: str_field(&body, "title")
                         .unwrap_or("SoundCloud 歌单")
                         .to_string(),
                     sources,
@@ -418,7 +418,12 @@ fn pick_transcoding(track: &Value) -> Option<(String, String)> {
         .and_then(Value::as_array)?;
     let mut fallback = None;
     for item in list {
-        let url = item.get("url").and_then(Value::as_str)?;
+        // 缺 url 的条目要**跳过**而不是让整个函数返回 None：
+        // transcodings 数组里偶尔混进没有 url 的占位项，`?` 会连后面的
+        // progressive 直链一起丢掉，表现成"没有可用的音频流"。
+        let Some(url) = item.get("url").and_then(Value::as_str).filter(|u| !u.is_empty()) else {
+            continue;
+        };
         let protocol = item
             .pointer("/format/protocol")
             .and_then(Value::as_str)
@@ -444,10 +449,7 @@ fn to_source(track: &Value) -> Option<SongSource> {
     if track.get("kind").and_then(Value::as_str) == Some("playlist") {
         return None;
     }
-    let permalink = track
-        .get("permalink_url")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let permalink = str_field(track, "permalink_url").unwrap_or_default();
     let id = track
         .get("id")
         .map(|value| match value {
@@ -466,15 +468,10 @@ fn to_source(track: &Value) -> Option<SongSource> {
         .unwrap_or_default();
     let artist = track
         .get("publisher_metadata")
-        .and_then(|meta| meta.get("artist"))
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
+        .and_then(|meta| str_field(meta, "artist"))
         .unwrap_or(uploader);
 
-    let cover = track
-        .get("artwork_url")
-        .and_then(Value::as_str)
-        .filter(|url| !url.is_empty())
+    let cover = str_field(track, "artwork_url")
         .or_else(|| track.pointer("/user/avatar_url").and_then(Value::as_str))
         .unwrap_or_default();
 
@@ -488,11 +485,7 @@ fn to_source(track: &Value) -> Option<SongSource> {
     Some(SongSource {
         platform: Platform::Soundcloud,
         key: id,
-        title: track
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or("Unknown")
-            .to_string(),
+        title: str_field(track, "title").unwrap_or("Unknown").to_string(),
         artists: if artist.is_empty() {
             vec!["Unknown".to_string()]
         } else {
@@ -500,8 +493,7 @@ fn to_source(track: &Value) -> Option<SongSource> {
         },
         album: track
             .get("publisher_metadata")
-            .and_then(|meta| meta.get("album_title"))
-            .and_then(Value::as_str)
+            .and_then(|meta| str_field(meta, "album_title"))
             .unwrap_or_default()
             .to_string(),
         // duration 是毫秒
@@ -613,6 +605,36 @@ mod tests {
             "user": {"username": "uploader-account"}
         });
         assert_eq!(to_source(&track).unwrap().artists, vec!["uploader-account"]);
+    }
+
+    #[test]
+    fn a_transcoding_without_a_url_does_not_kill_the_whole_list() {
+        // 真实响应里偶尔混进没有 url 的占位条目。以前 `?` 会让整个函数返回 None，
+        // 后面的 progressive 直链一起丢掉，表现成"没有可用的音频流"。
+        let track = json!({"media": {"transcodings": [
+            {"format": {"protocol": "progressive", "mime_type": "audio/mpeg"}},
+            {"url": "", "format": {"protocol": "hls", "mime_type": "audio/mpeg"}},
+            {"url": "https://api/prog", "format": {"protocol": "progressive", "mime_type": "audio/mpeg"}}
+        ]}});
+        assert_eq!(
+            pick_transcoding(&track),
+            Some(("https://api/prog".into(), "mp3".into()))
+        );
+    }
+
+    #[test]
+    fn empty_strings_fall_through_like_the_python_or_chain() {
+        let track = json!({
+            "kind": "track", "id": 7, "title": "",
+            "artwork_url": "",
+            "user": {"username": "uploader", "avatar_url": "https://i/avatar.jpg"},
+            "publisher_metadata": {"artist": "", "album_title": ""}
+        });
+        let source = to_source(&track).unwrap();
+        assert_eq!(source.title, "Unknown", "空标题要退回 Unknown");
+        assert_eq!(source.artists, vec!["uploader"], "空 artist 要退回上传者");
+        assert_eq!(source.album, "");
+        assert_eq!(source.cover, "https://i/avatar.jpg", "空封面要退回头像");
     }
 
     #[test]

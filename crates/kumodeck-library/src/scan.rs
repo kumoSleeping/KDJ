@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use kumodeck_providers::tags::is_audio_extension;
+use kumodeck_providers::tags::is_media_extension;
 
 use crate::service::{normalize_path, LibraryService};
 
@@ -40,7 +40,7 @@ fn is_audio(name: &str) -> bool {
     Path::new(name)
         .extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(is_audio_extension)
+        .is_some_and(is_media_extension)
 }
 
 /// 把入参里的文件/目录展开成去重后的音频文件列表（已归一化路径）。
@@ -76,8 +76,10 @@ pub fn collect_files(paths: &[String], recursive: bool) -> Vec<String> {
             };
             let mut names: Vec<PathBuf> = entries
                 .filter_map(|entry| entry.ok())
-                .filter(|entry| entry.file_type().map(|k| k.is_file()).unwrap_or(false))
                 .map(|entry| entry.path())
+                // is_file() 跟随符号链接：曲库自己会用符号链接把一首歌摆进第二个 set
+                //（硬链接失败时的退路），按链接本身的类型判定会把它们全漏掉
+                .filter(|path| path.is_file())
                 .collect();
             names.sort();
             for path in names {
@@ -105,7 +107,15 @@ pub fn collect_files(paths: &[String], recursive: bool) -> Vec<String> {
                 !skip_dir(&entry.file_name().to_string_lossy())
             });
         for entry in walker.filter_map(|entry| entry.ok()) {
-            if !entry.file_type().is_file() {
+            // 目录不进结果；符号链接**要**进（follow_links(false) 下它的 file_type
+            // 是 symlink 而不是 file），指向文件的链接和普通文件一样是曲目。
+            // 指向目录的链接不展开，否则一个指回上层的链接会让遍历无限递归。
+            let is_file = if entry.file_type().is_symlink() {
+                entry.path().is_file()
+            } else {
+                entry.file_type().is_file()
+            };
+            if !is_file {
                 continue;
             }
             if is_audio(&entry.file_name().to_string_lossy()) {
@@ -258,8 +268,76 @@ mod tests {
     }
 
     #[test]
+    fn video_containers_are_scanned_too() {
+        // v0.1.0 的 MEDIA_EXTENSIONS = 音频 ∪ 视频：现场素材/MV 只有视频版
+        let dir = scratch("video");
+        for name in ["a.mkv", "b.mov", "c.webm", "d.m4v", "e.mp4"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        std::fs::write(dir.join("f.txt"), b"x").unwrap();
+
+        let found = collect_files(&[dir.to_string_lossy().into_owned()], true);
+        assert_eq!(found.len(), 5, "找到的是：{found:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_tracks_are_collected_but_symlinked_directories_are_not_followed() {
+        let base = scratch("symlink-scan");
+        let real = base.join("real");
+        let lib = base.join("lib");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(real.join("song.mp3"), b"x").unwrap();
+        // 硬链接失败时 link_file 会退到符号链接，这一份也是曲库里的一首歌
+        std::os::unix::fs::symlink(real.join("song.mp3"), lib.join("linked.mp3")).unwrap();
+        // 指回上层的目录链接不能展开，否则遍历会绕圈
+        std::os::unix::fs::symlink(&base, lib.join("loop")).unwrap();
+
+        let found = collect_files(&[lib.to_string_lossy().into_owned()], true);
+        assert_eq!(found.len(), 1, "找到的是：{found:?}");
+        assert!(found[0].ends_with("linked.mp3"));
+
+        // 非递归那条分支也一样
+        let shallow = collect_files(&[lib.to_string_lossy().into_owned()], false);
+        assert_eq!(shallow.len(), 1, "找到的是：{shallow:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn missing_paths_are_ignored_rather_than_failing() {
         let found = collect_files(&["/definitely/not/here".to_string()], true);
         assert!(found.is_empty());
+    }
+
+    #[test]
+    fn the_very_first_progress_event_already_carries_the_real_total() {
+        // `POST /api/library/scan` 立刻返回、`found` 恒为 0（和 v0.1.0 一致），
+        // 前端那根进度条的总数完全靠这第一条事件。这里一旦退化成先报 0、
+        // 边扫边涨，进度条就会在扫描过程中一直往回缩。
+        let dir = scratch("progress-total");
+        for name in ["a.mp3", "b.mp3", "c.mp3"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let service = crate::service::LibraryService::new(
+            crate::db::Database::open_in_memory().unwrap(),
+        );
+        let events: std::sync::Mutex<Vec<(usize, usize)>> = Default::default();
+        let progress = |done: usize, total: usize, _current: &str| {
+            events.lock().unwrap().push((done, total));
+        };
+        scan_paths(
+            &service,
+            &[dir.to_string_lossy().into_owned()],
+            true,
+            &progress,
+        )
+        .unwrap();
+
+        let events = events.lock().unwrap();
+        assert_eq!(events[0], (0, 3), "第一条就要给出真实总数");
+        assert_eq!(events.last().copied(), Some((3, 3)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

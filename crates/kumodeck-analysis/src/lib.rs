@@ -10,3 +10,4 @@ pub mod engine;
 pub mod key;
 pub mod loudness;
 pub mod tempo;
+pub mod waveform;

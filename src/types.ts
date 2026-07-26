@@ -295,7 +295,20 @@ export interface TrackPatch {
   artist?: string;
   album?: string;
   genre?: string;
+  /** 自由文本：文件里可能是 "2021"，也可能是 "2021-05-17"，当数字会把日期截掉。 */
+  year?: string;
   tags?: string[];
+}
+
+/**
+ * PATCH 的返回：就是一条 Track，可能多带一个 `tag_write_error`。
+ *
+ * 标题/艺人这些字段除了进数据库还要写回文件标签（DJ 软件只认文件里那份），
+ * 而文件可能只读或者正被占用。那种情况下数据库改动是保住了的，
+ * 只有文件没跟上——必须说出来，不然用户会以为拖进 Rekordbox 也是新的。
+ */
+export interface TrackPatchResult extends Track {
+  tag_write_error?: string;
 }
 
 export interface ScanResponseLike {
@@ -363,19 +376,18 @@ export interface AnalyzeProgress {
   track_id: number | null;
 }
 
-export interface ToastPayload {
-  level: "info" | "warn" | "error";
-  text: string;
-}
-
+/**
+ * 后端仍然会推 `{"type":"toast"}`（EventHub::publish_toast 还在），
+ * 但前端已经没有浮层通知了，这条分支故意不在联合类型里：
+ * 收到就当没这回事，各 store 的 switch 落到 default 直接忽略。
+ */
 export type WsEvent =
   | { type: "download.updated"; payload: DownloadTask }
   | { type: "download.list"; payload: DownloadTask[] }
   | { type: "scan.progress"; payload: ScanProgress }
   | { type: "analyze.progress"; payload: AnalyzeProgress }
   | { type: "library.updated"; payload: { track_ids: number[] } }
-  | { type: "account.changed"; payload: Account }
-  | { type: "toast"; payload: ToastPayload };
+  | { type: "account.changed"; payload: Account };
 
 /* ---------------------------------------------------------------- preload */
 

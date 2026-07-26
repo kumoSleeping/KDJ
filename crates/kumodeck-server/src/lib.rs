@@ -24,9 +24,11 @@ pub use state::AppState;
 
 /// 组装完整的应用路由。
 pub fn build_app(state: Arc<AppState>) -> Router {
+    let settings = state.config.to_settings();
     let downloads = Arc::new(downloads::DownloadManager::new(
         state.hub.clone(),
-        state.config.to_settings().concurrent_downloads,
+        settings.concurrent_downloads,
+        settings.auto_start_downloads,
     ));
     let ctx = routes::Ctx {
         state: state.clone(),

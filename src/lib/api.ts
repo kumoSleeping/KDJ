@@ -1,7 +1,8 @@
 /**
- * sidecar 客户端。所有网络访问都必须走这里，组件里不要出现裸 fetch。
+ * 本地后端客户端。所有网络访问都必须走这里，组件里不要出现裸 fetch。
  */
 
+import { getBridge } from "./bridge";
 import type {
   Account,
   AnalyzeResponseLike,
@@ -31,7 +32,9 @@ import type {
   WsEvent,
 } from "../types";
 
-const bridge = () => window.kumodeck;
+// 壳可能是 Tauri / Electron / 浏览器预览，由 bridge.ts 运行时探测。
+// 保持同步取用：audioUrl / coverUrl / WebSocket 这些调用点不能改成 async。
+const bridge = () => getBridge();
 
 export class ApiError extends Error {
   constructor(

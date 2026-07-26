@@ -1,0 +1,131 @@
+# 安卓 APK（Tauri 2 mobile）。
+#
+# ⚠️ 这条流水线目前是**骨架**：M7（src-tauri 壳）和 M8（安卓）都还没做，
+# 没人在真机上跑通过。已知风险全部写在下面的注释里，谁来接手先读一遍再改，
+# 不要把"CI 红了"当成随机故障去重试。
+#
+# 触发只留 workflow_dispatch 和 tag：安卓构建要下 SDK/NDK（~2GB）又要交叉编
+# 译四遍，挂在每次 push 上纯属浪费额度，而且在壳做好之前必然跳过。
+name: rust-android
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*", "rust-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-android-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  # NDK 版本必须钉死。理由：
+  #   1. cargo-mobile2 / tauri 生成的 gradle 脚本按 NDK 目录名找 clang，
+  #      runner 镜像里预装的版本随时会变，飘一次就是"昨天还好好的"；
+  #   2. ring 0.17 和 libsqlite3-sys(bundled) 都要 NDK 里的 clang 当交叉编译器，
+  #      r23 以下缺 `libgcc → libunwind` 的兼容垫片，链接会报 `-lgcc not found`。
+  # r26/r27 都验证过是社区常用档；换版本请连带重跑一次真机安装。
+  NDK_VERSION: 27.2.12479018
+  # Tauri 的 gradle 插件要求 JDK 17+
+  JAVA_VERSION: "17"
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: 安装 Android SDK
+        uses: android-actions/setup-android@v3
+
+      # setup-android 只给 cmdline-tools，NDK 要自己点名装。
+      # ANDROID_NDK_HOME / NDK_HOME 两个变量都要给：Tauri 读前者，
+      # cc-rs（ring / libsqlite3-sys 的构建脚本）读后者，只给一个会在
+      # "gradle 跑起来了但 cargo 编不过" 的地方失败，很难看出是缺变量。
+      - name: 安装 NDK
+        run: |
+          set -euo pipefail
+          sdkmanager --install "ndk;${NDK_VERSION}" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      # 只装真机会用到的两个 ABI：aarch64 覆盖 2018 年后基本所有机器，
+      # armv7 兜老设备。i686 / x86_64 是模拟器用的，要跑模拟器再补
+      # （同时 `tauri android build` 的 --target 也要一起加，否则 gradle
+      #  找不到那个 ABI 的 .so 会直接失败）。
+      - name: 安装 Rust 与安卓 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - name: Rust 构建缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      # 判据同 rust-build.yml：看 tauri.conf.json 而不是目录，
+      # 半成品的 src-tauri/ 目录会让 `android init` 报一堆没头没尾的错。
+      - name: 探测 Tauri 壳
+        id: shell
+        run: |
+          if [ -f src-tauri/tauri.conf.json ] && [ -f src-tauri/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::src-tauri/tauri.conf.json 还不存在（M7/M8 未完成），安卓构建跳过。"
+          fi
+
+      # `android init` 生成 src-tauri/gen/android/（gradle 工程）。
+      # 已知坑：
+      #   - identifier 里带 `-` 或以数字开头会被 Java 包名规则拒掉，
+      #     tauri.conf.json 的 identifier 要写成 com.kumosleeping.kumodeck 这种；
+      #   - gen/android 是生成物，按 Tauri 官方建议**不进版本库**，所以 CI 每次都要 init；
+      #     如果以后要改 AndroidManifest（比如加 INTERNET / 存储权限），
+      #     得把 gen/android 提交进仓库或改用 tauri 的 manifest 合并配置，
+      #     否则每次 init 都会把手改冲掉。
+      - name: tauri android init
+        if: steps.shell.outputs.present == 'true'
+        run: npx --yes @tauri-apps/cli@^2 android init
+
+      # 已知风险（按踩到的概率排）：
+      #   1. **签名**：这里出的是未签名 / 只带 debug 签名的 APK，
+      #      直接装到真机可能被 "应用未安装" 拒绝。正式发版要配
+      #      ANDROID_KEY_BASE64 / ANDROID_KEY_PASSWORD 之类的 secrets，
+      #      在 gen/android/app/build.gradle.kts 里挂 signingConfigs。
+      #      骨架阶段先不引入 secrets，免得给一个空 secret 更难排查。
+      #   2. **ring 交叉编译**：reqwest 走 rustls，rustls 的密码学后端是 ring，
+      #      ring 有汇编 + C，要 NDK clang。armv7 上历史上还需要显式
+      #      CC_armv7_linux_androideabi / AR_armv7_linux_androideabi，
+      #      NDK r23+ 一般能自动找到；报 `clang: not found` 就是这里。
+      #   3. **rusqlite bundled**：会用 cc 编 SQLite 的 C 源码，同样吃 NDK clang，
+      #      而且交叉编译时不要让它去 pkg-config 找系统 sqlite。
+      #   4. **16KB page size**：Android 15 起要求 .so 按 16KB 对齐，
+      #      老 NDK 编出来的库在新机器上会加载失败——这也是钉 r27 的理由之一。
+      #   5. **minSdk**：Tauri 2 要求 API 24+，WebView 版本太老的机器直接白屏。
+      - name: tauri android build --apk
+        if: steps.shell.outputs.present == 'true'
+        run: npx --yes @tauri-apps/cli@^2 android build --apk --target aarch64 --target armv7
+
+      - name: 上传 APK
+        if: steps.shell.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kumodeck-android-apk
+          path: |
+            src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error

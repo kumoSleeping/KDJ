@@ -14,7 +14,12 @@
     "dist": "npm run build && electron-builder",
     "rust:server": "cargo run --release -p kumodeck-server --bin kumodeck-server",
     "rust:web": "vite --config vite.rust.config.ts",
-    "rust:dev": "concurrently -n server,web -c cyan,magenta \"npm:rust:server\" \"npm:rust:web\""
+    "rust:dev": "concurrently -n server,web -c cyan,magenta \"npm:rust:server\" \"npm:rust:web\"",
+    "tauri": "tauri",
+    "tauri:web": "vite --config vite.tauri.config.ts",
+    "tauri:web:build": "tsc --noEmit && vite build --config vite.tauri.config.ts",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
@@ -23,6 +28,7 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",

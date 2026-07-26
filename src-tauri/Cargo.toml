@@ -1,0 +1,35 @@
+[package]
+name = "kumodeck-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "KumoDeck 桌面壳：把 axum server 编进 Tauri 进程内"
+
+[lib]
+# 安卓/iOS 的入口是系统通过 JNI/静态链接去加载库，没有 main()，
+# 所以逻辑全放 lib、main.rs 只转调一行。桌面和移动端因此共用同一份 run()。
+name = "kumodeck_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+anyhow = "1.0.104"
+kumodeck-core = { version = "0.2.0", path = "../crates/kumodeck-core" }
+kumodeck-server = { version = "0.2.0", path = "../crates/kumodeck-server" }
+rand = "0.10.2"
+serde = { version = "1.0.229", features = ["derive"] }
+tauri = { version = "2.11", features = [] }
+tauri-plugin-dialog = "2.7"
+tauri-plugin-opener = "2.5"
+tokio = { version = "1.53.1", features = ["sync"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[features]
+# `tauri build` 会自动带上这个 feature，`generate_context!` 才会去读
+# frontendDist 把前端产物嵌进二进制；不带的时候（`cargo build` / `tauri dev`）
+# 走 devUrl。**不要删**：删了之后光 `cargo build` 就会因为找不到 dist-tauri/ 而失败。
+custom-protocol = ["tauri/custom-protocol"]

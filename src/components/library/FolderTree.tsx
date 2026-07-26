@@ -19,6 +19,7 @@ import { api } from "../../lib/api";
 import { useAppStore } from "../../stores/appStore";
 import { useLibraryStore } from "../../stores/libraryStore";
 import type { FolderNode } from "../../types";
+import { InlineNotice } from "../common";
 
 /** 拖曲目到文件夹用的 MIME。自定义类型才能在 dragover 阶段就认出是不是自家的拖拽。 */
 export const TRACK_DND_TYPE = "application/x-kumodeck-tracks";
@@ -78,8 +79,6 @@ export function FolderTree() {
   const applyFolderOp = useLibraryStore((state) => state.applyFolderOp);
   const paste = useLibraryStore((state) => state.paste);
   const startScan = useLibraryStore((state) => state.startScan);
-  const pushToast = useAppStore((state) => state.pushToast);
-  const autoAnalyze = useAppStore((state) => state.settings?.auto_analyze ?? true);
   // 动了文件夹或曲库搜索 = 现在关心的是本地，把中间那对切回曲库。
   // 搜索结果不丢，列表面板顶边的标签随时能切回去。
   const setListMode = useAppStore((state) => state.setListMode);
@@ -92,6 +91,12 @@ export function FolderTree() {
   const [dropTarget, setDropTarget] = useState("");
   const [dropEdge, setDropEdge] = useState<"" | "before" | "after">("");
   const [menu, setMenu] = useState<MenuState | null>(null);
+  /**
+   * 文件夹操作失败就地贴在这一栏底下。原来走的是全局弹窗，
+   * 但拖拽/改名这类操作的"哪里出错了"必须和被操作的那棵树待在一起，
+   * 弹窗飘走之后用户只剩一个没变化的界面。
+   */
+  const [notice, setNotice] = useState("");
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -132,34 +137,39 @@ export function FolderTree() {
       return next;
     });
 
-  /** 点开一个还没入库的目录 = 顺手把它扫进来。用户不该为了看见歌先去点「扫描目录」。 */
+  /**
+   * 点开一个还没入库的目录 = 顺手把它导进来。用户不该为了看见歌先去点一次「添加文件夹」。
+   * 和「添加文件夹」一样，导入完自动排进分析队列——分析是后台该自己做完的事。
+   * 进行中的反馈就是那颗计数徽标变成「…」，不再弹窗。
+   */
   const importPending = (node: FolderNode) => {
     if (node.pending_count <= 0 || importing) return;
     setImporting(node.path);
-    void startScan([node.path], autoAnalyze)
-      .then(() => pushToast("info", `正在导入「${node.name}」的 ${node.pending_count} 个文件`))
-      .catch((error: unknown) => {
-        setImporting("");
-        pushToast("error", `导入失败：${(error as Error).message}`);
-      });
+    setNotice("");
+    void startScan([node.path], true).catch((error: unknown) => {
+      setImporting("");
+      setNotice(`导入「${node.name}」失败：${(error as Error).message}`);
+    });
   };
 
   const runOp = (ids: number[], dest: string, alt: boolean) => {
     if (ids.length === 0) return;
     const op = alt ? "link" : "move";
+    setNotice("");
     void applyFolderOp(ids, dest, op)
       .then((result) => {
+        // 全成功不报喜：曲目已经出现在目标文件夹里了，那就是最好的回执。
+        // 只有部分失败才要说话，否则用户会以为整批都搬过去了。
         const failed = Object.keys(result.errors).length;
+        if (failed === 0) return;
         const detail = Object.entries(result.methods)
           .map(([method, count]) => `${METHOD_LABEL[method] ?? method} ${count}`)
           .join(" · ");
-        pushToast(
-          failed > 0 ? "warn" : "info",
-          `${op === "link" ? "链接" : "移动"} ${result.track_ids.length} 首${detail ? `（${detail}）` : ""}` +
-            (failed > 0 ? `，${failed} 首失败` : ""),
+        setNotice(
+          `${op === "link" ? "链接" : "移动"} ${result.track_ids.length} 首${detail ? `（${detail}）` : ""}，${failed} 首失败`,
         );
       })
-      .catch((error: unknown) => pushToast("error", `操作失败：${(error as Error).message}`));
+      .catch((error: unknown) => setNotice(`操作失败：${(error as Error).message}`));
   };
 
   const prompt = (title: string, initial = "") => {
@@ -182,7 +192,7 @@ export function FolderTree() {
     void api
       .orderFolder(parentPath, reorder(names, from, to, after))
       .then(() => refreshFolders())
-      .catch((error: unknown) => pushToast("error", `排序保存失败：${(error as Error).message}`));
+      .catch((error: unknown) => setNotice(`排序保存失败：${(error as Error).message}`));
   };
 
   const render = (node: FolderNode, depth: number) => {
@@ -266,12 +276,12 @@ export function FolderTree() {
                   void api
                     .moveFolder(from, node.path)
                     .then(() => {
-                      pushToast("info", `已把「${info.name}」移到「${node.name}」里`);
+                      // 树上文件夹换了位置就是回执本身，不再弹窗
                       // 当前筛选指向的旧路径没了，跟着走到新位置
                       if (filter.folder === from) setFilter({ folder: `${node.path}/${info.name}` });
                       return refreshFolders();
                     })
-                    .catch((error: unknown) => pushToast("error", (error as Error).message));
+                    .catch((error: unknown) => setNotice((error as Error).message));
                 } else if (info.parent === node.parent) {
                   // 同一层的上下边缘 = 换顺序
                   applyReorder(node.parent, info.name, node.name, edge === "after");
@@ -281,14 +291,13 @@ export function FolderTree() {
                   void api
                     .moveFolder(from, node.parent)
                     .then(() => {
-                      pushToast("info", `已把「${info.name}」移到「${node.name}」同级`);
                       if (filter.folder === from) setFilter({ folder: `${node.parent}/${info.name}` });
                       return refreshFolders();
                     })
-                    .catch((error: unknown) => pushToast("error", (error as Error).message));
+                    .catch((error: unknown) => setNotice((error as Error).message));
                 }
               } catch {
-                pushToast("error", "拖拽数据读不出来");
+                setNotice("拖拽数据读不出来");
               }
               return;
             }
@@ -297,7 +306,7 @@ export function FolderTree() {
             try {
               runOp(JSON.parse(raw) as number[], node.path, event.altKey);
             } catch {
-              pushToast("error", "拖拽数据读不出来");
+              setNotice("拖拽数据读不出来");
             }
           }}
         >
@@ -393,13 +402,11 @@ export function FolderTree() {
           }
           disabled={!needsInit}
           onClick={() => {
+            // 成功的回执是这个按钮自己变灰 + 文件夹变得能拖了，不用再弹一次
             void api
               .initFolders()
-              .then(() => {
-                pushToast("info", "已在每层目录写入 .kumodeck.json，现在可以拖动排序了");
-                return refreshFolders();
-              })
-              .catch((error: unknown) => pushToast("error", (error as Error).message));
+              .then(() => refreshFolders())
+              .catch((error: unknown) => setNotice((error as Error).message));
           }}
         >
           <ListOrdered size={12} />
@@ -431,7 +438,7 @@ export function FolderTree() {
         {roots.map((root) => render(root, 0))}
         {roots.length === 0 && (
           <p className="kd-faint" style={{ padding: "0.6rem 0.5rem", lineHeight: 1.5 }}>
-            还没有曲库目录。去「设置 → 曲库目录」加一个，或者点上方的「扫描目录」。
+            还没有文件夹。点上方的「添加文件夹」选一个本地目录，剩下的交给后台。
           </p>
         )}
         {folders && folders.outside > 0 && (
@@ -440,6 +447,14 @@ export function FolderTree() {
           </p>
         )}
       </div>
+
+      {/* 贴在树和底下那排按钮之间：文件夹操作出错时，消息必须留在被操作的树旁边 */}
+      <InlineNotice
+        className="kd-folder-notice"
+        block
+        text={notice}
+        onDismiss={() => setNotice("")}
+      />
 
       <div className="kd-folder-foot">
         <button
@@ -455,7 +470,7 @@ export function FolderTree() {
             void api
               .createFolder(filter.folder, name)
               .then(() => refreshFolders())
-              .catch((error: unknown) => pushToast("error", (error as Error).message));
+              .catch((error: unknown) => setNotice((error as Error).message));
           }}
         >
           <FolderPlus size={12} />
@@ -473,11 +488,11 @@ export function FolderTree() {
               : "先在曲目表里 Cmd+C / Cmd+X"
           }
           onClick={() => {
-            void paste(filter.folder)
-              .then((result) => {
-                if (result) pushToast("info", `粘贴 ${result.track_ids.length} 首`);
-              })
-              .catch((error: unknown) => pushToast("error", (error as Error).message));
+            // 粘完曲目就出现在列表里了，成功不用再说一遍
+            setNotice("");
+            void paste(filter.folder).catch((error: unknown) =>
+              setNotice((error as Error).message),
+            );
           }}
         >
           <ClipboardPaste size={12} />
@@ -501,7 +516,7 @@ export function FolderTree() {
               void api
                 .createFolder(menu.node.path, name)
                 .then(() => refreshFolders())
-                .catch((error: unknown) => pushToast("error", (error as Error).message));
+                .catch((error: unknown) => setNotice((error as Error).message));
             }}
           >
             <FolderPlus size={12} />
@@ -525,7 +540,7 @@ export function FolderTree() {
                   }
                   return refreshFolders();
                 })
-                .catch((error: unknown) => pushToast("error", (error as Error).message));
+                .catch((error: unknown) => setNotice((error as Error).message));
             }}
           >
             <PencilLine size={12} />
@@ -560,7 +575,7 @@ export function FolderTree() {
                   if (filter.folder === menu.node.path) setFilter({ folder: "" });
                   return refreshFolders();
                 })
-                .catch((error: unknown) => pushToast("error", (error as Error).message));
+                .catch((error: unknown) => setNotice((error as Error).message));
             }}
           >
             <Trash2 size={12} />

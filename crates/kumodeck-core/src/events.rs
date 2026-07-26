@@ -69,6 +69,9 @@ impl EventHub {
         let _ = self.sender.send(message);
     }
 
+    /// 前端已经没有浮层通知了（`WsEvent` 里不再有 `toast` 分支），
+    /// 这条事件现在发出去没人接。留着是因为它不花什么代价，
+    /// 而且 CLI / 日志这类没有界面的消费者仍然用得上。
     pub fn publish_toast(&self, level: &str, text: &str) {
         self.publish("toast", &json!({ "level": level, "text": text }));
     }

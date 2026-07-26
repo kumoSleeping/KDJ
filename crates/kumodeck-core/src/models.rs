@@ -583,7 +583,26 @@ pub struct TrackPatch {
     pub artist: Option<String>,
     pub album: Option<String>,
     pub genre: Option<String>,
+    /// 自由文本而不是数字：文件里存的可能是 "2021" 也可能是 "2021-05-17"，
+    /// 解析成 i64 会把后者截断，写回去就把日期弄丢了。
+    pub year: Option<String>,
     pub tags: Option<Vec<String>>,
+}
+
+/// PATCH 曲目的响应。
+///
+/// `#[serde(flatten)]` 让 JSON 形状仍然是一个 Track，只是**可能**多一个
+/// `tag_write_error`——契约上只加可选字段，旧前端拿到它照样能当 Track 用。
+///
+/// 为什么要单开一个字段：写回文件标签是"尽力而为"的（文件只读、被 DJ 软件
+/// 占着都很常见），失败不该让整次保存回滚。数据库那边已经存好了，
+/// 只有文件没跟上——这件事必须说出来，不然用户会以为文件里也改好了。
+#[derive(Debug, Clone, Serialize)]
+pub struct TrackPatchResult {
+    #[serde(flatten)]
+    pub track: Track,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag_write_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

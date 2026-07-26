@@ -18,6 +18,25 @@ pub const TOKEN_HEADER: &str = "X-KumoDeck-Token";
 /// `<audio src>` / `<img src>` 发不出自定义请求头，这两个端点必须额外接受 `?token=`。
 const QUERY_TOKEN_PREFIXES: [&str; 2] = ["/api/library/audio/", "/api/library/cover/"];
 
+/// 浏览器的 `new WebSocket(url)` 同样没法带自定义请求头，握手也只能靠 `?token=`。
+///
+/// 这条在 Python 版里是**隐式**成立的：Starlette 的 `@app.middleware("http")`
+/// 根本不作用于 websocket 作用域，`/ws` 压根没经过鉴权中间件，全靠 handler 自己校验。
+/// axum 这边升级请求就是一条普通 GET，会实打实地过中间件——不显式放行的话，
+/// 前端连不上 WS，而症状是"下载/分析的进度条永远不动"，非常难联想到鉴权。
+/// handler 里那次 constant-time 校验保留着，两层都在。
+const QUERY_TOKEN_PATHS: [&str; 1] = ["/ws"];
+
+/// 这个路径允不允许把 token 放在 query 里。
+///
+/// 其余端点一律只认请求头，免得 token 被写进浏览器历史/代理日志。
+fn accepts_query_token(path: &str) -> bool {
+    QUERY_TOKEN_PATHS.contains(&path)
+        || QUERY_TOKEN_PREFIXES
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+}
+
 /// 常量时间比较。
 ///
 /// token 是长期有效的（整个进程生命周期），用 `==` 会给旁路计时留口子。
@@ -45,7 +64,7 @@ pub async fn require_token(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    if supplied.is_empty() && QUERY_TOKEN_PREFIXES.iter().any(|prefix| path.starts_with(prefix)) {
+    if supplied.is_empty() && accepts_query_token(&path) {
         supplied = query_param(request.uri().query().unwrap_or_default(), "token");
     }
 
@@ -136,19 +155,15 @@ mod tests {
     }
 
     #[test]
-    fn only_media_endpoints_accept_a_query_token() {
+    fn only_media_endpoints_and_ws_accept_a_query_token() {
+        // 发不出自定义头的三个调用点：<audio>、<img>、new WebSocket()
+        assert!(accepts_query_token("/api/library/audio/12"));
+        assert!(accepts_query_token("/api/library/cover/12"));
+        assert!(accepts_query_token("/ws"));
         // 其余端点必须走请求头，免得 token 被写进浏览器历史/日志
-        assert!(QUERY_TOKEN_PREFIXES
-            .iter()
-            .any(|prefix| "/api/library/audio/12".starts_with(prefix)));
-        assert!(QUERY_TOKEN_PREFIXES
-            .iter()
-            .any(|prefix| "/api/library/cover/12".starts_with(prefix)));
-        assert!(!QUERY_TOKEN_PREFIXES
-            .iter()
-            .any(|prefix| "/api/settings".starts_with(prefix)));
-        assert!(!QUERY_TOKEN_PREFIXES
-            .iter()
-            .any(|prefix| "/api/library/tracks".starts_with(prefix)));
+        assert!(!accepts_query_token("/api/settings"));
+        assert!(!accepts_query_token("/api/library/tracks"));
+        // /ws 是精确匹配而不是前缀：别让 /wsomething 也跟着放行
+        assert!(!accepts_query_token("/wsx"));
     }
 }
