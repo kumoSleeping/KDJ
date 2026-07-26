@@ -22,13 +22,22 @@
 | M2 provider 抽象 + 网易云 | ✅ 真机验证 | `--example smoke_netease` |
 | M3 QQ 音乐 / B 站 / SoundCloud | ✅ 真机验证 | `--example smoke_qq / smoke_bili / smoke_sc` |
 | M5 分析管线（tempo/key/loudness/decode） | ✅ 40 首真机对拍：调号 98%、能量 100% | `docs/rust-port/03` |
-| M1 曲库 SQLite 层 | ⬜ 未开始 | |
+| M1 曲库 SQLite 层 + 文件夹 + 扫描 | ✅ 真实 1379 首曲库集成测试 | `docs/rust-port/04` |
 | M4 下载队列 + WS 事件 | ⬜ 未开始 | |
-| M6 曲库写操作（scan/folders/manifest） | ⬜ 未开始 | |
+| M6 曲库写操作（scan/folders/manifest） | ✅ 含 move/link/清单顺序 | `crates/kumodeck-library` |
 | M7 axum server + Tauri 壳 + 前端接线 | ⬜ 未开始 | |
 | M8 安卓 APK | ⬜ 未开始 | |
 
-跑一遍全部测试：`cargo test --workspace`（当前 169 个）。
+跑一遍全部测试：`cargo test --workspace`（当前 223 个）。
+
+曲库层另有一组**跑在用户真实曲库上**的集成测试，默认跳过：
+
+```bash
+KUMODECK_TEST_DB="$HOME/Library/Application Support/kumodeck/data/kumodeck.db" \
+  cargo test -p kumodeck-library --test real_library
+```
+
+（内部会先拷贝再打开，不碰原库。）
 
 ## 2. 怎么验证一件事是真的做完了
 
@@ -90,14 +99,11 @@ cargo run -p kumodeck-providers --example smoke_sc       -- lofi
 
 按依赖顺序：
 
-1. **曲库层**（`crates/kumodeck-library`）：SQLite schema 要和现有
-   `kumodeck.db` 兼容（用户有现成数据）。注意 Windows 上 `\` 是 SQL LIKE 的
-   转义字符，`os.sep` 必须过 `_escape_like`——这是 v0.1.0 修过的真 bug。
-2. **server 层**（`crates/kumodeck-server`）：38 条路由 + `/ws`，
+1. **server 层**（`crates/kumodeck-server`）：38 条路由 + `/ws`，
    清单见 `sidecar/kumodeck/app.py`。token 鉴权用 constant-time 比较。
-3. **Tauri 壳**：只需要替掉 240 行 Electron glue
+2. **Tauri 壳**：只需要替掉 240 行 Electron glue
    （`openPath` / `revealPath` / `pickFolder` / `pickFolders` / `windowControl`）。
-4. **安卓**：范围要诚实——下载 + 播放 + 已下载曲目的分析；
+3. **安卓**：范围要诚实——下载 + 播放 + 已下载曲目的分析；
    多根曲库目录扫描和文件夹拖拽排序是桌面专属。
 
 ## 6.1 曲库层必须落实的一条约束
@@ -115,7 +121,8 @@ crates/kumodeck-providers/  net.rs(安全) provider.rs(trait) tags.rs ffmpeg.rs
                             netease/ qqmusic/ bilibili/ soundcloud/
 crates/kumodeck-analysis/   dsp.rs decode.rs tempo.rs key.rs loudness.rs engine.rs
                             examples/golden.rs  ← 对拍工具
-crates/kumodeck-library/    （空，待做）
+crates/kumodeck-library/    db.rs camelot.rs service.rs folders.rs scan.rs
+                            tests/real_library.rs  ← 真库集成测试
 crates/kumodeck-server/     （空，待做）
 sidecar/                    Python 原版，**保留着当参照物**，最后再删
 src/                        现有 React 前端，保留
