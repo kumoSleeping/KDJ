@@ -15,6 +15,24 @@ fn new_job_id() -> String {
     format!("{:016x}", rand::random::<u64>())
 }
 
+/// 导入结束时那一条 `scan.progress`（`phase = "done"`）。
+///
+/// 成功和失败共用一个构造点，是为了保证两边**形状一样**：前端只有这一条事件
+/// 能知道这次导入的结局，失败时少一个键、成功时多一个键的话，它就只能靠
+/// "有没有这个字段"去猜，而那正是最容易在下一次改动里悄悄错掉的判断。
+///
+/// `error` 恒定出现（成功是 `null`），所以新一轮的终局事件总能把上一次的错误盖掉。
+fn scan_done_event(job_id: &str, done: usize, total: usize, error: Option<String>) -> serde_json::Value {
+    json!({
+        "job_id": job_id,
+        "done": done,
+        "total": total,
+        "current": "",
+        "phase": "done",
+        "error": error,
+    })
+}
+
 /// 起一次扫描。立刻返回 job_id，实际工作在后台线程里跑。
 pub fn spawn_scan(state: Arc<AppState>, paths: Vec<String>, recursive: bool, analyze: bool) -> String {
     let job_id = new_job_id();
@@ -40,23 +58,21 @@ pub fn spawn_scan(state: Arc<AppState>, paths: Vec<String>, recursive: bool, ana
         let track_ids = match result {
             Ok(ids) => ids,
             Err(err) => {
-                tracing::error!("扫描失败：{err:#}");
-                hub.publish_toast("error", &format!("扫描失败：{err:#}"));
+                tracing::error!("导入失败：{err:#}");
+                // 失败原因必须**跟着终局事件一起走**。前端不再有浮层通知，
+                // 只回一个 0/0 的 done 的话，用户看到的是进度条闪一下就没了、
+                // 一首歌都没进来，而"为什么"全在他看不见的服务端日志里。
                 hub.publish(
                     "scan.progress",
-                    &json!({"job_id": job, "done": 0, "total": 0, "current": "", "phase": "done"}),
+                    &scan_done_event(&job, 0, 0, Some(format!("{err:#}"))),
                 );
                 return;
             }
         };
 
         let total = track_ids.len();
-        hub.publish(
-            "scan.progress",
-            &json!({"job_id": job, "done": total, "total": total, "current": "", "phase": "done"}),
-        );
+        hub.publish("scan.progress", &scan_done_event(&job, total, total, None));
         hub.publish_library_updated(&track_ids);
-        hub.publish_toast("info", &format!("扫描完成，共 {total} 首"));
 
         if analyze && !track_ids.is_empty() {
             match state.library.pending_analysis_ids(Some(&track_ids), false) {
@@ -74,6 +90,52 @@ pub fn spawn_scan(state: Arc<AppState>, paths: Vec<String>, recursive: bool, ana
 /// 分析是 CPU 密集的（解码 + FFT），worker 开多了会把机器压满，
 /// 表现是 UI 掉帧、下载速度也跟着掉。固定 2 个。
 const ANALYSIS_WORKERS: usize = 2;
+
+/// 全局分析并发闸门。
+///
+/// `ANALYSIS_WORKERS` 原来只限**一个批次内**的线程数：3 个下载同时完成
+/// 加上后台补齐，就是 4 个批次 × 2 线程 = 8 条分析线程同时在跑，
+/// 正是上面注释想避免的场面（实测「停止」一次取消掉 3 个批次）。
+/// v0.1.0 的做法是所有非插队批次共用一个 2-worker 线程池；这里等价地
+/// 用一个 2 permit 的闸门：**每首歌**取一次 permit，批次之间自然交错，
+/// 不会出现"先来的批次把闸门占到跑完"的饥饿。
+///
+/// 插队批次（`priority = true`，正在播放的那一首）**不走闸门**——
+/// Python 版单独给它开池子也是同一个理由：它等的每一秒用户都盯着看。
+struct AnalysisGate {
+    permits: Mutex<usize>,
+    cv: std::sync::Condvar,
+}
+
+/// 闸门的凭证。拿在手里代表占着一个并发额度，drop 即归还。
+struct AnalysisPermit<'a>(&'a AnalysisGate);
+
+impl AnalysisGate {
+    const fn new(permits: usize) -> Self {
+        AnalysisGate {
+            permits: Mutex::new(permits),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> AnalysisPermit<'_> {
+        let mut permits = self.permits.lock().unwrap();
+        while *permits == 0 {
+            permits = self.cv.wait(permits).unwrap();
+        }
+        *permits -= 1;
+        AnalysisPermit(self)
+    }
+}
+
+impl Drop for AnalysisPermit<'_> {
+    fn drop(&mut self) {
+        *self.0.permits.lock().unwrap() += 1;
+        self.0.cv.notify_one();
+    }
+}
+
+static ANALYSIS_GATE: AnalysisGate = AnalysisGate::new(ANALYSIS_WORKERS);
 
 // ---------------------------------------------------------------- 停止分析
 
@@ -214,6 +276,9 @@ pub fn spawn_analysis(state: Arc<AppState>, track_ids: Vec<i64>, priority: bool)
                 let cancel = cancel.clone();
                 scope.spawn(move || {
                     for track_id in chunk {
+                        // 先排队拿全局额度，**拿到之后**再看取消：闸门里等了
+                        // 半分钟才轮到的线程，看到的必须是最新的取消状态
+                        let _permit = (!priority).then(|| ANALYSIS_GATE.acquire());
                         // 每首歌之间查一次。查在循环顶上而不是分析中途：
                         // 解码/FFT 是一整块 CPU 活，切进去只能靠杀线程
                         if cancel.is_cancelled() {
@@ -235,6 +300,9 @@ pub fn spawn_analysis(state: Arc<AppState>, track_ids: Vec<i64>, priority: bool)
                                 &result.camelot,
                                 &result.key,
                                 result.energy,
+                                // 备注是用户自己的话，comment 的组法在 tags 层：
+                                // "8A - Energy 7 - 备注"，备注必须原样保留在最后
+                                &track.comment,
                             );
                         }
                         updated.lock().unwrap().push(track_id);
@@ -412,5 +480,58 @@ mod tests {
         let registry = AnalysisRegistry::default();
         register(&registry, "job-a", 3, 5);
         assert_eq!(registry.cancel("job-a").remaining, 0);
+    }
+
+    #[test]
+    fn a_failed_import_says_why_in_the_final_event() {
+        // 浮层通知删掉之后，这是失败原因唯一的出路：只回 0/0 的话，
+        // 用户看到的是"进度条闪了一下，一首都没进来"，和空目录一模一样
+        let event = scan_done_event("job-x", 0, 0, Some("目录读不了：Permission denied".into()));
+        assert_eq!(event["phase"], "done");
+        assert_eq!(event["error"], "目录读不了：Permission denied");
+    }
+
+    #[test]
+    fn a_successful_import_still_carries_the_error_key_as_null() {
+        // 缺键和 null 在前端是两回事：缺键时它没法把上一次失败的提示盖掉，
+        // 用户会看着一条早就过期的红字，怎么重试都不消失
+        let event = scan_done_event("job-x", 7, 7, None);
+        assert!(event.as_object().unwrap().contains_key("error"));
+        assert!(event["error"].is_null());
+        assert_eq!(event["done"], 7);
+        assert_eq!(event["total"], 7);
+    }
+
+    #[test]
+    fn the_gate_caps_concurrency_across_batches_not_within_one() {
+        // 模拟 4 个批次同时开工：不管来了多少批，闸门里同时最多 2 个。
+        // 用自建实例而不是那个 static，免得和真在跑的分析互相干扰。
+        let gate = Arc::new(AnalysisGate::new(2));
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let gate = gate.clone();
+                let running = running.clone();
+                let peak = peak.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..3 {
+                        let _permit = gate.acquire();
+                        let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        running.fetch_sub(1, Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert!(peak.load(Ordering::SeqCst) <= 2, "峰值 {}", peak.load(Ordering::SeqCst));
+        // 全部归还之后额度要回到满值，不然闸门会越用越窄
+        assert_eq!(*gate.permits.lock().unwrap(), 2);
     }
 }

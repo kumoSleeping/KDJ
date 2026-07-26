@@ -51,6 +51,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/library/tracks/{id}", patch(library_patch))
         .route("/api/library/tracks/{id}", delete(library_delete))
         .route("/api/library/tracks/{id}/write-tags", post(write_tags))
+        .route("/api/library/tracks/{id}/reread-tags", post(reread_tags))
         .route("/api/library/stats", get(library_stats))
         .route("/api/library/harmonic/{id}", get(library_harmonic))
         .route("/api/library/folders", get(library_folders))
@@ -572,7 +573,24 @@ async fn write_tags(
         &track.camelot,
         &track.music_key,
         track.energy,
+        &track.comment,
     )?;
+    Ok(Json(track))
+}
+
+/// 反方向：把文件里现存的标签读回库里。
+///
+/// 覆盖规则、mtime 归零那些事全在 `reread_tags_from_file` 里，这里不重复一遍——
+/// 那套规则必须和增量导入共用同一份实现，抄到路由层迟早会跑偏。
+///
+/// 读完要 `publish_library_updated`：曲目详情面板是靠这条事件回刷的，
+/// 少了它用户点完「重读标签」得手动切走再切回来才看得见新值。
+async fn reread_tags(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i64>,
+) -> ApiResult<Json<Track>> {
+    let track = state.library.reread_tags_from_file(id)?;
+    state.hub.publish_library_updated(&[id]);
     Ok(Json(track))
 }
 
@@ -940,9 +958,11 @@ async fn library_scan(
         requested
     };
     if paths.is_empty() {
-        // 既没给目录、也没有曲库根：静默起一个扫 0 个文件的任务，
-        // 用户点了「扫描」却什么都没发生，只会以为按钮坏了
-        return Err(ApiError::bad_request("没有可扫描的目录"));
+        // 既没给目录、也没有曲库根，起个任务也是扫 0 个文件，不如直接说清楚。
+        // 措辞不提"扫描"：界面上这条路径只有「添加文件夹」一个入口，
+        // 冒出一个用户没听说过的词只会让他不知道自己刚才操作的是什么
+        // （参照实现在这里回的是"没有可扫描的目录"，状态码/时机保持一致）。
+        return Err(ApiError::bad_request("没有可添加的目录"));
     }
     let job_id = crate::jobs::spawn_scan(state.clone(), paths, payload.recursive, payload.analyze);
     // `found` 恒为 0，真实数量走 `scan.progress` 的第一条事件（它已经带着总数）。
@@ -978,31 +998,38 @@ async fn library_analyze_cancel(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AnalyzeCancelParams>,
 ) -> Json<crate::jobs::CancelReport> {
-    let report = state.analysis.cancel(&params.job_id);
-    // 本来就没任务在跑时不要弹 toast：用户点了一下什么也没发生，
-    // 再冒一句"已停止分析，剩下 0 首"只会让人以为出错了
-    if report.canceled > 0 {
-        state.hub.publish_toast(
-            "info",
-            &format!("已停止分析，剩下 {} 首不再处理", report.remaining),
-        );
-    }
-    Json(report)
+    // 结果就在响应体里（canceled/remaining），前端就地展示；
+    // 界面上早没有浮层通知了，这里不额外发事件
+    Json(state.analysis.cancel(&params.job_id))
 }
 
 // ---------------------------------------------------------------- 媒体
 
-/// 这些后缀是视频容器：播放时不给 `<audio>` 塞整个视频文件（mkv 根本放不了），
-/// 先用 ffmpeg 把音轨抽出来缓存成 m4a，再按普通音频伺服。
-const VIDEO_SUFFIXES: [&str; 5] = ["mp4", "m4v", "mov", "webm", "mkv"];
-
+/// 是不是视频容器。播放时不给 `<audio>` 塞整个视频文件（mkv 根本放不了），
+/// 先用 ffmpeg 把音轨抽出来缓存成 m4a，再按普通音频伺服；封面也走视频那条路。
+///
+/// 后缀表用 `tags::VIDEO_EXTENSIONS` 那一份，不在这里再抄一遍：
+/// 抄一份的下场是扫描认得的格式和播放认得的格式慢慢对不上，
+/// 表现成"这个文件进得了库但点了没声音"。
 fn is_video_container(path: &Path) -> bool {
     let ext = path
         .extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    VIDEO_SUFFIXES.contains(&ext.as_str())
+    kumodeck_providers::tags::VIDEO_EXTENSIONS.contains(&ext.as_str())
+}
+
+/// 缓存键里的文件 mtime。文件被换掉（重新打了标签、换了个更好的版本）之后
+/// 旧缓存必须自动作废，否则用户会一直看到旧封面 / 旧波形，还完全不知道怎么刷。
+/// 读不到就当 0——最坏是这份缓存一直命中，比每次都重算强。
+fn file_mtime(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|delta| delta.as_secs())
+        .unwrap_or(0)
 }
 
 /// 视频文件 → 音轨 m4a 缓存。remux（流拷贝）优先，编码不兼容再转码 AAC。
@@ -1010,12 +1037,7 @@ fn is_video_container(path: &Path) -> bool {
 /// 缓存键带 mtime：文件被替换后旧缓存自动失效。半成品写 `.partial` 名，
 /// ffmpeg 中断不会留下能被下次请求误用的坏文件。
 async fn extracted_audio(path: &Path, track_id: i64, cache_dir: &Path) -> ApiResult<PathBuf> {
-    let mtime = std::fs::metadata(path)
-        .ok()
-        .and_then(|meta| meta.modified().ok())
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let mtime = file_mtime(path);
     let target = cache_dir.join(format!("{track_id}-{mtime}.m4a"));
     if std::fs::metadata(&target).map(|meta| meta.len() > 0).unwrap_or(false) {
         return Ok(target);
@@ -1207,18 +1229,127 @@ async fn library_cover(
         .library
         .get(id)?
         .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
-    let (data, mime) = kumodeck_providers::tags::read_cover(Path::new(&track.path))
-        .ok_or_else(|| ApiError::not_found("这首没有封面"))?;
-    Ok((
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, mime),
-            // 封面不会变，让浏览器缓存住，翻列表时不用反复请求
-            (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
-        ],
-        data,
-    )
-        .into_response())
+    let path = PathBuf::from(&track.path);
+    if let Some((data, mime)) = kumodeck_providers::tags::read_cover(&path) {
+        return Ok((StatusCode::OK, cover_headers(mime), data).into_response());
+    }
+    // VJ 素材和 MV 是没有内嵌封面的，一律 404 的话曲库里那一批视频
+    // 全是空白占位。抽一帧当封面——播放器就是这么做的。
+    if is_video_container(&path) {
+        if let Some(data) = video_cover(
+            &path,
+            track.id,
+            track.duration,
+            &state.config.data_dir.join("covers"),
+        )
+        .await
+        {
+            return Ok((StatusCode::OK, cover_headers(JPEG_MIME.into()), data).into_response());
+        }
+    }
+    Err(ApiError::not_found("没有内嵌封面"))
+}
+
+const JPEG_MIME: &str = "image/jpeg";
+
+/// 同时最多几个抽帧进程。曲库列表一屏几十行，滚一下就是几十个封面请求同时进来，
+/// 不设闸等于一次 fork 出几十个视频解码进程，机器直接卡住（4K 素材尤其明显）。
+/// 抽一帧本身很快，排队基本察觉不到，而且只有第一次要排——之后全走缓存。
+static FRAME_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
+
+/// 视频没有内嵌封面时抽一帧当封面，结果按 `(id, mtime)` 缓存到 `data/covers/`。
+///
+/// **任何一步失败都只返回 `None`**（上层照旧 404，前端显示占位图）。
+/// 安卓上根本没有 ffmpeg，这条路径要是能冒出 500，整个曲库列表会红一片；
+/// 抽不出封面本来也不是错误，只是"这首没有图"。
+async fn video_cover(
+    path: &Path,
+    track_id: i64,
+    duration: Option<f64>,
+    cache_dir: &Path,
+) -> Option<Vec<u8>> {
+    let mtime = file_mtime(path);
+    let target = cover_cache_file(cache_dir, track_id, mtime);
+    if let Ok(data) = std::fs::read(&target) {
+        if !data.is_empty() {
+            return Some(data);
+        }
+    }
+    if !kumodeck_providers::ffmpeg::available() {
+        return None;
+    }
+    std::fs::create_dir_all(cache_dir).ok()?;
+    let _slot = FRAME_SLOTS.acquire().await.ok()?;
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let log = cache_dir.join(format!("{track_id}-{mtime}.log"));
+    // 同一首歌可能被好几个请求同时撞上（列表和详情面板各要一次），
+    // 半成品的文件名带上纳秒，免得两个进程往同一个文件里写出一份花的 JPEG
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|delta| delta.subsec_nanos())
+        .unwrap_or(0);
+
+    let mut best: Option<(PathBuf, Vec<u8>)> = None;
+    for (index, at) in kumodeck_providers::ffmpeg::frame_positions(duration)
+        .into_iter()
+        .enumerate()
+    {
+        let tmp = cache_dir.join(format!("{track_id}-{mtime}-{nonce}-{index}.partial.jpg"));
+        let extracted = kumodeck_providers::ffmpeg::extract_frame(path, &tmp, at, &log, &cancel)
+            .await
+            .is_ok();
+        let data = extracted
+            .then(|| std::fs::read(&tmp).ok())
+            .flatten()
+            .filter(|data| !data.is_empty());
+        let Some(data) = data else {
+            let _ = std::fs::remove_file(&tmp);
+            continue;
+        };
+        let black = kumodeck_providers::ffmpeg::frame_is_mostly_black(&data);
+        if black && best.is_some() {
+            let _ = std::fs::remove_file(&tmp);
+        } else if let Some((stale, _)) = best.replace((tmp, data)) {
+            // 手上这张不黑，之前那张黑的可以扔了
+            let _ = std::fs::remove_file(&stale);
+        }
+        // 全黑的先留着：后面的位置可能压根抽不出来（时长未知时会挪过文件末尾），
+        // 那时候一张黑图仍然比 404 强
+        if !black {
+            break;
+        }
+    }
+    let _ = std::fs::remove_file(&log);
+
+    let (tmp, data) = best?;
+    // 先写临时名再改名，中途被打断也不会在缓存里留下一个半截的 JPEG
+    // 被下一次请求当成好图返回。改名失败不影响这次的结果，下次重抽一遍就是
+    if std::fs::rename(&tmp, &target).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Some(data)
+}
+
+/// 抽帧封面的缓存文件名。带 mtime，文件换掉之后旧图自动作废。
+fn cover_cache_file(cache_dir: &Path, track_id: i64, mtime: u64) -> PathBuf {
+    cache_dir.join(format!("{track_id}-{mtime}.jpg"))
+}
+
+/// 封面的响应头。
+///
+/// 曲库列表每行都放缩略图，滚一屏就是几十个请求，不给缓存头的话每次滚回来
+/// 都要重读文件、重解 tag，所以必须缓存。但**只缓存一小时**（和 Python 版一致）：
+/// 曲目 id 不变而文件被换掉是很常见的（换了个更好的版本、重新打了标签），
+/// 缓存一整天的话用户会看到一整天的旧封面，还完全不知道该怎么让它刷新。
+fn cover_headers(mime: String) -> [(header::HeaderName, String); 2] {
+    [
+        (header::CONTENT_TYPE, mime),
+        (
+            header::CACHE_CONTROL,
+            "private, max-age=3600".to_string(),
+        ),
+    ]
 }
 
 /// 换封面能收的最大图片。比这更大的多半是用户挑错了文件（原始 RAW / 长截图），
@@ -1273,12 +1404,7 @@ async fn library_waveform(
         return Err(ApiError::not_found("音频文件已丢失"));
     }
 
-    let mtime = std::fs::metadata(&path)
-        .ok()
-        .and_then(|meta| meta.modified().ok())
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let mtime = file_mtime(&path);
     // v2 = 三条包络 → 每列一色的格式变更。不带版本号的话，旧缓存会以旧结构
     // 被原样返回，前端拿到没有 amp 的对象只会画出一片空白。
     let cache_dir = state.config.data_dir.join("waveform");
@@ -1361,30 +1487,109 @@ mod tests {
         assert_eq!(parse_range("bytes=0-10", 0), None, "空文件没有可用范围");
     }
 
-    #[test]
-    fn a_request_without_range_gets_the_whole_file() {
-        let response = audio_response(vec![7; 100], "audio/mpeg".into(), None);
+    /// 写一份内容可辨认的样本文件（第 i 个字节 = i % 251），
+    /// 这样"切出来的到底是不是那一段"能真的验，而不是只看长度对不对。
+    fn sample_audio(name: &str, size: usize) -> PathBuf {
+        let dir = scratch(name);
+        let path = dir.join("a.mp3");
+        let data: Vec<u8> = (0..size).map(|index| (index % 251) as u8).collect();
+        std::fs::write(&path, data).unwrap();
+        path
+    }
+
+    async fn body_bytes(response: Response) -> Vec<u8> {
+        axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn a_request_without_range_gets_the_whole_file() {
+        let path = sample_audio("audio-full", 100);
+        let response = audio_response(&path, 100, "audio/mpeg".into(), None)
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let headers = response.headers();
+        let headers = response.headers().clone();
         assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
         assert_eq!(headers[header::CONTENT_LENGTH], "100");
+        assert_eq!(headers[header::CONTENT_TYPE], "audio/mpeg");
+        assert_eq!(body_bytes(response).await.len(), 100);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    #[test]
-    fn a_satisfiable_range_gets_206_with_content_range() {
-        let response = audio_response(vec![7; 100], "audio/mpeg".into(), Some("bytes=10-19"));
+    #[tokio::test]
+    async fn a_satisfiable_range_gets_206_with_exactly_those_bytes() {
+        // 只对 Content-Range 不够：seek 错位的话头是对的、字节是错的，
+        // 表现是"拖到副歌放出来的是别处"
+        let path = sample_audio("audio-range", 100);
+        let response = audio_response(&path, 100, "audio/mpeg".into(), Some("bytes=10-19"))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
-        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 10-19/100");
-        assert_eq!(response.headers()[header::CONTENT_LENGTH], "10");
+        let headers = response.headers().clone();
+        assert_eq!(headers[header::CONTENT_RANGE], "bytes 10-19/100");
+        assert_eq!(headers[header::CONTENT_LENGTH], "10");
+        assert_eq!(body_bytes(response).await, (10u8..20).collect::<Vec<u8>>());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    #[test]
-    fn an_unsatisfiable_range_gets_416_not_the_whole_file() {
+    #[tokio::test]
+    async fn an_open_ended_range_runs_to_the_end_of_the_file() {
+        let path = sample_audio("audio-tail", 100);
+        let response = audio_response(&path, 100, "audio/mpeg".into(), Some("bytes=90-"))
+            .await
+            .unwrap();
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 90-99/100");
+        assert_eq!(body_bytes(response).await, (90u8..100).collect::<Vec<u8>>());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_unsatisfiable_range_gets_416_not_the_whole_file() {
         // 回 200 + 整份数据的话，播放器以为 seek 成功了，
         // 拿到的却是从头开始的字节——表现是"进度条拖了等于没拖"
-        let response = audio_response(vec![7; 100], "audio/mpeg".into(), Some("bytes=500-600"));
+        let path = sample_audio("audio-416", 100);
+        let response = audio_response(&path, 100, "audio/mpeg".into(), Some("bytes=500-600"))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
         assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes */100");
+        assert!(body_bytes(response).await.is_empty(), "416 不该带数据");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_large_file_is_streamed_not_slurped() {
+        // 整份读进内存的写法在这条用例上会读满 4 MB 只为了发 10 字节。
+        // 直接盯住"内存"没法在单测里断言，退而求其次盯住**字节正确**：
+        // 只有真的 seek 过去才可能拿到这一段。
+        let size = 4 * 1024 * 1024 + 7;
+        let path = sample_audio("audio-big", size);
+        let start = (size - 10) as u64;
+        let response = audio_response(
+            &path,
+            size as u64,
+            "audio/flac".into(),
+            Some(&format!("bytes={start}-")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "10");
+        let expected: Vec<u8> = ((size - 10)..size).map(|i| (i % 251) as u8).collect();
+        assert_eq!(body_bytes(response).await, expected);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn covers_are_cached_for_an_hour_not_a_day() {
+        // 曲目 id 不变而文件被换掉很常见（换了个更好的版本、重打了标签）。
+        // 缓存一整天的话用户会盯着旧封面一整天，还不知道怎么让它刷新。
+        // 参照实现（sidecar/kumodeck/app.py::library_cover）就是 3600。
+        let headers = cover_headers("image/jpeg".into());
+        assert_eq!(headers[0].1, "image/jpeg");
+        assert_eq!(headers[1].1, "private, max-age=3600");
     }
 
     #[test]
@@ -1454,6 +1659,133 @@ mod tests {
         };
         apply_video_defaults(&mut req, &settings);
         assert_eq!(req.max_height, 1080);
+    }
+
+    #[test]
+    fn a_replaced_file_gets_a_different_cover_cache_name() {
+        // 曲目 id 不变而文件被换掉很常见（剪了个新版本、重新压了一遍）。
+        // 缓存名不带 mtime 的话用户会永远看到旧那一帧
+        let dir = Path::new("/tmp/covers");
+        let before = cover_cache_file(dir, 42, 1_700_000_000);
+        let after = cover_cache_file(dir, 42, 1_700_000_999);
+        assert_ne!(before, after);
+        assert_eq!(before.file_name().unwrap(), "42-1700000000.jpg");
+        // 不同曲目也不能撞
+        assert_ne!(before, cover_cache_file(dir, 43, 1_700_000_000));
+    }
+
+    #[tokio::test]
+    async fn a_file_that_cannot_be_read_as_video_degrades_to_no_cover() {
+        // 没装 ffmpeg（安卓）、文件坏了、根本没有视频流——三种情况都得是
+        // "这首没有图"而不是 500，否则曲库列表会红一片
+        let base = scratch("cover-broken");
+        let fake = base.join("broken.mp4");
+        std::fs::write(&fake, b"this is not a video").unwrap();
+        let cache = base.join("covers");
+
+        let cover = video_cover(&fake, 1, Some(180.0), &cache).await;
+        assert!(cover.is_none(), "抽不出来就是没有，不该 panic 也不该报错");
+        // 失败不能在缓存里留下空文件，否则下一次会把它当成好图返回
+        let leftovers: Vec<_> = std::fs::read_dir(&cache)
+            .map(|entries| entries.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        assert!(leftovers.is_empty(), "留下了半成品：{leftovers:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 用 ffmpeg 自己造一段测试视频。没装 ffmpeg 就返回 None，这条用例整个跳过——
+    /// 安卓和干净的 CI 机器上本来就没有 ffmpeg。
+    async fn make_test_video(path: &Path, filter: &str, seconds: u32) -> bool {
+        if !kumodeck_providers::ffmpeg::available() {
+            return false;
+        }
+        let args = [
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            filter,
+            "-t",
+            &seconds.to_string(),
+            "-pix_fmt",
+            "yuv420p",
+            path.to_str().unwrap(),
+        ]
+        .map(str::to_string);
+        let log = path.with_extension("log");
+        let ok = kumodeck_providers::ffmpeg::run(
+            &args,
+            &log,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .is_ok();
+        let _ = std::fs::remove_file(&log);
+        ok
+    }
+
+    #[tokio::test]
+    async fn a_video_without_embedded_art_gets_a_frame_and_caches_it() {
+        let base = scratch("cover-frame");
+        let video = base.join("clip.mp4");
+        if !make_test_video(&video, "testsrc=size=640x360:rate=10", 4).await {
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        let cache = base.join("covers");
+
+        let cover = video_cover(&video, 7, Some(4.0), &cache).await.unwrap();
+        assert!(cover.starts_with(b"\xff\xd8\xff"), "得是一张真的 JPEG");
+        let cached = cover_cache_file(&cache, 7, file_mtime(&video));
+        assert_eq!(std::fs::read(&cached).unwrap(), cover, "第二次要走缓存");
+        // 半成品不能留在缓存目录里
+        let names: Vec<String> = std::fs::read_dir(&cache)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 1, "缓存目录里应该只剩成品：{names:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn an_all_black_opening_makes_it_try_a_later_position() {
+        // VJ 素材常常黑好几秒。第一个位置全黑时要往后挪，
+        // 不然列表里排出来一列黑方块，和没有封面看着一样
+        let base = scratch("cover-black");
+        let video = base.join("fade.mp4");
+        // 前 6 秒纯黑，之后是彩色测试图；时长 12 秒 → 第一枪落在 1.2 秒（黑），
+        // 重试落在 4.2 / 7.2 秒，后者能抽到画面
+        let filter = "color=c=black:size=320x240:rate=10:duration=6[a];\
+testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
+        if !make_test_video(&video, filter, 12).await {
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        // 先确认第一枪确实打在黑场上，否则这条用例是白跑的
+        let first = base.join("first.jpg");
+        kumodeck_providers::ffmpeg::extract_frame(
+            &video,
+            &first,
+            kumodeck_providers::ffmpeg::frame_position(Some(12.0)),
+            &base.join("ff.log"),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            kumodeck_providers::ffmpeg::frame_is_mostly_black(&std::fs::read(&first).unwrap()),
+            "样本视频开头不是黑的，这条用例没验到东西"
+        );
+
+        let cover = video_cover(&video, 8, Some(12.0), &base.join("covers"))
+            .await
+            .unwrap();
+        assert!(
+            !kumodeck_providers::ffmpeg::frame_is_mostly_black(&cover),
+            "挑出来的还是黑的，重试没起作用"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -80,9 +80,7 @@ pub fn normalize_path(path: &Path) -> String {
 }
 
 pub fn now_iso() -> String {
-    chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string()
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -415,11 +413,10 @@ impl LibraryService {
     /// 用户刚改的东西要么被冲掉，要么每次扫描都白重读一遍。
     pub fn sync_file_stat(&self, track_id: i64) -> Result<()> {
         let conn = self.db.conn()?;
-        let path: String = conn.query_row(
-            "SELECT path FROM tracks WHERE id = ?",
-            [track_id],
-            |row| row.get(0),
-        )?;
+        let path: String =
+            conn.query_row("SELECT path FROM tracks WHERE id = ?", [track_id], |row| {
+                row.get(0)
+            })?;
         let meta = std::fs::metadata(&path).with_context(|| format!("无法读取文件: {path}"))?;
         let mtime = meta
             .modified()
@@ -460,6 +457,35 @@ impl LibraryService {
         self.after_file_write(track_id, write_cover(Path::new(&track.path), data))
     }
 
+    /// 按文件里现存的标签刷新库里那条记录。
+    ///
+    /// 为什么单独要这个：`upsert_file` 拿 `(file_mtime, size)` 做增量跳过，
+    /// 所以"文件里有标签、库里是空的"这种记录（早年入库时读标签失败、
+    /// 或者用别的软件改过标签但 mtime 恰好没变）再扫多少遍都不会好——
+    /// 库里那份错值就是那次跳过的结果，跳过本身又是靠它自己维持的。
+    ///
+    /// 实现上不另写一套 UPDATE，而是把库里的 `file_mtime` 先清零、逼 `upsert_file`
+    /// 走"文件变了"那条分支：覆盖规则（只在读到非空值时才盖、不清空分析结果）
+    /// 必须和扫描完全一致，抄一份迟早会跑偏。清零后中途失败也是安全方向——
+    /// 最坏结果只是下次扫描多读一次标签。
+    pub fn reread_tags_from_file(&self, track_id: i64) -> Result<Track> {
+        let conn = self.db.conn()?;
+        let path: String = conn
+            .query_row("SELECT path FROM tracks WHERE id = ?", [track_id], |row| {
+                row.get(0)
+            })
+            .with_context(|| format!("曲目不存在：{track_id}"))?;
+        anyhow::ensure!(Path::new(&path).exists(), "文件不在了，读不到标签：{path}");
+        // 0 不会等于任何一个真实 mtime，增量比对必然不成立
+        conn.execute("UPDATE tracks SET file_mtime = 0 WHERE id = ?", [track_id])?;
+        // `upsert_file` 自己要借连接，握着不放会把池占满
+        drop(conn);
+
+        // source_platform / source_key 传空 = 这次不动来源信息
+        self.upsert_file(Path::new(&path), "", "")?;
+        self.get(track_id)?.context("刚重读的曲目查不到了")
+    }
+
     /// 写文件之后一律同步一次 stat，**哪怕写失败**：
     /// lofty 是"改完再落盘"，失败点可能在落盘之后，那时 mtime 已经变了。
     /// 只在成功路径上同步的话，这条失败会留下一个错的 mtime 埋在库里。
@@ -489,16 +515,11 @@ impl LibraryService {
     }
 
     /// 把一个音频文件写进库，返回 track id。同一路径重复调用是幂等的。
-    pub fn upsert_file(
-        &self,
-        path: &Path,
-        source_platform: &str,
-        source_key: &str,
-    ) -> Result<i64> {
+    pub fn upsert_file(&self, path: &Path, source_platform: &str, source_key: &str) -> Result<i64> {
         let key_path = normalize_path(path);
         let file_path = PathBuf::from(&key_path);
-        let meta = std::fs::metadata(&file_path)
-            .with_context(|| format!("无法读取文件: {key_path}"))?;
+        let meta =
+            std::fs::metadata(&file_path).with_context(|| format!("无法读取文件: {key_path}"))?;
         let mtime = meta
             .modified()
             .ok()
@@ -508,10 +529,12 @@ impl LibraryService {
         let size = meta.len() as i64;
 
         let conn = self.db.conn()?;
-        let existing: Option<(i64, Option<f64>, i64, String, String)> = conn
+        let existing: Option<(i64, Option<f64>, i64, String, String, bool)> = conn
             .query_row(
                 "SELECT id, file_mtime, COALESCE(size, 0), COALESCE(source_platform, ''), \
-                 COALESCE(source_key, '') FROM tracks WHERE path = ?",
+                 COALESCE(source_key, ''), \
+                 (COALESCE(artist, '') = '' AND COALESCE(album, '') = '') \
+                 FROM tracks WHERE path = ?",
                 [&key_path],
                 |row| {
                     Ok((
@@ -520,21 +543,33 @@ impl LibraryService {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        row.get(5)?,
                     ))
                 },
             )
             .ok();
 
-        if let Some((id, old_mtime, old_size, old_platform, old_key)) = &existing {
-            // 增量：mtime + size 都没变就直接返回，省掉读标签（扫描里最贵的一步）
+        if let Some((id, old_mtime, old_size, old_platform, old_key, tags_missing)) = &existing {
+            // 增量：mtime + size 都没变就直接返回，省掉读标签（扫描里最贵的一步）。
+            // 例外：库里艺人+专辑双空的行不许走快路径（`file_index` 的注释有全文），
+            // 逼它落到下面的重读分支——覆盖规则"只在读到非空值时才盖"在那边，
+            // 所以真没标签的文件重读之后也只是原地踏步，不会被清掉别的字段。
             let unchanged = old_mtime
                 .map(|value| (value - mtime).abs() < 1e-6)
                 .unwrap_or(false)
-                && *old_size == size;
+                && *old_size == size
+                && !*tags_missing;
             if unchanged {
                 // 唯一例外：来源信息是调用方带进来的（下载完成时补登记），
                 // 文件没变也要认，否则重复下载的曲目会一直挂着 local
-                self.touch_source(&conn, *id, old_platform, old_key, source_platform, source_key)?;
+                self.touch_source(
+                    &conn,
+                    *id,
+                    old_platform,
+                    old_key,
+                    source_platform,
+                    source_key,
+                )?;
                 return Ok(*id);
             }
         }
@@ -575,7 +610,11 @@ impl LibraryService {
                     tags.channels,
                     tags.format,
                     size,
-                    if source_platform.is_empty() { "local" } else { source_platform },
+                    if source_platform.is_empty() {
+                        "local"
+                    } else {
+                        source_platform
+                    },
                     source_key,
                     now,
                     now,
@@ -729,10 +768,15 @@ impl LibraryService {
     /// 只有用户显式点「强制重新分析」（force=true）才覆盖。
     pub fn pending_analysis_ids(&self, track_ids: Option<&[i64]>, force: bool) -> Result<Vec<i64>> {
         let conn = self.db.conn()?;
-        let condition = if force { "" } else { " WHERE analyzed_at IS NULL" };
+        let condition = if force {
+            ""
+        } else {
+            " WHERE analyzed_at IS NULL"
+        };
 
         let Some(wanted) = track_ids else {
-            let mut stmt = conn.prepare(&format!("SELECT id FROM tracks{condition} ORDER BY id"))?;
+            let mut stmt =
+                conn.prepare(&format!("SELECT id FROM tracks{condition} ORDER BY id"))?;
             let ids = stmt
                 .query_map([], |row| row.get::<_, i64>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -745,7 +789,11 @@ impl LibraryService {
         let mut found: std::collections::HashSet<i64> = Default::default();
         for chunk in wanted.chunks(900) {
             let placeholders = vec!["?"; chunk.len()].join(",");
-            let extra = if force { "" } else { " AND analyzed_at IS NULL" };
+            let extra = if force {
+                ""
+            } else {
+                " AND analyzed_at IS NULL"
+            };
             let mut stmt = conn.prepare(&format!(
                 "SELECT id FROM tracks WHERE id IN ({placeholders}){extra}"
             ))?;
@@ -788,7 +836,11 @@ impl LibraryService {
         if relations.is_empty() {
             return Ok(Vec::new());
         }
-        let tolerance = if bpm_tolerance > 0.0 { bpm_tolerance } else { 6.0 };
+        let tolerance = if bpm_tolerance > 0.0 {
+            bpm_tolerance
+        } else {
+            6.0
+        };
         // limit=0 当"没传"，退回默认 50（和 v0.1.0 的 `limit or 50` 一致）；
         // 夹成 1 会让传 0 的客户端只拿到一首，看着像推荐算法坏了
         let limit = if limit == 0 { 50 } else { limit.min(500) };
@@ -806,7 +858,11 @@ impl LibraryService {
             // BPM 范围下推到 SQL，别把整个兼容调的曲目都拉进内存再筛。
             // BETWEEN 遇到 NULL 为假，顺带把没分析出 BPM 的候选也挡掉了。
             let (low, high) = (bpm - tolerance, bpm + tolerance);
-            let ranges = [(low, high), (low * 2.0, high * 2.0), (low / 2.0, high / 2.0)];
+            let ranges = [
+                (low, high),
+                (low * 2.0, high * 2.0),
+                (low / 2.0, high / 2.0),
+            ];
             bpm_clause = format!(
                 " AND ({})",
                 vec!["bpm BETWEEN ? AND ?"; ranges.len()].join(" OR ")
@@ -867,7 +923,12 @@ impl LibraryService {
             b.score
                 .total_cmp(&a.score)
                 .then_with(|| a.bpm_delta.abs().total_cmp(&b.bpm_delta.abs()))
-                .then_with(|| a.track.title.to_lowercase().cmp(&b.track.title.to_lowercase()))
+                .then_with(|| {
+                    a.track
+                        .title
+                        .to_lowercase()
+                        .cmp(&b.track.title.to_lowercase())
+                })
         });
 
         // 同一首歌常常在好几个 set 文件夹里各有一份（硬链接/拷贝），
@@ -919,7 +980,9 @@ impl LibraryService {
                 "SELECT UPPER(camelot), COUNT(*) FROM tracks \
                  WHERE camelot IS NOT NULL AND camelot != '' GROUP BY UPPER(camelot)",
             )?;
-            for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))? {
+            for row in stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })? {
                 let (code, count) = row?;
                 raw_camelot.insert(code, count);
             }
@@ -946,7 +1009,11 @@ impl LibraryService {
         }
         let by_bpm_bucket: BTreeMap<String, i64> = BPM_BUCKET_ORDER
             .iter()
-            .filter_map(|name| buckets.get(*name).map(|count| ((*name).to_string(), *count)))
+            .filter_map(|name| {
+                buckets
+                    .get(*name)
+                    .map(|count| ((*name).to_string(), *count))
+            })
             .collect();
 
         let mut by_platform: BTreeMap<String, i64> = BTreeMap::new();
@@ -955,7 +1022,9 @@ impl LibraryService {
                 "SELECT COALESCE(NULLIF(source_platform, ''), 'local'), COUNT(*) \
                  FROM tracks GROUP BY 1",
             )?;
-            for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))? {
+            for row in stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })? {
                 let (platform, count) = row?;
                 by_platform.insert(platform, count);
             }
@@ -1052,8 +1121,7 @@ impl LibraryService {
 
         let conn = self.db.conn()?;
         let values: Vec<SqlValue> = {
-            let mut stmt =
-                conn.prepare(&format!("SELECT {COLUMNS} FROM tracks WHERE id = ?"))?;
+            let mut stmt = conn.prepare(&format!("SELECT {COLUMNS} FROM tracks WHERE id = ?"))?;
             let mut rows = stmt.query([source_id])?;
             let Some(row) = rows.next()? else {
                 return Ok(());
@@ -1081,15 +1149,28 @@ impl LibraryService {
         Ok(())
     }
 
-    /// path → (id, file_mtime)。扫描前一次性拉出来做增量比对，
+    /// path → (id, file_mtime, 标签可疑地空)。扫描前一次性拉出来做增量比对，
     /// 比每个文件查一次库快一个数量级。
-    pub fn file_index(&self) -> Result<HashMap<String, (i64, f64)>> {
+    ///
+    /// 第三个布尔是给增量跳过用的例外：艺人和专辑**双双为空**的行多半是
+    /// 早年入库时读标签失败留下的（文件里其实有），mtime 又恰好没变，
+    /// 光靠"文件动过才重读"永远修不好——所以这种行不许走快路径。
+    /// 真没标签的文件会因此每次扫描都被多读一遍标签，代价是每个文件几毫秒，
+    /// 换来的是坏行自动愈合，不用用户挨个点「重读标签」。
+    pub fn file_index(&self) -> Result<HashMap<String, (i64, f64, bool)>> {
         let conn = self.db.conn()?;
-        let mut stmt = conn.prepare("SELECT id, path, file_mtime FROM tracks")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, path, file_mtime, \
+             (COALESCE(artist, '') = '' AND COALESCE(album, '') = '') FROM tracks",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(1)?,
-                (row.get::<_, i64>(0)?, row.get::<_, Option<f64>>(2)?.unwrap_or(0.0)),
+                (
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                    row.get::<_, bool>(3)?,
+                ),
             ))
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -1099,7 +1180,10 @@ impl LibraryService {
 // ---------------------------------------------------------------- 行映射
 
 fn text(row: &Row, name: &str) -> String {
-    row.get::<_, Option<String>>(name).ok().flatten().unwrap_or_default()
+    row.get::<_, Option<String>>(name)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 fn row_to_track(row: &Row) -> Track {
@@ -1122,7 +1206,11 @@ fn row_to_track(row: &Row) -> Track {
         samplerate: row.get("samplerate").ok().flatten(),
         channels: row.get("channels").ok().flatten(),
         format: text(row, "format"),
-        size: row.get::<_, Option<i64>>("size").ok().flatten().unwrap_or(0),
+        size: row
+            .get::<_, Option<i64>>("size")
+            .ok()
+            .flatten()
+            .unwrap_or(0),
         bpm: row.get("bpm").ok().flatten(),
         bpm_confidence: row.get("bpm_confidence").ok().flatten(),
         first_beat: row.get("first_beat").ok().flatten(),
@@ -1133,7 +1221,11 @@ fn row_to_track(row: &Row) -> Track {
         energy: row.get("energy").ok().flatten(),
         rms_db: row.get("rms_db").ok().flatten(),
         peak_db: row.get("peak_db").ok().flatten(),
-        rating: row.get::<_, Option<i64>>("rating").ok().flatten().unwrap_or(0),
+        rating: row
+            .get::<_, Option<i64>>("rating")
+            .ok()
+            .flatten()
+            .unwrap_or(0),
         color: text(row, "color"),
         comment: text(row, "comment"),
         cue_ms: row.get("cue_ms").ok().flatten(),
@@ -1201,7 +1293,11 @@ mod tests {
                 row.title,
                 row.camelot,
                 row.bpm,
-                if row.analyzed { Some("2024-01-01T00:00:00Z") } else { None },
+                if row.analyzed {
+                    Some("2024-01-01T00:00:00Z")
+                } else {
+                    None
+                },
             ],
         )
         .unwrap();
@@ -1227,20 +1323,32 @@ mod tests {
         let root = format!("{}lib", SEP);
         insert(
             &service,
-            Row { path: &format!("{root}{SEP}a.mp3"), ..Default::default() },
+            Row {
+                path: &format!("{root}{SEP}a.mp3"),
+                ..Default::default()
+            },
         );
         insert(
             &service,
-            Row { path: &format!("{root}{SEP}set1{SEP}b.mp3"), ..Default::default() },
+            Row {
+                path: &format!("{root}{SEP}set1{SEP}b.mp3"),
+                ..Default::default()
+            },
         );
         insert(
             &service,
-            Row { path: &format!("{root}-evil{SEP}c.mp3"), ..Default::default() },
+            Row {
+                path: &format!("{root}-evil{SEP}c.mp3"),
+                ..Default::default()
+            },
         );
 
         let shallow = service.list_tracks(&query(&root, false)).unwrap();
         assert_eq!(shallow.total, 1);
-        assert!(paths(&shallow)[0].ends_with("a.mp3"), "子目录和同前缀兄弟目录都不算");
+        assert!(
+            paths(&shallow)[0].ends_with("a.mp3"),
+            "子目录和同前缀兄弟目录都不算"
+        );
 
         let deep = service.list_tracks(&query(&root, true)).unwrap();
         assert_eq!(deep.total, 2, "打开开关才连子目录一起看");
@@ -1251,10 +1359,19 @@ mod tests {
         // 目录名里带 % / _ 是合法的，不转义的话 `%` 会匹配到任意别的目录
         let service = service();
         let tricky = format!("{}lib{}100%_mix", SEP, SEP);
-        insert(&service, Row { path: &format!("{tricky}{SEP}a.mp3"), ..Default::default() });
         insert(
             &service,
-            Row { path: &format!("{}lib{}100XYmix{}b.mp3", SEP, SEP, SEP), ..Default::default() },
+            Row {
+                path: &format!("{tricky}{SEP}a.mp3"),
+                ..Default::default()
+            },
+        );
+        insert(
+            &service,
+            Row {
+                path: &format!("{}lib{}100XYmix{}b.mp3", SEP, SEP, SEP),
+                ..Default::default()
+            },
         );
 
         let page = service.list_tracks(&query(&tricky, false)).unwrap();
@@ -1266,11 +1383,29 @@ mod tests {
     fn search_text_escapes_like_wildcards() {
         // 用户搜 "50%" 不该变成匹配一切
         let service = service();
-        insert(&service, Row { path: "/lib/a.mp3", title: "50% off", ..Default::default() });
-        insert(&service, Row { path: "/lib/b.mp3", title: "完全无关", ..Default::default() });
+        insert(
+            &service,
+            Row {
+                path: "/lib/a.mp3",
+                title: "50% off",
+                ..Default::default()
+            },
+        );
+        insert(
+            &service,
+            Row {
+                path: "/lib/b.mp3",
+                title: "完全无关",
+                ..Default::default()
+            },
+        );
 
         let page = service
-            .list_tracks(&TrackQuery { q: "50%".into(), limit: 200, ..Default::default() })
+            .list_tracks(&TrackQuery {
+                q: "50%".into(),
+                limit: 200,
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(page.total, 1);
     }
@@ -1278,15 +1413,36 @@ mod tests {
     #[test]
     fn analyzed_filter_splits_the_library_in_two() {
         let service = service();
-        insert(&service, Row { path: "/lib/a.mp3", analyzed: true, ..Default::default() });
-        insert(&service, Row { path: "/lib/b.mp3", ..Default::default() });
+        insert(
+            &service,
+            Row {
+                path: "/lib/a.mp3",
+                analyzed: true,
+                ..Default::default()
+            },
+        );
+        insert(
+            &service,
+            Row {
+                path: "/lib/b.mp3",
+                ..Default::default()
+            },
+        );
 
         let done = service
-            .list_tracks(&TrackQuery { analyzed: Some(true), limit: 200, ..Default::default() })
+            .list_tracks(&TrackQuery {
+                analyzed: Some(true),
+                limit: 200,
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(done.total, 1);
         let todo = service
-            .list_tracks(&TrackQuery { analyzed: Some(false), limit: 200, ..Default::default() })
+            .list_tracks(&TrackQuery {
+                analyzed: Some(false),
+                limit: 200,
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(todo.total, 1);
         assert!(paths(&todo)[0].ends_with("b.mp3"));
@@ -1295,9 +1451,29 @@ mod tests {
     #[test]
     fn camelot_sort_is_numeric_and_nulls_sink_in_both_directions() {
         let service = service();
-        insert(&service, Row { path: "/lib/a.mp3", camelot: "10A", ..Default::default() });
-        insert(&service, Row { path: "/lib/b.mp3", camelot: "8A", ..Default::default() });
-        insert(&service, Row { path: "/lib/c.mp3", ..Default::default() });
+        insert(
+            &service,
+            Row {
+                path: "/lib/a.mp3",
+                camelot: "10A",
+                ..Default::default()
+            },
+        );
+        insert(
+            &service,
+            Row {
+                path: "/lib/b.mp3",
+                camelot: "8A",
+                ..Default::default()
+            },
+        );
+        insert(
+            &service,
+            Row {
+                path: "/lib/c.mp3",
+                ..Default::default()
+            },
+        );
 
         let ascending = service
             .list_tracks(&TrackQuery {
@@ -1308,7 +1484,11 @@ mod tests {
             })
             .unwrap();
         let codes: Vec<&str> = ascending.items.iter().map(|t| t.camelot.as_str()).collect();
-        assert_eq!(codes, vec!["8A", "10A", ""], "字符串排序会把 10A 排到 8A 前面");
+        assert_eq!(
+            codes,
+            vec!["8A", "10A", ""],
+            "字符串排序会把 10A 排到 8A 前面"
+        );
 
         let descending = service
             .list_tracks(&TrackQuery {
@@ -1318,7 +1498,11 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let codes: Vec<&str> = descending.items.iter().map(|t| t.camelot.as_str()).collect();
+        let codes: Vec<&str> = descending
+            .items
+            .iter()
+            .map(|t| t.camelot.as_str())
+            .collect();
         assert_eq!(codes, vec!["10A", "8A", ""], "空值升降序都垫底");
     }
 
@@ -1333,7 +1517,10 @@ mod tests {
         for name in ["a.mp3", "b.mp3", "c.mp3"] {
             insert(
                 &service,
-                Row { path: &format!("{folder}{SEP}{name}"), ..Default::default() },
+                Row {
+                    path: &format!("{folder}{SEP}{name}"),
+                    ..Default::default()
+                },
             );
         }
         // 清单只列了两首，没列的那首按文件名排在后面
@@ -1359,11 +1546,18 @@ mod tests {
         for index in 0..5 {
             insert(
                 &service,
-                Row { path: &format!("/lib/{index}.mp3"), ..Default::default() },
+                Row {
+                    path: &format!("/lib/{index}.mp3"),
+                    ..Default::default()
+                },
             );
         }
         let page = service
-            .list_tracks(&TrackQuery { limit: 2, offset: 4, ..Default::default() })
+            .list_tracks(&TrackQuery {
+                limit: 2,
+                offset: 4,
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(page.total, 5);
         assert_eq!(page.items.len(), 1, "最后一页只剩一条");
@@ -1371,7 +1565,11 @@ mod tests {
         assert_eq!(page.offset, 4);
 
         let clamped = service
-            .list_tracks(&TrackQuery { limit: 99_999, offset: -3, ..Default::default() })
+            .list_tracks(&TrackQuery {
+                limit: 99_999,
+                offset: -3,
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(clamped.limit, 2000);
         assert_eq!(clamped.offset, 0);
@@ -1385,7 +1583,10 @@ mod tests {
         for index in 0..3 {
             insert(
                 &service,
-                Row { path: &format!("/lib/{index}.mp3"), ..Default::default() },
+                Row {
+                    path: &format!("/lib/{index}.mp3"),
+                    ..Default::default()
+                },
             );
         }
         let page = service.list_tracks(&TrackQuery::default()).unwrap();
@@ -1414,8 +1615,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(track.rating, 5);
-        assert_eq!(track.tags, vec!["house", "techno"], "去空白、去重、按字母排");
-        assert!(service.patch(id + 999, &TrackPatch::default()).is_err(), "不存在的 id 要报错");
+        assert_eq!(
+            track.tags,
+            vec!["house", "techno"],
+            "去空白、去重、按字母排"
+        );
+        assert!(
+            service.patch(id + 999, &TrackPatch::default()).is_err(),
+            "不存在的 id 要报错"
+        );
     }
 
     #[test]
@@ -1424,9 +1632,18 @@ mod tests {
         let service = service();
         let id = insert(&service, Row::default());
         let track = service
-            .patch(id, &TrackPatch { year: Some("2021-05-17".into()), ..Default::default() })
+            .patch(
+                id,
+                &TrackPatch {
+                    year: Some("2021-05-17".into()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
-        assert_eq!(track.year, "2021-05-17", "整串日期要原样存住，不能截成 2021");
+        assert_eq!(
+            track.year, "2021-05-17",
+            "整串日期要原样存住，不能截成 2021"
+        );
     }
 
     /// 造一个 2 秒静音 WAV，用来做"真的写标签"的测试。
@@ -1451,8 +1668,7 @@ mod tests {
     }
 
     fn scratch_track(name: &str) -> (LibraryService, i64, PathBuf) {
-        let dir = std::env::temp_dir()
-            .join(format!("kumodeck-meta-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kumodeck-meta-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = std::fs::canonicalize(&dir).unwrap().join("song.wav");
@@ -1495,7 +1711,10 @@ mod tests {
         service.write_patch_to_file(id, &patch).unwrap();
 
         let tags = read_tags(&path);
-        assert_eq!(tags.title, "手改的标题", "文件里也得改了，不然 Rekordbox 那边看不到");
+        assert_eq!(
+            tags.title, "手改的标题",
+            "文件里也得改了，不然 Rekordbox 那边看不到"
+        );
         assert_eq!(tags.year, "2019");
 
         let after = stored_mtime(&service, &path);
@@ -1515,14 +1734,22 @@ mod tests {
     #[test]
     fn a_rescan_after_writing_tags_does_not_re_read_and_overwrite() {
         let (service, id, path) = scratch_track("rescan");
-        let patch = TrackPatch { title: Some("手改的标题".into()), ..Default::default() };
+        let patch = TrackPatch {
+            title: Some("手改的标题".into()),
+            // 艺人必须非空：夹具默认艺人+专辑双空，那会命中"可疑行自动重读"
+            // 的例外（见 file_index），照妖镜就照错了对象——这条测试要照的是
+            // "一条**正常**记录在 mtime 同步后走不走增量跳过"
+            artist: Some("正常的艺人".into()),
+            ..Default::default()
+        };
         service.patch(id, &patch).unwrap();
         service.write_patch_to_file(id, &patch).unwrap();
 
         // 埋一个只存在于库里的哨兵：`upsert_file` 走重读那条路时会拿文件里的
         // 标题把它盖掉，走增量跳过则原样留着。这就是 mtime 有没有同步的照妖镜。
         let conn = service.db().conn().unwrap();
-        conn.execute("UPDATE tracks SET title = '库里的哨兵' WHERE id = ?", [id]).unwrap();
+        conn.execute("UPDATE tracks SET title = '库里的哨兵' WHERE id = ?", [id])
+            .unwrap();
         drop(conn);
 
         assert_eq!(service.upsert_file(&path, "local", "").unwrap(), id);
@@ -1535,10 +1762,96 @@ mod tests {
         // 反证：把 mtime 拨回同步之前，同一次扫描就会把哨兵冲掉——
         // 说明上面那条断言不是碰巧成立的
         let conn = service.db().conn().unwrap();
-        conn.execute("UPDATE tracks SET file_mtime = 1.0 WHERE id = ?", [id]).unwrap();
+        conn.execute("UPDATE tracks SET file_mtime = 1.0 WHERE id = ?", [id])
+            .unwrap();
         drop(conn);
         service.upsert_file(&path, "local", "").unwrap();
         assert_eq!(service.get(id).unwrap().unwrap().title, "手改的标题");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_stale_empty_row_heals_itself_on_the_next_scan() {
+        // 复现库里那 7 首 mp3：文件里有艺人/专辑，库里是空的，而 mtime 对得上。
+        // 老行为是每次扫描都跳过、空值永远翻不了身；现在"艺人+专辑双空"
+        // 不许走增量快路径，普通的一次 upsert 就能把它治好。
+        let (service, id, path) = scratch_track("self-heal");
+        kumodeck_providers::tags::write_metadata(
+            &path,
+            &MetadataEdit {
+                artist: Some("文件里的艺人"),
+                album: Some("文件里的专辑"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        service.sync_file_stat(id).unwrap();
+        let conn = service.db().conn().unwrap();
+        conn.execute(
+            "UPDATE tracks SET artist = '', album = '' WHERE id = ?",
+            [id],
+        )
+        .unwrap();
+        drop(conn);
+
+        // file_index 必须把这行标成可疑，扫描才知道别跳它。库里只有这一条。
+        let index = service.file_index().unwrap();
+        assert_eq!(index.len(), 1);
+        let (_, _, suspect) = *index.values().next().unwrap();
+        assert!(suspect, "艺人+专辑双空的行要被标成可疑");
+
+        // 文件没动过（mtime/size 全对得上），一次普通 upsert 也要能治好
+        service.upsert_file(&path, "local", "").unwrap();
+        let track = service.get(id).unwrap().unwrap();
+        assert_eq!(track.artist, "文件里的艺人");
+        assert_eq!(track.album, "文件里的专辑");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn rereading_tags_fixes_wrong_values_the_scan_cannot_see() {
+        // 自动愈合只认"空"。库里存了**错但非空**的值（别的软件写坏的）
+        // 增量扫描分不出来，这时才需要用户显式点「重读标签」。
+        let (service, id, path) = scratch_track("reread");
+        kumodeck_providers::tags::write_metadata(
+            &path,
+            &MetadataEdit {
+                artist: Some("文件里的艺人"),
+                album: Some("文件里的专辑"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        service.sync_file_stat(id).unwrap();
+        let conn = service.db().conn().unwrap();
+        conn.execute(
+            "UPDATE tracks SET artist = '写错的艺人', album = '写错的专辑' WHERE id = ?",
+            [id],
+        )
+        .unwrap();
+        drop(conn);
+
+        // 前提确认：非空的错值，扫一遍治不好（mtime 没变，跳过是对的）
+        service.upsert_file(&path, "local", "").unwrap();
+        assert_eq!(service.get(id).unwrap().unwrap().artist, "写错的艺人");
+
+        let track = service.reread_tags_from_file(id).unwrap();
+        assert_eq!(track.artist, "文件里的艺人");
+        assert_eq!(track.album, "文件里的专辑");
+        // 重读完 mtime 必须落回磁盘上的现状，不然下一次扫描又要白读一遍
+        assert!((stored_mtime(&service, &path) - disk_mtime(&path)).abs() < 1e-6);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn rereading_tags_of_a_missing_file_fails_before_touching_the_record() {
+        let (service, id, path) = scratch_track("reread-gone");
+        std::fs::remove_file(&path).unwrap();
+        let before = stored_mtime(&service, &path);
+        assert!(service.reread_tags_from_file(id).is_err());
+        // 文件读不到时不能把 file_mtime 清零留在库里：那会让下次扫描
+        // 对一个根本不存在的文件反复重试
+        assert!((stored_mtime(&service, &path) - before).abs() < 1e-6);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1549,7 +1862,9 @@ mod tests {
 
         let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
         png.extend_from_slice(&[0, 0, 0, 13, b'I', b'H', b'D', b'R']);
-        png.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89]);
+        png.extend_from_slice(&[
+            0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89,
+        ]);
         png.extend_from_slice(&[0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82]);
         service.write_cover_to_file(id, &png).unwrap();
 
@@ -1589,9 +1904,28 @@ mod tests {
     #[test]
     fn pending_analysis_keeps_the_callers_order_and_skips_analyzed() {
         let service = service();
-        let a = insert(&service, Row { path: "/lib/a.mp3", ..Default::default() });
-        let b = insert(&service, Row { path: "/lib/b.mp3", analyzed: true, ..Default::default() });
-        let c = insert(&service, Row { path: "/lib/c.mp3", ..Default::default() });
+        let a = insert(
+            &service,
+            Row {
+                path: "/lib/a.mp3",
+                ..Default::default()
+            },
+        );
+        let b = insert(
+            &service,
+            Row {
+                path: "/lib/b.mp3",
+                analyzed: true,
+                ..Default::default()
+            },
+        );
+        let c = insert(
+            &service,
+            Row {
+                path: "/lib/c.mp3",
+                ..Default::default()
+            },
+        );
 
         // 前端选中的顺序 = 用户期望的分析顺序；重复的 id 只算一次
         let pending = service
@@ -1599,12 +1933,17 @@ mod tests {
             .unwrap();
         assert_eq!(pending, vec![c, a], "已分析的被挡在外面");
 
-        let forced = service.pending_analysis_ids(Some(&[c, a, b]), true).unwrap();
+        let forced = service
+            .pending_analysis_ids(Some(&[c, a, b]), true)
+            .unwrap();
         assert_eq!(forced, vec![c, a, b], "force 时不看 analyzed_at");
 
         let all = service.pending_analysis_ids(None, false).unwrap();
         assert_eq!(all, vec![a, c], "不传 id 时按 id 排");
-        assert!(service.pending_analysis_ids(Some(&[]), false).unwrap().is_empty());
+        assert!(service
+            .pending_analysis_ids(Some(&[]), false)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1612,7 +1951,12 @@ mod tests {
         let service = service();
         let source = insert(
             &service,
-            Row { path: "/lib/src.mp3", camelot: "8A", bpm: Some(128.0), ..Default::default() },
+            Row {
+                path: "/lib/src.mp3",
+                camelot: "8A",
+                bpm: Some(128.0),
+                ..Default::default()
+            },
         );
         for index in 0..3 {
             insert(
@@ -1629,7 +1973,13 @@ mod tests {
         let matches = service.harmonic_matches(source, 6.0, 0, true).unwrap();
         assert_eq!(matches.len(), 3, "limit=0 当没传，不该只给一首");
         assert!(matches.iter().all(|m| m.relation == HarmonicRelation::Same));
-        assert_eq!(service.harmonic_matches(source, 6.0, 2, true).unwrap().len(), 2);
+        assert_eq!(
+            service
+                .harmonic_matches(source, 6.0, 2, true)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -1637,26 +1987,55 @@ mod tests {
         let service = service();
         let source = insert(
             &service,
-            Row { path: "/lib/src.mp3", title: "src", camelot: "8A", bpm: Some(128.0), ..Default::default() },
+            Row {
+                path: "/lib/src.mp3",
+                title: "src",
+                camelot: "8A",
+                bpm: Some(128.0),
+                ..Default::default()
+            },
         );
         // 同一首歌在两个 set 里各一份（硬链接），推荐列表里只该出现一次
         insert(
             &service,
-            Row { path: "/lib/set1/x.mp3", title: "EMOTION", camelot: "9A", bpm: Some(128.0), ..Default::default() },
+            Row {
+                path: "/lib/set1/x.mp3",
+                title: "EMOTION",
+                camelot: "9A",
+                bpm: Some(128.0),
+                ..Default::default()
+            },
         );
         insert(
             &service,
-            Row { path: "/lib/set2/x.mp3", title: "EMOTION", camelot: "9A", bpm: Some(128.0), ..Default::default() },
+            Row {
+                path: "/lib/set2/x.mp3",
+                title: "EMOTION",
+                camelot: "9A",
+                bpm: Some(128.0),
+                ..Default::default()
+            },
         );
         // 本曲有 BPM、候选没有：对不上拍，排除
         insert(
             &service,
-            Row { path: "/lib/nobpm.mp3", title: "nobpm", camelot: "8A", ..Default::default() },
+            Row {
+                path: "/lib/nobpm.mp3",
+                title: "nobpm",
+                camelot: "8A",
+                ..Default::default()
+            },
         );
         // 调号不兼容
         insert(
             &service,
-            Row { path: "/lib/far.mp3", title: "far", camelot: "3B", bpm: Some(128.0), ..Default::default() },
+            Row {
+                path: "/lib/far.mp3",
+                title: "far",
+                camelot: "3B",
+                bpm: Some(128.0),
+                ..Default::default()
+            },
         );
 
         let matches = service.harmonic_matches(source, 6.0, 50, false).unwrap();
@@ -1667,7 +2046,13 @@ mod tests {
         // 半速也算能接：64 BPM 折算成 128
         insert(
             &service,
-            Row { path: "/lib/half.mp3", title: "half", camelot: "8A", bpm: Some(64.0), ..Default::default() },
+            Row {
+                path: "/lib/half.mp3",
+                title: "half",
+                camelot: "8A",
+                bpm: Some(64.0),
+                ..Default::default()
+            },
         );
         let matches = service.harmonic_matches(source, 6.0, 50, false).unwrap();
         let half = matches.iter().find(|m| m.track.title == "half").unwrap();
@@ -1682,11 +2067,22 @@ mod tests {
         let service = service();
         insert(
             &service,
-            Row { path: "/lib/a.mp3", camelot: "10a", bpm: Some(128.0), analyzed: true, ..Default::default() },
+            Row {
+                path: "/lib/a.mp3",
+                camelot: "10a",
+                bpm: Some(128.0),
+                analyzed: true,
+                ..Default::default()
+            },
         );
         insert(
             &service,
-            Row { path: "/lib/b.mp3", camelot: "8A", bpm: Some(60.0), ..Default::default() },
+            Row {
+                path: "/lib/b.mp3",
+                camelot: "8A",
+                bpm: Some(60.0),
+                ..Default::default()
+            },
         );
 
         let stats = service.stats().unwrap();

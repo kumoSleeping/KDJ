@@ -490,10 +490,9 @@ async fn run_audio(
         }
         Err(err) => {
             let message = format!("{err:#}");
+            // 失败原因走 settle → download.updated，队列面板就地显示；
+            // 没有任何浮层通知，这里不再另发事件
             manager.settle(&id, TaskState::Failed, &message);
-            state
-                .hub
-                .publish_toast("error", &format!("下载失败：{} —— {message}", source.title));
         }
     }
 }
@@ -601,10 +600,8 @@ pub fn enqueue_video(
             }
             Err(err) => {
                 let message = format!("{err:#}");
+                // 同上：settle 已把原因带给队列面板，不再另发浮层事件
                 manager.settle(&id, TaskState::Failed, &message);
-                state
-                    .hub
-                    .publish_toast("error", &format!("下载失败：{title} —— {message}"));
             }
         }
     });

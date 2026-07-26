@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
+#[derive(Debug)]
 pub struct ApiError {
     pub status: StatusCode,
     pub detail: String,

@@ -342,7 +342,10 @@ fn walk(directory: &Path, counts: &HashMap<String, i64>, depth: usize) -> Folder
     if depth < MAX_DEPTH {
         // 顺序由目录自己的清单决定，不是字母序：DJ 的 set 目录是按演出顺序排的，
         // 按字母排会把「5月 / 6yue / 7yue」打散成毫无意义的次序。
-        for name in apply_order(directory, &listed).into_iter().take(MAX_CHILDREN) {
+        for name in apply_order(directory, &listed)
+            .into_iter()
+            .take(MAX_CHILDREN)
+        {
             children.push(walk(&directory.join(name), counts, depth + 1));
         }
     }
@@ -368,7 +371,10 @@ fn walk(directory: &Path, counts: &HashMap<String, i64>, depth: usize) -> Folder
         total_count: direct + children.iter().map(|child| child.total_count).sum::<i64>(),
         // 未入库 = 磁盘上有、库里没有。负数没有意义（库里可能还留着已删文件的记录）
         pending_count: (files - direct).max(0)
-            + children.iter().map(|child| child.pending_count).sum::<i64>(),
+            + children
+                .iter()
+                .map(|child| child.pending_count)
+                .sum::<i64>(),
         children,
         is_root: false,
         managed,
@@ -405,12 +411,12 @@ pub fn create_folder(parent: &Path, name: &str, roots: &[PathBuf]) -> Result<Pat
 pub fn rename_folder(path: &Path, name: &str, roots: &[PathBuf]) -> Result<PathBuf> {
     let clean = validate_name(name)?;
     let source = ensure_inside(path, roots)?;
-    anyhow::ensure!(!roots.contains(&source), "曲库根目录不能在这里改名，去设置里改");
+    anyhow::ensure!(
+        !roots.contains(&source),
+        "曲库根目录不能在这里改名，去设置里改"
+    );
     anyhow::ensure!(source.is_dir(), "文件夹不存在");
-    let target = source
-        .parent()
-        .context("没有上级目录")?
-        .join(&clean);
+    let target = source.parent().context("没有上级目录")?.join(&clean);
     anyhow::ensure!(!target.exists(), "同名文件夹已存在");
     std::fs::rename(&source, &target).context("改名失败")?;
     Ok(target)
@@ -462,10 +468,9 @@ fn move_dir_across_volumes(source: &Path, target: &Path) -> Result<()> {
 }
 
 fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
-    std::fs::create_dir_all(target)
-        .with_context(|| format!("建目录失败：{}", target.display()))?;
-    for entry in std::fs::read_dir(source)
-        .with_context(|| format!("读目录失败：{}", source.display()))?
+    std::fs::create_dir_all(target).with_context(|| format!("建目录失败：{}", target.display()))?;
+    for entry in
+        std::fs::read_dir(source).with_context(|| format!("读目录失败：{}", source.display()))?
     {
         let entry = entry?;
         let from = entry.path();
@@ -486,8 +491,7 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
                 std::fs::copy(&from, &to)?;
             }
         } else {
-            std::fs::copy(&from, &to)
-                .with_context(|| format!("复制失败：{}", from.display()))?;
+            std::fs::copy(&from, &to).with_context(|| format!("复制失败：{}", from.display()))?;
         }
     }
     Ok(())
@@ -609,10 +613,8 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "kumodeck-folders-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("kumodeck-folders-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // canonicalize 一次，免得 macOS 上 /var 与 /private/var 的差异干扰包含性判断
@@ -742,7 +744,11 @@ mod tests {
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub/d.mp3"), b"x").unwrap();
 
-        assert_eq!(count_audio_files(&dir), 2, "只数本层、只数音频、跳过隐藏文件");
+        assert_eq!(
+            count_audio_files(&dir),
+            2,
+            "只数本层、只数音频、跳过隐藏文件"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -879,7 +885,9 @@ mod tests {
         std::fs::create_dir_all(b.join("set")).unwrap();
         let roots = vec![root];
 
-        let err = move_folder(&a.join("set"), &b, &roots).unwrap_err().to_string();
+        let err = move_folder(&a.join("set"), &b, &roots)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("同名"), "{err}");
         // 两边都还在，没被静默合并
         assert!(a.join("set").is_dir());

@@ -105,7 +105,10 @@ pub fn parse_key_filter(value: &str) -> (String, String) {
     }
     let normalized = raw.to_lowercase().replace('♯', "#").replace('♭', "b");
     for (code, name) in CAMELOT_TO_KEY {
-        if key_variants(name).iter().any(|variant| *variant == normalized) {
+        if key_variants(name)
+            .iter()
+            .any(|variant| *variant == normalized)
+        {
             return (code.to_string(), raw.to_string());
         }
     }
@@ -377,7 +380,9 @@ mod tests {
         assert_eq!(bpm_bucket(170.0), "170+");
         assert_eq!(bpm_bucket(200.0), "170+");
         // 每个产出的档位名都必须在展示顺序表里
-        for bpm in [60.0, 95.0, 105.0, 115.0, 125.0, 135.0, 145.0, 155.0, 165.0, 180.0] {
+        for bpm in [
+            60.0, 95.0, 105.0, 115.0, 125.0, 135.0, 145.0, 155.0, 165.0, 180.0,
+        ] {
             let bucket = bpm_bucket(bpm);
             assert!(
                 BPM_BUCKET_ORDER.contains(&bucket.as_str()),

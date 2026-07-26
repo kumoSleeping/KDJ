@@ -148,14 +148,16 @@ pub fn scan_paths(
     let mut track_ids: Vec<i64> = Vec::with_capacity(total);
 
     for (done, file_path) in files.iter().enumerate() {
-        if let Some((id, known_mtime)) = index.get(file_path) {
+        if let Some((id, known_mtime, tags_missing)) = index.get(file_path) {
             let mtime = std::fs::metadata(file_path)
                 .ok()
                 .and_then(|meta| meta.modified().ok())
                 .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs_f64());
-            // 增量扫描：文件没动过就不重读标签
-            if mtime.is_some_and(|mtime| (known_mtime - mtime).abs() < 1e-6) {
+            // 增量扫描：文件没动过就不重读标签。
+            // 库里标签可疑地空的行例外（见 `file_index`）——放它落到 upsert_file
+            // 重读一次，坏行才能自动愈合
+            if !tags_missing && mtime.is_some_and(|mtime| (known_mtime - mtime).abs() < 1e-6) {
                 track_ids.push(*id);
                 on_progress(done + 1, total, file_path);
                 continue;
@@ -176,8 +178,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("kumodeck-scan-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kumodeck-scan-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::canonicalize(&dir).unwrap()
@@ -320,9 +321,8 @@ mod tests {
         for name in ["a.mp3", "b.mp3", "c.mp3"] {
             std::fs::write(dir.join(name), b"x").unwrap();
         }
-        let service = crate::service::LibraryService::new(
-            crate::db::Database::open_in_memory().unwrap(),
-        );
+        let service =
+            crate::service::LibraryService::new(crate::db::Database::open_in_memory().unwrap());
         let events: std::sync::Mutex<Vec<(usize, usize)>> = Default::default();
         let progress = |done: usize, total: usize, _current: &str| {
             events.lock().unwrap().push((done, total));

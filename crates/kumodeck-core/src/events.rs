@@ -69,13 +69,6 @@ impl EventHub {
         let _ = self.sender.send(message);
     }
 
-    /// 前端已经没有浮层通知了（`WsEvent` 里不再有 `toast` 分支），
-    /// 这条事件现在发出去没人接。留着是因为它不花什么代价，
-    /// 而且 CLI / 日志这类没有界面的消费者仍然用得上。
-    pub fn publish_toast(&self, level: &str, text: &str) {
-        self.publish("toast", &json!({ "level": level, "text": text }));
-    }
-
     /// `library.updated` 出现在多处，统一在这里拼，避免 payload 形状漂移。
     pub fn publish_library_updated(&self, track_ids: &[i64]) {
         self.publish("library.updated", &json!({ "track_ids": track_ids }));

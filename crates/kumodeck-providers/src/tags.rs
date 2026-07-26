@@ -16,8 +16,13 @@ use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, TagExt};
 
 /// 支持的音频扩展名。曲库扫描也用这一份，两边必须一致。
+///
+/// 和 v0.1.0 的 `tagging.py::AUDIO_EXTENSIONS` **逐项相同**，一个都别多：
+/// 早先这里多了 `wma`/`alac`，后果是这些文件被扫进曲库、symphonia 又解不了，
+/// 永远挂着"分析失败"。`mp4` 也不在这里——它在 [`VIDEO_EXTENSIONS`]，
+/// 入库判定走 `is_media_extension`（音频 ∪ 视频），不受影响。
 pub const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "m4a", "mp4", "aac", "ogg", "opus", "wav", "aiff", "aif", "wma", "alac",
+    "mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "aiff", "aif",
 ];
 
 /// 视频容器也进曲库：现场素材、MV 常常只有视频版。
@@ -281,15 +286,90 @@ pub fn read_tags(path: &Path) -> TrackTags {
     out
 }
 
-/// 把分析结果写进文件标签（BPM / KEY / 能量）。
+/// "A minor" / "Am" / "Db major" → ID3 TKEY 形状（"Am" / "Db"）。
 ///
-/// 用户点「写入标签」时调用。写的是各家 DJ 软件都认的通用键。
+/// TKEY 规定最多 3 个字符：根音 A-G + 可选 `#`/`b` + 小调加 `m`。
+/// 逐行对照 v0.1.0 的 `tagging.py::to_id3_key`——这是写进用户文件的东西，
+/// 换了软件还得能读回来，形状不能私自发明。
+pub fn to_id3_key(music_key: &str) -> String {
+    let value = music_key.trim().replace('♯', "#").replace('♭', "b");
+    if value.is_empty() {
+        return String::new();
+    }
+    let normalized = value.replace('-', " ");
+    let mut parts = normalized.split_whitespace();
+    let mut root = parts.next().unwrap_or_default().to_string();
+    let rest = parts.collect::<Vec<_>>().join(" ").to_lowercase();
+
+    let minor = if !rest.is_empty() {
+        rest.starts_with("min") || rest.starts_with("mol") || rest == "m"
+    } else {
+        // 无后缀写法："Am" / "F#m" / "C"
+        let is_minor = root.len() > 1 && root.ends_with('m');
+        if is_minor {
+            root.pop();
+        }
+        is_minor
+    };
+    if root.is_empty() {
+        return String::new();
+    }
+
+    let tail = &root[1..];
+    let accidental = if tail.contains('#') {
+        "#"
+    } else if tail.to_lowercase().contains('b') {
+        "b"
+    } else {
+        ""
+    };
+    let head = root
+        .chars()
+        .next()
+        .map(|c| c.to_ascii_uppercase())
+        .unwrap_or_default();
+    format!("{head}{accidental}{}", if minor { "m" } else { "" })
+}
+
+/// Comment 的组法：`"8A - Energy 7 - 用户备注"`。
+///
+/// Mixed In Key 就是把 Camelot 写进 comment 的，DJ 软件间传文件时
+/// 这是最通用的一条通道；用户自己的备注跟在最后，不能被吃掉。
+/// 分隔符 `" - "` 与 v0.1.0 的 `_comment_text` 一致。
+fn analysis_comment(camelot: &str, energy: Option<i64>, comment: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !camelot.is_empty() {
+        parts.push(camelot.to_string());
+    }
+    if let Some(energy) = energy.filter(|value| *value > 0) {
+        parts.push(format!("Energy {energy}"));
+    }
+    if !comment.is_empty() {
+        parts.push(comment.to_string());
+    }
+    parts.join(" - ")
+}
+
+/// 把分析结果写进文件标签（BPM / KEY / 能量 / 备注）。
+///
+/// 和 v0.1.0 的 `tagging.py::write_analysis_tags` 对齐的两条硬规则：
+/// 1. **调性字段写传统调名**（"Am"），不写 Camelot——Rekordbox 的 Key 列
+///    不认识 "8A"，写进去用户看到的是一列乱码般的编号；
+/// 2. Camelot 和能量走 comment（`"8A - Energy 7 - 用户备注"`），
+///    用户自己的备注必须原样保留在最后。
+///
+/// Python 版还会写 TXXX:CAMELOT / TXXX:EnergyLevel 两个自定义字段；
+/// lofty 的统一 `ItemKey` 是封闭枚举、写不了自定义描述的 TXXX，
+/// 绕开统一 API 按格式各写一套的风险大于收益（同 `embed_metadata`
+/// 对多艺人的取舍）。读这两个字段的基本只有 Mixed In Key 自己，
+/// 它要的信息 comment 里都有。
 pub fn write_analysis_tags(
     path: &Path,
     bpm: Option<f64>,
     camelot: &str,
     music_key: &str,
     energy: Option<i64>,
+    comment: &str,
 ) -> Result<()> {
     let mut tagged = Probe::open(path)
         .with_context(|| format!("打开音频文件失败：{}", path.display()))?
@@ -301,19 +381,18 @@ pub fn write_analysis_tags(
     }
     let tag = tagged.primary_tag_mut().expect("刚插入过一定存在");
 
+    let camelot = camelot.trim().to_uppercase();
+    let key_text = to_id3_key(music_key);
+
     if let Some(bpm) = bpm.filter(|value| *value > 0.0) {
         // BPM 写整数：ID3 的 TBPM 规范上就是整数，写小数有些软件会读成 0
         tag.insert_text(ItemKey::Bpm, format!("{}", bpm.round() as i64));
     }
-    if !camelot.is_empty() {
-        tag.insert_text(ItemKey::InitialKey, camelot.to_string());
+    if !key_text.is_empty() {
+        tag.insert_text(ItemKey::InitialKey, key_text);
     }
-    if !music_key.is_empty() {
-        // Comment 里补一份人类可读的，方便在没有 KEY 字段的播放器里看
-        let mut note = music_key.to_string();
-        if let Some(energy) = energy {
-            note.push_str(&format!(" · Energy {energy}"));
-        }
+    let note = analysis_comment(&camelot, energy, comment);
+    if !note.is_empty() {
         tag.insert_text(ItemKey::Comment, note);
     }
 
@@ -426,6 +505,86 @@ pub(crate) mod tests {
         let path = dir.join("song.wav");
         std::fs::write(&path, silent_wav(2)).unwrap();
         path
+    }
+
+    #[test]
+    fn id3_key_conversion_matches_the_python_reference() {
+        // 用例逐条取自 tagging.py::to_id3_key 的语义，别删也别"顺手美化"
+        for (input, want) in [
+            ("A minor", "Am"),
+            ("A Minor", "Am"),
+            ("Db major", "Db"),
+            ("F# minor", "F#m"),
+            ("Am", "Am"),
+            ("F#m", "F#m"),
+            ("C", "C"),
+            ("c moll", "Cm"),
+            ("E♭ major", "Eb"),
+            // 参照实现的怪癖，照抄不修：`-` 换成空格后 root="B"、rest="flat minor"，
+            // rest 不以 "min" 开头 → 判成大调，flat 也丢了。我们的分析引擎
+            // 只产出 "A minor"/"Db major" 这种形状，这条输入实际到不了这里。
+            ("B-flat minor", "B"),
+            ("", ""),
+            ("   ", ""),
+        ] {
+            assert_eq!(to_id3_key(input), want, "输入 {input:?}");
+        }
+    }
+
+    #[test]
+    fn analysis_comment_keeps_the_users_note_at_the_end() {
+        assert_eq!(analysis_comment("8A", Some(7), "开场用"), "8A - Energy 7 - 开场用");
+        assert_eq!(analysis_comment("8A", None, ""), "8A");
+        assert_eq!(analysis_comment("", Some(3), ""), "Energy 3");
+        assert_eq!(analysis_comment("", None, ""), "");
+        // energy=0 是"没有值"不是"能量为零"，Python 的 if energy 同款语义
+        assert_eq!(analysis_comment("8A", Some(0), ""), "8A");
+    }
+
+    #[test]
+    fn analysis_tags_write_the_traditional_key_not_camelot() {
+        let path = scratch("analysis-key");
+        write_analysis_tags(&path, Some(128.0), "8a", "A minor", Some(7), "收尾曲").unwrap();
+        let back = read_tags(&path);
+        // Rekordbox 的 Key 列读的就是这个字段，写 "8A" 它不认识
+        let tagged = Probe::open(&path).unwrap().read().unwrap();
+        let tag = tagged.primary_tag().unwrap();
+        assert_eq!(tag.get_string(ItemKey::InitialKey), Some("Am"));
+        assert_eq!(
+            tag.get_string(ItemKey::Comment),
+            Some("8A - Energy 7 - 收尾曲"),
+            "Camelot 走 comment，用户备注在最后"
+        );
+        let secs = back.duration.expect("写完标签必须还读得出时长");
+        assert_eq!(secs.round() as i64, 2, "写标签不能把音频本体写坏");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn video_extension_list_matches_the_frontend_copy() {
+        // 这份表在 src/lib/format.ts 里还有一份手抄的。谁漂移了，表现是
+        // "有的视频有角标有的没有"，从症状根本联想不到这里——所以用测试锁死。
+        let ts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/lib/format.ts");
+        let source = std::fs::read_to_string(&ts)
+            .expect("src/lib/format.ts 应当存在（前端的视频后缀表在里面）");
+        let mut in_front: Vec<String> = Vec::new();
+        // 形状：const VIDEO_EXTENSIONS = new Set(["mp4", ...]);
+        if let Some(start) = source.find("VIDEO_EXTENSIONS") {
+            let tail = &source[start..];
+            let open = tail.find('[').expect("VIDEO_EXTENSIONS 后面应当是数组字面量");
+            let close = tail[open..].find(']').unwrap() + open;
+            for piece in tail[open + 1..close].split(',') {
+                let name = piece.trim().trim_matches(|c| c == '"' || c == '\'');
+                if !name.is_empty() {
+                    in_front.push(name.to_string());
+                }
+            }
+        }
+        let mut ours: Vec<String> = VIDEO_EXTENSIONS.iter().map(|s| s.to_string()).collect();
+        in_front.sort();
+        ours.sort();
+        assert_eq!(in_front, ours, "前后端的视频后缀表漂移了，两边要一起改");
     }
 
     #[test]

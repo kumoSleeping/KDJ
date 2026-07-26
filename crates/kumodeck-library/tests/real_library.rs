@@ -60,7 +60,11 @@ fn opening_a_real_database_does_not_migrate_data_away() {
     assert!(stats.analyzed > 0, "已分析 {}", stats.analyzed);
     assert!(stats.total_duration > 0.0);
     // 真库里各种调号都有
-    assert!(stats.by_camelot.len() > 10, "调号分布 {:?}", stats.by_camelot);
+    assert!(
+        stats.by_camelot.len() > 10,
+        "调号分布 {:?}",
+        stats.by_camelot
+    );
     assert!(!stats.by_bpm_bucket.is_empty());
 }
 
@@ -79,7 +83,10 @@ fn listing_paginates_consistently() {
     let first_ids: std::collections::HashSet<i64> =
         first.items.iter().map(|track| track.id).collect();
     assert!(
-        second.items.iter().all(|track| !first_ids.contains(&track.id)),
+        second
+            .items
+            .iter()
+            .all(|track| !first_ids.contains(&track.id)),
         "分页出现重复曲目"
     );
 }
@@ -169,7 +176,24 @@ fn analyzed_filter_splits_the_library_exactly() {
     let pending = service.list_tracks(&query).unwrap().total;
 
     assert_eq!(analyzed + pending, total, "两边加起来必须是全部");
-    assert!(analyzed > 0 && pending > 0, "真库里两种都该有");
+    assert!(analyzed > 0, "真库里一首分析过的都没有，库不对");
+
+    // 不断言 `pending > 0`：用户已经放行「重新分析全部」，真库随时可能是 1420/1420，
+    // 那时这条会红——而红的是环境不是代码。要测的是**筛选语义**，
+    // 所以改成看返回的行本身对不对，两边为空时这一段自然什么也不查。
+    query.limit = 50;
+    for (want_analyzed, expect) in [(true, true), (false, false)] {
+        query.analyzed = Some(want_analyzed);
+        for track in service.list_tracks(&query).unwrap().items {
+            assert_eq!(
+                track.analyzed_at.is_some(),
+                expect,
+                "analyzed={want_analyzed} 却筛出了 analyzed_at={:?} 的「{}」",
+                track.analyzed_at,
+                track.filename
+            );
+        }
+    }
 }
 
 #[test]
@@ -182,14 +206,9 @@ fn text_search_matches_across_title_artist_album_and_filename() {
     assert!(page.total > 0);
     // 每条结果至少有一个字段命中
     for track in page.items.iter().take(50) {
-        let hit = [
-            &track.title,
-            &track.artist,
-            &track.album,
-            &track.filename,
-        ]
-        .iter()
-        .any(|field| field.to_lowercase().contains('a'));
+        let hit = [&track.title, &track.artist, &track.album, &track.filename]
+            .iter()
+            .any(|field| field.to_lowercase().contains('a'));
         assert!(hit, "「{}」没有任何字段命中 a", track.filename);
     }
 }
