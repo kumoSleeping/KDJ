@@ -70,6 +70,18 @@ async function createTauriBridge(): Promise<KumoDeckBridge> {
     ...info,
     openPath: (path: string) => tauriInvoke<void>("open_path", { path }),
     revealPath: (path: string) => tauriInvoke<void>("reveal_path", { path }),
+    openExternal: (url: string) => tauriInvoke<void>("open_external", { url }),
+    // 一键更新：桌面才有。安卓的 Tauri 壳没有 updater 插件，invoke 会直接
+    // 报"命令不存在"——所以按平台判掉，让 UI 落到"开下载页"的分支。
+    applyUpdate: /android/i.test(navigator.userAgent)
+      ? null
+      : async (onProgress) => {
+          // 走 Rust 侧命令而不是 @tauri-apps/plugin-updater 的 JS 包：
+          // 少一个要和 Rust 版本对齐的 npm 依赖（同 tauriInvoke 的理由）。
+          // 进度事件靠轮询命令返回，一次 invoke 全托管到重启。
+          await tauriInvoke<void>("apply_update");
+          void onProgress; // 下载进度在 Rust 侧打日志；窗口马上就重启了
+        },
     pickFolder: async () => {
       const picked = await tauriInvoke<unknown>("pick_folder");
       // 用户取消时 Tauri 的对话框返回 null，契约要求的也是 null
@@ -118,6 +130,11 @@ function createBrowserBridge(): KumoDeckBridge {
         .map((line) => line.trim())
         .filter(Boolean);
     },
+    // 浏览器里"外链"就是开新标签页
+    openExternal: async (url: string) => {
+      window.open(url, "_blank", "noopener");
+    },
+    applyUpdate: null,
     windowControl: () => {},
     onSidecarLog: () => () => {},
   };

@@ -10,6 +10,8 @@
  */
 
 import { api } from "./api";
+import { useHarmonicScope } from "./harmonicScope";
+import { useLibraryStore } from "../stores/libraryStore";
 import type { HarmonicMatch, Track } from "../types";
 
 /** 本次运行放过的曲目。刷新页面即清空——这是有意的，见文件头。 */
@@ -39,8 +41,12 @@ export function clearPlayHistory(): void {
  */
 export async function pickNext(current: Track): Promise<Track | null> {
   let matches: HarmonicMatch[];
+  // 范围跟着详情栏那两枚开关走。**必须是同一个值**——用户把范围收到当前
+  // 文件夹、结果自动续播还从全库里接，那是这个开关最难被发现的失效方式。
+  const { scope } = useHarmonicScope.getState();
+  const folder = scope === "folder" ? useLibraryStore.getState().filter.folder : "";
   try {
-    matches = await api.harmonic(current.id, 8, 40);
+    matches = await api.harmonic(current.id, 8, 40, folder);
   } catch {
     // 推荐拿不到就安静停下：自动续播是锦上添花，不该弹错误打断用户
     return null;

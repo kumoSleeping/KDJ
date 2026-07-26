@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Activity, FolderPlus, RefreshCw, RotateCcw, Square } from "lucide-react";
+import { RefreshCw, RotateCcw, Square } from "lucide-react";
 import { forgetQueuedAnalysis } from "../../lib/autoAnalyze";
 import { CAMELOT_ORDER, camelotToLabel } from "../../lib/camelot";
 import { selectAnalyzing, useLibraryStore } from "../../stores/libraryStore";
@@ -16,7 +16,6 @@ export function LibraryToolbar() {
   const filter = useLibraryStore((state) => state.filter);
   const setFilter = useLibraryStore((state) => state.setFilter);
   const resetFilter = useLibraryStore((state) => state.resetFilter);
-  const startScan = useLibraryStore((state) => state.startScan);
   const startAnalyze = useLibraryStore((state) => state.startAnalyze);
   const cancelAnalyze = useLibraryStore((state) => state.cancelAnalyze);
   const setAutoAnalyzeSuspended = useLibraryStore((state) => state.setAutoAnalyzeSuspended);
@@ -51,7 +50,6 @@ export function LibraryToolbar() {
     scan && scan.phase === "done" && scan.error && scan.job_id !== dismissedScanJob
       ? `添加文件夹失败：${scan.error}`
       : "";
-  const pending = stats ? stats.total - stats.analyzed : 0;
   const total = stats?.total ?? 0;
 
   /**
@@ -68,38 +66,6 @@ export function LibraryToolbar() {
   useEffect(() => {
     if (scanning) setConfirmAll(false);
   }, [scanning]);
-
-  /**
-   * 「添加文件夹」是一个动作，不是一次作业：选完目录之后登记曲库根、扫描、
-   * 把新曲目排进分析队列这三件事全在后台自动做完，用户不需要再点第二下。
-   * 所以 analyze 恒为 true——它是这个动作语义的一部分，不是可选项。
-   */
-  const addFolders = async () => {
-    const paths = await window.kumodeck?.pickFolders();
-    if (!paths || paths.length === 0) return;
-    setNotice("");
-    try {
-      await startScan(paths, true);
-    } catch (error) {
-      setNotice(`添加文件夹失败：${(error as Error).message}`);
-    }
-  };
-
-  /**
-   * 平时不用点这里：选中、播放、以及空闲时的后台补齐已经在自动排队了。
-   * 这个按钮是「现在就全部排上」的快捷方式，同时也是按过「停止」之后
-   * 把自动化重新点亮的开关——所以要先清掉排过队的记号，被取消的那些才排得回去。
-   */
-  const analyzePending = async () => {
-    setNotice("");
-    forgetQueuedAnalysis();
-    setAutoAnalyzeSuspended(false);
-    try {
-      await startAnalyze(null, false);
-    } catch (error) {
-      setNotice(`分析失败：${(error as Error).message}`);
-    }
-  };
 
   /**
    * 全库重算（force）。库里现在混着两套算法的结果——1200 多首是 Python 版算的、
@@ -204,32 +170,19 @@ export function LibraryToolbar() {
 
         <span className="kd-toolbar-gap" />
 
-        <Button
-          onClick={() => void addFolders()}
-          disabled={scanning}
-          title="选一个文件夹加进曲库，导入和分析都在后台自动做完"
-        >
-          <FolderPlus size={13} />
-          添加文件夹
-        </Button>
-        {/* 停止不在这儿：它就贴在下面那条分析进度条旁边——要停的是那根进度条，
-            按钮离它一行远的话，得先确认"我停的是哪个"。
-            这里也不用红色：它和顶上的「搜索」会叠成两个常亮的红块。 */}
-        <Button
-          onClick={() => void analyzePending()}
-          disabled={pending <= 0 || analyzing}
-          title="立刻把所有还没跑过的曲目全排上（平时它们会在空闲时慢慢补齐）"
-        >
-          <Activity size={13} />
-          分析{pending > 0 ? `（${pending}）` : ""}
-        </Button>
-        {/* 重算是"从头再来"，不是"补上缺的"，所以和「分析」分开成两颗按钮：
-            合成一颗带修饰键的话，用户得先知道有这么个修饰键。
+        {/* 「添加文件夹」搬去左边文件夹栏的底栏了：那一栏才是"曲库由哪些目录
+            组成"这件事的地方，和「新建」「粘贴」并排。放在这条筛选工具条上
+            属于把两件不相干的事挤在一行。
+
+            「分析」按钮整个删掉：分析已经是全自动的（播放中插队 > 可视区域
+            + 选中 > 空闲后台补齐），这颗按钮做的事系统本来就会做，留着只是
+            让人以为"不点就不会分析"。要从头重算仍然有下面这颗。 */}
+        {/* 重算是"从头再来"，不是"补上缺的"。
 
             **不因为"正在分析"而禁用**：后台补齐几乎一直在跑，按那个禁用的话
             这颗按钮实际上永远点不动。点下去会先把在跑的停掉再从头来。
 
-            平时是幽灵按钮——它不该和旁边两颗常用的抢注意力。举起来（等确认）
+            平时是幽灵按钮——它不该和旁边的筛选控件抢注意力。举起来（等确认）
             那一下要显眼，但工具条同一时刻只能有一块红：正在跑时红色归进度条尾巴上的
             「停止」，这里就退成中性实心；没在跑时才用红描边。 */}
         <Button

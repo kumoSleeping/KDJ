@@ -565,11 +565,6 @@ pub fn enqueue_video(
             Ok(_) => {}
             Err(err) => tracing::debug!("视频信息预解析失败（不影响下载）：{err:#}"),
         }
-        let title = manager
-            .get(&id)
-            .map(|task| task.title)
-            .unwrap_or_else(|| probe.clone());
-
         let progress_manager = manager.clone();
         let progress_id = id.clone();
         let progress: kumodeck_providers::ProgressSink =

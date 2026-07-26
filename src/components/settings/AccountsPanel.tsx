@@ -3,9 +3,10 @@ import { X } from "lucide-react";
 import { useAppStore } from "../../stores/appStore";
 import { Button, InlineNotice } from "../common";
 import { AccountRow } from "./AccountRow";
+import { UpdateRow } from "./UpdateRow";
 
 /**
- * 「平台登录」住在右侧详情栏里，由左下角齿轮呼出。
+ * 「账号管理」住在右侧详情栏里，由列表标签行最右侧的按钮呼出。
  *
  * 整页设置和弹窗都试过、都被否了：除登录外每个设置都有就地入口
  * （保存目录在下载队列、音质在搜索条、主题在标题栏、画质在视频面板、
@@ -29,7 +30,7 @@ export function AccountsPanel() {
   return (
     <div className="kd-col" style={{ height: "100%", minHeight: 0 }}>
       <div className="kd-toolbar">
-        <strong>平台登录</strong>
+        <strong>账号管理</strong>
         <span className="kd-toolbar-gap" />
         <Button variant="ghost" size="sm" iconOnly aria-label="关闭" onClick={toggleAccounts}>
           <X size={13} />
@@ -46,6 +47,9 @@ export function AccountsPanel() {
         ) : (
           rows.map((account) => <AccountRow key={account.platform} account={account} />)
         )}
+        {/* 更新和账号是同一类事（都是"这台机器上的软件本身"），排在账号后面
+            同一套行样式，不另开一个设置页 */}
+        <UpdateRow />
         <p className="kd-faint" style={{ fontSize: "var(--kd-size-xs)", lineHeight: 1.6 }}>
           SoundCloud 不需要登录。其它设置都在用的地方直接改：保存目录在下载队列、
           音质在搜索条、主题在右上角、平台优先级拖动按钮排序。

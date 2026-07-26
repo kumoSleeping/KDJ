@@ -4,6 +4,7 @@ import {
   ChevronRight,
   ClipboardPaste,
   Folder,
+  FolderInput,
   FolderOpen,
   FolderPlus,
   HardDrive,
@@ -97,6 +98,28 @@ export function FolderTree() {
    * 弹窗飘走之后用户只剩一个没变化的界面。
    */
   const [notice, setNotice] = useState("");
+
+  /**
+   * 「添加文件夹」是一个动作，不是一次作业：选完目录之后登记曲库根、扫描、
+   * 把新曲目排进分析队列这三件事全在后台自动做完，用户不需要再点第二下。
+   * 所以 `startScan` 的 analyze 恒为 true——它是这个动作语义的一部分，不是可选项。
+   *
+   * 失败原因分两处：这里 catch 得到的是"任务都没起来"（比如挑的路径没权限），
+   * 真正扫描过程中的失败随 `scan.progress` 的终局事件走，显示在曲目表上方
+   * 那条工具条里（LibraryToolbar 的 importError）——两处都不能省。
+   */
+  const scan = useLibraryStore((state) => state.scan);
+  const scanning = scan !== null && scan.phase !== "done";
+  const addFolders = async () => {
+    const paths = await window.kumodeck?.pickFolders();
+    if (!paths || paths.length === 0) return;
+    setNotice("");
+    try {
+      await startScan(paths, true);
+    } catch (error) {
+      setNotice(`添加文件夹失败：${(error as Error).message}`);
+    }
+  };
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -457,6 +480,21 @@ export function FolderTree() {
       />
 
       <div className="kd-folder-foot">
+        {/* 「添加文件夹」从上面那条筛选工具条搬到了这里：这一栏才是"曲库由哪些
+            目录组成"的地方。它和「新建」是两件事——新建是在曲库里造一个空目录，
+            添加是把磁盘上已有的目录连同里面的歌一起收进来。 */}
+        <button
+          type="button"
+          className="kd-btn"
+          data-size="sm"
+          data-variant="ghost"
+          disabled={scanning}
+          title="选磁盘上的文件夹加进曲库，导入和分析都在后台自动做完"
+          onClick={() => void addFolders()}
+        >
+          <FolderInput size={12} />
+          添加
+        </button>
         <button
           type="button"
           className="kd-btn"

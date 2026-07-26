@@ -6,9 +6,10 @@ import { camelotToLabel } from "../../lib/camelot";
 import { DASH, formatBpm, formatBytes, formatDate, formatDuration } from "../../lib/format";
 import { useLibraryStore } from "../../stores/libraryStore";
 import type { Track, TrackPatch } from "../../types";
-import { Button, Field, InlineNotice, Panel } from "../common";
+import { Button, Field, InlineNotice, Panel, PanelStack } from "../common";
 import { CamelotWheel } from "./CamelotWheel";
 import { HarmonicList } from "./HarmonicList";
+import { VjSearchPanel } from "./VjSearchPanel";
 import { Waveform } from "./Waveform";
 import { CamelotChip, EnergyMeter, playTrack } from "./TrackTable";
 
@@ -309,7 +310,11 @@ export function TrackDetail({ track }: { track: Track }) {
 
       <InlineNotice text={notice} onDismiss={() => setNotice("")} />
 
+      {/* 这几块的顺序用户可以拖着调，长期记住——整理曲库时想先看元数据，
+          排 set 时想先看接下一首，与其替他选一个，不如让他拖一次然后不用再想。 */}
+      <PanelStack storageKey="kd-detail-panels">
       <Panel
+        key="metadata"
         heading="元数据"
         padded
         dense
@@ -450,7 +455,7 @@ export function TrackDetail({ track }: { track: Track }) {
         )}
       </Panel>
 
-      <Panel heading="分析" padded dense>
+      <Panel key="analysis" heading="分析" padded dense>
         <div className="kd-stat-grid" data-dense="true" style={{ marginBottom: "0.5rem" }}>
           <div className="kd-stat">
             <div className="kd-stat-label">BPM</div>
@@ -491,14 +496,19 @@ export function TrackDetail({ track }: { track: Track }) {
         )}
       </Panel>
 
-      <Panel heading="接下一首" padded dense>
+      <Panel key="harmonic" heading="接下一首" padded dense>
         {/* 放宽筛选之后这里动辄三四十首，不封高度会把下面的面板挤到看不见 */}
         <div className="kd-scroll" style={{ maxHeight: "13rem" }}>
           <HarmonicList track={track} onSelect={selectTrack} />
         </div>
       </Panel>
 
-      <Panel heading="文件" padded dense>
+      {/* 排在「接下一首」后面：接歌想好了，接着就是给这首配画面 */}
+      <Panel key="vj" heading="搜 VJ（B 站）" padded dense>
+        <VjSearchPanel track={track} />
+      </Panel>
+
+      <Panel key="file" heading="文件" padded dense>
         <div className="kd-col" style={{ gap: "0.2rem", fontSize: "var(--kd-size-sm)" }}>
           {/* 时长/格式/大小已经在顶部标题下那行显示过了，这里不重复 */}
           <Row label="采样率">
@@ -515,7 +525,7 @@ export function TrackDetail({ track }: { track: Track }) {
         </div>
       </Panel>
 
-      <Panel heading="评分" padded dense>
+      <Panel key="rating" heading="评分" padded dense>
         {/* 评分不进编辑表单：点一下就是一个完整的意思，没有"改一半反悔"这回事 */}
         <div className="kd-row" style={{ gap: "0.15rem" }}>
           {[1, 2, 3, 4, 5].map((value) => (
@@ -544,6 +554,7 @@ export function TrackDetail({ track }: { track: Track }) {
       </Panel>
 
       <Panel
+        key="wheel"
         heading="调号轮"
         padded
         dense
@@ -557,6 +568,7 @@ export function TrackDetail({ track }: { track: Track }) {
           <CamelotWheel code={track.camelot} size={168} onPick={(code) => setFilter({ key: code })} />
         </div>
       </Panel>
+      </PanelStack>
     </div>
   );
 }

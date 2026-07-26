@@ -135,8 +135,18 @@ jobs:
           # 用户首次打开要右键 → 打开。
           APPLE_SIGNING_IDENTITY: "-"
           CI: "true"
+          # 一键更新的 minisign 私钥（见 docs/rust-port/08 §密钥）。
+          # 没配 secret 时下面会摘掉 createUpdaterArtifacts 继续出普通安装包——
+          # 宁可少更新包也不让整条流水线红掉；配上之后自动恢复。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
           set -euo pipefail
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::warning::没有 TAURI_SIGNING_PRIVATE_KEY secret，本次不出更新包（一键更新装不上这版之后的）"
+            jq 'del(.bundle.createUpdaterArtifacts)' src-tauri/tauri.conf.json > /tmp/conf.json
+            mv /tmp/conf.json src-tauri/tauri.conf.json
+          fi
           if node -e "process.exit((require('./package.json').scripts||{})['tauri:build']?0:1)"; then
             npm run tauri:build -- ${{ matrix.tauri_args }}
           else
@@ -151,6 +161,8 @@ jobs:
       #   bundle/macos/KumoDeck.app  和  bundle/dmg/KumoDeck_0.2.0_aarch64.dmg
       # 也就是 src-tauri 作为 workspace 成员那一支。带 --target universal-apple-darwin
       # 时会变成 target/universal-apple-darwin/release/bundle/，通配仍然兜得住。
+      # *.tar.gz / *.sig / setup.exe 的 sig 是 updater 的更新包与签名，
+      # latest-json 那个 job 和终端用户都要从 Release 上取，一并上传
       - name: 上传产物
         if: steps.shell.outputs.present == 'true'
         uses: actions/upload-artifact@v4
@@ -158,9 +170,13 @@ jobs:
           name: kumodeck-rust-${{ matrix.label }}
           path: |
             **/release/bundle/dmg/*.dmg
+            **/release/bundle/macos/*.app.tar.gz
+            **/release/bundle/macos/*.app.tar.gz.sig
             **/release/bundle/nsis/*.exe
+            **/release/bundle/nsis/*.exe.sig
             **/release/bundle/msi/*.msi
             **/release/bundle/appimage/*.AppImage
+            **/release/bundle/appimage/*.AppImage.sig
             **/release/bundle/deb/*.deb
             **/release/bundle/rpm/*.rpm
           if-no-files-found: error
@@ -171,10 +187,77 @@ jobs:
         with:
           files: |
             **/release/bundle/dmg/*.dmg
+            **/release/bundle/macos/*.app.tar.gz
+            **/release/bundle/macos/*.app.tar.gz.sig
             **/release/bundle/nsis/*.exe
+            **/release/bundle/nsis/*.exe.sig
             **/release/bundle/msi/*.msi
             **/release/bundle/appimage/*.AppImage
+            **/release/bundle/appimage/*.AppImage.sig
             **/release/bundle/deb/*.deb
             **/release/bundle/rpm/*.rpm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 一键更新的"版本清单"。updater 启动时拉 releases/latest/download/latest.json，
+  # 按平台键取下载地址和 minisign 签名。必须等三平台都传完 Release 再拼，
+  # 所以 needs: desktop 是硬依赖，不是习惯。
+  latest-json:
+    name: 更新清单 latest.json
+    needs: desktop
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载全部平台产物
+        uses: actions/download-artifact@v4
+        with:
+          path: bundles
+
+      - name: 拼 latest.json 并传上 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, glob
+          tag = os.environ["TAG"]; repo = os.environ["REPO"]
+          def find(pattern):
+              hits = glob.glob(f"bundles/**/{pattern}", recursive=True)
+              return hits[0] if hits else None
+          def entry(art):
+              sig = art + ".sig"
+              if not os.path.exists(sig):
+                  return None  # 没签名 = 没配私钥 secret，这个平台跳过
+              name = os.path.basename(art)
+              return {
+                  "signature": open(sig).read(),
+                  "url": f"https://github.com/{repo}/releases/download/{tag}/{name}",
+              }
+          platforms = {}
+          mac = find("*.app.tar.gz")
+          if mac and (e := entry(mac)):
+              # universal 一个包喂两个平台键：updater 按 os-arch 精确取键
+              platforms["darwin-aarch64"] = e
+              platforms["darwin-x86_64"] = e
+          win = find("*-setup.exe") or find("*.exe")
+          if win and (e := entry(win)):
+              platforms["windows-x86_64"] = e
+          linux = find("*.AppImage")
+          if linux and (e := entry(linux)):
+              platforms["linux-x86_64"] = e
+          if not platforms:
+              print("::warning::一个带签名的更新包都没有（没配 TAURI_SIGNING_PRIVATE_KEY？），不上传 latest.json")
+              raise SystemExit(0)
+          manifest = {
+              "version": tag.lstrip("v"),
+              "pub_date": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+              "platforms": platforms,
+          }
+          json.dump(manifest, open("latest.json", "w"), indent=2)
+          print(json.dumps(manifest, indent=2)[:800])
+          PY
+          if [ -f latest.json ]; then
+            gh release upload "$TAG" latest.json --repo "$REPO" --clobber
+          fi

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, MousePointerClick, X } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
 import { formatBytes, formatDuration } from "../../lib/format";
@@ -31,6 +31,13 @@ function errorText(error: unknown): string {
  * 结果照样落在「搜索」标签里，只是那一条长得像视频（见 VideoResultRow）。
  */
 const BILI_RE = /bilibili\.com|b23\.tv|^\s*(?:BV[0-9A-Za-z]{10}|av\d+)\s*$/i;
+
+/** 「搜VJ(Bili)」从详情面板发过来：query 已经拼好（曲名 + 关键词）。 */
+export const VJ_SEARCH_EVENT = "kd:vj-search";
+
+export function requestVjSearch(query: string): void {
+  window.dispatchEvent(new CustomEvent<string>(VJ_SEARCH_EVENT, { detail: query }));
+}
 
 /**
  * 唯一的工作台。没有"下载板块"和"曲库板块"之分。
@@ -193,6 +200,77 @@ export function Workspace() {
       setBusy(false);
     }
   }, [query, platforms, merge, batch, settings, setHasResults]);
+
+  /* ------------------------------------------------------------ 三栏拖宽 */
+  const splitRef = useRef<HTMLDivElement | null>(null);
+
+  // 打开时恢复上次拖的宽度。存 px：百分比在窗口缩放时会把"我调好的那栏"再挤变形
+  useEffect(() => {
+    const el = splitRef.current;
+    if (!el) return;
+    for (const side of ["left", "right"] as const) {
+      const saved = localStorage.getItem(`kd-split-${side}`);
+      if (saved) el.style.setProperty(`--kd-${side}`, `${saved}px`);
+    }
+  }, []);
+
+  const COLUMN_BOUNDS = { left: [140, 420], right: [240, 600] } as const;
+
+  const startColumnDrag = (side: "left" | "right") => (event: React.PointerEvent) => {
+    const el = splitRef.current;
+    if (!el) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const target =
+      side === "left" ? (el.firstElementChild as HTMLElement) : (el.lastElementChild as HTMLElement);
+    const startWidth = target.getBoundingClientRect().width;
+    const [min, max] = COLUMN_BOUNDS[side];
+    const onMove = (move: PointerEvent) => {
+      // 左把手往右拖 = 左栏变宽；右把手往右拖 = 右栏变窄
+      const delta = side === "left" ? move.clientX - startX : startX - move.clientX;
+      const width = Math.round(Math.min(max, Math.max(min, startWidth + delta)));
+      el.style.setProperty(`--kd-${side}`, `${width}px`);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      const value = el.style.getPropertyValue(`--kd-${side}`).replace("px", "");
+      if (value) localStorage.setItem(`kd-split-${side}`, value);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  const resetColumn = (side: "left" | "right") => {
+    splitRef.current?.style.removeProperty(`--kd-${side}`);
+    localStorage.removeItem(`kd-split-${side}`);
+  };
+
+  /**
+   * 「搜VJ(Bili)」：详情面板把拼好的词发过来，这里代填搜索框、
+   * 只勾 B 站、然后提交。提交不能在事件回调里直接调 submit()——
+   * 那个闭包看到的还是旧 query——所以立一个"待发射"标记，
+   * 等 state 落定后的渲染周期里再开枪。
+   */
+  const [vjPending, setVjPending] = useState("");
+  useEffect(() => {
+    const onVj = (event: Event) => {
+      const q = (event as CustomEvent<string>).detail?.trim();
+      if (!q) return;
+      setQuery(q);
+      setPlatforms(["bilibili"]);
+      setListMode("search");
+      setVjPending(q);
+    };
+    window.addEventListener(VJ_SEARCH_EVENT, onVj);
+    return () => window.removeEventListener(VJ_SEARCH_EVENT, onVj);
+  }, [setListMode]);
+  useEffect(() => {
+    if (vjPending && query === vjPending && platforms.length === 1 && platforms[0] === "bilibili") {
+      setVjPending("");
+      void submit();
+    }
+  }, [vjPending, query, platforms, submit]);
 
   const toggleSelect = useCallback((key: string) => {
     setChosen((current) => {
@@ -369,9 +447,20 @@ export function Workspace() {
       />
 
       <div className="kd-section-body">
-        <div className="kd-split" data-folders="true">
+        <div className="kd-split" data-folders="true" ref={splitRef}>
           {/* 文件夹栏一直在：搜到的歌下载完就落进这些文件夹，看得见落点才知道下到哪了 */}
           <FolderTree />
+
+          {/* 三栏之间的两条把手：拖动改左/右栏宽度，中间吃剩余。宽度记在
+              localStorage，下次打开还是你拉的样子。双击复位到默认。 */}
+          <div
+            className="kd-split-handle"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整文件夹栏宽度"
+            onPointerDown={startColumnDrag("left")}
+            onDoubleClick={() => resetColumn("left")}
+          />
 
           <div className="kd-table-wrap">
             {/* 列表面板的"眉目"：两个标签常驻，随时可切，不等搜索了才出现。
@@ -415,10 +504,10 @@ export function Workspace() {
                   <X size={12} />
                 </Button>
               )}
-              {/* 「登录」贴最右：切的是右栏（账号面板），不是中间列表 */}
+              {/* 「账号管理」贴最右：切的是右栏（账号面板），不是中间列表 */}
               <nav className="kd-list-tabs" aria-label="账号">
                 <button type="button" aria-pressed={showAccounts} onClick={toggleAccounts}>
-                  登录
+                  账号管理
                 </button>
               </nav>
             </div>
@@ -494,7 +583,16 @@ export function Workspace() {
             )}
           </div>
 
-          {/* 右栏：齿轮呼出的登录面板优先，其次搜索时是下载队列，曲库时是曲目详情 */}
+          <div
+            className="kd-split-handle"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整详情栏宽度"
+            onPointerDown={startColumnDrag("right")}
+            onDoubleClick={() => resetColumn("right")}
+          />
+
+          {/* 右栏：齿轮呼出的账号面板优先，其次搜索时是下载队列，曲库时是曲目详情 */}
           <aside className="kd-split-aside kd-scroll">
             {showAccounts ? (
               <AccountsPanel />

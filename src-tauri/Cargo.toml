@@ -21,12 +21,23 @@ kumodeck-core = { version = "0.2.0", path = "../crates/kumodeck-core" }
 kumodeck-server = { version = "0.2.0", path = "../crates/kumodeck-server" }
 rand = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }
+# tauri.conf.json 里一有 `plugins` 段，`generate_context!` 展开出来的代码就会
+# 直接引用 ::serde_json 反序列化插件配置——不显式依赖它，报的是
+# "could not find serde_json in the list of imported crates"，
+# 看着完全不像是"加了个 updater 配置"引起的。
+serde_json = "1.0"
 tauri = { version = "2.11", features = [] }
 tauri-plugin-dialog = "2.7"
 tauri-plugin-opener = "2.5"
 tokio = { version = "1.53.1", features = ["sync"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+# 一键更新：updater 下载+minisign 校验+原地替换，process 提供替换后的自重启。
+# 只在桌面有意义（安卓走 Release 页下 APK），target 限定住免得安卓交叉编译多拖依赖。
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [features]
 # `tauri build` 会自动带上这个 feature，`generate_context!` 才会去读

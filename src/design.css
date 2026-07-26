@@ -312,23 +312,38 @@ textarea {
 .kd-split {
   display: grid;
   /* 右栏放的是整首曲子的分析结果（BPM/调号轮/和声推荐/文件信息），
-     320px 装不下，得一直往下滚。加宽到 22rem 并配合 .kd-panel-dense，
-     常见笔记本屏上一屏基本能看完。 */
-  grid-template-columns: minmax(0, 1fr) 22rem;
+     320px 装不下，得一直往下滚。默认 22rem 并配合 .kd-panel-dense。
+     三栏宽度走 CSS 变量：拖动把手往元素上写 --kd-left/--kd-right（px），
+     没拖过就吃这里的默认值；大屏的默认值在下面的媒体查询里放宽。 */
+  grid-template-columns:
+    var(--kd-left, 13rem) 6px minmax(0, 1fr) 6px var(--kd-right, 22rem);
   min-height: 0;
   flex: 1;
 }
-/* 文件夹模式：左边加一栏目录树。宽度固定，中间的曲目表吃掉剩余空间。 */
-.kd-split[data-folders="true"] {
-  grid-template-columns: 13rem minmax(0, 1fr) 22rem;
-}
 @media (min-width: 1600px) {
+  /* 大屏默认更宽。用户拖过的话，拖动写在元素 style 上的变量优先级更高，自然盖掉 */
   .kd-split {
-    grid-template-columns: minmax(0, 1fr) 25rem;
+    --kd-left: 15rem;
+    --kd-right: 25rem;
   }
-  .kd-split[data-folders="true"] {
-    grid-template-columns: 15rem minmax(0, 1fr) 25rem;
-  }
+}
+/* 拖宽把手：平时隐形，悬停/拖动时亮一条细线。6px 已经算宽了——
+   它是两栏之间唯一的空隙，太宽会看起来像布局裂开了。 */
+.kd-split-handle {
+  cursor: col-resize;
+  position: relative;
+  touch-action: none;
+}
+.kd-split-handle::after {
+  content: "";
+  position: absolute;
+  inset: 0 2px;
+  background: transparent;
+  transition: background 0.12s;
+}
+.kd-split-handle:hover::after,
+.kd-split-handle:active::after {
+  background: var(--kd-line);
 }
 .kd-split-aside {
   border-left: 1px solid var(--kd-line);
@@ -1176,6 +1191,64 @@ textarea {
 }
 /* 试听条走常规播放器的样子：无边框图标键、小封面、一条细线。
    这里不需要品牌感——它是个预览工具，安静比抢眼重要。 */
+/* 「正在播」块：封面 + 两行字，整块可点（回到正在放的曲目）。
+   按钮外衣要全部脱掉，让它看起来就是信息本身。 */
+.kd-player-now {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.15rem 0.35rem;
+  border-radius: 6px;
+  min-width: 0;
+  cursor: pointer;
+}
+.kd-player-now:hover:not(:disabled) {
+  background: var(--kd-panel-inset);
+}
+.kd-player-now:disabled {
+  cursor: default;
+}
+.kd-player-artist {
+  display: block;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-height: 1em; /* 没艺人时占位，换歌高度不跳 */
+}
+/* 圆形播放键：整条播放条唯一的动作，红色归它 */
+.kd-player-go {
+  appearance: none;
+  border: none;
+  flex: none;
+  width: 2.3rem;
+  height: 2.3rem;
+  border-radius: 50%;
+  background: var(--kd-theme);
+  color: var(--kd-theme-ink);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.12s, transform 0.08s;
+}
+.kd-player-go:hover:not(:disabled) {
+  background: var(--kd-theme-strong);
+}
+.kd-player-go:active:not(:disabled) {
+  transform: scale(0.94);
+}
+.kd-player-go:disabled {
+  background: var(--kd-panel-inset);
+  color: var(--kd-faint);
+  cursor: default;
+}
 .kd-player-btn {
   appearance: none;
   border: none;
@@ -1378,12 +1451,32 @@ textarea {
 .kd-set-control > .kd-select {
   width: 100%;
 }
+/* 头像位：是个常驻的占位块，有图才往里塞 <img>。
+   登录前后左边留白一样宽，几行平台名不会因为谁有头像而错开。
+   28px 比原来的 22px 大一点——两行文字（平台名 + 状态）的行高就是 28 上下，
+   小于它的头像看着像掉在角落里。 */
 .kd-set-avatar {
-  width: 22px;
-  height: 22px;
+  width: 28px;
+  height: 28px;
   flex: none;
-  object-fit: cover;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--kd-panel-inset);
   border: 1px solid var(--kd-line);
+}
+.kd-set-avatar > img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: opacity 0.15s;
+}
+/* 同一个位子放图标而不是头像（更新那一行）：不描边，免得看着像个空头像框 */
+.kd-set-avatar-icon {
+  display: grid;
+  place-items: center;
+  border-color: transparent;
+  color: var(--kd-muted);
 }
 /* ============================================================
  * 文件夹树
@@ -1615,4 +1708,160 @@ textarea {
   letter-spacing: 0.04em;
   /* 不参与标题的省略号截断：角标被截掉就失去意义了 */
   white-space: nowrap;
+}
+
+/* ============================================================
+ * 面板拖排 / 接歌范围 / 搜 VJ 关键词
+ * 这一段全是右侧详情栏里新加的东西。
+ * ========================================================== */
+
+/* 面板槽位：把手绝对定位在右上角，平时半透明，鼠标进这块才亮起来。
+   常亮的话六块面板右上角就是六个灰点，比面板标题还抢眼。 */
+.kd-panel-slot {
+  position: relative;
+}
+.kd-panel-grip {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  z-index: 2;
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--kd-faint);
+  padding: 2px;
+  line-height: 0;
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.kd-panel-slot:hover .kd-panel-grip,
+.kd-panel-grip:focus-visible {
+  opacity: 1;
+}
+.kd-panel-grip:active {
+  cursor: grabbing;
+}
+.kd-panel-slot[data-dragging="true"] {
+  opacity: 0.4;
+}
+/* 落点提示：一条横线压在目标面板顶边，比整块变色更能说明"插到这里" */
+.kd-panel-slot[data-over="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -3px;
+  height: 2px;
+  background: var(--kd-theme);
+  z-index: 3;
+}
+
+/* 接歌范围的两枚小开关。和列表标签（.kd-list-tabs）同一套语言：
+   选中态只是中性底色，不跟真正的动作抢红色。 */
+.kd-scope {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-bottom: 0.4rem;
+  font-size: var(--kd-size-xs);
+}
+.kd-scope > button {
+  appearance: none;
+  border: 1px solid var(--kd-line);
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.kd-scope > button[aria-pressed="true"] {
+  background: var(--kd-panel-inset);
+  border-color: var(--kd-line);
+  color: var(--kd-text);
+  font-weight: 600;
+}
+.kd-scope > button:hover:not([aria-pressed="true"]) {
+  color: var(--kd-text);
+}
+
+/* 搜 VJ 的关键词按钮群 */
+.kd-vj-words {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.kd-vj-word {
+  position: relative;
+  display: inline-flex;
+}
+.kd-vj-word > button:first-child {
+  appearance: none;
+  border: 1px solid var(--kd-line);
+  background: transparent;
+  color: var(--kd-text);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.kd-vj-word > button:first-child:hover {
+  border-color: var(--kd-theme);
+  color: var(--kd-theme);
+}
+/* 删除叉压在右上角外沿：塞进按钮里会把词挤窄，一排词的宽度全跟着变 */
+.kd-vj-word-x {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  appearance: none;
+  border: none;
+  border-radius: 50%;
+  width: 14px;
+  height: 14px;
+  display: grid;
+  place-items: center;
+  background: var(--kd-danger);
+  color: #fff;
+  cursor: pointer;
+  padding: 0;
+}
+.kd-vj-word-add {
+  appearance: none;
+  border: 1px dashed var(--kd-line);
+  background: transparent;
+  color: var(--kd-faint);
+  border-radius: 999px;
+  padding: 0.12rem 0.45rem;
+  cursor: pointer;
+  line-height: 0;
+}
+.kd-vj-word-add:hover {
+  color: var(--kd-text);
+  border-color: var(--kd-muted);
+}
+.kd-vj-add {
+  width: 6rem;
+  font-size: var(--kd-size-xs);
+  padding: 0.1rem 0.4rem;
+}
+/* 文字按钮：长得像链接，用在"管理关键词"这种低频开关上 */
+.kd-linklike {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: inherit;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+.kd-linklike:hover {
+  color: var(--kd-text);
+  text-decoration: underline;
 }

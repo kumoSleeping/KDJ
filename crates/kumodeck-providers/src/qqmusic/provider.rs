@@ -330,7 +330,10 @@ impl QqMusicProvider {
                         .and_then(|info| info.get("Pic"))
                         .and_then(Value::as_str)
                         .unwrap_or_default()
-                        .to_string(),
+                        // qlogo 的头像接口给的是 http://——前端 CSP 只放行 https 的图，
+                        // 原样透传的结果是头像被拦、onError 把 <img> 藏掉，
+                        // 看起来就是"QQ 音乐没有头像"。qlogo 全域支持 https，直接升。
+                        .replacen("http://", "https://", 1),
                 );
             }
         }

@@ -1,10 +1,10 @@
 # 安卓 APK（Tauri 2 mobile）。
 #
-# 状态：本机（macOS/arm64 + NDK r27c）已经真的编出了一个 aarch64 release APK
-# ——18,025,001 B，unsigned，实测细节见 docs/rust-port/06-packaging-results.md §4。
-# **但这条流水线本身仍然没在 GitHub 上跑过**，而且那个 APK 还没装进过真机：
-# 装机之前必须先解决 usesCleartextTraffic（见下面风险 1），否则大概率白屏。
-# 下面的风险注释已经按本机实测重排过一遍，别再照着旧版去乱设 CC_*/AR_*。
+# 状态：本机（macOS/arm64 + NDK r27c）能编出 aarch64 release APK，明文放行和
+# 签名都已就位（见 scripts/android-postinit.sh），实测细节在
+# docs/rust-port/06-packaging-results.md §4 和 08-updates-and-signing.md。
+# **仍未验证**：这条流水线没在 GitHub 上真跑过，APK 也没装进过真机。
+# 下面的风险注释已按本机实测重排，别再照着旧版去乱设 CC_*/AR_*。
 #
 # 触发只留 workflow_dispatch 和 tag：安卓构建要下 SDK/NDK（~2GB）又要交叉编
 # 译四遍，挂在每次 push 上纯属浪费额度，而且在壳做好之前必然跳过。
@@ -124,34 +124,21 @@ jobs:
         if: steps.shell.outputs.present == 'true'
         run: npx --yes @tauri-apps/cli@^2 android init
 
-      # 风险 1 的解法：release 也放行明文 HTTP。
-      # 这个 app 的前端在 WebView 里对 127.0.0.1 上的进程内 axum 发明文请求
-      # （token 鉴权，见 auth.rs），Android 对 targetSdk 28+ 默认禁明文，
-      # 不开的话 release 包装上真机就是白屏。四家平台的 API 全走 https，
-      # 实际放行的只有本机回环这一条。gen/android 不进版本库，所以必须在
-      # init 之后每次都补——模板里 debug 本来就是 true，这里只翻 release 的默认值。
-      - name: 放行 localhost 明文（改 usesCleartextTraffic）
+      # init 之后必须重做的三件事（明文放行 / 签名 / 图标）统一交给
+      # scripts/android-postinit.sh —— 本地和 CI 跑**同一份**脚本。
+      # 各写一套的下场是"我这儿能装、CI 出来的装不上"，而且这种差异
+      # 只有等到把 APK 拷进手机那一刻才会暴露。
+      #
+      # 签名的钥匙来自 repo secrets（配置方法见 docs/rust-port/08-updates-and-signing.md）：
+      #   ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS
+      # 没配时脚本会跳过签名继续出未签名包，不让整条流水线红掉。
+      - name: init 后置补丁（明文 / 签名 / 图标）
         if: steps.shell.outputs.present == 'true'
-        run: |
-          set -euo pipefail
-          f=src-tauri/gen/android/app/build.gradle.kts
-          sed -i 's/manifestPlaceholders\["usesCleartextTraffic"\] = "false"/manifestPlaceholders["usesCleartextTraffic"] = "true"/' "$f"
-          grep -n 'usesCleartextTraffic' "$f"
-          # sed 打空是静默的：模板哪天改了形状，这里必须炸而不是装作补完了
-          if grep -q 'usesCleartextTraffic"\] = "false"' "$f"; then
-            echo '::error::usesCleartextTraffic 还留着 false，sed 没打中——去对一下模板形状'
-            exit 1
-          fi
-
-      # init 出来的 gradle 工程带的是 Tauri 默认图标。真图标（`tauri icon` 的产物）
-      # 提交在 src-tauri/icons/android/ 里，覆盖过去；顺带把自适应图标的背景层
-      # 从模板的 #fff 换成应用底色——白底配深色图会在圆形遮罩里露一圈白边。
-      - name: 同步应用图标进 gradle 工程
-        if: steps.shell.outputs.present == 'true'
-        run: |
-          set -euo pipefail
-          cp -R src-tauri/icons/android/. src-tauri/gen/android/app/src/main/res/
-          grep -o '#[0-9a-fA-F]*' src-tauri/gen/android/app/src/main/res/values/ic_launcher_background.xml
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: ./scripts/android-postinit.sh
 
       # 风险表已按本机实测（NDK r27c）重排。**先看下面这三条已经被证伪的**，
       # 别再花时间去调 CC_*/AR_*：
@@ -170,11 +157,10 @@ jobs:
       #   1. ✅ ~~明文 HTTP 被禁~~ 已解决：init 之后的「放行 localhost 明文」
       #      步骤把 release 的 usesCleartextTraffic 翻成 true（本机 merged
       #      manifest 已验证），细节与取舍见 06-packaging-results.md §4.7 后记。
-      #   2. **签名**：这里出的是未签名 APK（产物名就叫 *-unsigned.apk），
-      #      直接装到真机可能被 "应用未安装" 拒绝。正式发版要配
-      #      ANDROID_KEY_BASE64 / ANDROID_KEY_PASSWORD 之类的 secrets，
-      #      在 gen/android/app/build.gradle.kts 里挂 signingConfigs。
-      #      骨架阶段先不引入 secrets，免得给一个空 secret 更难排查。
+      #   2. ✅ ~~签名~~ 已解决：android-postinit.sh 从 secrets 里还原 keystore
+      #      并注入 signingConfigs，产物是 app-universal-release.apk（不带
+      #      -unsigned 后缀）。secrets 没配时退回未签名包，届时产物名会变，
+      #      下面上传那步的通配符两种都收。
       #   3. **16KB page size**：Android 15 起要求 .so 按 16KB 对齐，
       #      老 NDK 编出来的库在新机器上会加载失败——这也是钉 r27 的理由之一。
       #      r27c 编出来的库还没装进真机验证过。
@@ -204,6 +190,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+            src-tauri/gen/android/app/build/outputs/apk/**/release/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

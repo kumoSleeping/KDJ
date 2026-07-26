@@ -44,20 +44,26 @@ export function AccountRow({ account }: { account: Account }) {
 
   return (
     <div className="kd-set-row">
-      <div className="kd-set-text kd-row" style={{ gap: "0.55rem" }}>
-        {account.avatar && (
-          <img
-            className="kd-set-avatar"
-            src={account.avatar}
-            alt=""
-            referrerPolicy="no-referrer"
-            onError={(event) => {
-              event.currentTarget.style.display = "none";
-            }}
-          />
-        )}
-        <div style={{ minWidth: 0 }}>
-          <div className="kd-set-label">{account.label}</div>
+      <div className="kd-set-text kd-row" style={{ gap: "0.6rem" }}>
+        {/* 头像占位常驻（有图才渲染 img，没图就是一块圆角灰底）：
+            登录前后左边留白一样宽，三行平台名不会因为谁有头像而错开。 */}
+        <span className="kd-set-avatar" aria-hidden="true">
+          {account.avatar && (
+            <img
+              src={account.avatar}
+              alt=""
+              referrerPolicy="no-referrer"
+              onError={(event) => {
+                event.currentTarget.style.opacity = "0";
+              }}
+            />
+          )}
+        </span>
+        {/* flex:1 是必须的：只给 min-width:0 的话这一格会缩到 min-content，
+            「网易云音乐」就被压成一行一个字。min-width:0 管的是能不能缩，
+            flex:1 管的是要不要占满剩余宽度，两个都要写。 */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="kd-set-label kd-truncate">{account.label}</div>
           <div className="kd-set-hint kd-truncate">
             {/* 状态本身就是这行的说明，不再另起一个彩色标签 */}
             <span data-state={account.state}>{STATE_LABEL[account.state]}</span>

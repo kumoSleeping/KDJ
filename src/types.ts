@@ -407,8 +407,27 @@ export interface KumoDeckBridge {
   revealPath: (path: string) => Promise<void>;
   pickFolder: () => Promise<string | null>;
   pickFolders: () => Promise<string[]>;
+  /** 用系统浏览器开外链（Release 页等）。可选：老 Electron 契约里没有，
+      调用方一律 `?.` + `window.open` 兜底。 */
+  openExternal?: (url: string) => Promise<void>;
+  /**
+   * 桌面独有的一键更新：下载 + 校验 + 原地替换 + 重启，全程由
+   * tauri-plugin-updater 托管。非桌面壳是 null/缺席——调用方按平台
+   * 各给各的操作（安卓开 Release 页下 APK，浏览器开发布页）。
+   */
+  applyUpdate?: null | ((onProgress?: (done: number, total: number | null) => void) => Promise<void>);
   windowControl: (action: "minimize" | "maximize" | "close") => void;
   onSidecarLog: (cb: (line: string) => void) => () => void;
+}
+
+/** `/api/update/check` 的返回。 */
+export interface UpdateInfo {
+  current: string;
+  latest: string;
+  newer: boolean;
+  url: string;
+  name: string;
+  published_at: string;
 }
 
 declare global {

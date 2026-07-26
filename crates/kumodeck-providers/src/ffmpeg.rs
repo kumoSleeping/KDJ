@@ -28,17 +28,39 @@ pub fn binary() -> Result<PathBuf> {
     which("ffmpeg").context("没有找到 ffmpeg，请先安装 FFmpeg")
 }
 
+/// GUI 启动的 app 看不见的常见安装位置。
+///
+/// **macOS 的坑**：从 Finder/Dock 双击的 .app 继承的是 launchd 的极简
+/// `PATH=/usr/bin:/bin:/usr/sbin:/sbin`，Homebrew 的 `/opt/homebrew/bin`
+/// 根本不在里面。症状是**终端里起 dev 一切正常，装好的 App 里视频放不了**
+/// （视频播放/分析要先用 ffmpeg 抽音轨），且 /api/health 报 ffmpeg=false。
+/// v0.1.0 的 Electron 壳靠 `fix-path` 这个 npm 包兜的，纯 Rust 壳要自己兜。
+const GUI_BLIND_DIRS: &[&str] = &[
+    "/opt/homebrew/bin", // Apple Silicon Homebrew
+    "/usr/local/bin",    // Intel Homebrew / 手动安装
+    "/opt/local/bin",    // MacPorts
+];
+
 fn which(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(name);
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            // Windows 上要带扩展名
+            let with_exe = dir.join(format!("{name}.exe"));
+            if with_exe.is_file() {
+                return Some(with_exe);
+            }
+        }
+    }
+    // PATH 里没有再兜 GUI 看不见的位置——顺序反过来会把用户显式放进
+    // PATH 的自编译版盖掉
+    for dir in GUI_BLIND_DIRS {
+        let candidate = Path::new(dir).join(name);
         if candidate.is_file() {
             return Some(candidate);
-        }
-        // Windows 上要带扩展名
-        let with_exe = dir.join(format!("{name}.exe"));
-        if with_exe.is_file() {
-            return Some(with_exe);
         }
     }
     None

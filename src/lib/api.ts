@@ -16,6 +16,7 @@ import type {
   IntakeRequest,
   IntakeResponse,
   LibraryStats,
+  UpdateInfo,
   QrSession,
   QrState,
   ResolveResponse,
@@ -155,9 +156,14 @@ export const api = {
   writeTags: (id: number) => post<Track>(`/library/tracks/${id}/write-tags`),
   waveform: (id: number, buckets = 640) =>
     request<Waveform>(`/library/waveform/${id}?buckets=${buckets}`),
-  harmonic: (id: number, tolerance = 12, limit = 60) =>
-    request<HarmonicMatch[]>(`/library/harmonic/${id}?bpm_tolerance=${tolerance}&limit=${limit}`),
+  harmonic: (id: number, tolerance = 12, limit = 60, folder = "") =>
+    request<HarmonicMatch[]>(
+      `/library/harmonic/${id}?bpm_tolerance=${tolerance}&limit=${limit}` +
+        (folder ? `&folder=${encodeURIComponent(folder)}` : ""),
+    ),
   stats: () => request<LibraryStats>("/library/stats"),
+  /** 检查更新走后端：CSP/证书链三个壳一条路，见 routes.rs::update_check。 */
+  checkUpdate: () => request<UpdateInfo>("/update/check"),
 
   folders: () => request<FolderTree>("/library/folders"),
   createFolder: (parent: string, name: string) =>

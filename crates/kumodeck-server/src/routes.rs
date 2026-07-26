@@ -53,6 +53,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/library/tracks/{id}/write-tags", post(write_tags))
         .route("/api/library/tracks/{id}/reread-tags", post(reread_tags))
         .route("/api/library/stats", get(library_stats))
+        .route("/api/update/check", get(update_check))
         .route("/api/library/harmonic/{id}", get(library_harmonic))
         .route("/api/library/folders", get(library_folders))
         .route("/api/library/folders/create", post(folder_create))
@@ -609,6 +610,9 @@ struct HarmonicParams {
     /// 放宽的关系集（相对小调、两步等）。默认开。
     #[serde(default = "default_true")]
     wide: bool,
+    /// 只在这个文件夹（含子级）里接。空 = 全库。
+    #[serde(default)]
+    folder: String,
 }
 fn default_tolerance() -> f64 {
     12.0
@@ -618,6 +622,17 @@ fn default_harmonic_limit() -> usize {
 }
 fn default_true() -> bool {
     true
+}
+
+/// 检查更新：问 GitHub 最新 Release，回「有没有更新 + 下载页」。
+///
+/// 走后端而不是让前端直接 fetch GitHub：省掉 CSP connect-src 白名单
+/// 和安卓 WebView 的证书链差异，浏览器/桌面/安卓三个壳同一条路。
+/// 版本号取本 crate 的（workspace 统一版本，发版脚本和 tauri.conf.json 同步涨）。
+async fn update_check() -> ApiResult<Json<kumodeck_providers::update::UpdateInfo>> {
+    Ok(Json(
+        kumodeck_providers::update::check(env!("CARGO_PKG_VERSION")).await?,
+    ))
 }
 
 async fn library_harmonic(
@@ -636,6 +651,8 @@ async fn library_harmonic(
         // limit=0 会一首都不返回，几千的 limit 又会把整库塞给前端
         params.limit.clamp(1, 200),
         params.wide,
+        // 「接下一首」的范围开关：空 = 全库，非空 = 只在这个文件夹（含子级）里接
+        &params.folder,
     )?))
 }
 

@@ -819,12 +819,16 @@ impl LibraryService {
     ///
     /// 默认走 wide：宁可多列几首让人自己挑，也不要因为规则太紧而空手。
     /// 排序把稳妥的选项放前面，所以"更多"不会变成"更差"。
+    /// `folder` 非空时只在这个目录（含子目录）里找候选——「接下一首」的
+    /// 范围开关用它：现场演出常常是"这个歌单文件夹内接歌"，跨包推荐会把
+    /// 准备之外的曲目接进来。空串 = 全库，和 v0.1.0 一致。
     pub fn harmonic_matches(
         &self,
         track_id: i64,
         bpm_tolerance: f64,
         limit: usize,
         wide: bool,
+        folder: &str,
     ) -> Result<Vec<HarmonicMatch>> {
         let Some(source) = self.get(track_id)? else {
             return Ok(Vec::new());
@@ -873,9 +877,18 @@ impl LibraryService {
             }
         }
 
+        // 目录过滤和 build_where 里同一套写法：前缀过 escape_like，深层包含
+        let mut folder_clause = String::new();
+        let folder = folder.trim().trim_end_matches('/');
+        if !folder.is_empty() {
+            let prefix = format!("{}{SEP}", normalize_path(Path::new(folder)));
+            folder_clause = " AND path LIKE ? ESCAPE '\\'".into();
+            params.push(SqlValue::Text(format!("{}%", escape_like(&prefix))));
+        }
+
         let mut stmt = conn.prepare(&format!(
             "SELECT * FROM tracks WHERE UPPER(COALESCE(camelot, '')) IN ({placeholders}) \
-             AND id != ?{bpm_clause}"
+             AND id != ?{bpm_clause}{folder_clause}"
         ))?;
         let candidates: Vec<Track> = stmt
             .query_map(rusqlite::params_from_iter(params.iter()), |row| {
@@ -1252,6 +1265,18 @@ mod tests {
     use super::*;
     use kumodeck_core::models::HarmonicRelation;
 
+    /// 伪造曲库根。**必须带盘符**，`/lib` 或 `\lib` 都不行。
+    ///
+    /// Windows 上 `\lib` 只有 root 没有 prefix，`Path::is_absolute()` 是 false，
+    /// 于是 `normalize_path` 会把当前工作目录的盘符拼上去变成 `D:\lib`；
+    /// 而下面的 `insert` 是把裸路径直接写进库的（存的还是 `\lib\...`），
+    /// 前缀就永远对不上，folder 过滤和 rebase 一条都查不出来。
+    /// Unix 上 `/lib` 本身已经是绝对路径，所以这个坑只在 Windows 上炸。
+    #[cfg(windows)]
+    const ROOT: &str = r"C:\lib";
+    #[cfg(not(windows))]
+    const ROOT: &str = "/lib";
+
     /// 直接写行，不碰文件系统：这一层要验的是 SQL 和排序规则，
     /// 走 `upsert_file` 反而会把测试绑在标签解析上。
     struct Row<'a> {
@@ -1320,7 +1345,7 @@ mod tests {
     #[test]
     fn folder_filter_shows_only_this_level_unless_deep() {
         let service = service();
-        let root = format!("{}lib", SEP);
+        let root = ROOT.to_string();
         insert(
             &service,
             Row {
@@ -1358,7 +1383,7 @@ mod tests {
     fn folder_filter_escapes_like_wildcards_in_the_path() {
         // 目录名里带 % / _ 是合法的，不转义的话 `%` 会匹配到任意别的目录
         let service = service();
-        let tricky = format!("{}lib{}100%_mix", SEP, SEP);
+        let tricky = format!("{ROOT}{SEP}100%_mix");
         insert(
             &service,
             Row {
@@ -1369,7 +1394,7 @@ mod tests {
         insert(
             &service,
             Row {
-                path: &format!("{}lib{}100XYmix{}b.mp3", SEP, SEP, SEP),
+                path: &format!("{ROOT}{SEP}100XYmix{SEP}b.mp3"),
                 ..Default::default()
             },
         );
@@ -1970,12 +1995,12 @@ mod tests {
                 },
             );
         }
-        let matches = service.harmonic_matches(source, 6.0, 0, true).unwrap();
+        let matches = service.harmonic_matches(source, 6.0, 0, true, "").unwrap();
         assert_eq!(matches.len(), 3, "limit=0 当没传，不该只给一首");
         assert!(matches.iter().all(|m| m.relation == HarmonicRelation::Same));
         assert_eq!(
             service
-                .harmonic_matches(source, 6.0, 2, true)
+                .harmonic_matches(source, 6.0, 2, true, "")
                 .unwrap()
                 .len(),
             2
@@ -2038,7 +2063,7 @@ mod tests {
             },
         );
 
-        let matches = service.harmonic_matches(source, 6.0, 50, false).unwrap();
+        let matches = service.harmonic_matches(source, 6.0, 50, false, "").unwrap();
         let titles: Vec<&str> = matches.iter().map(|m| m.track.title.as_str()).collect();
         assert_eq!(titles, vec!["EMOTION"]);
         assert_eq!(matches[0].relation, HarmonicRelation::EnergyUp);
@@ -2054,7 +2079,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let matches = service.harmonic_matches(source, 6.0, 50, false).unwrap();
+        let matches = service.harmonic_matches(source, 6.0, 50, false, "").unwrap();
         let half = matches.iter().find(|m| m.track.title == "half").unwrap();
         assert_eq!(half.tempo_ratio, 2.0);
         assert_eq!(half.bpm_delta, 0.0);
@@ -2102,19 +2127,19 @@ mod tests {
         let id = insert(
             &service,
             Row {
-                path: &format!("{}lib{}set1{}set1{}a.mp3", SEP, SEP, SEP, SEP),
+                path: &format!("{ROOT}{SEP}set1{SEP}set1{SEP}a.mp3"),
                 ..Default::default()
             },
         );
-        let old = format!("{}lib{}set1", SEP, SEP);
-        let new = format!("{}lib{}set2", SEP, SEP);
+        let old = format!("{ROOT}{SEP}set1");
+        let new = format!("{ROOT}{SEP}set2");
         let moved = service
             .rebase_paths(Path::new(&old), Path::new(&new))
             .unwrap();
         assert_eq!(moved, vec![id]);
         assert_eq!(
             service.get(id).unwrap().unwrap().path,
-            format!("{}lib{}set2{}set1{}a.mp3", SEP, SEP, SEP, SEP)
+            format!("{ROOT}{SEP}set2{SEP}set1{SEP}a.mp3")
         );
     }
 }

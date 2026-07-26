@@ -81,6 +81,49 @@ fn reveal_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
+/// 用系统浏览器开外链（Release 下载页）。只放行 http(s)——
+/// opener 什么 scheme 都肯开，file:// 之类的从网页侧透进来就是提权。
+#[tauri::command]
+fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err(format!("拒绝打开非 http(s) 链接：{url}"));
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|err| err.to_string())
+}
+
+/// 一键更新：查 → 下载（minisign 校验）→ 原地替换 → 重启。
+/// 全托管在 Rust 侧，前端一次 invoke 到底；错误原样带回去就地显示。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tauri::command]
+async fn apply_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|err| err.to_string())?;
+    let Some(update) = updater.check().await.map_err(|err| err.to_string())? else {
+        return Err("已经是最新版本".into());
+    };
+    update
+        .download_and_install(
+            |done, total| {
+                tracing::info!("更新下载中：{done}/{total:?}");
+            },
+            || tracing::info!("更新下载完成，开始安装"),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    // 替换完的二进制要重启才生效；不重启的话用户看着"更新完了"但跑的还是旧版
+    app.restart();
+}
+
+/// 移动端同名占位：generate_handler 不接受按 cfg 缺席的命令，
+/// 这里直接把"按平台该怎么办"说给前端听。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+async fn apply_update() -> Result<(), String> {
+    Err("这个平台不支持一键更新，请去 Release 页下载最新安装包".into())
+}
+
 /// 选一个目录，取消返回 `null`（和 Electron 的 `canceled → null` 一致）。
 ///
 /// 用回调版而不是 `blocking_pick_folder`：命令有可能落在事件循环所在的线程上，
@@ -228,9 +271,16 @@ pub fn run() {
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,kumodeck=debug".into()))
         .init();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+    // updater/process 只在桌面注册：安卓的更新走 Release 页下 APK
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init());
+
+    builder
         .setup(|app| {
             let bridge = start_server(app.handle())?;
             tracing::info!("KumoDeck 后端就绪：{}", bridge.base_url);
@@ -248,6 +298,8 @@ pub fn run() {
             get_bridge_info,
             open_path,
             reveal_path,
+            open_external,
+            apply_update,
             pick_folder,
             pick_folders,
             window_control

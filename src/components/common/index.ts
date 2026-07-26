@@ -10,5 +10,7 @@ export { InlineNotice } from "./InlineNotice";
 export type { InlineNoticeProps } from "./InlineNotice";
 export { Panel } from "./Panel";
 export type { PanelProps } from "./Panel";
+export { PanelStack } from "./PanelStack";
+export type { PanelStackProps } from "./PanelStack";
 export { ProgressBar } from "./ProgressBar";
 export type { ProgressBarProps, ProgressState } from "./ProgressBar";

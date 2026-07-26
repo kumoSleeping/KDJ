@@ -16,6 +16,7 @@ const POSITION_BROADCAST_MS = 200;
 
 export function PlayerBar() {
   const selected = useLibraryStore(selectSelectedTrack);
+  const selectTrack = useLibraryStore((state) => state.selectTrack);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lastBroadcast = useRef(0);
 
@@ -153,56 +154,74 @@ export function PlayerBar() {
         }}
       />
 
-      {/* 登录入口在列表标签行最右侧的「登录」，播放条不再放齿轮 */}
+      {/* 账号入口在列表标签行最右侧，播放条不放齿轮 */}
 
-      {/* 播放/停止合成一个键：一次点击只有一个含义，出场时不会点错 */}
+      {/* 「正在播」块：封面 + 曲名/艺人。点它 = 让右侧详情回到正在放的这首——
+          听着听着翻远了，一下就能回来。唱片占位常驻：没有它的话换歌时封面会
+          "啪"地冒出来把右边的字挤走。 */}
       <button
         type="button"
-        className="kd-player-btn"
+        className="kd-player-now"
+        disabled={!track}
+        title={track ? "回到正在播放的曲目" : undefined}
+        onClick={() => {
+          if (track) selectTrack(track);
+        }}
+      >
+        <span className="kd-player-disc" aria-hidden="true">
+          <Disc3 size={18} />
+          {track && (
+            <img
+              src={api.coverUrl(track.id)}
+              alt=""
+              onError={(event) => {
+                event.currentTarget.style.opacity = "0";
+              }}
+              onLoad={(event) => {
+                event.currentTarget.style.opacity = "1";
+              }}
+            />
+          )}
+        </span>
+        <span className="kd-player-meta" data-notice={notice ? "true" : undefined}>
+          <span className="kd-player-title">
+            {track
+              ? track.title || track.filename
+              : selected
+                ? selected.title || selected.filename
+                : "没有在播的曲目"}
+          </span>
+          {/* 第二行是艺人：播放条是"现在在放什么"的唯一显示，光有曲名
+              分不清同名翻唱。没有艺人时这行留空占位，高度不跳。 */}
+          <span className="kd-player-artist">
+            {(track ? track.artist : selected?.artist) || " "}
+          </span>
+        </span>
+      </button>
+      <InlineNotice text={notice} onDismiss={() => setNotice("")} />
+
+      {/* 播放/停止合成一个键：一次点击只有一个含义，出场时不会点错。
+          圆形红键——这是整条播放条唯一的动作，红色归它。 */}
+      <button
+        type="button"
+        className="kd-player-go"
         aria-label={playing ? "停止" : "播放"}
         disabled={!track && !selected}
         onClick={() => {
           // 还没有在播的曲子时，播的就是曲库里当前选中的那首——
-          // 「选中 → 按下面的播放」和双击是等价的两条路。
+          // 「选中 → 按播放」和双击是等价的两条路。
           if (!track) {
             if (selected) playTrack(selected);
             return;
           }
           const audio = audioRef.current;
-          if (playing && audio) audio.currentTime = 0; // 停止就是回到开头，和按钮上的图标一致
+          if (playing && audio) audio.currentTime = 0; // 停止就是回到开头，和图标一致
           setPlaying((value) => !value);
           if (playing) setPosition(0);
         }}
       >
         {playing ? <Square size={13} fill="currentColor" /> : <Play size={15} fill="currentColor" />}
       </button>
-
-      {/* 唱片占位常驻：没有它的话，换一首歌时封面会"啪"地冒出来再把右边的字挤走。
-          占位始终在，封面加载好了盖在上面，布局从头到尾不动。 */}
-      <span className="kd-player-disc" aria-hidden="true">
-        <Disc3 size={18} />
-        {track && (
-          <img
-            src={api.coverUrl(track.id)}
-            alt=""
-            onError={(event) => {
-              event.currentTarget.style.opacity = "0";
-            }}
-            onLoad={(event) => {
-              event.currentTarget.style.opacity = "1";
-            }}
-          />
-        )}
-      </span>
-
-      {/* 曲名一行就够；艺人、BPM、调号在曲库详情里都有，底部条不复述。
-          出错时这一格要多分点宽度，不然一句话只剩三个字加省略号。 */}
-      <div className="kd-player-meta" data-notice={notice ? "true" : undefined}>
-        <div className="kd-player-title">
-          {track ? track.title || track.filename : selected ? selected.title || selected.filename : "没有在播的曲目"}
-        </div>
-        <InlineNotice text={notice} onDismiss={() => setNotice("")} />
-      </div>
 
       <div className="kd-player-scrub">
         {/* 进度条就是波形本身：DJ 软件都是这么做的，看一眼就知道下一个 drop 还有多远 */}

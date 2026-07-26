@@ -2,9 +2,24 @@ import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { api } from "../../lib/api";
 import type { Platform, QrState, QrStateValue } from "../../types";
-import { Button, CornerBadge } from "../common";
+import { Button } from "../common";
 
 const POLL_INTERVAL_MS = 1500;
+
+/** 登录成功后停留多久再自己关掉。够看清昵称，又不用再点一下「完成」。 */
+const CLOSE_DELAY_MS = 900;
+
+/**
+ * 扫的是哪个 App。
+ *
+ * QQ 音乐的二维码要用 **QQ** 扫，不是 QQ 音乐——弹窗上只写「QQ 音乐」的话，
+ * 人会打开 QQ 音乐 App 找扫码入口，找不到。这句话省掉的是一次真实的困惑。
+ */
+const SCAN_WITH: Partial<Record<Platform, string>> = {
+  wyy: "用网易云音乐 App 扫码",
+  qqm: "用 QQ 扫码（不是 QQ 音乐）",
+  bilibili: "用哔哩哔哩 App 扫码",
+};
 
 const STATE_TEXT: Record<QrStateValue, string> = {
   waiting: "等待扫码",
@@ -34,6 +49,20 @@ export function QrLoginDialog({ platform, label, onClose, onSuccess }: QrLoginDi
   // 卸载后仍在飞的请求不能再 setState，也不能再排下一次轮询
   const aliveRef = useRef(true);
 
+  /**
+   * 回调放进 ref，**不进** effect 依赖。
+   *
+   * 这是「扫完码又冒出一张新二维码」的真凶：调用方传的是内联箭头函数
+   * （`onSuccess={() => void refreshAccounts()}`），每次渲染都是新身份；
+   * 而登录成功 → refreshAccounts → 父组件重渲染 → onSuccess 换身份
+   * → 下面那个 effect 判定依赖变了 → 重跑 → **重新申请一张二维码**。
+   * 明明已经登录成功，弹窗却像什么都没发生一样刷新了。
+   */
+  const successRef = useRef(onSuccess);
+  const closeRef = useRef(onClose);
+  successRef.current = onSuccess;
+  closeRef.current = onClose;
+
   useEffect(() => {
     aliveRef.current = true;
     return () => {
@@ -55,7 +84,12 @@ export function QrLoginDialog({ platform, label, onClose, onSuccess }: QrLoginDi
         if (!aliveRef.current) return;
         setStatus(state);
         if (state.state === "done") {
-          onSuccess();
+          successRef.current();
+          // 成功之后自己关掉：右边那一行当场就变成「已登录」，
+          // 还要用户再点一下「完成」纯属多一步。留 0.9s 让人看清昵称。
+          timer = setTimeout(() => {
+            if (aliveRef.current) closeRef.current();
+          }, CLOSE_DELAY_MS);
           return;
         }
         if (FINAL_STATES.has(state.state)) return;
@@ -84,7 +118,9 @@ export function QrLoginDialog({ platform, label, onClose, onSuccess }: QrLoginDi
     return () => {
       if (timer) clearTimeout(timer);
     };
-  }, [platform, round, onSuccess]);
+    // onSuccess/onClose 有意不进依赖，走 ref——理由见上面 successRef 的注释
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [platform, round]);
 
   const done = status?.state === "done";
   const stale = status !== null && FINAL_STATES.has(status.state) && !done;
@@ -92,7 +128,8 @@ export function QrLoginDialog({ platform, label, onClose, onSuccess }: QrLoginDi
   return (
     <div className="kd-overlay" role="dialog" aria-modal="true" aria-label={`${label}扫码登录`}>
       <div className="kd-dialog">
-        <CornerBadge>登录</CornerBadge>
+        {/* 原来这里挂着一枚红色的「登录」角标。删掉的理由：弹窗标题已经写着
+            平台名、内容是一张二维码，角标既不提供信息又占掉了这块唯一的红色额度。 */}
         <div className="kd-dialog-head">
           {label}
           <span className="kd-toolbar-gap" />
@@ -123,11 +160,20 @@ export function QrLoginDialog({ platform, label, onClose, onSuccess }: QrLoginDi
                 // 过期/取消后二维码已失效，压暗提示要点重试
                 style={{ opacity: stale ? 0.25 : 1, imageRendering: "pixelated", background: "#fff" }}
               />
+              {/* 「用哪个 App 扫」比「等待扫码」有用得多——尤其 QQ 音乐是用 QQ 扫的 */}
               <div className="kd-row kd-muted" style={{ gap: "0.4rem" }}>
                 {status?.state === "scanned" && <LoaderCircle className="kd-spin" size={13} />}
-                <span>{status ? STATE_TEXT[status.state] : "等待扫码"}</span>
+                <span>
+                  {status && status.state !== "waiting"
+                    ? STATE_TEXT[status.state]
+                    : (SCAN_WITH[platform] ?? "等待扫码")}
+                </span>
               </div>
-              {status?.message && <p className="kd-faint">{status.message}</p>}
+              {/* 后端的 message 常常就是状态本身（"等待扫码"），原样再印一遍
+                  就成了屏幕上同一句话出现两次。只在它真的多说了点什么时才显示。 */}
+              {status?.message && status.message !== STATE_TEXT[status.state] && (
+                <p className="kd-faint">{status.message}</p>
+              )}
             </>
           )}
         </div>
