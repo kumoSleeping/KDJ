@@ -1,0 +1,44 @@
+# electron-builder 配置。本地打包：npm run dist（需要先准备 sidecar-dist/，
+# 见 .github/workflows/build.yml —— CI 用 PyInstaller 生成）。
+appId: app.kumodeck.desktop
+productName: KumoDeck
+directories:
+  output: release
+
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+
+# PyInstaller 冻结出的 sidecar（连解释器带依赖），装好后在
+# resources/sidecar-bin/，electron/main.ts 会优先找它。
+extraResources:
+  - from: sidecar-dist
+    to: sidecar-bin
+
+asar: true
+
+mac:
+  category: public.app-category.music
+  # 没有开发者证书：不签名。用户首次打开需要右键 → 打开绕过 Gatekeeper。
+  identity: null
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+
+linux:
+  category: Audio
+  target:
+    - AppImage

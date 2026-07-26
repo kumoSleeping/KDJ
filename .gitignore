@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-electron/
+release/
+sidecar-dist/
+sidecar/.venv/
+sidecar/dist/
+sidecar/build/
+sidecar/*.spec
+sidecar/**/__pycache__/
+sidecar/kumodeck.egg-info/
+*.pyc
+*.log
+nohup.out
+.DS_Store
+data/

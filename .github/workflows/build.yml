@@ -1,0 +1,100 @@
+# 多平台打包：macOS DMG（arm64 + x64）/ Windows NSIS EXE / Linux AppImage。
+#
+# 关键决定：sidecar 不随包携带 venv（venv 不可搬迁——解释器是指向构建机的
+# 符号链接、shebang 写死绝对路径），而是每个平台用 PyInstaller 冻结成
+# 独立可执行，electron-builder 作为 extraResources 打进 resources/sidecar-bin/。
+#
+# 触发：打 v* tag 自动构建并发 GitHub Release；手动 workflow_dispatch 只出 artifact。
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest # Apple Silicon runner；x64 由 electron-builder 交叉出包
+          - os: windows-latest
+          - os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 后端测试
+        shell: bash
+        run: |
+          python -m pip install -U pip
+          python -m pip install "./sidecar[dev]"
+          python -m pytest sidecar/tests -q
+
+      - name: PyInstaller 冻结 sidecar
+        shell: bash
+        # 在 sidecar/ 里跑，免得 PyInstaller 的 dist/ 撞上 vite 的 dist/。
+        # --collect-all 那几家：动态 import 多（yt-dlp 全是懒加载、bilibili_api
+        # 带数据文件），漏了会在运行时才炸。
+        run: |
+          python -m pip install pyinstaller
+          cd sidecar
+          pyinstaller --noconfirm --clean --onedir --name kumodeck-sidecar \
+            --collect-all yt_dlp \
+            --collect-all bilibili_api \
+            --collect-all qqmusic_api \
+            --collect-all pyncm \
+            --collect-all segno \
+            --collect-submodules uvicorn \
+            --hidden-import websockets \
+            pyinstaller_entry.py
+          cd ..
+          mv sidecar/dist/kumodeck-sidecar sidecar-dist
+
+      - name: sidecar 可执行冒烟（--version 能跑通说明冻结没缺模块入口）
+        shell: bash
+        run: ./sidecar-dist/kumodeck-sidecar --version || ./sidecar-dist/kumodeck-sidecar.exe --version
+
+      - name: 构建渲染层与主进程
+        run: npm run build
+
+      - name: electron-builder 出安装包
+        run: npx electron-builder --publish never
+        env:
+          # electron-builder 在 mac 上默认会尝试签名，identity: null 已关掉；
+          # CSC_IDENTITY_AUTO_DISCOVERY 再保险一层，避免 runner 上的证书干扰
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: kumodeck-${{ runner.os }}
+          path: |
+            release/*.dmg
+            release/*.exe
+            release/*.AppImage
+          if-no-files-found: error
+
+      - name: 发布 Release（仅 tag）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.dmg
+            release/*.exe
+            release/*.AppImage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

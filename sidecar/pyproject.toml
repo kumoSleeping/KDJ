@@ -1,0 +1,38 @@
+[project]
+name = "kumodeck"
+version = "0.1.0"
+description = "KumoDeck sidecar — 多平台音乐/视频下载 + DJ 曲库分析服务"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    # 光装 uvicorn 不带任何 WS 实现，/ws 会被拒绝升级（日志里是
+    # "No supported WebSocket library detected"），下载/扫描/分析进度全推不出去。
+    "websockets>=12",
+    "pydantic>=2.7",
+    "httpx>=0.27",
+    "numpy>=1.26",
+    "mutagen>=1.47",
+    "segno>=1.6",
+    "pillow>=10.0",
+    # pyncm 已从 PyPI 索引里下架，只能钉死 wheel 直链（和 kumocode_v2 的 pyproject 一致）
+    "pyncm @ https://files.pythonhosted.org/packages/58/f4/05d7a0116bd70dcef0f7214c0e9ee6a50a124525eaefc5c2bb0c5085f0b7/pyncm-1.8.1-py3-none-any.whl",
+    "qqmusic-api-python>=0.5.3",
+    "bilibili-api-python==17.4.2",
+    "yt-dlp>=2025.6.30",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["kumodeck*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

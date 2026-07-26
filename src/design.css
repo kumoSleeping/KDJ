@@ -1,0 +1,1496 @@
+/*
+ * KumoDeck — Design System
+ * ---------------------------------------------------------------
+ * 取向参考 pi-web-platform / entari-plugin-hyw：
+ *   - 零圆角（所有 border-radius: 0）
+ *   - 招牌红色角标（左上角外挂，大写、粗、紧字距）
+ *   - 扁平卡片：纯色面板 + 1px 描边 + 极淡阴影，不用玻璃/模糊
+ *   - 系统字体栈，数字一律等宽（tabular-nums）
+ *   - 红色只用于角标 / 焦点 / 强调条，正文强调保持中性
+ * DJ 场景默认深色；亮色同样完整可用。
+ * ---------------------------------------------------------------
+ * 组件只允许使用这里定义的 .kd-* 类，不要写内联魔法数值。
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* —— 主色 —— */
+  --kd-theme: #ef4444;
+  --kd-theme-ink: #ffffff;
+  --kd-theme-strong: color-mix(in srgb, var(--kd-theme) 85%, #000);
+  --kd-theme-soft: color-mix(in srgb, var(--kd-theme) 14%, transparent);
+
+  /* —— 文本 —— */
+  --kd-text: #f2f2f2;
+  --kd-text-body: #d4d4d8;
+  --kd-muted: #8a8a90;
+  --kd-faint: #5f5f66;
+
+  /* —— 面 —— */
+  --kd-bg: #111113;
+  --kd-panel: #17171a;
+  --kd-panel-raised: #1d1d21;
+  --kd-panel-inset: #0d0d0f;
+  --kd-line: #2a2a2f;
+  --kd-line-soft: #202024;
+  --kd-hover: #232328;
+  --kd-selected: #2a2a31;
+  /* 播放条上"已播部分"的遮罩：深色主题盖黑 */
+  --kd-wave-dim: rgba(0, 0, 0, 0.55);
+
+  /* —— 语义 —— */
+  --kd-ok: #22c55e;
+  --kd-warn: #f59e0b;
+  --kd-danger: #ef4444;
+  --kd-info: #60a5fa;
+
+  /* —— 阴影 —— */
+  --kd-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --kd-shadow-float: 0 8px 24px -6px rgba(0, 0, 0, 0.6), 0 2px 6px -2px rgba(0, 0, 0, 0.4);
+  --kd-shadow-badge: 0 2px 4px 0 rgba(0, 0, 0, 0.45);
+
+  /* —— 字体 —— */
+  --kd-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+    "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", Arial, sans-serif;
+  --kd-font-mono: "SF Mono", "JetBrains Mono", Menlo, ui-monospace, "Cascadia Code", monospace;
+  --kd-size: 0.8125rem;
+  --kd-size-sm: 0.75rem;
+  --kd-size-xs: 0.6875rem;
+  --kd-size-lg: 0.9375rem;
+
+  /* —— 度量 —— */
+  --kd-titlebar-h: 38px;
+  --kd-player-h: 60px;
+  --kd-badge-hang: 0.5rem;
+  --kd-row-h: 34px;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --kd-text: #1c1c1e;
+  --kd-text-body: #3a3a3c;
+  --kd-muted: #86868b;
+  --kd-faint: #b0b0b6;
+  --kd-bg: #f2f2f2;
+  --kd-panel: #ffffff;
+  --kd-panel-raised: #ffffff;
+  --kd-panel-inset: #f9fafb;
+  --kd-line: #e5e7eb;
+  --kd-line-soft: #f0f0f2;
+  --kd-hover: #f4f4f5;
+  --kd-selected: #ececef;
+  /* 浅色主题的已播遮罩盖白：盖黑的话白天整条进度是一坨黑 */
+  --kd-wave-dim: rgba(255, 255, 255, 0.62);
+  --kd-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --kd-shadow-float: 0 4px 6px -1px rgba(0, 0, 0, 0.06), 0 2px 4px -1px rgba(0, 0, 0, 0.04);
+  --kd-shadow-badge: 0 2px 4px 0 rgba(0, 0, 0, 0.15);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  border-radius: 0 !important;
+}
+
+/* 上面的 `*` 选择器管不到表单控件的 shadow part（滑块滑钮、复选框对勾都在里面），
+   浏览器默认给的是圆的。全部按住手改成方的，保持"零圆角"这条不破例。 */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 1.85rem;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  background: var(--kd-line);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 8px;
+  height: 14px;
+  margin-top: -5px;
+  background: var(--kd-theme);
+  border: none;
+}
+input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 2px var(--kd-theme-soft);
+}
+input[type="checkbox"],
+input[type="radio"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 0.9rem;
+  height: 0.9rem;
+  border: 1px solid var(--kd-line);
+  background: var(--kd-panel-inset);
+  cursor: pointer;
+  display: inline-grid;
+  place-content: center;
+  flex: none;
+}
+input[type="checkbox"]:checked,
+input[type="radio"]:checked {
+  background: var(--kd-theme);
+  border-color: var(--kd-theme);
+}
+/* 方形对勾：两条边框旋转 45°，不引图标也不带一点圆 */
+input[type="checkbox"]:checked::after {
+  content: "";
+  width: 0.28rem;
+  height: 0.5rem;
+  margin-top: -2px;
+  border: solid var(--kd-theme-ink);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+input[type="radio"]:checked::after {
+  content: "";
+  width: 0.4rem;
+  height: 0.4rem;
+  background: var(--kd-theme-ink);
+}
+input[type="checkbox"]:disabled,
+input[type="radio"]:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+  background: var(--kd-bg);
+  color: var(--kd-text);
+  font-family: var(--kd-font);
+  font-size: var(--kd-size);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: var(--kd-theme-soft);
+}
+
+input,
+button,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+/* ============================================================
+ * 滚动条 — 细、直角
+ * ========================================================== */
+.kd-scroll {
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--kd-muted) 45%, transparent) transparent;
+}
+.kd-scroll::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+.kd-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--kd-muted) 38%, transparent);
+}
+.kd-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--kd-muted) 60%, transparent);
+}
+.kd-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ============================================================
+ * 招牌：红色角标
+ * 用法：<div class="kd-relative"><span class="kd-corner-badge">LIBRARY</span>…</div>
+ * ========================================================== */
+.kd-corner-badge {
+  position: absolute;
+  top: calc(-1 * var(--kd-badge-hang));
+  left: calc(-1 * var(--kd-badge-hang));
+  height: 1.5rem;
+  padding: 0 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: var(--kd-theme);
+  color: var(--kd-theme-ink);
+  font-size: var(--kd-size-xs);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: var(--kd-shadow-badge);
+  z-index: 10;
+}
+.kd-corner-badge[data-tone="neutral"] {
+  background: var(--kd-text);
+  color: var(--kd-bg);
+}
+.kd-corner-badge[data-tone="ok"] {
+  background: var(--kd-ok);
+  color: #06210f;
+}
+.kd-corner-badge[data-tone="warn"] {
+  background: var(--kd-warn);
+  color: #241505;
+}
+
+/* ============================================================
+ * 应用外壳
+ * ========================================================== */
+.kd-app {
+  height: 100%;
+  display: grid;
+  grid-template-rows: var(--kd-titlebar-h) 1fr auto;
+  background: var(--kd-bg);
+}
+
+.kd-titlebar {
+  -webkit-app-region: drag;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0 0.75rem 0 84px; /* 给 macOS 红绿灯留位 */
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  user-select: none;
+}
+.kd-titlebar-brand {
+  font-weight: 700;
+  font-size: var(--kd-size-lg);
+  letter-spacing: -0.01em;
+  color: var(--kd-text);
+}
+.kd-titlebar-spacer {
+  flex: 1;
+}
+.kd-titlebar-status {
+  -webkit-app-region: no-drag;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.kd-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* —— 主区 —— */
+.kd-section {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--kd-bg);
+}
+.kd-section-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.kd-pad {
+  padding: 1.25rem;
+}
+.kd-split {
+  display: grid;
+  /* 右栏放的是整首曲子的分析结果（BPM/调号轮/和声推荐/文件信息），
+     320px 装不下，得一直往下滚。加宽到 22rem 并配合 .kd-panel-dense，
+     常见笔记本屏上一屏基本能看完。 */
+  grid-template-columns: minmax(0, 1fr) 22rem;
+  min-height: 0;
+  flex: 1;
+}
+/* 文件夹模式：左边加一栏目录树。宽度固定，中间的曲目表吃掉剩余空间。 */
+.kd-split[data-folders="true"] {
+  grid-template-columns: 13rem minmax(0, 1fr) 22rem;
+}
+@media (min-width: 1600px) {
+  .kd-split {
+    grid-template-columns: minmax(0, 1fr) 25rem;
+  }
+  .kd-split[data-folders="true"] {
+    grid-template-columns: 15rem minmax(0, 1fr) 25rem;
+  }
+}
+.kd-split-aside {
+  border-left: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  min-height: 0;
+  overflow: auto;
+}
+
+/* ============================================================
+ * 面板 / 卡片
+ * ========================================================== */
+.kd-relative {
+  position: relative;
+}
+.kd-panel {
+  position: relative;
+  border: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  box-shadow: var(--kd-shadow);
+}
+.kd-panel-raised {
+  background: var(--kd-panel-raised);
+}
+.kd-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.85rem;
+  border-bottom: 1px solid var(--kd-line-soft);
+  font-weight: 700;
+  font-size: var(--kd-size-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--kd-muted);
+}
+/* 面板标题不带红竖条（Markdown 引用式的侧线用户点名不要）：
+   大写字母 + 灰色 + 下边线已经足够把标题和正文分开。 */
+/* 角标挂在面板外侧 -0.5rem 处、自身高 1.5rem，于是有 1rem 压在面板里面。
+   带角标的面板要把首行内容让开这 1rem，否则标题/操作会被角标压住。
+   角标宽度随文案变化（中文标签尤其长），所以让的是纵向而不是横向。 */
+.kd-panel[data-badged="true"] > .kd-panel-head {
+  padding-top: 1.4rem;
+}
+.kd-panel[data-badged="true"] > .kd-panel-body:first-of-type {
+  padding-top: 1.4rem;
+}
+.kd-panel-body {
+  padding: 0.85rem;
+}
+/* 统计块 */
+.kd-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 1px;
+  background: var(--kd-line);
+  border: 1px solid var(--kd-line);
+}
+.kd-stat {
+  background: var(--kd-panel);
+  padding: 0.75rem 0.9rem;
+}
+.kd-stat-label {
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.kd-stat-value {
+  margin-top: 0.25rem;
+  font-size: 1.35rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.kd-stat-hint {
+  color: var(--kd-faint);
+  font-size: var(--kd-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================
+ * 按钮
+ * ========================================================== */
+.kd-btn {
+  -webkit-app-region: no-drag;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  height: 1.85rem;
+  padding: 0 0.7rem;
+  border: 1px solid var(--kd-line);
+  background: var(--kd-panel-raised);
+  color: var(--kd-text);
+  font-size: var(--kd-size-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.kd-btn:hover:not(:disabled) {
+  background: var(--kd-hover);
+  border-color: color-mix(in srgb, var(--kd-muted) 45%, transparent);
+}
+.kd-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.kd-btn[data-variant="primary"] {
+  background: var(--kd-theme);
+  border-color: var(--kd-theme);
+  color: var(--kd-theme-ink);
+}
+.kd-btn[data-variant="primary"]:hover:not(:disabled) {
+  background: var(--kd-theme-strong);
+  border-color: var(--kd-theme-strong);
+}
+.kd-btn[data-variant="ghost"] {
+  background: transparent;
+  border-color: transparent;
+  color: var(--kd-muted);
+}
+.kd-btn[data-variant="ghost"]:hover:not(:disabled) {
+  background: var(--kd-hover);
+  color: var(--kd-text);
+}
+.kd-btn[data-variant="danger"] {
+  border-color: color-mix(in srgb, var(--kd-danger) 45%, transparent);
+  color: var(--kd-danger);
+  background: transparent;
+}
+.kd-btn[data-variant="danger"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--kd-danger) 12%, transparent);
+}
+.kd-btn[data-size="sm"] {
+  height: 1.5rem;
+  padding: 0 0.5rem;
+  font-size: var(--kd-size-xs);
+}
+.kd-btn[data-size="lg"] {
+  height: 2.2rem;
+  padding: 0 1rem;
+  font-size: var(--kd-size);
+}
+.kd-btn-icon {
+  width: 1.85rem;
+  padding: 0;
+}
+
+/* 分段控件 */
+.kd-segment {
+  display: inline-flex;
+  border: 1px solid var(--kd-line);
+  background: var(--kd-panel-raised);
+}
+.kd-segment > button {
+  height: 1.85rem;
+  padding: 0 0.7rem;
+  border: none;
+  border-right: 1px solid var(--kd-line);
+  background: transparent;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.kd-segment > button:last-child {
+  border-right: none;
+}
+/* 激活态用中性底色而不是主题红：分段开关是"状态"，不是"动作"。
+   满屏的开关每个都亮一块红，真正要按的那颗红按钮反而没了分量。 */
+.kd-segment > button[aria-pressed="true"] {
+  background: var(--kd-selected);
+  color: var(--kd-text);
+}
+/* 例外：搜索平台按钮激活时上各家品牌色（和来源小方块同一组色值），认色比认字快。
+   网易云红底配白字；QQ 绿和 SC 橙偏亮，配深字才够对比。 */
+.kd-segment > button[data-platform="wyy"][aria-pressed="true"] {
+  background: #e63329;
+  color: #fff;
+}
+.kd-segment > button[data-platform="qqm"][aria-pressed="true"] {
+  background: #31c27c;
+  color: #0c2018;
+}
+.kd-segment > button[data-platform="soundcloud"][aria-pressed="true"] {
+  background: #ff8800;
+  color: #2b1600;
+}
+.kd-segment > button[data-platform="bilibili"][aria-pressed="true"] {
+  background: #fb7299;
+  color: #fff;
+}
+/* 平台按钮可以拖动排优先级：拖动中的半透明 */
+.kd-segment > button[data-dragging] {
+  opacity: 0.4;
+}
+/* 白天模式：QQ 绿满饱和压在白底上太沉，提亮一档（其余两家本来就亮） */
+:root[data-theme="light"] .kd-segment > button[data-platform="qqm"][aria-pressed="true"] {
+  background: #43d693;
+  color: #093721;
+}
+/* 关着但可点：淡下去 + 虚线，和 disabled 的死灰区分开 */
+.kd-segment > button[data-off] {
+  color: var(--kd-faint);
+  border-style: dashed;
+}
+.kd-segment > button:hover:not([aria-pressed="true"]) {
+  background: var(--kd-hover);
+  color: var(--kd-text);
+}
+
+/* ============================================================
+ * 表单
+ * ========================================================== */
+/* 紧凑面板：右侧详情栏和设置页都是"信息多、每条都不长"的场景，
+   标准间距会把内容拉到要滚好几屏。 */
+.kd-panel-dense > .kd-panel-head {
+  padding: 0.35rem 0.6rem;
+}
+.kd-panel-dense > .kd-panel-body {
+  padding: 0.55rem 0.6rem;
+}
+.kd-panel-dense[data-badged="true"] > .kd-panel-head,
+.kd-panel-dense[data-badged="true"] > .kd-panel-body:first-of-type {
+  padding-top: 1.25rem;
+}
+.kd-panel-dense .kd-field {
+  gap: 0.15rem;
+}
+.kd-panel-dense .kd-panel-body > * + * {
+  margin-top: 0.5rem;
+}
+.kd-stat-grid[data-dense="true"] .kd-stat {
+  padding: 0.4rem 0.5rem;
+}
+.kd-stat-grid[data-dense="true"] .kd-stat-value {
+  margin-top: 0.1rem;
+  font-size: 1.05rem;
+}
+.kd-stat-grid[data-dense="true"] {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.kd-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.kd-field-label {
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.kd-field-hint {
+  color: var(--kd-faint);
+  font-size: var(--kd-size-xs);
+}
+.kd-input,
+.kd-select,
+.kd-textarea {
+  height: 1.85rem;
+  padding: 0 0.55rem;
+  border: 1px solid var(--kd-line);
+  background: var(--kd-panel-inset);
+  color: var(--kd-text);
+  font-size: var(--kd-size);
+  outline: none;
+  min-width: 0;
+}
+.kd-textarea {
+  height: auto;
+  padding: 0.45rem 0.55rem;
+  resize: vertical;
+}
+/* 紧凑下拉：搜索框旁边的音质选择这类"次要旋钮"，不该和主输入框一样抢眼 */
+.kd-select[data-size="sm"] {
+  height: 1.6rem;
+  padding: 0 0.35rem;
+  font-size: var(--kd-size-xs);
+}
+/* 聚焦不描红框（用户点名不要）：边框换中性灰、底色轻微抬亮，
+   看得出"光标在这"就够了，红色留给动作按钮 */
+.kd-input:focus,
+.kd-select:focus,
+.kd-textarea:focus {
+  border-color: var(--kd-faint);
+  background: var(--kd-panel-raised);
+}
+.kd-input::placeholder {
+  color: var(--kd-faint);
+}
+.kd-input[data-size="lg"] {
+  height: 2.2rem;
+  font-size: var(--kd-size-lg);
+}
+.kd-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--kd-text-body);
+  cursor: pointer;
+  user-select: none;
+}
+.kd-check input {
+  width: 0.9rem;
+  height: 0.9rem;
+  accent-color: var(--kd-theme);
+  cursor: pointer;
+}
+.kd-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1.15rem;
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  flex-wrap: wrap;
+}
+/* 紧凑工具条：平台选择那一行不需要和主搜索框一样的高度 */
+.kd-toolbar[data-slim="true"] {
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+}
+
+.kd-toolbar-gap {
+  flex: 1;
+}
+
+/* ============================================================
+ * 表格
+ * ========================================================== */
+.kd-table-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.kd-table-wrap > .kd-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 列表面板的"眉目"：曲库/搜索结果的切换和概况数字都嵌在面板顶边这一条上，
+   不再单独占一整行大标题。激活态只用一道 2px 下划线标主题色——
+   整屏的大块红色只留给真正的动作按钮。 */
+.kd-list-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  height: 2.15rem;
+  padding-right: 0.6rem;
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  flex: none;
+}
+.kd-list-title {
+  padding-left: 0.75rem;
+  font-size: var(--kd-size-sm);
+  font-weight: 700;
+}
+.kd-list-note {
+  color: var(--kd-faint);
+  font-size: var(--kd-size-xs);
+  min-width: 0;
+}
+.kd-list-tabs {
+  display: flex;
+  height: 100%;
+}
+.kd-list-tabs > button {
+  height: 100%;
+  padding: 0 0.85rem;
+  border: none;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+/* 激活态不再画红下划线：亮字 + 中性底就够了，红色留给动作按钮 */
+.kd-list-tabs > button[aria-pressed="true"] {
+  color: var(--kd-text);
+  background: var(--kd-selected);
+}
+.kd-list-tabs > button:hover:not([aria-pressed="true"]) {
+  color: var(--kd-text);
+}
+
+/* 勾选后才浮出来的动作条：唯一的红色按钮只在"有东西可入队"这一刻出现 */
+.kd-picked-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.75rem;
+  border-top: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  flex: none;
+}
+
+.kd-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+.kd-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+  white-space: nowrap;
+  user-select: none;
+}
+.kd-table thead th[data-sortable="true"] {
+  cursor: pointer;
+}
+.kd-table thead th[data-sortable="true"]:hover {
+  color: var(--kd-text);
+}
+.kd-table tbody td {
+  height: var(--kd-row-h);
+  padding: 0 0.6rem;
+  border-bottom: 1px solid var(--kd-line-soft);
+  color: var(--kd-text-body);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 0;
+}
+.kd-table tbody tr:hover td {
+  background: var(--kd-hover);
+}
+/* 选中只靠底色，不描红边：红色留给动作，选中是状态 */
+.kd-table tbody tr[aria-selected="true"] td {
+  background: var(--kd-selected);
+  color: var(--kd-text);
+}
+/* 焦点行不再单独描线（黑线红线都试过，用户都嫌吵）：
+   单选时选中即焦点，多选时详情栏标题自证是哪一首。 */
+/* 行内拖动换位的插入线：上半 = 插到这行前面，下半 = 插到后面 */
+.kd-table tbody tr[data-drop="before"] td {
+  box-shadow: inset 0 3px 0 var(--kd-theme);
+}
+.kd-table tbody tr[data-drop="after"] td {
+  box-shadow: inset 0 -3px 0 var(--kd-theme);
+}
+/* 白天模式的列表面板铺白底：默认透出去的是 --kd-bg 灰底，
+   一整屏结果看起来发灰发沉，其实内容没问题，是底色的锅 */
+:root[data-theme="light"] .kd-table-wrap {
+  background: var(--kd-panel);
+}
+/* 搜索结果里的小封面位。尺寸固定，图片有没有都不会让标题跳位。 */
+.kd-thumb {
+  display: inline-block;
+  width: 22px;
+  height: 22px;
+  margin-right: 0.45rem;
+  vertical-align: -6px;
+  background: var(--kd-panel-inset);
+  border: 1px solid var(--kd-line-soft);
+  overflow: hidden;
+}
+.kd-thumb > img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.kd-link-mark {
+  display: inline-flex;
+  vertical-align: -1px;
+  margin-right: 0.3rem;
+  color: var(--kd-muted);
+}
+/* 批量结果的包含关系：父行是一个"包"（歌单 / 专辑 / 一次关键词搜索），
+   子行缩进并挂一条肘形导引线。用绝对定位的伪元素画线而不是 border-left，
+   线才只出现在缩进区里，不会把整行的下边框切断。 */
+.kd-table tbody tr[data-tree="parent"] td {
+  background: var(--kd-panel-raised);
+  color: var(--kd-text);
+}
+.kd-table tbody tr[data-tree="parent"] td:first-child {
+  box-shadow: inset 3px 0 0 var(--kd-theme);
+}
+.kd-tree-indent {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding-left: 1.5rem;
+  max-width: 100%;
+}
+.kd-tree-indent::before {
+  content: "";
+  position: absolute;
+  left: 0.5rem;
+  top: -0.75rem;
+  bottom: 50%;
+  width: 1px;
+  background: var(--kd-line);
+}
+.kd-tree-indent::after {
+  content: "";
+  position: absolute;
+  left: 0.5rem;
+  top: 50%;
+  width: 0.5rem;
+  height: 1px;
+  background: var(--kd-line);
+}
+/* 每个包的最后一行不再向下延伸，竖线到肘部为止 */
+.kd-tree-indent[data-last="true"]::before {
+  bottom: 50%;
+}
+
+.kd-td-strong {
+  color: var(--kd-text);
+  font-weight: 600;
+}
+.kd-td-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* ============================================================
+ * 徽标 / 芯片
+ * ========================================================== */
+.kd-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  height: 1.15rem;
+  padding: 0 0.35rem;
+  border: 1px solid var(--kd-line);
+  background: var(--kd-panel-inset);
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.kd-chip[data-tone="theme"] {
+  border-color: var(--kd-theme);
+  color: var(--kd-theme);
+  background: var(--kd-theme-soft);
+}
+.kd-chip[data-tone="ok"] {
+  border-color: color-mix(in srgb, var(--kd-ok) 50%, transparent);
+  color: var(--kd-ok);
+  background: color-mix(in srgb, var(--kd-ok) 12%, transparent);
+}
+.kd-chip[data-tone="warn"] {
+  border-color: color-mix(in srgb, var(--kd-warn) 50%, transparent);
+  color: var(--kd-warn);
+  background: color-mix(in srgb, var(--kd-warn) 12%, transparent);
+}
+.kd-chip[data-tone="danger"] {
+  border-color: color-mix(in srgb, var(--kd-danger) 50%, transparent);
+  color: var(--kd-danger);
+  background: color-mix(in srgb, var(--kd-danger) 12%, transparent);
+}
+
+/* Camelot 色块：背景色由内联 style 提供（见 lib/camelot.ts） */
+.kd-camelot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.4rem;
+  height: 1.2rem;
+  padding: 0 0.3rem;
+  color: #0b0b0d;
+  font-size: var(--kd-size-xs);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+.kd-camelot[data-empty="true"] {
+  background: var(--kd-panel-inset);
+  border: 1px dashed var(--kd-line);
+  color: var(--kd-faint);
+}
+
+/* 能量条 */
+.kd-energy {
+  display: inline-flex;
+  gap: 1px;
+  align-items: flex-end;
+  height: 0.85rem;
+}
+.kd-energy i {
+  width: 3px;
+  /* 不能用 --kd-line：它和选中行底色（--kd-selected）几乎同色，
+     一选中整条能量表就隐形。带透明度的灰在两种底上都看得见。 */
+  background: color-mix(in srgb, var(--kd-faint) 55%, transparent);
+}
+.kd-energy i[data-on="true"] {
+  background: var(--kd-theme);
+}
+
+/* ============================================================
+ * 进度
+ * ========================================================== */
+.kd-progress {
+  position: relative;
+  height: 4px;
+  background: var(--kd-line);
+  overflow: hidden;
+}
+.kd-progress > span {
+  display: block;
+  height: 100%;
+  background: var(--kd-theme);
+  transition: width 0.2s ease;
+}
+.kd-progress[data-state="done"] > span {
+  background: var(--kd-ok);
+}
+.kd-progress[data-state="failed"] > span {
+  background: var(--kd-danger);
+}
+.kd-progress[data-indeterminate="true"] > span {
+  width: 34% !important;
+  animation: kd-slide 1.1s ease-in-out infinite;
+}
+@keyframes kd-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(320%); }
+}
+
+/* ============================================================
+ * 空状态 / 加载
+ * ========================================================== */
+.kd-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 3rem 1rem;
+  color: var(--kd-faint);
+  text-align: center;
+}
+.kd-empty-title {
+  color: var(--kd-muted);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: var(--kd-size-sm);
+}
+.kd-empty-hint {
+  max-width: 34rem;
+  font-size: var(--kd-size-sm);
+  line-height: 1.6;
+}
+
+.kd-spin {
+  animation: kd-rotate 0.9s linear infinite;
+}
+@keyframes kd-rotate {
+  to { transform: rotate(360deg); }
+}
+
+/* ============================================================
+ * Toast
+ * ========================================================== */
+.kd-toasts {
+  position: fixed;
+  right: 1rem;
+  bottom: calc(var(--kd-player-h) + 1rem);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  pointer-events: none;
+}
+.kd-toast {
+  position: relative;
+  min-width: 15rem;
+  max-width: 26rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--kd-line);
+  border-left: 3px solid var(--kd-info);
+  background: var(--kd-panel-raised);
+  box-shadow: var(--kd-shadow-float);
+  font-size: var(--kd-size-sm);
+  pointer-events: auto;
+}
+.kd-toast[data-level="warn"] { border-left-color: var(--kd-warn); }
+.kd-toast[data-level="error"] { border-left-color: var(--kd-danger); }
+
+/* ============================================================
+ * 对话框
+ * ========================================================== */
+.kd-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+.kd-dialog {
+  position: relative;
+  width: min(28rem, calc(100vw - 3rem));
+  border: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  box-shadow: var(--kd-shadow-float);
+}
+.kd-dialog-head {
+  display: flex;
+  align-items: center;
+  padding: 0.9rem 1rem 0.5rem;
+  font-weight: 800;
+  font-size: var(--kd-size-lg);
+}
+.kd-dialog-body {
+  padding: 0.5rem 1rem 1rem;
+}
+.kd-dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--kd-line-soft);
+}
+
+/* ============================================================
+ * 播放条
+ * ========================================================== */
+.kd-player {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  height: var(--kd-player-h);
+  padding: 0 1rem;
+  border-top: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+}
+/* 试听条走常规播放器的样子：无边框图标键、小封面、一条细线。
+   这里不需要品牌感——它是个预览工具，安静比抢眼重要。 */
+.kd-player-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--kd-text);
+  width: 1.9rem;
+  height: 1.9rem;
+  display: inline-grid;
+  place-content: center;
+  cursor: pointer;
+  flex: none;
+}
+.kd-player-btn:hover:not(:disabled) {
+  color: var(--kd-theme);
+}
+.kd-player-btn:disabled {
+  color: var(--kd-faint);
+  cursor: default;
+}
+.kd-player-meta {
+  min-width: 0;
+  flex: 0 0 200px;
+}
+.kd-player-title {
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-player-scrub {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+}
+/* 底部进度条就是整轨波形（DJ 软件的标准做法）：已播部分压暗，白线是播放头。 */
+.kd-player-wave {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--kd-line);
+}
+
+/* ============================================================
+ * 队列行
+ * ========================================================== */
+.kd-queue-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.25rem 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--kd-line-soft);
+}
+.kd-queue-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-queue-meta {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================
+ * 结果行 / 多源
+ * ========================================================== */
+.kd-source-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+/* 来源小方块按平台配色，认色比认字快。取各家的品牌色：
+   网易云橙红、QQ 音乐绿、SoundCloud 偏黄的橙、B 站蓝。
+   没被选中的那个压暗到 40%，一眼能看出"这首哪几个平台有 / 现在下哪个"。 */
+.kd-source-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--kd-faint);
+  opacity: 0.4;
+}
+.kd-source-dot[data-active="true"] {
+  opacity: 1;
+}
+.kd-source-dot[data-platform="wyy"] {
+  background: #e63329;
+}
+.kd-source-dot[data-platform="qqm"] {
+  background: #31c27c;
+}
+.kd-source-dot[data-platform="soundcloud"] {
+  background: #ff8800;
+}
+.kd-source-dot[data-platform="bilibili"] {
+  /* 和平台按钮同一个 B 站粉，别一个粉一个蓝 */
+  background: #fb7299;
+}
+
+.kd-cover {
+  width: 34px;
+  height: 34px;
+  object-fit: cover;
+  background: var(--kd-panel-inset);
+  border: 1px solid var(--kd-line);
+  flex: none;
+}
+
+/* 顶栏上的目录小按钮：显示当前落盘目录，点开就是系统选择框。
+   做成低对比度的一小条，它是"当前状态"而不是主操作。 */
+.kd-path-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  max-width: 12rem;
+  padding: 0.25rem 0.45rem;
+  border: 1px solid var(--kd-line);
+  background: var(--kd-panel-inset);
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  cursor: pointer;
+}
+.kd-path-chip:hover {
+  border-color: var(--kd-line-strong, var(--kd-line));
+  color: var(--kd-text);
+}
+
+/* 播放条上的唱片位：占位图标 + 覆盖上去的封面。
+   尺寸写死，封面有没有都不会让右边的文字跳位。 */
+.kd-player-disc {
+  position: relative;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--kd-panel-inset);
+  border: 1px solid var(--kd-line);
+  color: var(--kd-faint);
+}
+.kd-player-disc > img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.12s linear;
+}
+
+/* ============================================================
+ * 账号行（登录弹窗用；整页设置已删除）
+ * ========================================================== */
+.kd-set-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--kd-line-soft);
+}
+.kd-set-text {
+  flex: 1;
+  min-width: 0;
+}
+.kd-set-label {
+  color: var(--kd-text);
+  font-size: var(--kd-size-sm);
+}
+.kd-set-hint {
+  color: var(--kd-faint);
+  font-size: var(--kd-size-xs);
+  line-height: 1.4;
+}
+/* 未登录/过期用暖色提示，但只染这几个字，不做整块的彩色标签 */
+.kd-set-hint [data-state="expired"],
+.kd-set-hint [data-state="missing"] {
+  color: var(--kd-warn);
+}
+.kd-set-hint [data-state="valid"] {
+  color: var(--kd-ok, var(--kd-muted));
+}
+.kd-set-control {
+  flex: none;
+  width: 15rem;
+}
+.kd-set-control > .kd-input,
+.kd-set-control > .kd-select {
+  width: 100%;
+}
+.kd-set-avatar {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  object-fit: cover;
+  border: 1px solid var(--kd-line);
+}
+/* ============================================================
+ * 文件夹树
+ * 目录是磁盘上真实存在的，不是虚拟分组——所以视觉上按"文件浏览器"来做，
+ * 而不是按标签/播放列表来做。
+ * ========================================================== */
+.kd-folder-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+}
+.kd-folder-search {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.4rem;
+  border-bottom: 1px solid var(--kd-line);
+}
+.kd-folder-search > input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  color: var(--kd-text);
+  font-size: var(--kd-size-sm);
+  outline: none;
+}
+.kd-folder-search > input::placeholder {
+  color: var(--kd-faint);
+}
+.kd-folder-search > button {
+  flex: none;
+  display: inline-flex;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+.kd-folder-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--kd-line);
+}
+.kd-folder-title {
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.kd-folder-deep {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: auto;
+  color: var(--kd-faint);
+  font-size: var(--kd-size-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.kd-folder-list {
+  flex: 1;
+  min-height: 0;
+  padding: 0.25rem 0;
+}
+.kd-folder {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  height: 1.6rem;
+  padding-right: 0.35rem;
+  color: var(--kd-text-body);
+  font-size: var(--kd-size-sm);
+  cursor: default;
+  user-select: none;
+}
+.kd-folder:hover {
+  background: var(--kd-hover);
+}
+/* 当前文件夹只靠底色，不描红侧条 */
+.kd-folder[data-active="true"] {
+  background: var(--kd-selected);
+  color: var(--kd-text);
+}
+/* 拖到目标上：整块反白而不是只描边，因为行只有 26px 高，
+   1px 的框在余光里根本看不见。 */
+.kd-folder[data-drop="true"] {
+  background: var(--kd-theme);
+  color: #fff;
+}
+/* 拖文件夹换顺序：落点画成一条插入线，不反白——反白是"放进这个文件夹"的意思，
+   两种操作必须一眼分得开。 */
+.kd-folder[data-edge="before"] {
+  box-shadow: inset 0 3px 0 var(--kd-theme);
+  background: var(--kd-theme-soft);
+}
+.kd-folder[data-edge="after"] {
+  box-shadow: inset 0 -3px 0 var(--kd-theme);
+  background: var(--kd-theme-soft);
+}
+.kd-folder-caret {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0.9rem;
+  height: 0.9rem;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--kd-faint);
+  cursor: pointer;
+}
+.kd-folder-caret:disabled {
+  cursor: default;
+}
+.kd-folder-count {
+  margin-left: auto;
+  color: var(--kd-faint);
+  font-size: var(--kd-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+/* 未入库的数量要看得出来是"待办"而不是"已有"：红字就够，不描边不打底 */
+.kd-folder-count[data-pending="true"] {
+  color: var(--kd-theme);
+  font-weight: 700;
+}
+.kd-folder-more {
+  flex: none;
+  display: none;
+  align-items: center;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+.kd-folder:hover .kd-folder-more {
+  display: inline-flex;
+}
+.kd-folder-more:hover {
+  color: var(--kd-text);
+}
+.kd-folder-foot {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.35rem;
+  border-top: 1px solid var(--kd-line);
+}
+.kd-folder-foot > .kd-btn {
+  flex: 1;
+}
+
+.kd-context-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 10rem;
+  padding: 0.2rem;
+  border: 1px solid var(--kd-line);
+  background: var(--kd-panel-raised);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
+}
+.kd-context-menu > button {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.35rem 0.5rem;
+  border: none;
+  background: none;
+  color: var(--kd-text-body);
+  font: inherit;
+  font-size: var(--kd-size-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.kd-context-menu > button:hover:not(:disabled) {
+  background: var(--kd-hover);
+  color: var(--kd-text);
+}
+.kd-context-menu > button:disabled {
+  color: var(--kd-faint);
+  cursor: default;
+}
+.kd-context-menu > button[data-danger="true"]:hover:not(:disabled) {
+  background: var(--kd-danger);
+  color: #fff;
+}
+
+/* ============================================================
+ * 工具类（克制使用）
+ * ========================================================== */
+.kd-row { display: flex; align-items: center; gap: 0.5rem; }
+.kd-col { display: flex; flex-direction: column; gap: 0.5rem; }
+.kd-grow { flex: 1; min-width: 0; }
+.kd-muted { color: var(--kd-muted); }
+.kd-faint { color: var(--kd-faint); }
+.kd-mono { font-family: var(--kd-font-mono); font-variant-numeric: tabular-nums; }
+.kd-num { font-variant-numeric: tabular-nums; }
+.kd-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.kd-nowrap { white-space: nowrap; }
