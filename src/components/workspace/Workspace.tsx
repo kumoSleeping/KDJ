@@ -9,17 +9,16 @@ import {
   useLibraryStore,
   type TrackSort,
 } from "../../stores/libraryStore";
-import type { IntakeItem, Platform, Quality, SongSource } from "../../types";
+import type { IntakeItem, Platform, Quality, SongSource, VideoInfo } from "../../types";
 import { Button, EmptyState, InlineNotice } from "../common";
 import { QueuePanel } from "../download/QueuePanel";
-import { ResultTable, selectionKey } from "../download/ResultTable";
+import { ResultTable, selectableGroups, selectionKey } from "../download/ResultTable";
 import { DEFAULT_PRIORITY, SearchBar, SearchPlatforms } from "../download/SearchBar";
 import { FolderTree } from "../library/FolderTree";
 import { AccountsPanel } from "../settings/AccountsPanel";
 import { LibraryToolbar } from "../library/LibraryToolbar";
 import { TrackDetail } from "../library/TrackDetail";
 import { TrackTable } from "../library/TrackTable";
-import { VideoPanel } from "../video/VideoPanel";
 
 function errorText(error: unknown): string {
   if (error instanceof ApiError) return error.message;
@@ -29,6 +28,7 @@ function errorText(error: unknown): string {
 /**
  * B 站输入的识别。音乐/视频不再是手动切的开关：
  * 贴的是 B 站链接或 BV 号，那就是要下视频，没有第二种解释。
+ * 结果照样落在「搜索」标签里，只是那一条长得像视频（见 VideoResultRow）。
  */
 const BILI_RE = /bilibili\.com|b23\.tv|^\s*(?:BV[0-9A-Za-z]{10}|av\d+)\s*$/i;
 
@@ -78,6 +78,8 @@ export function Workspace() {
   const [quality, setQuality] = useState<Quality | "">("");
   const [busy, setBusy] = useState(false);
   const [items, setItems] = useState<IntakeItem[] | null>(null);
+  /** 贴链接解析出来的那一个视频，置顶在结果列表最前面；关键词搜索会把它顶掉。 */
+  const [video, setVideo] = useState<VideoInfo | null>(null);
   const [note, setNote] = useState("");
   /**
    * 三处失败各有各的现场，所以分成三条，不合并成一个全局的错误：
@@ -113,6 +115,7 @@ export function Workspace() {
   /** 丢掉搜索结果，回到曲库标签。 */
   const closeResults = useCallback(() => {
     setItems(null);
+    setVideo(null);
     setNote("");
     setSearchError("");
     setQueueError("");
@@ -124,16 +127,31 @@ export function Workspace() {
     const text = query.trim();
     if (!text) return;
 
-    // B 站链接/BV 号 → 切到常驻的「视频」标签解析。
+    // B 站链接/BV 号 → 解析成一条视频结果，和搜索结果同在「搜索」标签里。
+    // 解析要往 B 站跑一趟，所以先切标签再等结果：不然按下回车后有一两秒
+    // 界面上什么都不变，像是没接住这次输入。
     if (BILI_RE.test(text)) {
-      useAppStore.getState().setListMode("video");
-      // VideoPanel 沿 busy 的上升沿触发解析，解析进度它自己管
       setBusy(true);
-      setTimeout(() => setBusy(false), 80);
+      setSearchError("");
+      setItems(null);
+      setChosen(new Set());
+      setHasResults(true);
+      try {
+        const info = await api.videoResolve(text);
+        setVideo(info);
+        setNote("1 个视频");
+      } catch (error) {
+        setVideo(null);
+        setNote("");
+        setSearchError(`解析失败：${errorText(error)}`);
+      } finally {
+        setBusy(false);
+      }
       return;
     }
 
     setBusy(true);
+    setVideo(null);
     setChosen(new Set());
     setExpandedGroups(new Set());
     setCollapsedItems(new Set());
@@ -205,7 +223,9 @@ export function Workspace() {
     (index: number) => {
       const item = items?.[index];
       if (!item) return;
-      const keys = item.groups.map((group) => selectionKey(index, group.group_id));
+      // 视频行没有勾选框，别把它们悄悄勾上——那样底下会冒出一条
+      // "已选 N 首"，但列表里根本找不到第 N 条被勾中的行
+      const keys = selectableGroups(item).map((group) => selectionKey(index, group.group_id));
       setChosen((current) => {
         const next = new Set(current);
         const allIn = keys.every((key) => next.has(key));
@@ -225,14 +245,14 @@ export function Workspace() {
 
   const toggleAll = useCallback(() => {
     const allKeys = (items ?? []).flatMap((item, index) =>
-      item.groups.map((group) => selectionKey(index, group.group_id)),
+      selectableGroups(item).map((group) => selectionKey(index, group.group_id)),
     );
     setChosen((current) => (current.size >= allKeys.length ? new Set() : new Set(allKeys)));
   }, [items]);
 
   const resultCount = useMemo(
-    () => (items ?? []).reduce((sum, item) => sum + item.groups.length, 0),
-    [items],
+    () => (items ?? []).reduce((sum, item) => sum + item.groups.length, 0) + (video ? 1 : 0),
+    [items, video],
   );
 
   const chosenSources = useMemo(() => {
@@ -354,7 +374,7 @@ export function Workspace() {
           <FolderTree />
 
           <div className="kd-table-wrap">
-            {/* 列表面板的"眉目"：三个标签常驻，随时可切，不等搜索了才出现。
+            {/* 列表面板的"眉目"：两个标签常驻，随时可切，不等搜索了才出现。
                 激活态只是中性底色，不跟真正的动作按钮抢红色。 */}
             <div className="kd-list-head">
               <nav className="kd-list-tabs" aria-label="列表内容">
@@ -371,13 +391,6 @@ export function Workspace() {
                   onClick={() => setListMode("search")}
                 >
                   搜索{resultCount > 0 && ` ${resultCount}`}
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={listMode === "video"}
-                  onClick={() => setListMode("video")}
-                >
-                  视频
                 </button>
               </nav>
               {/* 搜索失败时这条摘要就地变成失败原因（data-error 让它换个颜色），
@@ -427,12 +440,11 @@ export function Workspace() {
               />
             )}
 
-            {listMode === "video" ? (
-              <VideoPanel query={query} busy={busy} />
-            ) : listMode === "search" ? (
+            {listMode === "search" ? (
               <div className="kd-scroll">
                 <ResultTable
                   items={items ?? []}
+                  video={video}
                   loading={busy}
                   searched={hasResults}
                   selected={chosen}
@@ -482,11 +494,11 @@ export function Workspace() {
             )}
           </div>
 
-          {/* 右栏：齿轮呼出的登录面板优先，其次搜索/视频时是下载队列，曲库时是曲目详情 */}
+          {/* 右栏：齿轮呼出的登录面板优先，其次搜索时是下载队列，曲库时是曲目详情 */}
           <aside className="kd-split-aside kd-scroll">
             {showAccounts ? (
               <AccountsPanel />
-            ) : listMode !== "library" ? (
+            ) : listMode === "search" ? (
               <QueuePanel />
             ) : selected ? (
               <TrackDetail key={selected.id} track={selected} />

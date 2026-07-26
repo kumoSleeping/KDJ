@@ -26,6 +26,7 @@ import type {
   Track,
   TrackPage,
   TrackPatch,
+  TrackPatchResult,
   VideoDownloadRequest,
   VideoInfo,
   Waveform,
@@ -118,7 +119,29 @@ export const api = {
   },
   track: (id: number) => request<Track>(`/library/tracks/${id}`),
   patchTrack: (id: number, patch: TrackPatch) =>
-    request<Track>(`/library/tracks/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+    request<TrackPatchResult>(`/library/tracks/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  /**
+   * 换封面：请求体就是图片二进制。
+   *
+   * Content-Type 必须自己填上——`request` 只在没写的时候补 application/json，
+   * 让它补的话后端拿到的是一坨声称是 JSON 的 JPEG。
+   */
+  setCover: (id: number, file: Blob) =>
+    request<Track>(`/library/cover/${id}`, {
+      method: "PUT",
+      body: file,
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+    }),
+  /**
+   * 按文件里现存的标签刷新库里那条记录。
+   *
+   * 增量扫描按 mtime 跳过，所以"文件里有、库里空着"的记录（早年入库时读标签失败的）
+   * 靠再扫一遍是永远好不了的，只能显式重读一次。
+   */
+  rereadTags: (id: number) => post<Track>(`/library/tracks/${id}/reread-tags`),
   deleteTrack: (id: number, deleteFile = false) =>
     request<{ ok: boolean }>(`/library/tracks/${id}?delete_file=${deleteFile}`, { method: "DELETE" }),
   scan: (paths: string[], analyze = false) =>
@@ -154,9 +177,16 @@ export const api = {
     const { baseUrl, token } = bridge();
     return `${baseUrl}/api/library/audio/${id}?token=${encodeURIComponent(token)}`;
   },
-  coverUrl: (id: number) => {
+  /**
+   * `version` 是 cache-buster，不是后端认识的参数。
+   *
+   * 封面响应带 `Cache-Control: max-age`，换过封面之后 URL 不变的话
+   * 浏览器会一直拿缓存里那张旧图，用户看到的就是"换封面没反应"。
+   */
+  coverUrl: (id: number, version?: number | string) => {
     const { baseUrl, token } = bridge();
-    return `${baseUrl}/api/library/cover/${id}?token=${encodeURIComponent(token)}`;
+    const suffix = version === undefined || version === "" ? "" : `&v=${encodeURIComponent(version)}`;
+    return `${baseUrl}/api/library/cover/${id}?token=${encodeURIComponent(token)}${suffix}`;
   },
 };
 

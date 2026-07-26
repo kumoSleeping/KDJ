@@ -11,14 +11,17 @@ import { useDownloadStore } from "./downloadStore";
 import { useLibraryStore } from "./libraryStore";
 
 /**
- * 中间列表 + 右侧面板是**成对**切换的，三个标签常驻在列表面板顶边：
+ * 中间列表 + 右侧面板是**成对**切换的，两个标签常驻在列表面板顶边：
  *   library = 曲目表 + 曲目详情（本地）
  *   search  = 搜索结果 + 下载队列（在线）
- *   video   = 视频解析 + 下载队列（B 站）
- * 页面本身不换，只换这一对。搜索时自动切到 search、贴 B 站链接自动切到 video、
- * 点文件夹自动切回 library；随时可以手动点标签切——切走不丢内容。
+ * 页面本身不换，只换这一对。搜索时自动切到 search、点文件夹自动切回 library；
+ * 随时可以手动点标签切——切走不丢内容。
+ *
+ * 视频曾经是并列的第三个标签，现在并回了 search：贴 B 站链接和搜关键词都是
+ * "去网上找东西下"，分成两个标签之后每次都要先想"我刚才那条落在哪个标签里"。
+ * 视频和歌的差别只体现在结果行的长相上（见 VideoResultRow）。
  */
-export type ListMode = "library" | "search" | "video";
+export type ListMode = "library" | "search";
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

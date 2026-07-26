@@ -366,6 +366,14 @@ export interface ScanProgress {
   total: number;
   current: string;
   phase: "walk" | "tag" | "done";
+  /**
+   * 导入失败的原因，只出现在 `phase === "done"` 的那一条上（成功时是 null）。
+   * 中途的进度事件不带这个键——所以是可选的。
+   *
+   * 存在的理由：`POST /library/scan` 是"起个后台任务"，它的 Promise 早就 resolve 了，
+   * 真正的失败发生在之后。没有这个字段的话，失败在界面上和"扫出来 0 首"长得一模一样。
+   */
+  error?: string | null;
 }
 
 export interface AnalyzeProgress {

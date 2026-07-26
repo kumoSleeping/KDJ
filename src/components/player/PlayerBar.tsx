@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Disc3, Play, Square } from "lucide-react";
 import { api } from "../../lib/api";
 import { analyzePlaying } from "../../lib/autoAnalyze";
+import { markPlayed, pickNext } from "../../lib/autoplay";
 import { formatDuration } from "../../lib/format";
 import type { Track } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
@@ -37,6 +38,8 @@ export function PlayerBar() {
       setPosition(0);
       setDuration(next.duration ?? 0);
       setPlaying(true);
+      // 手动点播的也记进"放过了"：不然自动续播会把用户刚听完的那首再接一遍
+      markPlayed(next.id);
     };
     window.addEventListener(PLAY_EVENT, onPlay);
     return () => window.removeEventListener(PLAY_EVENT, onPlay);
@@ -123,8 +126,24 @@ export function PlayerBar() {
           if (Number.isFinite(value) && value > 0) setDuration(value);
         }}
         onEnded={() => {
-          setPlaying(false);
           setPosition(0);
+          // 自动续播：从和声推荐里挑一首没放过的接上。
+          // 先把"当前这首放完了"记下来再挑，否则它自己会出现在候选里。
+          const finished = track;
+          if (!finished) {
+            setPlaying(false);
+            return;
+          }
+          markPlayed(finished.id);
+          void pickNext(finished).then((next) => {
+            if (!next) {
+              // 推荐池空了（曲库太小 / 都放过了）就安静停下，不报错
+              setPlaying(false);
+              return;
+            }
+            // 走和双击列表同一条路：播放器不必知道谁触发了播放
+            playTrack(next);
+          });
         }}
         onError={() => {
           if (track) {

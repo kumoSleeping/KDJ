@@ -16,6 +16,7 @@ import type {
   ScanResponseLike,
   Track,
   TrackPatch,
+  TrackPatchResult,
   WsEvent,
 } from "../types";
 
@@ -176,8 +177,17 @@ export interface LibraryStore {
    * 一到 100% 就立刻消失的话，一批接一批跑时整条工具行会一灭一亮，列表跟着跳。
    */
   clearAnalyzeProgress(): void;
-  updateTrack(id: number, patch: TrackPatch): Promise<Track>;
+  /**
+   * 返回的是 `TrackPatchResult`：它就是一条 Track，只是可能多带一个
+   * `tag_write_error`。数据库存住了、文件标签没写进去时要靠它告诉用户，
+   * 吞掉的话用户会以为拖进 Rekordbox 的也是新的。
+   */
+  updateTrack(id: number, patch: TrackPatch): Promise<TrackPatchResult>;
   writeTags(id: number): Promise<Track>;
+  /** 换封面。返回的 Track 里 size / modified_at 会跟着变，所以要回写进列表。 */
+  setCover(id: number, file: Blob): Promise<Track>;
+  /** 按文件里现存的标签刷新库里那条记录。 */
+  rereadTags(id: number): Promise<Track>;
   removeTrack(id: number, deleteFile?: boolean): Promise<void>;
   handleEvent(event: WsEvent): void;
 }
@@ -359,10 +369,13 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   },
 
   async cancelAnalyze() {
-    const job = get().analyze;
     // 顺手摁灭自动补齐：不然停下来几秒后空闲探测又排一批，按钮等于没按
     set({ autoAnalyzeSuspended: true });
-    await api.cancelAnalyze(job?.job_id ?? "");
+    // 空 job_id = 全停。**故意不传手里那个 job_id**：同一时刻常常有好几批在跑
+    // （眼前这一屏一批、后台补齐一批），进度条只跟得住其中一批，
+    // 只停它的话用户按了「停止」风扇还在转，那就是个假按钮。
+    // 插队那批（正在放的那一首）后端压根没登记，全停也停不掉它——这是有意的。
+    await api.cancelAnalyze("");
     set({ analyze: null });
   },
 
@@ -385,6 +398,24 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   async writeTags(id) {
     const track = await api.writeTags(id);
+    set({
+      tracks: get().tracks.map((item) => (item.id === id ? track : item)),
+      selectedTrack: get().selectedTrack?.id === id ? track : get().selectedTrack,
+    });
+    return track;
+  },
+
+  async setCover(id, file) {
+    const track = await api.setCover(id, file);
+    set({
+      tracks: get().tracks.map((item) => (item.id === id ? track : item)),
+      selectedTrack: get().selectedTrack?.id === id ? track : get().selectedTrack,
+    });
+    return track;
+  },
+
+  async rereadTags(id) {
+    const track = await api.rereadTags(id);
     set({
       tracks: get().tracks.map((item) => (item.id === id ? track : item)),
       selectedTrack: get().selectedTrack?.id === id ? track : get().selectedTrack,

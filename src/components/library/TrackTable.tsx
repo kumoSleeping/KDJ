@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { FolderSearch, Link2, LoaderCircle } from "lucide-react";
 import { api } from "../../lib/api";
+import { observeTrackScroller } from "../../lib/autoAnalyze";
 import { camelotColor } from "../../lib/camelot";
-import { DASH, formatBpm, formatDuration } from "../../lib/format";
+import { DASH, formatBpm, formatDuration, isVideoTrack } from "../../lib/format";
 import {
   useLibraryStore,
   type SelectMode,
@@ -142,6 +143,10 @@ export function TrackTable({
     <div
       className="kd-scroll"
       style={{ height: "100%" }}
+      // 可视区域优先分析要知道"曲目表滚到哪了"。不挂这个 ref 它也能靠
+      // DOM 自己找到表（认 td[data-col="title"]），但那条路在列结构变动时
+      // 会静默失效——显式挂上就不再依赖任何选择器。
+      ref={observeTrackScroller}
       onScroll={(event) => {
         const el = event.currentTarget;
         // 距底 200px 就预取下一页，滚到底再等请求会有明显空白
@@ -228,10 +233,12 @@ export function TrackTable({
             >
               <td data-col="title" className="kd-td-strong" title={track.title || track.filename}>
                 {/* 内嵌封面缩略图。没图时 onError 藏掉 img，底下的灰格子当占位，
-                    行高不会跳。lazy：一页 200 行，只拉滚到眼前的。 */}
+                    行高不会跳。lazy：一页 200 行，只拉滚到眼前的。
+                    版本号挂 modified_at：换封面会更新它，列表里的小图才能跟着换——
+                    封面响应带 max-age=3600，不带版本号要干等缓存过期。 */}
                 <span className="kd-thumb">
                   <img
-                    src={api.coverUrl(track.id)}
+                    src={api.coverUrl(track.id, track.modified_at)}
                     alt=""
                     loading="lazy"
                     onError={(event) => {
@@ -249,6 +256,10 @@ export function TrackTable({
                     <Link2 size={11} />
                   </span>
                 )}
+                {/* 视频角标：曲库里混着 VJ 素材和 MV，不标一下和音频完全分不出来。
+                    紧贴标题文字放，读起来是「[封面] 视频 标题」。
+                    中性色不用红色——这是状态不是动作。 */}
+                {isVideoTrack(track.format) && <span className="kd-badge-video">视频</span>}
                 {track.title || track.filename}
               </td>
               <td data-col="artist" title={track.artist}>{track.artist || DASH}</td>
