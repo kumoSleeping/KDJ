@@ -46,6 +46,29 @@ sidecar 的 venv、PyInstaller 产物、egg-info、日志。
   矩阵三平台，先跑 pytest 再冻结再打包，冻结完拿 `--version` 冒烟。
 - 已推 `v0.1.0` tag 触发首跑。
 
+## CI 首跑排障记录（v0.1.0 最终发布成功）
+
+首跑三平台全挂，三个原因：
+
+1. **发 Release 无权限**：默认 GITHUB_TOKEN 只读，workflow 顶层补
+   `permissions: contents: write`。（mac/linux 的包其实都打出来了，栽在最后一步。）
+2. **Windows 测试失败之一 = 真产品 bug**：Windows 路径分隔符 `\` 恰好是
+   SQL LIKE 的 ESCAPE 字符。浅层文件夹筛选"排除子目录"的模式里裸拼了
+   `os.sep`，`%\%` 被解释成字面百分号 → Windows 上子目录曲目全漏进本层。
+   修复：`os.sep` 也过 `_escape_like`（POSIX 上 `/` 转义后不变，零影响）。
+3. **Windows 测试失败之二 = 夹具不可移植**：`/music/...` 无盘符假路径被
+   `normalize_path`（abspath）补上当前盘符，`rebase_paths` 前缀对不上。
+   夹具统一 `os.sep`（`u()` 助手）+ rebase 测试改用 tmp_path 真路径；
+   符号链接测试在无特权环境 pytest.skip。
+
+**远程排障技巧**：Actions 日志接口匿名 403 拿不到，但 check-run
+**annotations** 匿名可读——给 pytest 装 `pytest-github-actions-annotate-failures`，
+失败断言直接出现在 `/check-runs/{id}/annotations` 里，不用登录就能远程定位。
+另加 test.yml（push/PR 三平台测试不打包），迭代不必反复打 tag。
+
+首个 Release（v0.1.0）产物：mac arm64 DMG 155MB / mac x64 DMG 160MB /
+Windows Setup EXE 135MB / Linux AppImage 204MB。
+
 ## 已知边界
 
 - mac 未签名：首次打开要右键 → 打开；要去掉这一步得买开发者证书配公证。
