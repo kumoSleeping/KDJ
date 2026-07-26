@@ -1,21 +1,26 @@
 import { useState } from "react";
-import { Plus, RotateCcw, X } from "lucide-react";
+import { Plus, RotateCcw, Search, X } from "lucide-react";
 import { buildVjQuery, useVjKeywords } from "../../lib/vjKeywords";
 import type { Track } from "../../types";
+import { Button } from "../common";
 import { requestVjSearch } from "../workspace/Workspace";
 
 /**
- * 「搜VJ(Bili)」：拿当前这首歌去 B 站找可以当画面用的视频。
+ * 「搜 VJ（B 站）」：拿当前这首歌去 B 站找可以当画面用的视频。
  *
- * 点一个关键词 = 把「曲名（+ 艺人）+ 这个词」填进顶上的搜索框、平台切成
- * 只勾哔哩哔哩、直接搜。省掉的是"复制曲名 → 滚到顶上 → 粘贴 → 手打关键词
- * → 取消勾选另外三个平台"这一整套。
+ * 关键词是**可多选的选项**，不是"点一下就搜"的按钮：一次搜索常常要
+ * 好几个词一起限定（比如「官方 + 4K」），点一个搜一次等于每次只能试一个。
+ * 勾完之后底下那颗「搜索」才真的发起——搜索是要等网络的动作，
+ * 不该由"勾选"这种随手操作触发。
  *
- * 关键词可增删，和「带艺人」开关一起长期保存——常年搜手书的和常年搜现场的
- * 是两种用法，每次开软件重设一遍没有道理。
+ * 勾选、关键词列表、「带艺人」开关三样都长期保存：它们描述的是
+ * **这个人怎么找素材**，常年搜手书的和常年搜现场的是两种用法，
+ * 每次开软件重设一遍没有道理。
  */
 export function VjSearchPanel({ track }: { track: Track }) {
   const keywords = useVjKeywords((state) => state.keywords);
+  const picked = useVjKeywords((state) => state.picked);
+  const toggle = useVjKeywords((state) => state.toggle);
   const withArtist = useVjKeywords((state) => state.withArtist);
   const setWithArtist = useVjKeywords((state) => state.setWithArtist);
   const add = useVjKeywords((state) => state.add);
@@ -28,7 +33,10 @@ export function VjSearchPanel({ track }: { track: Track }) {
   const [editing, setEditing] = useState(false);
 
   const title = track.title || track.filename;
-  const preview = buildVjQuery(title, track.artist, "", withArtist) || title;
+  // 只把**还在列表里**的勾选算进去，顺序按列表来（不按勾选先后）：
+  // 同样几个词，搜出来的结果应该是同一批，不该取决于点的顺序
+  const active = keywords.filter((word) => picked.includes(word));
+  const query = buildVjQuery(title, track.artist, active, withArtist);
 
   const commitAdd = () => {
     if (draft.trim()) add(draft);
@@ -40,8 +48,8 @@ export function VjSearchPanel({ track }: { track: Track }) {
     <div className="kd-col" style={{ gap: "0.5rem" }}>
       {/* 先让人看见"到底会拿什么去搜"：曲名里的 [VDJ] 前缀会被洗掉，
           不显示出来的话用户会以为搜的是完整文件名。 */}
-      <div className="kd-faint kd-truncate" style={{ fontSize: "var(--kd-size-xs)" }} title={preview}>
-        搜索词：{preview} + 关键词
+      <div className="kd-faint" style={{ fontSize: "var(--kd-size-xs)", lineHeight: 1.5 }}>
+        搜索词：<span className="kd-mono">{query}</span>
       </div>
 
       <label className="kd-row kd-muted" style={{ gap: "0.35rem", fontSize: "var(--kd-size-xs)" }}>
@@ -59,8 +67,9 @@ export function VjSearchPanel({ track }: { track: Track }) {
           <span key={word} className="kd-vj-word">
             <button
               type="button"
-              title={`在 B 站搜「${buildVjQuery(title, track.artist, word, withArtist)}」`}
-              onClick={() => requestVjSearch(buildVjQuery(title, track.artist, word, withArtist))}
+              aria-pressed={picked.includes(word)}
+              title={picked.includes(word) ? "取消这个词" : "加上这个词"}
+              onClick={() => toggle(word)}
             >
               {word}
             </button>
@@ -106,7 +115,13 @@ export function VjSearchPanel({ track }: { track: Track }) {
         )}
       </div>
 
-      <div className="kd-row" style={{ gap: "0.5rem", fontSize: "var(--kd-size-xs)" }}>
+      {/* 搜索是这一块唯一的动作，红色归它 */}
+      <Button variant="primary" size="sm" onClick={() => requestVjSearch(query)}>
+        <Search size={12} />
+        搜索{active.length > 0 && ` （${active.length} 个词）`}
+      </Button>
+
+      <div className="kd-row" style={{ gap: "0.6rem", fontSize: "var(--kd-size-xs)" }}>
         <button type="button" className="kd-linklike" onClick={() => setEditing((v) => !v)}>
           {editing ? "完成" : "管理关键词"}
         </button>

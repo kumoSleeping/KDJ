@@ -2127,3 +2127,134 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
 .kd-sheet .kd-panel-slot + .kd-panel-slot {
   margin-top: 0.6rem;
 }
+
+/* ============================================================
+ * 搜索框（图标内嵌）与平台标志键
+ * ========================================================== */
+
+/* 搜索框把「音质」和「搜索」都收进边框里。
+   原来它们是外面两个独立控件，横着吃掉一大截宽度，而且那颗红色的
+   「搜索」会跟顶上真正的动作抢注意力——它和输入框本来就是同一件事的两半。 */
+.kd-searchbox {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  height: 2.1rem;
+  padding: 0 0.25rem 0 0.55rem;
+  border: 1px solid var(--kd-line);
+  background: var(--kd-panel-inset);
+}
+.kd-searchbox:focus-within {
+  border-color: var(--kd-muted);
+}
+.kd-searchbox-lead {
+  flex: none;
+  display: inline-flex;
+  color: var(--kd-faint);
+}
+.kd-searchbox > input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  outline: none;
+  color: var(--kd-text);
+  font-size: var(--kd-size-lg);
+}
+.kd-searchbox > input::placeholder {
+  color: var(--kd-faint);
+}
+/* 音质：一个方块，只显示 FLAC/320K/128K。原生 select 的下拉箭头会把
+   宽度撑开一截，藏掉之后它就是一个纯文字方块。 */
+.kd-searchbox-quality {
+  flex: none;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 3.4rem;
+  height: 1.7rem;
+  padding: 0 0.3rem;
+  border: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-align: center;
+  text-align-last: center;
+  cursor: pointer;
+}
+.kd-searchbox-quality:hover {
+  color: var(--kd-text);
+}
+/* 搜索键：框内最右的一个小图标。红色留给它——这是整条搜索区唯一的动作。 */
+.kd-searchbox-go {
+  flex: none;
+  appearance: none;
+  border: none;
+  width: 1.7rem;
+  height: 1.7rem;
+  display: grid;
+  place-items: center;
+  background: var(--kd-theme);
+  color: var(--kd-theme-ink);
+  cursor: pointer;
+}
+.kd-searchbox-go:hover:not(:disabled) {
+  background: var(--kd-theme-strong);
+}
+.kd-searchbox-go:disabled {
+  background: transparent;
+  color: var(--kd-faint);
+  cursor: default;
+}
+
+/* —— 平台标志键 ——
+   只有标志没有名字。四个中文/英文名横排要占掉半条工具栏，而这四家的
+   品牌色和形状本来就是用户脑子里的第一识别项；名字进 title。 */
+.kd-plats {
+  display: flex;
+  gap: 0.25rem;
+}
+.kd-plat {
+  appearance: none;
+  width: 1.95rem;
+  height: 1.95rem;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--kd-line);
+  background: transparent;
+  /* 没选中时降到中性灰：一排四个品牌色全亮着的话，选没选中就看不出来了 */
+  color: var(--kd-faint);
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.kd-plat:hover {
+  color: var(--kd-muted);
+  border-color: var(--kd-muted);
+}
+.kd-plat[aria-pressed="true"] {
+  border-color: currentColor;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+/* 选中时各家用各家的品牌色。这是它们唯一被允许上色的时刻。 */
+.kd-plat[aria-pressed="true"][data-platform="wyy"] {
+  color: #e02020;
+}
+.kd-plat[aria-pressed="true"][data-platform="qqm"] {
+  color: #31c27c;
+}
+.kd-plat[aria-pressed="true"][data-platform="soundcloud"] {
+  color: #ff5500;
+}
+.kd-plat[aria-pressed="true"][data-platform="bilibili"] {
+  color: #fb7299;
+}
+/* 未启用（SoundCloud 默认关着）：虚线边表示"能点，但点了是先启用" */
+.kd-plat[data-off="true"] {
+  border-style: dashed;
+  opacity: 0.55;
+}
+.kd-plat[data-dragging="true"] {
+  opacity: 0.4;
+}

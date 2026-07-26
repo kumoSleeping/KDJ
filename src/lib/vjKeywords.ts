@@ -32,6 +32,7 @@ export const DEFAULT_VJ_KEYWORDS = [
 
 const KEYWORDS_KEY = "kd-vj-keywords";
 const ARTIST_KEY = "kd-vj-with-artist";
+const PICKED_KEY = "kd-vj-picked";
 
 function load(): string[] {
   try {
@@ -49,12 +50,24 @@ function load(): string[] {
 
 interface VjKeywordState {
   keywords: string[];
+  /** 勾中的那几个。可以一个都不勾——那就是拿曲名裸搜。 */
+  picked: string[];
   /** 拼搜索词时要不要带上艺人名。 */
   withArtist: boolean;
   add(word: string): void;
   remove(word: string): void;
   reset(): void;
+  toggle(word: string): void;
   setWithArtist(value: boolean): void;
+}
+
+function loadPicked(): string[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(PICKED_KEY) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -65,7 +78,17 @@ interface VjKeywordState {
  */
 export const useVjKeywords = create<VjKeywordState>((set, get) => ({
   keywords: load(),
+  picked: loadPicked(),
   withArtist: localStorage.getItem(ARTIST_KEY) === "1",
+
+  toggle(word) {
+    const picked = get().picked;
+    const next = picked.includes(word)
+      ? picked.filter((k) => k !== word)
+      : [...picked, word];
+    localStorage.setItem(PICKED_KEY, JSON.stringify(next));
+    set({ picked: next });
+  },
 
   add(word) {
     const clean = word.trim();
@@ -79,12 +102,18 @@ export const useVjKeywords = create<VjKeywordState>((set, get) => ({
   remove(word) {
     const next = get().keywords.filter((k) => k !== word);
     localStorage.setItem(KEYWORDS_KEY, JSON.stringify(next));
-    set({ keywords: next });
+    // 勾选里也要摘掉：留着的话它会继续参与拼词，而界面上已经看不见这个词了
+    const picked = get().picked.filter((k) => k !== word);
+    localStorage.setItem(PICKED_KEY, JSON.stringify(picked));
+    set({ keywords: next, picked });
   },
 
   reset() {
     localStorage.removeItem(KEYWORDS_KEY);
-    set({ keywords: DEFAULT_VJ_KEYWORDS });
+    // 勾选一起清：恢复默认之后原来勾的可能已经不在列表里了，
+    // 留着就是一个看不见却仍在参与拼词的幽灵
+    localStorage.removeItem(PICKED_KEY);
+    set({ keywords: DEFAULT_VJ_KEYWORDS, picked: [] });
   },
 
   setWithArtist(value) {
@@ -100,13 +129,19 @@ export const useVjKeywords = create<VjKeywordState>((set, get) => ({
  * 上传者水印）在 B 站搜索里全是噪声——它们是我们自己的文件命名习惯，
  * 不是这首歌在 B 站上的名字。带着搜多半零结果，所以先洗掉。
  */
-export function buildVjQuery(title: string, artist: string, keyword: string, withArtist: boolean) {
+export function buildVjQuery(
+  title: string,
+  artist: string,
+  keywords: string[],
+  withArtist: boolean,
+) {
   const clean = title
     .replace(/^\s*[[【(（][^\]】)）]*[\]】)）]\s*/g, "") // 开头的 [VDJ] 这类标记，可能连着好几个
     .replace(/\s*[([（【][^)\]）】]*[)\]）】]\s*$/g, "") // 结尾的 (xxx remix) 这类括注
     .replace(/[_]+/g, " ")
     .trim();
-  return [clean || title, withArtist ? artist.trim() : "", keyword]
+  return [clean || title, withArtist ? artist.trim() : "", ...keywords]
+    .map((part) => part.trim())
     .filter(Boolean)
     .join(" ");
 }

@@ -88,7 +88,10 @@ export function Workspace() {
 
   const [query, setQuery] = useState("");
   const [platforms, setPlatforms] = useState<Platform[]>(["wyy", "qqm"]);
-  const [merge, setMerge] = useState(true);
+  // 跨平台去重恒为开，开关已删：不合并的话搜一次出四条一模一样的结果，
+  // 没有人会想要那个。留常量而不是把 true 写进调用点，是为了让
+  // `/intake` 那个字段的语义在这里仍然看得见。
+  const merge = true;
   const [quality, setQuality] = useState<Quality | "">("");
   const [busy, setBusy] = useState(false);
   const [items, setItems] = useState<IntakeItem[] | null>(null);
@@ -206,7 +209,8 @@ export function Workspace() {
     } finally {
       setBusy(false);
     }
-  }, [query, platforms, merge, batch, settings, setHasResults]);
+    // merge 是常量，不进依赖
+  }, [query, platforms, batch, settings, setHasResults]);
 
   /* ------------------------------------------------------------ 窄屏 / 竖屏 */
   const narrow = useNarrow();
@@ -482,8 +486,6 @@ export function Workspace() {
       <SearchPlatforms
         platforms={platforms}
         onTogglePlatform={togglePlatform}
-        merge={merge}
-        onMergeChange={setMerge}
         soundcloudEnabled={settings?.soundcloud_enabled ?? false}
       />
 

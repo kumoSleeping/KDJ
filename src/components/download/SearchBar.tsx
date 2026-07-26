@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { Clapperboard, Link2, LoaderCircle, Rows3, Search } from "lucide-react";
+import { Link2, LoaderCircle, Rows3, Search } from "lucide-react";
 import type { Platform, Quality } from "../../types";
 import { useAppStore } from "../../stores/appStore";
-import { Button } from "../common";
+import { PlatformMark } from "./PlatformMark";
 
 /** 平台一览。哔哩哔哩挂着视频小标志：贴 B 站链接会自动走视频解析。 */
 export const SEARCH_PLATFORMS: ReadonlyArray<{ id: Platform; label: string; video?: boolean }> = [
@@ -18,8 +18,6 @@ export const DEFAULT_PRIORITY: readonly string[] = ["wyy", "qqm", "soundcloud", 
 export interface SearchPlatformProps {
   platforms: Platform[];
   onTogglePlatform(platform: Platform): void;
-  merge: boolean;
-  onMergeChange(value: boolean): void;
   soundcloudEnabled: boolean;
 }
 
@@ -68,9 +66,12 @@ export function SearchBar({
         if (canSubmit) onSubmit();
       }}
     >
-      <span className="kd-muted kd-row" style={{ gap: "0.35rem", height: "1.85rem" }}>
-        {batch ? <Rows3 size={14} /> : isUrl ? <Link2 size={14} /> : <Search size={14} />}
-      </span>
+      {/* 批量模式才在外面留图标位：文本域有四行高，图标压在里面会跟文字打架 */}
+      {batch && (
+        <span className="kd-muted kd-row" style={{ gap: "0.35rem", height: "1.85rem" }}>
+          <Rows3 size={14} />
+        </span>
+      )}
 
       {batch ? (
         <textarea
@@ -93,64 +94,86 @@ export function SearchBar({
           onChange={(event) => onQueryChange(event.target.value)}
         />
       ) : (
-        <input
-          className="kd-input kd-grow"
-          data-size="lg"
-          value={query}
-          placeholder="歌名 / 艺人，或直接粘贴歌单、单曲分享链接（多行内容自动批量）"
-          aria-label="搜索关键词或链接"
-          onChange={(event) => onQueryChange(event.target.value)}
-          // 多行文本贴进单行输入框会被浏览器压成一行，批量意图就丢了；
-          // 拦下来原样放进 query，换行一到位就自动切成批量文本域
-          onPaste={(event) => {
-            const text = event.clipboardData.getData("text");
-            if (!/[\r\n]/.test(text.trim())) return;
-            event.preventDefault();
-            const clean = text.replace(/\r\n?/g, "\n").trim();
-            onQueryChange(query.trim() ? `${query.trim()}\n${clean}` : clean);
-          }}
-        />
+        // 搜索键住在输入框**里面**：它和输入框是同一件事的两半，
+        // 摆成外面一颗独立的红按钮会让它跟顶上真正的动作抢注意力，
+        // 而且横着吃掉一大截本该给输入框的宽度。
+        <div className="kd-searchbox kd-grow">
+          <span className="kd-searchbox-lead" aria-hidden="true">
+            {isUrl ? <Link2 size={14} /> : <Search size={14} />}
+          </span>
+          <input
+            value={query}
+            placeholder="歌名 / 艺人，或直接粘贴歌单、单曲分享链接（多行内容自动批量）"
+            aria-label="搜索关键词或链接"
+            onChange={(event) => onQueryChange(event.target.value)}
+            // 多行文本贴进单行输入框会被浏览器压成一行，批量意图就丢了；
+            // 拦下来原样放进 query，换行一到位就自动切成批量文本域
+            onPaste={(event) => {
+              const text = event.clipboardData.getData("text");
+              if (!/[\r\n]/.test(text.trim())) return;
+              event.preventDefault();
+              const clean = text.replace(/\r\n?/g, "\n").trim();
+              onQueryChange(query.trim() ? `${query.trim()}\n${clean}` : clean);
+            }}
+          />
+          <select
+            className="kd-searchbox-quality"
+            value={quality}
+            aria-label="下载音质"
+            title="这次下载用什么音质"
+            onChange={(event) => onQualityChange(event.target.value as Quality | "")}
+          >
+            <option value="">{defaultQuality.toUpperCase()}</option>
+            <option value="flac">FLAC</option>
+            <option value="320">320K</option>
+            <option value="128">128K</option>
+          </select>
+          <button
+            type="submit"
+            className="kd-searchbox-go"
+            disabled={!canSubmit}
+            aria-label={isUrl ? "解析" : "搜索"}
+            title={isUrl ? "解析这条链接" : "搜索"}
+          >
+            {busy ? <LoaderCircle className="kd-spin" size={14} /> : <Search size={14} />}
+          </button>
+        </div>
       )}
 
-      <div className="kd-row" style={{ gap: "0.3rem" }}>
-        <select
-          className="kd-select"
-          data-size="sm"
-          value={quality}
-          aria-label="下载音质"
-          title="这次下载用什么音质"
-          onChange={(event) => onQualityChange(event.target.value as Quality | "")}
-        >
-          <option value="">默认（{defaultQuality}）</option>
-          <option value="flac">FLAC</option>
-          <option value="320">320K</option>
-          <option value="128">128K</option>
-        </select>
-        <Button
+      {/* 批量模式：文本域是四行高，右边空得下一颗正经按钮，而且"批量处理 N 条"
+          这个数字必须说出来——贴了一大坨进去，得让人知道系统数出了几条 */}
+      {batch && (
+        <button
           type="submit"
-          variant="primary"
+          className="kd-btn"
+          data-variant="primary"
           disabled={!canSubmit}
-          title={batch ? "Cmd/Ctrl+Enter 也可以提交" : undefined}
+          title="Cmd/Ctrl+Enter 也可以提交"
         >
           {busy ? <LoaderCircle className="kd-spin" size={13} /> : <Search size={13} />}
-          {batch ? `批量处理${entryCount > 1 ? `（${entryCount}）` : ""}` : isUrl ? "解析" : "搜索"}
-        </Button>
-      </div>
+          批量处理{entryCount > 1 ? `（${entryCount}）` : ""}
+        </button>
+      )}
     </form>
   );
 }
 
 /**
- * 搜索平台与去重开关。单独一条窄行，跟在大搜索框下面。
+ * 搜索平台。单独一条窄行，跟在大搜索框下面。
+ *
+ * 只放各家的标志，不写名字：四个中文/英文名横着排要占掉半条工具栏，
+ * 而这四家的品牌色和形状本来就是用户脑子里的第一识别项。名字进 title，
+ * 需要确认的时候悬停一下就有。
  *
  * 按钮顺序 = 下载来源优先级：同一首歌几个平台都有时，默认从排最前的那家下。
  * 顺序可以直接拖动调整，存在设置里（platform_priority）。
+ *
+ * 「混合去重」的开关删掉了、恒为开：跨平台同一首歌不合并的话，
+ * 搜一次出四条一模一样的结果，没有人会想要那个。
  */
 export function SearchPlatforms({
   platforms,
   onTogglePlatform,
-  merge,
-  onMergeChange,
   soundcloudEnabled,
 }: SearchPlatformProps) {
   const saveSettings = useAppStore((state) => state.saveSettings);
@@ -176,7 +199,7 @@ export function SearchPlatforms({
 
   return (
     <div className="kd-toolbar" data-slim="true">
-      <div className="kd-segment" role="group" aria-label="搜索平台（拖动排序 = 来源优先级）">
+      <div className="kd-plats" role="group" aria-label="搜索平台（拖动排序 = 来源优先级）">
         {ordered.map((item) => {
           // SoundCloud 默认关着（走 yt-dlp，慢且不稳）。但按钮直接置灰是个死胡同：
           // 用户点不动，也没人告诉他为什么。改成点一下就把开关打开——
@@ -186,17 +209,20 @@ export function SearchPlatforms({
             <button
               key={item.id}
               type="button"
+              className="kd-plat"
               aria-pressed={platforms.includes(item.id)}
+              aria-label={item.label}
               data-platform={item.id}
               data-off={off || undefined}
               data-dragging={dragging === item.id || undefined}
               draggable
+              // 名字进 title：按钮上只有标志，悬停才说是谁
               title={
                 off
-                  ? "SoundCloud 未启用（走 yt-dlp，速度不稳）。点一下就启用"
+                  ? `${item.label}：未启用，点一下就启用`
                   : item.video
-                    ? "贴 B 站链接或 BV 号会自动走视频解析。拖动可调整来源优先级"
-                    : "拖动排序：排前面的平台优先作为下载来源"
+                    ? `${item.label}（贴链接或 BV 号自动走视频解析）· 拖动排序`
+                    : `${item.label} · 拖动排序：排前面的优先作为下载来源`
               }
               onDragStart={(event) => {
                 event.dataTransfer.effectAllowed = "move";
@@ -223,21 +249,12 @@ export function SearchPlatforms({
                 onTogglePlatform(item.id);
               }}
             >
-              {item.label}
-              {item.video && <Clapperboard size={11} style={{ marginLeft: "0.3rem" }} />}
+              <PlatformMark id={item.id} />
             </button>
           );
         })}
       </div>
 
-      <label className="kd-check" title="跨平台同一首歌合并成一条，下载时可挑来源">
-        <input
-          type="checkbox"
-          checked={merge}
-          onChange={(event) => onMergeChange(event.target.checked)}
-        />
-        混合去重
-      </label>
     </div>
   );
 }
