@@ -10,7 +10,10 @@
 #   - 打 tag：v* 或 rust-v*，额外发 GitHub Release。
 #     **注意**：build.yml 也监听 v*，所以在正式切换之前请用 `rust-v0.2.0`
 #     这种前缀 tag——GitHub 的 ref 模式从头匹配，`v*` 不会命中 `rust-v*`，
-#     这样两条流水线不会往同一个 Release 里塞两套 155MB / 15MB 的包。
+#     这样两条流水线不会往同一个 Release 里塞两套包。两套包的真实差距：
+#     v0.1.0 的 mac arm64 DMG 是 155MB，本机实测 Tauri 版是 5,911,874 B（≈5.6MiB），
+#     并排放在一个 Release 里用户根本分不清哪个是哪个。
+#     实测细节见 docs/rust-port/06-packaging-results.md。
 name: rust-build
 
 on:
@@ -149,6 +152,11 @@ jobs:
       # 产物路径用宽松的 `**` 通配：src-tauri 是不是 workspace 成员会决定
       # 产物落在 `target/` 还是 `src-tauri/target/`，加上 --target 又会多一层
       # 三元组目录。与其猜，不如让 glob 兜住所有情况。
+      #
+      # 本机实测（不带 --target 时）落点是根 `target/release/bundle/`：
+      #   bundle/macos/KumoDeck.app  和  bundle/dmg/KumoDeck_0.2.0_aarch64.dmg
+      # 也就是 src-tauri 作为 workspace 成员那一支。带 --target universal-apple-darwin
+      # 时会变成 target/universal-apple-darwin/release/bundle/，通配仍然兜得住。
       - name: 上传产物
         if: steps.shell.outputs.present == 'true'
         uses: actions/upload-artifact@v4

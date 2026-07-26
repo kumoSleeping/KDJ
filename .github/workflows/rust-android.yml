@@ -1,8 +1,10 @@
 # 安卓 APK（Tauri 2 mobile）。
 #
-# ⚠️ 这条流水线目前是**骨架**：M7（src-tauri 壳）和 M8（安卓）都还没做，
-# 没人在真机上跑通过。已知风险全部写在下面的注释里，谁来接手先读一遍再改，
-# 不要把"CI 红了"当成随机故障去重试。
+# 状态：本机（macOS/arm64 + NDK r27c）已经真的编出了一个 aarch64 release APK
+# ——18,025,001 B，unsigned，实测细节见 docs/rust-port/06-packaging-results.md §4。
+# **但这条流水线本身仍然没在 GitHub 上跑过**，而且那个 APK 还没装进过真机：
+# 装机之前必须先解决 usesCleartextTraffic（见下面风险 1），否则大概率白屏。
+# 下面的风险注释已经按本机实测重排过一遍，别再照着旧版去乱设 CC_*/AR_*。
 #
 # 触发只留 workflow_dispatch 和 tag：安卓构建要下 SDK/NDK（~2GB）又要交叉编
 # 译四遍，挂在每次 push 上纯属浪费额度，而且在壳做好之前必然跳过。
@@ -26,9 +28,11 @@ env:
   #      runner 镜像里预装的版本随时会变，飘一次就是"昨天还好好的"；
   #   2. ring 0.17 和 libsqlite3-sys(bundled) 都要 NDK 里的 clang 当交叉编译器，
   #      r23 以下缺 `libgcc → libunwind` 的兼容垫片，链接会报 `-lgcc not found`。
-  # r26/r27 都验证过是社区常用档；换版本请连带重跑一次真机安装。
+  # r27c 已在本机实测：ring / rusqlite / rustls 全部一次编过，没手工设过
+  # 任何 CC_*/AR_* 变量。换版本请连带重跑一次真机安装。
   NDK_VERSION: 27.2.12479018
-  # Tauri 的 gradle 插件要求 JDK 17+
+  # Tauri 的 gradle 插件要求 JDK 17+。**上限也要管**：本机用系统的 JDK 22 时
+  # sdkmanager 直接起不来，所以这里钉 17 而不是 latest。
   JAVA_VERSION: "17"
 
 jobs:
@@ -54,10 +58,21 @@ jobs:
       # ANDROID_NDK_HOME / NDK_HOME 两个变量都要给：Tauri 读前者，
       # cc-rs（ring / libsqlite3-sys 的构建脚本）读后者，只给一个会在
       # "gradle 跑起来了但 cargo 编不过" 的地方失败，很难看出是缺变量。
-      - name: 安装 NDK
+      # platform / build-tools 的版本**必须跟着 `android init` 生成的 gradle 工程走**，
+      # 不能想当然写 34。本机实测：Tauri 2.11 生成的 app/build.gradle.kts 里是
+      # `compileSdk = 36 / targetSdk = 36 / minSdk = 24` + AGP 8.11.0，
+      # 而 AGP 8.11 默认要 build-tools 35.0.0。装成 34 的结果是 cargo 全部编完
+      # （一两个小时）之后才在 gradle 那一步倒下：
+      #     Could not determine the dependencies of task ':app:minifyUniversalReleaseWithR8'.
+      #     > Failed to find Build Tools revision 35.0.0
+      # 这个报错和交叉编译毫无关系，别顺着 NDK 方向查。
+      # 以后 Tauri 升版把 compileSdk 顶到 37 时，这里也要跟着改——
+      # 判断方法：init 之后 grep 一下 gen/android/app/build.gradle.kts。
+      - name: 安装 NDK 与 SDK
         run: |
           set -euo pipefail
-          sdkmanager --install "ndk;${NDK_VERSION}" "platforms;android-34" "build-tools;34.0.0"
+          sdkmanager --install "ndk;${NDK_VERSION}" \
+                     "platforms;android-36" "build-tools;35.0.0" "platform-tools"
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
           echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
@@ -65,6 +80,9 @@ jobs:
       # armv7 兜老设备。i686 / x86_64 是模拟器用的，要跑模拟器再补
       # （同时 `tauri android build` 的 --target 也要一起加，否则 gradle
       #  找不到那个 ABI 的 .so 会直接失败）。
+      #
+      # 注意：`android init` 自己还会 rustup 补装 i686 / x86_64（本机实测），
+      # 所以这里少装两个不会让 init 失败，只是 init 那一步会多花一点时间下载。
       - name: 安装 Rust 与安卓 target
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -92,8 +110,11 @@ jobs:
 
       # `android init` 生成 src-tauri/gen/android/（gradle 工程）。
       # 已知坑：
-      #   - identifier 里带 `-` 或以数字开头会被 Java 包名规则拒掉，
-      #     tauri.conf.json 的 identifier 要写成 com.kumosleeping.kumodeck 这种；
+      #   - identifier 里带 `-` 或以数字开头会被 Java 包名规则拒掉。
+      #     现在的 `com.kumodeck.app` 是合法的（本机 init 一次通过），但 Tauri 会
+      #     告警说 `.app` 结尾和 macOS 的 bundle 扩展名冲突。要不要换是产品身份
+      #     决定，交用户拍板；换的时候注意它不影响数据目录——
+      #     `src-tauri/src/lib.rs::legacy_data_dir` 取的是 app_config_dir 的父目录。
       #   - gen/android 是生成物，按 Tauri 官方建议**不进版本库**，所以 CI 每次都要 init；
       #     如果以后要改 AndroidManifest（比如加 INTERNET / 存储权限），
       #     得把 gen/android 提交进仓库或改用 tauri 的 manifest 合并配置，
@@ -102,21 +123,69 @@ jobs:
         if: steps.shell.outputs.present == 'true'
         run: npx --yes @tauri-apps/cli@^2 android init
 
-      # 已知风险（按踩到的概率排）：
-      #   1. **签名**：这里出的是未签名 / 只带 debug 签名的 APK，
+      # 风险 1 的解法：release 也放行明文 HTTP。
+      # 这个 app 的前端在 WebView 里对 127.0.0.1 上的进程内 axum 发明文请求
+      # （token 鉴权，见 auth.rs），Android 对 targetSdk 28+ 默认禁明文，
+      # 不开的话 release 包装上真机就是白屏。四家平台的 API 全走 https，
+      # 实际放行的只有本机回环这一条。gen/android 不进版本库，所以必须在
+      # init 之后每次都补——模板里 debug 本来就是 true，这里只翻 release 的默认值。
+      - name: 放行 localhost 明文（改 usesCleartextTraffic）
+        if: steps.shell.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          f=src-tauri/gen/android/app/build.gradle.kts
+          sed -i 's/manifestPlaceholders\["usesCleartextTraffic"\] = "false"/manifestPlaceholders["usesCleartextTraffic"] = "true"/' "$f"
+          grep -n 'usesCleartextTraffic' "$f"
+          # sed 打空是静默的：模板哪天改了形状，这里必须炸而不是装作补完了
+          if grep -q 'usesCleartextTraffic"\] = "false"' "$f"; then
+            echo '::error::usesCleartextTraffic 还留着 false，sed 没打中——去对一下模板形状'
+            exit 1
+          fi
+
+      # init 出来的 gradle 工程带的是 Tauri 默认图标。真图标（`tauri icon` 的产物）
+      # 提交在 src-tauri/icons/android/ 里，覆盖过去；顺带把自适应图标的背景层
+      # 从模板的 #fff 换成应用底色——白底配深色图会在圆形遮罩里露一圈白边。
+      - name: 同步应用图标进 gradle 工程
+        if: steps.shell.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          cp -R src-tauri/icons/android/. src-tauri/gen/android/app/src/main/res/
+          grep -o '#[0-9a-fA-F]*' src-tauri/gen/android/app/src/main/res/values/ic_launcher_background.xml
+
+      # 风险表已按本机实测（NDK r27c）重排。**先看下面这三条已经被证伪的**，
+      # 别再花时间去调 CC_*/AR_*：
+      #   ✅ ring 0.17 交叉编译：一次编过，没设过任何 CC_*/AR_*。
+      #   ✅ rusqlite bundled（cc 编 SQLite 的 C 源码）：一次编过。
+      #   ✅ rustls / hyper-rustls：一次编过。
+      # 也就是说 r27c 自带的 clang 能被 cc-rs 自动找到，前提是
+      # ANDROID_NDK_HOME 和 NDK_HOME **两个都设了**（上一步已经设）。
+      #
+      # ✅ INTERNET 权限也不用操心：Tauri 模板生成的
+      #    gen/android/app/src/main/AndroidManifest.xml 第 3 行自带
+      #    <uses-permission android:name="android.permission.INTERNET" />，
+      #    manifest-merger report 确认合进去了。（旧注释把它列成第一风险，是猜的。）
+      #
+      # 还没被证伪、真正要担心的（按概率排）：
+      #   1. **明文 HTTP 被禁**：生成的 app/build.gradle.kts 里
+      #      defaultConfig 是 usesCleartextTraffic = "false"，只有 debug buildType
+      #      才置 "true"。而本项目的架构是进程内 axum 绑 127.0.0.1、前端走
+      #      http:// + ws://（HANDOFF §5 的既定决定），release APK 装上去
+      #      大概率白屏，且 debug 包复现不出来。解法见
+      #      docs/rust-port/06-packaging-results.md §4.7（推荐写一份
+      #      network_security_config.xml 只放开 127.0.0.1）。
+      #   2. **签名**：这里出的是未签名 APK（产物名就叫 *-unsigned.apk），
       #      直接装到真机可能被 "应用未安装" 拒绝。正式发版要配
       #      ANDROID_KEY_BASE64 / ANDROID_KEY_PASSWORD 之类的 secrets，
       #      在 gen/android/app/build.gradle.kts 里挂 signingConfigs。
       #      骨架阶段先不引入 secrets，免得给一个空 secret 更难排查。
-      #   2. **ring 交叉编译**：reqwest 走 rustls，rustls 的密码学后端是 ring，
-      #      ring 有汇编 + C，要 NDK clang。armv7 上历史上还需要显式
-      #      CC_armv7_linux_androideabi / AR_armv7_linux_androideabi，
-      #      NDK r23+ 一般能自动找到；报 `clang: not found` 就是这里。
-      #   3. **rusqlite bundled**：会用 cc 编 SQLite 的 C 源码，同样吃 NDK clang，
-      #      而且交叉编译时不要让它去 pkg-config 找系统 sqlite。
-      #   4. **16KB page size**：Android 15 起要求 .so 按 16KB 对齐，
+      #   3. **16KB page size**：Android 15 起要求 .so 按 16KB 对齐，
       #      老 NDK 编出来的库在新机器上会加载失败——这也是钉 r27 的理由之一。
-      #   5. **minSdk**：Tauri 2 要求 API 24+，WebView 版本太老的机器直接白屏。
+      #      r27c 编出来的库还没装进真机验证过。
+      #   4. **minSdk**：Tauri 2 要求 API 24+，WebView 版本太老的机器直接白屏。
+      #
+      # 时间预期：冷编一次 aarch64 全图（约 600 个 crate）在根 Cargo.toml 的
+      # release 档下（opt-level=z + lto + codegen-units=1）**要按小时算**。
+      # 上面的 rust-cache 因此是刚需，不是优化。
       - name: tauri android build --apk
         if: steps.shell.outputs.present == 'true'
         run: npx --yes @tauri-apps/cli@^2 android build --apk --target aarch64 --target armv7
