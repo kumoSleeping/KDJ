@@ -194,6 +194,26 @@ pub fn write_analysis_tags(
     Ok(())
 }
 
+/// 读内嵌封面，返回 `(字节, mime)`。
+///
+/// 曲库列表里每一行都要一张图，所以这里只取第一张、不做缩放——
+/// 缩放交给浏览器，省一个图像处理依赖。
+pub fn read_cover(path: &Path) -> Option<(Vec<u8>, String)> {
+    let tagged = Probe::open(path).ok()?.read().ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    // 优先正封面，没有就拿第一张（有些文件只存了 Other 类型）
+    let picture = tag
+        .pictures()
+        .iter()
+        .find(|pic| pic.pic_type() == PictureType::CoverFront)
+        .or_else(|| tag.pictures().first())?;
+    let mime = picture
+        .mime_type()
+        .map(|mime| mime.to_string())
+        .unwrap_or_else(|| "image/jpeg".to_string());
+    Some((picture.data().to_vec(), mime))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

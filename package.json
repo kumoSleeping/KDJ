@@ -11,7 +11,10 @@
     "sidecar:setup": "bash scripts/setup-sidecar.sh",
     "sidecar:test": "sidecar/.venv/bin/python -m pytest sidecar/tests -q",
     "typecheck": "tsc --noEmit",
-    "dist": "npm run build && electron-builder"
+    "dist": "npm run build && electron-builder",
+    "rust:server": "cargo run --release -p kumodeck-server --bin kumodeck-server",
+    "rust:web": "vite --config vite.rust.config.ts",
+    "rust:dev": "concurrently -n server,web -c cyan,magenta \"npm:rust:server\" \"npm:rust:web\""
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

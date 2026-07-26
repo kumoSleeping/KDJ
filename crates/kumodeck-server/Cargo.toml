@@ -5,3 +5,19 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow = "1.0.104"
+axum = { version = "0.8.9", features = ["ws", "macros"] }
+futures-util = "0.3.33"
+kumodeck-analysis = { version = "0.2.0", path = "../kumodeck-analysis" }
+kumodeck-core = { version = "0.2.0", path = "../kumodeck-core" }
+kumodeck-library = { version = "0.2.0", path = "../kumodeck-library" }
+kumodeck-providers = { version = "0.2.0", path = "../kumodeck-providers" }
+rand = "0.10.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+subtle = "2.6.1"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "fs", "time", "io-util", "signal"] }
+tokio-util = "0.7.19"
+tower-http = { version = "0.7.0", features = ["cors", "fs"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
