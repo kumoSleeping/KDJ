@@ -143,9 +143,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 顺带还省掉 `rav1e`/`ravif`/`y4m`/`av1-grain`/`loop9`/`exr` 这一串的编译时间，
 在安卓那种要按小时算的交叉编译上更明显。
 
-**本次没有把这个改动落到主工作树**：任务分配的文件范围不含 `crates/`，
-而且当时另有 agent 正在改 `providers/ffmpeg.rs`、`server/routes.rs`、
-`library/db.rs`，动依赖会把他们的增量编译全部作废。改一行即可，收益已量准。
+~~本次没有把这个改动落到主工作树~~ **后记（统合阶段）：已落地**，
+见 `crates/kumodeck-providers/Cargo.toml`（commit 3985e3a）。
+当时没动的原因（文件范围 + 并发 agent 的增量编译）已经不存在。
 
 ### 其它看过但不值得动的
 
@@ -369,8 +369,14 @@ buildTypes {
 1. 给 release 也置 `manifestPlaceholders["usesCleartextTraffic"] = "true"`——
    最省事，但等于对全网放开明文；
 2. 写一份 `network_security_config.xml`，只对 `127.0.0.1` / `localhost`
-   开 `cleartextTrafficPermitted="true"`——**更干净，推荐这个**；
+   开 `cleartextTrafficPermitted="true"`——更干净；
 3. 改成走 Tauri 的自定义协议 / IPC，不用本地 HTTP——推翻既有架构决定，不建议。
+
+**后记（统合阶段）：选了 1**，做成 CI 里 init 之后的 sed 补丁步骤
+（`rust-android.yml`「放行 localhost 明文」，sed 打空会 fail 而不是装作补完）。
+没选 2 的原因：`gen/android` 不入库，方案 2 要往生成树里塞一个新 res 文件
++ 改 manifest 引用，补丁面积是方案 1 的好几倍，而这个 app 自己的出站请求
+全走 https，实际暴露面只有本机回环上的明文。哪天要收紧再升级到方案 2。
 
 无论选哪个，都要面对"`gen/android` 不入库、下次 `init` 会冲掉手改"的问题
 （见 `05-ci-and-packaging.md` §4）。

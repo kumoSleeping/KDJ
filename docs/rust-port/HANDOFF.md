@@ -35,7 +35,13 @@ M7 之后陆续并进来、**已经集成收口**的几件：可视区域优先�
 视频结果并进搜索列表（`ListMode` 因此收敛成 `library | search` 两态，
 原来的独立视频面板 `VideoPanel.tsx` 已删）、`database is locked` 的真因修复。
 
-跑一遍全部测试：`cargo test --workspace`（当前 **400** 个，全绿）。
+统合阶段（`docs/rust-port/07`）又收进来的：write_analysis_tags 对齐参照实现
+（调性写传统调名、comment 组 `8A - Energy 7 - 备注`）、分析全局 2 permit
+闸门、坏行自愈扫描（艺人+专辑双空不走增量跳过）、AUDIO_EXTENSIONS 去掉
+wma/alac、publish_toast 移除、图标定稿（用户的小熊灯照片，`design/icon/`）、
+安卓 cleartext 与图标的 CI init 后补丁。
+
+跑一遍全部测试：`cargo test --workspace`（当前 **406** 个，全绿）。
 
 前端和壳这一侧的验收命令：`npx tsc --noEmit`、`npm run tauri:web:build`。
 `src-tauri` 已经是 workspace 成员，所以 `cargo build --workspace` 会把壳一起编——

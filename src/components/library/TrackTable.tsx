@@ -76,13 +76,17 @@ interface Column {
  */
 const COLUMNS: Column[] = [
   { id: "title", label: "标题", key: "title" },
-  { id: "artist", label: "艺人", width: "clamp(4rem, 13%, 11rem)", key: "artist" },
-  { id: "album", label: "专辑", width: "clamp(3rem, 10%, 9rem)", key: "album" },
-  { id: "bpm", label: "BPM", width: "4.5rem", align: "num", key: "bpm" },
-  { id: "camelot", label: "KEY", width: "4rem", key: "camelot" },
-  { id: "energy", label: "能量", width: "4.5rem", key: "energy" },
-  { id: "duration", label: "时长", width: "4.5rem", align: "num", key: "duration" },
-  { id: null, label: "格式", width: "4rem", key: "format" },
+  // 标题单元格里还装着封面缩略图 + 「视频」角标（约 70px），它们都算在标题头上，
+  // 所以其余列的预留只能更抠：艺人/专辑的理想占比与上限都压小
+  //（曲库里一大片视频行这两列本来就全是"—"），数字列给到刚好放下内容为止。
+  { id: "artist", label: "艺人", width: "clamp(3.2rem, 9%, 9rem)", key: "artist" },
+  { id: "album", label: "专辑", width: "clamp(2.6rem, 7%, 7rem)", key: "album" },
+  { id: "bpm", label: "BPM", width: "4.2rem", align: "num", key: "bpm" },
+  { id: "camelot", label: "KEY", width: "3.4rem", key: "camelot" },
+  // 能量表本体 10 根柱 ≈ 39px，3.8rem 足够，不裁柱子
+  { id: "energy", label: "能量", width: "3.8rem", key: "energy" },
+  { id: "duration", label: "时长", width: "4rem", align: "num", key: "duration" },
+  { id: null, label: "格式", width: "3.4rem", key: "format" },
 ];
 
 export interface TrackTableProps {
