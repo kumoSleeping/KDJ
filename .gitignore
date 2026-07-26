@@ -14,3 +14,6 @@ sidecar/kumodeck.egg-info/
 nohup.out
 .DS_Store
 data/
+
+# Rust
+/target
