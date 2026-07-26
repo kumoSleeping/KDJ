@@ -12,5 +12,7 @@ export { Panel } from "./Panel";
 export type { PanelProps } from "./Panel";
 export { PanelStack } from "./PanelStack";
 export type { PanelStackProps } from "./PanelStack";
+export { Sheet } from "./Sheet";
+export type { SheetProps } from "./Sheet";
 export { ProgressBar } from "./ProgressBar";
 export type { ProgressBarProps, ProgressState } from "./ProgressBar";

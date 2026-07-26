@@ -1,16 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Download, MousePointerClick, X } from "lucide-react";
+import {
+  Download,
+  FolderTree as FolderTree_Icon,
+  MousePointerClick,
+  PanelRight,
+  X,
+} from "lucide-react";
 import { api, ApiError } from "../../lib/api";
 import { formatBytes, formatDuration } from "../../lib/format";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
+import { useNarrow } from "../../lib/useNarrow";
 import {
   selectSelectedTrack,
   useLibraryStore,
   type TrackSort,
 } from "../../stores/libraryStore";
 import type { IntakeItem, Platform, Quality, SongSource, VideoInfo } from "../../types";
-import { Button, EmptyState, InlineNotice } from "../common";
+import { Button, EmptyState, InlineNotice, Sheet } from "../common";
 import { QueuePanel } from "../download/QueuePanel";
 import { ResultTable, selectableGroups, selectionKey } from "../download/ResultTable";
 import { DEFAULT_PRIORITY, SearchBar, SearchPlatforms } from "../download/SearchBar";
@@ -200,6 +207,40 @@ export function Workspace() {
       setBusy(false);
     }
   }, [query, platforms, merge, batch, settings, setHasResults]);
+
+  /* ------------------------------------------------------------ 窄屏 / 竖屏 */
+  const narrow = useNarrow();
+  /** 当前拉开的是哪个抽屉。null = 都收着。 */
+  const [sheet, setSheet] = useState<"folders" | "aside" | null>(null);
+
+  // 右栏那份内容只写一遍，宽屏塞进 <aside>、窄屏塞进抽屉——
+  // 写两份的话，以后加一种面板必然漏改一处
+  const asideLabel = showAccounts ? "账号管理" : listMode === "search" ? "下载队列" : "曲目详情";
+  const asideHasContent = showAccounts || listMode === "search" || selected !== null;
+  const asidePanel = showAccounts ? (
+    <AccountsPanel />
+  ) : listMode === "search" ? (
+    <QueuePanel />
+  ) : selected ? (
+    <TrackDetail key={selected.id} track={selected} />
+  ) : (
+    <EmptyState
+      icon={<MousePointerClick size={20} />}
+      title="选一首看详情"
+      hint="分析过的曲目会显示 BPM、调号轮，以及能接上的下一首。"
+    />
+  );
+
+  // 窄屏下换了标签（曲库 ↔ 搜索）就把抽屉收起来：抽屉里装的内容会跟着变，
+  // 留在屏幕上等于突然换了一块东西，比自己收起来更让人迷惑
+  useEffect(() => {
+    if (narrow) setSheet(null);
+  }, [narrow, listMode]);
+
+  // 点「账号管理」时窄屏没有右栏可以显示，直接把抽屉拉开
+  useEffect(() => {
+    if (narrow && showAccounts) setSheet("aside");
+  }, [narrow, showAccounts]);
 
   /* ------------------------------------------------------------ 三栏拖宽 */
   const splitRef = useRef<HTMLDivElement | null>(null);
@@ -447,20 +488,24 @@ export function Workspace() {
       />
 
       <div className="kd-section-body">
-        <div className="kd-split" data-folders="true" ref={splitRef}>
-          {/* 文件夹栏一直在：搜到的歌下载完就落进这些文件夹，看得见落点才知道下到哪了 */}
-          <FolderTree />
+        <div className="kd-split" data-folders="true" data-narrow={narrow ? "true" : undefined} ref={splitRef}>
+          {/* 窄屏（竖屏 / 手机）下左右两栏收进底部抽屉，只留中间的列表。
+              列表是这个软件的脊柱：找歌、搜歌、看结果全在它上面，
+              两侧那两栏都是"针对当前这一首/这一次搜索"的补充，按需拉出来就够。 */}
+          {!narrow && <FolderTree />}
 
           {/* 三栏之间的两条把手：拖动改左/右栏宽度，中间吃剩余。宽度记在
               localStorage，下次打开还是你拉的样子。双击复位到默认。 */}
-          <div
-            className="kd-split-handle"
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="调整文件夹栏宽度"
-            onPointerDown={startColumnDrag("left")}
-            onDoubleClick={() => resetColumn("left")}
-          />
+          {!narrow && (
+            <div
+              className="kd-split-handle"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="调整文件夹栏宽度"
+              onPointerDown={startColumnDrag("left")}
+              onDoubleClick={() => resetColumn("left")}
+            />
+          )}
 
           <div className="kd-table-wrap">
             {/* 列表面板的"眉目"：两个标签常驻，随时可切，不等搜索了才出现。
@@ -583,33 +628,59 @@ export function Workspace() {
             )}
           </div>
 
-          <div
-            className="kd-split-handle"
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="调整详情栏宽度"
-            onPointerDown={startColumnDrag("right")}
-            onDoubleClick={() => resetColumn("right")}
-          />
+          {!narrow && (
+            <div
+              className="kd-split-handle"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="调整详情栏宽度"
+              onPointerDown={startColumnDrag("right")}
+              onDoubleClick={() => resetColumn("right")}
+            />
+          )}
 
-          {/* 右栏：齿轮呼出的账号面板优先，其次搜索时是下载队列，曲库时是曲目详情 */}
-          <aside className="kd-split-aside kd-scroll">
-            {showAccounts ? (
-              <AccountsPanel />
-            ) : listMode === "search" ? (
-              <QueuePanel />
-            ) : selected ? (
-              <TrackDetail key={selected.id} track={selected} />
-            ) : (
-              <EmptyState
-                icon={<MousePointerClick size={20} />}
-                title="选一首看详情"
-                hint="分析过的曲目会显示 BPM、调号轮，以及能接上的下一首。"
-              />
-            )}
-          </aside>
+          {/* 右栏：账号面板优先，其次搜索时是下载队列，曲库时是曲目详情。
+              窄屏下同一份内容改由底部抽屉装（见下面的 asidePanel）。 */}
+          {!narrow && <aside className="kd-split-aside kd-scroll">{asidePanel}</aside>}
         </div>
       </div>
+
+      {/* ---------------- 窄屏：悬浮键 + 两个抽屉 ---------------- */}
+      {narrow && (
+        <>
+          <div className="kd-fabs">
+            <button
+              type="button"
+              className="kd-fab"
+              aria-label="文件夹"
+              title="文件夹"
+              onClick={() => setSheet("folders")}
+            >
+              <FolderTree_Icon size={17} />
+            </button>
+            {/* 有选中的曲目 / 有队列内容时才点得亮：点开一个空面板是白跑一趟。
+                data-dot 在有内容时点一个小红点，替代"自动弹出"——
+                自动弹会在滚列表时不停打断，这个点只是告诉你"这里有东西可看"。 */}
+            <button
+              type="button"
+              className="kd-fab"
+              data-dot={asideHasContent ? "true" : undefined}
+              aria-label={asideLabel}
+              title={asideLabel}
+              onClick={() => setSheet("aside")}
+            >
+              <PanelRight size={17} />
+            </button>
+          </div>
+
+          <Sheet open={sheet === "folders"} title="文件夹" onClose={() => setSheet(null)}>
+            <FolderTree />
+          </Sheet>
+          <Sheet open={sheet === "aside"} title={asideLabel} onClose={() => setSheet(null)}>
+            {asidePanel}
+          </Sheet>
+        </>
+      )}
     </section>
   );
 }

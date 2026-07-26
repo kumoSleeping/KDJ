@@ -257,6 +257,23 @@ textarea {
   background: var(--kd-bg);
 }
 
+/* 手机没有窗口装饰：收掉给 macOS 红绿灯留的 84px，并让出状态栏高度。
+   env(safe-area-inset-*) 在没有刘海的设备上是 0，写了不吃亏。 */
+.kd-titlebar[data-mobile="true"] {
+  padding-left: 0.75rem;
+  padding-top: env(safe-area-inset-top, 0);
+  height: calc(var(--kd-titlebar-h) + env(safe-area-inset-top, 0));
+}
+/* 悬浮键和播放条要避开底部的手势条 */
+.kd-titlebar[data-mobile="true"] ~ * .kd-fabs,
+body:has(.kd-titlebar[data-mobile="true"]) .kd-fabs {
+  bottom: calc(var(--kd-player-h) + 0.75rem + env(safe-area-inset-bottom, 0));
+}
+body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
+  padding-bottom: env(safe-area-inset-bottom, 0);
+  height: calc(var(--kd-player-h) + env(safe-area-inset-bottom, 0));
+}
+
 .kd-titlebar {
   -webkit-app-region: drag;
   display: flex;
@@ -1864,4 +1881,249 @@ textarea {
 .kd-linklike:hover {
   color: var(--kd-text);
   text-decoration: underline;
+}
+
+/* ============================================================
+ * 竖屏 / 窄屏（≤940px）
+ *
+ * 设计取向：**列表是脊柱**。找歌、搜歌、看结果全在它上面，
+ * 左边的文件夹和右边的详情都是"针对当前这一首/这一次搜索"的补充。
+ * 所以窄屏下把三栏压成一栏，两侧的内容收进底部抽屉，右下角两颗悬浮键
+ * 按需拉出来——而不是自动弹：自动弹会在滚列表时不停打断。
+ *
+ * 阈值 940px 是量出来的：13rem + 22rem 两栏 = 560px，中间的表再留 380px
+ * 才够放下标题+BPM+KEY+时长。这一档同时覆盖竖着的平板和横着的手机。
+ * ========================================================== */
+@media (max-width: 940px) {
+  /* 单栏。把手和两侧栏由 JS 摘掉，这里只负责把网格塌成一列 */
+  .kd-split[data-narrow="true"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* 搜索条那一排平台按钮换行，不要横向滚动 */
+  .kd-section > .kd-toolbar,
+  .kd-toolbar {
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
+  }
+
+  /* —— 曲目表改成两行式 ——
+     只作用于曲库表（data-kind="library"）：搜索结果表用的是同一个 .kd-table，
+     但里面有视频大行那套自排的多行块，套上 grid 会散架。
+
+     选择器必须写到 `tbody td` 这一层：基础样式里那条
+     `.kd-table tbody td { max-width: 0 }`（auto 布局下做省略号用的）
+     特异性比 `.kd-table td` 高，不覆盖的话每个单元格都会被压成 0 宽——
+     症状是"只剩封面缩略图，标题一个字都不显示"。 */
+  .kd-table[data-kind="library"],
+  .kd-table[data-kind="library"] tbody,
+  .kd-table[data-kind="library"] tbody tr,
+  .kd-table[data-kind="library"] tbody td {
+    display: block;
+  }
+  .kd-table[data-kind="library"] thead {
+    display: none;
+  }
+  .kd-table[data-kind="library"] tbody tr {
+    display: grid;
+    /* 第二行是一串**左对齐**的元信息，不是四根对齐的列。
+       竖屏下没有"列"这回事——上下两行谁也对不齐谁，硬排成列的结果是
+       艺人孤零零贴在最左、数字甩到最右，中间一大片空。
+       所以前三个按内容宽度排，最后一个吃掉剩余空间（内容仍左对齐）。 */
+    grid-template-columns: minmax(0, max-content) max-content max-content 1fr;
+    grid-template-areas:
+      "title  title title title"
+      "artist bpm   key   dur";
+    gap: 0.15rem 0.55rem;
+    padding: 0.45rem 0.7rem;
+    align-items: center;
+    border-bottom: 1px solid var(--kd-line-soft);
+  }
+  /* 数字列在宽屏是右对齐（为了小数点对齐），竖屏下这一串要左对齐才连得上 */
+  .kd-table[data-kind="library"] tbody td.kd-td-num {
+    text-align: left;
+  }
+  /* 没有艺人时整格不占位，见 TrackTable 里 data-empty 的注释 */
+  .kd-table[data-kind="library"] tbody td[data-col="artist"][data-empty="true"] {
+    display: none;
+  }
+  .kd-table[data-kind="library"] tbody td {
+    /* 三个必须显式还原的基础样式，理由见上面 */
+    max-width: none;
+    height: auto;
+    padding: 0;
+    border: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .kd-table[data-kind="library"] tbody td[data-col="title"] {
+    grid-area: title;
+    font-size: var(--kd-size);
+  }
+  .kd-table[data-kind="library"] tbody td[data-col="artist"] {
+    grid-area: artist;
+    color: var(--kd-muted);
+    font-size: var(--kd-size-xs);
+  }
+  .kd-table[data-kind="library"] tbody td[data-col="bpm"] {
+    grid-area: bpm;
+    font-size: var(--kd-size-xs);
+    color: var(--kd-muted);
+  }
+  .kd-table[data-kind="library"] tbody td[data-col="camelot"] {
+    grid-area: key;
+  }
+  .kd-table[data-kind="library"] tbody td[data-col="duration"] {
+    grid-area: dur;
+    font-size: var(--kd-size-xs);
+    color: var(--kd-muted);
+  }
+  /* 专辑/能量/格式在两行式里没有位子。它们是**可以从别处得到**的信息
+     （专辑和格式在详情抽屉里、能量已经体现在排序里），而标题和 BPM/调号
+     不是——窄屏下的取舍只能按这个标准来。 */
+  .kd-table[data-kind="library"] tbody td[data-col="album"],
+  .kd-table[data-kind="library"] tbody td[data-col="energy"],
+  .kd-table[data-kind="library"] tbody td[data-col="format"] {
+    display: none;
+  }
+  /* 悬停/选中的底色原来挂在 td 上（表格里 tr 不接受 background），
+     两行式下要挪回 tr，不然只有几个单元格变色 */
+  .kd-table[data-kind="library"] tbody tr:hover {
+    background: var(--kd-hover);
+  }
+  .kd-table[data-kind="library"] tbody tr[aria-selected="true"] {
+    background: var(--kd-selected);
+  }
+  .kd-table[data-kind="library"] tbody tr:hover td,
+  .kd-table[data-kind="library"] tbody tr[aria-selected="true"] td {
+    background: transparent;
+  }
+
+  /* 搜索结果表没做两行式（里面有视频大行那套自排的多行块，改不动），
+     宽度必然溢出。给它自己横向滚动，别让整页跟着横滚——
+     会横滚的页面在手机上连竖着滑都容易误触。 */
+  .kd-table-wrap > .kd-scroll {
+    overflow-x: auto;
+  }
+  .kd-table:not([data-kind="library"]) {
+    min-width: 44rem;
+  }
+
+  /* 播放条：波形留着（它就是进度条），时间文字省掉——
+     两位数字占的宽度够波形多显示两秒的细节 */
+  .kd-player {
+    padding: 0 0.6rem;
+    gap: 0.5rem;
+  }
+  .kd-player-scrub > .kd-nowrap {
+    display: none;
+  }
+  .kd-player-now {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+}
+
+/* —— 右下角悬浮键 ——
+   贴在播放条上方。两颗，正好对应被收起来的那两栏，不做"展开更多"那一步：
+   多一次点击换来的只是少两个图标。 */
+.kd-fabs {
+  position: fixed;
+  right: 0.75rem;
+  bottom: calc(var(--kd-player-h) + 0.75rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  z-index: 40;
+}
+.kd-fab {
+  position: relative;
+  appearance: none;
+  width: 2.6rem;
+  height: 2.6rem;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--kd-line);
+  background: var(--kd-panel-raised);
+  color: var(--kd-text);
+  box-shadow: var(--kd-shadow-float);
+  cursor: pointer;
+}
+.kd-fab:active {
+  background: var(--kd-hover);
+}
+/* 小红点：告诉你"这里有东西可看"，替代自动弹出 */
+.kd-fab[data-dot="true"]::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 6px;
+  height: 6px;
+  background: var(--kd-theme);
+}
+
+/* —— 底部抽屉 —— */
+.kd-sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-end;
+}
+.kd-sheet {
+  width: 100%;
+  /* 只盖住下半屏：上面那截列表还看得见，心里知道自己停在哪。
+     换成全屏就变成了"进去/出来"，每次回来都要重新找位置。 */
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--kd-panel);
+  border-top: 1px solid var(--kd-line);
+  box-shadow: var(--kd-shadow-float);
+  transition: transform 0.18s ease-out;
+}
+.kd-sheet-grab {
+  flex: none;
+  padding: 0.5rem 0.9rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: grab;
+  touch-action: none; /* 不让浏览器把下拖当成页面滚动，否则抽屉拖不动 */
+  border-bottom: 1px solid var(--kd-line-soft);
+}
+.kd-sheet-grab:active {
+  cursor: grabbing;
+}
+.kd-sheet-bar {
+  width: 2.2rem;
+  height: 3px;
+  background: var(--kd-faint);
+}
+.kd-sheet-title {
+  font-weight: 700;
+  font-size: var(--kd-size-sm);
+}
+.kd-sheet-body {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 抽屉里装文件夹树时给它一个确定的高度。
+   `.kd-folder-pane` 原本是 grid 的一栏、高度由父容器给；进了抽屉之后
+   父容器高度是内容撑的，两边互相等对方 → 树被压成 0 高。
+   右边框也去掉：抽屉里它左右都到边，那条线看着像画歪了。 */
+.kd-sheet .kd-folder-pane {
+  height: 62vh;
+  border-right: none;
+}
+/* 详情栏在宽屏是 <aside> 自带内边距，进抽屉后由 kd-sheet-body 负责，
+   这里只保证内部面板之间的间距不塌 */
+.kd-sheet .kd-panel-slot + .kd-panel-slot {
+  margin-top: 0.6rem;
 }

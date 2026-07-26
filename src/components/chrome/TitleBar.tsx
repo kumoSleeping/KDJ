@@ -21,13 +21,17 @@ export function TitleBar() {
 
   // macOS 用 hiddenInset 标题栏，红绿灯是系统画的（.kd-titlebar 左侧已留出 84px），
   // 自绘一套只会重影，所以只有非 mac 才渲染窗口按钮。
-  const isMac = window.kumodeck?.platform === "darwin";
+  const platform = window.kumodeck?.platform;
+  const isMac = platform === "darwin";
+  // 安卓/iOS 没有窗口这回事：最小化和关闭都无从谈起，"最大化"更是永远的现状。
+  // 这三颗按钮在手机上纯属占地方，而顶部那 84px 的红绿灯留白也要收掉。
+  const isMobile = platform === "android" || platform === "ios";
   const control = (action: "minimize" | "maximize" | "close") => () => {
     window.kumodeck?.windowControl(action);
   };
 
   return (
-    <header className="kd-titlebar">
+    <header className="kd-titlebar" data-mobile={isMobile ? "true" : undefined}>
       <div className="kd-titlebar-brand">KumoDeck</div>
 
       {/* 下载在跑时给一条状态：搜索结果关掉之后队列还在后台跑，
@@ -52,7 +56,7 @@ export function TitleBar() {
         {isDark ? <Sun size={13} /> : <Moon size={13} />}
       </Button>
 
-      {!isMac && (
+      {!isMac && !isMobile && (
         <div className="kd-row">
           <Button variant="ghost" size="sm" iconOnly aria-label="最小化" onClick={control("minimize")}>
             <Minus size={13} />

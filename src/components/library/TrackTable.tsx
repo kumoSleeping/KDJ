@@ -157,7 +157,7 @@ export function TrackTable({
         if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) onScrollEnd();
       }}
     >
-      <table className="kd-table">
+      <table className="kd-table" data-kind="library">
         <thead>
           <tr>
             {COLUMNS.map((column) => (
@@ -266,15 +266,19 @@ export function TrackTable({
                 {isVideoTrack(track.format) && <span className="kd-badge-video">视频</span>}
                 {track.title || track.filename}
               </td>
-              <td data-col="artist" title={track.artist}>{track.artist || DASH}</td>
+              {/* data-empty 是给竖屏用的：那边没有"列"要对齐，
+                  一个孤零零的破折号只是噪声，直接不占位 */}
+              <td data-col="artist" data-empty={track.artist ? undefined : "true"} title={track.artist}>
+                {track.artist || DASH}
+              </td>
               <td data-col="album" className="kd-muted" title={track.album}>
                 {track.album || DASH}
               </td>
               <td data-col="bpm" className="kd-td-num">{formatBpm(track.bpm)}</td>
-              <td>
+              <td data-col="camelot">
                 <CamelotChip code={track.camelot} />
               </td>
-              <td>
+              <td data-col="energy">
                 <EnergyMeter value={track.energy} />
               </td>
               <td data-col="duration" className="kd-td-num">{formatDuration(track.duration)}</td>
