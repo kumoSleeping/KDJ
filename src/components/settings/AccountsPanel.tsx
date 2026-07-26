@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { X } from "lucide-react";
 import { useAppStore } from "../../stores/appStore";
-import { Button } from "../common";
+import { Button, InlineNotice } from "../common";
 import { AccountRow } from "./AccountRow";
 
 /**
@@ -14,6 +14,7 @@ import { AccountRow } from "./AccountRow";
  */
 export function AccountsPanel() {
   const accounts = useAppStore((state) => state.accounts);
+  const accountsError = useAppStore((state) => state.accountsError);
   const refreshAccounts = useAppStore((state) => state.refreshAccounts);
   const toggleAccounts = useAppStore((state) => state.toggleAccounts);
 
@@ -34,6 +35,10 @@ export function AccountsPanel() {
           <X size={13} />
         </Button>
       </div>
+
+      {/* 拉不到账号状态时，下面那句"稍等一下"会一直挂着；
+          把真正的原因摆在同一块地方，才不至于让人一直等 */}
+      <InlineNotice text={accountsError} block />
 
       <div className="kd-scroll kd-grow" style={{ minHeight: 0, padding: "0 0.85rem 1rem" }}>
         {rows.length === 0 ? (

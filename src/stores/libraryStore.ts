@@ -1,5 +1,5 @@
 /**
- * 曲库列表 + 筛选 + 选中 + 扫描/分析进度。
+ * 曲库列表 + 筛选 + 选中 + 导入/分析进度。
  * 列表数据永远由 refresh() 从后端拉（筛选/排序都在 SQL 里做），前端不做二次过滤。
  */
 
@@ -16,6 +16,7 @@ import type {
   ScanResponseLike,
   Track,
   TrackPatch,
+  TrackPatchResult,
   WsEvent,
 } from "../types";
 
@@ -80,6 +81,23 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * 插队分析（正在播放的那一首）的 job_id。这些批次不占进度条：
+ * 那条进度条讲的是「批量还剩多少」，被一首歌的 0/1 顶掉会让人以为批量被重置了。
+ * 批次收尾时删掉，否则挂一整夜这个集合只涨不减。
+ */
+const quietJobs = new Set<string>();
+
+/**
+ * 进度条同一时刻只跟一批走。插队的、选中触发的、后台补齐的批次会同时存在，
+ * 谁都往里写的话数字会来回跳（300/1379 突然变成 0/20 再跳回去）。
+ * 已经有一批没跑完时，新来的先不抢；跑完了才让位。
+ */
+function claimProgress(current: AnalyzeProgress | null, next: AnalyzeProgress): AnalyzeProgress {
+  if (current && current.job_id !== next.job_id && current.done < current.total) return current;
+  return next;
+}
+
 function toQuery(filter: LibraryFilter, offset: number): Record<string, string | number | undefined> {
   return {
     q: filter.q.trim(),
@@ -124,6 +142,12 @@ export interface LibraryStore {
   stats: LibraryStats | null;
   scan: ScanProgress | null;
   analyze: AnalyzeProgress | null;
+  /**
+   * 用户刚按过「停止」。自动化的那几条路径（选中即分析、后台补齐）看着它，
+   * 否则几秒后空闲探测又排一批上来，那个按钮等于没按。
+   * 重新点「分析」才解除。
+   */
+  autoAnalyzeSuspended: boolean;
 
   refresh(): Promise<void>;
   loadMore(): Promise<void>;
@@ -138,11 +162,32 @@ export interface LibraryStore {
   copyToClipboard(op: FileOp): void;
   paste(dest: string): Promise<FolderOpResult | null>;
   applyFolderOp(ids: number[], dest: string, op: FileOp): Promise<FolderOpResult>;
+  /**
+   * 「添加文件夹」背后的一整套后台动作：把目录登记成曲库根、遍历入库、
+   * （analyze 时）把新曲目排进分析队列。调用方只负责把目录交出去，
+   * 不用再引导用户点第二个按钮。
+   */
   startScan(paths: string[], analyze?: boolean): Promise<ScanResponseLike>;
   startAnalyze(trackIds: number[] | null, force?: boolean, priority?: boolean): Promise<AnalyzeResponseLike>;
   cancelAnalyze(): Promise<void>;
-  updateTrack(id: number, patch: TrackPatch): Promise<Track>;
+  setAutoAnalyzeSuspended(value: boolean): void;
+  /**
+   * 收掉进度条。跑完的那一批会先留在条上（让人看见"完了"），
+   * 确认后面没有下一批接着跑之后才由空闲探测收走——
+   * 一到 100% 就立刻消失的话，一批接一批跑时整条工具行会一灭一亮，列表跟着跳。
+   */
+  clearAnalyzeProgress(): void;
+  /**
+   * 返回的是 `TrackPatchResult`：它就是一条 Track，只是可能多带一个
+   * `tag_write_error`。数据库存住了、文件标签没写进去时要靠它告诉用户，
+   * 吞掉的话用户会以为拖进 Rekordbox 的也是新的。
+   */
+  updateTrack(id: number, patch: TrackPatch): Promise<TrackPatchResult>;
   writeTags(id: number): Promise<Track>;
+  /** 换封面。返回的 Track 里 size / modified_at 会跟着变，所以要回写进列表。 */
+  setCover(id: number, file: Blob): Promise<Track>;
+  /** 按文件里现存的标签刷新库里那条记录。 */
+  rereadTags(id: number): Promise<Track>;
   removeTrack(id: number, deleteFile?: boolean): Promise<void>;
   handleEvent(event: WsEvent): void;
 }
@@ -162,6 +207,7 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   stats: null,
   scan: null,
   analyze: null,
+  autoAnalyzeSuspended: false,
 
   async refresh() {
     cancelPending();
@@ -301,19 +347,43 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   async startAnalyze(trackIds, force = false, priority = false) {
     const response = await api.analyze(trackIds, force, priority);
-    // 插队分析（正在放的那首）不占用进度条：它只有一首，
-    // 把工具栏那条几百首的进度覆盖掉会让人以为批量被重置了。
-    if (!priority) {
+    if (priority) {
+      // 插队分析（正在放的那首）不占用进度条：它只有一首，
+      // 把工具栏那条几百首的进度覆盖掉会让人以为批量被重置了。
+      // 记下来是因为它的进度事件照样会推过来，得在 handleEvent 里认出来丢掉。
+      quietJobs.add(response.job_id);
+    } else if (response.queued > 0) {
+      // queued === 0 时**不能**建进度条：后端对空批次直接返回、一条事件都不发，
+      // 一根 0/0 的进度条会永远挂在工具栏上收不回去。
       set({
-        analyze: { job_id: response.job_id, done: 0, total: response.queued, current: "", track_id: null },
+        analyze: claimProgress(get().analyze, {
+          job_id: response.job_id,
+          done: 0,
+          total: response.queued,
+          current: "",
+          track_id: null,
+        }),
       });
     }
     return response;
   },
 
   async cancelAnalyze() {
-    const job = get().analyze;
-    await api.cancelAnalyze(job?.job_id ?? "");
+    // 顺手摁灭自动补齐：不然停下来几秒后空闲探测又排一批，按钮等于没按
+    set({ autoAnalyzeSuspended: true });
+    // 空 job_id = 全停。**故意不传手里那个 job_id**：同一时刻常常有好几批在跑
+    // （眼前这一屏一批、后台补齐一批），进度条只跟得住其中一批，
+    // 只停它的话用户按了「停止」风扇还在转，那就是个假按钮。
+    // 插队那批（正在放的那一首）后端压根没登记，全停也停不掉它——这是有意的。
+    await api.cancelAnalyze("");
+    set({ analyze: null });
+  },
+
+  setAutoAnalyzeSuspended(value) {
+    set({ autoAnalyzeSuspended: value });
+  },
+
+  clearAnalyzeProgress() {
     set({ analyze: null });
   },
 
@@ -328,6 +398,24 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   async writeTags(id) {
     const track = await api.writeTags(id);
+    set({
+      tracks: get().tracks.map((item) => (item.id === id ? track : item)),
+      selectedTrack: get().selectedTrack?.id === id ? track : get().selectedTrack,
+    });
+    return track;
+  },
+
+  async setCover(id, file) {
+    const track = await api.setCover(id, file);
+    set({
+      tracks: get().tracks.map((item) => (item.id === id ? track : item)),
+      selectedTrack: get().selectedTrack?.id === id ? track : get().selectedTrack,
+    });
+    return track;
+  },
+
+  async rereadTags(id) {
+    const track = await api.rereadTags(id);
     set({
       tracks: get().tracks.map((item) => (item.id === id ? track : item)),
       selectedTrack: get().selectedTrack?.id === id ? track : get().selectedTrack,
@@ -360,10 +448,15 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
         return;
       }
       case "analyze.progress": {
-        set({ analyze: event.payload });
-        if (event.payload.total > 0 && event.payload.done >= event.payload.total) {
-          void get().refreshStats();
+        const payload = event.payload;
+        const finished = payload.total > 0 && payload.done >= payload.total;
+        if (quietJobs.has(payload.job_id)) {
+          // 插队那一首：不碰进度条。结果照样会随 library.updated 刷进列表。
+          if (finished) quietJobs.delete(payload.job_id);
+          return;
         }
+        set({ analyze: claimProgress(get().analyze, payload) });
+        if (finished) void get().refreshStats();
         return;
       }
       case "library.updated": {
@@ -382,6 +475,16 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     }
   },
 }));
+
+/**
+ * 有没有一批分析正在跑。工具栏的进度条和后台补齐的空闲判断共用这一条，
+ * 两边各写一遍的话，改了判据就会一边显示"在跑"一边又去排新批次。
+ * total === 0 只可能来自扫描顺带起的批（前端没有它的总数），按"在跑"算。
+ */
+export function selectAnalyzing(state: LibraryStore): boolean {
+  const job = state.analyze;
+  return job !== null && (job.total === 0 || job.done < job.total);
+}
 
 /** 当前选中的曲目。优先取当前页的（最新），页外回落到 selectTrack 暂存的对象。 */
 export function selectSelectedTrack(state: LibraryStore): Track | null {

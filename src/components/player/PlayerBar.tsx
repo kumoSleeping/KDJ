@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Disc3, Play, Square } from "lucide-react";
 import { api } from "../../lib/api";
+import { analyzePlaying } from "../../lib/autoAnalyze";
+import { markPlayed, pickNext } from "../../lib/autoplay";
 import { formatDuration } from "../../lib/format";
-import { useAppStore } from "../../stores/appStore";
 import type { Track } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
+import { InlineNotice } from "../common";
 import { POSITION_EVENT, type PositionDetail } from "../library/TrackDetail";
 import { PLAY_EVENT, playTrack } from "../library/TrackTable";
 import { SEEK_EVENT, Waveform, type SeekDetail } from "../library/Waveform";
@@ -13,7 +15,6 @@ import { SEEK_EVENT, Waveform, type SeekDetail } from "../library/Waveform";
 const POSITION_BROADCAST_MS = 200;
 
 export function PlayerBar() {
-  const pushToast = useAppStore((state) => state.pushToast);
   const selected = useLibraryStore(selectSelectedTrack);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const lastBroadcast = useRef(0);
@@ -22,6 +23,11 @@ export function PlayerBar() {
   const [playing, setPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
+  /**
+   * 放不出来的原因写在曲名底下。播放条是"现在在放什么"的唯一显示，
+   * 按下播放却没有声音时，人的眼睛就在这里——错误理应也在这里。
+   */
+  const [notice, setNotice] = useState("");
 
   // 曲库表格双击 → 这里换曲并播放。用全局事件而不是共享 store，
   // 是为了让"能触发播放"的组件不必都知道播放器的存在。
@@ -32,22 +38,17 @@ export function PlayerBar() {
       setPosition(0);
       setDuration(next.duration ?? 0);
       setPlaying(true);
+      // 手动点播的也记进"放过了"：不然自动续播会把用户刚听完的那首再接一遍
+      markPlayed(next.id);
     };
     window.addEventListener(PLAY_EVENT, onPlay);
     return () => window.removeEventListener(PLAY_EVENT, onPlay);
   }, []);
 
-  // 放到一首还没分析的歌 → 让它插队分析。
-  // 批量分析可能排了几百首，正在放的这首等在队尾出不来 BPM/调号，
-  // 而"现在放的是什么速度、什么调"恰恰是最急着要知道的一条。
+  // 放到一首还没分析的歌 → 让它插队分析。去重、和"选中即分析"共享一份
+  // 排队记号的逻辑都在 autoAnalyze 里，这里只负责把"在放哪一首"告诉它。
   useEffect(() => {
-    if (!track || track.analyzed_at) return;
-    void useLibraryStore
-      .getState()
-      .startAnalyze([track.id], false, true)
-      .catch(() => {
-        // 插队失败不打扰：批量队列迟早会轮到它
-      });
+    if (track) analyzePlaying(track);
   }, [track?.id, track?.analyzed_at]);
 
   // 换曲：换 src 后必须 load()，否则 Chromium 会继续放上一首的缓冲
@@ -56,10 +57,11 @@ export function PlayerBar() {
     if (!audio || !track) return;
     audio.src = api.audioUrl(track.id);
     audio.load();
+    setNotice("");
     if (playing) {
       audio.play().catch((error: unknown) => {
         setPlaying(false);
-        pushToast("error", `播放失败：${(error as Error).message}`);
+        setNotice(`播放失败：${(error as Error).message}`);
       });
     }
     // playing 不进依赖：它变化时由下面的 effect 处理，这里只管换曲
@@ -124,13 +126,29 @@ export function PlayerBar() {
           if (Number.isFinite(value) && value > 0) setDuration(value);
         }}
         onEnded={() => {
-          setPlaying(false);
           setPosition(0);
+          // 自动续播：从和声推荐里挑一首没放过的接上。
+          // 先把"当前这首放完了"记下来再挑，否则它自己会出现在候选里。
+          const finished = track;
+          if (!finished) {
+            setPlaying(false);
+            return;
+          }
+          markPlayed(finished.id);
+          void pickNext(finished).then((next) => {
+            if (!next) {
+              // 推荐池空了（曲库太小 / 都放过了）就安静停下，不报错
+              setPlaying(false);
+              return;
+            }
+            // 走和双击列表同一条路：播放器不必知道谁触发了播放
+            playTrack(next);
+          });
         }}
         onError={() => {
           if (track) {
             setPlaying(false);
-            pushToast("error", "这个文件放不了，可能已被移动或格式浏览器不支持");
+            setNotice("这个文件放不了，可能已被移动，或者格式浏览器不支持");
           }
         }}
       />
@@ -177,11 +195,13 @@ export function PlayerBar() {
         )}
       </span>
 
-      {/* 曲名一行就够；艺人、BPM、调号在曲库详情里都有，底部条不复述 */}
-      <div className="kd-player-meta">
+      {/* 曲名一行就够；艺人、BPM、调号在曲库详情里都有，底部条不复述。
+          出错时这一格要多分点宽度，不然一句话只剩三个字加省略号。 */}
+      <div className="kd-player-meta" data-notice={notice ? "true" : undefined}>
         <div className="kd-player-title">
           {track ? track.title || track.filename : selected ? selected.title || selected.filename : "没有在播的曲目"}
         </div>
+        <InlineNotice text={notice} onDismiss={() => setNotice("")} />
       </div>
 
       <div className="kd-player-scrub">

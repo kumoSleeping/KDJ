@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api } from "../../lib/api";
 import { useAppStore } from "../../stores/appStore";
 import type { Account, AccountState } from "../../types";
-import { Button } from "../common";
+import { Button, InlineNotice } from "../common";
 import { QrLoginDialog } from "./QrLoginDialog";
 
 const STATE_LABEL: Record<AccountState, string> = {
@@ -21,20 +21,22 @@ const STATE_LABEL: Record<AccountState, string> = {
  */
 export function AccountRow({ account }: { account: Account }) {
   const refreshAccounts = useAppStore((state) => state.refreshAccounts);
-  const pushToast = useAppStore((state) => state.pushToast);
   const [showQr, setShowQr] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** 退出失败就贴在这一行自己底下：状态还写着"已登录"，得说清楚为什么。 */
+  const [notice, setNotice] = useState("");
 
   const loggedIn = account.state === "valid";
 
   const logout = async () => {
     setBusy(true);
+    setNotice("");
     try {
       await api.logout(account.platform);
+      // 成功不用报：这一行的状态当场从"已登录"变成"未登录"，按钮也换成扫码登录
       await refreshAccounts();
-      pushToast("info", `${account.label} 已退出登录`);
     } catch (error) {
-      pushToast("error", `退出失败：${(error as Error).message}`);
+      setNotice(`退出失败：${(error as Error).message}`);
     } finally {
       setBusy(false);
     }
@@ -63,6 +65,9 @@ export function AccountRow({ account }: { account: Account }) {
             {/* detail 常常就是状态本身（"未登录"），重复一遍纯属噪音 */}
             {account.detail && account.detail !== STATE_LABEL[account.state] && ` · ${account.detail}`}
           </div>
+          {/* 贴在状态行下面，而不是塞进右边那一列：那一列只有按钮那么宽，
+              一句"退出失败：连接被拒绝"进去就只剩省略号了 */}
+          <InlineNotice text={notice} onDismiss={() => setNotice("")} />
         </div>
       </div>
       <div className="kd-set-control" style={{ textAlign: "right" }}>

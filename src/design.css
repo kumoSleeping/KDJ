@@ -664,7 +664,10 @@ textarea {
 /* ============================================================
  * 表格
  * ========================================================== */
+/* 容器查询的锚点：列表面板夹在文件夹树和详情栏中间，真实可用宽度远小于窗口宽度，
+   所以要按**这个面板**的宽度决定砍哪列，而不是按视口。 */
 .kd-table-wrap {
+  container-type: inline-size;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -697,6 +700,10 @@ textarea {
   color: var(--kd-faint);
   font-size: var(--kd-size-xs);
   min-width: 0;
+}
+/* 搜索失败时这行摘要就地变成错误文案：另起一行会把列表顶得跳一下 */
+.kd-list-note[data-error="true"] {
+  color: var(--kd-danger);
 }
 .kd-list-tabs {
   display: flex;
@@ -737,6 +744,11 @@ textarea {
   width: 100%;
   border-collapse: collapse;
   font-variant-numeric: tabular-nums;
+  /* fixed 布局：写了 width 的列拿走各自的份额，**没写 width 的标题列吃掉剩余**。
+     用默认的 auto 布局时，配上下面 td 的 `max-width: 0`（省略号必需），
+     浏览器会把没写宽度的列压到最小——结果就是标题被压成 "[..." 而
+     整列都是 "—" 的专辑却稳稳占着 14%。列宽优先级见 TrackTable.tsx 的注释。 */
+  table-layout: fixed;
 }
 .kd-table thead th {
   position: sticky;
@@ -808,6 +820,83 @@ textarea {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+/* ------------------------------------------------------------------
+ * 结果表里的视频行
+ *
+ * 一首歌一行字就交代完了，视频得先看见画面才知道是不是要的那个，
+ * 所以它横跨整张表、占两倍行高，把封面和"要下哪一档"的旋钮都摆开。
+ * 混排在同一张表里而不是另开一个标签：找东西下载本来就是一件事。
+ * ---------------------------------------------------------------- */
+.kd-table tbody tr[data-video="true"] > td {
+  /* 目标是普通行的两倍高（用户原话"两个篇幅"）。写成 min-height 而不是 height：
+     标题换行、下载失败多出一条提示时该长就得长，锁死只会把内容裁掉。 */
+  height: auto;
+  min-height: calc(var(--kd-row-h) * 2);
+  padding: 0.3rem 0.6rem;
+  /* 表格默认那套单行省略号在这儿不适用：内部是自己排的多行块 */
+  white-space: normal;
+}
+.kd-video-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  min-width: 0;
+}
+/* 16:9：视频封面本来就是宽的，裁成方块等于把画面切掉一半。
+   尺寸写死，图片加载完不会把整行顶一下。 */
+.kd-video-cover {
+  flex: none;
+  display: block;
+  width: 104px;
+  aspect-ratio: 16 / 9;
+  background: var(--kd-panel-inset);
+  border: 1px solid var(--kd-line-soft);
+  overflow: hidden;
+}
+.kd-video-cover > img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.kd-video-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  flex: 1;
+  min-width: 0;
+}
+.kd-video-title {
+  color: var(--kd-text);
+  font-weight: 700;
+  line-height: 1.3;
+}
+.kd-video-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  line-height: 1.3;
+  white-space: nowrap;
+}
+/* 旋钮全在一行，窄了就换行——这一行是这一条视频的全部操作，不该被裁掉 */
+.kd-video-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  flex-wrap: wrap;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+}
+/* 分 P 的标题可以很长（有的合集把整张歌单写进 P 名），下拉宽度是按最长那条
+   撑出来的——不封顶的话它会把同一行的其它旋钮挤到下一行，整行跟着变高 */
+.kd-video-controls select[data-pages="true"] {
+  max-width: 14rem;
 }
 
 .kd-link-mark {
@@ -1006,32 +1095,35 @@ textarea {
 }
 
 /* ============================================================
- * Toast
+ * 就地提示（InlineNotice）
+ * ------------------------------------------------------------
+ * 右下角的浮层通知已经删掉：它盖在内容上、5 秒就自己跑了，
+ * 出错时人往往正盯着别处，回头看已经什么都没有了。
+ * 失败改成留在**出事的那个地方**——按钮旁边、面板里的一行小字，
+ * 不会自己消失，做下一次同样的操作时才清掉。
+ *
+ * 不用红：红色只给"动作"（加入队列 / 停止分析 / 移出曲库），
+ * 一个区域里再多一块红，那个真正要被按的按钮就不显眼了。
+ * 也没有左侧竖条一类的装饰，就是一枚芯片加一行字。
  * ========================================================== */
-.kd-toasts {
-  position: fixed;
-  right: 1rem;
-  bottom: calc(var(--kd-player-h) + 1rem);
-  z-index: 200;
+.kd-notice {
   display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  pointer-events: none;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  font-size: var(--kd-size-xs);
+  line-height: 1.4;
 }
-.kd-toast {
-  position: relative;
-  min-width: 15rem;
-  max-width: 26rem;
-  padding: 0.6rem 0.75rem;
-  border: 1px solid var(--kd-line);
-  border-left: 3px solid var(--kd-info);
-  background: var(--kd-panel-raised);
-  box-shadow: var(--kd-shadow-float);
-  font-size: var(--kd-size-sm);
-  pointer-events: auto;
+.kd-notice-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.kd-toast[data-level="warn"] { border-left-color: var(--kd-warn); }
-.kd-toast[data-level="error"] { border-left-color: var(--kd-danger); }
+/* 独占一行时（面板底部、按钮下面）自己撑开一点内边距 */
+.kd-notice[data-block="true"] {
+  padding: 0.3rem 0.5rem;
+}
 
 /* ============================================================
  * 对话框
@@ -1106,6 +1198,10 @@ textarea {
 .kd-player-meta {
   min-width: 0;
   flex: 0 0 200px;
+}
+/* 挂着"放不了"这条说明时才放宽：200px 里塞不下一句完整的话 */
+.kd-player-meta[data-notice="true"] {
+  flex: 1 1 200px;
 }
 .kd-player-title {
   font-weight: 700;
@@ -1436,6 +1532,12 @@ textarea {
 .kd-folder-more:hover {
   color: var(--kd-text);
 }
+/* 文件夹栏里的 InlineNotice 只需要一条上边框把它和树分开；
+   竖线之类的装饰不加，这一栏本来就窄。 */
+.kd-folder-notice {
+  border-top: 1px solid var(--kd-line);
+}
+
 .kd-folder-foot {
   display: flex;
   gap: 0.25rem;
@@ -1494,3 +1596,23 @@ textarea {
 .kd-num { font-variant-numeric: tabular-nums; }
 .kd-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .kd-nowrap { white-space: nowrap; }
+
+/* 视频角标。列表里 VJ 素材和音频混在一起，不标一下完全分不出来。
+   用中性的边框+弱化文字，不用红色——红色留给动作，这只是个状态。
+   贴在标题前面而不是单开一列：一列只为标少数几行不值当，
+   而且标题列本来就是"这是什么"的位置。 */
+.kd-badge-video {
+  /* 标题单元格是 inline 流（缩略图也是 inline-block），这里跟着用 inline-block；
+     写成 flex 子项在这个上下文里不生效。 */
+  display: inline-block;
+  margin-right: 0.35rem;
+  padding: 0 0.28rem;
+  border: 1px solid var(--kd-line);
+  border-radius: 3px;
+  color: var(--kd-muted);
+  font-size: 0.62rem;
+  line-height: 1.35;
+  letter-spacing: 0.04em;
+  /* 不参与标题的省略号截断：角标被截掉就失去意义了 */
+  white-space: nowrap;
+}

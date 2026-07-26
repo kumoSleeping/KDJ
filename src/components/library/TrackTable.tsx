@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { FolderSearch, Link2, LoaderCircle } from "lucide-react";
 import { api } from "../../lib/api";
+import { observeTrackScroller } from "../../lib/autoAnalyze";
 import { camelotColor } from "../../lib/camelot";
-import { DASH, formatBpm, formatDuration } from "../../lib/format";
+import { DASH, formatBpm, formatDuration, isVideoTrack } from "../../lib/format";
 import {
   useLibraryStore,
   type SelectMode,
@@ -58,17 +59,34 @@ interface Column {
   label: string;
   width?: string;
   align?: "num";
+  /** 给 CSS / 测试用来定位这一列。 */
+  key: string;
 }
 
+/**
+ * 列宽策略：**标题永远不参与压缩，其余列按优先级让位——但都不消失**。
+ *
+ * 标题是唯一无法从别处推断的信息（BPM/KEY/时长都是数字，看一眼就知道），
+ * 所以标题是唯一**不写 width** 的列，在 `table-layout: fixed` 下自动吃掉剩余空间。
+ *
+ * 艺人和专辑用 `clamp(下限, 理想值, 上限)`：面板一窄就先缩到下限，
+ * 把省出来的宽度让给标题。下限故意留得能看见几个字 + 省略号——
+ * **让位不等于消失**，一列全空白和一列没有是两回事。
+ * 专辑的下限比艺人更小，所以挤压时它先让。
+ */
 const COLUMNS: Column[] = [
-  { id: "title", label: "标题" },
-  { id: "artist", label: "艺人", width: "18%" },
-  { id: "album", label: "专辑", width: "14%" },
-  { id: "bpm", label: "BPM", width: "4.5rem", align: "num" },
-  { id: "camelot", label: "KEY", width: "4rem" },
-  { id: "energy", label: "能量", width: "4.5rem" },
-  { id: "duration", label: "时长", width: "4.5rem", align: "num" },
-  { id: null, label: "格式", width: "4rem" },
+  { id: "title", label: "标题", key: "title" },
+  // 标题单元格里还装着封面缩略图 + 「视频」角标（约 70px），它们都算在标题头上，
+  // 所以其余列的预留只能更抠：艺人/专辑的理想占比与上限都压小
+  //（曲库里一大片视频行这两列本来就全是"—"），数字列给到刚好放下内容为止。
+  { id: "artist", label: "艺人", width: "clamp(3.2rem, 9%, 9rem)", key: "artist" },
+  { id: "album", label: "专辑", width: "clamp(2.6rem, 7%, 7rem)", key: "album" },
+  { id: "bpm", label: "BPM", width: "4.2rem", align: "num", key: "bpm" },
+  { id: "camelot", label: "KEY", width: "3.4rem", key: "camelot" },
+  // 能量表本体 10 根柱 ≈ 39px，3.8rem 足够，不裁柱子
+  { id: "energy", label: "能量", width: "3.8rem", key: "energy" },
+  { id: "duration", label: "时长", width: "4rem", align: "num", key: "duration" },
+  { id: null, label: "格式", width: "3.4rem", key: "format" },
 ];
 
 export interface TrackTableProps {
@@ -120,7 +138,7 @@ export function TrackTable({
       <EmptyState
         icon={<FolderSearch size={22} />}
         title="曲库是空的"
-        hint="点上方「扫描目录」把本地音乐加进来；下载完成的曲目会自动入库。"
+        hint="点上方「添加文件夹」把本地音乐加进来，导入和分析都在后台自动完成；下载好的曲目会自己入库。"
       />
     );
   }
@@ -129,6 +147,10 @@ export function TrackTable({
     <div
       className="kd-scroll"
       style={{ height: "100%" }}
+      // 可视区域优先分析要知道"曲目表滚到哪了"。不挂这个 ref 它也能靠
+      // DOM 自己找到表（认 td[data-col="title"]），但那条路在列结构变动时
+      // 会静默失效——显式挂上就不再依赖任何选择器。
+      ref={observeTrackScroller}
       onScroll={(event) => {
         const el = event.currentTarget;
         // 距底 200px 就预取下一页，滚到底再等请求会有明显空白
@@ -141,6 +163,7 @@ export function TrackTable({
             {COLUMNS.map((column) => (
               <th
                 key={column.label}
+                data-col={column.key}
                 style={column.width ? { width: column.width } : undefined}
                 className={column.align === "num" ? "kd-td-num" : undefined}
                 data-sortable={column.id ? "true" : undefined}
@@ -212,12 +235,14 @@ export function TrackTable({
                   : undefined
               }
             >
-              <td className="kd-td-strong" title={track.title || track.filename}>
+              <td data-col="title" className="kd-td-strong" title={track.title || track.filename}>
                 {/* 内嵌封面缩略图。没图时 onError 藏掉 img，底下的灰格子当占位，
-                    行高不会跳。lazy：一页 200 行，只拉滚到眼前的。 */}
+                    行高不会跳。lazy：一页 200 行，只拉滚到眼前的。
+                    版本号挂 modified_at：换封面会更新它，列表里的小图才能跟着换——
+                    封面响应带 max-age=3600，不带版本号要干等缓存过期。 */}
                 <span className="kd-thumb">
                   <img
-                    src={api.coverUrl(track.id)}
+                    src={api.coverUrl(track.id, track.modified_at)}
                     alt=""
                     loading="lazy"
                     onError={(event) => {
@@ -235,21 +260,25 @@ export function TrackTable({
                     <Link2 size={11} />
                   </span>
                 )}
+                {/* 视频角标：曲库里混着 VJ 素材和 MV，不标一下和音频完全分不出来。
+                    紧贴标题文字放，读起来是「[封面] 视频 标题」。
+                    中性色不用红色——这是状态不是动作。 */}
+                {isVideoTrack(track.format) && <span className="kd-badge-video">视频</span>}
                 {track.title || track.filename}
               </td>
-              <td title={track.artist}>{track.artist || DASH}</td>
-              <td className="kd-muted" title={track.album}>
+              <td data-col="artist" title={track.artist}>{track.artist || DASH}</td>
+              <td data-col="album" className="kd-muted" title={track.album}>
                 {track.album || DASH}
               </td>
-              <td className="kd-td-num">{formatBpm(track.bpm)}</td>
+              <td data-col="bpm" className="kd-td-num">{formatBpm(track.bpm)}</td>
               <td>
                 <CamelotChip code={track.camelot} />
               </td>
               <td>
                 <EnergyMeter value={track.energy} />
               </td>
-              <td className="kd-td-num">{formatDuration(track.duration)}</td>
-              <td className="kd-mono kd-muted">{track.format.toUpperCase() || DASH}</td>
+              <td data-col="duration" className="kd-td-num">{formatDuration(track.duration)}</td>
+              <td data-col="format" className="kd-mono kd-muted">{track.format.toUpperCase() || DASH}</td>
             </tr>
           ))}
         </tbody>

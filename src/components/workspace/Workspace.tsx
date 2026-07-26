@@ -9,17 +9,16 @@ import {
   useLibraryStore,
   type TrackSort,
 } from "../../stores/libraryStore";
-import type { IntakeItem, Platform, Quality, SongSource } from "../../types";
-import { Button, EmptyState } from "../common";
+import type { IntakeItem, Platform, Quality, SongSource, VideoInfo } from "../../types";
+import { Button, EmptyState, InlineNotice } from "../common";
 import { QueuePanel } from "../download/QueuePanel";
-import { ResultTable, selectionKey } from "../download/ResultTable";
+import { ResultTable, selectableGroups, selectionKey } from "../download/ResultTable";
 import { DEFAULT_PRIORITY, SearchBar, SearchPlatforms } from "../download/SearchBar";
 import { FolderTree } from "../library/FolderTree";
 import { AccountsPanel } from "../settings/AccountsPanel";
 import { LibraryToolbar } from "../library/LibraryToolbar";
 import { TrackDetail } from "../library/TrackDetail";
 import { TrackTable } from "../library/TrackTable";
-import { VideoPanel } from "../video/VideoPanel";
 
 function errorText(error: unknown): string {
   if (error instanceof ApiError) return error.message;
@@ -29,6 +28,7 @@ function errorText(error: unknown): string {
 /**
  * B 站输入的识别。音乐/视频不再是手动切的开关：
  * 贴的是 B 站链接或 BV 号，那就是要下视频，没有第二种解释。
+ * 结果照样落在「搜索」标签里，只是那一条长得像视频（见 VideoResultRow）。
  */
 const BILI_RE = /bilibili\.com|b23\.tv|^\s*(?:BV[0-9A-Za-z]{10}|av\d+)\s*$/i;
 
@@ -44,7 +44,6 @@ const BILI_RE = /bilibili\.com|b23\.tv|^\s*(?:BV[0-9A-Za-z]{10}|av\d+)\s*$/i;
  */
 export function Workspace() {
   const settings = useAppStore((state) => state.settings);
-  const pushToast = useAppStore((state) => state.pushToast);
   const listMode = useAppStore((state) => state.listMode);
   const hasResults = useAppStore((state) => state.hasResults);
   const setListMode = useAppStore((state) => state.setListMode);
@@ -79,7 +78,17 @@ export function Workspace() {
   const [quality, setQuality] = useState<Quality | "">("");
   const [busy, setBusy] = useState(false);
   const [items, setItems] = useState<IntakeItem[] | null>(null);
+  /** 贴链接解析出来的那一个视频，置顶在结果列表最前面；关键词搜索会把它顶掉。 */
+  const [video, setVideo] = useState<VideoInfo | null>(null);
   const [note, setNote] = useState("");
+  /**
+   * 三处失败各有各的现场，所以分成三条，不合并成一个全局的错误：
+   * 搜索失败要顶在结果列表的摘要位、入队失败要贴在「加入队列」旁边、
+   * 拖动排序失败要出现在曲目表上方。合成一条就总有两处放错地方。
+   */
+  const [searchError, setSearchError] = useState("");
+  const [queueError, setQueueError] = useState("");
+  const [reorderError, setReorderError] = useState("");
 
   const [chosen, setChosen] = useState<Set<string>>(new Set());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -106,7 +115,10 @@ export function Workspace() {
   /** 丢掉搜索结果，回到曲库标签。 */
   const closeResults = useCallback(() => {
     setItems(null);
+    setVideo(null);
     setNote("");
+    setSearchError("");
+    setQueueError("");
     setChosen(new Set());
     useAppStore.getState().setHasResults(false);
   }, []);
@@ -115,20 +127,36 @@ export function Workspace() {
     const text = query.trim();
     if (!text) return;
 
-    // B 站链接/BV 号 → 切到常驻的「视频」标签解析。
+    // B 站链接/BV 号 → 解析成一条视频结果，和搜索结果同在「搜索」标签里。
+    // 解析要往 B 站跑一趟，所以先切标签再等结果：不然按下回车后有一两秒
+    // 界面上什么都不变，像是没接住这次输入。
     if (BILI_RE.test(text)) {
-      useAppStore.getState().setListMode("video");
-      // VideoPanel 沿 busy 的上升沿触发解析，解析进度它自己管
       setBusy(true);
-      setTimeout(() => setBusy(false), 80);
+      setSearchError("");
+      setItems(null);
+      setChosen(new Set());
+      setHasResults(true);
+      try {
+        const info = await api.videoResolve(text);
+        setVideo(info);
+        setNote("1 个视频");
+      } catch (error) {
+        setVideo(null);
+        setNote("");
+        setSearchError(`解析失败：${errorText(error)}`);
+      } finally {
+        setBusy(false);
+      }
       return;
     }
 
     setBusy(true);
+    setVideo(null);
     setChosen(new Set());
     setExpandedGroups(new Set());
     setCollapsedItems(new Set());
     setSourceIndex({});
+    setSearchError("");
     // 平台顺序 = 拖出来的优先级，决定同一首歌默认从哪家下。
     // 哔哩哔哩也参与关键词搜索。视频就是视频：下载保留完整视频文件，
     // 只在播放时取音轨（曲库对视频文件的统一行为）。
@@ -158,11 +186,13 @@ export function Workspace() {
       setItems([]);
       setHasResults(true);
       setNote("");
-      pushToast("error", `处理失败：${errorText(error)}`);
+      // 结果列表这时是空的，那条摘要位就腾出来写原因——
+      // 另起一行会把列表顶下去，切来切去整块面板都在跳
+      setSearchError(`处理失败：${errorText(error)}`);
     } finally {
       setBusy(false);
     }
-  }, [query, platforms, merge, batch, settings, pushToast, setHasResults]);
+  }, [query, platforms, merge, batch, settings, setHasResults]);
 
   const toggleSelect = useCallback((key: string) => {
     setChosen((current) => {
@@ -193,7 +223,9 @@ export function Workspace() {
     (index: number) => {
       const item = items?.[index];
       if (!item) return;
-      const keys = item.groups.map((group) => selectionKey(index, group.group_id));
+      // 视频行没有勾选框，别把它们悄悄勾上——那样底下会冒出一条
+      // "已选 N 首"，但列表里根本找不到第 N 条被勾中的行
+      const keys = selectableGroups(item).map((group) => selectionKey(index, group.group_id));
       setChosen((current) => {
         const next = new Set(current);
         const allIn = keys.every((key) => next.has(key));
@@ -213,14 +245,14 @@ export function Workspace() {
 
   const toggleAll = useCallback(() => {
     const allKeys = (items ?? []).flatMap((item, index) =>
-      item.groups.map((group) => selectionKey(index, group.group_id)),
+      selectableGroups(item).map((group) => selectionKey(index, group.group_id)),
     );
     setChosen((current) => (current.size >= allKeys.length ? new Set() : new Set(allKeys)));
   }, [items]);
 
   const resultCount = useMemo(
-    () => (items ?? []).reduce((sum, item) => sum + item.groups.length, 0),
-    [items],
+    () => (items ?? []).reduce((sum, item) => sum + item.groups.length, 0) + (video ? 1 : 0),
+    [items, video],
   );
 
   const chosenSources = useMemo(() => {
@@ -244,15 +276,17 @@ export function Workspace() {
 
   const addToQueue = useCallback(async () => {
     if (chosenSources.length === 0) return;
+    setQueueError("");
     try {
-      const tasks = await enqueue(chosenSources, { quality: quality === "" ? null : quality });
-      pushToast("info", `已加入 ${tasks.length} 个下载任务`);
+      // 不报"已加入 N 个任务"：右边那栏就是队列，任务当场排进去，
+      // 而且勾选被清空、这条动作栏跟着收起来，做成了看得一清二楚
+      await enqueue(chosenSources, { quality: quality === "" ? null : quality });
       setChosen(new Set());
       void refreshStats();
     } catch (error) {
-      pushToast("error", `加入队列失败：${errorText(error)}`);
+      setQueueError(`加入队列失败：${errorText(error)}`);
     }
-  }, [chosenSources, quality, enqueue, pushToast, refreshStats]);
+  }, [chosenSources, quality, enqueue, refreshStats]);
 
   /**
    * 本地列表里拖动换位：把整个文件夹的曲目顺序写回它的 .kumodeck.json。
@@ -262,6 +296,7 @@ export function Workspace() {
     async (ids: number[], targetId: number, before: boolean) => {
       const folder = filter.folder;
       if (!folder) return;
+      setReorderError("");
       try {
         const page = await api.tracks({
           folder,
@@ -283,10 +318,11 @@ export function Workspace() {
         // 手排完立刻按手排顺序看；setFilter 的防抖会触发 refresh
         setFilter({ sort: "custom" });
       } catch (error) {
-        pushToast("error", `排序失败：${errorText(error)}`);
+        // 拖完之后列表会自己弹回原来的顺序，得说清楚这不是"拖歪了"
+        setReorderError(`排序失败：${errorText(error)}`);
       }
     },
-    [filter.folder, filter.sort, filter.order, setFilter, pushToast],
+    [filter.folder, filter.sort, filter.order, setFilter],
   );
 
   const libraryNote =
@@ -295,6 +331,10 @@ export function Workspace() {
     (stats
       ? ` · 已分析 ${stats.analyzed} · ${formatDuration(stats.total_duration)} · ${formatBytes(stats.total_size)}`
       : "");
+
+  /** 标签行右边那条摘要：搜索出错时由原因顶替，其余时候是统计。 */
+  const headNote =
+    listMode === "library" ? libraryNote : listMode === "search" ? searchError || note : "";
 
   const sortBy = (column: TrackSort) => {
     // 点同一列切升降序，点新列默认降序（新加入、BPM 高的先看）
@@ -334,7 +374,7 @@ export function Workspace() {
           <FolderTree />
 
           <div className="kd-table-wrap">
-            {/* 列表面板的"眉目"：三个标签常驻，随时可切，不等搜索了才出现。
+            {/* 列表面板的"眉目"：两个标签常驻，随时可切，不等搜索了才出现。
                 激活态只是中性底色，不跟真正的动作按钮抢红色。 */}
             <div className="kd-list-head">
               <nav className="kd-list-tabs" aria-label="列表内容">
@@ -352,16 +392,15 @@ export function Workspace() {
                 >
                   搜索{resultCount > 0 && ` ${resultCount}`}
                 </button>
-                <button
-                  type="button"
-                  aria-pressed={listMode === "video"}
-                  onClick={() => setListMode("video")}
-                >
-                  视频
-                </button>
               </nav>
-              <span className="kd-list-note kd-truncate">
-                {listMode === "library" ? libraryNote : listMode === "search" ? note : ""}
+              {/* 搜索失败时这条摘要就地变成失败原因（data-error 让它换个颜色），
+                  不另起一行——列表上头多一条会把整块面板顶得跳一下 */}
+              <span
+                className="kd-list-note kd-truncate"
+                data-error={listMode === "search" && searchError ? "true" : undefined}
+                title={headNote || undefined}
+              >
+                {headNote}
               </span>
               <span className="kd-toolbar-gap" />
               {hasResults && listMode === "search" && (
@@ -392,13 +431,20 @@ export function Workspace() {
                 {libError}
               </div>
             )}
+            {/* 拖动排序失败：贴在曲目表正上方，就是刚才拖的那张表 */}
+            {listMode === "library" && (
+              <InlineNotice
+                text={reorderError}
+                onDismiss={() => setReorderError("")}
+                block
+              />
+            )}
 
-            {listMode === "video" ? (
-              <VideoPanel query={query} busy={busy} />
-            ) : listMode === "search" ? (
+            {listMode === "search" ? (
               <div className="kd-scroll">
                 <ResultTable
                   items={items ?? []}
+                  video={video}
                   loading={busy}
                   searched={hasResults}
                   selected={chosen}
@@ -438,6 +484,8 @@ export function Workspace() {
                   清除
                 </Button>
                 <span className="kd-toolbar-gap" />
+                {/* 入队失败就摆在这颗按钮左边：勾选还在，重按一次就是重试 */}
+                <InlineNotice text={queueError} onDismiss={() => setQueueError("")} />
                 <Button variant="primary" onClick={() => void addToQueue()}>
                   <Download size={13} />
                   加入队列
@@ -446,11 +494,11 @@ export function Workspace() {
             )}
           </div>
 
-          {/* 右栏：齿轮呼出的登录面板优先，其次搜索/视频时是下载队列，曲库时是曲目详情 */}
+          {/* 右栏：齿轮呼出的登录面板优先，其次搜索时是下载队列，曲库时是曲目详情 */}
           <aside className="kd-split-aside kd-scroll">
             {showAccounts ? (
               <AccountsPanel />
-            ) : listMode !== "library" ? (
+            ) : listMode === "search" ? (
               <QueuePanel />
             ) : selected ? (
               <TrackDetail key={selected.id} track={selected} />

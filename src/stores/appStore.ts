@@ -1,33 +1,27 @@
 /**
- * 应用级状态：当前板块、health、设置、账号、toast。
+ * 应用级状态：当前板块、health、设置、账号。
  * WS 事件也在这里统一分发给三个 store（见 connectEvents），
  * 组件不要自己 events.subscribe——那样每个组件都会各自处理一遍同一条事件。
  */
 
 import { create } from "zustand";
 import { api, events } from "../lib/api";
-import type { Account, Health, Settings, ToastPayload, WsEvent } from "../types";
+import type { Account, Health, Settings, WsEvent } from "../types";
 import { useDownloadStore } from "./downloadStore";
 import { useLibraryStore } from "./libraryStore";
 
 /**
- * 中间列表 + 右侧面板是**成对**切换的，三个标签常驻在列表面板顶边：
+ * 中间列表 + 右侧面板是**成对**切换的，两个标签常驻在列表面板顶边：
  *   library = 曲目表 + 曲目详情（本地）
  *   search  = 搜索结果 + 下载队列（在线）
- *   video   = 视频解析 + 下载队列（B 站）
- * 页面本身不换，只换这一对。搜索时自动切到 search、贴 B 站链接自动切到 video、
- * 点文件夹自动切回 library；随时可以手动点标签切——切走不丢内容。
+ * 页面本身不换，只换这一对。搜索时自动切到 search、点文件夹自动切回 library；
+ * 随时可以手动点标签切——切走不丢内容。
+ *
+ * 视频曾经是并列的第三个标签，现在并回了 search：贴 B 站链接和搜关键词都是
+ * "去网上找东西下"，分成两个标签之后每次都要先想"我刚才那条落在哪个标签里"。
+ * 视频和歌的差别只体现在结果行的长相上（见 VideoResultRow）。
  */
-export type ListMode = "library" | "search" | "video";
-
-export interface Toast {
-  id: number;
-  level: ToastPayload["level"];
-  text: string;
-}
-
-const TOAST_TTL_MS = 5000;
-let toastSeq = 0;
+export type ListMode = "library" | "search";
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -58,7 +52,8 @@ export interface AppStore {
   health: Health | null;
   settings: Settings | null;
   accounts: Account[];
-  toasts: Toast[];
+  /** 账号状态刷新失败的原因；空串 = 正常。登录面板自己显示这一行。 */
+  accountsError: string;
   booting: boolean;
   /** health 拉不通时的原因；空串 = sidecar 正常。 */
   bootError: string;
@@ -70,8 +65,6 @@ export interface AppStore {
   bootstrap(): Promise<void>;
   refreshAccounts(): Promise<void>;
   saveSettings(patch: Partial<Settings>): Promise<void>;
-  pushToast(level: ToastPayload["level"], text: string): number;
-  dismissToast(id: number): void;
   handleEvent(event: WsEvent): void;
 }
 
@@ -85,7 +78,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   health: null,
   settings: null,
   accounts: [],
-  toasts: [],
+  accountsError: "",
   booting: true,
   bootError: "",
   savingSettings: false,
@@ -120,7 +113,9 @@ export const useAppStore = create<AppStore>()((set, get) => ({
         set({ settings: settings.value });
         applyTheme(settings.value.theme);
       }
-      if (accounts.status === "fulfilled") set({ accounts: accounts.value });
+      // 账号拉不到不挡启动，但要把原因留下：登录面板不然只会一直写着"稍等一下"
+      if (accounts.status === "fulfilled") set({ accounts: accounts.value, accountsError: "" });
+      else set({ accountsError: `账号状态拉取失败：${errorText(accounts.reason)}` });
       set({ booting: false });
     })().finally(() => {
       bootInFlight = null;
@@ -131,9 +126,9 @@ export const useAppStore = create<AppStore>()((set, get) => ({
 
   async refreshAccounts() {
     try {
-      set({ accounts: await api.accounts() });
+      set({ accounts: await api.accounts(), accountsError: "" });
     } catch (error) {
-      get().pushToast("error", `账号状态刷新失败：${errorText(error)}`);
+      set({ accountsError: `账号状态刷新失败：${errorText(error)}` });
     }
   },
 
@@ -151,26 +146,14 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     } catch (error) {
       set({ settings: current, savingSettings: false });
       applyTheme(current.theme);
-      get().pushToast("error", `设置保存失败：${errorText(error)}`);
+      // 设置的入口散在各处（主题在标题栏、目录在队列、画质在视频面板），
+      // 没有一个统一的地方摆错误行；回滚本身已经是可见反馈——
+      // 拨过去的开关会自己弹回来。详情只留给控制台。
+      console.error(`设置保存失败：${errorText(error)}`);
     }
-  },
-
-  pushToast(level, text) {
-    const id = ++toastSeq;
-    set({ toasts: [...get().toasts, { id, level, text }] });
-    setTimeout(() => get().dismissToast(id), TOAST_TTL_MS);
-    return id;
-  },
-
-  dismissToast(id) {
-    set({ toasts: get().toasts.filter((toast) => toast.id !== id) });
   },
 
   handleEvent(event) {
-    if (event.type === "toast") {
-      get().pushToast(event.payload.level, event.payload.text);
-      return;
-    }
     if (event.type === "account.changed") {
       const account = event.payload;
       const accounts = get().accounts;

@@ -8,9 +8,15 @@ import {
   ListMusic,
   SearchX,
 } from "lucide-react";
-import type { IntakeItem, IntakeKind } from "../../types";
+import type { IntakeItem, IntakeKind, MergedGroup, VideoInfo } from "../../types";
 import { EmptyState } from "../common";
 import { MergedGroupRow, PLATFORM_LABEL } from "./MergedGroupRow";
+import {
+  isVideoGroup,
+  VideoResultRow,
+  videoSeedFromGroup,
+  videoSeedFromInfo,
+} from "./VideoResultRow";
 
 const KIND_LABEL: Record<IntakeKind, string> = {
   search: "搜索",
@@ -26,8 +32,22 @@ export function selectionKey(itemIndex: number, groupId: string): string {
   return `${itemIndex}:${groupId}`;
 }
 
+/**
+ * 能进"勾选 → 批量入队"那条路的组。
+ *
+ * 视频行被排除在外：画质 / 只要音轨 / 分 P 是逐条选的，批量入队那条接口
+ * （`/download` 收的是 `SongSource`）带不上这些参数。两条路并存的话，
+ * 用户在行里调完画质再去按底下那颗「加入队列」，调的东西会被无声丢掉。
+ * 所以视频行没有勾选框，只有它自己那颗「下载」。
+ */
+export function selectableGroups(item: IntakeItem): MergedGroup[] {
+  return item.groups.filter((group) => !isVideoGroup(group));
+}
+
 export interface ResultTableProps {
   items: IntakeItem[];
+  /** 贴 B 站链接解析出来的那一个视频，置顶在结果最前面。 */
+  video: VideoInfo | null;
   loading: boolean;
   /** 已处理过一次（用来区分"还没搜"和"搜了没结果"）。 */
   searched: boolean;
@@ -58,8 +78,12 @@ const HEAD_COLUMNS: ReadonlyArray<{ label: string; width?: string; num?: boolean
   { label: "", width: "3rem" },
 ];
 
+/** 视频行横跨整张表：首列的勾选框 + 上面这些列。 */
+const TOTAL_COLUMNS = HEAD_COLUMNS.length + 1;
+
 export function ResultTable({
   items,
+  video,
   loading,
   searched,
   selected,
@@ -75,7 +99,7 @@ export function ResultTable({
 }: ResultTableProps) {
   const totalGroups = items.reduce((sum, item) => sum + item.groups.length, 0);
 
-  if (loading && totalGroups === 0) {
+  if (loading && totalGroups === 0 && !video) {
     return (
       <EmptyState
         icon={<LoaderCircle className="kd-spin" size={22} />}
@@ -85,7 +109,7 @@ export function ResultTable({
     );
   }
 
-  if (items.length === 0) {
+  if (items.length === 0 && !video) {
     return searched ? (
       <EmptyState
         icon={<SearchX size={22} />}
@@ -103,53 +127,85 @@ export function ResultTable({
 
   // 单条关键词搜索就是普通列表，不套壳——套一层"包"只会平白多一行。
   const flat = items.length === 1 && items[0].kind === "search";
+  // 全选只管得着有勾选框的那些行，视频行不算在内，否则搜出来一屏视频时
+  // 表头那个框会永远勾不满
+  const selectableTotal = items.reduce((sum, item) => sum + selectableGroups(item).length, 0);
   const allSelected =
-    totalGroups > 0 &&
+    selectableTotal > 0 &&
     items.every((item, index) =>
-      item.groups.every((group) => selected.has(selectionKey(index, group.group_id))),
+      selectableGroups(item).every((group) => selected.has(selectionKey(index, group.group_id))),
     );
 
   return (
     <table className="kd-table">
-      <thead>
-        <tr>
-          <th style={{ width: "2rem" }}>
-            <input type="checkbox" checked={allSelected} aria-label="全选" onChange={onToggleAll} />
-          </th>
-          {HEAD_COLUMNS.map((column, index) => (
-            <th
-              key={column.label || `spacer-${index}`}
-              style={column.width ? { width: column.width } : undefined}
-              className={column.num ? "kd-td-num" : undefined}
-            >
-              {column.label}
+      {/* 只贴了一条 B 站链接时不摆表头：艺人/专辑/音质这些列底下一个格子都没有，
+          光留一排列名反而像"结果没加载出来" */}
+      {items.length > 0 && (
+        <thead>
+          <tr>
+            <th style={{ width: "2rem" }}>
+              <input
+                type="checkbox"
+                checked={allSelected}
+                aria-label="全选"
+                onChange={onToggleAll}
+              />
             </th>
-          ))}
-        </tr>
-      </thead>
+            {HEAD_COLUMNS.map((column, index) => (
+              <th
+                key={column.label || `spacer-${index}`}
+                style={column.width ? { width: column.width } : undefined}
+                className={column.num ? "kd-td-num" : undefined}
+              >
+                {column.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+      )}
       <tbody>
+        {/* 贴进来的那条链接置顶：它是用户刚刚亲手要的东西，不该排在搜索结果后面 */}
+        {video && (
+          <VideoResultRow
+            key={video.bvid}
+            {...videoSeedFromInfo(video)}
+            info={video}
+            colSpan={TOTAL_COLUMNS}
+          />
+        )}
         {items.map((item, index) => {
           const collapsed = collapsedItems.has(index);
+          const pickable = selectableGroups(item);
           const itemSelected =
-            item.groups.length > 0 &&
-            item.groups.every((group) => selected.has(selectionKey(index, group.group_id)));
+            pickable.length > 0 &&
+            pickable.every((group) => selected.has(selectionKey(index, group.group_id)));
 
           const rows = collapsed
             ? null
-            : item.groups.map((group, position) => (
-                <MergedGroupRow
-                  key={group.group_id}
-                  group={group}
-                  indent={!flat}
-                  last={position === item.groups.length - 1}
-                  sourceIndex={sourceIndex[group.group_id] ?? group.best_source_index}
-                  selected={selected.has(selectionKey(index, group.group_id))}
-                  expanded={expandedGroups.has(group.group_id)}
-                  onToggleSelect={() => onToggleSelect(selectionKey(index, group.group_id))}
-                  onToggleExpand={() => onToggleExpand(group.group_id)}
-                  onPickSource={(sourceIdx) => onPickSource(group.group_id, sourceIdx)}
-                />
-              ));
+            : item.groups.map((group, position) =>
+                // 视频行横跨整张表，所以它不吃 indent/last 那套导引线——
+                // 一条挂在两倍高的块上的肘线只会显得断掉
+                isVideoGroup(group) ? (
+                  <VideoResultRow
+                    key={group.group_id}
+                    {...videoSeedFromGroup(group)}
+                    colSpan={TOTAL_COLUMNS}
+                  />
+                ) : (
+                  <MergedGroupRow
+                    key={group.group_id}
+                    group={group}
+                    indent={!flat}
+                    last={position === item.groups.length - 1}
+                    sourceIndex={sourceIndex[group.group_id] ?? group.best_source_index}
+                    selected={selected.has(selectionKey(index, group.group_id))}
+                    expanded={expandedGroups.has(group.group_id)}
+                    onToggleSelect={() => onToggleSelect(selectionKey(index, group.group_id))}
+                    onToggleExpand={() => onToggleExpand(group.group_id)}
+                    onPickSource={(sourceIdx) => onPickSource(group.group_id, sourceIdx)}
+                  />
+                ),
+              );
 
           if (flat) return <Fragment key={item.entry}>{rows}</Fragment>;
 
@@ -160,7 +216,7 @@ export function ResultTable({
                   <input
                     type="checkbox"
                     checked={itemSelected}
-                    disabled={item.groups.length === 0}
+                    disabled={pickable.length === 0}
                     aria-label={`选择「${item.title || item.entry}」全部曲目`}
                     onChange={() => onToggleItemAll(index)}
                     onClick={(event) => event.stopPropagation()}

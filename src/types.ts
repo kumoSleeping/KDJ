@@ -295,7 +295,20 @@ export interface TrackPatch {
   artist?: string;
   album?: string;
   genre?: string;
+  /** 自由文本：文件里可能是 "2021"，也可能是 "2021-05-17"，当数字会把日期截掉。 */
+  year?: string;
   tags?: string[];
+}
+
+/**
+ * PATCH 的返回：就是一条 Track，可能多带一个 `tag_write_error`。
+ *
+ * 标题/艺人这些字段除了进数据库还要写回文件标签（DJ 软件只认文件里那份），
+ * 而文件可能只读或者正被占用。那种情况下数据库改动是保住了的，
+ * 只有文件没跟上——必须说出来，不然用户会以为拖进 Rekordbox 也是新的。
+ */
+export interface TrackPatchResult extends Track {
+  tag_write_error?: string;
 }
 
 export interface ScanResponseLike {
@@ -353,6 +366,14 @@ export interface ScanProgress {
   total: number;
   current: string;
   phase: "walk" | "tag" | "done";
+  /**
+   * 导入失败的原因，只出现在 `phase === "done"` 的那一条上（成功时是 null）。
+   * 中途的进度事件不带这个键——所以是可选的。
+   *
+   * 存在的理由：`POST /library/scan` 是"起个后台任务"，它的 Promise 早就 resolve 了，
+   * 真正的失败发生在之后。没有这个字段的话，失败在界面上和"扫出来 0 首"长得一模一样。
+   */
+  error?: string | null;
 }
 
 export interface AnalyzeProgress {
@@ -363,19 +384,18 @@ export interface AnalyzeProgress {
   track_id: number | null;
 }
 
-export interface ToastPayload {
-  level: "info" | "warn" | "error";
-  text: string;
-}
-
+/**
+ * 后端仍然会推 `{"type":"toast"}`（EventHub::publish_toast 还在），
+ * 但前端已经没有浮层通知了，这条分支故意不在联合类型里：
+ * 收到就当没这回事，各 store 的 switch 落到 default 直接忽略。
+ */
 export type WsEvent =
   | { type: "download.updated"; payload: DownloadTask }
   | { type: "download.list"; payload: DownloadTask[] }
   | { type: "scan.progress"; payload: ScanProgress }
   | { type: "analyze.progress"; payload: AnalyzeProgress }
   | { type: "library.updated"; payload: { track_ids: number[] } }
-  | { type: "account.changed"; payload: Account }
-  | { type: "toast"; payload: ToastPayload };
+  | { type: "account.changed"; payload: Account };
 
 /* ---------------------------------------------------------------- preload */
 

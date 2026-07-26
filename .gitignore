@@ -1,6 +1,7 @@
 node_modules/
 dist/
 dist-electron/
+dist-tauri/
 release/
 sidecar-dist/
 sidecar/.venv/
@@ -14,3 +15,12 @@ sidecar/kumodeck.egg-info/
 nohup.out
 .DS_Store
 data/
+
+# Rust
+/target
+
+# Tauri
+# gen/ 是 `tauri android init` / `tauri ios init` 生成的原生工程骨架，
+# 和 target/ 一样属于可重建产物
+src-tauri/gen/
+src-tauri/target/

@@ -154,7 +154,6 @@ export function SearchPlatforms({
   soundcloudEnabled,
 }: SearchPlatformProps) {
   const saveSettings = useAppStore((state) => state.saveSettings);
-  const pushToast = useAppStore((state) => state.pushToast);
   const priority = useAppStore(
     (state) => state.settings?.platform_priority ?? (DEFAULT_PRIORITY as string[]),
   );
@@ -215,8 +214,9 @@ export function SearchPlatforms({
               }}
               onClick={() => {
                 if (off) {
+                  // 启用之后这颗按钮的"未启用"灰态当场就没了，还顺手被选中，
+                  // 这本身就是回执，不必再说一遍"已启用 SoundCloud"
                   void saveSettings({ soundcloud_enabled: true });
-                  pushToast("info", "已启用 SoundCloud");
                   if (!platforms.includes(item.id)) onTogglePlatform(item.id);
                   return;
                 }

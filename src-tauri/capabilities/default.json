@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口的权限集。openPath/pickFolder 那几件事走的是本 crate 自己的 #[tauri::command]（应用命令不经过 ACL），所以这里只需要放行 core 的基础能力；dialog/opener 的前端 JS API 保持不可用，避免把「任意路径都能打开」暴露给页面。",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

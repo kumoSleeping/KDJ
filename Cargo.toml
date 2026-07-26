@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kumodeck-core",
+    "crates/kumodeck-providers",
+    "crates/kumodeck-analysis",
+    "crates/kumodeck-library",
+    "crates/kumodeck-server",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

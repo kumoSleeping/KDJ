@@ -116,3 +116,15 @@ export function folderName(path: string): string {
   const parts = path.split("/").filter(Boolean);
   return parts[parts.length - 1] ?? path;
 }
+
+/**
+ * 曲库里混着 VJ 素材和 MV，它们和音频在列表里长得一模一样。
+ *
+ * 这份后缀表必须和后端 `crates/kumodeck-providers/src/tags.rs::VIDEO_EXTENSIONS`
+ * 保持一致——两边不一致的表现是"有的视频有角标有的没有"，很难联想到是表漂移了。
+ */
+const VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "mov", "webm", "mkv"]);
+
+export function isVideoTrack(format: string): boolean {
+  return VIDEO_EXTENSIONS.has(format.trim().toLowerCase());
+}

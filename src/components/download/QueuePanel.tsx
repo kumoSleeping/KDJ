@@ -1,9 +1,10 @@
+import { useState } from "react";
 import { Clapperboard, FolderOpen, Inbox, Music2, Trash2, X } from "lucide-react";
 import { DASH, folderName, formatBytes, formatPercent, formatSpeed } from "../../lib/format";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import type { DownloadTask, Settings, TaskState } from "../../types";
-import { Button, EmptyState, ProgressBar } from "../common";
+import { Button, EmptyState, InlineNotice, ProgressBar } from "../common";
 import { PLATFORM_LABEL } from "./MergedGroupRow";
 
 const STATE_LABEL: Record<TaskState, string> = {
@@ -30,7 +31,8 @@ function progressState(state: TaskState): "running" | "done" | "failed" {
 
 function QueueRow({ task }: { task: DownloadTask }) {
   const cancel = useDownloadStore((store) => store.cancel);
-  const pushToast = useAppStore((store) => store.pushToast);
+  /** 取消这一条失败时的原因，和任务自己的 error 共用行尾那一行。 */
+  const [cancelError, setCancelError] = useState("");
   const active = task.state === "queued" || task.state === "running";
   // 后端拿不到 Content-Length 时 total_bytes 是 0，此时进度条走不确定态，
   // 否则会一直停在 0% 让人以为卡死了
@@ -52,8 +54,9 @@ function QueueRow({ task }: { task: DownloadTask }) {
             iconOnly
             aria-label="取消"
             onClick={() => {
+              setCancelError("");
               void cancel(task.id).catch((error: unknown) =>
-                pushToast("error", `取消失败：${(error as Error).message}`),
+                setCancelError(`取消失败：${(error as Error).message}`),
               );
             }}
           >
@@ -100,6 +103,14 @@ function QueueRow({ task }: { task: DownloadTask }) {
       {task.error && (
         <div className="kd-queue-meta" style={{ color: "var(--kd-danger)" }} title={task.error}>
           <span className="kd-truncate">{task.error}</span>
+        </div>
+      )}
+
+      {/* 取消失败是"我按了但没反应"，必须留在这一条上：任务还在跑，
+          光看进度条根本分不清是没点上还是后端拒绝了 */}
+      {cancelError && (
+        <div style={{ gridColumn: "1 / -1" }}>
+          <InlineNotice text={cancelError} onDismiss={() => setCancelError("")} />
         </div>
       )}
     </div>
@@ -164,10 +175,11 @@ export function QueuePanel() {
   const list = useDownloadStore((store) => store.list);
   const activeCount = useDownloadStore((store) => store.activeCount);
   const clear = useDownloadStore((store) => store.clear);
-  const pushToast = useAppStore((store) => store.pushToast);
   const autoStart = useAppStore((store) => store.settings?.auto_start_downloads ?? false);
   const saveSettings = useAppStore((store) => store.saveSettings);
   const finishedCount = list.length - activeCount;
+  /** 清理失败：列表纹丝不动，不说一声就等于按钮坏了。 */
+  const [clearError, setClearError] = useState("");
 
   return (
     <div className="kd-col" style={{ height: "100%", minHeight: 0 }}>
@@ -199,8 +211,9 @@ export function QueuePanel() {
           disabled={finishedCount <= 0}
           title="清掉已完成 / 失败 / 已取消的记录"
           onClick={() => {
+            setClearError("");
             void clear().catch((error: unknown) =>
-              pushToast("error", `清空失败：${(error as Error).message}`),
+              setClearError(`清理失败：${(error as Error).message}`),
             );
           }}
         >
@@ -208,6 +221,9 @@ export function QueuePanel() {
           清理
         </Button>
       </div>
+
+      {/* 就贴在「清理」这条工具条底下 */}
+      <InlineNotice text={clearError} onDismiss={() => setClearError("")} block />
 
       <SaveDirRow />
 
