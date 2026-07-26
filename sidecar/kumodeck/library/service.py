@@ -273,9 +273,11 @@ class LibraryService:
             where.append("path LIKE ? ESCAPE '\\'")
             params.append(f"{prefix}%")
             if not folder_deep:
-                # 再往下还有一层分隔符的（= 在子目录里）排掉
+                # 再往下还有一层分隔符的（= 在子目录里）排掉。
+                # os.sep 必须过转义：Windows 的分隔符恰好是 LIKE 的转义符 '\'，
+                # 裸拼出来的 %\% 意思是"字面百分号"，子目录一个都排不掉。
                 where.append("path NOT LIKE ? ESCAPE '\\'")
-                params.append(f"{prefix}%{os.sep}%")
+                params.append(f"{prefix}%{_escape_like(os.sep)}%")
 
         q = (q or "").strip()
         if q:

@@ -777,13 +777,15 @@ def test_clone_metadata_copies_analysis_and_tags(service: LibraryService):
     assert (clone.bpm, clone.camelot, clone.rating, clone.tags) == (140.0, "6A", 5, ["set-a"])
 
 
-def test_rebase_paths_only_replaces_the_prefix(service: LibraryService):
+def test_rebase_paths_only_replaces_the_prefix(service: LibraryService, tmp_path: Path):
     """目录名在路径里出现两次时，SQL 的 replace() 会改错，这里必须只换前缀。"""
-    track_id = insert(service, path=u("/music/set1/set1/a.mp3"), title="a")
-    changed = service.rebase_paths(Path(u("/music/set1")), Path(u("/music/set2")))
+    # 用 tmp_path 造真实绝对路径：normalize_path 走 abspath，Windows 上会给
+    # "/music/..." 这种无盘符假路径补上当前盘符，前缀就对不上了
+    track_id = insert(service, path=str(tmp_path / "set1" / "set1" / "a.mp3"), title="a")
+    changed = service.rebase_paths(tmp_path / "set1", tmp_path / "set2")
     assert changed == [track_id]
     moved = service.get(track_id)
-    assert moved is not None and moved.path == u("/music/set2/set1/a.mp3")
+    assert moved is not None and moved.path == str(tmp_path / "set2" / "set1" / "a.mp3")
 
 
 def test_infer_roots_handles_two_separate_trees(tmp_path: Path, monkeypatch):
