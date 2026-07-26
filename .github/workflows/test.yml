@@ -33,7 +33,9 @@ jobs:
 
       - name: 后端测试
         shell: bash
+        # annotate-failures 插件把每个失败测试变成 check-run annotation——
+        # 这是匿名可读的 API，远程排查不用登录拿完整日志
         run: |
           python -m pip install -U pip
-          python -m pip install "./sidecar[dev]"
-          python -m pytest sidecar/tests -q
+          python -m pip install "./sidecar[dev]" pytest-github-actions-annotate-failures
+          python -m pytest sidecar/tests -q --tb=short
