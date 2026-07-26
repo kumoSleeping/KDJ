@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -52,10 +53,16 @@ def service(tmp_path: Path) -> LibraryService:
     return LibraryService(Database(tmp_path / "kumodeck.db"))
 
 
+def u(text: str) -> str:
+    """假路径统一换成平台分隔符：服务层按 os.sep 拼路径前缀，
+    Windows 上 '\\music\\' 匹配不上写死的 '/music/'，CI 三平台都要绿。"""
+    return text.replace("/", os.sep)
+
+
 def insert(service: LibraryService, **kwargs) -> int:
     """直接塞一行假数据，绕开 upsert_file 的文件系统依赖。"""
     row = {
-        "path": f"/music/{kwargs.get('title', 'x')}.mp3",
+        "path": u(f"/music/{kwargs.get('title', 'x')}.mp3"),
         "filename": f"{kwargs.get('title', 'x')}.mp3",
         "title": "Untitled",
         "artist": "",
@@ -291,7 +298,7 @@ def test_harmonic_edge_cases(service: LibraryService):
 
     limited = insert(service, title="L", bpm=128.0, camelot="12A")
     for i in range(5):
-        insert(service, title=f"C{i}", bpm=128.0, camelot="1A", path=f"/m/c{i}.mp3")
+        insert(service, title=f"C{i}", bpm=128.0, camelot="1A", path=u(f"/m/c{i}.mp3"))
     assert len(service.harmonic_matches(limited, 6.0, 2)) == 2
 
 
@@ -677,7 +684,7 @@ def test_folder_tree_counts_recursively(service: LibraryService, roots: list[Pat
     insert(service, path=str(root / "杭州" / "a.mp3"), title="a")
     insert(service, path=str(root / "温州" / "b.mp3"), title="b")
     insert(service, path=str(root / "温州" / "encore" / "c.mp3"), title="c")
-    insert(service, path="/somewhere/else/d.mp3", title="d")
+    insert(service, path=u("/somewhere/else/d.mp3"), title="d")
 
     tree = build_tree([str(root)], service.all_paths())
     assert len(tree.roots) == 1
@@ -719,7 +726,12 @@ def test_ensure_inside_rejects_symlink_escape(tmp_path: Path, roots: list[Path])
     outside = tmp_path / "outside"
     outside.mkdir()
     trap = roots[0] / "trap"
-    trap.symlink_to(outside, target_is_directory=True)
+    try:
+        trap.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        # Windows 上创建符号链接要开发者模式/管理员权限，环境不给就跳过——
+        # 被测的 realpath 防线逻辑本身与平台无关
+        pytest.skip("此环境不允许创建符号链接")
     with pytest.raises(FolderError):
         ensure_inside(str(trap), roots)
 
@@ -757,7 +769,7 @@ def test_relocate_keeps_analysis(service: LibraryService, tmp_path: Path):
 def test_clone_metadata_copies_analysis_and_tags(service: LibraryService):
     source = insert(service, title="orig", bpm=140.0, camelot="6A", rating=5)
     service.patch(source, TrackPatch(tags=["set-a"]))
-    target = insert(service, path="/music/link.mp3", title="link")
+    target = insert(service, path=u("/music/link.mp3"), title="link")
 
     service.clone_metadata(source, target)
     clone = service.get(target)
@@ -767,11 +779,11 @@ def test_clone_metadata_copies_analysis_and_tags(service: LibraryService):
 
 def test_rebase_paths_only_replaces_the_prefix(service: LibraryService):
     """目录名在路径里出现两次时，SQL 的 replace() 会改错，这里必须只换前缀。"""
-    track_id = insert(service, path="/music/set1/set1/a.mp3", title="a")
-    changed = service.rebase_paths(Path("/music/set1"), Path("/music/set2"))
+    track_id = insert(service, path=u("/music/set1/set1/a.mp3"), title="a")
+    changed = service.rebase_paths(Path(u("/music/set1")), Path(u("/music/set2")))
     assert changed == [track_id]
     moved = service.get(track_id)
-    assert moved is not None and moved.path == "/music/set2/set1/a.mp3"
+    assert moved is not None and moved.path == u("/music/set2/set1/a.mp3")
 
 
 def test_infer_roots_handles_two_separate_trees(tmp_path: Path, monkeypatch):

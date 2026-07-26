@@ -1,0 +1,39 @@
+# 每次 push / PR 的快速验证：三平台 pytest + 前端 tsc/构建，不打安装包。
+# 打包（DMG/EXE/AppImage）在 build.yml，由 v* tag 触发。
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 前端类型检查与构建
+        run: |
+          npm ci
+          npm run build
+
+      - name: 后端测试
+        shell: bash
+        run: |
+          python -m pip install -U pip
+          python -m pip install "./sidecar[dev]"
+          python -m pytest sidecar/tests -q

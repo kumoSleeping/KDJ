@@ -12,6 +12,10 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# 发 Release 需要写权限——默认的 GITHUB_TOKEN 是只读的，首跑就栽在这
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
