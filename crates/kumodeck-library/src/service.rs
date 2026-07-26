@@ -83,6 +83,14 @@ pub fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
+fn order_direction(order: &str) -> &'static str {
+    if order.trim().eq_ignore_ascii_case("asc") {
+        "ASC"
+    } else {
+        "DESC"
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TrackQuery {
     pub q: String,
@@ -95,6 +103,13 @@ pub struct TrackQuery {
     pub folder_deep: bool,
     pub sort: String,
     pub order: String,
+    /// 副排序键。空 = 只按主键排。
+    ///
+    /// 用途：主键相同的那一撮再按它排。DJ 排 set 时常要「先按 BPM，
+    /// 同 BPM 里再按调号」——只有一个排序键的话，同 BPM 的那十几首是
+    /// 乱序的，得靠眼睛在里面找能接的调。
+    pub sort2: String,
+    pub order2: String,
     pub limit: i64,
     pub offset: i64,
 }
@@ -249,16 +264,27 @@ impl LibraryService {
         }
 
         let column = sort_column(&sort_key);
-        let direction = if query.order.trim().eq_ignore_ascii_case("asc") {
-            "ASC"
-        } else {
-            "DESC"
-        };
+        let direction = order_direction(&query.order);
         // `<col> IS NULL` 放第一排序键 = 空值永远垫底（升序降序都一样），
         // 再拿 id 兜底保证分页稳定不重复
+        //
+        // 副键夹在主键和 id 之间。它同样要带自己的 IS NULL，
+        // 否则同一个主键值里"没分析出调号的"会插在中间而不是垫底。
+        let secondary = {
+            let key = query.sort2.trim();
+            if key.is_empty() || key == sort_key {
+                // 和主键相同就没有意义，直接忽略——比报错友好，
+                // 而前端点两下同一列时确实会短暂出现这种状态
+                String::new()
+            } else {
+                let col2 = sort_column(key);
+                let dir2 = order_direction(&query.order2);
+                format!(" ({col2}) IS NULL, ({col2}) {dir2},")
+            }
+        };
         let sql = format!(
-            "SELECT * FROM tracks{clause} ORDER BY ({column}) IS NULL, ({column}) {direction}, \
-             id DESC LIMIT ? OFFSET ?"
+            "SELECT * FROM tracks{clause} ORDER BY ({column}) IS NULL, ({column}) {direction},\
+            {secondary} id DESC LIMIT ? OFFSET ?"
         );
         let mut all_params = params;
         all_params.push(SqlValue::Integer(limit));
@@ -1598,6 +1624,66 @@ mod tests {
             .unwrap();
         assert_eq!(clamped.limit, 2000);
         assert_eq!(clamped.offset, 0);
+    }
+
+    #[test]
+    fn a_secondary_sort_orders_within_ties_on_the_primary() {
+        // DJ 排 set 的实际用法：先按 BPM，同 BPM 的那一撮里再按调号。
+        // 只有一个排序键时，同 BPM 的十几首是乱序的，得靠眼睛在里面找能接的调。
+        let service = service();
+        for (name, bpm, camelot) in [
+            ("b-128-8A", 128.0, "8A"),
+            ("a-128-10A", 128.0, "10A"),
+            ("c-128-1A", 128.0, "1A"),
+            ("d-120-5A", 120.0, "5A"),
+        ] {
+            insert(
+                &service,
+                Row {
+                    path: &format!("{ROOT}{SEP}{name}.mp3"),
+                    title: name,
+                    bpm: Some(bpm),
+                    camelot,
+                    analyzed: true,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let page = service
+            .list_tracks(&TrackQuery {
+                sort: "bpm".into(),
+                order: "desc".into(),
+                sort2: "camelot".into(),
+                order2: "asc".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let titles: Vec<&str> = page.items.iter().map(|t| t.title.as_str()).collect();
+        // 128 的三首排在前面（bpm desc），它们内部按 camelot 升序：1A < 8A < 10A。
+        // 注意 10A 排在 8A **后面**——camelot 是拆成数字排的，不是字符串排的
+        assert_eq!(titles, vec!["c-128-1A", "b-128-8A", "a-128-10A", "d-120-5A"]);
+
+        // 副键和主键相同要被忽略，而不是拼出一条重复的 ORDER BY
+        let same = service
+            .list_tracks(&TrackQuery {
+                sort: "bpm".into(),
+                order: "desc".into(),
+                sort2: "bpm".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(same.items.len(), 4);
+
+        // 不给副键时行为和以前完全一致（只按主键 + id 兜底）
+        let none = service
+            .list_tracks(&TrackQuery {
+                sort: "bpm".into(),
+                order: "desc".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(none.items.first().unwrap().bpm, Some(128.0));
     }
 
     #[test]

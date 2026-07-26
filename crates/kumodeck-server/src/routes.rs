@@ -481,6 +481,11 @@ struct TrackQueryParams {
     sort: Option<String>,
     #[serde(default)]
     order: Option<String>,
+    /// 副排序键：主键相同的那一撮再按它排。空 = 只按主键。
+    #[serde(default)]
+    sort2: Option<String>,
+    #[serde(default)]
+    order2: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
 }
@@ -500,6 +505,8 @@ async fn library_tracks(
         folder_deep: params.folder_deep,
         sort: params.sort.unwrap_or_else(|| "added_at".into()),
         order: params.order.unwrap_or_else(|| "desc".into()),
+        sort2: params.sort2.unwrap_or_default(),
+        order2: params.order2.unwrap_or_else(|| "asc".into()),
         limit: params.limit.unwrap_or(200).clamp(1, 1000),
         offset: params.offset.unwrap_or(0).max(0),
     };

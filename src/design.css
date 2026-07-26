@@ -259,6 +259,13 @@ textarea {
 
 /* 手机没有窗口装饰：收掉给 macOS 红绿灯留的 84px，并让出状态栏高度。
    env(safe-area-inset-*) 在没有刘海的设备上是 0，写了不吃亏。 */
+/* macOS 的红绿灯是系统画在窗口左上角的，标题必须给它让位。
+   78 是量出来的：三颗灯从 x≈14 起、到 x≈66 止，再留十来 px 呼吸位。
+   **只在 macOS 桌面壳上加**——浏览器预览、Windows、Linux 都没有那三颗灯，
+   无条件留着的话左边就是白空一块（用户原话：卡在这里，很丑）。 */
+.kd-titlebar[data-mac="true"] {
+  padding-left: 78px;
+}
 .kd-titlebar[data-mobile="true"] {
   padding-left: 0.75rem;
   padding-top: env(safe-area-inset-top, 0);
@@ -279,7 +286,7 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  padding: 0 0.75rem 0 84px; /* 给 macOS 红绿灯留位 */
+  padding: 0 0.75rem; /* 给 macOS 红绿灯留位 */
   border-bottom: 1px solid var(--kd-line);
   background: var(--kd-panel);
   user-select: none;
@@ -326,6 +333,12 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
 .kd-pad {
   padding: 1.25rem;
 }
+/* 三档布局的网格。把手和两侧栏由 JS 按档位摘掉，这里只负责列的构成。
+   档位定义见 src/lib/useLayoutMode.ts。 */
+.kd-split[data-layout="narrow"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .kd-split {
   display: grid;
   /* 右栏放的是整首曲子的分析结果（BPM/调号轮/和声推荐/文件信息），
@@ -1737,10 +1750,13 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
 .kd-panel-slot {
   position: relative;
 }
+/* 把手在**左**上角，不在右上角：右上角是面板自己的操作位
+   （元数据面板那儿有「重读标签」和「编辑」两颗按钮），
+   两者叠在一起的结果是想点编辑却抓起了整块面板。 */
 .kd-panel-grip {
   position: absolute;
-  top: 0.35rem;
-  right: 0.35rem;
+  top: 0.3rem;
+  left: 0.25rem;
   z-index: 2;
   appearance: none;
   border: none;
@@ -1825,8 +1841,20 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   cursor: pointer;
 }
 .kd-vj-word > button:first-child:hover {
+  border-color: var(--kd-muted);
+}
+/* 勾中的样子：红底白字。
+   用实心反白而不是只换边框色——一排十几颗里，只改一条 1px 的边
+   扫一眼根本分不出来。
+   反白色用主题红而不是文字色：上一版用的是 var(--kd-text)，在浅色主题下
+   就是一块块纯黑方块，比底下那颗真正的「搜索」按钮还抢眼。
+   这里破一次"红色只给动作"：这些词选中之后**就是**那颗搜索按钮的参数，
+   同属一个动作，用同一个颜色才读得出它们是一伙的。 */
+.kd-vj-word > button:first-child[aria-pressed="true"] {
   border-color: var(--kd-theme);
-  color: var(--kd-theme);
+  background: var(--kd-theme);
+  color: var(--kd-theme-ink);
+  font-weight: 700;
 }
 /* 删除叉压在右上角外沿：塞进按钮里会把词挤窄，一排词的宽度全跟着变 */
 .kd-vj-word-x {
@@ -1894,121 +1922,11 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
  * 阈值 940px 是量出来的：13rem + 22rem 两栏 = 560px，中间的表再留 380px
  * 才够放下标题+BPM+KEY+时长。这一档同时覆盖竖着的平板和横着的手机。
  * ========================================================== */
-@media (max-width: 940px) {
-  /* 单栏。把手和两侧栏由 JS 摘掉，这里只负责把网格塌成一列 */
-  .kd-split[data-narrow="true"] {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  /* 搜索条那一排平台按钮换行，不要横向滚动 */
-  .kd-section > .kd-toolbar,
+@media (max-width: 820px) {
+  /* 搜索条保持一行：输入框可以缩，平台键和音质不缩。
+     让它 wrap 的话会散成三四层，把小半屏的高度吃掉。 */
   .kd-toolbar {
-    flex-wrap: wrap;
     row-gap: 0.4rem;
-  }
-
-  /* —— 曲目表改成两行式 ——
-     只作用于曲库表（data-kind="library"）：搜索结果表用的是同一个 .kd-table，
-     但里面有视频大行那套自排的多行块，套上 grid 会散架。
-
-     选择器必须写到 `tbody td` 这一层：基础样式里那条
-     `.kd-table tbody td { max-width: 0 }`（auto 布局下做省略号用的）
-     特异性比 `.kd-table td` 高，不覆盖的话每个单元格都会被压成 0 宽——
-     症状是"只剩封面缩略图，标题一个字都不显示"。 */
-  .kd-table[data-kind="library"],
-  .kd-table[data-kind="library"] tbody,
-  .kd-table[data-kind="library"] tbody tr,
-  .kd-table[data-kind="library"] tbody td {
-    display: block;
-  }
-  .kd-table[data-kind="library"] thead {
-    display: none;
-  }
-  .kd-table[data-kind="library"] tbody tr {
-    display: grid;
-    /* 第二行是一串**左对齐**的元信息，不是四根对齐的列。
-       竖屏下没有"列"这回事——上下两行谁也对不齐谁，硬排成列的结果是
-       艺人孤零零贴在最左、数字甩到最右，中间一大片空。
-       所以前三个按内容宽度排，最后一个吃掉剩余空间（内容仍左对齐）。 */
-    grid-template-columns: minmax(0, max-content) max-content max-content 1fr;
-    grid-template-areas:
-      "title  title title title"
-      "artist bpm   key   dur";
-    gap: 0.15rem 0.55rem;
-    padding: 0.45rem 0.7rem;
-    align-items: center;
-    border-bottom: 1px solid var(--kd-line-soft);
-  }
-  /* 数字列在宽屏是右对齐（为了小数点对齐），竖屏下这一串要左对齐才连得上 */
-  .kd-table[data-kind="library"] tbody td.kd-td-num {
-    text-align: left;
-  }
-  /* 没有艺人时整格不占位，见 TrackTable 里 data-empty 的注释 */
-  .kd-table[data-kind="library"] tbody td[data-col="artist"][data-empty="true"] {
-    display: none;
-  }
-  .kd-table[data-kind="library"] tbody td {
-    /* 三个必须显式还原的基础样式，理由见上面 */
-    max-width: none;
-    height: auto;
-    padding: 0;
-    border: none;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    min-width: 0;
-  }
-  .kd-table[data-kind="library"] tbody td[data-col="title"] {
-    grid-area: title;
-    font-size: var(--kd-size);
-  }
-  .kd-table[data-kind="library"] tbody td[data-col="artist"] {
-    grid-area: artist;
-    color: var(--kd-muted);
-    font-size: var(--kd-size-xs);
-  }
-  .kd-table[data-kind="library"] tbody td[data-col="bpm"] {
-    grid-area: bpm;
-    font-size: var(--kd-size-xs);
-    color: var(--kd-muted);
-  }
-  .kd-table[data-kind="library"] tbody td[data-col="camelot"] {
-    grid-area: key;
-  }
-  .kd-table[data-kind="library"] tbody td[data-col="duration"] {
-    grid-area: dur;
-    font-size: var(--kd-size-xs);
-    color: var(--kd-muted);
-  }
-  /* 专辑/能量/格式在两行式里没有位子。它们是**可以从别处得到**的信息
-     （专辑和格式在详情抽屉里、能量已经体现在排序里），而标题和 BPM/调号
-     不是——窄屏下的取舍只能按这个标准来。 */
-  .kd-table[data-kind="library"] tbody td[data-col="album"],
-  .kd-table[data-kind="library"] tbody td[data-col="energy"],
-  .kd-table[data-kind="library"] tbody td[data-col="format"] {
-    display: none;
-  }
-  /* 悬停/选中的底色原来挂在 td 上（表格里 tr 不接受 background），
-     两行式下要挪回 tr，不然只有几个单元格变色 */
-  .kd-table[data-kind="library"] tbody tr:hover {
-    background: var(--kd-hover);
-  }
-  .kd-table[data-kind="library"] tbody tr[aria-selected="true"] {
-    background: var(--kd-selected);
-  }
-  .kd-table[data-kind="library"] tbody tr:hover td,
-  .kd-table[data-kind="library"] tbody tr[aria-selected="true"] td {
-    background: transparent;
-  }
-
-  /* 搜索结果表没做两行式（里面有视频大行那套自排的多行块，改不动），
-     宽度必然溢出。给它自己横向滚动，别让整页跟着横滚——
-     会横滚的页面在手机上连竖着滑都容易误触。 */
-  .kd-table-wrap > .kd-scroll {
-    overflow-x: auto;
-  }
-  .kd-table:not([data-kind="library"]) {
-    min-width: 44rem;
   }
 
   /* 播放条：波形留着（它就是进度条），时间文字省掉——
@@ -2132,50 +2050,78 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
  * 搜索框（图标内嵌）与平台标志键
  * ========================================================== */
 
-/* 搜索框把「音质」和「搜索」都收进边框里。
-   原来它们是外面两个独立控件，横着吃掉一大截宽度，而且那颗红色的
-   「搜索」会跟顶上真正的动作抢注意力——它和输入框本来就是同一件事的两半。 */
-.kd-searchbox {
+/* 整条搜索区是**一个**控件：一圈边框，里面用间距和细分隔线分区。
+   上一版是"输入框有框、FLAC 有框、搜索键有框、四个平台各有一个框"，
+   一排下来七个描边矩形，用户原话「框框太多」。现在只有最外面那一圈。 */
+.kd-searchbar {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.5rem;
   min-width: 0;
-  height: 2.1rem;
-  padding: 0 0.25rem 0 0.55rem;
+  padding: 0 0.35rem 0 0.6rem;
   border: 1px solid var(--kd-line);
   background: var(--kd-panel-inset);
 }
-.kd-searchbox:focus-within {
+.kd-searchbar:focus-within {
   border-color: var(--kd-muted);
 }
-.kd-searchbox-lead {
+/* 批量模式是四行高的文本域，整条要顶部对齐，图标才不会浮在第二行文字中间 */
+.kd-searchbar[data-batch] {
+  align-items: flex-start;
+  padding-top: 0.45rem;
+  padding-bottom: 0.45rem;
+}
+.kd-searchbar-lead {
   flex: none;
   display: inline-flex;
+  align-items: center;
+  height: 2.1rem;
   color: var(--kd-faint);
 }
-.kd-searchbox > input {
+.kd-searchbar[data-batch] .kd-searchbar-lead {
+  height: auto;
+  padding-top: 0.35rem;
+}
+/* 输入框自己不再描边——边框归最外层那一圈 */
+.kd-searchbar-input {
   flex: 1;
   min-width: 0;
+  height: 2.1rem;
   border: none;
   background: none;
   outline: none;
   color: var(--kd-text);
   font-size: var(--kd-size-lg);
+  font-family: inherit;
 }
-.kd-searchbox > input::placeholder {
+textarea.kd-searchbar-input {
+  height: auto;
+  resize: vertical;
+  line-height: 1.5;
+  font-size: var(--kd-size);
+}
+.kd-searchbar-input::placeholder {
   color: var(--kd-faint);
 }
-/* 音质：一个方块，只显示 FLAC/320K/128K。原生 select 的下拉箭头会把
-   宽度撑开一截，藏掉之后它就是一个纯文字方块。 */
-.kd-searchbox-quality {
+.kd-searchbar-tools {
   flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+/* 分隔线只画在"换了个话题"的地方：输入 │ 音质 │ 平台+提交 */
+.kd-searchbar-sep {
+  width: 1px;
+  height: 1.15rem;
+  background: var(--kd-line);
+}
+/* 音质：纯文字，无框。原生 select 的下拉箭头会平白撑宽一截，藏掉。 */
+.kd-searchbar-quality {
   appearance: none;
   -webkit-appearance: none;
-  width: 3.4rem;
-  height: 1.7rem;
+  border: none;
+  background: none;
   padding: 0 0.3rem;
-  border: 1px solid var(--kd-line);
-  background: var(--kd-panel);
   color: var(--kd-muted);
   font-size: var(--kd-size-xs);
   font-weight: 700;
@@ -2184,26 +2130,33 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   text-align-last: center;
   cursor: pointer;
 }
-.kd-searchbox-quality:hover {
+.kd-searchbar-quality:hover {
   color: var(--kd-text);
 }
-/* 搜索键：框内最右的一个小图标。红色留给它——这是整条搜索区唯一的动作。 */
-.kd-searchbox-go {
+/* 提交键：整条搜索区唯一的红。批量时展开成带字的宽按钮。 */
+.kd-searchbar-go {
   flex: none;
   appearance: none;
   border: none;
-  width: 1.7rem;
-  height: 1.7rem;
-  display: grid;
-  place-items: center;
+  height: 1.8rem;
+  min-width: 1.8rem;
+  padding: 0 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
   background: var(--kd-theme);
   color: var(--kd-theme-ink);
+  font-size: var(--kd-size-sm);
   cursor: pointer;
 }
-.kd-searchbox-go:hover:not(:disabled) {
+.kd-searchbar-go[data-wide] {
+  padding: 0 0.7rem;
+}
+.kd-searchbar-go:hover:not(:disabled) {
   background: var(--kd-theme-strong);
 }
-.kd-searchbox-go:disabled {
+.kd-searchbar-go:disabled {
   background: transparent;
   color: var(--kd-faint);
   cursor: default;
@@ -2218,11 +2171,12 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
 }
 .kd-plat {
   appearance: none;
-  width: 1.95rem;
-  height: 1.95rem;
+  width: 1.75rem;
+  height: 1.75rem;
   display: grid;
   place-items: center;
-  border: 1px solid var(--kd-line);
+  /* 无边框：四个方框排在搜索条里就是"框套框"。选中与否靠颜色和底色说话。 */
+  border: none;
   background: transparent;
   /* 没选中时降到中性灰：一排四个品牌色全亮着的话，选没选中就看不出来了 */
   color: var(--kd-faint);
@@ -2231,11 +2185,10 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
 }
 .kd-plat:hover {
   color: var(--kd-muted);
-  border-color: var(--kd-muted);
+  background: var(--kd-hover);
 }
 .kd-plat[aria-pressed="true"] {
-  border-color: currentColor;
-  background: color-mix(in srgb, currentColor 12%, transparent);
+  background: color-mix(in srgb, currentColor 14%, transparent);
 }
 /* 选中时各家用各家的品牌色。这是它们唯一被允许上色的时刻。 */
 .kd-plat[aria-pressed="true"][data-platform="wyy"] {
@@ -2250,11 +2203,165 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
 .kd-plat[aria-pressed="true"][data-platform="bilibili"] {
   color: #fb7299;
 }
-/* 未启用（SoundCloud 默认关着）：虚线边表示"能点，但点了是先启用" */
+/* 未启用（SoundCloud 默认关着）：压暗表示"能点，但点了是先启用" */
 .kd-plat[data-off="true"] {
-  border-style: dashed;
-  opacity: 0.55;
+  opacity: 0.45;
 }
 .kd-plat[data-dragging="true"] {
   opacity: 0.4;
+}
+
+/* ============================================================
+ * 竖屏（单栏）专属收尾
+ * ========================================================== */
+
+/* KEY 色块统一宽度。Camelot 的颜色是有意义的（同色系＝能接），所以留着，
+   但一排宽窄不一的色块本身就是噪声——等宽之后它们在列里连成一条，
+   颜色才回到"信息"的位置上。 */
+.kd-camelot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.6rem;
+}
+
+@media (max-width: 820px) {
+  /* 搜索区在窄屏不许换行成四层。输入框可以缩，平台键和 FLAC 不缩，
+     整条仍是一行——上一版 flex-wrap 让它散成了四行，占掉小半屏。 */
+  .kd-section > form.kd-toolbar {
+    flex-wrap: nowrap;
+    gap: 0.35rem;
+    padding: 0.5rem 0.6rem;
+  }
+  .kd-searchbox {
+    min-width: 0;
+    flex: 1 1 auto;
+    padding-left: 0.4rem;
+  }
+  /* 输入框里那个放大镜前导图标在这个宽度是纯装饰，让位给真正能打字的地方 */
+  .kd-searchbox-lead {
+    display: none;
+  }
+  .kd-plats {
+    flex: none;
+  }
+  .kd-plat {
+    width: 1.75rem;
+    height: 1.75rem;
+  }
+
+  /* —— 播放条拆成两行 ——
+     一行塞不下"封面+两行字+播放键+波形+时间"，硬塞的结果是波形只剩一小条、
+     按钮和曲名挤在一起。上面一整行专门给音轨（它需要宽度才有意义），
+     下面一行才是"在放什么 + 控制"。 */
+  .kd-player {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "wave wave"
+      "now  go";
+    align-items: center;
+    gap: 0.4rem 0.6rem;
+    height: auto;
+    padding: 0.45rem 0.7rem calc(0.45rem + env(safe-area-inset-bottom, 0));
+  }
+  .kd-player-scrub {
+    grid-area: wave;
+  }
+  .kd-player-now {
+    grid-area: now;
+    flex: 1 1 auto;
+    padding: 0;
+  }
+  .kd-player-go {
+    grid-area: go;
+  }
+  /* 时间跟着波形那一行走，放在右端；这行有整屏宽度，容得下 */
+  .kd-player-scrub > .kd-player-time {
+    display: block;
+  }
+  /* 提示条在两行网格里没有自己的格子，让它压在最上面单独一行 */
+  .kd-player > .kd-notice {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+}
+
+/* 「正在播」那一块的三层都必须是块级。
+   它们在 JSX 里是 <span>，而**行内元素不吃 overflow/width/text-overflow**——
+   长曲名不会被裁掉，而是直接铺出去、盖在右边那颗圆形播放键上面。
+   用户截图里"播放键被字压住"就是这个。改 JSX 也行，但那份文件另有人在改，
+   而这条 CSS 无论 JSX 用 span 还是 div 都成立，索性钉在这里。 */
+.kd-player-meta,
+.kd-player-title {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+}
+.kd-player-title {
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 曲名放不下时横向滚动。只有量出溢出（PlayerBar 里打 data-marquee）才滚——
+   短名字也跟着动就成了噪音。滚的是内层那个 span，外层负责裁切。 */
+.kd-player-title[data-marquee="true"] {
+  text-overflow: clip;
+}
+.kd-player-title[data-marquee="true"] > span {
+  display: inline-block;
+  padding-right: 2.5rem; /* 尾巴和重新出现的头之间留一段，不然读起来是连着的 */
+  animation: kd-marquee 12s linear infinite;
+}
+.kd-player-title[data-marquee="true"]:hover > span {
+  animation-play-state: paused; /* 想看清全名时把鼠标停上去 */
+}
+@keyframes kd-marquee {
+  0%,
+  12% {
+    transform: translateX(0);
+  }
+  88%,
+  100% {
+    transform: translateX(calc(-100% + 100px));
+  }
+}
+
+/* ============================================================
+ * 曲目表：一排到底 + 横向滚动
+ *
+ * 两行式（标题一行、元信息一行）整个删了。它确实解决了"标题只剩两个字"，
+ * 但换来的是每行两倍高、上下两行谁也对不齐谁，一屏能看的曲目少一半。
+ * 现在的做法直白得多：**列宽不再让步，装不下就让这一栏自己横向滚**。
+ * 曲目表本来就是一张表，表放不下时横着拖是所有人都懂的动作。
+ * ========================================================== */
+.kd-table-wrap > .kd-scroll {
+  overflow-x: auto;
+}
+/* 46rem ≈ 736px：固定列合计约 370px，剩下 360px 全给标题。
+   低于这个宽度就横向滚，而不是把标题压成"两个字加省略号"。 */
+.kd-table[data-kind="library"] {
+  min-width: 46rem;
+}
+/* 搜索结果表里有视频大行那套自排的多行块，需要的宽度更大 */
+.kd-table:not([data-kind="library"]) {
+  min-width: 44rem;
+}
+
+/* 排序层级标记。①是主键、②是副键，箭头才是方向——
+   两件事用两个符号，光靠一个箭头分不出"这列是主还是副"。 */
+.kd-sort-mark {
+  margin-left: 0.25rem;
+  color: var(--kd-theme);
+  font-weight: 700;
+}
+.kd-sort-mark[data-second="true"] {
+  color: var(--kd-muted);
+  font-weight: 600;
+}
+
+/* 标题给左上角那个把手让出位置。只在可拖的槽位里让——
+   PanelStack 之外的 .kd-panel 不该平白多一截缩进。 */
+.kd-panel-slot > .kd-panel > .kd-panel-head {
+  padding-left: 1.35rem;
 }

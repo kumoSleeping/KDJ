@@ -281,12 +281,12 @@ export function TrackDetail({ track }: { track: Track }) {
         </Button>
         {/* 分析和写标签都不再摆按钮：分析由后台自动跑（播放/选中会插队），
             写标签跟着分析一起做。手动按钮只会让人以为"不点就不会发生"。 */}
+        {/* 带上文字。它原来是个光秃秃的文件夹图标，用户直接问"这个有什么用"——
+            一个说不出自己是干嘛的图标按钮，等于没有这个功能。 */}
         <Button
           size="sm"
           variant="ghost"
-          iconOnly
-          aria-label="在文件夹中显示"
-          title="在文件夹中显示"
+          title="在系统的文件管理器里定位这个文件"
           disabled={busy}
           // 走 run() 而不是裸调用：以前是 `void window.kumodeck?.revealPath(...)`，
           // 桥接没就位或系统调用失败时被 `?.` 和 `void` 一起吞掉，
@@ -294,6 +294,7 @@ export function TrackDetail({ track }: { track: Track }) {
           onClick={run("在文件夹中显示", () => getBridge().revealPath(track.path))}
         >
           <FolderOpen size={12} />
+          定位
         </Button>
         <Button
           size="sm"

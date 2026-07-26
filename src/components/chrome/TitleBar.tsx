@@ -19,19 +19,27 @@ export function TitleBar() {
   const resolved = theme === "system" ? (document.documentElement.dataset.theme ?? "dark") : theme;
   const isDark = resolved !== "light";
 
-  // macOS 用 hiddenInset 标题栏，红绿灯是系统画的（.kd-titlebar 左侧已留出 84px），
+  // macOS 用 hiddenInset 标题栏，红绿灯是系统画的（.kd-titlebar 左侧已留出 78px），
   // 自绘一套只会重影，所以只有非 mac 才渲染窗口按钮。
+  // 78 是量出来的：三颗灯从 x≈14 起、到 x≈66 止，78 还剩十来 px 的呼吸位；
+  // 原来那 84px 是照"14 + 70"估的，把标题白白往右推了一截。
   const platform = window.kumodeck?.platform;
   const isMac = platform === "darwin";
   // 安卓/iOS 没有窗口这回事：最小化和关闭都无从谈起，"最大化"更是永远的现状。
-  // 这三颗按钮在手机上纯属占地方，而顶部那 84px 的红绿灯留白也要收掉。
+  // 这三颗按钮在手机上纯属占地方，而顶部那 78px 的红绿灯留白也要收掉。
   const isMobile = platform === "android" || platform === "ios";
   const control = (action: "minimize" | "maximize" | "close") => () => {
     window.kumodeck?.windowControl(action);
   };
 
   return (
-    <header className="kd-titlebar" data-mobile={isMobile ? "true" : undefined}>
+    <header
+      className="kd-titlebar"
+      data-mobile={isMobile ? "true" : undefined}
+      // 只有 macOS 的桌面壳才需要给系统画的红绿灯让位。浏览器预览和
+      // Windows/Linux 都没有那三颗灯，留着 78px 就是左边白空一块。
+      data-mac={isMac ? "true" : undefined}
+    >
       <div className="kd-titlebar-brand">KumoDeck</div>
 
       {/* 下载在跑时给一条状态：搜索结果关掉之后队列还在后台跑，

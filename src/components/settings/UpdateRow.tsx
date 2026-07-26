@@ -5,6 +5,9 @@ import { getBridge } from "../../lib/bridge";
 import { useAppStore } from "../../stores/appStore";
 import type { UpdateInfo } from "../../types";
 import { Button, InlineNotice } from "../common";
+// 和账号行共用同一套行排版，见 AccountRow 里 settingRow 的注释
+// （`.kd-set-*` 那套右列写死 240px，在详情栏宽度下会把左边的名字压成竖排）
+import { settingRow } from "./AccountRow";
 
 /**
  * 「检查更新」一行，长得和上面那几行账号一样。
@@ -63,14 +66,16 @@ export function UpdateRow() {
   };
 
   return (
-    <div className="kd-set-row">
-      <div className="kd-set-text kd-row" style={{ gap: "0.6rem" }}>
-        <span className="kd-set-avatar kd-set-avatar-icon" aria-hidden="true">
+    <div style={settingRow.row}>
+      <div style={settingRow.text}>
+        <span style={settingRow.avatarIcon} aria-hidden="true">
           <ArrowUpCircle size={15} />
         </span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="kd-set-label">软件更新</div>
-          <div className="kd-set-hint kd-truncate">
+        <div style={settingRow.body}>
+          {/* 「软件更新」四个字曾经被压成竖排：右列吃掉 240px 之后，
+              这一格只剩一个字的宽度。现在名字这行明确 nowrap + 省略号 */}
+          <div style={settingRow.label}>软件更新</div>
+          <div style={settingRow.hint}>
             {info === null
               ? current
                 ? `当前 v${current}`
@@ -82,7 +87,7 @@ export function UpdateRow() {
           <InlineNotice text={notice} onDismiss={() => setNotice("")} />
         </div>
       </div>
-      <div className="kd-set-control" style={{ textAlign: "right" }}>
+      <div style={settingRow.control}>
         {info?.newer ? (
           // 有新版本才用红：这是这个面板里唯一一个"值得现在就点"的动作
           <Button size="sm" variant="primary" disabled={busy !== ""} onClick={() => void apply()}>

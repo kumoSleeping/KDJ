@@ -107,7 +107,6 @@ export function VideoResultRow({
   const rowRef = useRef<HTMLTableRowElement>(null);
 
   const effectiveHeight = maxHeight ?? settings?.video_max_height ?? 1080;
-  const transcode = settings?.video_transcode ?? false;
   const pages = info?.pages ?? [];
 
   /**
@@ -149,7 +148,11 @@ export function VideoResultRow({
         page_index: pageIndex,
         max_height: effectiveHeight,
         audio_only: audioOnly,
-        transcode,
+        // 恒真，没有开关：不转码只是把 B 站的原始流直接封进容器，
+        // Resolume / Final Cut / 一部分播放器打不开那种封装，下下来是废的。
+        // 而且必须显式写 true——后端 apply_video_defaults 见 false 会当成"没指定"，
+        // 落回全局设置里的 video_transcode（默认 false），等于这行白写。
+        transcode: true,
       });
       // 和音频走同一个队列 store，右边那栏就是同一个 QueuePanel——
       // 任务当场出现在那里，就是"已加入队列"最好的回执
@@ -159,7 +162,7 @@ export function VideoResultRow({
     } finally {
       setSending(false);
     }
-  }, [bvid, pageIndex, effectiveHeight, audioOnly, transcode, mergeTasks]);
+  }, [bvid, pageIndex, effectiveHeight, audioOnly, mergeTasks]);
 
   return (
     <tr ref={rowRef} data-video="true">
@@ -277,21 +280,9 @@ export function VideoResultRow({
                 只要音轨
               </label>
 
-              {/* 转码写的是全局设置而不是这一行的临时状态：后端在 transcode=false 时
-                  会落回设置里的值（apply_video_defaults），做成逐条开关的话"关掉"
-                  这个动作会在全局开着时静默失效——那就是个骗人的勾。 */}
-              <label
-                className="kd-check"
-                title="重新编码成所选格式（慢一个数量级）。关着就是直接封装原始流。"
-              >
-                <input
-                  type="checkbox"
-                  checked={transcode}
-                  disabled={audioOnly}
-                  onChange={(event) => void saveSettings({ video_transcode: event.target.checked })}
-                />
-                转码
-              </label>
+              {/* 「转码」开关删了，恒转码（见 download 里的注释）：这个勾唯一的用处是
+                  换取速度，代价是有概率下到一个打不开的文件——赌注和收益不对等，
+                  而且要下完拖进剪辑软件才发现输了。 */}
 
               <span className="kd-toolbar-gap" />
               {/* 中性而不是红：搜索一屏能出十几条视频行，每行一颗红按钮就是

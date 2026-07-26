@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Clapperboard, FolderOpen, Inbox, Music2, Trash2, X } from "lucide-react";
+import { Clapperboard, FolderOpen, Inbox, Music2, Play, Trash2, X } from "lucide-react";
 import { DASH, folderName, formatBytes, formatPercent, formatSpeed } from "../../lib/format";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
@@ -178,52 +178,81 @@ export function QueuePanel() {
   const autoStart = useAppStore((store) => store.settings?.auto_start_downloads ?? false);
   const saveSettings = useAppStore((store) => store.saveSettings);
   const finishedCount = list.length - activeCount;
-  /** 清理失败：列表纹丝不动，不说一声就等于按钮坏了。 */
-  const [clearError, setClearError] = useState("");
+  const queuedCount = list.reduce((sum, task) => sum + (task.state === "queued" ? 1 : 0), 0);
+  /**
+   * 「开始下载」按得动的唯一情形：闸门关着，且真有人被它拦在外面。
+   *
+   * 后端只有 `auto_start_downloads` 这一个闸门（DownloadManager::set_auto_start），
+   * 没有"只放行当前这批"的接口。而且 `wait_until_started` 过了之后还要抢并发额度——
+   * 闸门已经开着时剩下的 queued 是在等额度，再按一次什么也推不动，所以那时候要灰掉。
+   */
+  const canStart = !autoStart && queuedCount > 0;
+  /** 队列头上两个动作共用一条错误行：一次只按得动一个，堆两条只会把列表往下挤。 */
+  const [actionError, setActionError] = useState("");
 
   return (
     <div className="kd-col" style={{ height: "100%", minHeight: 0 }}>
       <div className="kd-toolbar">
         <strong>下载队列</strong>
-        <span className="kd-muted">
-          {activeCount} 进行 / {list.length} 总计
+        {/* 右栏死死的 22rem，标题+计数+两颗按钮量下来只剩 314px 可用。
+            计数压到 xs 还砍掉「总计」二字，是为了给三四位数的总量留出富余——
+            队列一破百就换行的话，这一行白排了。「进行」贴在前一个数上，
+            后一个数是什么不用再标 */}
+        <span
+          className="kd-muted"
+          style={{ fontSize: "var(--kd-size-xs)" }}
+          title={`${activeCount} 个在下 / 队列共 ${list.length} 个`}
+        >
+          {activeCount} 进行 / {list.length}
         </span>
         <span className="kd-toolbar-gap" />
-        {/* 关着 = 入队先攒着；拨开这一下就是"现在开始下"，攒着的全部放行 */}
-        <label
-          className="kd-check"
+        {/* 这一格里唯一的红：整个面板上"现在把东西下下来"就这一个动作 */}
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={!canStart}
           title={
-            autoStart
-              ? "自动下载开着：加入队列立刻开始"
-              : "自动下载关着：任务先攒在队列里，拨开开关才开始下"
+            canStart
+              ? `开始下载排队中的 ${queuedCount} 个任务`
+              : autoStart
+                ? "已经在下了：排队中的任务在等并发额度，让完一个自动接一个"
+                : "队列里没有排队中的任务"
           }
+          onClick={() => {
+            setActionError("");
+            void (async () => {
+              await saveSettings({ auto_start_downloads: true });
+              // saveSettings 自己吞异常并回滚（见 appStore 里的注释），Promise 永远 resolve，
+              // 所以"到底成没成"只能回头看状态。还是 false 就是 PUT /settings 挂了——
+              // 队列纹丝不动而不吭声，按钮看起来就是坏的
+              if (!useAppStore.getState().settings?.auto_start_downloads) {
+                setActionError("开始下载失败：设置没保存上，检查后端连接");
+              }
+            })();
+          }}
         >
-          <input
-            type="checkbox"
-            checked={autoStart}
-            onChange={(event) => void saveSettings({ auto_start_downloads: event.target.checked })}
-          />
-          自动下载
-        </label>
+          <Play size={12} />
+          开始下载
+        </Button>
         <Button
           variant="ghost"
           size="sm"
           disabled={finishedCount <= 0}
-          title="清掉已完成 / 失败 / 已取消的记录"
+          title="清掉已完成 / 失败 / 已取消的记录，进行中的留着"
           onClick={() => {
-            setClearError("");
+            setActionError("");
             void clear().catch((error: unknown) =>
-              setClearError(`清理失败：${(error as Error).message}`),
+              setActionError(`清空失败：${(error as Error).message}`),
             );
           }}
         >
           <Trash2 size={12} />
-          清理
+          清空
         </Button>
       </div>
 
-      {/* 就贴在「清理」这条工具条底下 */}
-      <InlineNotice text={clearError} onDismiss={() => setClearError("")} block />
+      {/* 就贴在动作那条工具条底下 */}
+      <InlineNotice text={actionError} onDismiss={() => setActionError("")} block />
 
       <SaveDirRow />
 

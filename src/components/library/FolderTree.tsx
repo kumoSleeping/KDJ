@@ -8,7 +8,6 @@ import {
   FolderOpen,
   FolderPlus,
   HardDrive,
-  ListOrdered,
   Library,
   MoreHorizontal,
   PencilLine,
@@ -85,8 +84,6 @@ export function FolderTree() {
   const setListMode = useAppStore((state) => state.setListMode);
 
   const roots = folders?.roots ?? [];
-  // 有任何一个根还没写清单，就把「初始化」亮出来
-  const needsInit = roots.some((root) => !root.managed);
   const [expanded, setExpanded] = useExpanded(roots);
   const [importing, setImporting] = useState("");
   const [dropTarget, setDropTarget] = useState("");
@@ -411,39 +408,14 @@ export function FolderTree() {
         )}
       </div>
 
-      <div className="kd-folder-head">
-        <span className="kd-folder-title">文件夹</span>
-        <button
-          type="button"
-          className="kd-folder-more"
-          style={{ display: "inline-flex", marginLeft: "auto" }}
-          aria-label="初始化顺序"
-          title={
-            needsInit
-              ? "在每层目录里写一份 .kumodeck.json，之后可以拖动调整顺序（配置跟着文件夹走）"
-              : "顺序已受管，可以直接拖动文件夹调整"
-          }
-          disabled={!needsInit}
-          onClick={() => {
-            // 成功的回执是这个按钮自己变灰 + 文件夹变得能拖了，不用再弹一次
-            void api
-              .initFolders()
-              .then(() => refreshFolders())
-              .catch((error: unknown) => setNotice((error as Error).message));
-          }}
-        >
-          <ListOrdered size={12} />
-        </button>
-        <label className="kd-folder-deep" title="连子文件夹里的曲目一起列出来">
-          <input
-            type="checkbox"
-            checked={filter.folderDeep}
-            onChange={(event) => setFilter({ folderDeep: event.target.checked })}
-          />
-          含子级
-        </label>
-      </div>
-
+      {/* 原来这里有一行「文件夹」标题 + 「初始化顺序」图标 + 「含子级」勾选。
+          全删了：
+          · 标题——左栏里除了文件夹没有别的东西，不用再说一遍；
+          · 初始化顺序——一个不说自己是干嘛的图标按钮，点了也看不出发生了什么。
+            真要拖动排序时，`applyFolderOp` 会自己按需写清单，不必先手动点一下；
+          · 含子级——选中一个歌单文件夹时，想看的本来就是它整棵子树里的曲目，
+            默认就该是"含"。做成开关只是把一个没人会关的选项摆在最显眼的位置。
+          `folderDeep` 字段保留在 store 里（后端 API 仍然收它），默认恒为 true。 */}
       <div className="kd-scroll kd-folder-list">
         <div
           className="kd-folder"
@@ -495,47 +467,12 @@ export function FolderTree() {
           <FolderInput size={12} />
           添加
         </button>
-        <button
-          type="button"
-          className="kd-btn"
-          data-size="sm"
-          data-variant="ghost"
-          disabled={!filter.folder}
-          title={filter.folder ? "在选中的文件夹里新建子文件夹" : "先选一个文件夹"}
-          onClick={() => {
-            const name = prompt("新文件夹名称");
-            if (!name) return;
-            void api
-              .createFolder(filter.folder, name)
-              .then(() => refreshFolders())
-              .catch((error: unknown) => setNotice((error as Error).message));
-          }}
-        >
-          <FolderPlus size={12} />
-          新建
-        </button>
-        <button
-          type="button"
-          className="kd-btn"
-          data-size="sm"
-          data-variant="ghost"
-          disabled={!clipboard || !filter.folder}
-          title={
-            clipboard
-              ? `粘贴 ${clipboard.ids.length} 首（${clipboard.op === "move" ? "移动" : "链接"}）`
-              : "先在曲目表里 Cmd+C / Cmd+X"
-          }
-          onClick={() => {
-            // 粘完曲目就出现在列表里了，成功不用再说一遍
-            setNotice("");
-            void paste(filter.folder).catch((error: unknown) =>
-              setNotice((error as Error).message),
-            );
-          }}
-        >
-          <ClipboardPaste size={12} />
-          粘贴{clipboard ? ` ${clipboard.ids.length}` : ""}
-        </button>
+        {/* 「新建」和「粘贴」都删了。
+            新建——在曲库里造一个空目录，造完还得自己往里搬歌，
+            而右键菜单里本来就有「新建子文件夹」，这里是第二个入口；
+            粘贴——它配的是曲目表里的 Cmd+C/Cmd+X，可真正在用的是直接把曲目
+            拖到目标文件夹上，拖比"复制→找到目标→点粘贴"少两步。
+            右键菜单保留了这两项，需要时仍然找得到。 */}
       </div>
 
       {menu && (
@@ -583,6 +520,26 @@ export function FolderTree() {
           >
             <PencilLine size={12} />
             重命名
+          </button>
+          {/* 粘贴：底栏那颗按钮删掉之后，这里是它唯一的界面入口。
+              键盘走 Cmd/Ctrl+V（见 useLibraryClipboard）。 */}
+          <button
+            type="button"
+            disabled={!clipboard}
+            title={
+              clipboard
+                ? `把剪贴板里的 ${clipboard.ids.length} 首${clipboard.op === "move" ? "移动" : "链接"}到这里`
+                : "先在曲目表里按 Cmd/Ctrl+C 或 Cmd/Ctrl+X"
+            }
+            onClick={() => {
+              const dest = menu.node.path;
+              setMenu(null);
+              setNotice("");
+              void paste(dest).catch((error: unknown) => setNotice((error as Error).message));
+            }}
+          >
+            <ClipboardPaste size={12} />
+            粘贴{clipboard ? ` ${clipboard.ids.length} 首` : ""}
           </button>
           <button
             type="button"

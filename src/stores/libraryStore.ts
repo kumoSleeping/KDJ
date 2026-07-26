@@ -24,6 +24,8 @@ import type {
 export type TrackSort =
   | "added_at" | "title" | "artist" | "album" | "bpm" | "camelot" | "energy" | "duration" | "custom";
 export type SortOrder = "asc" | "desc";
+/** 入库序 = "没有显式排序"。cycleSort 用它判断有没有主键。 */
+const DEFAULT_SORT: TrackSort = "added_at";
 /** 「已分析」三态筛选：全部 / 只看已分析 / 只看未分析。 */
 export type AnalyzedFilter = "all" | "yes" | "no";
 
@@ -43,6 +45,14 @@ export interface LibraryFilter {
   folderDeep: boolean;
   sort: TrackSort;
   order: SortOrder;
+  /**
+   * 副排序键：主键相同的那一撮再按它排。null = 只按主键。
+   *
+   * DJ 排 set 的实际用法是「先按 BPM，同 BPM 里再按调号」——
+   * 只有一个键时，同 BPM 的那十几首是乱序的，得靠眼睛在里面找能接的调。
+   */
+  sort2: TrackSort | null;
+  order2: SortOrder;
 }
 
 export const DEFAULT_FILTER: LibraryFilter = {
@@ -53,9 +63,14 @@ export const DEFAULT_FILTER: LibraryFilter = {
   energyMin: null,
   analyzed: "all",
   folder: "",
-  folderDeep: false,
+  // 「含子级」的开关已从界面删掉：选中一个歌单文件夹时想看的本来就是
+  // 它整棵子树里的曲目，做成开关只是把一个没人会关的选项摆在最显眼的位置。
+  // 字段留着——后端 API 仍然收它。
+  folderDeep: true,
   sort: "added_at",
   order: "desc",
+  sort2: null,
+  order2: "asc",
 };
 
 const PAGE_SIZE = 200;
@@ -110,6 +125,8 @@ function toQuery(filter: LibraryFilter, offset: number): Record<string, string |
     folder_deep: filter.folder && filter.folderDeep ? "true" : undefined,
     sort: filter.sort,
     order: filter.order,
+    sort2: filter.sort2 ?? undefined,
+    order2: filter.sort2 ? filter.order2 : undefined,
     limit: PAGE_SIZE,
     offset,
   };
@@ -154,6 +171,16 @@ export interface LibraryStore {
   refreshStats(): Promise<void>;
   refreshFolders(): Promise<void>;
   setFilter(patch: Partial<LibraryFilter>): void;
+  /**
+   * 点一次排序列。三段式，和用户的描述逐条对应：
+   *   · 点的是**主键** → 翻转它的方向；再点一次（回到最初方向）→ 取消这一列
+   *   · 点的是**副键** → 它升为主键，原主键降为副键（两者对调）
+   *   · 点的是**没参与排序的列** → 成为副键（已有主键时）或主键（没有主键时）
+   *
+   * 为什么把"取消"挂在主键的第三次点击上：用户明确要"再点一下取消这个操作"，
+   * 而一列只有升/降两个有意义的方向，第三次点回原状正好是"我不要按它排了"。
+   */
+  cycleSort(column: TrackSort): void;
   resetFilter(): void;
   select(id: number | null, mode?: SelectMode): void;
   /** 用完整对象选中（推荐列表这类"来源不在当前页"的入口用这个）。 */
@@ -248,6 +275,36 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     } catch {
       // 统计只是标题栏/概览的装饰，拉不到就保持旧值，不打扰用户
     }
+  },
+
+  cycleSort(column) {
+    const { sort, order, sort2, order2 } = get().filter;
+    // `added_at` 是"没有显式排序"的意思（入库序），不算用户选的主键——
+    // 不这么判的话，第一次点 BPM 会变成副键而不是主键，和用户的心智反着来
+    const hasPrimary = sort !== DEFAULT_SORT;
+
+    if (column === sort) {
+      // 主键：asc → desc → 取消。一列只有两个有意义的方向，
+      // 第三次点回原状正好就是"我不要按它排了"
+      if (order === "asc") {
+        get().setFilter({ order: "desc" });
+      } else if (sort2) {
+        // 取消主键时副键顶上来，而不是连它一起清掉
+        get().setFilter({ sort: sort2, order: order2, sort2: null, order2: "asc" });
+      } else {
+        get().setFilter({ sort: DEFAULT_SORT, order: "desc", sort2: null });
+      }
+      return;
+    }
+    if (column === sort2) {
+      // 副键：升为主键，原主键降为副键，各自的方向跟着走
+      get().setFilter({ sort: sort2, order: order2, sort2: sort, order2: order });
+      return;
+    }
+    // 没参与排序的列：已经有主键就当副键，否则自己当主键
+    get().setFilter(
+      hasPrimary ? { sort2: column, order2: "asc" } : { sort: column, order: "asc" },
+    );
   },
 
   setFilter(patch) {

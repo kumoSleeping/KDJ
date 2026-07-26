@@ -4,6 +4,7 @@ import { api } from "../../lib/api";
 import { observeTrackScroller } from "../../lib/autoAnalyze";
 import { camelotColor } from "../../lib/camelot";
 import { DASH, formatBpm, formatDuration, isVideoTrack } from "../../lib/format";
+import type { LayoutMode } from "../../lib/useLayoutMode";
 import {
   useLibraryStore,
   type SelectMode,
@@ -92,10 +93,22 @@ const COLUMNS: Column[] = [
 export interface TrackTableProps {
   tracks: Track[];
   loading: boolean;
+  /**
+   * 当前布局档位，原样落到 `<table data-layout>` 上给 CSS 当判据。
+   *
+   * 换行式（标题一行、元信息一行）**只有 narrow（只剩曲目表这一栏）才准用**。
+   * 之前是 `@container (max-width: 700px)` 判的，判据错在：那量的是曲目表这一栏
+   * 有多宽，于是"窗口 1400、把详情栏拖到 600"也会触发——屏幕明明还摆得下两栏，
+   * 却退化成手机排版。摆不摆得下长条要看还剩几栏，不看这一栏被挤成多窄。
+   */
+  layout: LayoutMode;
   selectedId: number | null;
   selectedIds: number[];
   sort: TrackSort;
   order: SortOrder;
+  /** 副排序键：主键相同的那一撮再按它排。null = 只按主键。 */
+  sort2: TrackSort | null;
+  order2: SortOrder;
   onSelect(id: number, mode: SelectMode): void;
   onSort(sort: TrackSort): void;
   onScrollEnd(): void;
@@ -114,10 +127,13 @@ function selectMode(event: React.MouseEvent): SelectMode {
 export function TrackTable({
   tracks,
   loading,
+  layout,
   selectedId,
   selectedIds,
   sort,
   order,
+  sort2,
+  order2,
   onSelect,
   onSort,
   onScrollEnd,
@@ -157,7 +173,10 @@ export function TrackTable({
         if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) onScrollEnd();
       }}
     >
-      <table className="kd-table" data-kind="library">
+      {/* data-kind 区分曲库表和搜索结果表（两者共用 .kd-table，但结果表里有
+          视频大行那套自排版，套不得两行式）；data-layout 是两行式的开关，
+          见 TrackTableProps.layout 里为什么不能交给容器宽度判。 */}
+      <table className="kd-table" data-kind="library" data-layout={layout}>
         <thead>
           <tr>
             {COLUMNS.map((column) => (
@@ -168,9 +187,28 @@ export function TrackTable({
                 className={column.align === "num" ? "kd-td-num" : undefined}
                 data-sortable={column.id ? "true" : undefined}
                 onClick={column.id ? () => onSort(column.id as TrackSort) : undefined}
+                data-sort={column.id === sort ? "1" : column.id === sort2 ? "2" : undefined}
+                title={
+                  column.id
+                    ? column.id === sort
+                      ? "再点一下换方向；方向转回来那一下取消这一列的排序"
+                      : column.id === sort2
+                        ? "副排序键。再点一下把它升为主排序（原主排序降为副）"
+                        : "点一下按它排。已经有主排序时，这一下加的是副排序"
+                    : undefined
+                }
               >
                 {column.label}
-                {column.id === sort && <span> {order === "asc" ? "↑" : "↓"}</span>}
+                {/* ①②：哪个是主、哪个是副，光靠箭头分不出来。
+                    数字标出层级，箭头标出方向，两件事各归各的符号。 */}
+                {column.id === sort && (
+                  <span className="kd-sort-mark">①{order === "asc" ? "↑" : "↓"}</span>
+                )}
+                {column.id !== sort && column.id === sort2 && (
+                  <span className="kd-sort-mark" data-second="true">
+                    ②{order2 === "asc" ? "↑" : "↓"}
+                  </span>
+                )}
               </th>
             ))}
           </tr>

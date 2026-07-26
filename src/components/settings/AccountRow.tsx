@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { api } from "../../lib/api";
 import { useAppStore } from "../../stores/appStore";
 import type { Account, AccountState } from "../../types";
@@ -10,6 +10,96 @@ const STATE_LABEL: Record<AccountState, string> = {
   expired: "登录已过期",
   missing: "未登录",
   unknown: "状态未知",
+};
+
+/** 只染状态那几个字，不做整块的彩色标签——一个区域已经有一颗红按钮了。 */
+const STATE_COLOR: Record<AccountState, string> = {
+  valid: "var(--kd-ok)",
+  expired: "var(--kd-warn)",
+  missing: "var(--kd-warn)",
+  unknown: "inherit",
+};
+
+/**
+ * 账号面板这一行的排版就地写死，不再走 design.css 的 `.kd-set-*`。
+ *
+ * 那套类是给已经删掉的"整页设置"写的，右列固定 `width: 15rem`(240px)。
+ * 可这个面板住在 ~350px 宽的右侧详情栏里，窄屏还会掉进更窄的底部抽屉——
+ * 240px 一被右列吃掉，左边只剩 100 来 px，「网易云音乐」直接被压成一列一个字，
+ * 右边那 240px 里却只放着一颗 60px 的按钮，白空一大片。
+ *
+ * 这里的宽度规则反过来：**右边按钮按内容取宽（不伸不缩），左边吃掉剩下的全部**。
+ * 这样从 350px 到全屏都成立，也不用为抽屉再写一档断点。
+ *
+ * 为什么用内联而不是新起一组全局类：用它的只有这个面板的两种行
+ * （账号行 / 更新行），进了 design.css 就迟早被别处"顺手复用"，
+ * 然后在别的宽度里重演一遍今天这个塌法。UpdateRow 从这里 import 复用。
+ */
+export const settingRow = {
+  row: {
+    position: "relative",
+    display: "flex",
+    alignItems: "center",
+    // 老的 1.5rem 间距在 350px 里是纯浪费，够把文字和按钮分开就行
+    gap: "0.75rem",
+    padding: "0.55rem 0",
+    borderBottom: "1px solid var(--kd-line-soft)",
+  },
+  /** 头像 + 文字块。flex:1 让它去抢剩余宽度，minWidth:0 才允许它缩到比内容还窄 */
+  text: {
+    flex: "1 1 auto",
+    minWidth: 0,
+    display: "flex",
+    alignItems: "center",
+    gap: "0.6rem",
+  },
+  /** 两行文字自己也要 minWidth:0，否则省略号不会生效，撑破的是外面那层 */
+  body: { flex: "1 1 auto", minWidth: 0 },
+  /** 名字这行宁可省略号也绝不换行：一换行整块就往"竖排"的方向塌 */
+  label: {
+    color: "var(--kd-text)",
+    fontSize: "var(--kd-size-sm)",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  hint: {
+    color: "var(--kd-faint)",
+    fontSize: "var(--kd-size-xs)",
+    lineHeight: 1.4,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  /* 头像位：常驻占位块，有图才往里塞 <img>。登录前后左边留白一样宽，
+     几行平台名不会因为谁有头像而错开。28px 对着两行文字的高度。 */
+  avatar: {
+    width: 28,
+    height: 28,
+    flex: "0 0 auto",
+    overflow: "hidden",
+    background: "var(--kd-panel-inset)",
+    border: "1px solid var(--kd-line)",
+  },
+  /** 同一个位子放图标而不是头像（更新那行）：不描边，免得看着像个空头像框 */
+  avatarIcon: {
+    width: 28,
+    height: 28,
+    flex: "0 0 auto",
+    display: "grid",
+    placeItems: "center",
+    color: "var(--kd-muted)",
+  },
+  /** 按钮列：不伸不缩，宽度完全由按钮自己的文字定 */
+  control: { flex: "0 0 auto" },
+} satisfies Record<string, CSSProperties>;
+
+const AVATAR_IMG: CSSProperties = {
+  width: "100%",
+  height: "100%",
+  objectFit: "cover",
+  display: "block",
+  transition: "opacity 0.15s",
 };
 
 /**
@@ -43,15 +133,14 @@ export function AccountRow({ account }: { account: Account }) {
   };
 
   return (
-    <div className="kd-set-row">
-      <div className="kd-set-text kd-row" style={{ gap: "0.6rem" }}>
-        {/* 头像占位常驻（有图才渲染 img，没图就是一块圆角灰底）：
-            登录前后左边留白一样宽，三行平台名不会因为谁有头像而错开。 */}
-        <span className="kd-set-avatar" aria-hidden="true">
+    <div style={settingRow.row}>
+      <div style={settingRow.text}>
+        <span style={settingRow.avatar} aria-hidden="true">
           {account.avatar && (
             <img
               src={account.avatar}
               alt=""
+              style={AVATAR_IMG}
               referrerPolicy="no-referrer"
               onError={(event) => {
                 event.currentTarget.style.opacity = "0";
@@ -59,14 +148,14 @@ export function AccountRow({ account }: { account: Account }) {
             />
           )}
         </span>
-        {/* flex:1 是必须的：只给 min-width:0 的话这一格会缩到 min-content，
-            「网易云音乐」就被压成一行一个字。min-width:0 管的是能不能缩，
-            flex:1 管的是要不要占满剩余宽度，两个都要写。 */}
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="kd-set-label kd-truncate">{account.label}</div>
-          <div className="kd-set-hint kd-truncate">
+        <div style={settingRow.body}>
+          {/* title 兜住省略号：名字被截了还能悬停看全 */}
+          <div style={settingRow.label} title={account.label}>
+            {account.label}
+          </div>
+          <div style={settingRow.hint}>
             {/* 状态本身就是这行的说明，不再另起一个彩色标签 */}
-            <span data-state={account.state}>{STATE_LABEL[account.state]}</span>
+            <span style={{ color: STATE_COLOR[account.state] }}>{STATE_LABEL[account.state]}</span>
             {account.nickname && ` · ${account.nickname}`}
             {/* detail 常常就是状态本身（"未登录"），重复一遍纯属噪音 */}
             {account.detail && account.detail !== STATE_LABEL[account.state] && ` · ${account.detail}`}
@@ -76,10 +165,12 @@ export function AccountRow({ account }: { account: Account }) {
           <InlineNotice text={notice} onDismiss={() => setNotice("")} />
         </div>
       </div>
-      <div className="kd-set-control" style={{ textAlign: "right" }}>
+      <div style={settingRow.control}>
         {!account.supports_login ? (
           // 不支持登录的平台（SoundCloud）连按钮都不给，点了只会撞上后端的 RuntimeError
-          <span className="kd-faint">无需登录</span>
+          <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>
+            无需登录
+          </span>
         ) : loggedIn ? (
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => void logout()}>
             退出

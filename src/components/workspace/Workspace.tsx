@@ -10,17 +10,18 @@ import { api, ApiError } from "../../lib/api";
 import { formatBytes, formatDuration } from "../../lib/format";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
-import { useNarrow } from "../../lib/useNarrow";
+import { useLayoutMode } from "../../lib/useLayoutMode";
+import { useLibraryClipboard } from "../../lib/useLibraryClipboard";
 import {
   selectSelectedTrack,
   useLibraryStore,
-  type TrackSort,
+  type SelectMode,
 } from "../../stores/libraryStore";
 import type { IntakeItem, Platform, Quality, SongSource, VideoInfo } from "../../types";
 import { Button, EmptyState, InlineNotice, Sheet } from "../common";
 import { QueuePanel } from "../download/QueuePanel";
 import { ResultTable, selectableGroups, selectionKey } from "../download/ResultTable";
-import { DEFAULT_PRIORITY, SearchBar, SearchPlatforms } from "../download/SearchBar";
+import { DEFAULT_PRIORITY, SearchBar } from "../download/SearchBar";
 import { FolderTree } from "../library/FolderTree";
 import { AccountsPanel } from "../settings/AccountsPanel";
 import { LibraryToolbar } from "../library/LibraryToolbar";
@@ -212,10 +213,39 @@ export function Workspace() {
     // merge 是常量，不进依赖
   }, [query, platforms, batch, settings, setHasResults]);
 
-  /* ------------------------------------------------------------ 窄屏 / 竖屏 */
-  const narrow = useNarrow();
+  // 曲目表的 Cmd/Ctrl + C / X / V。挂在这里而不是 TrackTable 里：
+  // 快捷键是全局的，而 TrackTable 在搜索结果模式下会整个消失
+  useLibraryClipboard();
+
+  /* ------------------------------------------------------------ 布局档位 */
+  const layout = useLayoutMode();
+  // 只有两档：wide 三栏全在，narrow 两侧一起收进抽屉。
+  // 不做"只收左边"的中间态——见 useLayoutMode 的注释
+  const showTree = layout === "wide";
+  const showAside = layout === "wide";
   /** 当前拉开的是哪个抽屉。null = 都收着。 */
   const [sheet, setSheet] = useState<"folders" | "aside" | null>(null);
+
+  /**
+   * narrow 下点一首歌 = 顺手把详情抽屉拉开。这一档没有右栏，不这么做的话
+   * 选中一首歌在界面上只有"某一行变了个色"，详情还得再去按右下角那颗悬浮键。
+   * 播放不中断：抽屉只是盖上来的一层，正在放的那首照旧在走。
+   * （视觉上目前还盖得到播放条——`.kd-sheet-scrim` 是 `inset: 0`，
+   *   要把它停在播放条上沿得改那条 CSS，不在这个文件里。）
+   *
+   * 三种不弹的情况，理由各不相同：
+   *   - wide/medium：右栏本来就在版面上，再弹一层浮层是拿浮层盖住已经看得见的东西；
+   *   - Cmd/Shift 多选：那是在攒一批（要批量拖到别的文件夹），每点一下弹一次
+   *     会把这批动作切碎，而且抽屉里只显示 selectedId 那一首，帮不上忙；
+   *   - 账号面板开着：那时右栏/抽屉里装的是账号管理，不是这首歌的详情。
+   */
+  const selectTrack = useCallback(
+    (id: number, mode: SelectMode) => {
+      select(id, mode);
+      if (layout === "narrow" && mode === "replace" && !showAccounts) setSheet("aside");
+    },
+    [select, layout, showAccounts],
+  );
 
   // 右栏那份内容只写一遍，宽屏塞进 <aside>、窄屏塞进抽屉——
   // 写两份的话，以后加一种面板必然漏改一处
@@ -238,13 +268,13 @@ export function Workspace() {
   // 窄屏下换了标签（曲库 ↔ 搜索）就把抽屉收起来：抽屉里装的内容会跟着变，
   // 留在屏幕上等于突然换了一块东西，比自己收起来更让人迷惑
   useEffect(() => {
-    if (narrow) setSheet(null);
-  }, [narrow, listMode]);
+    setSheet(null);
+  }, [layout, listMode]);
 
   // 点「账号管理」时窄屏没有右栏可以显示，直接把抽屉拉开
   useEffect(() => {
-    if (narrow && showAccounts) setSheet("aside");
-  }, [narrow, showAccounts]);
+    if (!showAside && showAccounts) setSheet("aside");
+  }, [showAside, showAccounts]);
 
   /* ------------------------------------------------------------ 三栏拖宽 */
   const splitRef = useRef<HTMLDivElement | null>(null);
@@ -459,14 +489,9 @@ export function Workspace() {
   const headNote =
     listMode === "library" ? libraryNote : listMode === "search" ? searchError || note : "";
 
-  const sortBy = (column: TrackSort) => {
-    // 点同一列切升降序，点新列默认降序（新加入、BPM 高的先看）
-    setFilter(
-      filter.sort === column
-        ? { order: filter.order === "asc" ? "desc" : "asc" }
-        : { sort: column, order: "desc" },
-    );
-  };
+  // 主/副两级排序的三段式点击语义全在 store 里（cycleSort），
+  // 这里只负责把点击转过去——判断逻辑放在组件里迟早会和别处的入口不一致
+  const sortBy = useLibraryStore((state) => state.cycleSort);
 
   return (
     <section className="kd-section">
@@ -480,25 +505,22 @@ export function Workspace() {
         quality={quality}
         onQualityChange={setQuality}
         defaultQuality={settings?.default_quality ?? "flac"}
-      />
-      {/* 平台行永远在：搜完视频接着搜音乐是常见动作，
-          这一行忽隐忽现会让整个头部跳来跳去。 */}
-      <SearchPlatforms
+        // 平台选择并进搜索框那一行（见 SearchBar 里的注释）
         platforms={platforms}
         onTogglePlatform={togglePlatform}
         soundcloudEnabled={settings?.soundcloud_enabled ?? false}
       />
 
       <div className="kd-section-body">
-        <div className="kd-split" data-folders="true" data-narrow={narrow ? "true" : undefined} ref={splitRef}>
+        <div className="kd-split" data-folders="true" data-layout={layout} ref={splitRef}>
           {/* 窄屏（竖屏 / 手机）下左右两栏收进底部抽屉，只留中间的列表。
               列表是这个软件的脊柱：找歌、搜歌、看结果全在它上面，
               两侧那两栏都是"针对当前这一首/这一次搜索"的补充，按需拉出来就够。 */}
-          {!narrow && <FolderTree />}
+          {showTree && <FolderTree />}
 
           {/* 三栏之间的两条把手：拖动改左/右栏宽度，中间吃剩余。宽度记在
               localStorage，下次打开还是你拉的样子。双击复位到默认。 */}
-          {!narrow && (
+          {showTree && (
             <div
               className="kd-split-handle"
               role="separator"
@@ -599,12 +621,17 @@ export function Workspace() {
               <TrackTable
                 tracks={tracks}
                 loading={loading}
+                // 两行式排法的判据是"还剩几栏"，不是"这一栏被挤成多窄"，
+                // 所以档位得一路传到表上（见 TrackTableProps.layout）
+                layout={layout}
                 selectedId={selectedId}
                 selectedIds={selectedIds}
                 sort={filter.sort}
                 order={filter.order}
-                onSelect={select}
+                onSelect={selectTrack}
                 onSort={sortBy}
+                sort2={filter.sort2}
+                order2={filter.order2}
                 onScrollEnd={() => void loadMore()}
                 reorderable={Boolean(filter.folder) && !filter.folderDeep}
                 onReorder={(ids, targetId, before) => void reorderTracks(ids, targetId, before)}
@@ -630,7 +657,7 @@ export function Workspace() {
             )}
           </div>
 
-          {!narrow && (
+          {showAside && (
             <div
               className="kd-split-handle"
               role="separator"
@@ -643,36 +670,40 @@ export function Workspace() {
 
           {/* 右栏：账号面板优先，其次搜索时是下载队列，曲库时是曲目详情。
               窄屏下同一份内容改由底部抽屉装（见下面的 asidePanel）。 */}
-          {!narrow && <aside className="kd-split-aside kd-scroll">{asidePanel}</aside>}
+          {showAside && <aside className="kd-split-aside kd-scroll">{asidePanel}</aside>}
         </div>
       </div>
 
       {/* ---------------- 窄屏：悬浮键 + 两个抽屉 ---------------- */}
-      {narrow && (
+      {(!showTree || !showAside) && (
         <>
           <div className="kd-fabs">
-            <button
-              type="button"
-              className="kd-fab"
-              aria-label="文件夹"
-              title="文件夹"
-              onClick={() => setSheet("folders")}
-            >
-              <FolderTree_Icon size={17} />
-            </button>
+            {!showTree && (
+              <button
+                type="button"
+                className="kd-fab"
+                aria-label="文件夹"
+                title="文件夹"
+                onClick={() => setSheet("folders")}
+              >
+                <FolderTree_Icon size={17} />
+              </button>
+            )}
             {/* 有选中的曲目 / 有队列内容时才点得亮：点开一个空面板是白跑一趟。
                 data-dot 在有内容时点一个小红点，替代"自动弹出"——
                 自动弹会在滚列表时不停打断，这个点只是告诉你"这里有东西可看"。 */}
-            <button
-              type="button"
-              className="kd-fab"
-              data-dot={asideHasContent ? "true" : undefined}
-              aria-label={asideLabel}
-              title={asideLabel}
-              onClick={() => setSheet("aside")}
-            >
-              <PanelRight size={17} />
-            </button>
+            {!showAside && (
+              <button
+                type="button"
+                className="kd-fab"
+                data-dot={asideHasContent ? "true" : undefined}
+                aria-label={asideLabel}
+                title={asideLabel}
+                onClick={() => setSheet("aside")}
+              >
+                <PanelRight size={17} />
+              </button>
+            )}
           </div>
 
           <Sheet open={sheet === "folders"} title="文件夹" onClose={() => setSheet(null)}>

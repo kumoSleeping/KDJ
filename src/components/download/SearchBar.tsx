@@ -21,7 +21,7 @@ export interface SearchPlatformProps {
   soundcloudEnabled: boolean;
 }
 
-export interface SearchBarProps {
+export interface SearchBarProps extends SearchPlatformProps {
   query: string;
   onQueryChange(value: string): void;
   /** 批量模式由输入内容推导（有换行/多条链接），不再有开关按钮。 */
@@ -36,6 +36,17 @@ export interface SearchBarProps {
 /** 只用来给单行输入换个图标，真正的链接判定在后端。 */
 const LOOKS_LIKE_URL = /^\s*https?:\/\//i;
 
+/**
+ * 搜索条：**一个**控件，不是一排控件。
+ *
+ * 上一版这里是六七个描边矩形并排——输入框一个框、框里的音质又一个框、
+ * 框外四颗平台键各自还有一个框。每多画一条边就多一次"这是另一件东西"的
+ * 暗示，可它们回答的全是同一个问题的三个部分：搜什么、搜哪儿、要什么音质。
+ * 现在只保留最外面那一圈边，内部分区靠 1px 竖分隔线和留白，谁也不再单独描边；
+ * 平台键的选中态改用「品牌色 + 一点同色底」表达，不靠边框。
+ *
+ * 唯一还允许上红的是最右那颗提交键——它是这条里唯一的"动作"，其余都是"状态"。
+ */
 export function SearchBar({
   query,
   onQueryChange,
@@ -45,6 +56,7 @@ export function SearchBar({
   quality,
   onQualityChange,
   defaultQuality,
+  ...platformProps
 }: SearchBarProps) {
   const isUrl = LOOKS_LIKE_URL.test(query);
   const canSubmit = query.trim().length > 0 && !busy;
@@ -60,48 +72,41 @@ export function SearchBar({
   return (
     <form
       className="kd-toolbar"
-      style={batch ? { alignItems: "flex-start" } : undefined}
       onSubmit={(event) => {
         event.preventDefault();
         if (canSubmit) onSubmit();
       }}
     >
-      {/* 批量模式才在外面留图标位：文本域有四行高，图标压在里面会跟文字打架 */}
-      {batch && (
-        <span className="kd-muted kd-row" style={{ gap: "0.35rem", height: "1.85rem" }}>
-          <Rows3 size={14} />
+      <div className="kd-searchbar kd-grow" data-batch={batch || undefined}>
+        {/* 前导图标顺带当模式指示：单行是放大镜/链接，贴成多行就变成"多条"那个图标。
+            批量模式下它贴顶——文本域有四行高，图标浮在正中间会跟第二行文字打架。 */}
+        <span className="kd-searchbar-lead" aria-hidden="true">
+          {batch ? <Rows3 size={14} /> : isUrl ? <Link2 size={14} /> : <Search size={14} />}
         </span>
-      )}
 
-      {batch ? (
-        <textarea
-          className="kd-textarea kd-grow"
-          rows={4}
-          value={query}
-          placeholder={
-            "一行一条，或用逗号分隔。歌名和链接可以混着贴：\n" +
-            "Snow halation\nFive More Hours - Deorro\nhttps://music.163.com/playlist?id=..."
-          }
-          aria-label="批量关键词或链接"
-          autoFocus
-          // Cmd/Ctrl+Enter 提交：文本域里回车是换行，不能拿来当提交键
-          onKeyDown={(event) => {
-            if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && canSubmit) {
-              event.preventDefault();
-              onSubmit();
+        {batch ? (
+          <textarea
+            className="kd-searchbar-input"
+            rows={4}
+            value={query}
+            placeholder={
+              "一行一条，或用逗号分隔。歌名和链接可以混着贴：\n" +
+              "Snow halation\nFive More Hours - Deorro\nhttps://music.163.com/playlist?id=..."
             }
-          }}
-          onChange={(event) => onQueryChange(event.target.value)}
-        />
-      ) : (
-        // 搜索键住在输入框**里面**：它和输入框是同一件事的两半，
-        // 摆成外面一颗独立的红按钮会让它跟顶上真正的动作抢注意力，
-        // 而且横着吃掉一大截本该给输入框的宽度。
-        <div className="kd-searchbox kd-grow">
-          <span className="kd-searchbox-lead" aria-hidden="true">
-            {isUrl ? <Link2 size={14} /> : <Search size={14} />}
-          </span>
+            aria-label="批量关键词或链接"
+            autoFocus
+            // Cmd/Ctrl+Enter 提交：文本域里回车是换行，不能拿来当提交键
+            onKeyDown={(event) => {
+              if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && canSubmit) {
+                event.preventDefault();
+                onSubmit();
+              }
+            }}
+            onChange={(event) => onQueryChange(event.target.value)}
+          />
+        ) : (
           <input
+            className="kd-searchbar-input"
             value={query}
             placeholder="歌名 / 艺人，或直接粘贴歌单、单曲分享链接（多行内容自动批量）"
             aria-label="搜索关键词或链接"
@@ -116,8 +121,15 @@ export function SearchBar({
               onQueryChange(query.trim() ? `${query.trim()}\n${clean}` : clean);
             }}
           />
+        )}
+
+        {/* 右半边一组：音质 / 平台 / 提交。分隔线只在"换了个话题"的地方画：
+            输入 │ 这次要什么音质 │ 这次搜哪儿 → 提交。平台键之间不画线，
+            它们是同一类东西，靠间距就分得开。 */}
+        <div className="kd-searchbar-tools">
+          <span className="kd-searchbar-sep" aria-hidden="true" />
           <select
-            className="kd-searchbox-quality"
+            className="kd-searchbar-quality"
             value={quality}
             aria-label="下载音质"
             title="这次下载用什么音质"
@@ -128,42 +140,45 @@ export function SearchBar({
             <option value="320">320K</option>
             <option value="128">128K</option>
           </select>
+
+          <span className="kd-searchbar-sep" aria-hidden="true" />
+
+          {/* 四家平台就长在搜索条里，不另起一行：它们回答的是"这次搜哪儿"，
+              和输入框是同一个动作的两半；单开一行会让整个头部多占 40px，
+              竖屏下那是好几条曲目的高度。 */}
+          <SearchPlatforms {...platformProps} />
+
+          {/* 整条搜索区唯一的红：提交。批量时它带上条数——贴了一大坨进去，
+              得让人知道系统数出了几条，不然按下去是在赌。 */}
           <button
             type="submit"
-            className="kd-searchbox-go"
+            className="kd-searchbar-go"
+            data-wide={batch || undefined}
             disabled={!canSubmit}
-            aria-label={isUrl ? "解析" : "搜索"}
-            title={isUrl ? "解析这条链接" : "搜索"}
+            aria-label={batch ? "批量处理" : isUrl ? "解析" : "搜索"}
+            title={
+              batch ? "批量处理（Cmd/Ctrl+Enter 也可以提交）" : isUrl ? "解析这条链接" : "搜索"
+            }
           >
             {busy ? <LoaderCircle className="kd-spin" size={14} /> : <Search size={14} />}
+            {batch && <span>批量处理{entryCount > 1 ? `（${entryCount}）` : ""}</span>}
           </button>
         </div>
-      )}
-
-      {/* 批量模式：文本域是四行高，右边空得下一颗正经按钮，而且"批量处理 N 条"
-          这个数字必须说出来——贴了一大坨进去，得让人知道系统数出了几条 */}
-      {batch && (
-        <button
-          type="submit"
-          className="kd-btn"
-          data-variant="primary"
-          disabled={!canSubmit}
-          title="Cmd/Ctrl+Enter 也可以提交"
-        >
-          {busy ? <LoaderCircle className="kd-spin" size={13} /> : <Search size={13} />}
-          批量处理{entryCount > 1 ? `（${entryCount}）` : ""}
-        </button>
-      )}
+      </div>
     </form>
   );
 }
 
 /**
- * 搜索平台。单独一条窄行，跟在大搜索框下面。
+ * 搜索平台。四颗只有标志的键，长在搜索条右半边。
  *
  * 只放各家的标志，不写名字：四个中文/英文名横着排要占掉半条工具栏，
  * 而这四家的品牌色和形状本来就是用户脑子里的第一识别项。名字进 title，
  * 需要确认的时候悬停一下就有。
+ *
+ * 每颗**不再各自描边**。四个方框并排看上去像四个独立控件，可它们其实是
+ * 一组多选；现在选中 = 上品牌色 + 一层同色淡底，没选中 = 中性灰，
+ * 状态一样读得出来，少了四条边。
  *
  * 按钮顺序 = 下载来源优先级：同一首歌几个平台都有时，默认从排最前的那家下。
  * 顺序可以直接拖动调整，存在设置里（platform_priority）。
@@ -198,63 +213,60 @@ export function SearchPlatforms({
   };
 
   return (
-    <div className="kd-toolbar" data-slim="true">
-      <div className="kd-plats" role="group" aria-label="搜索平台（拖动排序 = 来源优先级）">
-        {ordered.map((item) => {
-          // SoundCloud 默认关着（走 yt-dlp，慢且不稳）。但按钮直接置灰是个死胡同：
-          // 用户点不动，也没人告诉他为什么。改成点一下就把开关打开——
-          // 他的意图很明确，没道理逼他跑去设置里再找一遍。
-          const off = item.id === "soundcloud" && !soundcloudEnabled;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              className="kd-plat"
-              aria-pressed={platforms.includes(item.id)}
-              aria-label={item.label}
-              data-platform={item.id}
-              data-off={off || undefined}
-              data-dragging={dragging === item.id || undefined}
-              draggable
-              // 名字进 title：按钮上只有标志，悬停才说是谁
-              title={
-                off
-                  ? `${item.label}：未启用，点一下就启用`
-                  : item.video
-                    ? `${item.label}（贴链接或 BV 号自动走视频解析）· 拖动排序`
-                    : `${item.label} · 拖动排序：排前面的优先作为下载来源`
+    <div className="kd-plats" role="group" aria-label="搜索平台（拖动排序 = 来源优先级）">
+      {ordered.map((item) => {
+        // SoundCloud 默认关着（走 yt-dlp，慢且不稳）。但按钮直接置灰是个死胡同：
+        // 用户点不动，也没人告诉他为什么。改成点一下就把开关打开——
+        // 他的意图很明确，没道理逼他跑去设置里再找一遍。
+        const off = item.id === "soundcloud" && !soundcloudEnabled;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            className="kd-plat"
+            aria-pressed={platforms.includes(item.id)}
+            aria-label={item.label}
+            data-platform={item.id}
+            data-off={off || undefined}
+            data-dragging={dragging === item.id || undefined}
+            draggable
+            // 名字进 title：按钮上只有标志，悬停才说是谁
+            title={
+              off
+                ? `${item.label}：未启用，点一下就启用`
+                : item.video
+                  ? `${item.label}（贴链接或 BV 号自动走视频解析）· 拖动排序`
+                  : `${item.label} · 拖动排序：排前面的优先作为下载来源`
+            }
+            onDragStart={(event) => {
+              event.dataTransfer.effectAllowed = "move";
+              event.dataTransfer.setData("text/plain", item.id);
+              setDragging(item.id);
+            }}
+            onDragEnd={() => setDragging(null)}
+            onDragOver={(event) => {
+              if (dragging && dragging !== item.id) event.preventDefault();
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              if (dragging) reorder(dragging, item.id);
+              setDragging(null);
+            }}
+            onClick={() => {
+              if (off) {
+                // 启用之后这颗按钮的"未启用"灰态当场就没了，还顺手被选中，
+                // 这本身就是回执，不必再说一遍"已启用 SoundCloud"
+                void saveSettings({ soundcloud_enabled: true });
+                if (!platforms.includes(item.id)) onTogglePlatform(item.id);
+                return;
               }
-              onDragStart={(event) => {
-                event.dataTransfer.effectAllowed = "move";
-                event.dataTransfer.setData("text/plain", item.id);
-                setDragging(item.id);
-              }}
-              onDragEnd={() => setDragging(null)}
-              onDragOver={(event) => {
-                if (dragging && dragging !== item.id) event.preventDefault();
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                if (dragging) reorder(dragging, item.id);
-                setDragging(null);
-              }}
-              onClick={() => {
-                if (off) {
-                  // 启用之后这颗按钮的"未启用"灰态当场就没了，还顺手被选中，
-                  // 这本身就是回执，不必再说一遍"已启用 SoundCloud"
-                  void saveSettings({ soundcloud_enabled: true });
-                  if (!platforms.includes(item.id)) onTogglePlatform(item.id);
-                  return;
-                }
-                onTogglePlatform(item.id);
-              }}
-            >
-              <PlatformMark id={item.id} />
-            </button>
-          );
-        })}
-      </div>
-
+              onTogglePlatform(item.id);
+            }}
+          >
+            <PlatformMark id={item.id} />
+          </button>
+        );
+      })}
     </div>
   );
 }

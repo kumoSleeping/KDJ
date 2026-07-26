@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { Disc3, Play, Square } from "lucide-react";
 import { api } from "../../lib/api";
 import { analyzePlaying } from "../../lib/autoAnalyze";
@@ -13,6 +13,82 @@ import { SEEK_EVENT, Waveform, type SeekDetail } from "../library/Waveform";
 
 /** 广播播放位置的节流间隔：节拍网格的播放头不需要每帧更新。 */
 const POSITION_BROADCAST_MS = 200;
+
+/** 跑马灯速度（px/s）。再快像广告牌，再慢会让人以为界面卡住了。 */
+const MARQUEE_SPEED = 40;
+/**
+ * 一个来回的周期里"在走"占的比例（单程 35%），剩下的是两端的停顿——
+ * 停顿是留给人读字的，不停的跑马灯一句话都读不完。
+ * 只有当 design.css 的 @keyframes kd-marquee 真的按 --kd-marquee-time 计时时
+ * 这个数才有意义，两边的百分比要对得上；那边现在写的是固定时长，
+ * 变量给了它用不用是那边的事，用不上也不会出错。
+ */
+const MARQUEE_TRAVEL = 0.35;
+
+/**
+ * 一行会被正确裁切的字：真的放不下时才横向滚动。
+ *
+ * 踩过的两个坑：
+ * 1. 这里原来直接是个 <span>，而**行内元素不吃 overflow:hidden / width**——
+ *    长曲名会一路铺出去，盖在右边的圆形播放键上，键都按不着。
+ *    所以外壳必须有 display:block 的效果（.kd-player-title / .kd-player-artist
+ *    的 display:block 在 design.css 里）。
+ * 2. CSS 判断不了"放不放得下"，只能在 JS 里比 scrollWidth 和 clientWidth。
+ *    量出来没溢出就一个像素都不动——短曲名乱滚比看不全更烦人。
+ */
+function MarqueeText({ className, text }: { className: string; text: string }) {
+  const boxRef = useRef<HTMLSpanElement | null>(null);
+  /** 溢出的像素数，0 = 放得下 = 不滚 */
+  const [shift, setShift] = useState(0);
+
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    let alive = true;
+    const measure = () => {
+      // clientWidth 为 0 说明还没排上版（或者被藏起来了），这时量到的溢出是假的，
+      // 会把短曲名也判成要滚
+      if (!alive || !box.clientWidth) return;
+      const over = box.scrollWidth - box.clientWidth;
+      // 留 1px 容差：亚像素排版常常差零点几，不留就会有一批"抖一下"的假滚动
+      setShift(over > 1 ? over : 0);
+    };
+    measure();
+    // 换歌那一帧量到的宽度是**不准的**：曲名里的中日文字形要 Chromium 去系统字体里
+    // 异步回退，回退完成后这行字会变宽（实测 533px → 573px，差的这 40px 正好是
+    // 跑马灯永远滚不到的尾巴）。这条路上一个事件都听不到——字体栈里没有 @font-face，
+    // document.fonts.ready 页面一加载就 resolve 了；连内层挂 ResizeObserver 都不响
+    // （实测换字形一次回调都没有）。所以只能隔几帧自己再量一遍：
+    // 下一帧接住绝大多数，400ms 那次兜底慢的。
+    const frame = requestAnimationFrame(measure);
+    const timer = window.setTimeout(measure, 400);
+    // 容器变宽变窄（窗口 resize、面板拖动）靠 RO。用它而不是 window.resize：
+    // 布局变了但窗口没变的情况它也接得住。
+    const observer = new ResizeObserver(measure);
+    observer.observe(box);
+    return () => {
+      alive = false;
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, [text]);
+
+  // 把"要走多远、该走多久"按实际溢出量算好交给 CSS：关键帧是死的，
+  // 只有这两个变量能让长曲名和短曲名滚得一样快、并且不多走一步空转。
+  const style = shift
+    ? ({
+        "--kd-marquee-shift": `${-shift}px`,
+        "--kd-marquee-time": `${Math.max(4, shift / (MARQUEE_SPEED * MARQUEE_TRAVEL)).toFixed(1)}s`,
+      } as CSSProperties)
+    : undefined;
+
+  return (
+    <span ref={boxRef} className={className} data-marquee={shift ? "true" : undefined} style={style}>
+      <span className="kd-marquee">{text}</span>
+    </span>
+  );
+}
 
 export function PlayerBar() {
   const selected = useLibraryStore(selectSelectedTrack);
@@ -111,6 +187,16 @@ export function PlayerBar() {
 
   // 跳转统一由 Waveform 发 kd:seek 事件，上面那个监听负责落到 <audio> 上
 
+  // 在放的优先；没在放就显示曲库里选中的那首（按下播放键放的就是它）
+  const titleText = track
+    ? track.title || track.filename
+    : selected
+      ? selected.title || selected.filename
+      : "没有在播的曲目";
+  // 没有艺人时垫一个 nbsp 而不是空串：空内容不产生行盒，第二行会塌掉，
+  // 换到一首没艺人的歌整条播放条的字就往下跳一下
+  const artistText = (track ? track.artist : selected?.artist) || "\u00a0";
+
   return (
     <div className="kd-player">
       <audio
@@ -183,19 +269,13 @@ export function PlayerBar() {
             />
           )}
         </span>
+        {/* 两行都走 MarqueeText：曲名再长也只能在这个盒子里滚，
+            越不过右边的播放键——那是这条上唯一的动作，绝不能被字盖住 */}
         <span className="kd-player-meta" data-notice={notice ? "true" : undefined}>
-          <span className="kd-player-title">
-            {track
-              ? track.title || track.filename
-              : selected
-                ? selected.title || selected.filename
-                : "没有在播的曲目"}
-          </span>
+          <MarqueeText className="kd-player-title" text={titleText} />
           {/* 第二行是艺人：播放条是"现在在放什么"的唯一显示，光有曲名
               分不清同名翻唱。没有艺人时这行留空占位，高度不跳。 */}
-          <span className="kd-player-artist">
-            {(track ? track.artist : selected?.artist) || " "}
-          </span>
+          <MarqueeText className="kd-player-artist" text={artistText} />
         </span>
       </button>
       <InlineNotice text={notice} onDismiss={() => setNotice("")} />
@@ -206,6 +286,7 @@ export function PlayerBar() {
         type="button"
         className="kd-player-go"
         aria-label={playing ? "停止" : "播放"}
+        data-playing={playing ? "true" : undefined}
         disabled={!track && !selected}
         onClick={() => {
           // 还没有在播的曲子时，播的就是曲库里当前选中的那首——
@@ -230,13 +311,15 @@ export function PlayerBar() {
             className="kd-player-wave"
             trackId={track.id}
             position={position}
-            height={30}
+            height={38}
             dimPlayed
           />
         ) : (
-          <div className="kd-player-wave" style={{ height: 30, background: "var(--kd-panel-inset)" }} />
+          /* 空态不复用 kd-player-wave：Waveform 组件的根元素也带这个 class，
+             针对空态写的"压成一条细线"会连真波形一起压扁 */
+          <div className="kd-player-wave-idle" aria-hidden="true" />
         )}
-        <span className="kd-nowrap">
+        <span className="kd-player-time kd-nowrap">
           {formatDuration(position)} / {formatDuration(duration)}
         </span>
       </div>

@@ -50,7 +50,11 @@ export function AccountsPanel() {
         {/* 更新和账号是同一类事（都是"这台机器上的软件本身"），排在账号后面
             同一套行样式，不另开一个设置页 */}
         <UpdateRow />
-        <p className="kd-faint" style={{ fontSize: "var(--kd-size-xs)", lineHeight: 1.6 }}>
+        {/* 上面每行自带一条下边框，紧贴着的话这段说明会像是"更新行的一部分" */}
+        <p
+          className="kd-faint"
+          style={{ fontSize: "var(--kd-size-xs)", lineHeight: 1.6, marginTop: "0.85rem" }}
+        >
           SoundCloud 不需要登录。其它设置都在用的地方直接改：保存目录在下载队列、
           音质在搜索条、主题在右上角、平台优先级拖动按钮排序。
         </p>
