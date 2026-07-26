@@ -1,3 +1,7 @@
+# 【已归档 2026-07-27】v0.1.x 的 Electron + PyInstaller 打包线。
+# Rust 重写（rust-build.yml / rust-android.yml / release.yml）已扶正为正式流水线，
+# 这里摘掉 v* tag 触发器免得和 Rust 线往同一个 Release 里塞两套包；
+# 留 workflow_dispatch 是为了哪天要复刻旧版产物还能手动跑。
 # 多平台打包：macOS DMG（arm64 + x64）/ Windows NSIS EXE / Linux AppImage。
 #
 # 关键决定：sidecar 不随包携带 venv（venv 不可搬迁——解释器是指向构建机的
@@ -8,8 +12,6 @@
 name: build
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 # 发 Release 需要写权限——默认的 GITHUB_TOKEN 是只读的，首跑就栽在这

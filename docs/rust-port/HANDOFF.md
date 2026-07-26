@@ -7,9 +7,13 @@
 
 ## 0. 铁律
 
-1. **不许动 main。** 分支是 `rust-rewrite`。用户明确说过：
-   「在我审视完成之后，我允许了才能把正式的分支换成这个当前的尝试分支。」
-   没有用户当面点头，不合并、不切换、不 force push。
+1. ~~不许动 main~~ **已解禁**：2026-07-27 用户看完 UI 后当面放行，
+   `rust-rewrite` 已并入 main（merge commit 970a61f）并推送。
+   现在功能改动直接走 main；`rust-rewrite` 分支保留作历史。
+   **发版**：改 `src-tauri/tauri.conf.json` 的 `version` 推 main，
+   `release.yml` 检测到未发行的版本号会自动打 tag、建 Release、
+   dispatch 桌面+安卓两条打包线到 tag ref 上（GITHUB_TOKEN 打的 tag
+   不会自己触发工作流——GitHub 防递归的硬规则，所以必须显式 dispatch）。
 2. **验收标准三条**：行为和 v0.1.0 一模一样 → 体积大幅缩小 → 能出安卓安装包。
 3. **契约不许悄悄改**：`crates/kumodeck-core/src/models.rs` 的字段名必须和
    `src/types.ts` 一一对应。改一个字段就要全量回归 5792 行前端。
@@ -181,7 +185,9 @@ src/lib/bridge.ts           运行时探测壳（Tauri / Electron / 浏览器）
 vite.tauri.config.ts        Tauri 专用前端构建（端口 5275、产物 dist-tauri/、剥 index.html 的 CSP meta）
 docs/rust-port/             本目录，每步一份
 .github/workflows/
-  build.yml / test.yml      旧的 Electron + PyInstaller 线，**不许动**
+  build.yml / test.yml      旧 Electron 线，已归档成 workflow_dispatch-only
+  release.yml               版本号哨兵：main 上 tauri.conf.json 的 version 没发行过
+                            就自动 tag + Release + dispatch 两条打包线
   rust-build.yml            Tauri 桌面三平台（src-tauri 不存在时自动只跑测试）
   rust-android.yml          安卓 APK 骨架，风险写在 YAML 注释里
 ```

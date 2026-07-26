@@ -1,0 +1,94 @@
+# 自动发行：推送 main 时检测版本号，出现新版本就打 tag + 建 Release，
+# 再把两条打包线（桌面 rust-build.yml / 安卓 rust-android.yml）调度到 tag 上跑。
+#
+# 版本号的唯一权威是 **src-tauri/tauri.conf.json 的 .version**——
+# 它是 Tauri 打包时真正盖到产物上的那个数（DMG 文件名、APK versionName 都从这来），
+# package.json / Cargo.toml 里的只是影子，检测别看它们。
+#
+# 发版流程（人只做第一步）：
+#   1. 改 src-tauri/tauri.conf.json 的 "version"，提交、推 main；
+#   2. 本工作流发现 v{version} 这个 tag 还不存在 → 打 tag、建 Release（自动生成 notes）；
+#   3. dispatch 两条打包线到 refs/tags/v{version} 上——它们各自的
+#      「发布 Release（仅 tag）」步骤会把产物传进同一个 Release。
+#
+# 为什么不是"打了 tag 自动触发打包"而要显式 dispatch：
+# 用 GITHUB_TOKEN push 的 tag **不会**触发任何 on:tags 工作流
+# （GitHub 防工作流递归的硬规则），静默得像一切正常。手动打 tag 推上来
+# 那条老路仍然通（tag 事件会直接触发两条打包线，本工作流不掺和）。
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # 打 tag + 建 Release
+  actions: write # dispatch 两条打包线
+
+# 排队而不是取消：两次连续推送要是都带版本号变更，各自都该发出去
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.probe.outputs.version }}
+      new: ${{ steps.probe.outputs.new }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检测版本号是否已发行
+        id: probe
+        run: |
+          set -euo pipefail
+          version=$(jq -r '.version' src-tauri/tauri.conf.json)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # 形状不对宁可不发也别打出 v null 这种 tag
+          if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::tauri.conf.json 里的 version 不像语义化版本：$version"
+            exit 1
+          fi
+          # 问远端而不是本地：checkout 默认浅克隆不带 tags，本地查永远是"没有"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
+            echo "v$version 已存在，本次推送不发行"
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "发现新版本 v$version"
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  cut:
+    needs: gate
+    if: needs.gate.outputs.new == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 打 tag 并建 Release
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "KumoDeck v$VERSION" "$GITHUB_SHA"
+          git push origin "v$VERSION"
+          # Release 先建好（产物晚点由打包线传进来）。--generate-notes 用
+          # 上个 tag 到现在的提交自动写变更记录。
+          gh release create "v$VERSION" \
+            --title "KumoDeck v$VERSION" \
+            --generate-notes \
+            --notes "> 产物由 rust-build / rust-android 两条流水线上传，跑完前这里可能暂时是空的。"
+
+      - name: 调度打包线到 tag 上
+        run: |
+          set -euo pipefail
+          # --ref 指到 tag，两条线里的 github.ref 就是 refs/tags/v$VERSION，
+          # 它们各自"仅 tag 才发布"的条件因此成立，产物会传进上面那个 Release
+          gh workflow run rust-build.yml --ref "v$VERSION"
+          gh workflow run rust-android.yml --ref "v$VERSION"
+          echo "已调度桌面 + 安卓打包，进度看 Actions 页"

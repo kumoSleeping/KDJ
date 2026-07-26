@@ -1,25 +1,19 @@
 # 纯 Rust + Tauri 的桌面三平台打包（macOS / Windows / Linux）。
-#
-# 和现有 build.yml 的关系：**两条独立的流水线，互不覆盖**。
-#   build.yml       = v0.1.0 那套 Electron + PyInstaller sidecar，仍然是 main 上的正式产物；
-#   rust-build.yml  = rust-rewrite 分支的 Tauri 产物。
-# 在用户点头把 rust-rewrite 扶正之前，旧的那条不许动（HANDOFF 铁律 1）。
+# 2026-07-27 起这是 main 的**正式**流水线（rust-rewrite 已扶正并入 main）；
+# v0.1.0 的 Electron 线（build.yml / test.yml）已归档成 workflow_dispatch-only。
 #
 # 触发：
-#   - push 到 rust-rewrite：跑测试 + 打包，产物只当 artifact；
-#   - 打 tag：v* 或 rust-v*，额外发 GitHub Release。
-#     **注意**：build.yml 也监听 v*，所以在正式切换之前请用 `rust-v0.2.0`
-#     这种前缀 tag——GitHub 的 ref 模式从头匹配，`v*` 不会命中 `rust-v*`，
-#     这样两条流水线不会往同一个 Release 里塞两套包。两套包的真实差距：
-#     v0.1.0 的 mac arm64 DMG 是 155MB，本机实测 Tauri 版是 5,911,874 B（≈5.6MiB），
-#     并排放在一个 Release 里用户根本分不清哪个是哪个。
-#     实测细节见 docs/rust-port/06-packaging-results.md。
+#   - push 到 main：跑测试 + 打包，产物只当 artifact；
+#   - tag `v*`：额外发 GitHub Release。tag 的正常来源是 release.yml——
+#     它盯着 src-tauri/tauri.conf.json 的 version，出现没发行过的版本号
+#     就自动打 tag 建 Release 再 dispatch 本工作流到 tag ref 上。
+#     手动 push tag 也照常触发，两条路殊途同归。
 name: rust-build
 
 on:
   push:
-    branches: [rust-rewrite]
-    tags: ["v*", "rust-v*"]
+    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 # 发 Release 需要写权限。默认的 GITHUB_TOKEN 是只读的——v0.1.0 首跑三平台

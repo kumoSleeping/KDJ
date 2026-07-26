@@ -13,10 +13,11 @@ name: rust-android
 on:
   workflow_dispatch:
   push:
-    tags: ["v*", "rust-v*"]
+    tags: ["v*"]
 
+# 发 Release 需要写权限（老 build.yml 首跑就是栽在只读 token 上）
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: rust-android-${{ github.ref }}
@@ -166,13 +167,9 @@ jobs:
       #    manifest-merger report 确认合进去了。（旧注释把它列成第一风险，是猜的。）
       #
       # 还没被证伪、真正要担心的（按概率排）：
-      #   1. **明文 HTTP 被禁**：生成的 app/build.gradle.kts 里
-      #      defaultConfig 是 usesCleartextTraffic = "false"，只有 debug buildType
-      #      才置 "true"。而本项目的架构是进程内 axum 绑 127.0.0.1、前端走
-      #      http:// + ws://（HANDOFF §5 的既定决定），release APK 装上去
-      #      大概率白屏，且 debug 包复现不出来。解法见
-      #      docs/rust-port/06-packaging-results.md §4.7（推荐写一份
-      #      network_security_config.xml 只放开 127.0.0.1）。
+      #   1. ✅ ~~明文 HTTP 被禁~~ 已解决：init 之后的「放行 localhost 明文」
+      #      步骤把 release 的 usesCleartextTraffic 翻成 true（本机 merged
+      #      manifest 已验证），细节与取舍见 06-packaging-results.md §4.7 后记。
       #   2. **签名**：这里出的是未签名 APK（产物名就叫 *-unsigned.apk），
       #      直接装到真机可能被 "应用未安装" 拒绝。正式发版要配
       #      ANDROID_KEY_BASE64 / ANDROID_KEY_PASSWORD 之类的 secrets，
@@ -198,3 +195,15 @@ jobs:
           path: |
             src-tauri/gen/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
+
+      # 和 rust-build.yml 的桌面产物进**同一个** Release（softprops 对已存在的
+      # Release 是追加文件，不会另建）。tag 的来源有两条路都成立：
+      # release.yml 检测到新版本号后 dispatch 到 tag ref，或者手动 push tag。
+      - name: 发布 Release（仅 tag）
+        if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

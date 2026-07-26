@@ -1,11 +1,11 @@
+# 【已归档 2026-07-27】v0.1.x 的 pytest + 前端验证线。sidecar/ 只剩参照物身份，
+# main 的 CI 由 rust-build.yml 负责（cargo test + tsc + 三平台打包）。
 # 每次 push / PR 的快速验证：三平台 pytest + 前端 tsc/构建，不打安装包。
 # 打包（DMG/EXE/AppImage）在 build.yml，由 v* tag 触发。
 name: test
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
