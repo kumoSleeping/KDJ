@@ -366,6 +366,7 @@ export function VideoPreview({
           ref={videoRef}
           src={api.videoPreviewUrl(req.bvid, req.page)}
           crossOrigin="anonymous"
+          preload="none"
           playsInline
           onClick={toggle}
           onPlay={() => {

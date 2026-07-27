@@ -2307,6 +2307,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   height: 2.1rem;
   color: var(--kd-faint);
 }
+.kd-searchbar-lead[data-network="true"] {
+  color: var(--kd-theme);
+}
 .kd-searchbar[data-batch] .kd-searchbar-lead {
   height: auto;
   padding-top: 0.35rem;
@@ -2485,7 +2488,9 @@ textarea.kd-searchbar-input {
      下面一行才是"在放什么 + 控制"。 */
   .kd-player {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    /* 右侧走带组有自己的可用宽度；左侧曲名是第一收缩对象，不能再让
+       transport 的 min-content 宽度把它或屏幕右边顶出去。 */
+    grid-template-columns: minmax(0, 1fr) minmax(0, 14.5rem);
     grid-template-areas:
       "wave wave"
       "now  go";
@@ -2505,7 +2510,19 @@ textarea.kd-searchbar-input {
     padding: 0;
   }
   .kd-player-go {
+    /* 播放键随整个 transport 组进入第二行，不能单独占一个网格格子。 */
+    grid-area: auto;
+  }
+  .kd-player-transport {
     grid-area: go;
+    min-width: 0;
+    max-width: 100%;
+    justify-content: flex-end;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .kd-player-transport::-webkit-scrollbar {
+    display: none;
   }
   /* 时间跟着波形那一行走，放在右端；这行有整屏宽度，容得下 */
   .kd-player-scrub > .kd-player-time {
@@ -2789,11 +2806,13 @@ textarea.kd-searchbar-input {
   background: transparent;
   transition: background 0.12s;
 }
-.kd-col-grip:hover,
-.kd-col-grip:active {
-  background: var(--kd-muted);
+.kd-col-grip:hover {
+  /* 这是换位拖把，不是搜索框或分割线；悬停时不再凭空冒出灰色长方体，
+     只有真正按住拖动时才给反馈。 */
+  background: transparent;
 }
 .kd-col-grip:active {
+  background: var(--kd-muted);
   cursor: grabbing;
 }
 .kd-table-wrap,

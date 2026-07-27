@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Link2, LoaderCircle, Rows3, Search } from "lucide-react";
+import { Globe2, Link2, LoaderCircle, Rows3, Search } from "lucide-react";
 import type { Platform, Quality } from "../../types";
 import { useAppStore } from "../../stores/appStore";
 import { PlatformMark } from "./PlatformMark";
@@ -46,7 +46,7 @@ const LOOKS_LIKE_URL = /^\s*https?:\/\//i;
  * 谁也不再单独描边；
  * 平台键的选中态改用「品牌色 + 一点同色底」表达，不靠边框。
  *
- * 唯一还允许上红的是最右那颗提交键——它是这条里唯一的"动作"，其余都是"状态"。
+ * 网络入口用红色 Globe2 做语义提示，最右提交键仍是这条里的主动作；两者都不画边框。
  */
 export function SearchBar({
   query,
@@ -90,10 +90,10 @@ export function SearchBar({
           inputRef.current?.focus();
         }}
       >
-        {/* 前导图标顺带当模式指示：单行是放大镜/链接，贴成多行就变成"多条"那个图标。
+        {/* 前导图标顺带当模式指示：网络搜索用 Globe2，链接用 Link2，贴成多行就变成"多条"那个图标。
             批量模式下它贴顶——文本域有四行高，图标浮在正中间会跟第二行文字打架。 */}
-        <span className="kd-searchbar-lead" aria-hidden="true">
-          {batch ? <Rows3 size={14} /> : isUrl ? <Link2 size={14} /> : <Search size={14} />}
+        <span className="kd-searchbar-lead" data-network="true" aria-hidden="true">
+          {batch ? <Rows3 size={14} /> : isUrl ? <Link2 size={14} /> : <Globe2 size={14} />}
         </span>
 
         {batch ? (
