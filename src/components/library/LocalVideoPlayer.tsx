@@ -58,7 +58,8 @@ export function LocalVideoPlayer({ track }: { track: Track }) {
           controls
           muted
           playsInline
-          preload="metadata"
+          // 打开详情时不要抢主线程读取视频容器；用户点击播放后浏览器会按需加载。
+          preload="none"
           poster={api.coverUrl(track.id, track.modified_at)}
           src={api.videoUrl(track.id)}
           onPlay={() => {

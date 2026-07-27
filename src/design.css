@@ -1237,6 +1237,7 @@ tr:hover .kd-thumb-glass,
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  min-width: 0;
   height: var(--kd-player-h);
   padding: 0 1rem;
   border-top: 1px solid var(--kd-line);
