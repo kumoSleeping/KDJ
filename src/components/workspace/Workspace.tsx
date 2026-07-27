@@ -20,10 +20,17 @@ import {
 import type { IntakeItem, Platform, Quality, SongSource, VideoInfo } from "../../types";
 import { Button, EmptyState, InlineNotice, Sheet } from "../common";
 import { QueuePanel } from "../download/QueuePanel";
+import {
+  VIDEO_PREVIEW_EVENT,
+  VideoPreview,
+  type VideoPreviewRequest,
+} from "../download/VideoPreview";
 import { ResultTable, selectableGroups, selectionKey } from "../download/ResultTable";
 import { DEFAULT_PRIORITY, SearchBar } from "../download/SearchBar";
 import { FolderTree } from "../library/FolderTree";
+import { DETAIL_EVENT } from "../library/TrackTable";
 import { AccountsPanel } from "../settings/AccountsPanel";
+import { DjPanel } from "../player/DjPanel";
 import { LibraryToolbar } from "../library/LibraryToolbar";
 import { TrackDetail } from "../library/TrackDetail";
 import { TrackTable } from "../library/TrackTable";
@@ -42,6 +49,10 @@ const BILI_RE = /bilibili\.com|b23\.tv|^\s*(?:BV[0-9A-Za-z]{10}|av\d+)\s*$/i;
 
 /** 「搜VJ(Bili)」从详情面板发过来：query 已经拼好（曲名 + 关键词）。 */
 export const VJ_SEARCH_EVENT = "kd:vj-search";
+
+/** 三栏的身份。顺序可拖动调整，存 localStorage。 */
+type ColumnId = "tree" | "list" | "aside";
+const COLUMN_ORDER_KEY = "kd-column-order";
 
 export function requestVjSearch(query: string): void {
   window.dispatchEvent(new CustomEvent<string>(VJ_SEARCH_EVENT, { detail: query }));
@@ -63,8 +74,10 @@ export function Workspace() {
   const hasResults = useAppStore((state) => state.hasResults);
   const setListMode = useAppStore((state) => state.setListMode);
   const setHasResults = useAppStore((state) => state.setHasResults);
+  const showTrackDetail = useAppStore((state) => state.showTrackDetail);
   const showAccounts = useAppStore((state) => state.showAccounts);
   const toggleAccounts = useAppStore((state) => state.toggleAccounts);
+  const showDjPanel = useAppStore((state) => state.showDjPanel);
   const enqueue = useDownloadStore((state) => state.enqueue);
 
   const tracks = useLibraryStore((state) => state.tracks);
@@ -98,6 +111,8 @@ export function Workspace() {
   const [items, setItems] = useState<IntakeItem[] | null>(null);
   /** 贴链接解析出来的那一个视频，置顶在结果列表最前面；关键词搜索会把它顶掉。 */
   const [video, setVideo] = useState<VideoInfo | null>(null);
+  /** 正在预览的视频。开在右栏队列头上，不弹窗——弹窗盖住结果列表，看完还得找回去。 */
+  const [preview, setPreview] = useState<VideoPreviewRequest | null>(null);
   const [note, setNote] = useState("");
   /**
    * 三处失败各有各的现场，所以分成三条，不合并成一个全局的错误：
@@ -134,6 +149,7 @@ export function Workspace() {
   const closeResults = useCallback(() => {
     setItems(null);
     setVideo(null);
+    setPreview(null);
     setNote("");
     setSearchError("");
     setQueueError("");
@@ -141,7 +157,11 @@ export function Workspace() {
     useAppStore.getState().setHasResults(false);
   }, []);
 
-  const submit = useCallback(async () => {
+  /**
+   * `platformsOverride` 是一次性的：代搜（搜VJ）只搜 B 站，但**不动**搜索框上
+   * 勾着的平台——那是用户为"下歌"调好的状态，程序替他搜一次不该顺手改掉。
+   */
+  const submit = useCallback(async (platformsOverride?: Platform[]) => {
     const text = query.trim();
     if (!text) return;
 
@@ -179,7 +199,7 @@ export function Workspace() {
     // 哔哩哔哩也参与关键词搜索。视频就是视频：下载保留完整视频文件，
     // 只在播放时取音轨（曲库对视频文件的统一行为）。
     const priority = settings?.platform_priority ?? (DEFAULT_PRIORITY as string[]);
-    const orderedPlatforms = [...platforms].sort(
+    const orderedPlatforms = [...(platformsOverride ?? platforms)].sort(
       (a, b) => priority.indexOf(a) - priority.indexOf(b),
     );
     try {
@@ -227,34 +247,81 @@ export function Workspace() {
   const [sheet, setSheet] = useState<"folders" | "aside" | null>(null);
 
   /**
-   * narrow 下点一首歌 = 顺手把详情抽屉拉开。这一档没有右栏，不这么做的话
-   * 选中一首歌在界面上只有"某一行变了个色"，详情还得再去按右下角那颗悬浮键。
-   * 播放不中断：抽屉只是盖上来的一层，正在放的那首照旧在走。
-   * （视觉上目前还盖得到播放条——`.kd-sheet-scrim` 是 `inset: 0`，
-   *   要把它停在播放条上沿得改那条 CSS，不在这个文件里。）
-   *
-   * 三种不弹的情况，理由各不相同：
-   *   - wide/medium：右栏本来就在版面上，再弹一层浮层是拿浮层盖住已经看得见的东西；
-   *   - Cmd/Shift 多选：那是在攒一批（要批量拖到别的文件夹），每点一下弹一次
-   *     会把这批动作切碎，而且抽屉里只显示 selectedId 那一首，帮不上忙；
-   *   - 账号面板开着：那时右栏/抽屉里装的是账号管理，不是这首歌的详情。
+   * narrow 下点一首歌**不再**顺手弹详情抽屉——那版试过：点一下的意图九成是
+   * "放这首"，弹层却先把列表盖掉，每次都得先关抽屉才能点下一首。
+   * 现在点一下 = 直接播放（见 TrackTable 行点击），要看详情就点播放条上的
+   * 「正在播」块（封面+曲名那块），它发 DETAIL_EVENT，narrow 档在这里接住拉开抽屉。
+   * wide 档不用接：右栏本来就在版面上，选中即可见。
    */
   const selectTrack = useCallback(
     (id: number, mode: SelectMode) => {
+      showTrackDetail();
       select(id, mode);
-      if (layout === "narrow" && mode === "replace" && !showAccounts) setSheet("aside");
     },
-    [select, layout, showAccounts],
+    [select, showTrackDetail],
   );
+
+  /**
+   * 「正在播」跳转自己切的标签，不该被下面"换标签收抽屉"的 effect 误伤——
+   * 只有这一次的 listMode 变化要放行抽屉，所以立个一次性记号。
+   */
+  const detailJumpRef = useRef(false);
+  useEffect(() => {
+    const onDetail = () => {
+      // 人在搜索页时先跳回曲库页：详情装在曲库页的右栏/抽屉里，
+      // 停在搜索页把抽屉拉开，底下的列表和这首歌对不上号
+      if (useAppStore.getState().listMode !== "library") {
+        detailJumpRef.current = true;
+      }
+      showTrackDetail();
+      if (layout === "narrow") setSheet("aside");
+    };
+    window.addEventListener(DETAIL_EVENT, onDetail);
+    return () => window.removeEventListener(DETAIL_EVENT, onDetail);
+  }, [layout, showTrackDetail]);
+
+  // 「预览」从结果行发过来：装进右栏（队列头上）。narrow 档没有右栏，
+  // 顺手把抽屉拉开——点了预览却什么都没出现，才是真正的迷惑
+  useEffect(() => {
+    const onPreview = (event: Event) => {
+      // 在线视频预览属于搜索页；显式点击预览时让账号/接播设置自动让位。
+      setListMode("search");
+      setPreview((event as CustomEvent<VideoPreviewRequest>).detail);
+      if (layout === "narrow") setSheet("aside");
+    };
+    window.addEventListener(VIDEO_PREVIEW_EVENT, onPreview);
+    return () => window.removeEventListener(VIDEO_PREVIEW_EVENT, onPreview);
+  }, [layout, setListMode]);
 
   // 右栏那份内容只写一遍，宽屏塞进 <aside>、窄屏塞进抽屉——
   // 写两份的话，以后加一种面板必然漏改一处
-  const asideLabel = showAccounts ? "账号管理" : listMode === "search" ? "下载队列" : "曲目详情";
-  const asideHasContent = showAccounts || listMode === "search" || selected !== null;
+  const asideLabel = showAccounts
+    ? "账号管理"
+    : showDjPanel
+      ? "接播设置"
+      : listMode === "search"
+        ? "下载队列"
+        : "曲目详情";
+  const asideHasContent = showAccounts || showDjPanel || listMode === "search" || selected !== null;
   const asidePanel = showAccounts ? (
     <AccountsPanel />
+  ) : showDjPanel ? (
+    <DjPanel />
   ) : listMode === "search" ? (
-    <QueuePanel />
+    // 预览叠在队列头上而不是顶替它：预览的同时照样往队列里加任务，
+    // 两件事本来就会同时发生（看对了就点下载）
+    <div className="kd-col" style={{ height: "100%", minHeight: 0 }}>
+      {preview && (
+        <VideoPreview
+          key={`${preview.bvid}#${preview.page}`}
+          req={preview}
+          onClose={() => setPreview(null)}
+        />
+      )}
+      <div className="kd-grow" style={{ minHeight: 0 }}>
+        <QueuePanel />
+      </div>
+    </div>
   ) : selected ? (
     <TrackDetail key={selected.id} track={selected} />
   ) : (
@@ -268,13 +335,73 @@ export function Workspace() {
   // 窄屏下换了标签（曲库 ↔ 搜索）就把抽屉收起来：抽屉里装的内容会跟着变，
   // 留在屏幕上等于突然换了一块东西，比自己收起来更让人迷惑
   useEffect(() => {
+    // 例外：「正在播」跳转刚切的标签，它正要用这个抽屉（见 detailJumpRef）
+    if (detailJumpRef.current) {
+      detailJumpRef.current = false;
+      return;
+    }
     setSheet(null);
   }, [layout, listMode]);
 
-  // 点「账号管理」时窄屏没有右栏可以显示，直接把抽屉拉开
+  // 点「账号管理」/「DJ 接歌」时窄屏没有右栏可以显示，直接把抽屉拉开
   useEffect(() => {
-    if (!showAside && showAccounts) setSheet("aside");
-  }, [showAside, showAccounts]);
+    if (!showAside && (showAccounts || showDjPanel)) setSheet("aside");
+  }, [showAside, showAccounts, showDjPanel]);
+
+  /* ------------------------------------------------------------ 三栏换位 */
+  /**
+   * 三栏的左右顺序，长期保存。
+   *
+   * 用 CSS `order` 换位而不是重排 DOM：拖宽用的两条把手是按"左栏/右栏"
+   * 绑定的，DOM 一动，把手拖的就不是它旁边那一栏了。`order` 只改视觉顺序，
+   * 把手和它服务的那一栏始终是同一个元素。
+   */
+  const [columnOrder, setColumnOrder] = useState<ColumnId[]>(() => {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(COLUMN_ORDER_KEY) ?? "null");
+      if (Array.isArray(saved) && saved.length === 3) return saved as ColumnId[];
+    } catch {
+      // 存档坏了就用默认序，不值得为它报错
+    }
+    return ["tree", "list", "aside"];
+  });
+  const [dragCol, setDragCol] = useState<ColumnId | null>(null);
+
+  // ×10 留出插空：两条拖宽把手要能落在自己那一栏的紧邻位置。
+  // 直接用 0/1/2 的话，把手和栏 order 相同，只能按 DOM 顺序排，
+  // 栏一换位把手就跑到另一边去了。
+  const orderOf = (id: ColumnId) => columnOrder.indexOf(id) * 10;
+  const moveColumn = (from: ColumnId, to: ColumnId) => {
+    if (from === to) return;
+    const next = columnOrder.filter((id) => id !== from);
+    next.splice(next.indexOf(to), 0, from);
+    localStorage.setItem(COLUMN_ORDER_KEY, JSON.stringify(next));
+    setColumnOrder(next);
+  };
+  /** 每栏都要接住拖放，所以把这几个 handler 抽出来。 */
+  const dropProps = (id: ColumnId) => ({
+    onDragOver: (event: React.DragEvent) => {
+      if (dragCol && dragCol !== id) event.preventDefault();
+    },
+    onDrop: (event: React.DragEvent) => {
+      event.preventDefault();
+      if (dragCol) moveColumn(dragCol, id);
+      setDragCol(null);
+    },
+  });
+  /** 换位把手：只有它可拖，否则栏里的按钮、输入框全会被拖拽劫走。 */
+  const gripProps = (id: ColumnId) => ({
+    className: "kd-col-grip",
+    draggable: true,
+    "aria-label": "拖动调整这一栏的位置",
+    title: "拖动调整这一栏的位置",
+    onDragStart: (event: React.DragEvent) => {
+      setDragCol(id);
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", id); // Firefox 不设就不触发 drag
+    },
+    onDragEnd: () => setDragCol(null),
+  });
 
   /* ------------------------------------------------------------ 三栏拖宽 */
   const splitRef = useRef<HTMLDivElement | null>(null);
@@ -322,10 +449,12 @@ export function Workspace() {
   };
 
   /**
-   * 「搜VJ(Bili)」：详情面板把拼好的词发过来，这里代填搜索框、
-   * 只勾 B 站、然后提交。提交不能在事件回调里直接调 submit()——
-   * 那个闭包看到的还是旧 query——所以立一个"待发射"标记，
-   * 等 state 落定后的渲染周期里再开枪。
+   * 「搜VJ(Bili)」：详情面板把拼好的词发过来，这里代填搜索框、然后提交。
+   * 提交不能在事件回调里直接调 submit()——那个闭包看到的还是旧 query——
+   * 所以立一个"待发射"标记，等 state 落定后的渲染周期里再开枪。
+   *
+   * 只搜 B 站走的是 submit 的一次性覆盖参数，**不动**平台勾选：
+   * 这是程序代搜，不是用户改了主意；搜完回来下歌，勾着的还是原来那几家。
    */
   const [vjPending, setVjPending] = useState("");
   useEffect(() => {
@@ -333,7 +462,6 @@ export function Workspace() {
       const q = (event as CustomEvent<string>).detail?.trim();
       if (!q) return;
       setQuery(q);
-      setPlatforms(["bilibili"]);
       setListMode("search");
       setVjPending(q);
     };
@@ -341,11 +469,11 @@ export function Workspace() {
     return () => window.removeEventListener(VJ_SEARCH_EVENT, onVj);
   }, [setListMode]);
   useEffect(() => {
-    if (vjPending && query === vjPending && platforms.length === 1 && platforms[0] === "bilibili") {
+    if (vjPending && query === vjPending) {
       setVjPending("");
-      void submit();
+      void submit(["bilibili"]);
     }
-  }, [vjPending, query, platforms, submit]);
+  }, [vjPending, query, submit]);
 
   const toggleSelect = useCallback((key: string) => {
     setChosen((current) => {
@@ -516,7 +644,17 @@ export function Workspace() {
           {/* 窄屏（竖屏 / 手机）下左右两栏收进底部抽屉，只留中间的列表。
               列表是这个软件的脊柱：找歌、搜歌、看结果全在它上面，
               两侧那两栏都是"针对当前这一首/这一次搜索"的补充，按需拉出来就够。 */}
-          {showTree && <FolderTree />}
+          {showTree && (
+            <div
+              className="kd-col-slot"
+              style={{ order: orderOf("tree"), minWidth: 0 }}
+              data-dragging={dragCol === "tree" ? "true" : undefined}
+              {...dropProps("tree")}
+            >
+              <span {...gripProps("tree")} />
+              <FolderTree />
+            </div>
+          )}
 
           {/* 三栏之间的两条把手：拖动改左/右栏宽度，中间吃剩余。宽度记在
               localStorage，下次打开还是你拉的样子。双击复位到默认。 */}
@@ -525,13 +663,20 @@ export function Workspace() {
               className="kd-split-handle"
               role="separator"
               aria-orientation="vertical"
+              style={{ order: orderOf("tree") + 1 }}
               aria-label="调整文件夹栏宽度"
               onPointerDown={startColumnDrag("left")}
               onDoubleClick={() => resetColumn("left")}
             />
           )}
 
-          <div className="kd-table-wrap">
+          <div
+            className="kd-table-wrap"
+            style={{ order: orderOf("list") }}
+            data-dragging={dragCol === "list" ? "true" : undefined}
+            {...dropProps("list")}
+          >
+            <span {...gripProps("list")} />
             {/* 列表面板的"眉目"：两个标签常驻，随时可切，不等搜索了才出现。
                 激活态只是中性底色，不跟真正的动作按钮抢红色。 */}
             <div className="kd-list-head">
@@ -662,6 +807,7 @@ export function Workspace() {
               className="kd-split-handle"
               role="separator"
               aria-orientation="vertical"
+              style={{ order: orderOf("aside") - 1 }}
               aria-label="调整详情栏宽度"
               onPointerDown={startColumnDrag("right")}
               onDoubleClick={() => resetColumn("right")}
@@ -670,7 +816,17 @@ export function Workspace() {
 
           {/* 右栏：账号面板优先，其次搜索时是下载队列，曲库时是曲目详情。
               窄屏下同一份内容改由底部抽屉装（见下面的 asidePanel）。 */}
-          {showAside && <aside className="kd-split-aside kd-scroll">{asidePanel}</aside>}
+          {showAside && (
+            <aside
+              className="kd-split-aside kd-scroll"
+              style={{ order: orderOf("aside") }}
+              data-dragging={dragCol === "aside" ? "true" : undefined}
+              {...dropProps("aside")}
+            >
+              <span {...gripProps("aside")} />
+              {asidePanel}
+            </aside>
+          )}
         </div>
       </div>
 

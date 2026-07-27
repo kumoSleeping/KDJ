@@ -7,7 +7,7 @@ pub mod streams;
 pub mod url;
 pub mod wbi;
 
-pub use provider::BilibiliProvider;
+pub use provider::{BilibiliProvider, PreviewStream};
 
 /// 目标高度 → B 站的 qn 编号。传得比实际能拿到的高没关系，
 /// 服务端会降到账号权限允许的最高档。

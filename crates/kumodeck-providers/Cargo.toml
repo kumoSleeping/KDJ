@@ -9,6 +9,8 @@ aes = "0.8"
 anyhow = "1.0.104"
 async-trait = "0.1.91"
 base64 = "0.22"
+# 预览流转发：不让 server 层依赖 reqwest 的类型，字节流用裸 Bytes 传出去
+bytes = "1"
 cbc = "0.1"
 ecb = { version = "0.1", features = ["alloc"] }
 flate2 = "1.1.9"

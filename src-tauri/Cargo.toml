@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "KumoDeck 桌面壳：把 axum server 编进 Tauri 进程内"
+description = "KDJ 桌面壳：把 axum server 编进 Tauri 进程内"
 
 [lib]
 # 安卓/iOS 的入口是系统通过 JNI/静态链接去加载库，没有 main()，

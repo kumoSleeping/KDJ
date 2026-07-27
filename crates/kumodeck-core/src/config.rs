@@ -113,7 +113,7 @@ fn default_analysis_duration() -> f64 {
     240.0
 }
 fn default_theme() -> Theme {
-    Theme::Dark
+    Theme::Light
 }
 fn default_video_height() -> i64 {
     1080
@@ -130,11 +130,22 @@ fn default_platform_priority() -> Vec<String> {
     ]
 }
 fn default_video_dir() -> String {
-    home_dir()
-        .join("Downloads")
-        .join("KumoDeck")
-        .to_string_lossy()
-        .into_owned()
+    default_download_root().to_string_lossy().into_owned()
+}
+
+/// 系统的「下载」目录。Windows / Linux 上这个目录可能被本地化或挪过位置
+/// （XDG、注册表），必须问系统而不是拼死 `~/Downloads`；问不到才退回去。
+pub fn system_download_dir() -> PathBuf {
+    directories::UserDirs::new()
+        .and_then(|dirs| dirs.download_dir().map(Path::to_path_buf))
+        .unwrap_or_else(|| home_dir().join("Downloads"))
+}
+
+/// 全新安装的默认下载落点：系统「下载」目录下的 KDJ 子目录。
+/// 直接落在下载根目录会和浏览器下载互相淹没。
+/// 用户在设置里改过之后走 settings.json 里存的那份（见 `AppConfig::create`）。
+pub fn default_download_root() -> PathBuf {
+    system_download_dir().join("KDJ")
 }
 
 pub fn home_dir() -> PathBuf {
@@ -162,7 +173,6 @@ pub fn expand_user(raw: &str) -> PathBuf {
 #[derive(Debug)]
 pub struct AppConfig {
     pub data_dir: PathBuf,
-    pub token: String,
     pub host: String,
     /// 0 = 让 OS 分配空闲端口（Tauri 内嵌时的默认做法）
     pub port: u16,
@@ -180,12 +190,11 @@ impl AppConfig {
     ///
     /// 传进来的 `download_dir` 只是**默认值**：用户在设置界面改过之后
     /// settings.json 里的值优先，否则每次启动都会被覆盖回去。
-    pub fn create(data_dir: PathBuf, download_dir: PathBuf, token: String, port: u16) -> Self {
+    pub fn create(data_dir: PathBuf, download_dir: PathBuf, port: u16) -> Self {
         let data_dir = expand_user(&data_dir.to_string_lossy());
         let download_dir = expand_user(&download_dir.to_string_lossy());
         let config = AppConfig {
             data_dir,
-            token,
             host: "127.0.0.1".to_string(),
             port,
             inner: RwLock::new(Inner {
@@ -371,7 +380,7 @@ mod tests {
     #[test]
     fn missing_file_keeps_defaults() {
         let dir = scratch("missing");
-        let config = AppConfig::create(dir.join("data"), dir.join("dl"), "t".into(), 0);
+        let config = AppConfig::create(dir.join("data"), dir.join("dl"), 0);
         assert_eq!(config.to_settings().default_quality, Quality::Flac);
         assert_eq!(config.to_settings().concurrent_downloads, 3);
     }
@@ -388,7 +397,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = AppConfig::create(data, dir.join("dl"), "t".into(), 0);
+        let config = AppConfig::create(data, dir.join("dl"), 0);
         let settings = config.to_settings();
         assert_eq!(settings.default_quality, Quality::Flac, "非法字段回落默认值");
         assert_eq!(settings.concurrent_downloads, 7, "合法字段必须留下");
@@ -398,13 +407,13 @@ mod tests {
     #[test]
     fn save_then_load_roundtrips() {
         let dir = scratch("roundtrip");
-        let config = AppConfig::create(dir.join("data"), dir.join("dl"), "t".into(), 0);
+        let config = AppConfig::create(dir.join("data"), dir.join("dl"), 0);
         let mut settings = config.to_settings();
         settings.filename_template = "{artist} - {title}".into();
         settings.platform_priority = vec!["bilibili".into(), "wyy".into()];
         config.apply_settings(settings.clone());
 
-        let reopened = AppConfig::create(dir.join("data"), dir.join("dl"), "t".into(), 0);
+        let reopened = AppConfig::create(dir.join("data"), dir.join("dl"), 0);
         assert_eq!(reopened.to_settings(), settings);
     }
 
@@ -412,19 +421,19 @@ mod tests {
     fn cli_download_dir_does_not_override_saved_one() {
         // 命令行给的只是默认值，用户改过就以 settings.json 为准
         let dir = scratch("dldir");
-        let config = AppConfig::create(dir.join("data"), dir.join("first"), "t".into(), 0);
+        let config = AppConfig::create(dir.join("data"), dir.join("first"), 0);
         let mut settings = config.to_settings();
         settings.download_dir = dir.join("chosen").to_string_lossy().into_owned();
         config.apply_settings(settings);
 
-        let reopened = AppConfig::create(dir.join("data"), dir.join("second"), "t".into(), 0);
+        let reopened = AppConfig::create(dir.join("data"), dir.join("second"), 0);
         assert_eq!(reopened.download_dir(), dir.join("chosen"));
     }
 
     #[test]
     fn empty_video_dir_follows_download_dir() {
         let dir = scratch("videodir");
-        let config = AppConfig::create(dir.join("data"), dir.join("dl"), "t".into(), 0);
+        let config = AppConfig::create(dir.join("data"), dir.join("dl"), 0);
         let mut settings = config.to_settings();
         settings.video_download_dir = "  ".into();
         config.apply_settings(settings);

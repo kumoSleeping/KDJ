@@ -484,6 +484,11 @@ pub struct VideoDownloadRequest {
     pub audio_only: bool,
     #[serde(default)]
     pub transcode: bool,
+    /// 成品相对原片的起点偏移（毫秒）。正数掐掉开头这么长，负数在开头
+    /// 补同样长的黑场/静音——预览面板里对着唱盘校出来的那个值。
+    /// 0（默认）= 原样，走 copy 快路径；非零会强制重编码（见 ffmpeg.rs）。
+    #[serde(default)]
+    pub offset_ms: i64,
 }
 
 // ---------------------------------------------------------------- 曲库

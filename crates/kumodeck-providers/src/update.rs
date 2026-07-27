@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-const RELEASES_LATEST: &str = "https://api.github.com/repos/kumoSleeping/KumoDeck/releases/latest";
+const RELEASES_LATEST: &str = "https://api.github.com/repos/kumoSleeping/KDJ/releases/latest";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateInfo {
@@ -38,7 +38,7 @@ fn triple(version: &str) -> (u64, u64, u64) {
 pub async fn check(current: &str) -> Result<UpdateInfo> {
     let client = reqwest::Client::builder()
         // GitHub API 拒绝没有 UA 的请求（403），这不是可选项
-        .user_agent(format!("KumoDeck/{current}"))
+        .user_agent(format!("KDJ/{current}"))
         .build()?;
     let response = client
         .get(RELEASES_LATEST)

@@ -1,11 +1,10 @@
 //! 本地 HTTP + WebSocket 服务。
 //!
-//! 只绑 127.0.0.1，每次启动生成随机 token。保留 HTTP 而不是全走 Tauri IPC
+//! 只绑 127.0.0.1。保留 HTTP 而不是全走 Tauri IPC
 //! 的理由见 `docs/rust-port/00-architecture.md`：前端 `api.ts` 几乎不用动，
 //! 播放器也要靠 Range 请求才能拖进度条。
 
 pub mod aggregate;
-pub mod auth;
 pub mod downloads;
 pub mod error;
 pub mod jobs;
@@ -37,13 +36,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 
     routes::router(ctx)
         .route("/ws", axum::routing::get(ws::handler))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            auth::require_token,
-        ))
-        // CORS 必须加在鉴权**外层**：浏览器的预检请求不带自定义头，
-        // 先过鉴权的话必然 401。只监听 127.0.0.1 且强制 token，
-        // 放开 origin 不构成额外暴露面。
+        // 服务只监听 127.0.0.1；开放 CORS 让 Tauri WebView 和本机浏览器调试都能直连。
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)

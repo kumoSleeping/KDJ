@@ -32,9 +32,7 @@ pub struct BiliClient {
 
 impl BiliClient {
     pub fn new(session_dir: &Path) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .timeout(std::time::Duration::from_secs(30))
+        let http = crate::net::http_timeouts(reqwest::Client::builder().user_agent(USER_AGENT))
             .build()
             .context("构建 B 站 HTTP 客户端失败")?;
         let client = BiliClient {

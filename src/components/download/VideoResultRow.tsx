@@ -6,6 +6,7 @@ import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import type { MergedGroup, VideoFormat, VideoInfo } from "../../types";
 import { Button, InlineNotice } from "../common";
+import { requestVideoPreview } from "./VideoPreview";
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -167,7 +168,17 @@ export function VideoResultRow({
   return (
     <tr ref={rowRef} data-video="true">
       <td colSpan={colSpan}>
-        <div className="kd-video-row">
+        {/* 没有单独的「预览」按钮：点行身任意留白（封面、标题、元信息）就在
+            右栏开预览。分 P / 画质那些控件自己消费点击，closest 一挡就分开了。 */}
+        <div
+          className="kd-video-row"
+          title="点击在右栏预览"
+          onClick={(event) => {
+            if (!bvid) return;
+            if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+            requestVideoPreview({ bvid, title, author, page: pageIndex });
+          }}
+        >
           {/* 封面按 16:9 摆：视频封面本来就是宽的，裁成方块等于把画面切掉一半。
               尺寸由 CSS 写死，图片加载完不会把整行顶一下。 */}
           <span className="kd-video-cover">

@@ -8,9 +8,29 @@
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use url::Url;
+
+/// 四家 provider 共用的 HTTP client 超时配置。
+///
+/// **不能用 `ClientBuilder::timeout`**：那是"从发请求到响应体读完"的全程上限，
+/// 而元数据 API 和音频/视频下载共用同一个 client——下载一首 41 MB 的 FLAC
+/// 在 200 KB/s 的 CDN 上要三分多钟，30 秒的全程上限会让它必定死在半路
+/// （症状：`error decoding response body: operation timed out`，
+/// 且失败字节数恰好 ≈ 速率 × 上限秒数）。
+///
+/// 正确语义拆成两段：
+/// - `connect_timeout`：建连要快，服务器不通就赶紧报错；
+/// - `read_timeout`：**相邻两次读之间**的间隔上限，流一直在动就永不触发，
+///   真停住了（CDN 僵死、网断）也能在 30 秒内断开，不会无限挂着。
+/// 总时长不设上限——下载多久是文件大小和网速的事，不该由超时来裁。
+pub fn http_timeouts(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    builder
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(30))
+}
 
 /// 判断 URL 的 host 是否就是 domain（或其子域）。
 ///

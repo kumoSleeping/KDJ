@@ -5,9 +5,11 @@
 
 import { create } from "zustand";
 import { api } from "../lib/api";
+import { useQueueStore } from "./queueStore";
 import type {
   AnalyzeProgress,
   AnalyzeResponseLike,
+  FileDisposalMode,
   FileOp,
   FolderOpResult,
   FolderTree,
@@ -165,6 +167,12 @@ export interface LibraryStore {
    * 重新点「分析」才解除。
    */
   autoAnalyzeSuspended: boolean;
+  /**
+   * 中列正显示「临时列表」（点歌队列，见 queueStore）而不是曲库查询结果。
+   * 走同一个 tracks 字段而不是另开一条渲染路：选中、范围多选、详情联动
+   * 全都吃 store.tracks，另开一条的话这些行为要重写一遍。
+   */
+  queueView: boolean;
 
   refresh(): Promise<void>;
   loadMore(): Promise<void>;
@@ -215,7 +223,15 @@ export interface LibraryStore {
   setCover(id: number, file: Blob): Promise<Track>;
   /** 按文件里现存的标签刷新库里那条记录。 */
   rereadTags(id: number): Promise<Track>;
+  /** 切换「临时列表」视图。开 = 中列显示点歌队列；点任何文件夹自动退出。 */
+  setQueueView(on: boolean): void;
   removeTrack(id: number, deleteFile?: boolean): Promise<void>;
+  /**
+   * 批量删除（多选右键菜单走这条）。一次请求删整批：逐条打 N 个请求
+   * 会推 N 条 WS 事件、触发 N 轮防抖刷新。
+   * 返回后端的失败清单（track id → 原因）；没删成的那些行会留在列表里。
+   */
+  removeTracks(ids: number[], file: FileDisposalMode): Promise<Record<string, string>>;
   handleEvent(event: WsEvent): void;
 }
 
@@ -235,10 +251,32 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   scan: null,
   analyze: null,
   autoAnalyzeSuspended: false,
+  queueView: false,
 
   async refresh() {
     cancelPending();
     const seq = ++requestSeq;
+    // 临时列表视图：tracks 就是队列的快照，按队列顺序，不打后端。
+    // 队列一变（入队/播放消耗）由文件底部的订阅再拉着 refresh 跑一遍。
+    if (get().queueView) {
+      const items = useQueueStore.getState().list();
+      const visible = new Set(items.map((item) => item.id));
+      const selectedIds = get().selectedIds.filter((id) => visible.has(id));
+      const selectedId = get().selectedId;
+      const nextSelectedId = selectedId !== null && visible.has(selectedId)
+        ? selectedId
+        : (selectedIds[selectedIds.length - 1] ?? null);
+      set({
+        tracks: items,
+        total: items.length,
+        loading: false,
+        error: "",
+        selectedIds,
+        selectedId: nextSelectedId,
+        selectedTrack: nextSelectedId === null ? null : get().selectedTrack,
+      });
+      return;
+    }
     set({ loading: true });
     try {
       const page = await api.tracks(toQuery(get().filter, 0));
@@ -253,8 +291,22 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     }
   },
 
+  setQueueView(on) {
+    if (get().queueView === on) return;
+    // 切视图时旧选区必须失效：否则空队列里按 Delete / Cmd+C，操作的会是
+    // 刚才曲库页里那批已经看不见的曲目。
+    set({
+      queueView: on,
+      selectedId: null,
+      selectedIds: [],
+      selectedTrack: null,
+    });
+    void get().refresh();
+  },
+
   async loadMore() {
-    const { tracks, total, loadingMore, loading } = get();
+    const { tracks, total, loadingMore, loading, queueView } = get();
+    if (queueView) return; // 队列一次全在页里，没有"更多"
     if (loadingMore || loading || tracks.length >= total) return;
     const seq = requestSeq;
     set({ loadingMore: true });
@@ -309,7 +361,15 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   setFilter(patch) {
     cancelPending();
-    set({ filter: { ...get().filter, ...patch } });
+    // 动了筛选/排序/搜索 = 想看曲库查询结果了，临时列表视图自动让位
+    const leavingQueue = get().queueView;
+    set({
+      filter: { ...get().filter, ...patch },
+      queueView: false,
+      ...(leavingQueue
+        ? { selectedId: null, selectedIds: [], selectedTrack: null }
+        : {}),
+    });
     filterTimer = setTimeout(() => {
       filterTimer = null;
       void get().refresh();
@@ -318,7 +378,14 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   resetFilter() {
     cancelPending();
-    set({ filter: { ...DEFAULT_FILTER } });
+    const leavingQueue = get().queueView;
+    set({
+      filter: { ...DEFAULT_FILTER },
+      queueView: false,
+      ...(leavingQueue
+        ? { selectedId: null, selectedIds: [], selectedTrack: null }
+        : {}),
+    });
     void get().refresh();
   },
 
@@ -481,16 +548,26 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   },
 
   async removeTrack(id, deleteFile = false) {
-    await api.deleteTrack(id, deleteFile);
-    set({
-      tracks: get().tracks.filter((item) => item.id !== id),
-      total: Math.max(0, get().total - 1),
-      selectedId: get().selectedId === id ? null : get().selectedId,
-      selectedIds: get().selectedIds.filter((item) => item !== id),
-      selectedTrack: get().selectedTrack?.id === id ? null : get().selectedTrack,
-    });
-    void get().refreshStats();
-    void get().refreshFolders();
+    await get().removeTracks([id], deleteFile ? "remove" : "keep");
+  },
+
+  async removeTracks(ids, file) {
+    const result = await api.deleteTracks(ids, file);
+    // 失败的留在列表里：它们的库记录还在（后端删文件失败时连记录一起保留）
+    const failed = new Set(Object.keys(result.errors).map(Number));
+    const gone = new Set(ids.filter((id) => !failed.has(id)));
+    if (gone.size > 0) {
+      set({
+        tracks: get().tracks.filter((item) => !gone.has(item.id)),
+        total: Math.max(0, get().total - gone.size),
+        selectedId: gone.has(get().selectedId ?? -1) ? null : get().selectedId,
+        selectedIds: get().selectedIds.filter((item) => !gone.has(item)),
+        selectedTrack: gone.has(get().selectedTrack?.id ?? -1) ? null : get().selectedTrack,
+      });
+      void get().refreshStats();
+      void get().refreshFolders();
+    }
+    return result.errors;
   },
 
   handleEvent(event) {
@@ -542,6 +619,13 @@ export function selectAnalyzing(state: LibraryStore): boolean {
   const job = state.analyze;
   return job !== null && (job.total === 0 || job.done < job.total);
 }
+
+// 队列一动（入队/插队/播放消耗/清空），临时列表视图跟着重渲染。
+// 订阅放在这儿而不是 queueStore 里：依赖只许 libraryStore → queueStore 单向走。
+useQueueStore.subscribe(() => {
+  const state = useLibraryStore.getState();
+  if (state.queueView) void state.refresh();
+});
 
 /** 当前选中的曲目。优先取当前页的（最新），页外回落到 selectTrack 暂存的对象。 */
 export function selectSelectedTrack(state: LibraryStore): Track | null {

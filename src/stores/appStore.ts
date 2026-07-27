@@ -9,6 +9,7 @@ import { api, events } from "../lib/api";
 import type { Account, Health, Settings, WsEvent } from "../types";
 import { useDownloadStore } from "./downloadStore";
 import { useLibraryStore } from "./libraryStore";
+import { useQueueStore } from "./queueStore";
 
 /**
  * 中间列表 + 右侧面板是**成对**切换的，两个标签常驻在列表面板顶边：
@@ -41,6 +42,13 @@ export function applyTheme(theme: Settings["theme"]): void {
   if (document.documentElement.dataset.theme !== resolved) {
     document.documentElement.dataset.theme = resolved;
   }
+  // 存的是算好的 dark/light 而不是 system：读它的是 public/theme-init.js，
+  // 跑在首帧前，越简单越好，不该在那边再算一遍系统偏好
+  try {
+    localStorage.setItem("kd-theme", resolved);
+  } catch {
+    /* localStorage 不可用只影响下次启动的首帧，不影响本次 */
+  }
 }
 
 export interface AppStore {
@@ -49,6 +57,8 @@ export interface AppStore {
   hasResults: boolean;
   /** 右侧详情栏是否正显示「平台登录」面板（左下角齿轮呼出）。 */
   showAccounts: boolean;
+  /** 右侧详情栏是否正显示「接播设置」面板（播放条 DJ 按钮呼出）。 */
+  showDjPanel: boolean;
   health: Health | null;
   settings: Settings | null;
   accounts: Account[];
@@ -61,7 +71,10 @@ export interface AppStore {
 
   setListMode(mode: ListMode): void;
   setHasResults(value: boolean): void;
+  /** 让右栏回到曲目详情；任何显式选歌/换歌入口都走它。 */
+  showTrackDetail(): void;
   toggleAccounts(): void;
+  openDjPanel(): void;
   bootstrap(): Promise<void>;
   refreshAccounts(): Promise<void>;
   saveSettings(patch: Partial<Settings>): Promise<void>;
@@ -75,6 +88,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   listMode: "library",
   hasResults: false,
   showAccounts: false,
+  showDjPanel: false,
   health: null,
   settings: null,
   accounts: [],
@@ -84,15 +98,32 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   savingSettings: false,
 
   setListMode(mode) {
-    set({ listMode: mode });
+    // 用户点了曲库/搜索/文件夹，就是在切换当前关注的内容；账号和接播设置
+    // 应该自动让位，不能逼用户先找到右上角的关闭按钮。
+    set({ listMode: mode, showAccounts: false, showDjPanel: false });
   },
 
   setHasResults(value) {
-    set({ hasResults: value, listMode: value ? "search" : "library" });
+    set({
+      hasResults: value,
+      listMode: value ? "search" : "library",
+      showAccounts: false,
+      showDjPanel: false,
+    });
   },
 
+  showTrackDetail() {
+    set({ listMode: "library", showAccounts: false, showDjPanel: false });
+  },
+
+  // 账号面板和 DJ 面板共用右栏那一个位置，互斥：开一个就把另一个顶掉，
+  // 不然"关掉 A 露出的是 B"会让人以为关错了东西
   toggleAccounts() {
-    set({ showAccounts: !get().showAccounts });
+    set({ showAccounts: !get().showAccounts, showDjPanel: false });
+  },
+
+  openDjPanel() {
+    set({ showDjPanel: true, showAccounts: false });
   },
 
   bootstrap() {
@@ -146,7 +177,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     } catch (error) {
       set({ settings: current, savingSettings: false });
       applyTheme(current.theme);
-      // 设置的入口散在各处（主题在标题栏、目录在队列、画质在视频面板），
+      // 设置的入口散在各处（主题在播放器左侧、目录在队列、画质在视频面板），
       // 没有一个统一的地方摆错误行；回滚本身已经是可见反馈——
       // 拨过去的开关会自己弹回来。详情只留给控制台。
       console.error(`设置保存失败：${errorText(error)}`);
@@ -191,5 +222,6 @@ export function connectEvents(): () => void {
     useAppStore.getState().handleEvent(event);
     useDownloadStore.getState().handleEvent(event);
     useLibraryStore.getState().handleEvent(event);
+    useQueueStore.getState().handleEvent(event);
   });
 }

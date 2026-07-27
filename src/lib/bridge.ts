@@ -1,20 +1,9 @@
 /**
- * 运行时桥接层：同一份前端要跑在三种壳里 —— Tauri（新）、Electron（旧）、浏览器预览。
- *
- * 为什么不在构建期用环境变量二选一：`rust-rewrite` 期间两个壳会并存一段时间
- * （老壳还要能出包、新壳还在验证），构建期分叉意味着每次都要重新 build 才能换壳测。
- * 运行时探测的代价只有一次 `typeof` 判断。
- *
- * 探测顺序 Tauri → Electron → 浏览器：Tauri 优先是因为将来 Tauri 壳里
- * 不会再有 `window.kumodeck`，而反过来"Electron 里混进 Tauri 句柄"不可能发生。
- *
- * 探测完成后会把结果**装回 `window.kumodeck`**。这不是偷懒：`window.kumodeck`
- * 本来就是前端和壳之间的既有契约（`src/types.ts::KumoDeckBridge`），
- * 组件里那 7 处 `window.kumodeck?.revealPath(...)` 因此一行都不用改，
- * 也就不存在"漏改一处导致某个按钮在 Tauri 下变哑巴"这种回归。
+ * KDJ 运行时桥接层：正式环境走 Tauri，独立 Rust Web 调试走浏览器降级。
+ * Electron 已停用，不再探测或兼容它的 preload 全局对象。
  */
 
-import type { KumoDeckBridge } from "../types";
+import type { KdjBridge } from "../types";
 
 declare global {
   interface Window {
@@ -32,7 +21,6 @@ declare global {
 /** `get_bridge_info` 的返回：Rust 侧启动 axum 之后才知道端口和 token。 */
 interface BridgeInfo {
   baseUrl: string;
-  token: string;
   platform: string;
 }
 
@@ -57,14 +45,13 @@ function normalizeInfo(raw: unknown): BridgeInfo {
     return "";
   };
   const baseUrl = str("baseUrl", "base_url");
-  const token = str("token");
-  if (!baseUrl || !token) {
+  if (!baseUrl) {
     throw new Error(`get_bridge_info 返回不完整：${JSON.stringify(raw)}`);
   }
-  return { baseUrl, token, platform: str("platform") || "unknown" };
+  return { baseUrl, platform: str("platform") || "unknown" };
 }
 
-async function createTauriBridge(): Promise<KumoDeckBridge> {
+async function createTauriBridge(): Promise<KdjBridge> {
   const info = normalizeInfo(await tauriInvoke<unknown>("get_bridge_info"));
   return {
     ...info,
@@ -92,7 +79,7 @@ async function createTauriBridge(): Promise<KumoDeckBridge> {
       return Array.isArray(picked) ? picked.filter((p): p is string => typeof p === "string") : [];
     },
     // 契约里 windowControl 是同步的（Electron 走 ipcRenderer.send 不等回包），
-    // 改成 async 会波及 TitleBar，所以这里 fire-and-forget 保持签名不变
+    // 改成 async 会波及所有窗口控制入口，所以这里 fire-and-forget 保持签名不变
     windowControl: (action) => {
       void tauriInvoke("window_control", { action }).catch(() => {});
     },
@@ -104,16 +91,17 @@ async function createTauriBridge(): Promise<KumoDeckBridge> {
 /**
  * 浏览器降级：`npx vite --config vite.rust.config.ts` 那套预览。
  *
- * 配置里注入的 `window.kumodeck` 是内联 `<script>`，而 index.html 的 CSP 是
+ * 配置里注入的 `window.kdj` 是内联 `<script>`，而 index.html 的 CSP 是
  * `script-src 'self'`（没有 'unsafe-inline'），所以那段 shim 有可能被浏览器直接拦掉。
  * 这里兜底给出同样的默认值，预览就不依赖那段注入能不能落地。
  */
-function createBrowserBridge(): KumoDeckBridge {
-  const port = (import.meta.env.VITE_KUMODECK_PORT as string | undefined) ?? "8788";
-  const token = (import.meta.env.VITE_KUMODECK_TOKEN as string | undefined) ?? "dev-token";
+function createBrowserBridge(): KdjBridge {
+  const port =
+    (import.meta.env.VITE_KDJ_PORT as string | undefined) ??
+    (import.meta.env.VITE_KUMODECK_PORT as string | undefined) ??
+    "8788";
   return {
     baseUrl: `http://127.0.0.1:${port}`,
-    token,
     platform: "browser",
     // 浏览器里没有原生对话框和文件管理器，只能降级成提示
     openPath: async (path: string) => {
@@ -140,16 +128,13 @@ function createBrowserBridge(): KumoDeckBridge {
   };
 }
 
-function detect(): Promise<KumoDeckBridge> {
+function detect(): Promise<KdjBridge> {
   if (window.__TAURI_INTERNALS__) return createTauriBridge();
-  // Electron 的 preload 是同步注入的，探测到就直接用原对象，
-  // 不要重新包一层：contextBridge 暴露的属性是只读的，改它会抛
-  if (window.kumodeck) return Promise.resolve(window.kumodeck);
   return Promise.resolve(createBrowserBridge());
 }
 
-let current: KumoDeckBridge | null = null;
-let pending: Promise<KumoDeckBridge> | null = null;
+let current: KdjBridge | null = null;
+let pending: Promise<KdjBridge> | null = null;
 
 /**
  * 初始化桥接层。Tauri 下 baseUrl/token 要等 Rust 起完 axum 才知道，
@@ -158,14 +143,12 @@ let pending: Promise<KumoDeckBridge> | null = null;
  *
  * 重复调用返回同一个 Promise：并发调用不会打两次 `get_bridge_info`。
  */
-export function initBridge(): Promise<KumoDeckBridge> {
+export function initBridge(): Promise<KdjBridge> {
   if (!pending) {
     pending = detect().then((resolved) => {
       current = resolved;
-      // 装回 window：组件里既有的 `window.kumodeck?.xxx` 调用点因此不用动。
-      // Electron 下 detect() 返回的就是它自己，赋值会被 contextBridge 拒绝，故跳过。
-      if (window.kumodeck !== resolved) {
-        Object.defineProperty(window, "kumodeck", {
+      if (window.kdj !== resolved) {
+        Object.defineProperty(window, "kdj", {
           value: resolved,
           writable: false,
           configurable: true,
@@ -187,8 +170,8 @@ export function initBridge(): Promise<KumoDeckBridge> {
  * 没初始化时不静默降级：Electron 下 preload 本来就是同步可用的，直接兜底；
  * 其余情况宁可抛出来，也好过悄悄连到一个错的 baseUrl 上排查半天。
  */
-export function getBridge(): KumoDeckBridge {
+export function getBridge(): KdjBridge {
   if (current) return current;
-  if (typeof window !== "undefined" && window.kumodeck) return window.kumodeck;
+  if (typeof window !== "undefined" && window.kdj) return window.kdj;
   throw new Error("桥接层尚未初始化：main.tsx 必须先 await initBridge()");
 }

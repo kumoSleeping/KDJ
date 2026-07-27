@@ -34,6 +34,31 @@ const CDN_FALLBACK: &str = "https://dl.stream.qqmusic.qq.com/";
 const QR_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const PROFILE_TTL: Duration = Duration::from_secs(300);
 
+/// 主页接口的字段在 QQ 音乐不同版本之间变过几次：旧回包是 `Info.Pic`，
+/// 新版和 qqmusic-api-python 使用 `base_info.avatar`。头像字段本身也有时是
+/// URL 字符串、有时包在 `{ url: ... }` 里，所以这里集中做兼容，不让 account()
+/// 再绑定某一个客户端版本的回包形状。
+fn profile_text(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    if let Some(text) = value.as_str().filter(|text| !text.is_empty()) {
+        return Some(text.to_string());
+    }
+    let object = value.as_object()?;
+    ["url", "avatar", "avatarUrl", "pic", "headPicUrl", "frontPicUrl"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn profile_path<'a>(data: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    path.iter().try_fold(data, |value, key| value.get(*key))
+}
+
+fn https_avatar(url: String) -> String {
+    url.replacen("http://", "https://", 1)
+}
+
 /// 契约音质 → (文件名前缀, 扩展名)。前缀是 QQ 侧的文件类型编码，不能改。
 fn file_type(quality: Quality) -> (&'static str, &'static str) {
     match quality {
@@ -307,35 +332,60 @@ impl QqMusicProvider {
                 return profile.clone();
             }
         }
-        let euin = self.client.credential().encrypt_uin;
+        let credential = self.client.credential();
+        let euin = credential.encrypt_uin.clone();
+        let musicid = credential.str_musicid();
         let mut profile = (String::new(), String::new());
-        if !euin.is_empty() {
+        if !musicid.is_empty() || !euin.is_empty() {
             if let Ok(data) = self
                 .client
                 .call(
                     "music.UnifiedHomepage.UnifiedHomepageSrv",
                     "GetHomepageHeader",
-                    json!({"IsQueryTabDetail": 1, "uin": euin}),
+                    json!({
+                        "IsQueryTabDetail": 1,
+                        // 新版接口通常认明文 musicid；保留 encrypt_uin 兼容旧版。
+                        "uin": musicid,
+                        "hostuin": musicid,
+                        "encrypt_uin": euin,
+                    }),
                     QqPlatform::Desktop,
                 )
                 .await
             {
-                profile = (
-                    data.get("Info")
-                        .and_then(|info| info.get("Nick"))
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    data.get("Info")
-                        .and_then(|info| info.get("Pic"))
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        // qlogo 的头像接口给的是 http://——前端 CSP 只放行 https 的图，
-                        // 原样透传的结果是头像被拦、onError 把 <img> 藏掉，
-                        // 看起来就是"QQ 音乐没有头像"。qlogo 全域支持 https，直接升。
-                        .replacen("http://", "https://", 1),
-                );
+                let nickname = [
+                    profile_path(&data, &["base_info", "name"]),
+                    profile_path(&data, &["base_info", "nick"]),
+                    profile_path(&data, &["Info", "Nick"]),
+                    data.get("nickname"),
+                ]
+                .into_iter()
+                .find_map(|value| value.and_then(Value::as_str).filter(|text| !text.is_empty()))
+                .unwrap_or_default()
+                .to_string();
+                let avatar = [
+                    profile_path(&data, &["base_info", "avatar"]),
+                    profile_path(&data, &["base_info", "avatarUrl"]),
+                    profile_path(&data, &["Info", "Pic"]),
+                    data.get("avatar"),
+                    data.get("avatarUrl"),
+                    data.get("headPicUrl"),
+                    data.get("frontPicUrl"),
+                ]
+                .into_iter()
+                .find_map(profile_text)
+                .map(https_avatar)
+                .unwrap_or_default();
+                profile = (nickname, avatar);
             }
+        }
+        // 主页接口偶尔只返回昵称、不返回头像。musicid 是登录凭证里的普通 QQ
+        // 标识，不把 encrypt_uin 当 QQ 号；qlogo 是最后的公开头像兜底，不需要把
+        // Cookie 暴露给前端，也能避开 QQ 主页接口的字段漂移。
+        if profile.1.is_empty() && !musicid.is_empty() {
+            let qlogo_uin = musicid.strip_prefix('o').unwrap_or(&musicid);
+            profile.1 =
+                format!("https://q.qlogo.cn/headimg_dl?dst_uin={qlogo_uin}&spec=100");
         }
         *self.profile.lock().unwrap() = Some((profile.clone(), Instant::now()));
         profile
@@ -572,6 +622,25 @@ impl MusicProvider for QqMusicProvider {
             }));
         }
         Ok(None)
+    }
+
+    /// 试听走 128K（M500）档。media_mid 的取法和补救和 download 一致：
+    /// 搜索结果里它偶尔是空的，回查一次详情再试。
+    async fn preview_url(&self, source: &SongSource) -> Result<Option<String>> {
+        let raw = Value::Object(source.payload.clone());
+        let mut media_mid = media_mid_of(&raw, &source.key);
+        let mut resolved = self.resolve_url(&source.key, &media_mid, Quality::Q128).await?;
+        if resolved.is_none() {
+            let detail = self.query_song(&source.key).await?;
+            if !detail.is_null() {
+                media_mid = media_mid_of(&detail, &source.key);
+                resolved = self.resolve_url(&source.key, &media_mid, Quality::Q128).await?;
+            }
+        }
+        let Some((url, _ext)) = resolved else {
+            bail!("QQ 音乐没有返回可用试听地址（可能是版权受限或需要绿钻）");
+        };
+        Ok(Some(url))
     }
 
     async fn download(&self, job: DownloadJob<'_>) -> Result<PathBuf> {
@@ -876,6 +945,26 @@ const _: fn() -> Credential = Credential::default;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_avatar_accepts_new_and_legacy_homepage_shapes() {
+        let modern = json!({"base_info": {"name": "DJ", "avatar": "http://avatar/new.jpg"}});
+        let legacy = json!({"Info": {"Nick": "旧昵称", "Pic": {"url": "http://avatar/old.jpg"}}});
+        assert_eq!(
+            profile_path(&modern, &["base_info", "name"])
+                .and_then(Value::as_str),
+            Some("DJ")
+        );
+        assert_eq!(
+            profile_text(profile_path(&modern, &["base_info", "avatar"])),
+            Some("http://avatar/new.jpg".into())
+        );
+        assert_eq!(
+            profile_text(profile_path(&legacy, &["Info", "Pic"])),
+            Some("http://avatar/old.jpg".into())
+        );
+        assert_eq!(https_avatar("http://avatar/new.jpg".into()), "https://avatar/new.jpg");
+    }
 
     #[test]
     fn song_links_of_every_shape_are_parsed() {

@@ -1,5 +1,7 @@
 import { useEffect } from "react";
+import { api } from "./api";
 import { useLibraryStore } from "../stores/libraryStore";
+import { useQueueStore } from "../stores/queueStore";
 
 /**
  * 曲目表的复制 / 剪切 / 粘贴快捷键。
@@ -14,7 +16,7 @@ import { useLibraryStore } from "../stores/libraryStore";
  * 正在输入时一律不接管：搜索框里按 Cmd+C 要复制的是选中的文字，
  * 不是曲目。`isEditable` 把 input/textarea/contenteditable 全挡掉。
  */
-function isEditable(target: EventTarget | null): boolean {
+export function isEditable(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   if (!el) return false;
   const tag = el.tagName;
@@ -37,6 +39,17 @@ export function useLibraryClipboard(): void {
         return;
       }
       if (key === "v") {
+        if (store.queueView && store.clipboard) {
+          event.preventDefault();
+          const ids = store.clipboard.ids;
+          void Promise.allSettled(ids.map((id) => api.track(id))).then((results) => {
+            const tracks = results.flatMap((result) =>
+              result.status === "fulfilled" ? [result.value] : [],
+            );
+            if (tracks.length > 0) useQueueStore.getState().add(tracks);
+          });
+          return;
+        }
         // 粘到"当前正在看的那个文件夹"。没选文件夹时无处可粘，
         // 静默忽略比弹一句"请先选文件夹"更省事——用户下一步自然会去点一个
         const dest = store.filter.folder;

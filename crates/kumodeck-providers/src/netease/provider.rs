@@ -508,6 +508,12 @@ impl MusicProvider for NeteaseProvider {
         }))
     }
 
+    /// 试听走 128K 档：`Q128.gradient()` 只有一级，天然就是"最低码率"。
+    async fn preview_url(&self, source: &SongSource) -> Result<Option<String>> {
+        let (url, _ext, _size) = self.resolve_audio(&source.key, Quality::Q128).await?;
+        Ok(Some(url))
+    }
+
     async fn download(&self, job: DownloadJob<'_>) -> Result<PathBuf> {
         job.check_canceled()?;
         let source = job.source;

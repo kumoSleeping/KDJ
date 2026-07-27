@@ -11,14 +11,54 @@
 
 import { api } from "./api";
 import { useHarmonicScope } from "./harmonicScope";
+import { usePlayMode } from "./playMode";
 import { useLibraryStore } from "../stores/libraryStore";
+import { useQueueStore } from "../stores/queueStore";
 import type { HarmonicMatch, Track } from "../types";
 
 /** 本次运行放过的曲目。刷新页面即清空——这是有意的，见文件头。 */
 const played = new Set<number>();
 
+/**
+ * 播放历史栈，「上一首」按它回退。
+ *
+ * 为什么不能直接复用上面那个 Set：Set 只记得"放过没"，不记得**顺序**，
+ * 而"上一首"要的恰恰是顺序。也不能拿曲库的当前排序当历史——
+ * 用户可能是从推荐列表点进来的，那首歌在曲库排序里离得很远。
+ *
+ * 只记 id 不记整条 Track：曲目对象会被后台分析和 WS 事件换掉，
+ * 存快照的话回退时拿到的是过期数据（BPM 还是空的）。
+ */
+const history: number[] = [];
+/** 回退到哪一步了。-1 = 停在最新那首。 */
+let cursor = -1;
+
 export function markPlayed(trackId: number): void {
   played.add(trackId);
+  // 回退途中又手动点了别的歌 → 从当前位置截断，新的一首接上去。
+  // 不截断的话历史会分叉，再按"上一首"回到的是另一条时间线。
+  if (cursor >= 0) history.length = cursor + 1;
+  // 连着点同一首不该在历史里堆两条
+  if (history[history.length - 1] !== trackId) history.push(trackId);
+  cursor = -1;
+}
+
+/** 有没有可以回退的上一首。按钮的禁用态读它。 */
+export function hasPrevious(): boolean {
+  const at = cursor < 0 ? history.length - 1 : cursor;
+  return at > 0;
+}
+
+/**
+ * 上一首的 track id。返回 null = 已经在最开头。
+ *
+ * 只回 id，让调用方去 store 里取最新的 Track——见上面"只记 id"的理由。
+ */
+export function stepBack(): number | null {
+  const at = cursor < 0 ? history.length - 1 : cursor;
+  if (at <= 0) return null;
+  cursor = at - 1;
+  return history[cursor] ?? null;
 }
 
 export function hasPlayed(trackId: number): boolean {
@@ -28,10 +68,91 @@ export function hasPlayed(trackId: number): boolean {
 /** 只在测试和"重置续播"这种显式操作里用。 */
 export function clearPlayHistory(): void {
   played.clear();
+  history.length = 0;
+  cursor = -1;
 }
 
 /**
- * 挑下一首。
+ * 按 id 取回一条最新的 Track。
+ *
+ * 当前页里没有就去后端要——「上一首」回退到的那首很可能已经被翻页翻走了，
+ * 只在当前页里找的话，翻两页之后上一首就点不动了。
+ */
+export async function trackById(id: number): Promise<Track | null> {
+  const inPage = useLibraryStore.getState().tracks.find((track) => track.id === id);
+  if (inPage) return inPage;
+  try {
+    return await api.track(id);
+  } catch {
+    // 曲目被删了 / 后端不通：安静放弃，按钮点了没反应好过弹一条错误
+    return null;
+  }
+}
+
+/**
+ * 归一化曲名，用来判"是不是同一首歌的另一份"。
+ *
+ * 曲库里同一首歌常有好几份：`[VDJ] xxx`、`xxx (Remix)`、`xxx_master2`、
+ * 一份 mp3 一份 flac。它们调号 BPM 几乎一样，和声推荐必然把它们排在最前面——
+ * 结果就是"接下一首"接到了刚放完那首自己。
+ *
+ * 洗掉的东西和 vjKeywords.buildVjQuery 是同一套思路：方括号前缀、尾部括注、
+ * 下划线、大小写、空白。剩下的核心名字一样就当同一首。
+ */
+function normalizeTitle(raw: string): string {
+  return raw
+    .replace(/^\s*[[【(（][^\]】)）]*[\]】)）]\s*/g, "")
+    .replace(/\s*[([（【][^)\]）】]*[)\]）】]\s*$/g, "")
+    .replace(/[_\-–—]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * 两条记录是不是同一首歌。
+ *
+ * 只比归一化后的**曲名**，不比艺人：同一首歌的不同版本里，艺人字段经常
+ * 一份写了 remixer、一份是空的，比上去反而漏判。空名字一律当不同——
+ * 两首都没名字的时候拿空串相等去判，会把整批未命名文件当成同一首。
+ */
+function sameSong(a: Track, b: Track): boolean {
+  const left = normalizeTitle(a.title || a.filename);
+  const right = normalizeTitle(b.title || b.filename);
+  return left.length > 0 && left === right;
+}
+
+/**
+ * 挑下一首，按播放条上选的模式来（见 playMode.ts）。
+ *
+ * 范围（全库 / 当前文件夹）四种模式共用 harmonicScope 那一个开关——
+ * **必须是同一个值**：用户把范围收到当前文件夹、结果自动续播还从全库里接，
+ * 那是这个开关最难被发现的失效方式。
+ *
+ * `manual` = 用户自己按了「下一首」。区别只影响单曲循环：循环的是**自动**续播，
+ * 人伸手按下一首就是想逃出这首歌，这时按招牌的调性接歌给他挑。
+ */
+export async function pickNext(current: Track, manual = false): Promise<Track | null> {
+  const { mode } = usePlayMode.getState();
+  const { scope } = useHarmonicScope.getState();
+  const folder = scope === "folder" ? useLibraryStore.getState().filter.folder : "";
+
+  // 点歌队列优先（KTV 语义）：排了歌就先放排的，什么模式都一样——
+  // 队列是用户显式排的"接下来放这个"，意图比模式的通用规则强。
+  // 播放即消耗：弹出去的那首从队列里划掉。
+  const queued = useQueueStore.getState().shift(current.id);
+  if (queued) return queued;
+  // 范围收在「临时列表」且队列已经放空：安静停下，这正是这一档的意义
+  if (scope === "queue") return null;
+
+  if (mode === "one" && !manual) return current;
+  if (mode === "order") return nextInOrder(current, folder);
+  if (mode === "shuffle") return randomPick(current, folder);
+  return harmonicPick(current, folder);
+}
+
+/**
+ * 调性接歌（默认模式）。
  *
  * 用和曲目详情栏里同一条推荐接口，所以"自动接的那首"和用户自己看到的
  * 推荐列表是同一套排序——不会出现"它给我接了一首列表里根本没有的歌"。
@@ -39,12 +160,8 @@ export function clearPlayHistory(): void {
  * 容差比详情栏默认的 12 收得更紧：手动挑歌时人可以自己判断能不能对上，
  * 自动接必须保守，接出一首对不上拍的比不接更糟。
  */
-export async function pickNext(current: Track): Promise<Track | null> {
+async function harmonicPick(current: Track, folder: string): Promise<Track | null> {
   let matches: HarmonicMatch[];
-  // 范围跟着详情栏那两枚开关走。**必须是同一个值**——用户把范围收到当前
-  // 文件夹、结果自动续播还从全库里接，那是这个开关最难被发现的失效方式。
-  const { scope } = useHarmonicScope.getState();
-  const folder = scope === "folder" ? useLibraryStore.getState().filter.folder : "";
   try {
     matches = await api.harmonic(current.id, 8, 40, folder);
   } catch {
@@ -53,7 +170,88 @@ export async function pickNext(current: Track): Promise<Track | null> {
   }
 
   const fresh = matches.find(
-    (match) => match.track.id !== current.id && !played.has(match.track.id),
+    (match) =>
+      match.track.id !== current.id &&
+      !played.has(match.track.id) &&
+      !sameSong(current, match.track),
   );
   return fresh?.track ?? null;
+}
+
+/**
+ * 顺序播放：列表里当前这首的下一行，到头绕回第一首。
+ *
+ * 绕回而不是停下：这是个接歌工具，"顺序"要的是可预期的次序，
+ * 不是"放完一遍就沉默"——半夜垫场时列表放完直接没声音是事故。
+ *
+ * 快路径直接读眼前这张列表（范围和当前视图一致时它就是答案，还带着
+ * 用户此刻的全部筛选和排序）；人翻去了别的文件夹/搜索页时才去问后端。
+ */
+async function nextInOrder(current: Track, folder: string): Promise<Track | null> {
+  const state = useLibraryStore.getState();
+  if (state.filter.folder === folder) {
+    const index = state.tracks.findIndex((item) => item.id === current.id);
+    if (index !== -1) {
+      if (index + 1 < state.tracks.length) return state.tracks[index + 1];
+      if (state.tracks.length < state.total) {
+        // 正好放到已加载分页的末尾：把下一页拉进来接着放
+        await state.loadMore();
+        const after = useLibraryStore.getState().tracks;
+        return after[index + 1] ?? after[0] ?? null;
+      }
+      const first = state.tracks[0];
+      return first && first.id !== current.id ? first : null;
+    }
+  }
+
+  // 当前视图对不上范围：按同一套排序去后端翻页找到这首，取它的下一首
+  const { sort, order } = state.filter;
+  try {
+    const pageSize = 200;
+    for (let offset = 0; ; offset += pageSize) {
+      const page = await api.tracks({ folder, sort, order, limit: pageSize, offset });
+      const index = page.items.findIndex((item) => item.id === current.id);
+      if (index !== -1) {
+        if (index + 1 < page.items.length) return page.items[index + 1];
+        if (offset + page.items.length < page.total) {
+          const next = await api.tracks({ folder, sort, order, limit: 1, offset: offset + index + 1 });
+          return next.items[0] ?? null;
+        }
+        const first = await api.tracks({ folder, sort, order, limit: 1, offset: 0 });
+        return first.items[0] && first.items[0].id !== current.id ? first.items[0] : null;
+      }
+      // 整个范围都翻完了还没找到（比如正放的这首不属于这个文件夹）：
+      // 没有"它的下一首"可言，从范围的第一首开始
+      if (offset + pageSize >= page.total) {
+        return page.items.find((item) => item.id !== current.id) ?? null;
+      }
+    }
+  } catch {
+    return null; // 和 harmonicPick 一个道理：安静停下
+  }
+}
+
+/**
+ * 随机播放：范围内随机挑一首。
+ *
+ * 不把整个范围拉下来再抽——问一次总数，随机一个 offset 只取一条。
+ * 先试几次"没放过的"（不然小曲库里随机会反复撞同几首），
+ * 全放过了就放宽到"不是当前这首"，随机模式不该有停下来的一天。
+ */
+async function randomPick(current: Track, folder: string): Promise<Track | null> {
+  try {
+    const probe = await api.tracks({ folder, limit: 1, offset: 0 });
+    if (probe.total <= 1) return null;
+    let fallback: Track | null = null;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const offset = Math.floor(Math.random() * probe.total);
+      const candidate = (await api.tracks({ folder, limit: 1, offset })).items[0];
+      if (!candidate || candidate.id === current.id) continue;
+      if (!played.has(candidate.id) && !sameSong(current, candidate)) return candidate;
+      fallback = candidate;
+    }
+    return fallback;
+  } catch {
+    return null;
+  }
 }

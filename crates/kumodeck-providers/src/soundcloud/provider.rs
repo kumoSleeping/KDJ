@@ -36,14 +36,12 @@ pub struct SoundCloudProvider {
 
 impl SoundCloudProvider {
     pub fn new(ctx: ProviderContext) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+        let http = crate::net::http_timeouts(reqwest::Client::builder().user_agent(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
                  (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            )
-            .timeout(Duration::from_secs(30))
-            .build()
-            .context("构建 SoundCloud HTTP 客户端失败")?;
+        ))
+        .build()
+        .context("构建 SoundCloud HTTP 客户端失败")?;
         Ok(SoundCloudProvider {
             ctx,
             http,
@@ -278,6 +276,23 @@ impl MusicProvider for SoundCloudProvider {
             }
             _ => bail!("没有读取到 SoundCloud 内容。"),
         }
+    }
+
+    /// SoundCloud 的 progressive 流本来就只有一档（128K 上下的 mp3），
+    /// 拿到授权直链就是"最低码率"。
+    async fn preview_url(&self, source: &SongSource) -> Result<Option<String>> {
+        self.ensure_enabled()?;
+        let transcoding = source.payload_str("transcoding_url");
+        let transcoding = if transcoding.is_empty() {
+            // 和 download 同一套补救：payload 是老版本存的就回查一次详情
+            let permalink = source.payload_str("permalink_url");
+            anyhow::ensure!(!permalink.is_empty(), "SoundCloud 音轨缺少试听链接");
+            let body = self.api_get("/resolve", &[("url", permalink)]).await?;
+            pick_transcoding(&body).context("SoundCloud 没有可用的音频流")?.0
+        } else {
+            transcoding
+        };
+        Ok(Some(self.authorize_stream(&transcoding).await?))
     }
 
     async fn download(&self, job: DownloadJob<'_>) -> Result<PathBuf> {

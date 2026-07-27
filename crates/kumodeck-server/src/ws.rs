@@ -3,29 +3,16 @@
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
-use axum::response::{IntoResponse, Response};
-use serde::Deserialize;
+use axum::extract::State;
+use axum::response::Response;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::auth::token_matches;
 use crate::state::AppState;
-
-#[derive(Deserialize)]
-pub struct WsParams {
-    #[serde(default)]
-    token: String,
-}
 
 pub async fn handler(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<WsParams>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    // WS 握手带不了自定义头，token 只能走 query
-    if !token_matches(&params.token, &state.config.token) {
-        return (axum::http::StatusCode::UNAUTHORIZED, "未授权").into_response();
-    }
     upgrade.on_upgrade(move |socket| pump(socket, state))
 }
 

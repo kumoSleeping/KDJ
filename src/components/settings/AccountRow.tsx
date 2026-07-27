@@ -102,6 +102,14 @@ const AVATAR_IMG: CSSProperties = {
   transition: "opacity 0.15s",
 };
 
+/** QQ 音乐账号接口偶尔只返回 musicid，不返回主页头像；前端仍然可以用公开的
+ * QQ 头像地址显示头像。这个兜底不携带任何登录 Cookie。 */
+function qqAvatarFallback(account: Account): string {
+  if (account.platform !== "qqm") return "";
+  const musicid = account.detail.match(/(?:^|\D)musicid=(\d+)/)?.[1];
+  return musicid ? `https://q.qlogo.cn/headimg_dl?dst_uin=${musicid}&spec=100` : "";
+}
+
 /**
  * 一个平台一行。
  *
@@ -117,6 +125,8 @@ export function AccountRow({ account }: { account: Account }) {
   const [notice, setNotice] = useState("");
 
   const loggedIn = account.state === "valid";
+  const avatarFallback = qqAvatarFallback(account);
+  const avatarSrc = account.avatar || avatarFallback;
 
   const logout = async () => {
     setBusy(true);
@@ -136,13 +146,18 @@ export function AccountRow({ account }: { account: Account }) {
     <div style={settingRow.row}>
       <div style={settingRow.text}>
         <span style={settingRow.avatar} aria-hidden="true">
-          {account.avatar && (
+          {avatarSrc && (
             <img
-              src={account.avatar}
+              src={avatarSrc}
               alt=""
               style={AVATAR_IMG}
               referrerPolicy="no-referrer"
               onError={(event) => {
+                // 后端返回的主页头像失效时切到 musicid 兜底；兜底本身也失败才隐藏。
+                if (avatarFallback && event.currentTarget.src !== avatarFallback) {
+                  event.currentTarget.src = avatarFallback;
+                  return;
+                }
                 event.currentTarget.style.opacity = "0";
               }}
             />

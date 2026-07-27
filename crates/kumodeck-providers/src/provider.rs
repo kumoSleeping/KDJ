@@ -167,6 +167,16 @@ pub trait MusicProvider: Send + Sync {
 
     /// 下载单曲，返回最终文件路径；失败返回 Err（不要返回空路径）。
     async fn download(&self, job: DownloadJob<'_>) -> Result<PathBuf>;
+
+    /// 试听直链：**最低码率**档的播放地址，给搜索结果里「不下载先听听」用。
+    ///
+    /// 约定：`Ok(None)` = 这家平台没有试听的形状（B 站的预览走 `/api/video/preview`）；
+    /// 拿不到地址（版权/会员）返回 Err 并把原因写清楚。
+    /// 地址会直接交给前端的 `<audio src>`，所以必须是浏览器裸 GET 就能放的直链。
+    async fn preview_url(&self, source: &SongSource) -> Result<Option<String>> {
+        let _ = source;
+        Ok(None)
+    }
 }
 
 /// 没有登录体系的 provider 可以直接复用这几个默认实现。

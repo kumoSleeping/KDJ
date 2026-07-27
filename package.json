@@ -1,17 +1,14 @@
 {
-  "name": "kumodeck",
+  "name": "kdj",
   "version": "0.2.1",
   "private": true,
-  "description": "KumoDeck — DJ 曲库与多平台音乐/视频下载工作台",
-  "main": "dist-electron/main.js",
+  "description": "KDJ — DJ 曲库与多平台音乐/视频下载工作台",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "preview": "vite preview",
-    "sidecar:setup": "bash scripts/setup-sidecar.sh",
-    "sidecar:test": "sidecar/.venv/bin/python -m pytest sidecar/tests -q",
+    "dev": "npm run tauri:dev",
+    "build": "npm run tauri:build",
+    "preview": "vite preview --config vite.tauri.config.ts --outDir dist-tauri",
     "typecheck": "tsc --noEmit",
-    "dist": "npm run build && electron-builder",
+    "dist": "npm run tauri:build",
     "rust:server": "cargo run --release -p kumodeck-server --bin kumodeck-server",
     "rust:web": "vite --config vite.rust.config.ts",
     "rust:dev": "concurrently -n server,web -c cyan,magenta \"npm:rust:server\" \"npm:rust:web\"",
@@ -33,12 +30,8 @@
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^33.3.1",
-    "electron-builder": "^26.15.3",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",
-    "vite-plugin-electron": "^0.29.0",
-    "vite-plugin-electron-renderer": "^0.14.6",
     "ws": "^8.21.1"
   }
 }

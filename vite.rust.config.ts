@@ -3,7 +3,7 @@
  *
  * 和 vite.config.ts 的区别只有两点：
  *  1. 不加载 electron 插件（这是浏览器里跑的预览）；
- *  2. 注入一段 shim 顶替 Electron preload 暴露的 `window.kumodeck`，
+ *  2. 注入一段 shim 提供 `window.kdj`，
  *     让前端能连上 `kumodeck-server` 这个独立进程。
  *
  * 用法：
@@ -13,23 +13,21 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 
-const API_PORT = process.env.KUMODECK_PORT ?? "8788";
-const API_TOKEN = process.env.KUMODECK_TOKEN ?? "dev-token";
+const API_PORT = process.env.KDJ_PORT ?? process.env.KUMODECK_PORT ?? "8788";
 
 function devBridge(): Plugin {
   return {
-    name: "kumodeck-dev-bridge",
+    name: "kdj-dev-bridge",
     transformIndexHtml() {
       return [
         {
           tag: "script",
           injectTo: "head-prepend",
           children: `
-window.kumodeck = {
+window.kdj = {
   baseUrl: "http://127.0.0.1:${API_PORT}",
-  token: ${JSON.stringify(API_TOKEN)},
   platform: "browser",
-  // 下面这些在 Electron 里是原生对话框，浏览器预览里只能降级
+  // 浏览器预览没有 Tauri 原生对话框，只能降级
   openPath: async (p) => { console.info("[dev] openPath", p); },
   revealPath: async (p) => { console.info("[dev] revealPath", p); },
   pickFolder: async () => window.prompt("输入要添加的目录绝对路径") || null,

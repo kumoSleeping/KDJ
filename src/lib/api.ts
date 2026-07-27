@@ -9,6 +9,7 @@ import type {
   DownloadRequest,
   DownloadTask,
   FileOp,
+  FileDisposalMode,
   FolderOpResult,
   FolderTree,
   HarmonicMatch,
@@ -24,6 +25,7 @@ import type {
   SearchRequest,
   SearchResponse,
   Settings,
+  SongSource,
   Track,
   TrackPage,
   TrackPatch,
@@ -50,9 +52,8 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const { baseUrl, token } = bridge();
+  const { baseUrl } = bridge();
   const headers = new Headers(init.headers);
-  headers.set("X-KumoDeck-Token", token);
   if (init.body !== undefined && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
@@ -99,6 +100,11 @@ export const api = {
   logout: (platform: string) => post<Account>(`/accounts/${platform}/logout`),
 
   search: (body: SearchRequest) => post<SearchResponse>("/search", body),
+  /**
+   * 歌曲试听直链（最低码率，不下载）。整个 SongSource 发过去：
+   * QQ 的 media_mid、SoundCloud 的 transcoding_url 都在 payload 里。
+   */
+  songPreview: (source: SongSource) => post<{ url: string }>("/song/preview", { source }),
   resolve: (url: string, limit = 500) => post<ResolveResponse>("/resolve", { url, limit }),
   intake: (body: IntakeRequest) => post<IntakeResponse>("/intake", body),
 
@@ -109,6 +115,14 @@ export const api = {
 
   videoResolve: (url: string) => post<VideoInfo>("/video/resolve", { url }),
   videoDownload: (body: VideoDownloadRequest) => post<DownloadTask>("/video/download", body),
+  /**
+   * 视频预览流（后端代理 B 站 CDN，见 routes.rs::video_preview）。
+   * 后端代理 B 站防盗链；本机 API 开放，无需额外令牌。
+   */
+  videoPreviewUrl: (bvid: string, page = 0) => {
+    const { baseUrl } = bridge();
+    return `${baseUrl}/api/video/preview?bvid=${encodeURIComponent(bvid)}&page=${page}`;
+  },
 
   tracks: (params: Record<string, string | number | undefined>) => {
     const query = new URLSearchParams();
@@ -145,6 +159,16 @@ export const api = {
   rereadTags: (id: number) => post<Track>(`/library/tracks/${id}/reread-tags`),
   deleteTrack: (id: number, deleteFile = false) =>
     request<{ ok: boolean }>(`/library/tracks/${id}?delete_file=${deleteFile}`, { method: "DELETE" }),
+  /**
+   * 批量删除。file 决定文件本体的去向（keep/trash/remove）。
+   * `errors` 按 track id 报没删成的原因（比如进不了回收站），
+   * 那些曲目连库记录都原样留着——半删的状态比报错更难收拾。
+   */
+  deleteTracks: (ids: number[], file: FileDisposalMode) =>
+    post<{ removed: number; errors: Record<string, string> }>("/library/tracks/delete", {
+      track_ids: ids,
+      file,
+    }),
   scan: (paths: string[], analyze = false) =>
     post<ScanResponseLike>("/library/scan", { paths, recursive: true, analyze }),
   analyze: (trackIds: number[] | null, force = false, priority = false) =>
@@ -180,8 +204,12 @@ export const api = {
     post<FolderOpResult>("/library/folders/apply", { track_ids: trackIds, dest, op }),
 
   audioUrl: (id: number) => {
-    const { baseUrl, token } = bridge();
-    return `${baseUrl}/api/library/audio/${id}?token=${encodeURIComponent(token)}`;
+    const { baseUrl } = bridge();
+    return `${baseUrl}/api/library/audio/${id}`;
+  },
+  videoUrl: (id: number) => {
+    const { baseUrl } = bridge();
+    return `${baseUrl}/api/library/video/${id}`;
   },
   /**
    * `version` 是 cache-buster，不是后端认识的参数。
@@ -190,9 +218,9 @@ export const api = {
    * 浏览器会一直拿缓存里那张旧图，用户看到的就是"换封面没反应"。
    */
   coverUrl: (id: number, version?: number | string) => {
-    const { baseUrl, token } = bridge();
-    const suffix = version === undefined || version === "" ? "" : `&v=${encodeURIComponent(version)}`;
-    return `${baseUrl}/api/library/cover/${id}?token=${encodeURIComponent(token)}${suffix}`;
+    const { baseUrl } = bridge();
+    const suffix = version === undefined || version === "" ? "" : `?v=${encodeURIComponent(version)}`;
+    return `${baseUrl}/api/library/cover/${id}${suffix}`;
   },
 };
 
@@ -217,8 +245,8 @@ class EventStream {
 
   private ensure(): void {
     if (this.socket || this.stopped) return;
-    const { baseUrl, token } = bridge();
-    const url = `${baseUrl.replace(/^http/, "ws")}/ws?token=${encodeURIComponent(token)}`;
+    const { baseUrl } = bridge();
+    const url = `${baseUrl.replace(/^http/, "ws")}/ws`;
     const socket = new WebSocket(url);
     this.socket = socket;
     socket.onopen = () => {

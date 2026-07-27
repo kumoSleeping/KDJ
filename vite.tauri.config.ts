@@ -25,7 +25,7 @@ import react from "@vitejs/plugin-react";
 
 function stripElectronCsp(): Plugin {
   return {
-    name: "kumodeck-strip-electron-csp",
+    name: "kdj-strip-retired-electron-csp",
     transformIndexHtml(html) {
       // [^>]* 而不是 [\s\S]*?：属性值里不会有 '>'，这样匹配绝不会越过标签边界
       // 把后面的内容一起吃掉（属性是折行写的，所以不能用 . 匹配）。

@@ -15,7 +15,16 @@ export interface Health {
   ffmpeg: boolean;
   data_dir: string;
   download_dir: string;
+  /**
+   * 后端跑在哪个系统上（std::env::consts::OS："macos"/"windows"/"linux"/"android"…）。
+   * 删除曲目能不能走系统回收站看它——文件在后端那台机器上，问它才作数。
+   * 可选：Python sidecar（开发用）的 health 没有这个键。
+   */
+  platform?: string;
 }
+
+/** 删除曲目时怎么处置文件：只删记录 / 移到系统回收站 / 直接删掉。 */
+export type FileDisposalMode = "keep" | "trash" | "remove";
 
 export interface Settings {
   download_dir: string;
@@ -38,6 +47,12 @@ export interface Settings {
   platform_priority: string[];
   /** 入队后是否立刻开始下载；关着就攒在队列里等这个开关拨开。 */
   auto_start_downloads: boolean;
+  /**
+   * 只读派生字段（后端 GET/PUT /api/settings 附带）：全新安装的默认下载落点
+   * ——系统「下载」目录 + KDJ。「保存到」菜单里的「系统下载」项用它。
+   * PUT 回去会被后端忽略，不持久化。
+   */
+  default_download_dir?: string;
 }
 
 export type VideoFormat = "mp4" | "mkv" | "mov";
@@ -200,6 +215,8 @@ export interface VideoDownloadRequest {
   max_height?: number;
   audio_only?: boolean;
   transcode?: boolean;
+  /** 成品起点偏移（毫秒）：正=掐头，负=开头补黑场/静音。见 models.rs。 */
+  offset_ms?: number;
 }
 
 export interface Track {
@@ -399,16 +416,14 @@ export type WsEvent =
 
 /* ---------------------------------------------------------------- preload */
 
-export interface KumoDeckBridge {
+export interface KdjBridge {
   baseUrl: string;
-  token: string;
   platform: NodeJS.Platform | string;
   openPath: (path: string) => Promise<void>;
   revealPath: (path: string) => Promise<void>;
   pickFolder: () => Promise<string | null>;
   pickFolders: () => Promise<string[]>;
-  /** 用系统浏览器开外链（Release 页等）。可选：老 Electron 契约里没有，
-      调用方一律 `?.` + `window.open` 兜底。 */
+  /** 用系统浏览器开外链（Release 页等）。 */
   openExternal?: (url: string) => Promise<void>;
   /**
    * 桌面独有的一键更新：下载 + 校验 + 原地替换 + 重启，全程由
@@ -432,6 +447,6 @@ export interface UpdateInfo {
 
 declare global {
   interface Window {
-    kumodeck: KumoDeckBridge;
+    kdj: KdjBridge;
   }
 }

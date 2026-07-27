@@ -65,9 +65,7 @@ pub struct NeteaseClient {
 
 impl NeteaseClient {
     pub fn new(session_dir: &Path) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent(UA_DEFAULT)
-            .timeout(std::time::Duration::from_secs(60))
+        let http = crate::net::http_timeouts(reqwest::Client::builder().user_agent(UA_DEFAULT))
             .build()
             .context("构建网易云 HTTP 客户端失败")?;
         let client = NeteaseClient {

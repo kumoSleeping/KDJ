@@ -23,6 +23,30 @@ use crate::db::{Conn, Database};
 /// 平台路径分隔符。曲库过滤按前缀匹配要用。
 const SEP: char = std::path::MAIN_SEPARATOR;
 
+/// 删除曲目时怎么处置文件本体。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FileDisposal {
+    /// 只删库记录，文件留在原地。
+    Keep,
+    /// 移到系统回收站——能反悔的删除。安卓/iOS 没有回收站，会返回错误。
+    Trash,
+    /// 直接从磁盘删掉，不可恢复。回收站不可用的平台走这条（前端会先确认）。
+    Remove,
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn move_to_trash(path: &Path) -> Result<()> {
+    trash::delete(path).map_err(|err| anyhow::anyhow!("移入回收站失败：{err}"))
+}
+
+/// 见 Cargo.toml：这两个平台没有系统回收站，trash crate 压根没编进来。
+/// 正常流程走不到这儿（前端按 health.platform 改用「直接删除+确认」），
+/// 留这个桩是防旧客户端/手写请求打进来时静默丢文件。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn move_to_trash(_path: &Path) -> Result<()> {
+    anyhow::bail!("这个平台没有系统回收站，请改用直接删除")
+}
+
 /// sort 白名单：绝对不能把 query string 直接拼进 ORDER BY（SQL 注入），
 /// 也不能只做转义——SQLite 的标识符引用规则太松，白名单映射是唯一安全的做法。
 fn sort_column(key: &str) -> &'static str {
@@ -520,7 +544,7 @@ impl LibraryService {
         outcome.and(synced)
     }
 
-    pub fn delete(&self, track_id: i64, delete_file: bool) -> Result<bool> {
+    pub fn delete(&self, track_id: i64, disposal: FileDisposal) -> Result<bool> {
         let conn = self.db.conn()?;
         let path: Option<String> = conn
             .query_row("SELECT path FROM tracks WHERE id = ?", [track_id], |row| {
@@ -530,11 +554,22 @@ impl LibraryService {
         let Some(path) = path else {
             return Ok(false);
         };
+        // 回收站失败必须发生在删库记录**之前**：trash 挂了（比如文件在
+        // 不支持回收站的网络盘上）就原样报错、什么都不动，用户看到的是
+        // "没删成"而不是"库里没了文件还在"的半截状态。
+        // 文件已经不在原地则视作无事可做——记录照删，这正是清理死条目的场景。
+        if disposal == FileDisposal::Trash {
+            let file = Path::new(&path);
+            if file.exists() {
+                move_to_trash(file)?;
+            }
+        }
         conn.execute("DELETE FROM tracks WHERE id = ?", [track_id])?;
         conn.execute("DELETE FROM tags WHERE track_id = ?", [track_id])?;
         conn.execute("DELETE FROM playlist_items WHERE track_id = ?", [track_id])?;
-        if delete_file {
-            // 文件删不掉（权限/已被移走）不该让接口失败，记录已从库里移除即可
+        if disposal == FileDisposal::Remove {
+            // 直接删除维持宽容语义：文件删不掉（权限/已被移走）不该让接口失败，
+            // 记录已从库里移除即可
             let _ = std::fs::remove_file(&path);
         }
         Ok(true)

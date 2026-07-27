@@ -158,7 +158,7 @@ jobs:
       # 三元组目录。与其猜，不如让 glob 兜住所有情况。
       #
       # 本机实测（不带 --target 时）落点是根 `target/release/bundle/`：
-      #   bundle/macos/KumoDeck.app  和  bundle/dmg/KumoDeck_0.2.0_aarch64.dmg
+      #   bundle/macos/KDJ.app  和  bundle/dmg/KDJ_0.2.0_aarch64.dmg
       # 也就是 src-tauri 作为 workspace 成员那一支。带 --target universal-apple-darwin
       # 时会变成 target/universal-apple-darwin/release/bundle/，通配仍然兜得住。
       # *.tar.gz / *.sig / setup.exe 的 sig 是 updater 的更新包与签名，

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link2, LoaderCircle, Rows3, Search } from "lucide-react";
 import type { Platform, Quality } from "../../types";
 import { useAppStore } from "../../stores/appStore";
@@ -42,7 +42,8 @@ const LOOKS_LIKE_URL = /^\s*https?:\/\//i;
  * 上一版这里是六七个描边矩形并排——输入框一个框、框里的音质又一个框、
  * 框外四颗平台键各自还有一个框。每多画一条边就多一次"这是另一件东西"的
  * 暗示，可它们回答的全是同一个问题的三个部分：搜什么、搜哪儿、要什么音质。
- * 现在只保留最外面那一圈边，内部分区靠 1px 竖分隔线和留白，谁也不再单独描边；
+ * 现在连最外圈也不画，整条搜索直接嵌进顶部；内部分区只靠 1px 竖分隔线和留白，
+ * 谁也不再单独描边；
  * 平台键的选中态改用「品牌色 + 一点同色底」表达，不靠边框。
  *
  * 唯一还允许上红的是最右那颗提交键——它是这条里唯一的"动作"，其余都是"状态"。
@@ -58,6 +59,7 @@ export function SearchBar({
   defaultQuality,
   ...platformProps
 }: SearchBarProps) {
+  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   const isUrl = LOOKS_LIKE_URL.test(query);
   const canSubmit = query.trim().length > 0 && !busy;
   // 拆分规则和后端 split_intake_text 保持一致：有换行只按行拆，没换行才按逗号拆
@@ -72,12 +74,22 @@ export function SearchBar({
   return (
     <form
       className="kd-toolbar"
+      data-tauri-drag-region
       onSubmit={(event) => {
         event.preventDefault();
         if (canSubmit) onSubmit();
       }}
     >
-      <div className="kd-searchbar kd-grow" data-batch={batch || undefined}>
+      <div
+        className="kd-searchbar kd-grow"
+        data-batch={batch || undefined}
+        onClick={(event) => {
+          // 整片顶部搜索区都是输入入口；但真实控件仍处理自己的点击，不能点音质
+          // 下拉时把焦点强行抢回输入框，也不能破坏平台选择和提交。
+          if ((event.target as HTMLElement).closest("button, select, input, textarea")) return;
+          inputRef.current?.focus();
+        }}
+      >
         {/* 前导图标顺带当模式指示：单行是放大镜/链接，贴成多行就变成"多条"那个图标。
             批量模式下它贴顶——文本域有四行高，图标浮在正中间会跟第二行文字打架。 */}
         <span className="kd-searchbar-lead" aria-hidden="true">
@@ -86,6 +98,9 @@ export function SearchBar({
 
         {batch ? (
           <textarea
+            ref={(node) => {
+              inputRef.current = node;
+            }}
             className="kd-searchbar-input"
             rows={4}
             value={query}
@@ -106,6 +121,9 @@ export function SearchBar({
           />
         ) : (
           <input
+            ref={(node) => {
+              inputRef.current = node;
+            }}
             className="kd-searchbar-input"
             value={query}
             placeholder="歌名 / 艺人，或直接粘贴歌单、单曲分享链接（多行内容自动批量）"

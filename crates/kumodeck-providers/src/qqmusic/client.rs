@@ -185,9 +185,7 @@ pub struct QqClient {
 
 impl QqClient {
     pub fn new(session_dir: &Path) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent(DESKTOP_UA)
-            .timeout(std::time::Duration::from_secs(30))
+        let http = crate::net::http_timeouts(reqwest::Client::builder().user_agent(DESKTOP_UA))
             .build()
             .context("构建 QQ 音乐 HTTP 客户端失败")?;
         let client = QqClient {

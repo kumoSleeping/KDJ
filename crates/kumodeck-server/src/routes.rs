@@ -13,8 +13,8 @@ use axum::{Json, Router};
 use futures_util::StreamExt;
 use kumodeck_core::models::*;
 use kumodeck_core::Settings;
-use kumodeck_library::service::TrackQuery;
-use serde::Deserialize;
+use kumodeck_library::service::{FileDisposal, TrackQuery};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::downloads::{enqueue_audio, enqueue_video, DownloadManager};
@@ -39,6 +39,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         )
         .route("/api/accounts/{platform}/logout", post(logout))
         .route("/api/search", post(search))
+        .route("/api/song/preview", post(song_preview))
         .route("/api/resolve", post(resolve))
         .route("/api/intake", post(intake))
         .route("/api/downloads", get(list_downloads).post(enqueue))
@@ -46,10 +47,14 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/downloads/clear", post(clear_downloads))
         .route("/api/video/resolve", post(video_resolve))
         .route("/api/video/download", post(video_download))
+        .route("/api/video/preview", get(video_preview))
         .route("/api/library/tracks", get(library_tracks))
         .route("/api/library/tracks/{id}", get(library_track))
         .route("/api/library/tracks/{id}", patch(library_patch))
         .route("/api/library/tracks/{id}", delete(library_delete))
+        // 静态段和 {id} 同位并存：axum 的 matchit 保证静态优先，
+        // 且 "delete" 本来也解析不成 i64，不会被吞进单条路由
+        .route("/api/library/tracks/delete", post(library_delete_batch))
         .route("/api/library/tracks/{id}/write-tags", post(write_tags))
         .route("/api/library/tracks/{id}/reread-tags", post(reread_tags))
         .route("/api/library/stats", get(library_stats))
@@ -67,6 +72,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/library/analyze", post(library_analyze))
         .route("/api/library/analyze/cancel", post(library_analyze_cancel))
         .route("/api/library/audio/{id}", get(library_audio))
+        .route("/api/library/video/{id}", get(library_video))
         .route(
             "/api/library/cover/{id}",
             get(library_cover)
@@ -93,21 +99,40 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Health> {
     })
 }
 
-async fn get_settings(State(state): State<Arc<AppState>>) -> Json<Settings> {
-    Json(state.config.to_settings())
+/// Settings 加一个**只读**的派生字段：前端「保存到」菜单里的「系统下载」
+/// 选项需要知道默认落点的绝对路径（系统「下载」目录是本地化的，前端算不出来）。
+/// 不进 Settings 本体：它不该被持久化，PUT 回来也会被 serde 直接忽略。
+#[derive(Serialize)]
+struct SettingsView {
+    #[serde(flatten)]
+    settings: Settings,
+    default_download_dir: String,
+}
+
+fn settings_view(settings: Settings) -> SettingsView {
+    SettingsView {
+        settings,
+        default_download_dir: kumodeck_core::config::default_download_root()
+            .to_string_lossy()
+            .into_owned(),
+    }
+}
+
+async fn get_settings(State(state): State<Arc<AppState>>) -> Json<SettingsView> {
+    Json(settings_view(state.config.to_settings()))
 }
 
 async fn put_settings(
     State(state): State<Arc<AppState>>,
     axum::Extension(ctx): axum::Extension<Ctx>,
     Json(payload): Json<Settings>,
-) -> Json<Settings> {
+) -> Json<SettingsView> {
     let settings = state.config.apply_settings(payload);
     ctx.downloads.set_concurrency(settings.concurrent_downloads);
     // 「自动下载」开关拨开的那一刻，把攒着的排队任务全放行——
     // 开关本身就是"现在开始下"的动作，不必再多一个开始按钮。
     ctx.downloads.set_auto_start(settings.auto_start_downloads);
-    Json(settings)
+    Json(settings_view(settings))
 }
 
 // ---------------------------------------------------------------- 账号
@@ -184,6 +209,32 @@ async fn search(
     Json(payload): Json<SearchRequest>,
 ) -> Json<SearchResponse> {
     Json(crate::aggregate::search(&state, &payload).await)
+}
+
+#[derive(Deserialize)]
+struct SongPreviewBody {
+    source: SongSource,
+}
+
+/// 搜索结果里的「试听」：拿一条**最低码率**的播放直链，不下载不入库。
+///
+/// 前端把整个 SongSource 发过来而不是只发 key：QQ 的 media_mid、SoundCloud
+/// 的 transcoding_url 都躺在 payload 里，只发 key 等于逼着后端把详情再查一遍。
+async fn song_preview(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SongPreviewBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(provider) = state.provider(body.source.platform) else {
+        return Err(ApiError::bad_request("不认识的平台"));
+    };
+    match provider.preview_url(&body.source).await? {
+        Some(url) => Ok(Json(json!({ "url": url }))),
+        // B 站等没有"歌曲试听"形状的平台：它们的预览走各自的路
+        None => Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "这个平台不支持歌曲试听",
+        )),
+    }
 }
 
 /// 逐个平台试解析。返回 `(结果, 最后一次错误)`，结果为 None 表示没人认得这个链接。
@@ -442,6 +493,9 @@ fn apply_video_defaults(req: &mut VideoDownloadRequest, settings: &Settings) {
     if !req.transcode {
         req.transcode = settings.video_transcode;
     }
+    // 偏移封顶 ±10 分钟：这个值来自预览面板一下一下按出来的校准，
+    // 正常不过几秒；来一个天文数字的负偏移等于让 ffmpeg 铺几小时黑场
+    req.offset_ms = req.offset_ms.clamp(-600_000, 600_000);
 }
 
 async fn video_download(
@@ -459,6 +513,50 @@ async fn video_download(
     let task = enqueue_video(state.clone(), ctx.downloads.clone(), payload);
     ctx.downloads.broadcast_list();
     Ok(Json(task))
+}
+
+#[derive(Deserialize)]
+struct VideoPreviewParams {
+    bvid: String,
+    /// 分 P 下标，从 0 起。
+    #[serde(default)]
+    page: usize,
+}
+
+/// 视频预览流代理。B 站 CDN 认 Referer + Cookie 的防盗链，webview 里的
+/// `<video>` 发不出这些头，只能由后端转一手。Range 原样进出——
+/// 进度条的每次拖动就是一个新的 Range 请求。
+async fn video_preview(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<VideoPreviewParams>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty());
+    let stream = state
+        .bilibili
+        .preview_stream(&params.bvid, params.page, range)
+        .await?;
+    let mut builder = Response::builder()
+        .status(StatusCode::from_u16(stream.status).unwrap_or(StatusCode::OK))
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_TYPE, stream.content_type.as_str());
+    if let Some(length) = stream.content_length {
+        builder = builder.header(header::CONTENT_LENGTH, length);
+    }
+    if let Some(content_range) = stream.content_range.as_deref() {
+        builder = builder.header(header::CONTENT_RANGE, content_range);
+    }
+    builder
+        .body(axum::body::Body::from_stream(stream.body))
+        .map_err(|err| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("构造预览响应失败：{err}"),
+            )
+        })
 }
 
 // ---------------------------------------------------------------- 曲库
@@ -551,6 +649,21 @@ async fn library_patch(
 struct DeleteParams {
     #[serde(default)]
     delete_file: bool,
+    /// 新三态："keep" / "trash" / "remove"。带它时优先于 delete_file；
+    /// 不带时按老布尔翻译（true=remove），旧客户端行为一字不变。
+    file: Option<String>,
+}
+
+/// "keep"/"trash"/"remove" → 处置方式。空串当 keep：批量端点的 serde(default)。
+fn parse_disposal(name: &str) -> ApiResult<FileDisposal> {
+    match name {
+        "" | "keep" => Ok(FileDisposal::Keep),
+        "trash" => Ok(FileDisposal::Trash),
+        "remove" => Ok(FileDisposal::Remove),
+        other => Err(ApiError::bad_request(format!(
+            "file 只能是 keep/trash/remove，收到：{other}"
+        ))),
+    }
 }
 
 async fn library_delete(
@@ -558,13 +671,50 @@ async fn library_delete(
     AxumPath(id): AxumPath<i64>,
     Query(params): Query<DeleteParams>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let disposal = match &params.file {
+        Some(name) => parse_disposal(name)?,
+        None if params.delete_file => FileDisposal::Remove,
+        None => FileDisposal::Keep,
+    };
     // 删不存在的曲目要 404：回 200 + {"ok": false} 的话前端会当成删成功，
     // 把那一行从列表里抹掉，刷新之后它又回来了
-    if !state.library.delete(id, params.delete_file)? {
+    if !state.library.delete(id, disposal)? {
         return Err(ApiError::not_found("曲目不存在"));
     }
     state.hub.publish_library_updated(&[id]);
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct BatchDeleteRequest {
+    track_ids: Vec<i64>,
+    #[serde(default)]
+    file: String,
+}
+
+/// 批量删除。多选删 50 首打 50 个请求会推 50 条 WS 事件、触发 50 轮防抖刷新，
+/// 收成一个端点就是一条事件一次刷新。
+/// 单条失败不中断整批（比如某个文件进不了回收站）：删曲目是逐条独立的操作，
+/// 一颗坏文件不该把其余 49 首都挡回去；失败的连库记录一起原样留着，逐条报因。
+async fn library_delete_batch(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<BatchDeleteRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let disposal = parse_disposal(&payload.file)?;
+    let mut removed: Vec<i64> = Vec::new();
+    let mut errors = serde_json::Map::new();
+    for id in payload.track_ids {
+        match state.library.delete(id, disposal) {
+            Ok(_) => removed.push(id), // false=库里本来就没有：目的已达成，不算失败
+            Err(err) => {
+                errors.insert(id.to_string(), json!(format!("{err:#}")));
+            }
+        }
+    }
+    if !removed.is_empty() {
+        state.hub.publish_library_updated(&removed);
+    }
+    Ok(Json(json!({ "removed": removed.len(), "errors": errors })))
 }
 
 async fn write_tags(
@@ -1079,7 +1229,7 @@ async fn extracted_audio(path: &Path, track_id: i64, cache_dir: &Path) -> ApiRes
     let cancel = tokio_util::sync::CancellationToken::new();
     // webm/mkv 里常见 opus/vorbis，塞不进 m4a 容器，copy 会失败 → 第二轮转码
     for copy in [true, false] {
-        let args = kumodeck_providers::ffmpeg::extract_audio_args(path, &tmp, copy);
+        let args = kumodeck_providers::ffmpeg::extract_audio_args(path, &tmp, copy, 0);
         if kumodeck_providers::ffmpeg::run(&args, &log, &cancel).await.is_ok()
             && std::fs::metadata(&tmp).map(|meta| meta.len() > 0).unwrap_or(false)
         {
@@ -1123,6 +1273,34 @@ async fn library_audio(
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string);
     audio_response(&path, total, mime_for(&path), raw_range.as_deref()).await
+}
+
+/// 本地视频原文件流。和音频端点共用 Range 实现，拖进度条不会重新下载整份文件。
+async fn library_video(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i64>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let track = state
+        .library
+        .get(id)?
+        .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
+    let path = PathBuf::from(&track.path);
+    if !path.is_file() {
+        return Err(ApiError::not_found("视频文件已丢失"));
+    }
+    if !is_video_container(&path) {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "这不是视频曲目"));
+    }
+    let total = tokio::fs::metadata(&path)
+        .await
+        .map_err(|err| ApiError::not_found(format!("读不到视频文件：{err}")))?
+        .len();
+    let raw_range = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty());
+    audio_response(&path, total, video_mime_for(&path), raw_range).await
 }
 
 /// 流式读的块大小。和 Python 版的 `STREAM_CHUNK` 一致。
@@ -1240,6 +1418,22 @@ fn mime_for(path: &Path) -> String {
         "ogg" => "audio/ogg",
         "opus" => "audio/opus",
         "wav" => "audio/wav",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+fn video_mime_for(path: &Path) -> String {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mp4" | "m4v" | "mov" => "video/mp4",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
         _ => "application/octet-stream",
     }
     .to_string()

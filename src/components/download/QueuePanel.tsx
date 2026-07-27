@@ -68,7 +68,7 @@ function QueueRow({ task }: { task: DownloadTask }) {
             size="sm"
             iconOnly
             aria-label="在文件夹中显示"
-            onClick={() => void window.kumodeck?.revealPath(task.path)}
+            onClick={() => void window.kdj?.revealPath(task.path)}
           >
             <FolderOpen size={12} />
           </Button>
@@ -117,9 +117,78 @@ function QueueRow({ task }: { task: DownloadTask }) {
   );
 }
 
+/** 「浏览…」不是一个目录，用不可能撞路径的值当哨兵。 */
+const BROWSE_SENTINEL = "\0browse";
+
+/**
+ * 「保存到」的下拉：把能一键选到的目录全摆出来——系统下载（默认落点）、
+ * 已加入曲库的文件夹、当前值——「浏览…」才去开目录选择器。
+ * 这样浏览器预览壳（没有原生对话框，pickFolder 只能退化成手输路径）
+ * 也有正经可选的项，手输只剩最后一条兜底路。
+ */
+function SaveDirSelect({
+  icon,
+  what,
+  value,
+  onChange,
+}: {
+  icon: React.ReactNode;
+  what: string;
+  value: string;
+  onChange: (dir: string) => void;
+}) {
+  const settings = useAppStore((store) => store.settings);
+  const defaultDir = settings?.default_download_dir ?? "";
+  const libraryDirs = settings?.library_dirs ?? [];
+
+  // 当前值排最前（select 要有它才显示得对），去重后系统下载、曲库文件夹依次排开
+  const seen = new Set<string>();
+  const options: { dir: string; hint: string }[] = [];
+  const add = (dir: string, hint: string) => {
+    if (!dir || seen.has(dir)) return;
+    seen.add(dir);
+    options.push({ dir, hint });
+  };
+  add(value, "");
+  add(defaultDir, "系统下载");
+  for (const dir of libraryDirs) add(dir, "曲库");
+
+  return (
+    <label className="kd-row" style={{ gap: "0.3rem" }} title={`${what}下载到 ${value}`}>
+      {icon}
+      <select
+        className="kd-select"
+        data-size="sm"
+        style={{ maxWidth: "9rem" }}
+        value={value}
+        onChange={(event) => {
+          const picked = event.target.value;
+          if (picked === BROWSE_SENTINEL) {
+            // select 的值不能停在「浏览…」上；用户取消选择时 value 没变，
+            // React 受控组件会自己把显示拉回当前目录
+            void window.kdj?.pickFolder().then((dir) => {
+              if (dir) onChange(dir);
+            });
+            return;
+          }
+          onChange(picked);
+        }}
+      >
+        {options.map(({ dir, hint }) => (
+          <option key={dir} value={dir} title={dir}>
+            {folderName(dir) || dir}
+            {dir === defaultDir ? " · 系统下载" : hint ? ` · ${hint}` : ""}
+          </option>
+        ))}
+        <option value={BROWSE_SENTINEL}>浏览…</option>
+      </select>
+    </label>
+  );
+}
+
 /**
  * 保存目录就放在队列头上：任务往哪落、想换个地方落，都是在看队列时冒出来的念头。
- * 音乐和视频各一个芯片，点开选目录，存回设置。原来塞在搜索框上的那个目录按钮删了——
+ * 音乐和视频各一个下拉，选完存回设置。原来塞在搜索框上的那个目录按钮删了——
  * 搜索的时候人在想"找什么"，不是"存哪里"。
  */
 function SaveDirRow() {
@@ -127,35 +196,26 @@ function SaveDirRow() {
   const saveSettings = useAppStore((store) => store.saveSettings);
   if (!settings) return null;
 
-  const pick = (key: keyof Pick<Settings, "download_dir" | "video_download_dir">) => {
-    void window.kumodeck?.pickFolder().then((dir) => {
-      if (dir) void saveSettings({ [key]: dir });
-    });
-  };
+  const save = (key: keyof Pick<Settings, "download_dir" | "video_download_dir">) => (dir: string) =>
+    void saveSettings({ [key]: dir });
 
   return (
     <div className="kd-toolbar" data-slim="true">
       <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>
         保存到
       </span>
-      <button
-        type="button"
-        className="kd-path-chip"
-        title={`音乐下载到 ${settings.download_dir}（点击更改）`}
-        onClick={() => pick("download_dir")}
-      >
-        <Music2 size={11} />
-        <span className="kd-truncate">{folderName(settings.download_dir) || "选择目录"}</span>
-      </button>
-      <button
-        type="button"
-        className="kd-path-chip"
-        title={`视频下载到 ${settings.video_download_dir}（点击更改）`}
-        onClick={() => pick("video_download_dir")}
-      >
-        <Clapperboard size={11} />
-        <span className="kd-truncate">{folderName(settings.video_download_dir) || "选择目录"}</span>
-      </button>
+      <SaveDirSelect
+        icon={<Music2 size={11} />}
+        what="音乐"
+        value={settings.download_dir}
+        onChange={save("download_dir")}
+      />
+      <SaveDirSelect
+        icon={<Clapperboard size={11} />}
+        what="视频"
+        value={settings.video_download_dir}
+        onChange={save("video_download_dir")}
+      />
       <span className="kd-toolbar-gap" />
       <Button
         variant="ghost"
@@ -163,7 +223,7 @@ function SaveDirRow() {
         iconOnly
         aria-label="在访达中打开音乐下载目录"
         title="在访达中打开音乐下载目录"
-        onClick={() => void window.kumodeck?.revealPath(settings.download_dir)}
+        onClick={() => void window.kdj?.revealPath(settings.download_dir)}
       >
         <FolderOpen size={12} />
       </Button>

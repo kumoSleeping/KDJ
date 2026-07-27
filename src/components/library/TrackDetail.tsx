@@ -3,12 +3,13 @@ import { FolderOpen, ImagePlus, Pencil, Play, RotateCcw, Star, Trash2 } from "lu
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
 import { camelotToLabel } from "../../lib/camelot";
-import { DASH, formatBpm, formatBytes, formatDate, formatDuration } from "../../lib/format";
+import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isVideoTrack } from "../../lib/format";
 import { useLibraryStore } from "../../stores/libraryStore";
 import type { Track, TrackPatch } from "../../types";
 import { Button, Field, InlineNotice, Panel, PanelStack } from "../common";
 import { CamelotWheel } from "./CamelotWheel";
 import { HarmonicList } from "./HarmonicList";
+import { LocalVideoPlayer } from "./LocalVideoPlayer";
 import { VjSearchPanel } from "./VjSearchPanel";
 import { Waveform } from "./Waveform";
 import { CamelotChip, EnergyMeter, playTrack } from "./TrackTable";
@@ -288,7 +289,7 @@ export function TrackDetail({ track }: { track: Track }) {
           variant="ghost"
           title="在系统的文件管理器里定位这个文件"
           disabled={busy}
-          // 走 run() 而不是裸调用：以前是 `void window.kumodeck?.revealPath(...)`，
+          // 走 run() 而不是裸调用：直接 fire-and-forget 时错误不会进详情栏，
           // 桥接没就位或系统调用失败时被 `?.` 和 `void` 一起吞掉，
           // 表现就是"这个按钮点了没反应"。
           onClick={run("在文件夹中显示", () => getBridge().revealPath(track.path))}
@@ -314,6 +315,11 @@ export function TrackDetail({ track }: { track: Track }) {
       {/* 这几块的顺序用户可以拖着调，长期记住——整理曲库时想先看元数据，
           排 set 时想先看接下一首，与其替他选一个，不如让他拖一次然后不用再想。 */}
       <PanelStack storageKey="kd-detail-panels">
+      {isVideoTrack(track.format) && (
+        <Panel key="video" heading="视频播放" padded={false} dense>
+          <LocalVideoPlayer track={track} />
+        </Panel>
+      )}
       <Panel
         key="metadata"
         heading="元数据"

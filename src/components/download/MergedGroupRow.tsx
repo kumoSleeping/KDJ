@@ -1,6 +1,7 @@
 import { Fragment } from "react";
-import { ChevronDown, ChevronRight, Check } from "lucide-react";
+import { ChevronDown, ChevronRight, Check, Loader2, Play, Square } from "lucide-react";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
+import { sourceKey, toggleSongPreview, useSongPreview } from "../../lib/songPreview";
 import type { MergedGroup, Platform, SongSource } from "../../types";
 
 /** 平台在表格里的短标签。混合搜索一行可能同时挂三个来源，全名太挤。 */
@@ -46,23 +47,78 @@ export function MergedGroupRow({
   const active = group.sources[sourceIndex] ?? group.sources[0];
   const multi = group.sources.length > 1;
 
+  /**
+   * 试听放哪个来源：优先当前选中的；选中的是 B 站就退而求其次找一家音乐
+   * 平台（B 站条目是视频，试听走视频预览那条路）。一家都没有就不给按钮。
+   */
+  const previewSource =
+    active && active.platform !== "bilibili"
+      ? active
+      : (group.sources.find((source) => source.platform !== "bilibili") ?? null);
+  const previewKey = previewSource ? sourceKey(previewSource) : null;
+  const playingKey = useSongPreview((state) => state.playingKey);
+  const loadingKey = useSongPreview((state) => state.loadingKey);
+  const previewErr = useSongPreview((state) => state.error);
+  const isPlaying = previewKey !== null && playingKey === previewKey;
+  const isLoading = previewKey !== null && loadingKey === previewKey;
+  const errText = previewErr && previewKey === previewErr.key ? previewErr.message : "";
+
+  const selectAndReveal = () => {
+    onToggleSelect();
+    // 多来源歌曲的选中结果需要立刻可见：选中时自动展开来源明细，
+    // 但不在取消选中时强行收起，避免把用户手动展开的内容突然折叠。
+    if (!selected && multi && !expanded) onToggleExpand();
+  };
+
+  const thumbImg = group.cover && (
+    <img
+      src={thumbUrl(group.cover)}
+      alt=""
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      onError={(event) => {
+        event.currentTarget.style.display = "none";
+      }}
+    />
+  );
+
   const titleCell = (
     <>
       {/* 小缩略图：一屏几十行，用最小档就够认人，尺寸写死所以不会因为
-          图片加载完把整行撑一下。 */}
-      <span className="kd-thumb">
-        {group.cover && (
-          <img
-            src={thumbUrl(group.cover)}
-            alt=""
-            loading="lazy"
-            referrerPolicy="no-referrer"
-            onError={(event) => {
-              event.currentTarget.style.display = "none";
-            }}
-          />
-        )}
-      </span>
+          图片加载完把整行撑一下。有音乐来源时它兼职试听键——悬停浮出
+          播放脸，点一下拉最低码率的流试听，不占新的一列。 */}
+      {previewSource ? (
+        <button
+          type="button"
+          className="kd-thumb kd-thumb-play"
+          data-live={isPlaying || isLoading ? "true" : undefined}
+          title={
+            errText
+              ? `试听失败：${errText}`
+              : isPlaying
+                ? "停止试听"
+                : "试听（最低音质流媒体，不下载）"
+          }
+          aria-label={isPlaying ? `停止试听 ${group.title}` : `试听 ${group.title}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            void toggleSongPreview(previewSource);
+          }}
+        >
+          {thumbImg}
+          <span className="kd-thumb-glass" data-error={errText ? "true" : undefined}>
+            {isLoading ? (
+              <Loader2 size={12} className="kd-spin" />
+            ) : isPlaying ? (
+              <Square size={10} fill="currentColor" />
+            ) : (
+              <Play size={11} fill="currentColor" />
+            )}
+          </span>
+        </button>
+      ) : (
+        <span className="kd-thumb">{thumbImg}</span>
+      )}
       {group.title}
       {group.in_library && (
         <span className="kd-chip" data-tone="ok" style={{ marginLeft: "0.4rem" }}>
@@ -74,13 +130,13 @@ export function MergedGroupRow({
 
   return (
     <Fragment>
-      <tr aria-selected={selected} onClick={onToggleSelect}>
+      <tr aria-selected={selected} onClick={selectAndReveal}>
         <td style={{ width: "2rem" }}>
           <input
             type="checkbox"
             checked={selected}
             aria-label={`选择 ${group.title}`}
-            onChange={onToggleSelect}
+            onChange={selectAndReveal}
             onClick={(event) => event.stopPropagation()}
           />
         </td>

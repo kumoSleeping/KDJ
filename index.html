@@ -1,13 +1,17 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="light">
   <head>
+    <!-- 首帧前恢复上次的主题，不然刷新时会先按默认色闪一下再切换。
+         CSP 是 script-src 'self'，inline 会被拦，所以只能是外部文件；
+         也必须是同步的普通 <script>——module/defer 都晚于首帧。 -->
+    <script src="/theme-init.js"></script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* ipc: http://ipc.localhost; img-src 'self' data: blob: https: http://127.0.0.1:*; media-src 'self' http://127.0.0.1:* blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"
     />
-    <title>KumoDeck</title>
+    <title>KDJ</title>
   </head>
   <body>
     <div id="root"></div>

@@ -11,8 +11,10 @@ if (!root) throw new Error("找不到 #root，index.html 被改坏了");
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
 function syncTheme(): void {
-  // settings 是异步拉回来的，没到之前先按 index.html 的默认深色走
-  applyTheme(useAppStore.getState().settings?.theme ?? "dark");
+  // settings 是异步拉回来的，没到之前不动主题——
+  // 首帧的值由 theme-init.js 从 localStorage 恢复，这里再写会把它冲掉又闪一下
+  const theme = useAppStore.getState().settings?.theme;
+  if (theme) applyTheme(theme);
 }
 
 // 设置变更 → 重算主题；theme = system 时还要跟随系统切换（macOS 的日夜自动切换会触发）

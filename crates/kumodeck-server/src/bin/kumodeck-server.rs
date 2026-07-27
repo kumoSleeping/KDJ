@@ -14,28 +14,28 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let data_dir = std::env::var("KUMODECK_DATA_DIR")
+    let data_dir = std::env::var("KDJ_DATA_DIR")
+        .or_else(|_| std::env::var("KUMODECK_DATA_DIR"))
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             kumodeck_core::config::home_dir()
                 .join("Library/Application Support/kumodeck/data")
         });
-    let download_dir = std::env::var("KUMODECK_DOWNLOAD_DIR")
+    let download_dir = std::env::var("KDJ_DOWNLOAD_DIR")
+        .or_else(|_| std::env::var("KUMODECK_DOWNLOAD_DIR"))
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| kumodeck_core::config::home_dir().join("Downloads/KumoDeck"));
-    // 开发时固定 token 和端口，省得每次改前端配置
-    let token = std::env::var("KUMODECK_TOKEN").unwrap_or_else(|_| "dev-token".into());
-    let port: u16 = std::env::var("KUMODECK_PORT")
+        .unwrap_or_else(|_| kumodeck_core::config::default_download_root());
+    let port: u16 = std::env::var("KDJ_PORT")
+        .or_else(|_| std::env::var("KUMODECK_PORT"))
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(8788);
 
-    let config = Arc::new(AppConfig::create(data_dir, download_dir, token.clone(), port));
+    let config = Arc::new(AppConfig::create(data_dir, download_dir, port));
     let (port, handle) = kumodeck_server::serve(config.clone()).await?;
 
-    println!("KumoDeck sidecar (Rust) 已启动");
+    println!("KDJ Rust 服务已启动");
     println!("  http://127.0.0.1:{port}");
-    println!("  token = {token}");
     println!("  data  = {}", config.data_dir.display());
     handle.await?;
     Ok(())

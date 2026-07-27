@@ -9,6 +9,7 @@ import {
   FolderPlus,
   HardDrive,
   Library,
+  ListMusic,
   MoreHorizontal,
   PencilLine,
   Search,
@@ -18,13 +19,14 @@ import {
 import { api } from "../../lib/api";
 import { useAppStore } from "../../stores/appStore";
 import { useLibraryStore } from "../../stores/libraryStore";
+import { useQueueStore } from "../../stores/queueStore";
 import type { FolderNode } from "../../types";
 import { InlineNotice } from "../common";
 
 /** 拖曲目到文件夹用的 MIME。自定义类型才能在 dragover 阶段就认出是不是自家的拖拽。 */
-export const TRACK_DND_TYPE = "application/x-kumodeck-tracks";
+export const TRACK_DND_TYPE = "application/x-kdj-tracks";
 /** 拖文件夹换顺序用的 MIME，和上面分开，dragover 时才好区别对待。 */
-const FOLDER_DND_TYPE = "application/x-kumodeck-folder";
+const FOLDER_DND_TYPE = "application/x-kdj-folder";
 
 interface MenuState {
   node: FolderNode;
@@ -74,7 +76,9 @@ export function FolderTree() {
   const folders = useLibraryStore((state) => state.folders);
   const filter = useLibraryStore((state) => state.filter);
   const clipboard = useLibraryStore((state) => state.clipboard);
+  const queueView = useLibraryStore((state) => state.queueView);
   const setFilter = useLibraryStore((state) => state.setFilter);
+  const setQueueView = useLibraryStore((state) => state.setQueueView);
   const refreshFolders = useLibraryStore((state) => state.refreshFolders);
   const applyFolderOp = useLibraryStore((state) => state.applyFolderOp);
   const paste = useLibraryStore((state) => state.paste);
@@ -82,6 +86,7 @@ export function FolderTree() {
   // 动了文件夹或曲库搜索 = 现在关心的是本地，把中间那对切回曲库。
   // 搜索结果不丢，列表面板顶边的标签随时能切回去。
   const setListMode = useAppStore((state) => state.setListMode);
+  const queueCount = useQueueStore((state) => state.ids.length);
 
   const roots = folders?.roots ?? [];
   const [expanded, setExpanded] = useExpanded(roots);
@@ -108,7 +113,7 @@ export function FolderTree() {
   const scan = useLibraryStore((state) => state.scan);
   const scanning = scan !== null && scan.phase !== "done";
   const addFolders = async () => {
-    const paths = await window.kumodeck?.pickFolders();
+    const paths = await window.kdj?.pickFolders();
     if (!paths || paths.length === 0) return;
     setNotice("");
     try {
@@ -217,7 +222,8 @@ export function FolderTree() {
 
   const render = (node: FolderNode, depth: number) => {
     const open = expanded.has(node.path);
-    const active = filter.folder === node.path;
+    // 临时列表视图开着时没有任何文件夹算"当前"——中列显示的不是文件夹内容
+    const active = filter.folder === node.path && !queueView;
     return (
       <div key={node.path}>
         <div
@@ -415,11 +421,37 @@ export function FolderTree() {
             真要拖动排序时，`applyFolderOp` 会自己按需写清单，不必先手动点一下；
           · 含子级——选中一个歌单文件夹时，想看的本来就是它整棵子树里的曲目，
             默认就该是"含"。做成开关只是把一个没人会关的选项摆在最显眼的位置。
-          `folderDeep` 字段保留在 store 里（后端 API 仍然收它），默认恒为 true。 */}
+      `folderDeep` 字段保留在 store 里（后端 API 仍然收它），默认恒为 true。 */}
       <div className="kd-scroll kd-folder-list">
+        {/* 添加是曲库入口，不是底部工具：和「临时列表」「全部曲目」并列放在
+            列表最上面，点它直接选择磁盘目录并开始后台扫描。 */}
+        <button
+          type="button"
+          className="kd-folder kd-folder-action"
+          disabled={scanning}
+          title="选磁盘上的文件夹加进曲库，导入和分析都在后台自动做完"
+          onClick={() => void addFolders()}
+        >
+          <span className="kd-folder-caret" />
+          <FolderInput size={13} />
+          <span className="kd-truncate">添加</span>
+        </button>
         <div
           className="kd-folder"
-          data-active={filter.folder === ""}
+          data-active={queueView}
+          style={{ paddingLeft: "0.35rem" }}
+          onClick={() => {
+            setListMode("library");
+            setQueueView(true);
+          }}
+        >
+          <span className="kd-folder-caret" />
+          <ListMusic size={13} />
+          <span className="kd-truncate">临时列表 ({queueCount})</span>
+        </div>
+        <div
+          className="kd-folder"
+          data-active={filter.folder === "" && !queueView}
           style={{ paddingLeft: "0.35rem" }}
           onClick={() => {
             setListMode("library");
@@ -433,7 +465,7 @@ export function FolderTree() {
         {roots.map((root) => render(root, 0))}
         {roots.length === 0 && (
           <p className="kd-faint" style={{ padding: "0.6rem 0.5rem", lineHeight: 1.5 }}>
-            还没有文件夹。点上方的「添加文件夹」选一个本地目录，剩下的交给后台。
+            还没有文件夹。点上方的「添加」选一个本地目录，剩下的交给后台。
           </p>
         )}
         {folders && folders.outside > 0 && (
@@ -443,37 +475,13 @@ export function FolderTree() {
         )}
       </div>
 
-      {/* 贴在树和底下那排按钮之间：文件夹操作出错时，消息必须留在被操作的树旁边 */}
+      {/* 文件夹操作出错时，消息必须留在被操作的树旁边。 */}
       <InlineNotice
         className="kd-folder-notice"
         block
         text={notice}
         onDismiss={() => setNotice("")}
       />
-
-      <div className="kd-folder-foot">
-        {/* 「添加文件夹」从上面那条筛选工具条搬到了这里：这一栏才是"曲库由哪些
-            目录组成"的地方。它和「新建」是两件事——新建是在曲库里造一个空目录，
-            添加是把磁盘上已有的目录连同里面的歌一起收进来。 */}
-        <button
-          type="button"
-          className="kd-btn"
-          data-size="sm"
-          data-variant="ghost"
-          disabled={scanning}
-          title="选磁盘上的文件夹加进曲库，导入和分析都在后台自动做完"
-          onClick={() => void addFolders()}
-        >
-          <FolderInput size={12} />
-          添加
-        </button>
-        {/* 「新建」和「粘贴」都删了。
-            新建——在曲库里造一个空目录，造完还得自己往里搬歌，
-            而右键菜单里本来就有「新建子文件夹」，这里是第二个入口；
-            粘贴——它配的是曲目表里的 Cmd+C/Cmd+X，可真正在用的是直接把曲目
-            拖到目标文件夹上，拖比"复制→找到目标→点粘贴"少两步。
-            右键菜单保留了这两项，需要时仍然找得到。 */}
-      </div>
 
       {menu && (
         <div
@@ -545,7 +553,7 @@ export function FolderTree() {
             type="button"
             onClick={() => {
               setMenu(null);
-              void window.kumodeck?.openPath(menu.node.path);
+              void window.kdj?.openPath(menu.node.path);
             }}
           >
             <FolderOpen size={12} />

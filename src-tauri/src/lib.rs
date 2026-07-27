@@ -8,7 +8,7 @@
 //!
 //! 传输层仍然是 127.0.0.1 上的 HTTP + WS，没有换成 Tauri IPC：前端
 //! `src/lib/api.ts` 因此一行不用改，播放器也要靠 Range 请求才能拖进度条。
-//! 这一层的安全模型和 Python 版完全一样——只绑回环、每次启动换 token。
+//! 服务只绑回环地址，Tauri 与本机浏览器调试都可以直接访问。
 //!
 //! 这里实现的 6 条命令是 `electron/preload.ts` 的一比一替代品，
 //! 名字和参数由 `src/lib/bridge.ts` 固定，改名等于把前端按钮变哑巴。
@@ -30,15 +30,13 @@ use tauri_plugin_opener::OpenerExt;
 /// 不用事件推送：窗口很可能在 `emit` 之前就跑完了 bootstrap，那是竞态。
 pub struct Bridge {
     base_url: String,
-    token: String,
 }
 
-/// 字段名对齐 `src/types.ts::KumoDeckBridge`，所以要 camelCase。
+/// 字段名对齐 `src/types.ts::KdjBridge`，所以要 camelCase。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BridgeInfo {
     pub base_url: String,
-    pub token: String,
     /// 取值和 Electron 的 `process.platform` 对齐（darwin / win32 / linux / android…），
     /// 前端按它区分桌面专属功能，见 `docs/rust-port/00-architecture.md` §8。
     pub platform: String,
@@ -55,12 +53,11 @@ fn node_platform() -> &'static str {
 
 // ------------------------------------------------------------------ 命令
 
-/// 前端 bootstrap 的第一次调用：拿到 baseUrl / token 才能发任何请求。
+/// 前端 bootstrap 的第一次调用：拿到动态分配的 baseUrl。
 #[tauri::command]
 fn get_bridge_info(bridge: tauri::State<'_, Bridge>) -> BridgeInfo {
     BridgeInfo {
         base_url: bridge.base_url.clone(),
-        token: bridge.token.clone(),
         platform: node_platform().to_string(),
     }
 }
@@ -225,35 +222,44 @@ fn legacy_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
     Ok(base.join("kumodeck").join("data"))
 }
 
+fn default_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
+    let current = app.path().app_config_dir()?.join("data");
+    let legacy = legacy_data_dir(app)?;
+    if current.exists() || !legacy.exists() {
+        Ok(current)
+    } else {
+        // 已有用户继续原地读旧库；新安装只会创建 KDJ 的目录。
+        Ok(legacy)
+    }
+}
+
+fn env_path(primary: &str, legacy: &str) -> Option<PathBuf> {
+    std::env::var_os(primary)
+        .or_else(|| std::env::var_os(legacy))
+        .map(PathBuf::from)
+}
+
 /// 起进程内的 axum server，返回前端要的 baseUrl / token。
 fn start_server(app: &tauri::AppHandle) -> anyhow::Result<Bridge> {
-    // 每次启动重新生成：token 固定就等于把整个曲库开放给同机任意进程。
-    // 32 字节走 `rand::random::<u128>()`，和 providers 里生成会话 id 的写法一致。
-    let token = format!(
-        "{:032x}{:032x}",
-        rand::random::<u128>(),
-        rand::random::<u128>()
-    );
-
     // 环境变量只是给调试留的后门；正常启动走 `legacy_data_dir`。
-    let data_dir = match std::env::var_os("KUMODECK_DATA_DIR") {
-        Some(raw) => PathBuf::from(raw),
-        None => legacy_data_dir(app)?,
-    };
-    // 和 v0.1.0 一致：`~/Music/KumoDeck`。Tauri 的 audio_dir 在 macOS 上就是
-    // `~/Music`，等价于 Electron 的 `app.getPath("music")`。
-    let download_dir = match std::env::var_os("KUMODECK_DOWNLOAD_DIR") {
-        Some(raw) => PathBuf::from(raw),
+    let data_dir = env_path("KDJ_DATA_DIR", "KUMODECK_DATA_DIR")
+        .map(Ok)
+        .unwrap_or_else(|| default_data_dir(app))?;
+    // 默认落到系统的「下载」目录（本地化的那个）+ KDJ 子目录。
+    // 这只是全新安装的默认值：settings.json 里存过的目录永远优先。
+    // 安卓上 Tauri 的 download_dir() 会报错，退回 core 里同一套解析。
+    let download_dir = match env_path("KDJ_DOWNLOAD_DIR", "KUMODECK_DOWNLOAD_DIR") {
+        Some(raw) => raw,
         None => app
             .path()
-            .audio_dir()
-            .unwrap_or_else(|_| kumodeck_core::config::home_dir().join("Music"))
-            .join("KumoDeck"),
+            .download_dir()
+            .map(|dir| dir.join("KDJ"))
+            .unwrap_or_else(|_| kumodeck_core::config::default_download_root()),
     };
 
     // 端口传 0 让内核挑：Electron 版是先 listen(0) 探一个再关掉再交给 Python，
     // 那中间有一段「探到的端口被别人抢走」的竞态窗口，这里直接没有。
-    let config = Arc::new(AppConfig::create(data_dir, download_dir, token.clone(), 0));
+    let config = Arc::new(AppConfig::create(data_dir, download_dir, 0));
     // serve() 内部 tokio::spawn，需要运行时上下文；Tauri 的全局运行时就是 tokio。
     // 返回的 JoinHandle 故意丢掉——tokio 里 drop JoinHandle 不会取消任务，
     // 服务的生命周期跟着进程走，和 Electron 版 sidecar 跟着主进程走是一个意思。
@@ -261,7 +267,6 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<Bridge> {
 
     Ok(Bridge {
         base_url: format!("http://127.0.0.1:{port}"),
-        token,
     })
 }
 
@@ -283,7 +288,7 @@ pub fn run() {
     builder
         .setup(|app| {
             let bridge = start_server(app.handle())?;
-            tracing::info!("KumoDeck 后端就绪：{}", bridge.base_url);
+            tracing::info!("KDJ 后端就绪：{}", bridge.base_url);
             app.manage(bridge);
             // 服务起好再显示窗口。窗口在配置里是 visible:false，这里补一次 show()——
             // Electron 版靠 `ready-to-show` 做同样的事，为的是不让用户看见
@@ -305,5 +310,5 @@ pub fn run() {
             window_control
         ])
         .run(tauri::generate_context!())
-        .expect("KumoDeck 启动失败");
+        .expect("KDJ 启动失败");
 }

@@ -1,5 +1,5 @@
 /*
- * KumoDeck — Design System
+ * KDJ — Design System
  * ---------------------------------------------------------------
  * 取向参考 pi-web-platform / entari-plugin-hyw：
  *   - 零圆角（所有 border-radius: 0）
@@ -60,7 +60,6 @@
   --kd-size-lg: 0.9375rem;
 
   /* —— 度量 —— */
-  --kd-titlebar-h: 38px;
   --kd-player-h: 60px;
   --kd-badge-hang: 0.5rem;
   --kd-row-h: 34px;
@@ -188,26 +187,18 @@ textarea {
   color: inherit;
 }
 
-/* ============================================================
- * 滚动条 — 细、直角
- * ========================================================== */
+/* 所有区域仍可用滚轮、触控板、触屏和键盘滚动，只隐藏 Chromium/Firefox
+   自带的滚动条。原装轨道会在窄栏里抢宽度，也与界面视觉不一致。 */
+* {
+  scrollbar-width: none;
+}
+*::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
 .kd-scroll {
   overflow: auto;
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--kd-muted) 45%, transparent) transparent;
-}
-.kd-scroll::-webkit-scrollbar {
-  width: 9px;
-  height: 9px;
-}
-.kd-scroll::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--kd-muted) 38%, transparent);
-}
-.kd-scroll::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--kd-muted) 60%, transparent);
-}
-.kd-scroll::-webkit-scrollbar-track {
-  background: transparent;
 }
 
 /* ============================================================
@@ -253,61 +244,25 @@ textarea {
 .kd-app {
   height: 100%;
   display: grid;
-  grid-template-rows: var(--kd-titlebar-h) 1fr auto;
+  grid-template-rows: 1fr auto;
   background: var(--kd-bg);
 }
-
-/* 手机没有窗口装饰：收掉给 macOS 红绿灯留的 84px，并让出状态栏高度。
-   env(safe-area-inset-*) 在没有刘海的设备上是 0，写了不吃亏。 */
-/* macOS 的红绿灯是系统画在窗口左上角的，标题必须给它让位。
-   78 是量出来的：三颗灯从 x≈14 起、到 x≈66 止，再留十来 px 呼吸位。
-   **只在 macOS 桌面壳上加**——浏览器预览、Windows、Linux 都没有那三颗灯，
-   无条件留着的话左边就是白空一块（用户原话：卡在这里，很丑）。 */
-.kd-titlebar[data-mac="true"] {
+.kd-app[data-mac="true"] .kd-section > form.kd-toolbar {
   padding-left: 78px;
+  -webkit-app-region: drag;
 }
-.kd-titlebar[data-mobile="true"] {
-  padding-left: 0.75rem;
-  padding-top: env(safe-area-inset-top, 0);
-  height: calc(var(--kd-titlebar-h) + env(safe-area-inset-top, 0));
+.kd-app[data-mac="true"] .kd-searchbar {
+  -webkit-app-region: no-drag;
 }
-/* 悬浮键和播放条要避开底部的手势条 */
-.kd-titlebar[data-mobile="true"] ~ * .kd-fabs,
-body:has(.kd-titlebar[data-mobile="true"]) .kd-fabs {
+.kd-app[data-mobile="true"] .kd-section > form.kd-toolbar {
+  padding-top: calc(0.6rem + env(safe-area-inset-top, 0));
+}
+.kd-app[data-mobile="true"] .kd-fabs {
   bottom: calc(var(--kd-player-h) + 0.75rem + env(safe-area-inset-bottom, 0));
 }
-body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
+.kd-app[data-mobile="true"] .kd-player {
   padding-bottom: env(safe-area-inset-bottom, 0);
   height: calc(var(--kd-player-h) + env(safe-area-inset-bottom, 0));
-}
-
-.kd-titlebar {
-  -webkit-app-region: drag;
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0 0.75rem; /* 给 macOS 红绿灯留位 */
-  border-bottom: 1px solid var(--kd-line);
-  background: var(--kd-panel);
-  user-select: none;
-}
-.kd-titlebar-brand {
-  font-weight: 700;
-  font-size: var(--kd-size-lg);
-  letter-spacing: -0.01em;
-  color: var(--kd-text);
-}
-.kd-titlebar-spacer {
-  flex: 1;
-}
-.kd-titlebar-status {
-  -webkit-app-region: no-drag;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  color: var(--kd-muted);
-  font-size: var(--kd-size-xs);
-  font-variant-numeric: tabular-nums;
 }
 
 .kd-body {
@@ -861,6 +816,18 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
 .kd-table tbody tr[data-drop="after"] td {
   box-shadow: inset 0 -3px 0 var(--kd-theme);
 }
+/* 列头拖排：正在拖的列头压暗；落点竖线画在目标的落入侧——
+   从左边拖来会落到目标右侧、从右边拖来落到左侧（见 TrackTable.moveColumn），
+   竖线必须跟着指对边，不然线画左边列落右边，看起来像拖错了 */
+.kd-table thead th[data-dragging="true"] {
+  opacity: 0.4;
+}
+.kd-table thead th[data-col-drop="before"] {
+  box-shadow: inset 3px 0 0 var(--kd-theme);
+}
+.kd-table thead th[data-col-drop="after"] {
+  box-shadow: inset -3px 0 0 var(--kd-theme);
+}
 /* 白天模式的列表面板铺白底：默认透出去的是 --kd-bg 灰底，
    一整屏结果看起来发灰发沉，其实内容没问题，是底色的锅 */
 :root[data-theme="light"] .kd-table-wrap {
@@ -882,6 +849,33 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+/* 缩略图兼职试听键（歌行）：不占新列，悬停行时浮出播放脸。
+   position 给浮层定位用；按钮形态只是把 span 的壳换掉，尺寸边框全同。 */
+button.kd-thumb {
+  position: relative;
+  padding: 0;
+  cursor: pointer;
+}
+.kd-thumb-glass {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: color-mix(in srgb, #000 45%, transparent);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+/* 悬停整行就露脸——图标才 22px，等着人精确悬到图上等于藏起来；
+   正在放/正在连的那行常亮，滚过一屏也知道声音是谁出的 */
+tr:hover .kd-thumb-glass,
+.kd-thumb[data-live="true"] .kd-thumb-glass {
+  opacity: 1;
+}
+.kd-thumb-glass[data-error="true"] {
+  opacity: 1;
+  color: var(--kd-danger);
 }
 
 /* ------------------------------------------------------------------
@@ -905,6 +899,17 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   align-items: flex-start;
   gap: 0.65rem;
   min-width: 0;
+  /* 整行就是预览的点击面（控件除外），给个手型示意 */
+  cursor: pointer;
+}
+.kd-video-row .kd-video-controls,
+.kd-video-row .kd-video-controls * {
+  cursor: auto;
+}
+.kd-video-row .kd-video-controls button,
+.kd-video-row .kd-video-controls select,
+.kd-video-row .kd-video-controls label {
+  cursor: pointer;
 }
 /* 16:9：视频封面本来就是宽的，裁成方块等于把画面切掉一半。
    尺寸写死，图片加载完不会把整行顶一下。 */
@@ -1228,6 +1233,7 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
  * 播放条
  * ========================================================== */
 .kd-player {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 0.75rem;
@@ -1235,6 +1241,45 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   padding: 0 1rem;
   border-top: 1px solid var(--kd-line);
   background: var(--kd-panel);
+}
+/* 播放条和上方内容之间只用一层很轻的渐隐阴影衔接，不再增加硬分割线。 */
+.kd-player::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: -0.65rem;
+  right: 0;
+  left: 0;
+  height: 0.65rem;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.14), transparent);
+  pointer-events: none;
+}
+.kd-player-leading {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  /* 桌面一行布局缩窄时，这块必须把宽度让给右侧走带键。原来里面的
+     200px 固定 meta 会把整块顶成不可收缩，最后把重要按钮挤出窗口。 */
+  flex: 0 1 17rem;
+  min-width: 0;
+}
+.kd-player-theme {
+  appearance: none;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+  transition: color 0.12s;
+}
+.kd-player-theme:hover {
+  color: var(--kd-text);
 }
 /* 试听条走常规播放器的样子：无边框图标键、小封面、一条细线。
    这里不需要品牌感——它是个预览工具，安静比抢眼重要。 */
@@ -1252,7 +1297,9 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   gap: 0.6rem;
   padding: 0.15rem 0.35rem;
   border-radius: 6px;
+  flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
   cursor: pointer;
 }
 .kd-player-now:hover:not(:disabled) {
@@ -1269,6 +1316,11 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   text-overflow: ellipsis;
   white-space: nowrap;
   min-height: 1em; /* 没艺人时占位，换歌高度不跳 */
+}
+.kd-player-video-label {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
 }
 /* 圆形播放键：整条播放条唯一的动作，红色归它 */
 .kd-player-go {
@@ -1317,7 +1369,8 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
 }
 .kd-player-meta {
   min-width: 0;
-  flex: 0 0 200px;
+  /* 曲名区可以一直缩到省略号，200px 只是理想宽度而不是硬下限。 */
+  flex: 1 1 200px;
 }
 /* 挂着"放不了"这条说明时才放宽：200px 里塞不下一句完整的话 */
 .kd-player-meta[data-notice="true"] {
@@ -1331,6 +1384,9 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
 }
 .kd-player-scrub {
   flex: 1;
+  /* flex 子项默认 min-width:auto，会把波形 canvas 的内容宽度当下限；
+     显式归零后，波形才能跟着窗口继续压缩而不是把右侧控件推出界。 */
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 0.6rem;
@@ -1343,6 +1399,185 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   flex: 1;
   min-width: 0;
   border: 1px solid var(--kd-line);
+}
+
+/* ============================================================
+ * 视频预览（右栏，下载队列头上）
+ *
+ * 不弹窗：预览要回答的是"下没下对片子"，答案就该出现在下载动作
+ * 旁边——右栏的队列头上。画面 16:9，底下一条实时波形当进度条，
+ * 视觉语言对齐底部播放条（已播压暗、白线播放头、点击跳转）。
+ * ========================================================== */
+.kd-preview {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-bottom: 0.6rem;
+  /* 和底下的队列面板划清界限：预览是临时的看片位，队列是常驻的工作区 */
+  border-bottom: 1px solid var(--kd-line);
+}
+.kd-preview-frame {
+  position: relative;
+  margin: 0 0.75rem;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border: 1px solid var(--kd-line);
+  overflow: hidden;
+}
+.kd-preview-frame > video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+}
+.kd-local-video {
+  padding: 0.65rem 0;
+}
+.kd-local-video .kd-preview-frame {
+  margin-inline: 0.65rem;
+}
+.kd-local-video .kd-djp-note {
+  margin: 0.5rem 0.65rem 0;
+}
+/* 暂停时居中的播放键：描边方块，和整套扁平语言一致，不做圆形浮钮 */
+.kd-preview-go {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 42px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--kd-panel) 82%, transparent);
+  border: 1px solid var(--kd-line);
+  color: var(--kd-text);
+  cursor: pointer;
+}
+.kd-preview-go:hover {
+  color: var(--kd-theme);
+  border-color: var(--kd-theme);
+}
+.kd-preview-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 1rem;
+  text-align: center;
+  color: var(--kd-danger);
+  font-size: var(--kd-size-xs);
+  background: color-mix(in srgb, var(--kd-panel-inset) 85%, transparent);
+}
+.kd-preview-scrub {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+}
+/* 实时波形：主题红由 color 传进 canvas（组件里 getComputedStyle 取用） */
+.kd-preview-wave {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  color: var(--kd-theme);
+  background: var(--kd-panel-inset);
+  border: 1px solid var(--kd-line);
+  cursor: pointer;
+  overflow: hidden;
+}
+
+/* 混音台一行：协同开关 + 交叉推子。推子两端各一张脸（唱盘/预览），
+   透明度由组件按等功率增益写进来，推到哪边哪边亮。 */
+.kd-xfade {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0 0.75rem;
+  color: var(--kd-muted);
+}
+.kd-xfade-toggle[data-on="true"] {
+  color: var(--kd-theme);
+}
+.kd-xfade-end {
+  flex: none;
+  transition: opacity 0.12s;
+}
+/* 中点刻度画在槽上而不是 input 里：range 的内部结构各家浏览器都不让碰 */
+.kd-xfade-slot {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+.kd-xfade-slot::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  bottom: 3px;
+  width: 1px;
+  background: var(--kd-line);
+}
+/* 推子本体沿用全局 range 那套（4px 轨 + 红色方帽，见文件头部）：
+   竖长方帽本来就是交叉推子的形状，不必另起炉灶。这里只压扁高度、
+   换个左右拖的光标，再把没开协同时的帽子调成灰的——红帽等于在喊
+   "来拖我"，而这时候拖它什么也不会发生。选择器带上 input[type="range"]
+   是为了压过全局那条的特异性。 */
+input[type="range"].kd-xfader {
+  /* 要 position 不是为了摆位置：中点刻度是槽的 ::before（positioned），
+     不给 input 也升成 positioned 的话，刻度会画在它上面，正中那一竖
+     恰好挡住点击/拖动 */
+  position: relative;
+  width: 100%;
+  height: 18px;
+  margin: 0;
+  cursor: ew-resize;
+}
+input[type="range"].kd-xfader:disabled {
+  cursor: default;
+}
+input[type="range"].kd-xfader:disabled::-webkit-slider-thumb {
+  background: var(--kd-line);
+}
+input[type="range"].kd-xfader:disabled::-moz-range-thumb {
+  background: var(--kd-line);
+}
+
+/* Offset 校准 + 下载两连：± 是裸图标（走带键语言），中间的数值是仪表，
+   等宽数字定宽——别让 +0.10s 变 +1.00s 时整行抖一下。 */
+.kd-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0.75rem;
+}
+.kd-offset {
+  display: flex;
+  align-items: center;
+}
+.kd-offset-value {
+  appearance: none;
+  border: none;
+  background: transparent;
+  min-width: 3.6rem;
+  padding: 0.1rem 0.15rem;
+  text-align: center;
+  font-family: inherit;
+  font-size: var(--kd-size-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+/* 拨过就亮：0.00 是"没校"，亮着的数字才是要带进成品的值 */
+.kd-offset-value[data-live="true"] {
+  color: var(--kd-theme);
 }
 
 /* ============================================================
@@ -1414,26 +1649,6 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   flex: none;
 }
 
-/* 顶栏上的目录小按钮：显示当前落盘目录，点开就是系统选择框。
-   做成低对比度的一小条，它是"当前状态"而不是主操作。 */
-.kd-path-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  max-width: 12rem;
-  padding: 0.25rem 0.45rem;
-  border: 1px solid var(--kd-line);
-  background: var(--kd-panel-inset);
-  color: var(--kd-muted);
-  font: inherit;
-  font-size: var(--kd-size-xs);
-  cursor: pointer;
-}
-.kd-path-chip:hover {
-  border-color: var(--kd-line-strong, var(--kd-line));
-  color: var(--kd-text);
-}
-
 /* 播放条上的唱片位：占位图标 + 覆盖上去的封面。
    尺寸写死，封面有没有都不会让右边的文字跳位。 */
 .kd-player-disc {
@@ -1456,6 +1671,10 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   object-fit: cover;
   opacity: 0;
   transition: opacity 0.12s linear;
+}
+.kd-player-disc[data-empty="true"] {
+  border-color: transparent;
+  background: transparent;
 }
 
 /* ============================================================
@@ -1576,6 +1795,17 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
 .kd-folder:hover {
   background: var(--kd-hover);
 }
+.kd-folder-action {
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.kd-folder-action:disabled {
+  color: var(--kd-faint);
+  cursor: wait;
+}
 /* 当前文件夹只靠底色，不描红侧条 */
 .kd-folder[data-active="true"] {
   background: var(--kd-selected);
@@ -1646,14 +1876,15 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   border-top: 1px solid var(--kd-line);
 }
 
-.kd-folder-foot {
+/* 曲目表的报错浮条：表格没有状态栏，删除失败的原因就近贴在滚动区底边。
+   sticky 让它不随内容滚走；渲染在表格之后，贴 bottom 正好浮在视野下缘。 */
+.kd-table-notice {
+  position: sticky;
+  bottom: 0.5rem;
+  z-index: 30;
   display: flex;
-  gap: 0.25rem;
-  padding: 0.35rem;
-  border-top: 1px solid var(--kd-line);
-}
-.kd-folder-foot > .kd-btn {
-  flex: 1;
+  justify-content: center;
+  padding: 0 0.5rem;
 }
 
 .kd-context-menu {
@@ -2025,6 +2256,16 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   height: 62vh;
   border-right: none;
 }
+/* 手机抽屉里的文件夹行比桌面树稍大一点，给手指留下更可靠的点击面积；
+   只放大抽屉版本，不牺牲桌面侧栏一屏能看到的目录数量。 */
+.kd-sheet .kd-folder {
+  height: 2rem;
+  font-size: var(--kd-size);
+}
+.kd-sheet .kd-folder > svg {
+  width: 15px;
+  height: 15px;
+}
 /* 详情栏在宽屏是 <aside> 自带内边距，进抽屉后由 kd-sheet-body 负责，
    这里只保证内部面板之间的间距不塌 */
 .kd-sheet .kd-panel-slot + .kd-panel-slot {
@@ -2035,20 +2276,23 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
  * 搜索框（图标内嵌）与平台标志键
  * ========================================================== */
 
-/* 整条搜索区是**一个**控件：一圈边框，里面用间距和细分隔线分区。
+/* 整条搜索区是**一个**控件，直接嵌进顶部工具栏，不再套最外层边界框；
+   内部只用间距和细分隔线分区。
    上一版是"输入框有框、FLAC 有框、搜索键有框、四个平台各有一个框"，
-   一排下来七个描边矩形，用户原话「框框太多」。现在只有最外面那一圈。 */
+   一排下来七个描边矩形，用户原话「框框太多」。 */
 .kd-searchbar {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   min-width: 0;
   padding: 0 0.35rem 0 0.6rem;
-  border: 1px solid var(--kd-line);
-  background: var(--kd-panel-inset);
+  border: none;
+  background: transparent;
+  cursor: text;
 }
 .kd-searchbar:focus-within {
-  border-color: var(--kd-muted);
+  /* 聚焦前后都和顶部同色：整条顶栏就是搜索面，不再浮出第二层深度。 */
+  background: transparent;
 }
 /* 批量模式是四行高的文本域，整条要顶部对齐，图标才不会浮在第二行文字中间 */
 .kd-searchbar[data-batch] {
@@ -2067,7 +2311,7 @@ body:has(.kd-titlebar[data-mobile="true"]) .kd-player {
   height: auto;
   padding-top: 0.35rem;
 }
-/* 输入框自己不再描边——边框归最外层那一圈 */
+/* 输入框自己也不描边——整片顶部就是它的容器。 */
 .kd-searchbar-input {
   flex: 1;
   min-width: 0;
@@ -2253,8 +2497,10 @@ textarea.kd-searchbar-input {
   .kd-player-scrub {
     grid-area: wave;
   }
-  .kd-player-now {
+  .kd-player-leading {
     grid-area: now;
+  }
+  .kd-player-now {
     flex: 1 1 auto;
     padding: 0;
   }
@@ -2363,4 +2609,198 @@ textarea.kd-searchbar-input {
    这条被改版误删过一次，删了的表现就是它变回红方块。 */
 .kd-player-go {
   border-radius: 50% !important;
+}
+
+/* 三颗走带键成一组。上一首/下一首是**裸图标**——一条播放条上摆三个
+   描边方块太吵；它们和中间那颗圆键同在一组，靠间距就分得开。
+   红色仍然只给中间那颗：播放是主动作，前后跳是它的附属。 */
+.kd-player-transport {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.kd-player-step {
+  appearance: none;
+  border: none;
+  background: transparent;
+  width: 1.7rem;
+  height: 1.7rem;
+  display: grid;
+  place-items: center;
+  color: var(--kd-muted);
+  cursor: pointer;
+  transition: color 0.12s;
+}
+.kd-player-step:hover:not(:disabled) {
+  color: var(--kd-text);
+}
+.kd-player-step:disabled {
+  color: var(--kd-line);
+  cursor: default;
+}
+/* 模式/范围两颗排在走带键右边，语义是"下一首怎么挑"的设置而不是走带动作，
+   隔出一步间距，别和三颗走带键混成五连击 */
+.kd-player-mode {
+  margin-left: 0.45rem;
+}
+
+/* DJ 接歌按钮：走带键左边、同样的裸图标脸。它是"换歌的方式"而不是走带
+   动作，和右边的模式/范围一个道理，隔出一步间距。容器只为给菜单当锚点。 */
+.kd-player-dj {
+  position: relative;
+  display: grid;
+  place-items: center;
+  margin-right: 0.45rem;
+}
+/* 亮起 = 有预设在生效。用主题红——播放条上只有播放键一个红色物件，
+   这颗亮起时用户要一眼看出"换歌行为已经变了"。 */
+.kd-player-djbtn[data-on="true"] {
+  color: var(--kd-theme);
+}
+.kd-player-djbtn[data-on="true"]:hover:not(:disabled) {
+  color: var(--kd-theme-strong);
+}
+
+/* ------------------------------------------------------------ DJ 配置面板
+   住在右侧详情栏（见 DjPanel.tsx）。控件都是"点了立刻生效"的单选/开关，
+   没有保存按钮——面板本身就是状态的显示。 */
+.kd-djp {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem;
+}
+.kd-djp-intro,
+.kd-djp-note {
+  margin: 0.35rem 0;
+  font-size: 0.72rem;
+  line-height: 1.55;
+  color: var(--kd-muted);
+}
+.kd-djp-options {
+  display: flex;
+  flex-direction: column;
+}
+/* 单选行：圆点 + 标题 + 说明。整行可点，不用去瞄那个小圆点。 */
+.kd-djp-option {
+  appearance: none;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.4rem 0.3rem;
+  cursor: pointer;
+  text-align: left;
+}
+.kd-djp-option:hover {
+  background: var(--kd-panel-inset);
+}
+.kd-djp-dot {
+  flex: none;
+  width: 0.7rem;
+  height: 0.7rem;
+  margin-top: 0.15rem;
+  border: 1.5px solid var(--kd-muted);
+  border-radius: 50%;
+}
+.kd-djp-option[data-active="true"] .kd-djp-dot {
+  border-color: var(--kd-theme);
+  background: radial-gradient(circle, var(--kd-theme) 0 40%, transparent 45%);
+}
+.kd-djp-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.kd-djp-label {
+  font-size: 0.78rem;
+  color: var(--kd-text);
+}
+.kd-djp-option[data-active="true"] .kd-djp-label {
+  color: var(--kd-theme);
+}
+.kd-djp-hint {
+  font-size: 0.68rem;
+  line-height: 1.5;
+  color: var(--kd-muted);
+}
+/* 小节数的分段选择：一排等宽小按钮，选中的描主题色。 */
+.kd-djp-segs {
+  display: flex;
+  gap: 0.25rem;
+  margin: 0.3rem 0;
+}
+.kd-djp-segs > button {
+  appearance: none;
+  flex: 1;
+  padding: 0.3rem 0.2rem;
+  border: 1px solid var(--kd-line);
+  background: transparent;
+  color: var(--kd-text-body);
+  font-size: 0.72rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.kd-djp-segs > button:hover {
+  background: var(--kd-panel-inset);
+}
+.kd-djp-segs > button[data-on="true"] {
+  border-color: var(--kd-theme);
+  color: var(--kd-theme);
+  background: var(--kd-theme-soft);
+}
+.kd-djp-check {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.78rem;
+  color: var(--kd-text);
+  cursor: pointer;
+  padding: 0.25rem 0;
+}
+
+/* ============================================================
+ * 三栏换位
+ *
+ * 用 CSS order 换位，不动 DOM：两条拖宽把手是按"左栏/右栏"绑定的，
+ * DOM 一动，把手拖的就不是它旁边那一栏了。
+ * 列宽是**按位置**定的（第一栏窄、第三栏宽），换位之后各自继承所在位置的宽度，
+ * 不满意可以接着拖宽——两个动作互不干扰。
+ * ========================================================== */
+.kd-col-slot {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
+}
+/* 换位把手：贴在每栏顶边中间的一小条。只有它可拖——整栏可拖的话，
+   栏里的按钮、输入框、波形点击全会先被拖拽劫走。 */
+.kd-col-grip {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 2.2rem;
+  height: 5px;
+  z-index: 5;
+  cursor: grab;
+  background: transparent;
+  transition: background 0.12s;
+}
+.kd-col-grip:hover,
+.kd-col-grip:active {
+  background: var(--kd-muted);
+}
+.kd-col-grip:active {
+  cursor: grabbing;
+}
+.kd-table-wrap,
+.kd-split-aside {
+  position: relative;
+}
+/* 正在拖的那一栏压暗，落点那栏亮一条左边线 */
+[data-dragging="true"] {
+  opacity: 0.5;
 }

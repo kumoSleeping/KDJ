@@ -75,12 +75,12 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "v$VERSION" -m "KumoDeck v$VERSION" "$GITHUB_SHA"
+          git tag -a "v$VERSION" -m "KDJ v$VERSION" "$GITHUB_SHA"
           git push origin "v$VERSION"
           # Release 先建好（产物晚点由打包线传进来）。--generate-notes 用
           # 上个 tag 到现在的提交自动写变更记录。
           gh release create "v$VERSION" \
-            --title "KumoDeck v$VERSION" \
+            --title "KDJ v$VERSION" \
             --generate-notes \
             --notes "> 产物由 rust-build / rust-android 两条流水线上传，跑完前这里可能暂时是空的。"
 

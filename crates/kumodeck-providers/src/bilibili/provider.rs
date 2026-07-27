@@ -39,10 +39,34 @@ const LABEL: &str = "哔哩哔哩";
 const CHUNK_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 const QR_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
+/// 预览直链的缓存时长。CDN 地址带签名（deadline 一般是两小时），取 30 分钟留足余量。
+/// 拖一次进度条就是一串 Range 请求，每个都重新 view+playurl 的话，
+/// 正好凑成最容易被风控的形状（短时间高频打接口）。
+const PREVIEW_URL_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// 预览的清晰度档位（qn=64 → 720P）。预览回答的是"是不是要找的那支片子"，
+/// 不是拿来审画质的；档位越高首帧越慢。
+const PREVIEW_QN: i64 = 64;
+
+/// 预览流的转发包裹：状态码 + 要透传的几个头 + 字节流。
+///
+/// 不直接把 `reqwest::Response` 交出去——server 层不依赖 reqwest，
+/// 让它拿着裸 `Bytes` 流自己包成 HTTP 响应。
+pub struct PreviewStream {
+    /// 200（整份）或 206（Range 片段），照抄上游。
+    pub status: u16,
+    pub content_type: String,
+    pub content_length: Option<u64>,
+    pub content_range: Option<String>,
+    pub body: futures_util::stream::BoxStream<'static, std::io::Result<bytes::Bytes>>,
+}
+
 pub struct BilibiliProvider {
     ctx: ProviderContext,
     client: BiliClient,
     qr_sessions: Mutex<HashMap<String, (String, Instant)>>,
+    /// (bvid, 分P) → (直链, 解析时刻)。见 `PREVIEW_URL_TTL`。
+    preview_urls: Mutex<HashMap<(String, usize), (String, Instant)>>,
 }
 
 impl BilibiliProvider {
@@ -53,6 +77,7 @@ impl BilibiliProvider {
             client: BiliClient::new(&session_dir)?,
             ctx,
             qr_sessions: Mutex::new(HashMap::new()),
+            preview_urls: Mutex::new(HashMap::new()),
         })
     }
 
@@ -114,6 +139,112 @@ impl BilibiliProvider {
         })
     }
 
+    /// 预览用的直链：durl 单文件 mp4（fnval=1）。
+    ///
+    /// `<video>` 不经 MSE 只放得了单流，DASH 音画分离的形态在预览里没法用；
+    /// 单流 mp4 恰好也是安卓下载走的那条路，B 站对它的支持是稳定的。
+    async fn preview_url(&self, bvid: &str, page_index: usize) -> Result<String> {
+        if let Some(url) = {
+            let cache = self.preview_urls.lock().unwrap();
+            cache
+                .get(&(bvid.to_string(), page_index))
+                .filter(|(_, born)| born.elapsed() < PREVIEW_URL_TTL)
+                .map(|(url, _)| url.clone())
+        } {
+            return Ok(url);
+        }
+        let info = self.client.view(bvid).await?;
+        let pages: Vec<Value> = info
+            .get("pages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let index = page_index.min(pages.len().saturating_sub(1));
+        let cid = cid_at(&info, &pages, index);
+        let playurl = self.client.playurl(bvid, cid, PREVIEW_QN, false).await?;
+        let PlayUrlData::Single { url, .. } = streams::parse_playurl(&playurl) else {
+            bail!("哔哩哔哩没有返回可直接播放的预览流");
+        };
+        ensure_media_url(&url).await?;
+        let mut cache = self.preview_urls.lock().unwrap();
+        // 顺手清掉过期的：预览是"搜一批、点着看"的用法，不清会越攒越多
+        cache.retain(|_, (_, born)| born.elapsed() <= PREVIEW_URL_TTL);
+        cache.insert((bvid.to_string(), page_index), (url.clone(), Instant::now()));
+        Ok(url)
+    }
+
+    /// 预览流：把 B 站 CDN 的响应（含 Range 语义）原样转出去。
+    ///
+    /// Referer / UA / Cookie 是防盗链三件套，webview 里的 `<video>` 一个都发不出来，
+    /// 所以必须由后端代打。Range 头照转——进度条拖不拖得动全看它。
+    pub async fn preview_stream(
+        &self,
+        bvid: &str,
+        page_index: usize,
+        range: Option<&str>,
+    ) -> Result<PreviewStream> {
+        let bvid = normalize_bvid(bvid);
+        anyhow::ensure!(!bvid.is_empty(), "BV 号格式不正确");
+        let cookies = self.client.cookie_header();
+        let send = |url: String, range: Option<String>| {
+            let http = self.client.http().clone();
+            let cookies = cookies.clone();
+            async move {
+                let mut builder = http
+                    .get(&url)
+                    .header(reqwest::header::REFERER, "https://www.bilibili.com/")
+                    .header(reqwest::header::USER_AGENT, USER_AGENT);
+                if !cookies.is_empty() {
+                    builder = builder.header(reqwest::header::COOKIE, cookies);
+                }
+                if let Some(range) = range {
+                    builder = builder.header(reqwest::header::RANGE, range);
+                }
+                builder.send().await.context("哔哩哔哩预览流请求失败")
+            }
+        };
+
+        let url = self.preview_url(&bvid, page_index).await?;
+        let mut response = send(url, range.map(str::to_string)).await?;
+        if matches!(response.status().as_u16(), 403 | 410 | 412) {
+            // 直链签名过期（缓存的太老 / 出口 IP 变了）：重解析一次再试，
+            // 别把一个能自愈的状况直接甩给前端当播放失败
+            self.preview_urls
+                .lock()
+                .unwrap()
+                .remove(&(bvid.clone(), page_index));
+            let fresh = self.preview_url(&bvid, page_index).await?;
+            response = send(fresh, range.map(str::to_string)).await?;
+        }
+        let status = response.status();
+        if !status.is_success() {
+            bail!("哔哩哔哩预览流返回 HTTP {}", status.as_u16());
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("video/mp4")
+            .to_string();
+        let content_range = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let content_length = response.content_length();
+        let body = response
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(std::io::Error::other))
+            .boxed();
+        Ok(PreviewStream {
+            status: status.as_u16(),
+            content_type,
+            content_length,
+            content_range,
+            body,
+        })
+    }
+
     /// 视频下载主流程。
     pub async fn download_video(
         &self,
@@ -121,6 +252,11 @@ impl BilibiliProvider {
         cancel: &CancellationToken,
         progress: &ProgressSink,
     ) -> Result<PathBuf> {
+        // 掐头/留白全靠 ffmpeg（安卓走的是无 ffmpeg 的单流直存路径），
+        // 早点把话说明白，别下完整段流才发现偏移根本没生效
+        if req.offset_ms != 0 && !ffmpeg::available() {
+            bail!("调整过 Offset 的下载需要 ffmpeg，这台设备上没有");
+        }
         let (bvid, requested_index) = self.target_of(req).await?;
         let logged_in = self.logged_in().await;
         let info = self.client.view(&bvid).await?;
@@ -171,7 +307,12 @@ impl BilibiliProvider {
         } else {
             self.ctx.video_format.clone()
         };
-        let stem = sanitize_filename_value(&title, &bvid);
+        let mut stem = sanitize_filename_value(&title, &bvid);
+        if req.offset_ms != 0 {
+            // 带偏移的成品在文件名上标出来：和「直接下载」同名会互相覆盖，
+            // 而且拿到手的人得知道这份的开头被动过
+            stem.push_str(&format!(" (off{:+.2}s)", req.offset_ms as f64 / 1000.0));
+        }
         let output_path =
             output_dir.join(finalize_filename(&format!("{stem}.{extension}"), &extension));
 
@@ -205,7 +346,7 @@ impl BilibiliProvider {
             let source_path = temp_dir.join(if is_single { "source.flv" } else { "audio.m4s" });
             self.fetch_streams(&[(source.url.clone(), source_path.clone())], &cookies, cancel, progress)
                 .await?;
-            self.extract_audio(&source_path, &staged, &log_path, cancel)
+            self.extract_audio(&source_path, &staged, &log_path, req.offset_ms, cancel)
                 .await?;
         } else {
             let Some(video) = video_stream.clone() else {
@@ -240,7 +381,7 @@ impl BilibiliProvider {
                 inputs
             };
             self.fetch_streams(&plan, &cookies, cancel, progress).await?;
-            let args = ffmpeg::mux_args(&inputs, &staged, req.transcode, max_height);
+            let args = ffmpeg::mux_args(&inputs, &staged, req.transcode, max_height, req.offset_ms);
             ffmpeg::run(&args, &log_path, cancel).await?;
         }
 
@@ -409,18 +550,22 @@ impl BilibiliProvider {
         source: &PathBuf,
         staged: &PathBuf,
         log_path: &PathBuf,
+        offset_ms: i64,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let copy_args = ffmpeg::extract_audio_args(source, staged, true);
-        match ffmpeg::run(&copy_args, log_path, cancel).await {
-            Ok(()) => return Ok(()),
-            Err(err) if err.to_string().contains("取消") => return Err(err),
-            Err(_) => {
-                // 源音轨不是 AAC（flv 里常见 mp3）时 m4a 容器装不下，退回重编码
-                let _ = std::fs::remove_file(staged);
+        // 带偏移必然重编码（见 extract_audio_args），copy 那一趟纯属白跑
+        if offset_ms == 0 {
+            let copy_args = ffmpeg::extract_audio_args(source, staged, true, 0);
+            match ffmpeg::run(&copy_args, log_path, cancel).await {
+                Ok(()) => return Ok(()),
+                Err(err) if err.to_string().contains("取消") => return Err(err),
+                Err(_) => {
+                    // 源音轨不是 AAC（flv 里常见 mp3）时 m4a 容器装不下，退回重编码
+                    let _ = std::fs::remove_file(staged);
+                }
             }
         }
-        let args = ffmpeg::extract_audio_args(source, staged, false);
+        let args = ffmpeg::extract_audio_args(source, staged, false, offset_ms);
         ffmpeg::run(&args, log_path, cancel).await
     }
 }
@@ -603,6 +748,7 @@ impl MusicProvider for BilibiliProvider {
             max_height: 1080,
             audio_only: false,
             transcode: false,
+            offset_ms: 0,
         };
         self.download_video(&req, &job.cancel, &job.progress).await
     }

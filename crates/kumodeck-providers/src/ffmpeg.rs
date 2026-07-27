@@ -66,10 +66,32 @@ fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// 毫秒转 ffmpeg 认的秒数写法（`-ss 1.250`）。
+fn secs(ms: i64) -> String {
+    format!("{:.3}", ms as f64 / 1000.0)
+}
+
 /// 混流命令。`inputs` 是 `[视频]` 或 `[视频, 音频]`。
-pub fn mux_args(inputs: &[PathBuf], output: &Path, transcode: bool, max_height: i64) -> Vec<String> {
+///
+/// `offset_ms` 正数掐掉开头（`-ss` 放在 `-i` 前面，重编码下精确到帧），
+/// 负数在开头补黑场 + 静音（tpad / adelay）。非零一律强制重编码：
+/// copy 只能按关键帧切，误差以秒计，而这个值是对着唱盘一拍一拍
+/// 校出来的，差几十毫秒都等于白校。
+pub fn mux_args(
+    inputs: &[PathBuf],
+    output: &Path,
+    transcode: bool,
+    max_height: i64,
+    offset_ms: i64,
+) -> Vec<String> {
+    let transcode = transcode || offset_ms != 0;
     let mut args: Vec<String> = vec!["-y".into()];
     for input in inputs {
+        if offset_ms > 0 {
+            // 每条输入都要各自 -ss：DASH 的音画是两个文件，只掐视频那条会错位
+            args.push("-ss".into());
+            args.push(secs(offset_ms));
+        }
         args.push("-i".into());
         args.push(input.to_string_lossy().into_owned());
     }
@@ -84,6 +106,12 @@ pub fn mux_args(inputs: &[PathBuf], output: &Path, transcode: bool, max_height: 
         args.push("0:a:0?".into());
     }
     if transcode {
+        // 负偏移的黑场在缩放前面补：tpad 生成的帧跟着源一起缩，滤镜链只写一遍尺寸
+        let mut vf = String::new();
+        if offset_ms < 0 {
+            vf.push_str(&format!("tpad=start_duration={},", secs(-offset_ms)));
+        }
+        vf.push_str(&format!("scale=-2:min({max_height}\\,ih)"));
         args.extend(
             [
                 "-c:v",
@@ -93,7 +121,7 @@ pub fn mux_args(inputs: &[PathBuf], output: &Path, transcode: bool, max_height: 
                 "-crf",
                 &TRANSCODE_CRF.to_string(),
                 "-vf",
-                &format!("scale=-2:min({max_height}\\,ih)"),
+                &vf,
                 "-pix_fmt",
                 "yuv420p",
                 "-c:a",
@@ -103,6 +131,11 @@ pub fn mux_args(inputs: &[PathBuf], output: &Path, transcode: bool, max_height: 
             ]
             .map(str::to_string),
         );
+        if offset_ms < 0 {
+            // 画面补了黑场，声音就得补等长的静音，否则音画从头错到尾
+            args.push("-af".into());
+            args.push(format!("adelay={}:all=1", -offset_ms));
+        }
     } else {
         // 桌面端没有体积限制的必要，默认直接封装，比重编码快一个数量级
         args.push("-c".into());
@@ -115,19 +148,31 @@ pub fn mux_args(inputs: &[PathBuf], output: &Path, transcode: bool, max_height: 
 }
 
 /// 抽音轨命令。`copy = true` 时不重编码。
-pub fn extract_audio_args(source: &Path, output: &Path, copy: bool) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "-y".into(),
+///
+/// `offset_ms` 语义同 [`mux_args`]：正数掐头、负数补静音，非零强制重编码
+/// （AAC 帧 20ms 一个，copy 切不准）。
+pub fn extract_audio_args(source: &Path, output: &Path, copy: bool, offset_ms: i64) -> Vec<String> {
+    let copy = copy && offset_ms == 0;
+    let mut args: Vec<String> = vec!["-y".into()];
+    if offset_ms > 0 {
+        args.push("-ss".into());
+        args.push(secs(offset_ms));
+    }
+    args.extend([
         "-i".into(),
         source.to_string_lossy().into_owned(),
         "-vn".into(),
         "-map".into(),
         "0:a:0".into(),
-    ];
+    ]);
     if copy {
         args.push("-c:a".into());
         args.push("copy".into());
     } else {
+        if offset_ms < 0 {
+            args.push("-af".into());
+            args.push(format!("adelay={}:all=1", -offset_ms));
+        }
         args.extend(["-c:a", "aac", "-b:a", "128k"].map(str::to_string));
     }
     args.push("-movflags".into());
@@ -301,6 +346,7 @@ mod tests {
             Path::new("out.mp4"),
             false,
             1080,
+            0,
         );
         let args = as_str(&args);
         assert_eq!(
@@ -314,14 +360,14 @@ mod tests {
 
     #[test]
     fn single_input_marks_the_audio_stream_optional() {
-        let args = mux_args(&[PathBuf::from("s.flv")], Path::new("out.mp4"), false, 1080);
+        let args = mux_args(&[PathBuf::from("s.flv")], Path::new("out.mp4"), false, 1080, 0);
         // `0:a:0?` 的问号不能丢：有些 flv 真的没有音轨，丢了整条命令就失败
         assert!(as_str(&args).contains(&"0:a:0?"));
     }
 
     #[test]
     fn transcode_scales_without_upscaling() {
-        let args = mux_args(&[PathBuf::from("v.m4s")], Path::new("out.mp4"), true, 720);
+        let args = mux_args(&[PathBuf::from("v.m4s")], Path::new("out.mp4"), true, 720, 0);
         let args = as_str(&args);
         assert!(args.contains(&"libx264"));
         // min(...) 保证不会把 480p 的源放大到 720p
@@ -331,13 +377,54 @@ mod tests {
 
     #[test]
     fn audio_extraction_prefers_copy_then_falls_back_to_aac() {
-        let copy = extract_audio_args(Path::new("s.m4s"), Path::new("o.m4a"), true);
+        let copy = extract_audio_args(Path::new("s.m4s"), Path::new("o.m4a"), true, 0);
         assert!(as_str(&copy).windows(2).any(|w| w == ["-c:a", "copy"]));
 
-        let reencode = extract_audio_args(Path::new("s.flv"), Path::new("o.m4a"), false);
+        let reencode = extract_audio_args(Path::new("s.flv"), Path::new("o.m4a"), false, 0);
         let reencode = as_str(&reencode);
         assert!(reencode.windows(2).any(|w| w == ["-c:a", "aac"]));
         assert!(reencode.contains(&"128k"));
+    }
+
+    #[test]
+    fn a_positive_offset_trims_every_input_and_forces_reencode() {
+        let args = mux_args(
+            &[PathBuf::from("v.m4s"), PathBuf::from("a.m4s")],
+            Path::new("out.mp4"),
+            false,
+            1080,
+            1250,
+        );
+        let args = as_str(&args);
+        // 两条输入各自 -ss：DASH 音画分离，只掐一条就错位
+        assert_eq!(args.iter().filter(|arg| **arg == "-ss").count(), 2);
+        assert!(args.windows(2).any(|w| w == ["-ss", "1.250"]));
+        // 明明传的 transcode=false，也必须走重编码——copy 只能按关键帧切
+        assert!(args.contains(&"libx264"));
+        assert!(!args.contains(&"copy"));
+    }
+
+    #[test]
+    fn a_negative_offset_pads_black_video_and_matching_silence() {
+        let args = mux_args(&[PathBuf::from("v.m4s")], Path::new("out.mp4"), true, 1080, -800);
+        let args = as_str(&args);
+        assert!(args.iter().any(|arg| arg.contains("tpad=start_duration=0.800")));
+        // 画面补了黑场，声音必须补等长静音
+        assert!(args.windows(2).any(|w| w == ["-af", "adelay=800:all=1"]));
+        assert!(!args.contains(&"-ss"));
+    }
+
+    #[test]
+    fn audio_offset_overrides_the_copy_fast_path() {
+        let trimmed = extract_audio_args(Path::new("s.m4s"), Path::new("o.m4a"), true, 300);
+        let trimmed = as_str(&trimmed);
+        assert!(trimmed.windows(2).any(|w| w == ["-ss", "0.300"]));
+        assert!(!trimmed.contains(&"copy"));
+
+        let padded = extract_audio_args(Path::new("s.m4s"), Path::new("o.m4a"), true, -300);
+        let padded = as_str(&padded);
+        assert!(padded.windows(2).any(|w| w == ["-af", "adelay=300:all=1"]));
+        assert!(!padded.contains(&"copy"));
     }
 
     #[test]
