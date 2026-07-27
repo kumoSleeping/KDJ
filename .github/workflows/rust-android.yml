@@ -208,7 +208,7 @@ jobs:
         if: steps.shell.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: kumodeck-android-apk
+          name: kdj-android-apk
           path: |
             src-tauri/gen/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error

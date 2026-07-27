@@ -4,8 +4,8 @@
 
 ## 做了什么
 
-1. 建骨架 `kumodeck/`：`electron/`（主进程）、`src/`（渲染层）、`sidecar/`（Python 服务）、`docs/`。
-2. 先写死契约再写代码：`docs/00-architecture.md` + `sidecar/kumodeck/models.py` + `src/types.ts` + `src/design.css` + `src/lib/api.ts`。
+1. 建骨架 `kdj/`：`electron/`（主进程）、`src/`（渲染层）、`sidecar/`（Python 服务）、`docs/`。
+2. 先写死契约再写代码：`docs/00-architecture.md` + `sidecar/kdj/models.py` + `src/types.ts` + `src/design.css` + `src/lib/api.ts`。
    —— 后面所有并行实现都以这五份为准，避免多人（多 agent）并行时接口漂移。
 3. `npm install`、`npm run sidecar:setup` 打通。
 
@@ -15,7 +15,7 @@
 
 ```
 × No solution found when resolving dependencies:
-╰─▶ Because pyncm was not found in the package registry and kumodeck==0.1.0
+╰─▶ Because pyncm was not found in the package registry and kdj==0.1.0
     depends on pyncm>=1.8 ...
 ```
 
@@ -72,7 +72,7 @@ ESM preload 需要 `sandbox: false` 才能加载。我们已经因为要用 `fet
 
 ## 坑 5：`<audio>` / `<img>` 发不了自定义请求头
 
-sidecar 用 `X-KumoDeck-Token` 头鉴权，但试听用的 `<audio src>` 和封面 `<img src>` 是浏览器直接发的请求，
+sidecar 用 `X-KDJ-Token` 头鉴权，但试听用的 `<audio src>` 和封面 `<img src>` 是浏览器直接发的请求，
 **加不了自定义头**。所以 `/api/library/audio/{id}` 和 `/api/library/cover/{id}` 这两条必须额外接受
 `?token=` 查询参数。已写进契约（`docs/00-architecture.md` 2.2 节）和 `src/lib/api.ts` 的
 `audioUrl()` / `coverUrl()`。

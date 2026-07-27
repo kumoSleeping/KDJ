@@ -1,14 +1,10 @@
 import { useState } from "react";
-import { Square } from "lucide-react";
-import { forgetQueuedAnalysis } from "../../lib/autoAnalyze";
-import { selectAnalyzing, useLibraryStore } from "../../stores/libraryStore";
-import { Button, InlineNotice, ProgressBar } from "../common";
+import { useLibraryStore } from "../../stores/libraryStore";
+import { InlineNotice, ProgressBar } from "../common";
 
 export function LibraryToolbar() {
-  const cancelAnalyze = useLibraryStore((state) => state.cancelAnalyze);
   const scan = useLibraryStore((state) => state.scan);
   const analyze = useLibraryStore((state) => state.analyze);
-  const analyzing = useLibraryStore(selectAnalyzing);
   /** 出错就地贴在工具条下面。原来是弹窗，可弹窗飘走之后用户就不知道刚才哪一步没成了。 */
   const [notice, setNotice] = useState("");
   /**
@@ -77,38 +73,9 @@ export function LibraryToolbar() {
               <span className="kd-chip" data-tone="theme">
                 分析
               </span>
-              <ProgressBar
-                className="kd-grow"
-                value={analyze.total > 0 ? analyze.done / analyze.total : 0}
-                indeterminate={analyze.total === 0}
-              />
-              <span className="kd-num kd-muted">
-                {analyze.done}/{analyze.total}
+              <span className="kd-muted kd-truncate" title={analyze.current}>
+                正在分析 {analyze.done}/{analyze.total} 首{analyze.current ? ` · ${analyze.current}` : ""}
               </span>
-              <span className="kd-truncate kd-faint" style={{ maxWidth: "14rem" }} title={analyze.current}>
-                {analyze.current}
-              </span>
-              {/* 分析上千首要跑很久，中途改主意必须能停下来——不给出口的话
-                  只能关掉整个 app，正在写的那一行还可能写坏。
-                  就地贴在进度条尾巴上：停的是眼前这根条，不用再去别处找按钮。
-                  这一行唯一的红色，而且只在真的有东西在跑时才出现。 */}
-              {analyzing && (
-                <Button
-                  variant="danger"
-                  size="sm"
-                  iconOnly
-                  aria-label="停止分析"
-                  title="停止分析。正在跑的那一首会跑完，之后也不再自动补齐"
-                  onClick={() => {
-                    forgetQueuedAnalysis();
-                    void cancelAnalyze().catch((error: unknown) =>
-                      setNotice((error as Error).message),
-                    );
-                  }}
-                >
-                  <Square size={10} fill="currentColor" />
-                </Button>
-              )}
             </span>
           )}
         </div>

@@ -9,15 +9,15 @@
 
 | 钥匙 | 干什么用 | 存在哪 | 丢了会怎样 |
 | --- | --- | --- | --- |
-| **minisign 私钥** | 给桌面更新包签名，装机端用内嵌公钥验 | `~/.tauri/kumodeck.key` | 已装的旧版**永远收不到新更新**（公钥编译进了旧包，换钥匙 = 换身份）。只能让用户手动重装 |
-| **Android keystore** | 给 APK 签名 | `~/.android/kumodeck-release.jks`，口令在同目录 `.pass` | 已装用户**无法覆盖升级**，必须先卸载再装（Android 认签名不认包名） |
+| **minisign 私钥** | 给桌面更新包签名，装机端用内嵌公钥验 | `~/.tauri/kdj.key` | 已装的旧版**永远收不到新更新**（公钥编译进了旧包，换钥匙 = 换身份）。只能让用户手动重装 |
+| **Android keystore** | 给 APK 签名 | `~/.android/kdj-release.jks`，口令在同目录 `.pass` | 已装用户**无法覆盖升级**，必须先卸载再装（Android 认签名不认包名） |
 
 两把钥匙都**没有进版本库**，也没有第二份拷贝。请立刻自己备份这三个文件：
 
 ```
-~/.tauri/kumodeck.key            minisign 私钥（无口令）
-~/.android/kumodeck-release.jks  Android keystore（4096 位 RSA，有效期到 2056）
-~/.android/kumodeck-release.pass keystore 口令
+~/.tauri/kdj.key            minisign 私钥（无口令）
+~/.android/kdj-release.jks  Android keystore（4096 位 RSA，有效期到 2056）
+~/.android/kdj-release.pass keystore 口令
 ```
 
 minisign 的**公钥**是可以公开的，它就写在 `src-tauri/tauri.conf.json` 的
@@ -30,10 +30,10 @@ Settings → Secrets and variables → Actions → New repository secret：
 
 | 名字 | 值怎么来 |
 | --- | --- |
-| `TAURI_SIGNING_PRIVATE_KEY` | `cat ~/.tauri/kumodeck.key` 的全文 |
-| `ANDROID_KEYSTORE_BASE64` | `base64 -i ~/.android/kumodeck-release.jks \| pbcopy` |
-| `ANDROID_KEYSTORE_PASSWORD` | `cat ~/.android/kumodeck-release.pass` |
-| `ANDROID_KEY_ALIAS` | `kumodeck` |
+| `TAURI_SIGNING_PRIVATE_KEY` | `cat ~/.tauri/kdj.key` 的全文 |
+| `ANDROID_KEYSTORE_BASE64` | `base64 -i ~/.android/kdj-release.jks \| pbcopy` |
+| `ANDROID_KEYSTORE_PASSWORD` | `cat ~/.android/kdj-release.pass` |
+| `ANDROID_KEY_ALIAS` | `kdj` |
 
 仓库提供了不回显私钥的一次性配置脚本。先做好加密离线备份，再运行：
 
@@ -42,7 +42,7 @@ Settings → Secrets and variables → Actions → New repository secret：
 ```
 
 脚本会先验证：内嵌 updater 公钥与本机私钥配对、Android keystore 中存在
-`kumodeck` alias；确认备份后，四个值都通过 stdin 写入 `gh secret set`，不会
+`kdj` alias；确认备份后，四个值都通过 stdin 写入 `gh secret set`，不会
 出现在命令行参数或日志里。
 
 **分支构建**没配密钥仍可继续，只产普通安装包用于编译验证；**正式 tag** 缺

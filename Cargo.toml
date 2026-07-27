@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/kumodeck-core",
-    "crates/kumodeck-providers",
-    "crates/kumodeck-analysis",
-    "crates/kumodeck-library",
-    "crates/kumodeck-server",
+    "crates/kdj-core",
+    "crates/kdj-providers",
+    "crates/kdj-analysis",
+    "crates/kdj-library",
+    "crates/kdj-server",
     "src-tauri",
 ]
 

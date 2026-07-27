@@ -15,21 +15,21 @@
    dispatch 桌面+安卓两条打包线到 tag ref 上（GITHUB_TOKEN 打的 tag
    不会自己触发工作流——GitHub 防递归的硬规则，所以必须显式 dispatch）。
 2. **验收标准三条**：行为和 v0.1.0 一模一样 → 体积大幅缩小 → 能出安卓安装包。
-3. **契约不许悄悄改**：`crates/kumodeck-core/src/models.rs` 的字段名必须和
+3. **契约不许悄悄改**：`crates/kdj-core/src/models.rs` 的字段名必须和
    `src/types.ts` 一一对应。改一个字段就要全量回归 5792 行前端。
 
 ## 1. 现在到哪了
 
 | 里程碑 | 状态 | 证据 |
 | --- | --- | --- |
-| M0 workspace + 契约模型 + 配置 + 事件总线 | ✅ | `crates/kumodeck-core`，22 测试 |
+| M0 workspace + 契约模型 + 配置 + 事件总线 | ✅ | `crates/kdj-core`，22 测试 |
 | M2 provider 抽象 + 网易云 | ✅ 真机验证 | `--example smoke_netease` |
 | M3 QQ 音乐 / B 站 / SoundCloud | ✅ 真机验证 | `--example smoke_qq / smoke_bili / smoke_sc` |
 | M5 分析管线（tempo/key/loudness/decode） | ✅ 40 首真机对拍：调号 98%、能量 100% | `docs/rust-port/03` |
 | M1 曲库 SQLite 层 + 文件夹 + 扫描 | ✅ 真实 1379 首曲库集成测试 | `docs/rust-port/04` |
-| M4 下载队列 + WS 事件 | ✅ 队列/取消/进度 + `/ws` 实连收到事件 | `crates/kumodeck-server/downloads.rs`、`ws.rs` |
-| M6 曲库写操作（scan/folders/manifest） | ✅ 含 move/link/清单顺序 | `crates/kumodeck-library` |
-| M7 axum server + Tauri 壳 + 前端接线 | ✅ 34 条路径 / 39 个方法端点 + `/ws`；6 条 Tauri 命令；`bridge.ts` 运行时探测壳 | `crates/kumodeck-server`、`src-tauri`、`src/lib/bridge.ts` |
+| M4 下载队列 + WS 事件 | ✅ 队列/取消/进度 + `/ws` 实连收到事件 | `crates/kdj-server/downloads.rs`、`ws.rs` |
+| M6 曲库写操作（scan/folders/manifest） | ✅ 含 move/link/清单顺序 | `crates/kdj-library` |
+| M7 axum server + Tauri 壳 + 前端接线 | ✅ 34 条路径 / 39 个方法端点 + `/ws`；6 条 Tauri 命令；`bridge.ts` 运行时探测壳 | `crates/kdj-server`、`src-tauri`、`src/lib/bridge.ts` |
 | M8 安卓 APK | 🟡 **APK 能编出来了，没装过真机** | 18,025,001 B unsigned，`docs/rust-port/06` §4 |
 | M9 打包体积实测 | ✅ DMG 5,911,874 B，v0.1.0 是 155 MB —— 小 26 倍 | `docs/rust-port/06` |
 | CI：桌面三平台 + 安卓骨架 | ✅ YAML 就位（未在 GitHub 上真跑过） | `docs/rust-port/05` |
@@ -55,8 +55,8 @@ wma/alac、publish_toast 移除、图标定稿（用户的小熊灯照片，`des
 曲库层另有一组**跑在用户真实曲库上**的集成测试，默认跳过：
 
 ```bash
-KUMODECK_TEST_DB="$HOME/Library/Application Support/kumodeck/data/kumodeck.db" \
-  cargo test -p kumodeck-library --test real_library
+KDJ_TEST_DB="$HOME/Library/Application Support/kdj/data/kdj.db" \
+  cargo test -p kdj-library --test real_library
 ```
 
 （内部会先拷贝再打开，不碰原库。当前 11 个，全绿。）
@@ -72,10 +72,10 @@ KUMODECK_TEST_DB="$HOME/Library/Application Support/kumodeck/data/kumodeck.db" \
 "返回 200 但内容是空的"，所以每个 provider 都配了真机冒烟脚本：
 
 ```bash
-cargo run -p kumodeck-providers --example smoke_netease -- Supernova
-cargo run -p kumodeck-providers --example smoke_qq       -- Supernova
-cargo run -p kumodeck-providers --example smoke_bili
-cargo run -p kumodeck-providers --example smoke_sc       -- lofi
+cargo run -p kdj-providers --example smoke_netease -- Supernova
+cargo run -p kdj-providers --example smoke_qq       -- Supernova
+cargo run -p kdj-providers --example smoke_bili
+cargo run -p kdj-providers --example smoke_sc       -- lofi
 ```
 
 改动 provider 之后**必须**把对应的冒烟跑一遍，看有没有真的搜到东西、
@@ -91,7 +91,7 @@ cargo run -p kumodeck-providers --example smoke_sc       -- lofi
 | 网易云接口不认 | 间歇性 | weapi 的 base64 必须按 76 列换行且结尾带换行 |
 | `/ws` 一律 401 | 进度条永远不动，页面其余部分全正常 | Starlette 的 `@app.middleware("http")` 根本不作用于 websocket 作用域，Python 版的 `/ws` 是**隐式**绕过鉴权中间件的；axum 这边升级请求就是普通 GET，会实打实过中间件，而 token 只能放 query（浏览器 `new WebSocket()` 带不了自定义头）。修在 `auth.rs::accepts_query_token` |
 | 启动刷两条 `ERROR r2d2: database is locked`，然后自己好了 | 只在文件库上出现，内存库测试永远测不到 | r2d2 是**并发**建 8 条连接的，而 `journal_mode=WAL` 原本写在 `with_init` 里 → 每条连接都切一次 → 撞车。`PRAGMA journal_mode` 撞车是直接返回 BUSY，**busy_timeout 救不了**。修法是建池之前用一条独立连接串行切一次（`db.rs::prepare_journal_mode`）；`with_init` 里从此只许放连接级 pragma |
-| `pkill -f kumodeck-app` 会误杀正在编译的 cargo | 构建报 `exited with code <signal 15>`，看起来像交叉编译坏了 | `pkill -f` 匹配整条命令行，而 tauri 生成的 cargo 命令行里有 `--package kumodeck-app`。要停应用请用 `pkill -f 'target/debug/kumodeck-app$'` 或按 PID 杀。长构建外面套 `sh -c "trap '' TERM; ..."` 保命 |
+| `pkill -f kdj-app` 会误杀正在编译的 cargo | 构建报 `exited with code <signal 15>`，看起来像交叉编译坏了 | `pkill -f` 匹配整条命令行，而 tauri 生成的 cargo 命令行里有 `--package kdj-app`。要停应用请用 `pkill -f 'target/debug/kdj-app$'` 或按 PID 杀。长构建外面套 `sh -c "trap '' TERM; ..."` 保命 |
 | 多个 agent 并行改同一个仓库 | 前端按钮点了 404 / CSS 里出现"选择器中间夹着注释"这种怪东西 | 谁都只改自己那几个文件，于是**跨文件的那一段没人接**：`reread_tags_from_file` 有实现、前端有按钮、中间的路由没人注册。收口时要专门对一遍"前端调的接口后端有没有" |
 
 **共同点：三次都是"接口说成功但结果是空的"。** 遇到这种现象，
@@ -168,20 +168,20 @@ cargo run -p kumodeck-providers --example smoke_sc       -- lofi
 ## 7. 目录速查
 
 ```
-crates/kumodeck-core/       契约模型 models.rs、配置 config.rs、事件 events.rs、路径 paths.rs
-crates/kumodeck-providers/  net.rs(安全) provider.rs(trait) tags.rs ffmpeg.rs
+crates/kdj-core/       契约模型 models.rs、配置 config.rs、事件 events.rs、路径 paths.rs
+crates/kdj-providers/  net.rs(安全) provider.rs(trait) tags.rs ffmpeg.rs
                             netease/ qqmusic/ bilibili/ soundcloud/
-crates/kumodeck-analysis/   dsp.rs decode.rs tempo.rs key.rs loudness.rs engine.rs
+crates/kdj-analysis/   dsp.rs decode.rs tempo.rs key.rs loudness.rs engine.rs
                             examples/golden.rs  ← 对拍工具
-crates/kumodeck-library/    db.rs camelot.rs service.rs folders.rs scan.rs
+crates/kdj-library/    db.rs camelot.rs service.rs folders.rs scan.rs
                             tests/real_library.rs  ← 真库集成测试
-crates/kumodeck-analysis/   ……waveform.rs（波形，给 /api/library/waveform）
-crates/kumodeck-server/     routes.rs(34 条路由) ws.rs auth.rs downloads.rs jobs.rs aggregate.rs
-                            bin/kumodeck-server.rs  ← 开发用独立进程，端口 8788 / token dev-token
+crates/kdj-analysis/   ……waveform.rs（波形，给 /api/library/waveform）
+crates/kdj-server/     routes.rs(34 条路由) ws.rs auth.rs downloads.rs jobs.rs aggregate.rs
+                            bin/kdj-server.rs  ← 开发用独立进程，端口 8788 / token dev-token
 src-tauri/                  Tauri 壳：lib.rs 里 6 条命令 + 进程内起 axum；main.rs 只转调
 sidecar/                    Python 原版，**保留着当参照物**，最后再删
 src/                        现有 React 前端，保留
-src/lib/bridge.ts           运行时探测壳（Tauri / Electron / 浏览器），装回 window.kumodeck
+src/lib/bridge.ts           运行时探测壳（Tauri / Electron / 浏览器），装回 window.kdj
 vite.tauri.config.ts        Tauri 专用前端构建（端口 5275、产物 dist-tauri/、剥 index.html 的 CSP meta）
 docs/rust-port/             本目录，每步一份
 .github/workflows/

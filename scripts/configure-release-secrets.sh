@@ -5,11 +5,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="${KDJ_GITHUB_REPO:-kumoSleeping/KDJ}"
-TAURI_KEY="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.tauri/kumodeck.key}"
-TAURI_PUB="${TAURI_SIGNING_PUBLIC_KEY_PATH:-$HOME/.tauri/kumodeck.key.pub}"
-ANDROID_KEYSTORE="${ANDROID_KEYSTORE_PATH:-$HOME/.android/kumodeck-release.jks}"
-ANDROID_PASS="${ANDROID_KEYSTORE_PASSWORD_FILE:-$HOME/.android/kumodeck-release.pass}"
-ANDROID_ALIAS="${ANDROID_KEY_ALIAS:-kumodeck}"
+TAURI_KEY="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.tauri/kdj.key}"
+TAURI_PUB="${TAURI_SIGNING_PUBLIC_KEY_PATH:-$HOME/.tauri/kdj.key.pub}"
+ANDROID_KEYSTORE="${ANDROID_KEYSTORE_PATH:-$HOME/.android/kdj-release.jks}"
+ANDROID_PASS="${ANDROID_KEYSTORE_PASSWORD_FILE:-$HOME/.android/kdj-release.pass}"
+ANDROID_ALIAS="${ANDROID_KEY_ALIAS:-kdj}"
 
 for command in gh python3 base64 keytool; do
   command -v "$command" >/dev/null || { echo "缺少命令：$command" >&2; exit 1; }
@@ -26,7 +26,7 @@ import json, pathlib, sys
 embedded = json.load(open(sys.argv[1]))["plugins"]["updater"]["pubkey"].strip()
 local = pathlib.Path(sys.argv[2]).read_text().strip()
 if embedded != local:
-    raise SystemExit("tauri.conf.json 的 updater 公钥与本机 kumodeck.key.pub 不匹配")
+    raise SystemExit("tauri.conf.json 的 updater 公钥与本机 kdj.key.pub 不匹配")
 print("✓ Tauri updater 公私钥对应")
 PY
 

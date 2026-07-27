@@ -27,9 +27,9 @@
 `.app` 里就两样东西，没有第三样：
 
 ```
-KumoDeck.app/Contents/
+KDJ.app/Contents/
 ├── Info.plist                4.0 KiB
-├── MacOS/kumodeck-app        9,980,144 B   ← 前端产物也在里面（见下）
+├── MacOS/kdj-app        9,980,144 B   ← 前端产物也在里面（见下）
 └── Resources/icon.icns       348,956 B
 ```
 
@@ -89,15 +89,15 @@ macOS 的 WebView 是系统的 WKWebView，不随包携带——这是和 Electr
 
 ## 3. 还能再压：`image` 的默认 features 是唯一一块明显的肥肉
 
-用 `cargo tree -p kumodeck-app -e normal -i <crate>` 查了 normal（非 build）依赖图，
-`image v0.25.10` 是 `kumodeck-providers` 的**运行时**依赖，而且开着 default features：
+用 `cargo tree -p kdj-app -e normal -i <crate>` 查了 normal（非 build）依赖图，
+`image v0.25.10` 是 `kdj-providers` 的**运行时**依赖，而且开着 default features：
 
 ```
 rav1e v0.8.1
 └── ravif v0.13.0
     └── image v0.25.10
-        ├── kumodeck-providers   ← 这里
-        └── qrcode v0.14.1 → kumodeck-providers
+        ├── kdj-providers   ← 这里
+        └── qrcode v0.14.1 → kdj-providers
 ```
 
 安卓那次冷编的日志里能直接看到这条链在实打实地编：
@@ -116,7 +116,7 @@ rav1e v0.8.1
 建议改法：
 
 ```toml
-# crates/kumodeck-providers/Cargo.toml
+# crates/kdj-providers/Cargo.toml
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
 ```
 
@@ -126,7 +126,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 
 ### 实测收益：−597,424 B（−7.2%）
 
-在 `/tmp` 的隔离副本上编了两遍 `kumodeck-server` 独立二进制（同一 profile、
+在 `/tmp` 的隔离副本上编了两遍 `kdj-server` 独立二进制（同一 profile、
 同一 target dir、只改这一行）：
 
 | 变体 | 字节 |
@@ -135,7 +135,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 | 裁剪后（只留 png/jpeg/webp/gif/bmp） | **7,652,160** |
 | 差 | **−597,424 B（−583 KiB，−7.2%）** |
 
-基线那一遍编出来的字节数和主工作树的 `target/release/kumodeck-server`
+基线那一遍编出来的字节数和主工作树的 `target/release/kdj-server`
 **完全一致**（都是 8,249,584），说明隔离副本是忠实复现，不是另一套东西。
 
 按同样比例推到 `.app` 上大约省 0.57 MB（9.9 MiB → 约 9.3 MiB）。
@@ -144,7 +144,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 在安卓那种要按小时算的交叉编译上更明显。
 
 ~~本次没有把这个改动落到主工作树~~ **后记（统合阶段）：已落地**，
-见 `crates/kumodeck-providers/Cargo.toml`（commit 3985e3a）。
+见 `crates/kdj-providers/Cargo.toml`（commit 3985e3a）。
 当时没动的原因（文件范围 + 并发 agent 的增量编译）已经不存在。
 
 ### 其它看过但不值得动的
@@ -176,7 +176,7 @@ src-tauri/gen/android/app/build/outputs/apk/universal/release/
 
 | 条目 | 未压缩字节 |
 | --- | --- |
-| `lib/arm64-v8a/libkumodeck_app_lib.so` | 15,239,504 |
+| `lib/arm64-v8a/libkdj_app_lib.so` | 15,239,504 |
 | `classes.dex`（Kotlin/Java，过了 R8） | 2,073,184 |
 | `resources.arsc` | 1,139,708 |
 | 其余 res/ 图标等 | 约 0.9 MB |
@@ -217,11 +217,11 @@ victory: Project generated successfully!
 ```
 
 生成 `src-tauri/gen/android/`（gitignore 里已经排除了）。
-`identifier = "com.kumodeck.app"` **没有**被 Java 包名规则拒绝
+`identifier = "com.kdj.app"` **没有**被 Java 包名规则拒绝
 ——YAML 注释里担心的那条没发生。但 Tauri 会告警：
 
 ```
-Warn The bundle identifier "com.kumodeck.app" set in `"tauri.conf.json" identifier`
+Warn The bundle identifier "com.kdj.app" set in `"tauri.conf.json" identifier`
      ends with `.app`. This is not recommended because it conflicts with the
      application bundle extension on macOS.
 ```
@@ -229,10 +229,10 @@ Warn The bundle identifier "com.kumodeck.app" set in `"tauri.conf.json" identifi
 **本次没改 identifier。** 它不阻塞任何构建，而 bundle id 是产品身份决定
 （改了 macOS 的 LaunchServices / keychain 记录也跟着变），应该由用户拍板，
 不该由打包这一步顺手改掉。数据目录不受影响：`src-tauri/src/lib.rs::legacy_data_dir`
-取的是 `app_config_dir()` 的**父目录**再拼死 `kumodeck`，和 identifier 无关。
+取的是 `app_config_dir()` 的**父目录**再拼死 `kdj`，和 identifier 无关。
 
 > **后续产品决策（2026-07-27）**：正式身份已固定为 `com.kdj.app`。当时的
-> `com.kumodeck.app` 构建只是无用户的预发行验证包，不保留覆盖升级兼容；从首个
+> `com.kdj.app` 构建只是无用户的预发行验证包，不保留覆盖升级兼容；从首个
 > `com.kdj.app` 签名包起，identifier 与 Android keystore 均不得再更换。
 
 ### 4.3 `tauri android build --apk --target aarch64`：Rust 侧全通，产出 .so
@@ -240,12 +240,12 @@ Warn The bundle identifier "com.kumodeck.app" set in `"tauri.conf.json" identifi
 **aarch64 的动态库编出来了**：
 
 ```
-/Users/kumo/git/kumodeck/target/aarch64-linux-android/release/libkumodeck_app_lib.so
+/Users/kumo/git/kdj/target/aarch64-linux-android/release/libkdj_app_lib.so
 15,239,488 B  (≈14.53 MiB)
 ```
 
 Tauri 随后把它 symlink 进 gradle 工程：
-`src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/libkumodeck_app_lib.so`。
+`src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/libkdj_app_lib.so`。
 
 `.so` 比 macOS 的可执行文件（9,980,144 B）大 5.3 MB，是正常的：cdylib 要保留
 动态符号表和重定位信息，`strip = true` 剥不掉这部分。
@@ -269,19 +269,19 @@ Tauri 随后把它 symlink 进 gradle 工程：
 
 ```
 failed to build Android app: `Failed to run `cargo build`: command
-["cargo", "build", "--package", "kumodeck-app", "--manifest-path",
- "/Users/kumo/git/kumodeck/src-tauri/Cargo.toml", "--target", "aarch64-linux-android",
+["cargo", "build", "--package", "kdj-app", "--manifest-path",
+ "/Users/kumo/git/kdj/src-tauri/Cargo.toml", "--target", "aarch64-linux-android",
  "--features", "tauri/custom-protocol tauri/custom-protocol", "--lib", "--release"]
 exited with code <signal 15>
 ```
 
 `<signal 15>` = SIGTERM。真因：同一时间另一个 agent 在跑
-`for i in 1 2 3; do ./target/debug/kumodeck-app & sleep 12; pkill -f kumodeck-app; done`。
+`for i in 1 2 3; do ./target/debug/kdj-app & sleep 12; pkill -f kdj-app; done`。
 `pkill -f` 匹配的是**整条命令行**，而 tauri 生成的 cargo 命令行里有
-`--package kumodeck-app`，于是连 cargo 一起杀了。
+`--package kdj-app`，于是连 cargo 一起杀了。
 
-**这条坑值得记住**：在这个仓库里 `pkill -f kumodeck-app` 会误杀正在编译的 cargo。
-要停应用请用 `pkill -f 'target/debug/kumodeck-app$'` 或者按 PID 杀。
+**这条坑值得记住**：在这个仓库里 `pkill -f kdj-app` 会误杀正在编译的 cargo。
+要停应用请用 `pkill -f 'target/debug/kdj-app$'` 或者按 PID 杀。
 
 这不是偶发：连着 5 次构建全死在这上面，其中一次是**编了 2 个多小时、
 只差最后一步 LTO 链接**的时候被杀的。绕过办法（POSIX 语义：设成 SIG_IGN 的信号
@@ -340,8 +340,8 @@ export ANDROID_HOME="$HOME/Library/Android/sdk"
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
 export NDK_HOME="$ANDROID_NDK_HOME"
 export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
-cd /Users/kumo/git/kumodeck
-# 机器上有别的 agent 在跑 `pkill -f kumodeck-app` 时，套一层 trap 保命（见 4.4）
+cd /Users/kumo/git/kdj
+# 机器上有别的 agent 在跑 `pkill -f kdj-app` 时，套一层 trap 保命（见 4.4）
 nohup sh -c "trap '' TERM; npx tauri android build --apk --target aarch64" &
 ```
 
@@ -362,7 +362,7 @@ buildTypes {
 }
 ```
 
-而 KumoDeck 的整个架构是"**进程内 axum 绑 127.0.0.1 + 前端走 http:// 和 ws://**"
+而 KDJ 的整个架构是"**进程内 axum 绑 127.0.0.1 + 前端走 http:// 和 ws://**"
 （`HANDOFF.md` §5 明确保留了 localhost HTTP + token，理由是播放器要 Range 请求）。
 `usesCleartextTraffic=false` 会让 Android 的默认 network security config
 禁掉明文 HTTP，**release APK 装上去大概率是"能开但什么都加载不出来"**，
@@ -409,35 +409,35 @@ merger report 里也确认合并进去了。原来 YAML 注释里把它列成第
 ### 桌面（macOS）
 
 ```bash
-cd /Users/kumo/git/kumodeck
+cd /Users/kumo/git/kdj
 npx tauri build
 # 产物：
-#   target/release/bundle/macos/KumoDeck.app
-#   target/release/bundle/dmg/KumoDeck_0.2.0_aarch64.dmg
+#   target/release/bundle/macos/KDJ.app
+#   target/release/bundle/dmg/KDJ_0.2.0_aarch64.dmg
 
 # 量体积（要真字节数，不要 du -sh 的四舍五入）
-du -sk target/release/bundle/macos/KumoDeck.app
+du -sk target/release/bundle/macos/KDJ.app
 stat -f "%z %N" target/release/bundle/dmg/*.dmg \
-                target/release/bundle/macos/KumoDeck.app/Contents/MacOS/kumodeck-app
+                target/release/bundle/macos/KDJ.app/Contents/MacOS/kdj-app
 
 # 验证它真的能跑（不是只是"文件存在"）
-open target/release/bundle/macos/KumoDeck.app
+open target/release/bundle/macos/KDJ.app
 osascript -e 'tell application "System Events" to get name of every window of \
-  (first process whose unix id is <PID>)'      # → KumoDeck
+  (first process whose unix id is <PID>)'      # → KDJ
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:<随机端口>/   # → 401（鉴权在起作用）
 ```
 
-本次就是这么验的：窗口标题 `KumoDeck` 出来了，进程内 axum 监听
+本次就是这么验的：窗口标题 `KDJ` 出来了，进程内 axum 监听
 `127.0.0.1:61791`（随机端口，每次启动重新生成 token），裸 GET 返回 401
 —— 壳、前端、server、鉴权四段都通。
 
 DMG 也真挂载过，不是只看了文件大小：
 
 ```bash
-hdiutil attach -nobrowse -readonly target/release/bundle/dmg/KumoDeck_0.2.0_aarch64.dmg
-ls -la /Volumes/KumoDeck/     # KumoDeck.app + Applications 软链 + .VolumeIcon.icns
-du -sk /Volumes/KumoDeck/KumoDeck.app   # 10096
-hdiutil detach /Volumes/KumoDeck
+hdiutil attach -nobrowse -readonly target/release/bundle/dmg/KDJ_0.2.0_aarch64.dmg
+ls -la /Volumes/KDJ/     # KDJ.app + Applications 软链 + .VolumeIcon.icns
+du -sk /Volumes/KDJ/KDJ.app   # 10096
+hdiutil detach /Volumes/KDJ
 ```
 
 ### 依赖裁剪对照（想量 `image` 那块的话）
@@ -446,12 +446,12 @@ hdiutil detach /Volumes/KumoDeck
 
 ```bash
 rsync -a --exclude target --exclude node_modules --exclude .git \
-      /Users/kumo/git/kumodeck/ /tmp/kdsize/
+      /Users/kumo/git/kdj/ /tmp/kdsize/
 # 从 /tmp/kdsize/Cargo.toml 的 members 里删掉 "src-tauri"（不然要前端产物）
 CARGO_TARGET_DIR=/tmp/kdsize-target cargo build --release \
-  --manifest-path /tmp/kdsize/Cargo.toml -p kumodeck-server --bin kumodeck-server
-stat -f "%z" /tmp/kdsize-target/release/kumodeck-server        # 基线
-# 改 /tmp/kdsize/crates/kumodeck-providers/Cargo.toml 的 image features，再编一次，对比
+  --manifest-path /tmp/kdsize/Cargo.toml -p kdj-server --bin kdj-server
+stat -f "%z" /tmp/kdsize-target/release/kdj-server        # 基线
+# 改 /tmp/kdsize/crates/kdj-providers/Cargo.toml 的 image features，再编一次，对比
 ```
 
 ⚠️ 冷编一次要很久（`lto = true` + `codegen-units = 1`），机器上有别的 cargo 在跑
@@ -473,7 +473,7 @@ rustup target add aarch64-linux-android armv7-linux-androideabi
 # 2. 生成 gradle 工程（gen/android 是生成物，不入库）
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
 export NDK_HOME="$ANDROID_NDK_HOME"
-cd /Users/kumo/git/kumodeck
+cd /Users/kumo/git/kdj
 npx tauri android init
 
 # 3. 编 APK（trap 那层见 §4.4；机器空闲时不需要）
@@ -526,7 +526,7 @@ gradle 那一步倒（§4.5）。版本要跟着 `gen/android/app/build.gradle.k
    范围按 `HANDOFF.md` §6 的第 3 条来——多根曲库目录和文件夹拖拽是桌面专属。
 4. **armv7**：`--target aarch64 --target armv7`，兜老设备。
 5. **`image` 的 default features**（§3）：改一行，实测省 597,424 B。
-   要动 `crates/kumodeck-providers/Cargo.toml`，本次不在文件范围内。
+   要动 `crates/kdj-providers/Cargo.toml`，本次不在文件范围内。
    改完记得跑一遍封面相关的冒烟（四家平台各下一首看封面写进去没有）。
 6. **identifier** 后续已拍板固定为 `com.kdj.app`（见 §4.2 后记）。
 7. macOS 签名/公证仍然没有（和 v0.1.0 一致，首次打开要右键 → 打开）。

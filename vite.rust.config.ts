@@ -4,16 +4,16 @@
  * 和 vite.config.ts 的区别只有两点：
  *  1. 不加载 electron 插件（这是浏览器里跑的预览）；
  *  2. 注入一段 shim 提供 `window.kdj`，
- *     让前端能连上 `kumodeck-server` 这个独立进程。
+ *     让前端能连上 `kdj-server` 这个独立进程。
  *
  * 用法：
- *   cargo run --release -p kumodeck-server --bin kumodeck-server   # 后端
+ *   cargo run --release -p kdj-server --bin kdj-server   # 后端
  *   npx vite --config vite.rust.config.ts                          # 前端
  */
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 
-const API_PORT = process.env.KDJ_PORT ?? process.env.KUMODECK_PORT ?? "8788";
+const API_PORT = process.env.KDJ_PORT ?? "8788";
 
 function devBridge(): Plugin {
   return {

@@ -110,6 +110,7 @@ export const api = {
 
   downloads: () => request<DownloadTask[]>("/downloads"),
   enqueue: (body: DownloadRequest) => post<DownloadTask[]>("/downloads", body),
+  startDownloads: () => post<{ started: boolean }>("/downloads/start"),
   cancelDownload: (id: string) => post<DownloadTask>(`/downloads/${id}/cancel`),
   clearDownloads: () => post<{ removed: number }>("/downloads/clear"),
 

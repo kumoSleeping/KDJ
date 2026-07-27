@@ -41,7 +41,7 @@ const memberManifests = [
 for (const path of memberManifests) {
   const source = readFileSync(path, "utf8");
   const next = source.replace(
-    /(kumodeck-[a-z-]+\s*=\s*\{\s*version\s*=\s*")[^"]+("\s*,\s*path\s*=)/g,
+    /(kdj-[a-z-]+\s*=\s*\{\s*version\s*=\s*")[^"]+("\s*,\s*path\s*=)/g,
     `$1${version}$2`,
   );
   writeFileSync(path, next);

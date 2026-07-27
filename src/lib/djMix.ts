@@ -834,7 +834,8 @@ export const djEngine = {
 
   /**
    * 建 AudioContext 和两条处理链。幂等；失败记 broken，之后 begin 永远
-   * 返回 false（调用方回退硬切）。在用户手势里调它（选预设时）。
+   * 返回 false（调用方回退硬切）。应用启动时就建好，避免第一次自动接歌
+   * 时临时重接正在出声的 MediaElement，产生爆音或短暂停顿。
    */
   warmup(): boolean {
     if (broken) return false;
@@ -844,9 +845,24 @@ export const djEngine = {
     }
     try {
       if (!djEngine.prime() || !ctx) return false;
-      decks = [buildDeck(ctx, elements[0]), buildDeck(ctx, elements[1])];
-      void ctx.resume();
-      return true;
+      // 第一次建立 MediaElementSource 会把正在播放的原生音频重新接入
+      // WebAudio 图。若此刻仍保持满音量，WebView 可能在重接瞬间打出一个
+      // 爆音；先把两台 element 静音一个渲染帧，接好图后再恢复原音量。
+      const volumes = elements.map((element) => element.volume) as [number, number];
+      for (const element of elements) element.volume = 0;
+      try {
+        decks = [buildDeck(ctx, elements[0]), buildDeck(ctx, elements[1])];
+        void ctx.resume();
+        requestAnimationFrame(() => {
+          elements[0].volume = volumes[0];
+          elements[1].volume = volumes[1];
+        });
+        return true;
+      } catch (error) {
+        elements[0].volume = volumes[0];
+        elements[1].volume = volumes[1];
+        throw error;
+      }
     } catch {
       broken = true;
       ctx = null;
@@ -953,6 +969,15 @@ export const djEngine = {
     decks[frontIndex].el.playbackRate = 1;
   },
 };
+
+// 在任何曲目开始播放前建好 MediaElementSource。AudioContext 会保持 suspended，
+// 不会绕过浏览器的用户手势限制；真正播放仍由播放器的用户操作触发。
+// 这消除了第一次自动接歌时的重接爆音和偶发停顿。
+try {
+  djEngine.warmup();
+} catch {
+  // warmup 自己会把 broken 记住，后续自动回退到普通硬切。
+}
 
 // 开发环境把引擎挂到 window：过渡是"听"出来的东西，自动化测试和排查
 // 只能靠这个口子看 isTransitioning / 两台 deck 的实时状态。打包版不带。

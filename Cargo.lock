@@ -2317,22 +2317,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "keyboard-types"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b750dcadc39a09dbadd74e118f6dd6598df77fa01df0cfcdc52c28dece74528a"
-dependencies = [
- "bitflags 2.13.1",
- "serde",
- "unicode-segmentation",
-]
-
-[[package]]
-name = "kumodeck-analysis"
+name = "kdj-analysis"
 version = "0.2.1"
 dependencies = [
  "anyhow",
- "kumodeck-core",
+ "kdj-core",
  "rubato",
  "rustfft",
  "serde",
@@ -2343,12 +2332,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "kumodeck-app"
+name = "kdj-app"
 version = "0.2.1"
 dependencies = [
  "anyhow",
- "kumodeck-core",
- "kumodeck-server",
+ "kdj-core",
+ "kdj-server",
  "rand 0.10.2",
  "serde",
  "serde_json",
@@ -2364,7 +2353,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kumodeck-core"
+name = "kdj-core"
 version = "0.2.1"
 dependencies = [
  "anyhow",
@@ -2377,14 +2366,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "kumodeck-library"
+name = "kdj-library"
 version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
- "kumodeck-analysis",
- "kumodeck-core",
- "kumodeck-providers",
+ "kdj-analysis",
+ "kdj-core",
+ "kdj-providers",
  "lofty",
  "r2d2",
  "r2d2_sqlite",
@@ -2398,7 +2387,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kumodeck-providers"
+name = "kdj-providers"
 version = "0.2.1"
 dependencies = [
  "aes",
@@ -2412,7 +2401,7 @@ dependencies = [
  "futures-util",
  "hex",
  "image",
- "kumodeck-core",
+ "kdj-core",
  "lofty",
  "md-5",
  "num-bigint",
@@ -2432,16 +2421,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "kumodeck-server"
+name = "kdj-server"
 version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
  "futures-util",
- "kumodeck-analysis",
- "kumodeck-core",
- "kumodeck-library",
- "kumodeck-providers",
+ "kdj-analysis",
+ "kdj-core",
+ "kdj-library",
+ "kdj-providers",
  "rand 0.10.2",
  "serde",
  "serde_json",
@@ -2451,6 +2440,17 @@ dependencies = [
  "tower-http 0.7.0",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "keyboard-types"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b750dcadc39a09dbadd74e118f6dd6598df77fa01df0cfcdc52c28dece74528a"
+dependencies = [
+ "bitflags 2.13.1",
+ "serde",
+ "unicode-segmentation",
 ]
 
 [[package]]

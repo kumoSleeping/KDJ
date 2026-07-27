@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    kumodeck_app_lib::run()
+    kdj_app_lib::run()
 }

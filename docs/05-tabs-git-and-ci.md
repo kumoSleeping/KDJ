@@ -23,7 +23,7 @@
 
 ## 3. Git 仓库
 
-`git@github.com:kumoSleeping/KumoDeck.git`（public），main 分支首次提交
+`git@github.com:kumoSleeping/KDJ.git`（public），main 分支首次提交
 85 个文件并推送；`.gitignore` 盖住 node_modules / dist* / release /
 sidecar 的 venv、PyInstaller 产物、egg-info、日志。
 
@@ -36,7 +36,7 @@ sidecar 的 venv、PyInstaller 产物、egg-info、日志。
   import，漏了运行时才炸）。在 sidecar/ 里跑，避免 PyInstaller 的 dist/
   撞 vite 的 dist/。
 - `electron/main.ts` 新增 `sidecarCommand()`：优先 `resources/sidecar-bin/`
-  的冻结可执行，退回开发用 venv 的 `python -m kumodeck`，CLI 参数两边一致。
+  的冻结可执行，退回开发用 venv 的 `python -m kdj`，CLI 参数两边一致。
   入口脚本 `sidecar/pyinstaller_entry.py`（带 `multiprocessing.freeze_support`，
   Windows 冻结包不加会无限自我复制）。
 - electron-builder（electron-builder.yml）：mac DMG（arm64+x64，

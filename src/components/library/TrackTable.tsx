@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Check,
+  BarChart3,
   FolderOpen,
   FolderSearch,
   Link2,
@@ -28,8 +29,8 @@ import {
 } from "../../stores/libraryStore";
 import { useQueueStore } from "../../stores/queueStore";
 import type { FileDisposalMode, Track } from "../../types";
-import { EmptyState, InlineNotice } from "../common";
-import { TRACK_DND_TYPE } from "./FolderTree";
+import { Button, EmptyState, InlineNotice } from "../common";
+import { pickAndScanFolders, TRACK_DND_TYPE } from "./FolderTree";
 
 /** 双击曲目 = 播放。PlayerBar 监听同名事件，两边不用互相持有引用。 */
 export const PLAY_EVENT = "kd:play";
@@ -73,7 +74,10 @@ export function CamelotChip({ code }: { code: string }) {
     );
   }
   return (
-    <span className="kd-camelot" style={{ background: camelotColor(code) }}>
+    <span
+      className="kd-camelot"
+      style={{ background: `color-mix(in srgb, ${camelotColor(code)} 32%, var(--kd-panel))` }}
+    >
       {code}
     </span>
   );
@@ -286,6 +290,7 @@ export function TrackTable({
   const loadingMore = useLibraryStore((state) => state.loadingMore);
   const queueView = useLibraryStore((state) => state.queueView);
   const removeTracks = useLibraryStore((state) => state.removeTracks);
+  const startAnalyze = useLibraryStore((state) => state.startAnalyze);
   const addToQueue = useQueueStore((state) => state.add);
   const removeFromQueue = useQueueStore((state) => state.remove);
   const selected = new Set(selectedIds);
@@ -472,8 +477,13 @@ export function TrackTable({
     return (
       <EmptyState
         icon={<FolderSearch size={22} />}
-        title="曲库是空的"
-        hint="点上方「添加文件夹」把本地音乐加进来，导入和分析都在后台自动完成；下载好的曲目会自己入库。"
+        title="把本地音乐带进 KDJ"
+        hint="选择音乐文件夹后，曲目会自动导入并在后台分析 BPM、调号和能量；也可以直接用顶部搜索下载歌曲。"
+        action={
+          <Button variant="primary" onClick={() => void pickAndScanFolders()}>
+            添加音乐文件夹
+          </Button>
+        }
       />
     );
   }
@@ -721,6 +731,10 @@ export function TrackTable({
           >
             <Play size={12} />
             播放
+          </button>
+          <button type="button" onClick={() => { setRowMenu(null); void startAnalyze(menuIds, true); }}>
+            <BarChart3 size={12} />
+            重新分析{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}
           </button>
           <button
             type="button"

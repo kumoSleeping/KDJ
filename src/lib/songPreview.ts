@@ -7,6 +7,16 @@ import {
 } from "./audioFocus";
 import type { SongSource } from "../types";
 
+export const SONG_PREVIEW_EVENT = "kd:song-preview";
+export interface SongPreviewRequest {
+  source: SongSource;
+  title: string;
+  artist: string;
+}
+export function requestSongPreview(request: SongPreviewRequest): void {
+  window.dispatchEvent(new CustomEvent<SongPreviewRequest>(SONG_PREVIEW_EVENT, { detail: request }));
+}
+
 /**
  * 搜索结果里的「试听」：不下载、不入库，问后端要一条**最低码率**直链
  * 塞进一个模块级的 <audio> 里放。整个应用同一时刻只可能试听一首，

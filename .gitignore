@@ -9,7 +9,7 @@ sidecar/dist/
 sidecar/build/
 sidecar/*.spec
 sidecar/**/__pycache__/
-sidecar/kumodeck.egg-info/
+sidecar/kdj.egg-info/
 *.pyc
 *.log
 nohup.out

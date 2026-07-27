@@ -1,5 +1,5 @@
 [package]
-name = "kumodeck-app"
+name = "kdj-app"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ description = "KDJ 桌面壳：把 axum server 编进 Tauri 进程内"
 [lib]
 # 安卓/iOS 的入口是系统通过 JNI/静态链接去加载库，没有 main()，
 # 所以逻辑全放 lib、main.rs 只转调一行。桌面和移动端因此共用同一份 run()。
-name = "kumodeck_app_lib"
+name = "kdj_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -17,8 +17,8 @@ tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
 anyhow = "1.0.104"
-kumodeck-core = { version = "0.2.1", path = "../crates/kumodeck-core" }
-kumodeck-server = { version = "0.2.1", path = "../crates/kumodeck-server" }
+kdj-core = { version = "0.2.1", path = "../crates/kdj-core" }
+kdj-server = { version = "0.2.1", path = "../crates/kdj-server" }
 rand = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }
 # tauri.conf.json 里一有 `plugins` 段，`generate_context!` 展开出来的代码就会

@@ -6,8 +6,8 @@ provider 抽象、以及**两家平台的完整实现并在真机验证过**。
 ## 已经能跑的东西
 
 ```
-cargo run -p kumodeck-providers --example smoke_netease -- Supernova
-cargo run -p kumodeck-providers --example smoke_qq       -- Supernova
+cargo run -p kdj-providers --example smoke_netease -- Supernova
+cargo run -p kdj-providers --example smoke_qq       -- Supernova
 ```
 
 实测输出（无登录态，匿名）：

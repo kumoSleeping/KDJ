@@ -19,6 +19,23 @@ export interface MediaSyncDetail {
   position?: number;
 }
 
+// 详情面板可能在播放器开始播放之后才挂载。保留最后一次播放器状态，
+// 新挂载的视频可以立即接上，而不用等下一次 play/timeupdate 事件。
+let latestPlayerSync: MediaSyncDetail | null = null;
+let latestPlayerPlaying = false;
+
 export function broadcastMediaSync(detail: MediaSyncDetail): void {
+  if (detail.owner === "player") {
+    if (detail.action === "play") latestPlayerPlaying = true;
+    if (detail.action === "pause") latestPlayerPlaying = false;
+    latestPlayerSync = {
+      ...detail,
+      action: latestPlayerPlaying ? "play" : "pause",
+    };
+  }
   window.dispatchEvent(new CustomEvent<MediaSyncDetail>(MEDIA_SYNC_EVENT, { detail }));
+}
+
+export function getLatestPlayerSync(trackId: number): MediaSyncDetail | null {
+  return latestPlayerSync?.trackId === trackId ? latestPlayerSync : null;
 }

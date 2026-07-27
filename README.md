@@ -46,7 +46,7 @@ docs/rust-port/ Rust 重写架构与迁移记录
 
 ## 分析算法
 
-当前分析实现位于 `crates/kumodeck-analysis/`，使用纯 Rust DSP 与 Symphonia 解码：
+当前分析实现位于 `crates/kdj-analysis/`，使用纯 Rust DSP 与 Symphonia 解码：
 
 - **BPM**：mel 频谱通量 → 起音包络 → 自相关（对数正态先验抑制倍频）→ 梳状滤波打分选倍频 →
   Ellis 动态规划节拍跟踪 → 由拍间隔中位数回算精修 BPM，并给出首拍偏移与整条节拍网格。

@@ -122,7 +122,7 @@ async function createTauriBridge(): Promise<KdjBridge> {
 function createBrowserBridge(): KdjBridge {
   const port =
     (import.meta.env.VITE_KDJ_PORT as string | undefined) ??
-    (import.meta.env.VITE_KUMODECK_PORT as string | undefined) ??
+    (import.meta.env.VITE_KDJ_PORT as string | undefined) ??
     "8788";
   return {
     baseUrl: `http://127.0.0.1:${port}`,

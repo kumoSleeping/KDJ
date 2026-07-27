@@ -1,6 +1,6 @@
 # 03 · 分析管线（BPM / 调号 / 能量）脱离 numpy 与 ffmpeg
 
-`crates/kumodeck-analysis`：解码 + DSP 原语 + tempo + key + loudness + 总入口。
+`crates/kdj-analysis`：解码 + DSP 原语 + tempo + key + loudness + 总入口。
 47 个单元测试，外加**和 Python 版在用户真实曲库上的逐字段对拍**。
 
 ## 结果：40 首真机对拍
@@ -106,7 +106,7 @@ B 站视频混流仍然需要 ffmpeg（和 v0.1.0 一致），安卓走 durl 单
 
 ```bash
 # Rust 侧
-cargo run --release -p kumodeck-analysis --example golden -- <清单文件>
+cargo run --release -p kdj-analysis --example golden -- <清单文件>
 ```
 
 清单文件是一行一个路径。**不要在 shell 里展开文件名**——

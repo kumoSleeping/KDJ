@@ -9,7 +9,7 @@
     "preview": "vite preview --config vite.tauri.config.ts --outDir dist-tauri",
     "typecheck": "tsc --noEmit",
     "dist": "npm run tauri:build",
-    "rust:server": "cargo run --release -p kumodeck-server --bin kumodeck-server",
+    "rust:server": "cargo run --release -p kdj-server --bin kdj-server",
     "rust:web": "vite --config vite.rust.config.ts",
     "rust:dev": "concurrently -n server,web -c cyan,magenta \"npm:rust:server\" \"npm:rust:web\"",
     "tauri": "tauri",

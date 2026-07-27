@@ -1,4 +1,4 @@
-# KumoDeck — 架构与实现契约（Demo 1）
+# KDJ — 架构与实现契约（Demo 1）
 
 > 这份文档是**唯一契约**。所有模块按这里的接口、文件名、字段名实现，不得擅自改名。
 > 改契约必须先改这份文档。
@@ -15,27 +15,27 @@
 
 | 来源 | 复用到 |
 | --- | --- |
-| `kumocode_v2/entari_plugin_kumo_music_dl/service.py` | `sidecar/kumodeck/providers/{netease,qqmusic,soundcloud}.py` |
-| `kumocode_v2/entari_plugin_kumo_video_dl/service.py` | `sidecar/kumodeck/providers/bilibili.py` |
+| `kumocode_v2/entari_plugin_kumo_music_dl/service.py` | `sidecar/kdj/providers/{netease,qqmusic,soundcloud}.py` |
+| `kumocode_v2/entari_plugin_kumo_video_dl/service.py` | `sidecar/kdj/providers/bilibili.py` |
 | `pi-web-platform/client/src/design.css` | `src/design.css`（红色角标 + 直角 + 扁平） |
 
 ## 1. 进程结构
 
 ```
 Electron main (electron/main.ts)
- ├─ 启动 Python sidecar：<venv>/bin/python -m kumodeck --port <free> --token <random>
+ ├─ 启动 Python sidecar：<venv>/bin/python -m kdj --port <free> --token <random>
  │    等待 GET /api/health 通过后再 loadURL
  ├─ BrowserWindow (titleBarStyle: hiddenInset, 无圆角风格)
- └─ preload.ts → contextBridge 暴露 window.kumodeck = { baseUrl, token, platform, openPath, pickFolder, minimize/maximize/close }
+ └─ preload.ts → contextBridge 暴露 window.kdj = { baseUrl, token, platform, openPath, pickFolder, minimize/maximize/close }
 
 Renderer (React 19 + Vite)  ── HTTP/WS ──▶  Python sidecar (FastAPI + uvicorn, 127.0.0.1)
 ```
 
-- sidecar **只监听 127.0.0.1**，所有请求必须带 `X-KumoDeck-Token: <token>`（WS 用 `?token=`）。
-- 数据目录：`app.getPath("userData")/kumodeck` → 通过 `--data-dir` 传给 sidecar。
-  - `data/kumodeck.db`（SQLite 曲库）
+- sidecar **只监听 127.0.0.1**，所有请求必须带 `X-KDJ-Token: <token>`（WS 用 `?token=`）。
+- 数据目录：`app.getPath("userData")/kdj` → 通过 `--data-dir` 传给 sidecar。
+  - `data/kdj.db`（SQLite 曲库）
   - `data/sessions/`（各平台登录态）
-  - `Downloads/KumoDeck/`（默认下载目录，可在设置里改）
+  - `Downloads/KDJ/`（默认下载目录，可在设置里改）
 
 ## 2. Python sidecar
 
@@ -43,7 +43,7 @@ Renderer (React 19 + Vite)  ── HTTP/WS ──▶  Python sidecar (FastAPI + 
 
 ```
 sidecar/pyproject.toml
-sidecar/kumodeck/
+sidecar/kdj/
   __init__.py
   __main__.py        # argparse(--port --token --data-dir --download-dir) → uvicorn.run
   config.py          # AppConfig 数据类 + 落盘 settings.json + 目录解析
@@ -69,12 +69,12 @@ sidecar/kumodeck/
     db.py            # SQLite 建表 / 迁移 / 连接管理
     scan.py          # 目录遍历 + mutagen 读标签 + 入库
     service.py       # LibraryService：查询/过滤/和声推荐/歌单/统计
-    folders.py       # 文件夹模式：目录树 / 越界校验 / 移动与硬链接 / .kumodeck.json 清单
+    folders.py       # 文件夹模式：目录树 / 越界校验 / 移动与硬链接 / .kdj.json 清单
 ```
 
 ### 2.2 HTTP API（前缀 `/api`）
 
-鉴权：除 `/api/health` 外全部要求 `X-KumoDeck-Token`。
+鉴权：除 `/api/health` 外全部要求 `X-KDJ-Token`。
 
 | 方法 | 路径 | 入参 | 出参 |
 | --- | --- | --- | --- |
@@ -108,7 +108,7 @@ sidecar/kumodeck/
 | POST | `/library/folders/create` | `{parent, name}` | `FolderTree` |
 | POST | `/library/folders/rename` | `{path, name}` | `FolderTree`（同时 rebase 该枝下所有曲目的 path） |
 | POST | `/library/folders/delete` | `{path}` | `FolderTree`（只删空目录） |
-| POST | `/library/folders/init` | `{path?}` | `FolderTree`（每层写 `.kumodeck.json`） |
+| POST | `/library/folders/init` | `{path?}` | `FolderTree`（每层写 `.kdj.json`） |
 | POST | `/library/folders/order` | `{path, names[]}` | `FolderTree` |
 | POST | `/library/folders/move` | `{path, dest_parent}` | `FolderTree`（整枝搬走并 rebase path） |
 | POST | `/library/folders/apply` | `{track_ids[], dest, op: "move"\|"link"}` | `FolderOpResult` |
@@ -354,7 +354,7 @@ src/components/player/PlayerBar.tsx
 ## 7. 运行
 
 ```bash
-cd kumodeck
+cd kdj
 npm install
 npm run sidecar:setup     # uv venv + uv pip install -e sidecar
 npm run dev               # vite + electron 并行
@@ -384,7 +384,7 @@ U 盘、要用 Rekordbox / Serato 再读一遍，虚拟分组到那一步就没�
 - **链接** = `os.link` → 失败退 `os.symlink` → 再退 `shutil.copy2`，
   然后 `upsert_file()` 建新行 + `clone_metadata()` 把分析结果抄过去。
   一首歌同时进两个 set 不多占空间。`Track.link` 字段告诉前端打不打链接标记。
-- **顺序** 存在每个目录里的 `.kumodeck.json`（`{version, order: [子目录名]}`）。
+- **顺序** 存在每个目录里的 `.kdj.json`（`{version, order: [子目录名]}`）。
   每目录一份而不是根目录一份大清单：清单跟着文件夹走，拷贝/搬移之后依然成立。
   清单里有磁盘上没有的名字直接丢弃，磁盘上有清单里没有的按名字排在后面。
   读坏了只退回按名字排序，不让整棵树打不开。
@@ -408,7 +408,7 @@ Serato 的交叉点：红↔绿 ≈ 200 Hz，绿↔蓝 ≈ 1.5 kHz。
 **一个工作台，没有板块。** `ViewId = "workspace" | "settings"`。
 
 ```
-标题栏           KumoDeck · (N 个下载中) · 日夜切换
+标题栏           KDJ · (N 个下载中) · 日夜切换
 大搜索框         去网上搜歌来下：输入 / 目录 / 音质 / 音乐·视频 / 批量 / 搜索
 平台条           网易云 · QQ · SoundCloud · 混合去重      （视频模式下隐藏）
 状态行           曲库 N 首 …   ／  搜索结果 N 首 · [加入队列] [回曲库]

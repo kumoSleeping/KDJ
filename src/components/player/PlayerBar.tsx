@@ -46,6 +46,7 @@ import {
 import type { Track } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { InlineNotice } from "../common";
+import { LocalVideoPlayer } from "../library/LocalVideoPlayer";
 import { POSITION_EVENT, type PositionDetail } from "../library/TrackDetail";
 import { DETAIL_EVENT, PLAY_EVENT, playTrack } from "../library/TrackTable";
 import { SEEK_EVENT, Waveform, type SeekDetail } from "../library/Waveform";
@@ -616,6 +617,9 @@ export function PlayerBar() {
     <div className="kd-player">
       {/* 这里不再渲染 <audio>：播放元素归 djEngine 所有（两台 deck 互换正主），
           事件监听在上面的 effect 里挂到 frontEl 上 */}
+      {/* 视频曲目在详情面板打开前也要跟着播放器走。这个不可见实例负责提前
+          加载和播放，打开详情时不会为了第一次解码再打断音频。 */}
+      {track && video ? <LocalVideoPlayer track={track} hidden /> : null}
 
       <div className="kd-player-leading">
         {/* 只留一颗裸图标：无块状底、无边框、无分割线。 */}
@@ -637,11 +641,11 @@ export function PlayerBar() {
       <button
         type="button"
         className="kd-player-now"
-        disabled={!track}
-        title={track ? "查看正在播放的曲目" : undefined}
+        disabled={!displayTrack}
+        title={displayTrack ? (track ? "查看正在播放的曲目" : "查看当前选中的曲目") : undefined}
         onClick={() => {
-          if (!track) return;
-          selectTrack(track);
+          if (!displayTrack) return;
+          selectTrack(displayTrack);
           window.dispatchEvent(new Event(DETAIL_EVENT));
         }}
       >

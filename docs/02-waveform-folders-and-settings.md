@@ -109,15 +109,15 @@ DJ 出场前要把一套歌拷进 U 盘、要用 Rekordbox / Serato 再读一遍
 2. `library_dirs` 为空但已有曲目时，`infer_roots()` 反推一次并写回设置。
 
 反推的第一版取**所有曲目路径的最近公共祖先**，在真实库上直接失败：曲目横跨
-下载目录（`~/Music/KumoDeck/netease`）和自建歌单目录（`~/git/djay/邦多利歌单`），
+下载目录（`~/Music/KDJ/netease`）和自建歌单目录（`~/git/djay/邦多利歌单`），
 公共祖先退化成 `~`，被"深度 < 4 不当根"的保护挡掉，于是还是一片空白。
 
 改成**每个存歌的目录各自往上退一层**，退到家目录 / `/Users` / `/Volumes` / `/`
-就不再往上。真实库上得到 `~/Music/KumoDeck` 和 `~/git/djay` 两个根，正确。
+就不再往上。真实库上得到 `~/Music/KDJ` 和 `~/git/djay` 两个根，正确。
 
-### `.kumodeck.json`：每个目录一份，不是根目录一份
+### `.kdj.json`：每个目录一份，不是根目录一份
 
-顺序存在每个受管目录里的 `.kumodeck.json`（`{version, order: [子目录名]}`）。
+顺序存在每个受管目录里的 `.kdj.json`（`{version, order: [子目录名]}`）。
 
 为什么每目录一份：**清单跟着文件夹走**。出场前把 `温州/` 整个拷进 U 盘，顺序也
 一起过去了；把某个子目录挪到别的根下面，它内部的顺序照样成立。一份中心清单
@@ -167,7 +167,7 @@ DJ 出场前要把一套歌拷进 U 盘、要用 Rekordbox / Serato 再读一遍
 
 - 右侧接上同一个 `QueuePanel`（同一个 download store，视频任务本来就在里面）
 - 顶栏加了目录小按钮 + 格式选择 + 「加入队列」，和下载板块一一对应
-- 视频单独一个 `video_download_dir`（默认 `~/Downloads/KumoDeck`）：视频动辄几百 MB，
+- 视频单独一个 `video_download_dir`（默认 `~/Downloads/KDJ`）：视频动辄几百 MB，
   混进音乐目录会被曲库扫描一起扫走
 - 容器格式可选 MP4 / MKV / MOV，默认 MP4；勾了「只要音轨」就固定 m4a，
   并且落到**音乐**目录——那是要进曲库的素材

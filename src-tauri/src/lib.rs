@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use kumodeck_core::AppConfig;
+use kdj_core::AppConfig;
 use serde::Serialize;
 use tauri::Manager;
 #[cfg(desktop)]
@@ -342,7 +342,7 @@ fn window_control(_window: tauri::Window, action: String) -> Result<(), String> 
 ///
 /// **必须沿用它，不能用 Tauri 的 `app_data_dir()`。** 后者会按 bundle identifier
 /// 落在 `.../com.kdj.app/data`，而 Electron 版按 productName 落在
-/// `.../kumodeck/data`。换目录 = 老用户打开新版本看到的是一个空应用：
+/// `.../kdj/data`。换目录 = 老用户打开新版本看到的是一个空应用：
 ///
 /// - 曲库里 1379 首的记录、评分、备注、cue 点全都读不到；
 /// - 更糟的是 `data/sessions/` 下网易云 / QQ / B 站三家的登录态一起失效，
@@ -356,50 +356,117 @@ fn window_control(_window: tauri::Window, action: String) -> Result<(), String> 
 /// - Linux   `~/.config/<productName>`
 ///
 /// Tauri 的 `app_config_dir()` 是同样的三个基目录（只是拼的是 identifier），
-/// 所以这里取它的父目录再拼死 `kumodeck`，就等价于 Electron 的落点。
-fn legacy_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
+/// 所以这里取它的父目录再拼死 `kdj`，就等价于 Electron 的落点。
+fn has_file_bytes(path: &Path) -> bool {
+    std::fs::metadata(path).map(|meta| meta.len() > 0).unwrap_or(false)
+}
+
+/// 把旧应用数据逐项迁移到新的 KDJ 数据目录。
+///
+/// 不能只迁移 settings.json：曲库数据库、封面和 providers 的 sessions 都是
+/// 用户数据。数据库文件名也随项目改名了，所以 kumodeck.db 需要映射成 kdj.db，
+/// WAL/SHM 同样要映射，否则 SQLite 会只看到一个空库。
+fn migrate_legacy_data(current: &Path, legacy: &Path, force: bool) -> anyhow::Result<bool> {
+    if !legacy.exists() {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(current)?;
+    let mut copied = false;
+
+    fn copy_tree(source: &Path, root: &Path, copied: &mut bool, force: bool) -> anyhow::Result<()> {
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            let source_path = entry.path();
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            let target_name = match name.as_ref() {
+                "kumodeck.db" => "kdj.db".to_string(),
+                "kumodeck.db-wal" => "kdj.db-wal".to_string(),
+                "kumodeck.db-shm" => "kdj.db-shm".to_string(),
+                _ => name.to_string(),
+            };
+            let target_path = root.join(target_name);
+            if source_path.is_dir() {
+                std::fs::create_dir_all(&target_path)?;
+                copy_tree(&source_path, &target_path, copied, force)?;
+                continue;
+            }
+            let source_size = std::fs::metadata(&source_path)?.len();
+            let target_size = std::fs::metadata(&target_path).map(|meta| meta.len()).unwrap_or(0);
+            // 目标已经有更新的数据时不覆盖；首次启动的空数据库/默认设置则由旧数据补齐。
+            if force || !target_path.exists() || source_size > target_size {
+                // 错误版本可能已在新目录写过少量数据。旧数据优先恢复，但覆盖前
+                // 给每个现有文件留一份副本，任何迁移判断失误都能人工找回。
+                if force && target_path.exists() {
+                    let backup_name = format!("{}.before-legacy-migration", target_path.file_name().unwrap_or_default().to_string_lossy());
+                    let backup = target_path.with_file_name(backup_name);
+                    if !backup.exists() {
+                        std::fs::copy(&target_path, backup)?;
+                    }
+                }
+                std::fs::copy(&source_path, &target_path)?;
+                *copied = true;
+            }
+        }
+        Ok(())
+    }
+
+    copy_tree(legacy, current, &mut copied, force)?;
+    Ok(copied)
+}
+
+fn default_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
+    let current = app.path().app_config_dir()?.join("data");
     let base = app
         .path()
         .app_config_dir()?
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| anyhow::anyhow!("拿不到配置目录的父目录"))?;
-    Ok(base.join("kumodeck").join("data"))
-}
 
-fn default_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
-    let current = app.path().app_config_dir()?.join("data");
-    let legacy = legacy_data_dir(app)?;
-    if current.exists() || !legacy.exists() {
-        Ok(current)
-    } else {
-        // 已有用户继续原地读旧库；新安装只会创建 KDJ 的目录。
-        Ok(legacy)
+    // 旧版本实际使用过 kumodeck，也有一版迁移代码预期 kdj；两处都认，
+    // 但不会把当前 com.kdj.app/data 当成旧目录再次拷贝。
+    let legacy_candidates = [base.join("kumodeck").join("data"), base.join("kdj").join("data")];
+    let current_has_sessions = current.join("sessions").exists();
+    let marker = current.join(".legacy-data-migrated");
+    for legacy in legacy_candidates {
+        let legacy_has_database = has_file_bytes(&legacy.join("kumodeck.db"))
+            || has_file_bytes(&legacy.join("kdj.db"));
+        let legacy_has_sessions = legacy.join("sessions").exists();
+        if legacy_has_database && !marker.exists() && (!current_has_sessions || legacy_has_sessions)
+        {
+            // 当前目录可能已经被错误版本创建过空库，首次发现旧会话时以旧数据为准，
+            // 强制整体替换数据库及 WAL，避免新旧 WAL 混在一起造成 SQLite 不一致。
+            if migrate_legacy_data(&current, &legacy, true)? {
+                std::fs::write(&marker, b"migrated\n")?;
+                eprintln!("KDJ: 已从 {} 迁移曲库、封面和登录凭证", legacy.display());
+            }
+            break;
+        }
     }
+    Ok(current)
 }
 
-fn env_path(primary: &str, legacy: &str) -> Option<PathBuf> {
-    std::env::var_os(primary)
-        .or_else(|| std::env::var_os(legacy))
-        .map(PathBuf::from)
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).map(PathBuf::from)
 }
 
 /// 起进程内的 axum server，返回前端要的 baseUrl / token。
 fn start_server(app: &tauri::AppHandle) -> anyhow::Result<Bridge> {
-    // 环境变量只是给调试留的后门；正常启动走 `legacy_data_dir`。
-    let data_dir = env_path("KDJ_DATA_DIR", "KUMODECK_DATA_DIR")
+    // 环境变量只是给调试留的后门；正常启动走带旧数据迁移的 default_data_dir。
+    let data_dir = env_path("KDJ_DATA_DIR")
         .map(Ok)
         .unwrap_or_else(|| default_data_dir(app))?;
     // 默认落到系统的「下载」目录（本地化的那个）+ KDJ 子目录。
     // 这只是全新安装的默认值：settings.json 里存过的目录永远优先。
     // 安卓上 Tauri 的 download_dir() 会报错，退回 core 里同一套解析。
-    let download_dir = match env_path("KDJ_DOWNLOAD_DIR", "KUMODECK_DOWNLOAD_DIR") {
+    let download_dir = match env_path("KDJ_DOWNLOAD_DIR") {
         Some(raw) => raw,
         None => app
             .path()
             .download_dir()
             .map(|dir| dir.join("KDJ"))
-            .unwrap_or_else(|_| kumodeck_core::config::default_download_root()),
+            .unwrap_or_else(|_| kdj_core::config::default_download_root()),
     };
 
     // 端口传 0 让内核挑：Electron 版是先 listen(0) 探一个再关掉再交给 Python，
@@ -408,7 +475,7 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<Bridge> {
     // serve() 内部 tokio::spawn，需要运行时上下文；Tauri 的全局运行时就是 tokio。
     // 返回的 JoinHandle 故意丢掉——tokio 里 drop JoinHandle 不会取消任务，
     // 服务的生命周期跟着进程走，和 Electron 版 sidecar 跟着主进程走是一个意思。
-    let (port, _serve_task) = tauri::async_runtime::block_on(kumodeck_server::serve(config))?;
+    let (port, _serve_task) = tauri::async_runtime::block_on(kdj_server::serve(config))?;
 
     Ok(Bridge {
         base_url: format!("http://127.0.0.1:{port}"),
@@ -418,7 +485,7 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<Bridge> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,kumodeck=debug".into()))
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,kdj=debug".into()))
         .init();
 
     let builder = tauri::Builder::default()

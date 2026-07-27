@@ -132,7 +132,7 @@ npx --yes @tauri-apps/cli@^2 android init
 npx --yes @tauri-apps/cli@^2 android build --apk --target aarch64 --target armv7
 ```
 
-真库集成测试在 CI 上会自己跳过（靠 `KUMODECK_TEST_DB` 开关），
+真库集成测试在 CI 上会自己跳过（靠 `KDJ_TEST_DB` 开关），
 本地想跑见 `04-library-layer.md`。
 
 ## 6. 远程排障

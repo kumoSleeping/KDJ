@@ -1,7 +1,7 @@
 import { Fragment } from "react";
 import { ChevronDown, ChevronRight, Check, Loader2, Play, Square } from "lucide-react";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
-import { sourceKey, toggleSongPreview, useSongPreview } from "../../lib/songPreview";
+import { requestSongPreview, sourceKey, toggleSongPreview, useSongPreview } from "../../lib/songPreview";
 import type { MergedGroup, Platform, SongSource } from "../../types";
 
 /** 平台在表格里的短标签。混合搜索一行可能同时挂三个来源，全名太挤。 */
@@ -65,6 +65,7 @@ export function MergedGroupRow({
 
   const selectAndReveal = () => {
     onToggleSelect();
+    if (previewSource) requestSongPreview({ source: previewSource, title: group.title, artist: group.artists.join(", ") });
     // 多来源歌曲的选中结果需要立刻可见：选中时自动展开来源明细，
     // 但不在取消选中时强行收起，避免把用户手动展开的内容突然折叠。
     if (!selected && multi && !expanded) onToggleExpand();

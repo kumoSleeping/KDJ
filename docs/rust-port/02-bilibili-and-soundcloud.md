@@ -6,8 +6,8 @@ pyncm / qqmusic-api / bilibili-api / yt-dlp 四个库全部不再需要。
 ## 真机验证结果
 
 ```
-cargo run -p kumodeck-providers --example smoke_bili
-cargo run -p kumodeck-providers --example smoke_sc -- lofi
+cargo run -p kdj-providers --example smoke_bili
+cargo run -p kdj-providers --example smoke_sc -- lofi
 ```
 
 - **B 站**：搜索 3 条、解析出 2 个画质档（480P/360P，都识别成 AVC）、

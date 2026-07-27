@@ -98,7 +98,7 @@ jobs:
       # 注意：**不要**给 cargo 接 `| head -N` 之类的管道，读端提前关闭会给
       # cargo 发 SIGPIPE 把编译打断，看起来像随机失败。
       # 只跑 debug：release 档开了 lto + codegen-units=1，跑测试等于白等十分钟。
-      # 真库集成测试（tests/real_library.rs）靠 KUMODECK_TEST_DB 环境变量开关，
+      # 真库集成测试（tests/real_library.rs）靠 KDJ_TEST_DB 环境变量开关，
       # CI 上没有这个变量，会自己跳过。
       - name: Rust 全量测试
         run: cargo test --workspace
@@ -171,7 +171,7 @@ jobs:
         if: steps.shell.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: kumodeck-rust-${{ matrix.label }}
+          name: kdj-rust-${{ matrix.label }}
           path: |
             **/release/bundle/dmg/*.dmg
             **/release/bundle/macos/*.app.tar.gz

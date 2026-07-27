@@ -22,7 +22,7 @@ import type {
   WsEvent,
 } from "../types";
 
-/** "custom" = 文件夹清单里的手排顺序（拖动排序写进 .kumodeck.json）。 */
+/** "custom" = 文件夹清单里的手排顺序（拖动排序写进 .kdj.json）。 */
 export type TrackSort =
   | "added_at" | "title" | "artist" | "album" | "bpm" | "camelot" | "energy" | "duration" | "custom";
 export type SortOrder = "asc" | "desc";

@@ -1,15 +1,15 @@
 # 04 · 曲库层：SQLite / 文件夹 / 扫描 / 和声推荐
 
-`crates/kumodeck-library`：43 个单元测试 + **11 个跑在用户真实曲库上的集成测试**。
+`crates/kdj-library`：43 个单元测试 + **11 个跑在用户真实曲库上的集成测试**。
 
 ## 最重要的一件事：老库直接能开
 
-表结构和 v0.1.x 逐字一致，用户手上那个 1379 首的 `kumodeck.db`
+表结构和 v0.1.x 逐字一致，用户手上那个 1379 首的 `kdj.db`
 不需要迁移、不需要重扫。集成测试就是拿真库的副本跑的。
 
 ```bash
-KUMODECK_TEST_DB=~/Library/Application\ Support/kumodeck/data/kumodeck.db \
-  cargo test -p kumodeck-library --test real_library
+KDJ_TEST_DB=~/Library/Application\ Support/kdj/data/kdj.db \
+  cargo test -p kdj-library --test real_library
 ```
 
 没设这个环境变量就整组跳过（CI 上没有这个文件）。

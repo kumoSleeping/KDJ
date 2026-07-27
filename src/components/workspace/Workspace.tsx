@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Download,
-  FolderTree as FolderTree_Icon,
   MousePointerClick,
-  PanelRight,
   X,
 } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
@@ -20,6 +18,8 @@ import {
 import type { IntakeItem, Platform, Quality, SongSource, VideoInfo } from "../../types";
 import { Button, EmptyState, InlineNotice, Sheet } from "../common";
 import { QueuePanel } from "../download/QueuePanel";
+import { SongPreviewPanel } from "../download/SongPreviewPanel";
+import { SONG_PREVIEW_EVENT, type SongPreviewRequest } from "../../lib/songPreview";
 import {
   VIDEO_PREVIEW_EVENT,
   VideoPreview,
@@ -27,7 +27,7 @@ import {
 } from "../download/VideoPreview";
 import { ResultTable, selectableGroups, selectionKey } from "../download/ResultTable";
 import { DEFAULT_PRIORITY, SearchBar } from "../download/SearchBar";
-import { FolderTree } from "../library/FolderTree";
+import { FolderTree, NarrowFolderRail } from "../library/FolderTree";
 import { DETAIL_EVENT } from "../library/TrackTable";
 import { AccountsPanel } from "../settings/AccountsPanel";
 import { DjPanel } from "../player/DjPanel";
@@ -113,6 +113,7 @@ export function Workspace() {
   const [video, setVideo] = useState<VideoInfo | null>(null);
   /** 正在预览的视频。开在右栏队列头上，不弹窗——弹窗盖住结果列表，看完还得找回去。 */
   const [preview, setPreview] = useState<VideoPreviewRequest | null>(null);
+  const [songPreview, setSongPreview] = useState<SongPreviewRequest | null>(null);
   const [note, setNote] = useState("");
   /**
    * 三处失败各有各的现场，所以分成三条，不合并成一个全局的错误：
@@ -244,7 +245,8 @@ export function Workspace() {
   const showTree = layout === "wide";
   const showAside = layout === "wide";
   /** 当前拉开的是哪个抽屉。null = 都收着。 */
-  const [sheet, setSheet] = useState<"folders" | "aside" | null>(null);
+  const [sheet, setSheet] = useState<"aside" | null>(null);
+  const [folderRailExpanded, setFolderRailExpanded] = useState(false);
 
   /**
    * narrow 下点一首歌**不再**顺手弹详情抽屉——那版试过：点一下的意图九成是
@@ -266,6 +268,7 @@ export function Workspace() {
    * 只有这一次的 listMode 变化要放行抽屉，所以立个一次性记号。
    */
   const detailJumpRef = useRef(false);
+  const previewJumpRef = useRef(false);
   useEffect(() => {
     const onDetail = () => {
       // 人在搜索页时先跳回曲库页：详情装在曲库页的右栏/抽屉里，
@@ -285,12 +288,23 @@ export function Workspace() {
   useEffect(() => {
     const onPreview = (event: Event) => {
       // 在线视频预览属于搜索页；显式点击预览时让账号/接播设置自动让位。
+      if (useAppStore.getState().listMode !== "search") previewJumpRef.current = true;
       setListMode("search");
       setPreview((event as CustomEvent<VideoPreviewRequest>).detail);
       if (layout === "narrow") setSheet("aside");
     };
     window.addEventListener(VIDEO_PREVIEW_EVENT, onPreview);
     return () => window.removeEventListener(VIDEO_PREVIEW_EVENT, onPreview);
+  }, [layout, setListMode]);
+  useEffect(() => {
+    const onSongPreview = (event: Event) => {
+      if (useAppStore.getState().listMode !== "search") previewJumpRef.current = true;
+      setListMode("search");
+      setSongPreview((event as CustomEvent<SongPreviewRequest>).detail);
+      if (layout === "narrow") setSheet("aside");
+    };
+    window.addEventListener(SONG_PREVIEW_EVENT, onSongPreview);
+    return () => window.removeEventListener(SONG_PREVIEW_EVENT, onSongPreview);
   }, [layout, setListMode]);
 
   // 右栏那份内容只写一遍，宽屏塞进 <aside>、窄屏塞进抽屉——
@@ -302,7 +316,6 @@ export function Workspace() {
       : listMode === "search"
         ? "下载队列"
         : "曲目详情";
-  const asideHasContent = showAccounts || showDjPanel || listMode === "search" || selected !== null;
   const asidePanel = showAccounts ? (
     <AccountsPanel />
   ) : showDjPanel ? (
@@ -318,6 +331,7 @@ export function Workspace() {
           onClose={() => setPreview(null)}
         />
       )}
+      {songPreview && <SongPreviewPanel request={songPreview} onClose={() => setSongPreview(null)} />}
       <div className="kd-grow" style={{ minHeight: 0 }}>
         <QueuePanel />
       </div>
@@ -338,6 +352,12 @@ export function Workspace() {
     // 例外：「正在播」跳转刚切的标签，它正要用这个抽屉（见 detailJumpRef）
     if (detailJumpRef.current) {
       detailJumpRef.current = false;
+      return;
+    }
+    // 点击搜索结果预览主动切页时，事件处理器已经拉开了右侧抽屉；
+    // 这里不能紧接着又把它关掉。
+    if (previewJumpRef.current) {
+      previewJumpRef.current = false;
       return;
     }
     setSheet(null);
@@ -570,7 +590,7 @@ export function Workspace() {
   }, [chosenSources, quality, enqueue, refreshStats]);
 
   /**
-   * 本地列表里拖动换位：把整个文件夹的曲目顺序写回它的 .kumodeck.json。
+   * 本地列表里拖动换位：把整个文件夹的曲目顺序写回它的 .kdj.json。
    * 先按当前排序取全量（分页外的也要参与），再把拖动的块插到目标位置。
    */
   const reorderTracks = useCallback(
@@ -623,6 +643,9 @@ export function Workspace() {
 
   return (
     <section className="kd-section">
+      {/* macOS 红绿灯所在的 overlay 区单独留出来：下面的搜索栏只负责搜索，
+          顶部空白区负责拖动窗口，两者不再在红绿灯底下交界。 */}
+      <div className="kd-window-spacer" data-tauri-drag-region aria-hidden="true" />
       {/* —— 顶上永远是那条"搜歌来下"的大搜索框 —— */}
       <SearchBar
         query={query}
@@ -654,6 +677,15 @@ export function Workspace() {
               <span {...gripProps("tree")} />
               <FolderTree />
             </div>
+          )}
+
+          {/* 竖屏不把完整文件夹树压缩进主列表，而是保留一条窄的左侧栏。
+              这样文件夹入口一直在眼前；详情面板则由播放栏当前曲目区域打开。 */}
+          {layout === "narrow" && (
+            <NarrowFolderRail
+              expanded={folderRailExpanded}
+              onToggle={() => setFolderRailExpanded((value) => !value)}
+            />
           )}
 
           {/* 三栏之间的两条把手：拖动改左/右栏宽度，中间吃剩余。宽度记在
@@ -693,7 +725,7 @@ export function Workspace() {
                   aria-pressed={listMode === "search"}
                   onClick={() => setListMode("search")}
                 >
-                  搜索{resultCount > 0 && ` ${resultCount}`}
+                  搜索{layout === "wide" && resultCount > 0 && ` ${resultCount}`}
                 </button>
               </nav>
               {/* 搜索失败时这条摘要就地变成失败原因（data-error 让它换个颜色），
@@ -743,6 +775,19 @@ export function Workspace() {
               />
             )}
 
+            {/* 搜索结果的批量操作贴在列表顶部：选中前几首后无需滚到页面底部。 */}
+            {listMode === "search" && chosenSources.length > 0 && (
+              <div className="kd-picked-bar kd-picked-bar-top">
+                <span className="kd-muted">已选 {chosenSources.length} 首</span>
+                <Button variant="ghost" size="sm" onClick={() => setChosen(new Set())}>清除</Button>
+                <span className="kd-toolbar-gap" />
+                <InlineNotice text={queueError} onDismiss={() => setQueueError("")} />
+                <Button variant="primary" onClick={() => void addToQueue()}>
+                  <Download size={13} /> 加入队列
+                </Button>
+              </div>
+            )}
+
             {listMode === "search" ? (
               <div className="kd-scroll">
                 <ResultTable
@@ -783,23 +828,6 @@ export function Workspace() {
               />
             )}
 
-            {/* 勾了歌才浮出来的动作条：整个面板唯一的红色按钮只在
-                "已经有可入队的东西"这一刻出现，平时不占地方也不抢眼。 */}
-            {listMode === "search" && chosenSources.length > 0 && (
-              <div className="kd-picked-bar">
-                <span className="kd-muted">已选 {chosenSources.length} 首</span>
-                <Button variant="ghost" size="sm" onClick={() => setChosen(new Set())}>
-                  清除
-                </Button>
-                <span className="kd-toolbar-gap" />
-                {/* 入队失败就摆在这颗按钮左边：勾选还在，重按一次就是重试 */}
-                <InlineNotice text={queueError} onDismiss={() => setQueueError("")} />
-                <Button variant="primary" onClick={() => void addToQueue()}>
-                  <Download size={13} />
-                  加入队列
-                </Button>
-              </div>
-            )}
           </div>
 
           {showAside && (
@@ -830,45 +858,11 @@ export function Workspace() {
         </div>
       </div>
 
-      {/* ---------------- 窄屏：悬浮键 + 两个抽屉 ---------------- */}
-      {(!showTree || !showAside) && (
-        <>
-          <div className="kd-fabs">
-            {!showTree && (
-              <button
-                type="button"
-                className="kd-fab"
-                aria-label="文件夹"
-                title="文件夹"
-                onClick={() => setSheet("folders")}
-              >
-                <FolderTree_Icon size={17} />
-              </button>
-            )}
-            {/* 有选中的曲目 / 有队列内容时才点得亮：点开一个空面板是白跑一趟。
-                data-dot 在有内容时点一个小红点，替代"自动弹出"——
-                自动弹会在滚列表时不停打断，这个点只是告诉你"这里有东西可看"。 */}
-            {!showAside && (
-              <button
-                type="button"
-                className="kd-fab"
-                data-dot={asideHasContent ? "true" : undefined}
-                aria-label={asideLabel}
-                title={asideLabel}
-                onClick={() => setSheet("aside")}
-              >
-                <PanelRight size={17} />
-              </button>
-            )}
-          </div>
-
-          <Sheet open={sheet === "folders"} title="文件夹" onClose={() => setSheet(null)}>
-            <FolderTree />
-          </Sheet>
-          <Sheet open={sheet === "aside"} title={asideLabel} onClose={() => setSheet(null)}>
-            {asidePanel}
-          </Sheet>
-        </>
+      {/* 窄屏文件夹栏常驻且可在布局内展开；只有详情/队列继续使用底部抽屉。 */}
+      {layout === "narrow" && (
+        <Sheet open={sheet === "aside"} title={asideLabel} onClose={() => setSheet(null)}>
+          {asidePanel}
+        </Sheet>
       )}
     </section>
   );

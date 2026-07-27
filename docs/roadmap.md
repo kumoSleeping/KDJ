@@ -8,7 +8,7 @@ Demo 1 之后的方向，按"对 DJ 的实际价值 / 实现成本"排的。
 | --- | --- | --- |
 | **波形图 + 热点标记** | 离线渲染整轨波形（峰值包络降采样存 `.kdwave` 缓存），在波形上标 intro/drop/outro。Drop 检测可用能量包络的突变点 + 节拍网格对齐。 | 中 |
 | **Cue 点与循环段** | 8 个热 cue，按小节吸附；导出到文件标签（Serato 用 GEOB，Rekordbox 用 `.xml`/`ANLZ`）。 | 中高 |
-| **Rekordbox / Serato 曲库导出** | `rekordbox.xml` 是最通用的交换格式，Demo 2 先做单向导出（KumoDeck → Rekordbox），带 BPM/KEY/Cue。 | 中 |
+| **Rekordbox / Serato 曲库导出** | `rekordbox.xml` 是最通用的交换格式，Demo 2 先做单向导出（KDJ → Rekordbox），带 BPM/KEY/Cue。 | 中 |
 | **智能歌单（Set 规划）** | 给起始曲目 + 目标时长，用 Camelot 兼容 + BPM 爬升曲线自动排一套 set，可手动微调。这是把曲库分析变成生产力的关键一步。 | 中 |
 | **重复曲目检测** | 同一首歌下了多个版本/多个平台。用 chromaprint 式指纹（可以用已有的 chroma 做粗指纹）+ 时长 + 标题相似度找重复，批量清理。 | 中 |
 
@@ -30,5 +30,5 @@ Demo 1 之后的方向，按"对 DJ 的实际价值 / 实现成本"排的。
 
 ## 明确不做
 
-- 不做在线流媒体播放（版权与稳定性都不划算，KumoDeck 只管把文件拿到本地并分析好）。
-- 不做 DJ 演出软件本身（Rekordbox / Serato / Traktor 生态太深），KumoDeck 定位是**它们上游的准备工作台**。
+- 不做在线流媒体播放（版权与稳定性都不划算，KDJ 只管把文件拿到本地并分析好）。
+- 不做 DJ 演出软件本身（Rekordbox / Serato / Traktor 生态太深），KDJ 定位是**它们上游的准备工作台**。

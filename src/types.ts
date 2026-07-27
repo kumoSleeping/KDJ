@@ -1,5 +1,5 @@
 /**
- * 前后端契约（对应 sidecar/kumodeck/models.py）。
+ * 前后端契约（对应 sidecar/kdj/models.py）。
  * 改这里必须同步改 models.py 和 docs/00-architecture.md。
  */
 
@@ -275,7 +275,7 @@ export interface FolderNode {
   pending_count: number;
   children: FolderNode[];
   is_root: boolean;
-  /** 目录里有 .kumodeck.json（顺序已受管）；false = 还没初始化，按名字排。 */
+  /** 目录里有 .kdj.json（顺序已受管）；false = 还没初始化，按名字排。 */
   managed: boolean;
 }
 

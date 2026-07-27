@@ -14,9 +14,9 @@
 #
 # 签名的钥匙从环境变量来，脚本本身不含任何密码：
 #   ANDROID_KEYSTORE_BASE64   keystore 文件的 base64（CI 用；本地可省）
-#   ANDROID_KEYSTORE_PATH     keystore 路径（本地用，默认 ~/.android/kumodeck-release.jks）
+#   ANDROID_KEYSTORE_PATH     keystore 路径（本地用，默认 ~/.android/kdj-release.jks）
 #   ANDROID_KEYSTORE_PASSWORD 口令
-#   ANDROID_KEY_ALIAS         别名（默认 kumodeck）
+#   ANDROID_KEY_ALIAS         别名（默认 kdj）
 # 一个都没有时**跳过签名**继续跑，出未签名包——本地只想验证能不能编时不该被卡住。
 set -euo pipefail
 
@@ -46,7 +46,7 @@ fi
 echo "✓ 明文放行"
 
 # ---------------------------------------------------------------- 2. 签名
-KEYSTORE="${ANDROID_KEYSTORE_PATH:-$HOME/.android/kumodeck-release.jks}"
+KEYSTORE="${ANDROID_KEYSTORE_PATH:-$HOME/.android/kdj-release.jks}"
 if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
   KEYSTORE="$GEN/app/release.jks"
   # base64 -d 在 GNU/BSD 上参数一致，-D 只有 BSD 认，所以统一用 -d
@@ -59,7 +59,7 @@ if [ -f "$KEYSTORE" ] && [ -n "${ANDROID_KEYSTORE_PASSWORD:-}" ]; then
   cat > "$GEN/app/keystore.properties" <<EOF
 storeFile=$(cd "$(dirname "$KEYSTORE")" && pwd)/$(basename "$KEYSTORE")
 storePassword=$ANDROID_KEYSTORE_PASSWORD
-keyAlias=${ANDROID_KEY_ALIAS:-kumodeck}
+keyAlias=${ANDROID_KEY_ALIAS:-kdj}
 keyPassword=${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}
 EOF
   chmod 600 "$GEN/app/keystore.properties"

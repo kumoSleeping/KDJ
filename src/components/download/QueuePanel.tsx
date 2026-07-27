@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { Clapperboard, FolderOpen, Inbox, Music2, Play, Trash2, X } from "lucide-react";
+import { api } from "../../lib/api";
 import { DASH, folderName, formatBytes, formatPercent, formatSpeed } from "../../lib/format";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
-import type { DownloadTask, Settings, TaskState } from "../../types";
+import { useLibraryStore } from "../../stores/libraryStore";
+import type { DownloadTask, FolderNode, Settings, TaskState } from "../../types";
 import { Button, EmptyState, InlineNotice, ProgressBar } from "../common";
 import { PLATFORM_LABEL } from "./MergedGroupRow";
 
@@ -29,7 +31,7 @@ function progressState(state: TaskState): "running" | "done" | "failed" {
   return "running";
 }
 
-function QueueRow({ task }: { task: DownloadTask }) {
+function QueueRow({ task, onOpenFolder }: { task: DownloadTask; onOpenFolder(path: string): void }) {
   const cancel = useDownloadStore((store) => store.cancel);
   /** 取消这一条失败时的原因，和任务自己的 error 共用行尾那一行。 */
   const [cancelError, setCancelError] = useState("");
@@ -68,7 +70,7 @@ function QueueRow({ task }: { task: DownloadTask }) {
             size="sm"
             iconOnly
             aria-label="在文件夹中显示"
-            onClick={() => void window.kdj?.revealPath(task.path)}
+            onClick={() => onOpenFolder(task.path)}
           >
             <FolderOpen size={12} />
           </Button>
@@ -191,7 +193,7 @@ function SaveDirSelect({
  * 音乐和视频各一个下拉，选完存回设置。原来塞在搜索框上的那个目录按钮删了——
  * 搜索的时候人在想"找什么"，不是"存哪里"。
  */
-function SaveDirRow() {
+function SaveDirRow({ onOpenFolder }: { onOpenFolder(path: string): void }) {
   const settings = useAppStore((store) => store.settings);
   const saveSettings = useAppStore((store) => store.saveSettings);
   if (!settings) return null;
@@ -221,9 +223,9 @@ function SaveDirRow() {
         variant="ghost"
         size="sm"
         iconOnly
-        aria-label="在访达中打开音乐下载目录"
-        title="在访达中打开音乐下载目录"
-        onClick={() => void window.kdj?.revealPath(settings.download_dir)}
+        aria-label="在面板中打开音乐下载目录"
+        title="在面板中打开音乐下载目录"
+        onClick={() => onOpenFolder(settings.download_dir)}
       >
         <FolderOpen size={12} />
       </Button>
@@ -235,20 +237,42 @@ export function QueuePanel() {
   const list = useDownloadStore((store) => store.list);
   const activeCount = useDownloadStore((store) => store.activeCount);
   const clear = useDownloadStore((store) => store.clear);
-  const autoStart = useAppStore((store) => store.settings?.auto_start_downloads ?? false);
-  const saveSettings = useAppStore((store) => store.saveSettings);
+  const folders = useLibraryStore((store) => store.folders);
+  const setFilter = useLibraryStore((store) => store.setFilter);
+  const setQueueView = useLibraryStore((store) => store.setQueueView);
+  const setListMode = useAppStore((store) => store.setListMode);
   const finishedCount = list.length - activeCount;
   const queuedCount = list.reduce((sum, task) => sum + (task.state === "queued" ? 1 : 0), 0);
   /**
    * 「开始下载」按得动的唯一情形：闸门关着，且真有人被它拦在外面。
    *
-   * 后端只有 `auto_start_downloads` 这一个闸门（DownloadManager::set_auto_start），
-   * 没有"只放行当前这批"的接口。而且 `wait_until_started` 过了之后还要抢并发额度——
-   * 闸门已经开着时剩下的 queued 是在等额度，再按一次什么也推不动，所以那时候要灰掉。
+   * 后端用一次性 generation 放行点击前已经排队的任务；以后新加的任务继续排队，
+   * 不会因为点过一次「开始下载」就永久锁进自动下载模式。
    */
-  const canStart = !autoStart && queuedCount > 0;
+  const canStart = queuedCount > 0;
   /** 队列头上两个动作共用一条错误行：一次只按得动一个，堆两条只会把列表往下挤。 */
   const [actionError, setActionError] = useState("");
+
+  const openFolder = (path: string) => {
+    const wanted = path.replaceAll("\\", "/").replace(/\/+$/, "");
+    let best = "";
+    const visit = (nodes: FolderNode[]) => {
+      for (const node of nodes) {
+        const folder = node.path.replaceAll("\\", "/").replace(/\/+$/, "");
+        if (wanted === folder || wanted.startsWith(`${folder}/`)) {
+          if (folder.length > best.length) best = node.path;
+          visit(node.children);
+        }
+      }
+    };
+    visit(folders?.roots ?? []);
+    setListMode("library");
+    setQueueView(false);
+    // 树刚启动尚未拉回来时，至少选文件所在的父目录；不能把文件本身
+    // 当成 folder filter，否则中间列表会显示为空，看起来像下载丢了。
+    const parent = path.replace(/[\\/][^\\/]*$/, "") || path;
+    setFilter({ folder: best || parent, q: "" });
+  };
 
   return (
     <div className="kd-col" style={{ height: "100%", minHeight: 0 }}>
@@ -274,19 +298,15 @@ export function QueuePanel() {
           title={
             canStart
               ? `开始下载排队中的 ${queuedCount} 个任务`
-              : autoStart
-                ? "已经在下了：排队中的任务在等并发额度，让完一个自动接一个"
-                : "队列里没有排队中的任务"
+              : "队列里没有排队中的任务"
           }
           onClick={() => {
             setActionError("");
             void (async () => {
-              await saveSettings({ auto_start_downloads: true });
-              // saveSettings 自己吞异常并回滚（见 appStore 里的注释），Promise 永远 resolve，
-              // 所以"到底成没成"只能回头看状态。还是 false 就是 PUT /settings 挂了——
-              // 队列纹丝不动而不吭声，按钮看起来就是坏的
-              if (!useAppStore.getState().settings?.auto_start_downloads) {
-                setActionError("开始下载失败：设置没保存上，检查后端连接");
+              try {
+                await api.startDownloads();
+              } catch (error: unknown) {
+                setActionError(`开始下载失败：${(error as Error).message}`);
               }
             })();
           }}
@@ -314,7 +334,7 @@ export function QueuePanel() {
       {/* 就贴在动作那条工具条底下 */}
       <InlineNotice text={actionError} onDismiss={() => setActionError("")} block />
 
-      <SaveDirRow />
+      <SaveDirRow onOpenFolder={openFolder} />
 
       <div className="kd-scroll kd-grow" style={{ minHeight: 0 }}>
         {list.length === 0 ? (
@@ -324,7 +344,7 @@ export function QueuePanel() {
             hint="在左边勾选歌曲，底部会出现「加入队列」。"
           />
         ) : (
-          list.map((task) => <QueueRow key={task.id} task={task} />)
+          list.map((task) => <QueueRow key={task.id} task={task} onOpenFolder={openFolder} />)
         )}
       </div>
     </div>

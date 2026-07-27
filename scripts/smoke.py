@@ -38,7 +38,7 @@ def free_port() -> int:
 def call(base: str, token: str, method: str, path: str, body: object = None):
     data = json.dumps(body).encode() if body is not None else None
     request = Request(f"{base}/api{path}", data=data, method=method)
-    request.add_header("X-KumoDeck-Token", token)
+    request.add_header("X-KDJ-Token", token)
     if data:
         request.add_header("Content-Type", "application/json")
     with urlopen(request, timeout=30) as response:
@@ -65,11 +65,11 @@ def main() -> int:
     port = free_port()
     token = secrets.token_hex(16)
     base = f"http://127.0.0.1:{port}"
-    workdir = Path(tempfile.mkdtemp(prefix="kumodeck-smoke-"))
+    workdir = Path(tempfile.mkdtemp(prefix="kdj-smoke-"))
 
     process = subprocess.Popen(
         [
-            str(PYTHON), "-u", "-m", "kumodeck",
+            str(PYTHON), "-u", "-m", "kdj",
             "--host", "127.0.0.1", "--port", str(port), "--token", token,
             "--data-dir", str(workdir / "data"),
             "--download-dir", str(workdir / "downloads"),

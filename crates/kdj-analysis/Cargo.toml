@@ -1,0 +1,16 @@
+[package]
+name = "kdj-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+kdj-core = { version = "0.2.1", path = "../kdj-core" }
+rubato = "4.0.0"
+rustfft = "6.4.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+symphonia = { version = "0.5.4", features = ["aac", "alac", "mp3", "isomp4", "ogg", "vorbis", "flac", "wav", "pcm"] }
+thiserror = "2.0.19"
+tracing = "0.1.44"

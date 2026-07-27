@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Globe2, Link2, LoaderCircle, Rows3, Search } from "lucide-react";
+import { Link2, Rows3, Search } from "lucide-react";
 import type { Platform, Quality } from "../../types";
 import { useAppStore } from "../../stores/appStore";
 import { PlatformMark } from "./PlatformMark";
@@ -44,9 +44,9 @@ const LOOKS_LIKE_URL = /^\s*https?:\/\//i;
  * 暗示，可它们回答的全是同一个问题的三个部分：搜什么、搜哪儿、要什么音质。
  * 现在连最外圈也不画，整条搜索直接嵌进顶部；内部分区只靠 1px 竖分隔线和留白，
  * 谁也不再单独描边；
- * 平台键的选中态改用「品牌色 + 一点同色底」表达，不靠边框。
+ * 平台键的选中态只点亮品牌色，不靠边框或淡色方块。
  *
- * 网络入口用红色 Globe2 做语义提示，最右提交键仍是这条里的主动作；两者都不画边框。
+ * 输入框按 Enter 提交；批量文本按 Cmd/Ctrl+Enter，不再额外摆一个右上角提交图标。
  */
 export function SearchBar({
   query,
@@ -62,15 +62,6 @@ export function SearchBar({
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   const isUrl = LOOKS_LIKE_URL.test(query);
   const canSubmit = query.trim().length > 0 && !busy;
-  // 拆分规则和后端 split_intake_text 保持一致：有换行只按行拆，没换行才按逗号拆
-  const entryCount = batch
-    ? new Set(
-        (query.includes("\n") ? query.split("\n") : query.split(/[,，、;；\t]+/))
-          .map((line) => line.trim())
-          .filter(Boolean),
-      ).size
-    : 0;
-
   return (
     <form
       className="kd-toolbar"
@@ -90,10 +81,10 @@ export function SearchBar({
           inputRef.current?.focus();
         }}
       >
-        {/* 前导图标顺带当模式指示：网络搜索用 Globe2，链接用 Link2，贴成多行就变成"多条"那个图标。
+        {/* 前导图标顺带当模式指示：关键词用放大镜，链接用 Link2，贴成多行就变成"多条"图标。
             批量模式下它贴顶——文本域有四行高，图标浮在正中间会跟第二行文字打架。 */}
         <span className="kd-searchbar-lead" data-network="true" aria-hidden="true">
-          {batch ? <Rows3 size={14} /> : isUrl ? <Link2 size={14} /> : <Globe2 size={14} />}
+          {batch ? <Rows3 size={14} /> : isUrl ? <Link2 size={14} /> : <Search size={14} />}
         </span>
 
         {batch ? (
@@ -141,8 +132,8 @@ export function SearchBar({
           />
         )}
 
-        {/* 右半边一组：音质 / 平台 / 提交。分隔线只在"换了个话题"的地方画：
-            输入 │ 这次要什么音质 │ 这次搜哪儿 → 提交。平台键之间不画线，
+        {/* 右半边一组：音质 / 平台。分隔线只在"换了个话题"的地方画：
+            输入 │ 这次要什么音质 │ 这次搜哪儿。平台键之间不画线，
             它们是同一类东西，靠间距就分得开。 */}
         <div className="kd-searchbar-tools">
           <span className="kd-searchbar-sep" aria-hidden="true" />
@@ -166,21 +157,7 @@ export function SearchBar({
               竖屏下那是好几条曲目的高度。 */}
           <SearchPlatforms {...platformProps} />
 
-          {/* 整条搜索区唯一的红：提交。批量时它带上条数——贴了一大坨进去，
-              得让人知道系统数出了几条，不然按下去是在赌。 */}
-          <button
-            type="submit"
-            className="kd-searchbar-go"
-            data-wide={batch || undefined}
-            disabled={!canSubmit}
-            aria-label={batch ? "批量处理" : isUrl ? "解析" : "搜索"}
-            title={
-              batch ? "批量处理（Cmd/Ctrl+Enter 也可以提交）" : isUrl ? "解析这条链接" : "搜索"
-            }
-          >
-            {busy ? <LoaderCircle className="kd-spin" size={14} /> : <Search size={14} />}
-            {batch && <span>批量处理{entryCount > 1 ? `（${entryCount}）` : ""}</span>}
-          </button>
+          {/* 不再放右上角提交图标：单行按 Enter，多行按 Cmd/Ctrl+Enter。 */}
         </div>
       </div>
     </form>

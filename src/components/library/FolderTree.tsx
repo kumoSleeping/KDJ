@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  BarChart3,
   ClipboardPaste,
   Folder,
   FolderInput,
@@ -11,6 +12,8 @@ import {
   Library,
   ListMusic,
   MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
   PencilLine,
   Search,
   Trash2,
@@ -27,6 +30,96 @@ import { InlineNotice } from "../common";
 export const TRACK_DND_TYPE = "application/x-kdj-tracks";
 /** 拖文件夹换顺序用的 MIME，和上面分开，dragover 时才好区别对待。 */
 const FOLDER_DND_TYPE = "application/x-kdj-folder";
+
+/** 所有“添加音乐”入口共用同一个动作：选目录后登记、扫描并自动分析。 */
+export async function pickAndScanFolders(): Promise<void> {
+  const paths = await window.kdj?.pickFolders();
+  if (!paths?.length) return;
+  await useLibraryStore.getState().startScan(paths, true);
+}
+
+function flattenFolders(nodes: FolderNode[]): FolderNode[] {
+  return nodes.flatMap((node) => [node, ...flattenFolders(node.children)]);
+}
+
+/**
+ * 窄屏常驻文件夹栏。收起时也能直接切换添加/临时列表/全库/任意文件夹；
+ * 展开时是占据布局宽度的真正侧栏，不覆盖列表，也不再退化成抽屉。
+ */
+export function NarrowFolderRail({ expanded, onToggle }: { expanded: boolean; onToggle(): void }) {
+  const folders = useLibraryStore((state) => state.folders);
+  const filter = useLibraryStore((state) => state.filter);
+  const queueView = useLibraryStore((state) => state.queueView);
+  const setFilter = useLibraryStore((state) => state.setFilter);
+  const setQueueView = useLibraryStore((state) => state.setQueueView);
+  const setListMode = useAppStore((state) => state.setListMode);
+  const [error, setError] = useState("");
+
+  if (expanded) {
+    return (
+      <aside className="kd-narrow-folder-panel" aria-label="文件夹侧栏">
+        <button className="kd-narrow-rail-toggle" type="button" onClick={onToggle} title="收起文件夹栏">
+          <PanelLeftClose size={15} />
+          <span>文件夹</span>
+        </button>
+        <FolderTree />
+      </aside>
+    );
+  }
+
+  const choose = (folder: string) => {
+    setQueueView(false);
+    setFilter({ folder, folderDeep: false });
+    setListMode("library");
+  };
+  return (
+    <aside className="kd-narrow-folder-rail kd-scroll" aria-label="快捷文件夹栏">
+      <button type="button" onClick={onToggle} title="展开文件夹栏" aria-label="展开文件夹栏">
+        <PanelLeftOpen size={15} />
+      </button>
+      <button
+        type="button"
+        title={error || "添加音乐文件夹"}
+        aria-label="添加音乐文件夹"
+        onClick={() => {
+          setError("");
+          void pickAndScanFolders().catch((reason: unknown) => setError((reason as Error).message));
+        }}
+      >
+        <FolderPlus size={15} /><small>添加</small>
+      </button>
+      <button
+        type="button"
+        data-active={queueView || undefined}
+        title="临时列表"
+        onClick={() => { setQueueView(true); setListMode("library"); }}
+      >
+        <ListMusic size={15} /><small>临时</small>
+      </button>
+      <button
+        type="button"
+        data-active={!queueView && !filter.folder || undefined}
+        title="全部曲目"
+        onClick={() => choose("")}
+      >
+        <Library size={15} /><small>全部</small>
+      </button>
+      <span className="kd-narrow-rail-sep" />
+      {flattenFolders(folders?.roots ?? []).map((node) => (
+        <button
+          key={node.path}
+          type="button"
+          data-active={!queueView && filter.folder === node.path || undefined}
+          title={node.path}
+          onClick={() => choose(node.path)}
+        >
+          {node.is_root ? <HardDrive size={14} /> : <Folder size={14} />}
+          <small>{node.name.slice(0, 2)}</small>
+        </button>
+      ))}
+    </aside>
+  );
+}
 
 interface MenuState {
   node: FolderNode;
@@ -83,6 +176,7 @@ export function FolderTree() {
   const applyFolderOp = useLibraryStore((state) => state.applyFolderOp);
   const paste = useLibraryStore((state) => state.paste);
   const startScan = useLibraryStore((state) => state.startScan);
+  const startAnalyze = useLibraryStore((state) => state.startAnalyze);
   // 动了文件夹或曲库搜索 = 现在关心的是本地，把中间那对切回曲库。
   // 搜索结果不丢，列表面板顶边的标签随时能切回去。
   const setListMode = useAppStore((state) => state.setListMode);
@@ -113,11 +207,9 @@ export function FolderTree() {
   const scan = useLibraryStore((state) => state.scan);
   const scanning = scan !== null && scan.phase !== "done";
   const addFolders = async () => {
-    const paths = await window.kdj?.pickFolders();
-    if (!paths || paths.length === 0) return;
     setNotice("");
     try {
-      await startScan(paths, true);
+      await pickAndScanFolders();
     } catch (error) {
       setNotice(`添加文件夹失败：${(error as Error).message}`);
     }
@@ -447,7 +539,9 @@ export function FolderTree() {
         >
           <span className="kd-folder-caret" />
           <ListMusic size={13} />
-          <span className="kd-truncate">临时列表 ({queueCount})</span>
+          <span className="kd-truncate">
+            临时列表 <span className="kd-folder-count">({queueCount})</span>
+          </span>
         </div>
         <div
           className="kd-folder"
@@ -528,6 +622,26 @@ export function FolderTree() {
           >
             <PencilLine size={12} />
             重命名
+          </button>
+          <button type="button" onClick={() => {
+            const folder = menu.node.path;
+            setMenu(null);
+            void (async () => {
+              // 后端单页最多 1000 首，文件夹可能远大于这个数；完整翻页后
+              // 一次性交给分析队列，避免右键看似成功却只分析前 1000 首。
+              const ids: number[] = [];
+              let offset = 0;
+              while (true) {
+                const page = await api.tracks({ folder, folder_deep: 1, limit: 1000, offset });
+                ids.push(...page.items.map((track) => track.id));
+                offset += page.items.length;
+                if (page.items.length === 0 || offset >= page.total) break;
+              }
+              await startAnalyze(ids, false);
+            })().catch((error: unknown) => setNotice((error as Error).message));
+          }}>
+            <BarChart3 size={12} />
+            分析此文件夹
           </button>
           {/* 粘贴：底栏那颗按钮删掉之后，这里是它唯一的界面入口。
               键盘走 Cmd/Ctrl+V（见 useLibraryClipboard）。 */}

@@ -270,6 +270,23 @@ textarea {
   flex-direction: column;
   min-height: 0;
 }
+.kd-body > .kd-section {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* macOS overlay 标题栏的空白拖动区。搜索栏往下移一点后，红绿灯不会再
+   和搜索控件的左边界碰在一起；无 overlay 的平台不额外占高度。 */
+.kd-window-spacer {
+  display: none;
+}
+.kd-app[data-mac="true"] .kd-window-spacer {
+  display: block;
+  flex: none;
+  height: 1.65rem;
+  background: var(--kd-panel);
+  -webkit-app-region: drag;
+}
 
 /* —— 主区 —— */
 .kd-section {
@@ -291,7 +308,101 @@ textarea {
 /* 三档布局的网格。把手和两侧栏由 JS 按档位摘掉，这里只负责列的构成。
    档位定义见 src/lib/useLayoutMode.ts。 */
 .kd-split[data-layout="narrow"] {
-  grid-template-columns: minmax(0, 1fr);
+  display: flex;
+  gap: 0;
+}
+
+.kd-narrow-folder-rail {
+  flex: none;
+  width: 3.15rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.18rem;
+  padding: 0.35rem 0.2rem;
+  border-right: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.kd-narrow-folder-rail > button {
+  appearance: none;
+  flex: none;
+  width: 2.65rem;
+  min-height: 2.55rem;
+  display: flex;
+  flex-direction: column;
+  place-items: center;
+  align-items: center;
+  justify-content: center;
+  gap: 0.12rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+.kd-narrow-folder-rail > button small {
+  display: block;
+  max-width: 2.35rem;
+  overflow: hidden;
+  color: inherit;
+  font-size: 0.57rem;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-narrow-folder-rail > button:hover {
+  color: var(--kd-text);
+  background: var(--kd-hover);
+}
+.kd-narrow-folder-rail > button[data-active="true"] {
+  color: var(--kd-text);
+  background: var(--kd-selected);
+  box-shadow: inset 2px 0 var(--kd-theme);
+}
+.kd-narrow-rail-sep {
+  flex: none;
+  width: 1.8rem;
+  height: 1px;
+  margin: 0.15rem 0;
+  background: var(--kd-line);
+}
+.kd-narrow-folder-panel {
+  flex: 0 0 clamp(11rem, 38vw, 15rem);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+}
+.kd-narrow-folder-panel > .kd-folder-pane {
+  flex: 1;
+  min-height: 0;
+}
+.kd-narrow-rail-toggle {
+  appearance: none;
+  flex: none;
+  height: 2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.65rem;
+  border: none;
+  border-bottom: 1px solid var(--kd-line);
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  cursor: pointer;
+}
+.kd-narrow-rail-toggle:hover {
+  color: var(--kd-text);
+  background: var(--kd-hover);
+}
+.kd-split[data-layout="narrow"] > .kd-table-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .kd-split {
@@ -732,14 +843,11 @@ textarea {
   font-weight: 600;
   cursor: pointer;
 }
-/* 激活态不再画红下划线：亮字 + 中性底就够了，红色留给动作按钮 */
-/* 选中态用红底白字，而不是原来那块灰。
-   曲库/搜索是这个软件最重要的一个开关——"我现在看的是本地还是网上"，
-   灰底和没选中几乎分不出来，看错一次就会对着搜索结果找自己的歌。
-   这里破一次"红色只给动作"：它标的是当前所在位置，重要性够格。 */
+/* 激活态只用亮字和细下划线，不再铺一整块红色。 */
 .kd-list-tabs > button[aria-pressed="true"] {
-  color: var(--kd-theme-ink);
-  background: var(--kd-theme);
+  color: var(--kd-text);
+  background: transparent;
+  box-shadow: inset 0 -2px var(--kd-theme);
   font-weight: 700;
 }
 .kd-list-tabs > button:hover:not([aria-pressed="true"]) {
@@ -755,6 +863,19 @@ textarea {
   border-top: 1px solid var(--kd-line);
   background: var(--kd-panel);
   flex: none;
+}
+.kd-picked-bar-top {
+  border-top: 1px solid var(--kd-line-soft);
+  border-bottom: 1px solid var(--kd-line-soft);
+}
+.kd-song-preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.75rem;
+}
+.kd-song-preview-body audio {
+  width: 100%;
 }
 
 .kd-table {
@@ -1065,12 +1186,13 @@ tr:hover .kd-thumb-glass,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 2.4rem;
-  height: 1.2rem;
-  padding: 0 0.3rem;
-  color: #0b0b0d;
+  min-width: 2rem;
+  height: 1.05rem;
+  padding: 0 0.24rem;
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  color: var(--kd-text-body);
   font-size: var(--kd-size-xs);
-  font-weight: 800;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
 }
@@ -1587,10 +1709,29 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-queue-row {
   position: relative;
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 0.25rem 0.75rem;
   padding: 0.55rem 0.75rem;
   border-bottom: 1px solid var(--kd-line-soft);
+}
+
+.kd-harmonic-select {
+  appearance: none;
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--kd-line);
+  background: transparent;
+  color: var(--kd-theme);
+  cursor: pointer;
+}
+
+.kd-harmonic-select[aria-pressed="true"] {
+  border-color: var(--kd-theme);
+  background: var(--kd-theme-soft);
 }
 .kd-queue-title {
   font-weight: 600;
@@ -1599,7 +1740,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   white-space: nowrap;
 }
 .kd-queue-meta {
-  grid-column: 1 / -1;
+  grid-column: 2 / -1;
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -2140,6 +2281,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
  * 才够放下标题+BPM+KEY+时长。这一档同时覆盖竖着的平板和横着的手机。
  * ========================================================== */
 @media (max-width: 820px) {
+  .kd-folder-count {
+    display: none;
+  }
   /* 搜索条保持一行：输入框可以缩，平台键和音质不缩。
      让它 wrap 的话会散成三四层，把小半屏的高度吃掉。 */
   .kd-toolbar {
@@ -2421,7 +2565,7 @@ textarea.kd-searchbar-input {
   background: var(--kd-hover);
 }
 .kd-plat[aria-pressed="true"] {
-  background: color-mix(in srgb, currentColor 14%, transparent);
+  background: transparent;
 }
 /* 选中时各家用各家的品牌色。这是它们唯一被允许上色的时刻。 */
 .kd-plat[aria-pressed="true"][data-platform="wyy"] {
@@ -2455,7 +2599,7 @@ textarea.kd-searchbar-input {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 2.6rem;
+  min-width: 2rem;
 }
 
 @media (max-width: 820px) {

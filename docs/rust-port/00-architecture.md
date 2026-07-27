@@ -47,7 +47,7 @@ Linux AppImage 204MB。体积来源实测：
   相对于要砍掉的 300MB 是噪声。
 - 现有 5792 行 TSX 是"和原本一模一样"这个验收标准的直接载体。重写它等于
   把风险从"后端算法对不对"扩大到"UI 每一个像素对不对"。
-- 真正要改的只有 240 行 Electron glue（`window.kumodeck.*` → Tauri plugin）。
+- 真正要改的只有 240 行 Electron glue（`window.kdj.*` → Tauri plugin）。
 
 如果之后想换 Svelte，那是独立一件事，不该和"砍体积 + 上安卓"绑在一起。
 
@@ -60,18 +60,18 @@ Linux AppImage 204MB。体积来源实测：
 - 代价：axum + tokio 约 +1.5MB。值。
 
 安全模型原样保留：**只绑 127.0.0.1**，每次启动生成随机 token，
-HTTP 走 `X-KumoDeck-Token` 头、WS 走 `?token=`，比较用 constant-time。
+HTTP 走 `X-KDJ-Token` 头、WS 走 `?token=`，比较用 constant-time。
 
 ## 3. Workspace 布局
 
 ```
 Cargo.toml                    # workspace
 crates/
-  kumodeck-core/              # models（= src/types.ts 契约）、config、events、db
-  kumodeck-providers/         # provider trait + 网易云/QQ/B站/SoundCloud + 各家加密
-  kumodeck-analysis/          # decode / tempo / key / loudness / waveform
-  kumodeck-library/           # scan / folders / service / tagging
-  kumodeck-server/            # axum 路由 + ws + token 鉴权 + 下载队列
+  kdj-core/              # models（= src/types.ts 契约）、config、events、db
+  kdj-providers/         # provider trait + 网易云/QQ/B站/SoundCloud + 各家加密
+  kdj-analysis/          # decode / tempo / key / loudness / waveform
+  kdj-library/           # scan / folders / service / tagging
+  kdj-server/            # axum 路由 + ws + token 鉴权 + 下载队列
 src-tauri/                    # Tauri app：起 server、原生对话框、窗口控制
 src/                          # 现有 React 前端（保留）
 ```
@@ -151,7 +151,7 @@ provider 自己不知道别人的存在——和现在一样。
 - **能做**：搜索、下载（落进应用私有目录 / SAF 选定目录）、播放、
   已下载曲目的 BPM/调号分析、和声推荐。
 - **不做（桌面专属）**：多根曲库目录扫描、文件夹拖拽排序、
-  `.kumodeck.json` 顺序管理、move/hardlink 操作。
+  `.kdj.json` 顺序管理、move/hardlink 操作。
 
 前端按 `/api/health` 回的 `platform` 字段隐藏桌面专属入口。
 
