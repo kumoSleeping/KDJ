@@ -19,6 +19,22 @@ pub struct UpdateInfo {
     pub url: String,
     pub name: String,
     pub published_at: String,
+    pub notes: String,
+}
+
+/// Android 的 GitHub 渠道只认正式签名 APK。Release 可能先创建、APK 十几分钟后
+/// 才传完；这段窗口里宁可提示「发布中」也不能把 unsigned 包或 Release 首页
+/// 当成可安装更新交给用户。
+fn signed_android_apk_url(body: &serde_json::Value) -> Option<&str> {
+    body["assets"].as_array()?.iter().find_map(|asset| {
+        let name = asset["name"].as_str()?;
+        let lower = name.to_ascii_lowercase();
+        if lower.ends_with(".apk") && !lower.contains("unsigned") {
+            asset["browser_download_url"].as_str()
+        } else {
+            None
+        }
+    })
 }
 
 /// "v0.2.1" / "0.2.1" → (0, 2, 1)。解析不了当 (0,0,0)——
@@ -54,13 +70,25 @@ pub async fn check(current: &str) -> Result<UpdateInfo> {
     if tag.is_empty() {
         anyhow::bail!("GitHub 返回里没有 tag_name，可能还没有任何 Release");
     }
+    let is_newer = triple(&tag) > triple(current);
+    let release_url = body["html_url"].as_str().unwrap_or_default();
+    let url = if cfg!(target_os = "android") {
+        match signed_android_apk_url(&body) {
+            Some(url) => url,
+            None if is_newer => anyhow::bail!("新版本正在生成签名 APK，请稍后再检查"),
+            None => release_url,
+        }
+    } else {
+        release_url
+    };
     Ok(UpdateInfo {
-        newer: triple(&tag) > triple(current),
+        newer: is_newer,
         latest: tag.trim_start_matches('v').to_string(),
         current: current.to_string(),
-        url: body["html_url"].as_str().unwrap_or_default().to_string(),
+        url: url.to_string(),
         name: body["name"].as_str().unwrap_or(&tag).to_string(),
         published_at: body["published_at"].as_str().unwrap_or_default().to_string(),
+        notes: body["body"].as_str().unwrap_or_default().to_string(),
     })
 }
 
@@ -77,5 +105,18 @@ mod tests {
         // 解析不了的当 (0,0,0)：奇形怪状的 tag 永远不会被当成"新版本"
         assert_eq!(triple("nightly"), (0, 0, 0));
         assert!(!(triple("nightly") > triple("0.0.1")));
+    }
+
+    #[test]
+    fn android_selects_only_a_signed_apk_asset() {
+        let release = serde_json::json!({
+            "assets": [
+                {"name": "app-universal-release-unsigned.apk", "browser_download_url": "bad"},
+                {"name": "KDJ_0.3.0_universal-release.apk", "browser_download_url": "good"},
+                {"name": "KDJ.dmg", "browser_download_url": "other"}
+            ]
+        });
+        assert_eq!(signed_android_apk_url(&release), Some("good"));
+        assert_eq!(signed_android_apk_url(&serde_json::json!({"assets": []})), None);
     }
 }

@@ -14,7 +14,7 @@
 //! 名字和参数由 `src/lib/bridge.ts` 固定，改名等于把前端按钮变哑巴。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use kumodeck_core::AppConfig;
 use serde::Serialize;
@@ -30,6 +30,59 @@ use tauri_plugin_opener::OpenerExt;
 /// 不用事件推送：窗口很可能在 `emit` 之前就跑完了 bootstrap，那是竞态。
 pub struct Bridge {
     base_url: String,
+}
+
+const RELEASE_PAGE: &str = "https://github.com/kumoSleeping/KDJ/releases/latest";
+
+/// Updater 下载在 Rust 里执行，前端用一个很轻的 IPC 轮询读这里。
+/// 不用全局事件：更新开始后窗口很快会退出，轮询没有订阅/退订竞态，也不会把
+/// tauri-plugin-updater 的 JS 绑定和 ACL 暴露给页面。
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateProgress {
+    pub stage: &'static str,
+    pub downloaded: u64,
+    pub total: Option<u64>,
+    pub message: String,
+}
+
+impl Default for UpdateProgress {
+    fn default() -> Self {
+        Self {
+            stage: "idle",
+            downloaded: 0,
+            total: None,
+            message: String::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct UpdateProgressState(Mutex<UpdateProgress>);
+
+impl UpdateProgressState {
+    fn replace(&self, progress: UpdateProgress) {
+        // 更新进度不是值得让整个应用 panic 的状态；上次持锁线程若异常退出，
+        // 仍取回 inner 继续写，最多丢一帧进度。
+        *self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = progress;
+    }
+
+    fn get(&self) -> UpdateProgress {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DesktopUpdateInfo {
+    pub current: String,
+    pub latest: String,
+    pub newer: bool,
+    pub url: String,
+    pub name: String,
+    pub published_at: String,
+    pub notes: String,
 }
 
 /// 字段名对齐 `src/types.ts::KdjBridge`，所以要 camelCase。
@@ -90,25 +143,117 @@ fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
+/// 桌面检查必须直接问 updater 清单，而不是只问 GitHub 最新 Release。
+/// Release 是先建空壳、各平台包后上传的；只有 updater.check() 找得到当前
+/// OS/架构/安装格式对应的签名包，按钮才应该告诉用户「可以更新」。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tauri::command]
+async fn check_desktop_update(app: tauri::AppHandle) -> Result<DesktopUpdateInfo, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let current = app.package_info().version.to_string();
+    let updater = app.updater().map_err(|err| err.to_string())?;
+    let update = updater.check().await.map_err(|err| err.to_string())?;
+    Ok(match update {
+        Some(update) => DesktopUpdateInfo {
+            current,
+            latest: update.version.clone(),
+            newer: true,
+            url: RELEASE_PAGE.into(),
+            name: format!("KDJ v{}", update.version),
+            published_at: update.date.map(|date| date.to_string()).unwrap_or_default(),
+            notes: update.body.unwrap_or_default(),
+        },
+        None => DesktopUpdateInfo {
+            latest: current.clone(),
+            current,
+            newer: false,
+            url: RELEASE_PAGE.into(),
+            name: "KDJ".into(),
+            published_at: String::new(),
+            notes: String::new(),
+        },
+    })
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+async fn check_desktop_update() -> Result<DesktopUpdateInfo, String> {
+    Err("这个平台由系统应用商店或安装器负责更新".into())
+}
+
+#[tauri::command]
+fn get_update_progress(progress: tauri::State<'_, UpdateProgressState>) -> UpdateProgress {
+    progress.get()
+}
+
+fn fail_update(app: &tauri::AppHandle, error: impl ToString) -> String {
+    let message = error.to_string();
+    app.state::<UpdateProgressState>().replace(UpdateProgress {
+        stage: "failed",
+        downloaded: 0,
+        total: None,
+        message: message.clone(),
+    });
+    message
+}
+
 /// 一键更新：查 → 下载（minisign 校验）→ 原地替换 → 重启。
 /// 全托管在 Rust 侧，前端一次 invoke 到底；错误原样带回去就地显示。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 async fn apply_update(app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
-    let updater = app.updater().map_err(|err| err.to_string())?;
-    let Some(update) = updater.check().await.map_err(|err| err.to_string())? else {
-        return Err("已经是最新版本".into());
+    app.state::<UpdateProgressState>().replace(UpdateProgress {
+        stage: "checking",
+        downloaded: 0,
+        total: None,
+        message: "正在确认当前平台的签名更新包".into(),
+    });
+    let updater = app.updater().map_err(|err| fail_update(&app, err))?;
+    let Some(update) = updater
+        .check()
+        .await
+        .map_err(|err| fail_update(&app, err))?
+    else {
+        return Err(fail_update(&app, "已经是最新版本"));
     };
+
+    let progress_app = app.clone();
+    let install_app = app.clone();
+    let mut downloaded_bytes = 0u64;
     update
         .download_and_install(
-            |done, total| {
-                tracing::info!("更新下载中：{done}/{total:?}");
+            move |chunk, total| {
+                downloaded_bytes = downloaded_bytes.saturating_add(chunk as u64);
+                progress_app.state::<UpdateProgressState>().replace(UpdateProgress {
+                    stage: "downloading",
+                    downloaded: downloaded_bytes,
+                    total,
+                    message: "正在下载并校验更新包".into(),
+                });
+                tracing::info!("更新下载中：{downloaded_bytes}/{total:?}");
             },
-            || tracing::info!("更新下载完成，开始安装"),
+            move || {
+                let current = install_app.state::<UpdateProgressState>().get();
+                install_app.state::<UpdateProgressState>().replace(UpdateProgress {
+                    stage: "installing",
+                    downloaded: current.downloaded,
+                    total: current.total.or(Some(current.downloaded)),
+                    message: "签名校验通过，正在安装".into(),
+                });
+                tracing::info!("更新下载完成，开始安装");
+            },
         )
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| fail_update(&app, err))?;
+    let completed = app.state::<UpdateProgressState>().get();
+    app.state::<UpdateProgressState>().replace(UpdateProgress {
+        stage: "restarting",
+        downloaded: completed.downloaded,
+        total: completed.total.or(Some(completed.downloaded)),
+        message: "安装完成，正在重启".into(),
+    });
     // 替换完的二进制要重启才生效；不重启的话用户看着"更新完了"但跑的还是旧版
     app.restart();
 }
@@ -196,7 +341,7 @@ fn window_control(_window: tauri::Window, action: String) -> Result<(), String> 
 /// v0.1.0（Electron）用的数据目录。
 ///
 /// **必须沿用它，不能用 Tauri 的 `app_data_dir()`。** 后者会按 bundle identifier
-/// 落在 `.../com.kumodeck.app/data`，而 Electron 版按 productName 落在
+/// 落在 `.../com.kdj.app/data`，而 Electron 版按 productName 落在
 /// `.../kumodeck/data`。换目录 = 老用户打开新版本看到的是一个空应用：
 ///
 /// - 曲库里 1379 首的记录、评分、备注、cue 点全都读不到；
@@ -287,6 +432,7 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            app.manage(UpdateProgressState::default());
             let bridge = start_server(app.handle())?;
             tracing::info!("KDJ 后端就绪：{}", bridge.base_url);
             app.manage(bridge);
@@ -304,6 +450,8 @@ pub fn run() {
             open_path,
             reveal_path,
             open_external,
+            check_desktop_update,
+            get_update_progress,
             apply_update,
             pick_folder,
             pick_folders,

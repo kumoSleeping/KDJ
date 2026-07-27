@@ -3,7 +3,7 @@ import { ArrowUpCircle, Check, LoaderCircle } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
 import { useAppStore } from "../../stores/appStore";
-import type { UpdateInfo } from "../../types";
+import type { UpdateInfo, UpdateProgress } from "../../types";
 import { Button, InlineNotice } from "../common";
 // 和账号行共用同一套行排版，见 AccountRow 里 settingRow 的注释
 // （`.kd-set-*` 那套右列写死 240px，在详情栏宽度下会把左边的名字压成竖排）
@@ -19,16 +19,18 @@ import { settingRow } from "./AccountRow";
  * 装的动作分两种，按壳的能力自动选，不给用户出选择题：
  *   · 桌面 → `bridge.applyUpdate()`：tauri-plugin-updater 下载 + minisign
  *     校验 + 原地替换 + 自重启，全程不用离开软件；
- *   · 安卓 / 浏览器 → 开 Release 页，用户自己下 APK。
- *     安卓没法自替换（要走系统安装器），这是平台限制不是偷懒。
+ *   · 安卓 → GitHub API 选出正式签名 APK，系统浏览器下载后交给系统安装器；
+ *   · 浏览器 → 开 Release 页。安卓没法静默自替换，这是平台限制不是偷懒。
  */
 export function UpdateRow() {
   const [info, setInfo] = useState<UpdateInfo | null>(null);
   const [busy, setBusy] = useState<"" | "check" | "apply">("");
   const [notice, setNotice] = useState("");
+  const [progress, setProgress] = useState<UpdateProgress | null>(null);
 
   const bridge = getBridge();
   const canSelfUpdate = typeof bridge.applyUpdate === "function";
+  const isAndroid = bridge.platform === "android";
   // 当前版本从 /api/health 拿：启动时本来就拉过一次，不为了显示一行字
   // 再开一条管子，也不用往三份 vite 配置里各塞一个 define
   const current = useAppStore((state) => state.health?.version) ?? "";
@@ -37,7 +39,9 @@ export function UpdateRow() {
     setBusy("check");
     setNotice("");
     try {
-      setInfo(await api.checkUpdate());
+      // 桌面必须直接问 Tauri 清单，确保当前安装格式的签名包已经就绪；
+      // 安卓/浏览器没有 updater，才退回 GitHub Release API。
+      setInfo(await (bridge.checkUpdate ? bridge.checkUpdate() : api.checkUpdate()));
     } catch (error) {
       setInfo(null);
       setNotice(`检查更新失败：${(error as Error).message}`);
@@ -56,14 +60,29 @@ export function UpdateRow() {
       return;
     }
     setBusy("apply");
+    setProgress({ stage: "checking", downloaded: 0, total: null, message: "正在确认更新包" });
     try {
       // 成功的话进程会被 restart 掉，下面这行永远不会执行到
-      await bridge.applyUpdate?.();
+      await bridge.applyUpdate?.(setProgress);
     } catch (error) {
       setNotice(`更新失败：${(error as Error).message}`);
       setBusy("");
+      setProgress(null);
     }
   };
+
+  const progressLabel = (() => {
+    if (busy !== "apply" || !progress) return "";
+    if (progress.stage === "downloading") {
+      if (progress.total && progress.total > 0) {
+        return `下载中 ${Math.min(100, Math.round((progress.downloaded / progress.total) * 100))}%`;
+      }
+      return "下载中";
+    }
+    if (progress.stage === "installing") return "正在安装";
+    if (progress.stage === "restarting") return "正在重启";
+    return "准备更新";
+  })();
 
   return (
     <div style={settingRow.row}>
@@ -76,13 +95,13 @@ export function UpdateRow() {
               这一格只剩一个字的宽度。现在名字这行明确 nowrap + 省略号 */}
           <div style={settingRow.label}>软件更新</div>
           <div style={settingRow.hint}>
-            {info === null
+            {progressLabel || (info === null
               ? current
                 ? `当前 v${current}`
                 : "点右边看看有没有新版本"
               : info.newer
                 ? `发现新版本 v${info.latest}（当前 v${info.current}）`
-                : `已是最新 v${info.current}`}
+                : `已是最新 v${info.current}`)}
           </div>
           <InlineNotice text={notice} onDismiss={() => setNotice("")} />
         </div>
@@ -97,6 +116,8 @@ export function UpdateRow() {
               </>
             ) : canSelfUpdate ? (
               "下载并重启"
+            ) : isAndroid ? (
+              "下载 APK"
             ) : (
               "去下载页"
             )}

@@ -112,9 +112,10 @@ jobs:
       # `android init` 生成 src-tauri/gen/android/（gradle 工程）。
       # 已知坑：
       #   - identifier 里带 `-` 或以数字开头会被 Java 包名规则拒掉。
-      #     现在的 `com.kumodeck.app` 是合法的（本机 init 一次通过），但 Tauri 会
-      #     告警说 `.app` 结尾和 macOS 的 bundle 扩展名冲突。要不要换是产品身份
-      #     决定，交用户拍板；换的时候注意它不影响数据目录——
+      #     正式身份固定为 `com.kdj.app`；从首个正式签名 APK 起不要再改，Android
+      #     覆盖升级同时认 applicationId 和签名证书，任意一个变化都会变成另一个应用。
+      #     `.app` 结尾会触发 Tauri 的 macOS 扩展名提示，但不影响 Android 包名；
+      #     它也不影响数据目录——
       #     `src-tauri/src/lib.rs::legacy_data_dir` 取的是 app_config_dir 的父目录。
       #   - gen/android 是生成物，按 Tauri 官方建议**不进版本库**，所以 CI 每次都要 init；
       #     如果以后要改 AndroidManifest（比如加 INTERNET / 存储权限），
@@ -124,6 +125,24 @@ jobs:
         if: steps.shell.outputs.present == 'true'
         run: npx --yes @tauri-apps/cli@^2 android init
 
+      # 分支构建允许不签名（只验证能否交叉编译）；tag 是交付物，缺任意一项都
+      # 必须在耗时数小时的 Android 编译之前停下，不能再悄悄发布 unsigned APK。
+      - name: 验证正式发行签名密钥
+        if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::正式发行缺少 GitHub Secret：$name"
+              exit 1
+            fi
+          done
+
       # init 之后必须重做的三件事（明文放行 / 签名 / 图标）统一交给
       # scripts/android-postinit.sh —— 本地和 CI 跑**同一份**脚本。
       # 各写一套的下场是"我这儿能装、CI 出来的装不上"，而且这种差异
@@ -131,7 +150,7 @@ jobs:
       #
       # 签名的钥匙来自 repo secrets（配置方法见 docs/rust-port/08-updates-and-signing.md）：
       #   ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS
-      # 没配时脚本会跳过签名继续出未签名包，不让整条流水线红掉。
+      # 分支构建没配时脚本会跳过签名；正式 tag 已由上一步强制门禁。
       - name: init 后置补丁（明文 / 签名 / 图标）
         if: steps.shell.outputs.present == 'true'
         env:
@@ -173,6 +192,18 @@ jobs:
         if: steps.shell.outputs.present == 'true'
         run: npx --yes @tauri-apps/cli@^2 android build --apk --target aarch64 --target armv7
 
+      - name: 验证正式 APK 确实已签名
+        if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk=$(find src-tauri/gen/android/app/build/outputs/apk -path '*/release/*-release.apk' -print -quit)
+          if [ -z "$apk" ]; then
+            echo "::error::没有找到已签名的 *-release.apk"
+            exit 1
+          fi
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs -v "$apk"
+
       - name: 上传 APK
         if: steps.shell.outputs.present == 'true'
         uses: actions/upload-artifact@v4
@@ -190,6 +221,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            src-tauri/gen/android/app/build/outputs/apk/**/release/*.apk
+            src-tauri/gen/android/app/build/outputs/apk/**/release/*-release.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

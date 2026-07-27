@@ -1,12 +1,12 @@
 # 自动发行：推送 main 时检测版本号，出现新版本就打 tag + 建 Release，
 # 再把两条打包线（桌面 rust-build.yml / 安卓 rust-android.yml）调度到 tag 上跑。
 #
-# 版本号的唯一权威是 **src-tauri/tauri.conf.json 的 .version**——
-# 它是 Tauri 打包时真正盖到产物上的那个数（DMG 文件名、APK versionName 都从这来），
-# package.json / Cargo.toml 里的只是影子，检测别看它们。
+# 版本号以 **src-tauri/tauri.conf.json 的 .version** 为发版入口，但
+# package.json / Cargo.toml 必须同步：Tauri 安装包读前者，内置 Rust health/update
+# 读 Cargo 版本。gate 会校验三处一致，避免 UI 和安装包各报一个版本。
 #
 # 发版流程（人只做第一步）：
-#   1. 改 src-tauri/tauri.conf.json 的 "version"，提交、推 main；
+#   1. 同步修改 tauri.conf.json / package.json / Cargo.toml 的版本，提交、推 main；
 #   2. 本工作流发现 v{version} 这个 tag 还不存在 → 打 tag、建 Release（自动生成 notes）；
 #   3. dispatch 两条打包线到 refs/tags/v{version} 上——它们各自的
 #      「发布 Release（仅 tag）」步骤会把产物传进同一个 Release。
@@ -40,6 +40,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 校验三处版本号一致
+        run: |
+          set -euo pipefail
+          tauri=$(jq -r '.version' src-tauri/tauri.conf.json)
+          npm=$(jq -r '.version' package.json)
+          cargo=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)
+          if [ "$tauri" != "$npm" ] || [ "$tauri" != "$cargo" ]; then
+            echo "::error::版本号不一致：tauri=$tauri package.json=$npm Cargo.toml=$cargo"
+            exit 1
+          fi
+
       - name: 检测版本号是否已发行
         id: probe
         run: |
@@ -69,6 +80,21 @@ jobs:
       VERSION: ${{ needs.gate.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: 正式发行密钥门禁
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          for name in TAURI_SIGNING_PRIVATE_KEY ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::缺少正式发行 GitHub Secret：$name；不创建 tag/空 Release"
+              exit 1
+            fi
+          done
 
       - name: 打 tag 并建 Release
         run: |

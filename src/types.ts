@@ -426,16 +426,21 @@ export interface KdjBridge {
   /** 用系统浏览器开外链（Release 页等）。 */
   openExternal?: (url: string) => Promise<void>;
   /**
+   * 桌面直接问 Tauri Updater 的清单；只有当前安装格式真的存在签名更新包时
+   * 才会返回 newer=true。移动端/浏览器没有它，继续走 GitHub Release API。
+   */
+  checkUpdate?: null | (() => Promise<UpdateInfo>);
+  /**
    * 桌面独有的一键更新：下载 + 校验 + 原地替换 + 重启，全程由
    * tauri-plugin-updater 托管。非桌面壳是 null/缺席——调用方按平台
    * 各给各的操作（安卓开 Release 页下 APK，浏览器开发布页）。
    */
-  applyUpdate?: null | ((onProgress?: (done: number, total: number | null) => void) => Promise<void>);
+  applyUpdate?: null | ((onProgress?: (progress: UpdateProgress) => void) => Promise<void>);
   windowControl: (action: "minimize" | "maximize" | "close") => void;
   onSidecarLog: (cb: (line: string) => void) => () => void;
 }
 
-/** `/api/update/check` 的返回。 */
+/** `/api/update/check` 或桌面 Tauri updater check 的统一返回。 */
 export interface UpdateInfo {
   current: string;
   latest: string;
@@ -443,6 +448,16 @@ export interface UpdateInfo {
   url: string;
   name: string;
   published_at: string;
+  /** Release notes；旧后端或没有 notes 的清单可以省略。 */
+  notes?: string;
+}
+
+/** Rust 更新任务的可轮询进度。 */
+export interface UpdateProgress {
+  stage: "idle" | "checking" | "downloading" | "installing" | "restarting" | "failed";
+  downloaded: number;
+  total: number | null;
+  message: string;
 }
 
 declare global {

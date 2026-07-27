@@ -7,9 +7,9 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 chrono = "0.4.45"
-kumodeck-analysis = { version = "0.2.0", path = "../kumodeck-analysis" }
-kumodeck-core = { version = "0.2.0", path = "../kumodeck-core" }
-kumodeck-providers = { version = "0.2.0", path = "../kumodeck-providers" }
+kumodeck-analysis = { version = "0.2.1", path = "../kumodeck-analysis" }
+kumodeck-core = { version = "0.2.1", path = "../kumodeck-core" }
+kumodeck-providers = { version = "0.2.1", path = "../kumodeck-providers" }
 lofty = "0.24.0"
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.25"

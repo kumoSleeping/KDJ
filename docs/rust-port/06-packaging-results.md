@@ -231,6 +231,10 @@ Warn The bundle identifier "com.kumodeck.app" set in `"tauri.conf.json" identifi
 不该由打包这一步顺手改掉。数据目录不受影响：`src-tauri/src/lib.rs::legacy_data_dir`
 取的是 `app_config_dir()` 的**父目录**再拼死 `kumodeck`，和 identifier 无关。
 
+> **后续产品决策（2026-07-27）**：正式身份已固定为 `com.kdj.app`。当时的
+> `com.kumodeck.app` 构建只是无用户的预发行验证包，不保留覆盖升级兼容；从首个
+> `com.kdj.app` 签名包起，identifier 与 Android keystore 均不得再更换。
+
 ### 4.3 `tauri android build --apk --target aarch64`：Rust 侧全通，产出 .so
 
 **aarch64 的动态库编出来了**：
@@ -524,7 +528,7 @@ gradle 那一步倒（§4.5）。版本要跟着 `gen/android/app/build.gradle.k
 5. **`image` 的 default features**（§3）：改一行，实测省 597,424 B。
    要动 `crates/kumodeck-providers/Cargo.toml`，本次不在文件范围内。
    改完记得跑一遍封面相关的冒烟（四家平台各下一首看封面写进去没有）。
-6. **identifier** 要不要从 `com.kumodeck.app` 换掉，用户拍板（§4.2）。
+6. **identifier** 后续已拍板固定为 `com.kdj.app`（见 §4.2 后记）。
 7. macOS 签名/公证仍然没有（和 v0.1.0 一致，首次打开要右键 → 打开）。
 
 `HANDOFF.md` 的里程碑表里 M8 那一行可以从"⬜ 未开始"改成

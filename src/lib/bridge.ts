@@ -3,7 +3,7 @@
  * Electron 已停用，不再探测或兼容它的 preload 全局对象。
  */
 
-import type { KdjBridge } from "../types";
+import type { KdjBridge, UpdateInfo, UpdateProgress } from "../types";
 
 declare global {
   interface Window {
@@ -53,22 +53,46 @@ function normalizeInfo(raw: unknown): BridgeInfo {
 
 async function createTauriBridge(): Promise<KdjBridge> {
   const info = normalizeInfo(await tauriInvoke<unknown>("get_bridge_info"));
+  const desktop = ["darwin", "win32", "linux"].includes(info.platform);
   return {
     ...info,
     openPath: (path: string) => tauriInvoke<void>("open_path", { path }),
     revealPath: (path: string) => tauriInvoke<void>("reveal_path", { path }),
     openExternal: (url: string) => tauriInvoke<void>("open_external", { url }),
-    // 一键更新：桌面才有。安卓的 Tauri 壳没有 updater 插件，invoke 会直接
-    // 报"命令不存在"——所以按平台判掉，让 UI 落到"开下载页"的分支。
-    applyUpdate: /android/i.test(navigator.userAgent)
-      ? null
-      : async (onProgress) => {
+    // 检查也必须走 updater 本身，不能先问 GitHub releases/latest：Release 先建、
+    // 三平台包后到的窗口里，后者会谎报"可更新"，真正安装时才发现 latest.json
+    // 或当前 bundle 的签名包还不存在。
+    checkUpdate: desktop
+      ? () => tauriInvoke<UpdateInfo>("check_desktop_update")
+      : null,
+    // 一键更新只在桌面存在。不要靠 UA 猜 Android：Tauri 已经把 Rust 平台名
+    // 放在 get_bridge_info 里，这是不会被 WebView UA 变化影响的权威值。
+    applyUpdate: desktop
+      ? async (onProgress) => {
           // 走 Rust 侧命令而不是 @tauri-apps/plugin-updater 的 JS 包：
           // 少一个要和 Rust 版本对齐的 npm 依赖（同 tauriInvoke 的理由）。
-          // 进度事件靠轮询命令返回，一次 invoke 全托管到重启。
-          await tauriInvoke<void>("apply_update");
-          void onProgress; // 下载进度在 Rust 侧打日志；窗口马上就重启了
-        },
+          // apply_update 是长 invoke；旁边短轮询只读 Rust Mutex，不碰下载任务。
+          let polling = false;
+          const poll = async () => {
+            if (polling || !onProgress) return;
+            polling = true;
+            try {
+              onProgress(await tauriInvoke<UpdateProgress>("get_update_progress"));
+            } catch {
+              // 进程进入安装/重启后 IPC 会先断；这是成功路径，不在这里报假错误
+            } finally {
+              polling = false;
+            }
+          };
+          await poll();
+          const timer = window.setInterval(() => void poll(), 250);
+          try {
+            await tauriInvoke<void>("apply_update");
+          } finally {
+            window.clearInterval(timer);
+          }
+        }
+      : null,
     pickFolder: async () => {
       const picked = await tauriInvoke<unknown>("pick_folder");
       // 用户取消时 Tauri 的对话框返回 null，契约要求的也是 null
@@ -122,6 +146,7 @@ function createBrowserBridge(): KdjBridge {
     openExternal: async (url: string) => {
       window.open(url, "_blank", "noopener");
     },
+    checkUpdate: null,
     applyUpdate: null,
     windowControl: () => {},
     onSidecarLog: () => () => {},

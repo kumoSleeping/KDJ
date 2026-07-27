@@ -35,22 +35,33 @@ Settings → Secrets and variables → Actions → New repository secret：
 | `ANDROID_KEYSTORE_PASSWORD` | `cat ~/.android/kumodeck-release.pass` |
 | `ANDROID_KEY_ALIAS` | `kumodeck` |
 
-**没配也不会让 CI 红**：桌面那边会摘掉 `createUpdaterArtifacts` 出普通安装包
-（代价是这一版之后的一键更新装不上它），安卓那边跳过签名出未签名包。
-宁可少个功能也不要整条流水线倒下——但那样的话发出去的包用户装不了，
-所以正式发版前这四个 secret 必须配齐。
+仓库提供了不回显私钥的一次性配置脚本。先做好加密离线备份，再运行：
+
+```bash
+./scripts/configure-release-secrets.sh
+```
+
+脚本会先验证：内嵌 updater 公钥与本机私钥配对、Android keystore 中存在
+`kumodeck` alias；确认备份后，四个值都通过 stdin 写入 `gh secret set`，不会
+出现在命令行参数或日志里。
+
+**分支构建**没配密钥仍可继续，只产普通安装包用于编译验证；**正式 tag** 缺
+任意一个 Secret 会直接失败。`release.yml` 在创建 tag/空 Release **之前**也有
+同样的门禁，避免再次出现“Actions 全绿、Release 却没有任何可更新签名包”。
 
 ---
 
 ## 2. 自动发行：改版本号 = 发版
 
-**唯一权威是 `src-tauri/tauri.conf.json` 的 `.version`。** 它才是 Tauri 打包时
-真正盖到产物上的那个数（DMG 文件名、APK 的 versionName 都从这来）；
-`package.json` / `Cargo.toml` 里的只是影子。
+发版入口是 `src-tauri/tauri.conf.json` 的 `.version`，但三处版本必须一致：
+Tauri 安装包读它，前端/npm 读 `package.json`，内置 health 和旧版手动检查接口
+读 Cargo workspace 版本。不要手改三次，统一运行：
 
 ```
-改 tauri.conf.json 的 version → 提交 → 推 main → 完事
+node scripts/set-version.mjs 0.2.2 → 提交 → 推 main → 完事
 ```
+
+`release.yml` 会再次校验三处一致，不一致就拒绝发行。
 
 `release.yml` 干的事：
 
@@ -73,13 +84,19 @@ Settings → Secrets and variables → Actions → New repository secret：
 
 前端「账号管理」面板里的「软件更新」一行：
 
-- **检查**走后端 `/api/update/check`（问 GitHub 的 `releases/latest`）。
-  不让前端直接 fetch GitHub 的原因：桌面 CSP、安卓 WebView 证书链、
-  浏览器 CORS 三边规则各不相同，放后端就只有一条路要维护。
+- **桌面检查**直接调用 `tauri-plugin-updater::check()`。只有 `latest.json` 中
+  当前 OS、CPU 架构和原安装格式对应的签名包确实存在，才显示可更新；不会在
+  Release 已创建而三平台产物仍上传中的窗口误报。
+- **安卓/浏览器检查**走后端 `/api/update/check`。安卓会从 Release assets 中
+  精确选择不含 `unsigned` 的 APK，签名 APK 还没上传完时明确提示稍后重试；
+  浏览器则打开 Release 页。
 - **安装**按壳的能力自动分流，不给用户出选择题：
-  - 桌面 → `tauri-plugin-updater` 下载 + minisign 校验 + 原地替换 + 自重启
-  - 安卓 / 浏览器 → 开 Release 页自己下。安卓没法自替换（必须走系统安装器），
-    这是平台限制不是偷懒。
+  - 桌面 → 下载 + 显示百分比 + minisign 校验 + 原地替换 + 自重启
+  - 安卓 → 系统浏览器直接下载签名 APK，再由 Android 系统安装器确认覆盖
+  - 浏览器 → 开 Release 页
+
+正式应用身份固定为 `com.kdj.app`。从第一版正式签名 APK 开始，identifier 和
+Android keystore 任意一个都不能再换，否则 Android 会把新版当成另一个应用。
 
 ### `latest.json` 是怎么来的
 
@@ -88,10 +105,16 @@ updater 启动时拉 `releases/latest/download/latest.json`，按 `os-arch` 取�
 下载全部 artifact → 找 `*.app.tar.gz` / `*-setup.exe` / `*.AppImage` 和它们的
 `.sig` → 拼 JSON → `gh release upload --clobber`。
 
-macOS 的 universal 包一份喂两个键（`darwin-aarch64` 和 `darwin-x86_64`），
-因为 updater 按精确的 os-arch 取键，只写一个的话另一半架构收不到更新。
+清单使用 updater 2.10+ 的安装格式精确键，并保留无后缀兼容键：
 
-没有 `.sig` 的平台会被跳过并 `::warning::`——那说明私钥 secret 没配。
+- macOS：`darwin-{aarch64,x86_64}-app`
+- Windows：`windows-x86_64-{nsis,msi}`
+- Linux：`linux-x86_64-{appimage,deb,rpm}`
+
+macOS universal 包一份喂 arm64/x64 两个架构；Windows 和 Linux 则保证用户从
+什么格式安装，就继续用同格式更新，避免 MSI→NSIS 或 DEB→AppImage 串包。
+
+任一正式包或 `.sig` 缺失都会让 `latest-json` job 失败，不再静默发布残缺清单。
 
 ---
 
@@ -141,13 +164,10 @@ $ANDROID_HOME/build-tools/35.0.0/apksigner verify --print-certs -v <apk>
 ## 5. 发一版的完整流程
 
 ```bash
-# 1. 改版本号（唯一权威）
-vim src-tauri/tauri.conf.json      # "version": "0.2.2"
+# 1. 三处版本号 + Cargo.lock 一起更新
+node scripts/set-version.mjs 0.2.2
 
-# 2. 影子版本号跟一下（不改也能发，只是 npm/cargo 那边显示旧值）
-vim package.json Cargo.toml
-
-# 3. 提交推送，剩下的全自动
+# 2. 提交推送，剩下的全自动
 git commit -am "release: v0.2.2" && git push origin main
 ```
 

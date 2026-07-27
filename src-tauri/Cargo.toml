@@ -17,8 +17,8 @@ tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
 anyhow = "1.0.104"
-kumodeck-core = { version = "0.2.0", path = "../crates/kumodeck-core" }
-kumodeck-server = { version = "0.2.0", path = "../crates/kumodeck-server" }
+kumodeck-core = { version = "0.2.1", path = "../crates/kumodeck-core" }
+kumodeck-server = { version = "0.2.1", path = "../crates/kumodeck-server" }
 rand = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }
 # tauri.conf.json 里一有 `plugins` 段，`generate_context!` 展开出来的代码就会

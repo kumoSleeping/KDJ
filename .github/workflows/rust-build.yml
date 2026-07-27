@@ -136,14 +136,18 @@ jobs:
           APPLE_SIGNING_IDENTITY: "-"
           CI: "true"
           # 一键更新的 minisign 私钥（见 docs/rust-port/08 §密钥）。
-          # 没配 secret 时下面会摘掉 createUpdaterArtifacts 继续出普通安装包——
-          # 宁可少更新包也不让整条流水线红掉；配上之后自动恢复。
+          # 分支构建没配 secret 时摘掉 createUpdaterArtifacts，只做普通包验证；
+          # 正式 tag 缺密钥必须失败，不能发布一个更新链断掉的版本。
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
           set -euo pipefail
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-            echo "::warning::没有 TAURI_SIGNING_PRIVATE_KEY secret，本次不出更新包（一键更新装不上这版之后的）"
+            if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+              echo "::error::正式发行缺少 TAURI_SIGNING_PRIVATE_KEY；拒绝发布一个后续无法一键升级的版本"
+              exit 1
+            fi
+            echo "::warning::分支构建没有 TAURI_SIGNING_PRIVATE_KEY，本次只验证普通安装包"
             jq 'del(.bundle.createUpdaterArtifacts)' src-tauri/tauri.conf.json > /tmp/conf.json
             mv /tmp/conf.json src-tauri/tauri.conf.json
           fi
@@ -175,10 +179,13 @@ jobs:
             **/release/bundle/nsis/*.exe
             **/release/bundle/nsis/*.exe.sig
             **/release/bundle/msi/*.msi
+            **/release/bundle/msi/*.msi.sig
             **/release/bundle/appimage/*.AppImage
             **/release/bundle/appimage/*.AppImage.sig
             **/release/bundle/deb/*.deb
+            **/release/bundle/deb/*.deb.sig
             **/release/bundle/rpm/*.rpm
+            **/release/bundle/rpm/*.rpm.sig
           if-no-files-found: error
 
       - name: 发布 Release（仅 tag）
@@ -192,10 +199,13 @@ jobs:
             **/release/bundle/nsis/*.exe
             **/release/bundle/nsis/*.exe.sig
             **/release/bundle/msi/*.msi
+            **/release/bundle/msi/*.msi.sig
             **/release/bundle/appimage/*.AppImage
             **/release/bundle/appimage/*.AppImage.sig
             **/release/bundle/deb/*.deb
+            **/release/bundle/deb/*.deb.sig
             **/release/bundle/rpm/*.rpm
+            **/release/bundle/rpm/*.rpm.sig
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -226,32 +236,42 @@ jobs:
           def find(pattern):
               hits = glob.glob(f"bundles/**/{pattern}", recursive=True)
               return hits[0] if hits else None
-          def entry(art):
+          def entry(art, label):
+              if not art:
+                  raise SystemExit(f"::error::缺少 {label} 更新包")
               sig = art + ".sig"
               if not os.path.exists(sig):
-                  return None  # 没签名 = 没配私钥 secret，这个平台跳过
+                  raise SystemExit(f"::error::{label} 缺少签名：{sig}")
               name = os.path.basename(art)
               return {
-                  "signature": open(sig).read(),
+                  "signature": open(sig).read().strip(),
                   "url": f"https://github.com/{repo}/releases/download/{tag}/{name}",
               }
           platforms = {}
           mac = find("*.app.tar.gz")
-          if mac and (e := entry(mac)):
-              # universal 一个包喂两个平台键：updater 按 os-arch 精确取键
-              platforms["darwin-aarch64"] = e
-              platforms["darwin-x86_64"] = e
-          win = find("*-setup.exe") or find("*.exe")
-          if win and (e := entry(win)):
-              platforms["windows-x86_64"] = e
-          linux = find("*.AppImage")
-          if linux and (e := entry(linux)):
-              platforms["linux-x86_64"] = e
-          if not platforms:
-              print("::warning::一个带签名的更新包都没有（没配 TAURI_SIGNING_PRIVATE_KEY？），不上传 latest.json")
-              raise SystemExit(0)
+          mac_entry = entry(mac, "macOS app")
+          # universal 一个包喂两个架构；-app 是 updater 2.10+ 的安装格式精确键，
+          # 无后缀键留给已经装出去的旧 updater 兼容。
+          for arch in ("aarch64", "x86_64"):
+              platforms[f"darwin-{arch}-app"] = mac_entry
+              platforms[f"darwin-{arch}"] = mac_entry
+
+          nsis_entry = entry(find("*-setup.exe"), "Windows NSIS")
+          msi_entry = entry(find("*.msi"), "Windows MSI")
+          platforms["windows-x86_64-nsis"] = nsis_entry
+          platforms["windows-x86_64-msi"] = msi_entry
+          platforms["windows-x86_64"] = nsis_entry
+
+          appimage_entry = entry(find("*.AppImage"), "Linux AppImage")
+          deb_entry = entry(find("*.deb"), "Linux DEB")
+          rpm_entry = entry(find("*.rpm"), "Linux RPM")
+          platforms["linux-x86_64-appimage"] = appimage_entry
+          platforms["linux-x86_64-deb"] = deb_entry
+          platforms["linux-x86_64-rpm"] = rpm_entry
+          platforms["linux-x86_64"] = appimage_entry
           manifest = {
               "version": tag.lstrip("v"),
+              "notes": f"KDJ {tag}",
               "pub_date": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
               "platforms": platforms,
           }
