@@ -14,18 +14,18 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let data_dir = std::env::var("KDJ_DATA_DIR")
+    let data_dir = std::env::var("KUMODECK_DATA_DIR")
         .or_else(|_| std::env::var("KDJ_DATA_DIR"))
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             kdj_core::config::home_dir()
-                .join("Library/Application Support/kdj/data")
+                .join("Library/Application Support/kumodeck/data")
         });
-    let download_dir = std::env::var("KDJ_DOWNLOAD_DIR")
+    let download_dir = std::env::var("KUMODECK_DOWNLOAD_DIR")
         .or_else(|_| std::env::var("KDJ_DOWNLOAD_DIR"))
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| kdj_core::config::default_download_root());
-    let port: u16 = std::env::var("KDJ_PORT")
+    let port: u16 = std::env::var("KUMODECK_PORT")
         .or_else(|_| std::env::var("KDJ_PORT"))
         .ok()
         .and_then(|value| value.parse().ok())

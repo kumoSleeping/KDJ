@@ -2,10 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Download,
   MousePointerClick,
-  X,
 } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
-import { formatBytes, formatDuration } from "../../lib/format";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLayoutMode } from "../../lib/useLayoutMode";
@@ -15,8 +13,8 @@ import {
   useLibraryStore,
   type SelectMode,
 } from "../../stores/libraryStore";
-import type { IntakeItem, Platform, Quality, SongSource, VideoInfo } from "../../types";
-import { Button, EmptyState, InlineNotice, Sheet } from "../common";
+import type { IntakeItem, Platform, SongSource, VideoInfo } from "../../types";
+import { Button, EmptyState, InlineNotice, SelectionBar, Sheet } from "../common";
 import { QueuePanel } from "../download/QueuePanel";
 import { SongPreviewPanel } from "../download/SongPreviewPanel";
 import { SONG_PREVIEW_EVENT, type SongPreviewRequest } from "../../lib/songPreview";
@@ -76,19 +74,18 @@ export function Workspace() {
   const setHasResults = useAppStore((state) => state.setHasResults);
   const showTrackDetail = useAppStore((state) => state.showTrackDetail);
   const showAccounts = useAppStore((state) => state.showAccounts);
-  const toggleAccounts = useAppStore((state) => state.toggleAccounts);
+  const accountPanelEpoch = useAppStore((state) => state.accountPanelEpoch);
   const showDjPanel = useAppStore((state) => state.showDjPanel);
+  const djPanelEpoch = useAppStore((state) => state.djPanelEpoch);
   const enqueue = useDownloadStore((state) => state.enqueue);
 
   const tracks = useLibraryStore((state) => state.tracks);
-  const total = useLibraryStore((state) => state.total);
   const loading = useLibraryStore((state) => state.loading);
   const libError = useLibraryStore((state) => state.error);
   const filter = useLibraryStore((state) => state.filter);
   const selectedId = useLibraryStore((state) => state.selectedId);
   const selectedIds = useLibraryStore((state) => state.selectedIds);
   const selected = useLibraryStore(selectSelectedTrack);
-  const stats = useLibraryStore((state) => state.stats);
   const loadMore = useLibraryStore((state) => state.loadMore);
   const select = useLibraryStore((state) => state.select);
   const setFilter = useLibraryStore((state) => state.setFilter);
@@ -101,12 +98,11 @@ export function Workspace() {
   }, [refresh]);
 
   const [query, setQuery] = useState("");
-  const [platforms, setPlatforms] = useState<Platform[]>(["wyy", "qqm"]);
+  const [platforms, setPlatforms] = useState<Platform[]>(["wyy", "qqm", "local"]);
   // 跨平台去重恒为开，开关已删：不合并的话搜一次出四条一模一样的结果，
   // 没有人会想要那个。留常量而不是把 true 写进调用点，是为了让
   // `/intake` 那个字段的语义在这里仍然看得见。
   const merge = true;
-  const [quality, setQuality] = useState<Quality | "">("");
   const [busy, setBusy] = useState(false);
   const [items, setItems] = useState<IntakeItem[] | null>(null);
   /** 贴链接解析出来的那一个视频，置顶在结果列表最前面；关键词搜索会把它顶掉。 */
@@ -114,7 +110,6 @@ export function Workspace() {
   /** 正在预览的视频。开在右栏队列头上，不弹窗——弹窗盖住结果列表，看完还得找回去。 */
   const [preview, setPreview] = useState<VideoPreviewRequest | null>(null);
   const [songPreview, setSongPreview] = useState<SongPreviewRequest | null>(null);
-  const [note, setNote] = useState("");
   /**
    * 三处失败各有各的现场，所以分成三条，不合并成一个全局的错误：
    * 搜索失败要顶在结果列表的摘要位、入队失败要贴在「加入队列」旁边、
@@ -125,6 +120,7 @@ export function Workspace() {
   const [reorderError, setReorderError] = useState("");
 
   const [chosen, setChosen] = useState<Set<string>>(new Set());
+  const [searchSelectionMode, setSearchSelectionMode] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [collapsedItems, setCollapsedItems] = useState<Set<number>>(new Set());
   const [sourceIndex, setSourceIndex] = useState<Record<string, number>>({});
@@ -138,24 +134,18 @@ export function Workspace() {
     [query],
   );
 
+  useEffect(() => {
+    if (listMode === "search") return;
+    setChosen(new Set());
+    setSearchSelectionMode(false);
+  }, [listMode]);
+
   const togglePlatform = useCallback((platform: Platform) => {
     setPlatforms((current) =>
       current.includes(platform)
         ? current.filter((item) => item !== platform)
         : [...current, platform],
     );
-  }, []);
-
-  /** 丢掉搜索结果，回到曲库标签。 */
-  const closeResults = useCallback(() => {
-    setItems(null);
-    setVideo(null);
-    setPreview(null);
-    setNote("");
-    setSearchError("");
-    setQueueError("");
-    setChosen(new Set());
-    useAppStore.getState().setHasResults(false);
   }, []);
 
   /**
@@ -178,10 +168,8 @@ export function Workspace() {
       try {
         const info = await api.videoResolve(text);
         setVideo(info);
-        setNote("1 个视频");
       } catch (error) {
         setVideo(null);
-        setNote("");
         setSearchError(`解析失败：${errorText(error)}`);
       } finally {
         setBusy(false);
@@ -215,16 +203,9 @@ export function Workspace() {
       });
       setItems(response.items);
       setHasResults(true);
-      const found = response.items.reduce((sum, item) => sum + item.groups.length, 0);
-      setNote(
-        `${response.items.length} 条输入 · ${found} 首` +
-          (response.skipped > 0 ? ` · 超出上限丢弃 ${response.skipped} 条` : "") +
-          ` · ${Math.round(response.elapsed_ms)} ms`,
-      );
     } catch (error) {
       setItems([]);
       setHasResults(true);
-      setNote("");
       // 结果列表这时是空的，那条摘要位就腾出来写原因——
       // 另起一行会把列表顶下去，切来切去整块面板都在跳
       setSearchError(`处理失败：${errorText(error)}`);
@@ -290,6 +271,7 @@ export function Workspace() {
       // 在线视频预览属于搜索页；显式点击预览时让账号/接播设置自动让位。
       if (useAppStore.getState().listMode !== "search") previewJumpRef.current = true;
       setListMode("search");
+      setSongPreview(null);
       setPreview((event as CustomEvent<VideoPreviewRequest>).detail);
       if (layout === "narrow") setSheet("aside");
     };
@@ -300,6 +282,7 @@ export function Workspace() {
     const onSongPreview = (event: Event) => {
       if (useAppStore.getState().listMode !== "search") previewJumpRef.current = true;
       setListMode("search");
+      setPreview(null);
       setSongPreview((event as CustomEvent<SongPreviewRequest>).detail);
       if (layout === "narrow") setSheet("aside");
     };
@@ -328,10 +311,9 @@ export function Workspace() {
         <VideoPreview
           key={`${preview.bvid}#${preview.page}`}
           req={preview}
-          onClose={() => setPreview(null)}
         />
       )}
-      {songPreview && <SongPreviewPanel request={songPreview} onClose={() => setSongPreview(null)} />}
+      {songPreview && <SongPreviewPanel request={songPreview} />}
       <div className="kd-grow" style={{ minHeight: 0 }}>
         <QueuePanel />
       </div>
@@ -340,6 +322,7 @@ export function Workspace() {
     <TrackDetail key={selected.id} track={selected} />
   ) : (
     <EmptyState
+      className="kd-aside-empty"
       icon={<MousePointerClick size={20} />}
       title="选一首看详情"
       hint="分析过的曲目会显示 BPM、调号轮，以及能接上的下一首。"
@@ -366,7 +349,7 @@ export function Workspace() {
   // 点「账号管理」/「DJ 接歌」时窄屏没有右栏可以显示，直接把抽屉拉开
   useEffect(() => {
     if (!showAside && (showAccounts || showDjPanel)) setSheet("aside");
-  }, [showAside, showAccounts, showDjPanel]);
+  }, [showAside, showAccounts, showDjPanel, accountPanelEpoch, djPanelEpoch]);
 
   /* ------------------------------------------------------------ 三栏换位 */
   /**
@@ -550,11 +533,15 @@ export function Workspace() {
     );
     setChosen((current) => (current.size >= allKeys.length ? new Set() : new Set(allKeys)));
   }, [items]);
-
-  const resultCount = useMemo(
-    () => (items ?? []).reduce((sum, item) => sum + item.groups.length, 0) + (video ? 1 : 0),
-    [items, video],
-  );
+  const selectAllSearch = useCallback(() => {
+    setChosen(
+      new Set(
+        (items ?? []).flatMap((item, index) =>
+          selectableGroups(item).map((group) => selectionKey(index, group.group_id)),
+        ),
+      ),
+    );
+  }, [items]);
 
   const chosenSources = useMemo(() => {
     const picked: SongSource[] = [];
@@ -581,13 +568,41 @@ export function Workspace() {
     try {
       // 不报"已加入 N 个任务"：右边那栏就是队列，任务当场排进去，
       // 而且勾选被清空、这条动作栏跟着收起来，做成了看得一清二楚
-      await enqueue(chosenSources, { quality: quality === "" ? null : quality });
+      await enqueue(chosenSources, { quality: settings?.default_quality ?? null });
       setChosen(new Set());
+      setSearchSelectionMode(false);
       void refreshStats();
     } catch (error) {
       setQueueError(`加入队列失败：${errorText(error)}`);
     }
-  }, [chosenSources, quality, enqueue, refreshStats]);
+  }, [chosenSources, settings?.default_quality, enqueue, refreshStats]);
+
+  /** 歌单/专辑父行的明确主动作：无需先全选再找顶部按钮，整包直接进下载队列。 */
+  const downloadItem = useCallback(
+    async (index: number) => {
+      const item = items?.[index];
+      if (!item) return;
+      const seen = new Set<string>();
+      const sources = selectableGroups(item).flatMap((group) => {
+        const pickedIndex = sourceIndex[group.group_id] ?? group.best_source_index;
+        const source = group.sources[pickedIndex] ?? group.sources[0];
+        if (!source) return [];
+        const key = `${source.platform}:${source.key}`;
+        if (seen.has(key)) return [];
+        seen.add(key);
+        return [source];
+      });
+      if (!sources.length) return;
+      setQueueError("");
+      try {
+        await enqueue(sources, { quality: settings?.default_quality ?? null });
+        void refreshStats();
+      } catch (error) {
+        setQueueError(`整包下载失败：${errorText(error)}`);
+      }
+    },
+    [items, sourceIndex, settings?.default_quality, enqueue, refreshStats],
+  );
 
   /**
    * 本地列表里拖动换位：把整个文件夹的曲目顺序写回它的 .kdj.json。
@@ -626,42 +641,12 @@ export function Workspace() {
     [filter.folder, filter.sort, filter.order, setFilter],
   );
 
-  const libraryNote =
-    `${tracks.length} / ${total} 首` +
-    (selectedIds.length > 1 ? ` · 选中 ${selectedIds.length}` : "") +
-    (stats
-      ? ` · 已分析 ${stats.analyzed} · ${formatDuration(stats.total_duration)} · ${formatBytes(stats.total_size)}`
-      : "");
-
-  /** 标签行右边那条摘要：搜索出错时由原因顶替，其余时候是统计。 */
-  const headNote =
-    listMode === "library" ? libraryNote : listMode === "search" ? searchError || note : "";
-
   // 主/副两级排序的三段式点击语义全在 store 里（cycleSort），
   // 这里只负责把点击转过去——判断逻辑放在组件里迟早会和别处的入口不一致
   const sortBy = useLibraryStore((state) => state.cycleSort);
 
   return (
     <section className="kd-section">
-      {/* macOS 红绿灯所在的 overlay 区单独留出来：下面的搜索栏只负责搜索，
-          顶部空白区负责拖动窗口，两者不再在红绿灯底下交界。 */}
-      <div className="kd-window-spacer" data-tauri-drag-region aria-hidden="true" />
-      {/* —— 顶上永远是那条"搜歌来下"的大搜索框 —— */}
-      <SearchBar
-        query={query}
-        onQueryChange={setQuery}
-        batch={batch}
-        busy={busy}
-        onSubmit={() => void submit()}
-        quality={quality}
-        onQualityChange={setQuality}
-        defaultQuality={settings?.default_quality ?? "flac"}
-        // 平台选择并进搜索框那一行（见 SearchBar 里的注释）
-        platforms={platforms}
-        onTogglePlatform={togglePlatform}
-        soundcloudEnabled={settings?.soundcloud_enabled ?? false}
-      />
-
       <div className="kd-section-body">
         <div className="kd-split" data-folders="true" data-layout={layout} ref={splitRef}>
           {/* 窄屏（竖屏 / 手机）下左右两栏收进底部抽屉，只留中间的列表。
@@ -709,58 +694,27 @@ export function Workspace() {
             {...dropProps("list")}
           >
             <span {...gripProps("list")} />
-            {/* 列表面板的"眉目"：两个标签常驻，随时可切，不等搜索了才出现。
-                激活态只是中性底色，不跟真正的动作按钮抢红色。 */}
-            <div className="kd-list-head">
-              <nav className="kd-list-tabs" aria-label="列表内容">
-                <button
-                  type="button"
-                  aria-pressed={listMode === "library"}
-                  onClick={() => setListMode("library")}
-                >
-                  曲库
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={listMode === "search"}
-                  onClick={() => setListMode("search")}
-                >
-                  搜索{layout === "wide" && resultCount > 0 && ` ${resultCount}`}
-                </button>
-              </nav>
-              {/* 搜索失败时这条摘要就地变成失败原因（data-error 让它换个颜色），
-                  不另起一行——列表上头多一条会把整块面板顶得跳一下 */}
-              <span
-                className="kd-list-note kd-truncate"
-                data-error={listMode === "search" && searchError ? "true" : undefined}
-                title={headNote || undefined}
-              >
-                {headNote}
-              </span>
-              <span className="kd-toolbar-gap" />
-              {hasResults && listMode === "search" && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  iconOnly
-                  aria-label="丢掉搜索结果"
-                  title="丢掉搜索结果"
-                  onClick={closeResults}
-                >
-                  <X size={12} />
-                </Button>
-              )}
-              {/* 「账号管理」贴最右：切的是右栏（账号面板），不是中间列表 */}
-              <nav className="kd-list-tabs" aria-label="账号">
-                <button type="button" aria-pressed={showAccounts} onClick={toggleAccounts}>
-                  账号管理
-                </button>
-              </nav>
+            {/* 搜索永远是在线入口，不再先切“在线”才能搜。提交后自动显示结果；
+                点击左侧任意文件夹 / 全部曲目，则由 FolderTree 自动切回曲库。 */}
+            <div className="kd-list-head" data-mode={listMode} data-tauri-drag-region>
+              <SearchBar
+                query={query}
+                onQueryChange={setQuery}
+                batch={batch}
+                busy={busy}
+                onSubmit={() => void submit()}
+                platforms={platforms}
+                onTogglePlatform={togglePlatform}
+                soundcloudEnabled={settings?.soundcloud_enabled ?? false}
+              />
             </div>
 
             {/* 曲库的筛选条在面板**内部**：放在外面的话，切标签时它一出一没，
                 整个中间区域会跳高度。 */}
             {listMode === "library" && <LibraryToolbar />}
+            {listMode === "search" && (
+              <InlineNotice text={searchError} onDismiss={() => setSearchError("")} block />
+            )}
             {listMode === "library" && libError && (
               <div className="kd-toolbar" style={{ color: "var(--kd-danger)" }}>
                 {libError}
@@ -776,16 +730,21 @@ export function Workspace() {
             )}
 
             {/* 搜索结果的批量操作贴在列表顶部：选中前几首后无需滚到页面底部。 */}
-            {listMode === "search" && chosenSources.length > 0 && (
-              <div className="kd-picked-bar kd-picked-bar-top">
-                <span className="kd-muted">已选 {chosenSources.length} 首</span>
-                <Button variant="ghost" size="sm" onClick={() => setChosen(new Set())}>清除</Button>
-                <span className="kd-toolbar-gap" />
+            {listMode === "search" && (searchSelectionMode || chosen.size > 0) && (
+              <SelectionBar
+                count={chosen.size}
+                onSelectAll={selectAllSearch}
+                onClear={() => setChosen(new Set())}
+                onDone={() => {
+                  setChosen(new Set());
+                  setSearchSelectionMode(false);
+                }}
+              >
                 <InlineNotice text={queueError} onDismiss={() => setQueueError("")} />
-                <Button variant="primary" onClick={() => void addToQueue()}>
+                <Button variant="primary" size="sm" disabled={chosenSources.length === 0} onClick={() => void addToQueue()}>
                   <Download size={13} /> 加入队列
                 </Button>
-              </div>
+              </SelectionBar>
             )}
 
             {listMode === "search" ? (
@@ -796,6 +755,8 @@ export function Workspace() {
                   loading={busy}
                   searched={hasResults}
                   selected={chosen}
+                  selectionMode={searchSelectionMode}
+                  onSelectionModeChange={setSearchSelectionMode}
                   expandedGroups={expandedGroups}
                   collapsedItems={collapsedItems}
                   sourceIndex={sourceIndex}
@@ -805,6 +766,7 @@ export function Workspace() {
                   onToggleItem={toggleItem}
                   onToggleItemAll={toggleItemAll}
                   onToggleAll={toggleAll}
+                  onDownloadItem={(index) => void downloadItem(index)}
                 />
               </div>
             ) : (

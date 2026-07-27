@@ -11,6 +11,9 @@ const FMIN: f64 = 65.4;
 const FMAX: f64 = 2093.0;
 /// 谐波抑制：沿时间的中值滤波长度（帧）
 const HARMONIC_MEDIAN: usize = 17;
+/// 实际频谱的三次谐波落在基频的纯五度上。直接拿 chroma 匹配调性模板时，
+/// 这层泄漏会把主音系统性误判成属音（Camelot 同侧偏移一格）。
+const FIFTH_HARMONIC_LEAKAGE: f64 = 0.30;
 
 /// Krumhansl-Schmuckler 模板（索引 0 = 主音）
 const MAJOR_PROFILE: [f64; 12] = [
@@ -27,18 +30,18 @@ const NAMES: [&str; 12] = [
 
 /// Camelot 轮盘。索引 = 音级（C=0 … B=11），`.0` 是小调、`.1` 是大调。
 const CAMELOT: [(&str, &str); 12] = [
-    ("5A", "8B"),   // C
-    ("12A", "3B"),  // Db
-    ("7A", "10B"),  // D
-    ("2A", "5B"),   // Eb
-    ("9A", "12B"),  // E
-    ("4A", "7B"),   // F
-    ("11A", "2B"),  // F#
-    ("6A", "9B"),   // G
-    ("1A", "4B"),   // Ab
-    ("8A", "11B"),  // A
-    ("3A", "6B"),   // Bb
-    ("10A", "1B"),  // B
+    ("5A", "8B"),  // C
+    ("12A", "3B"), // Db
+    ("7A", "10B"), // D
+    ("2A", "5B"),  // Eb
+    ("9A", "12B"), // E
+    ("4A", "7B"),  // F
+    ("11A", "2B"), // F#
+    ("6A", "9B"),  // G
+    ("1A", "4B"),  // Ab
+    ("8A", "11B"), // A
+    ("3A", "6B"),  // Bb
+    ("10A", "1B"), // B
 ];
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -216,10 +219,28 @@ pub fn key_from_chroma(chroma: &[f64]) -> KeyResult {
             ..Default::default()
         };
     }
+    // 幅度先开方，避免一两个持续强音垄断整首；随后做一阶谐波去卷积。
+    // 若音级 q 的三次谐波泄漏到 q+7，那么音级 p 中应扣掉来自 p-7 (=p+5)
+    // 的一部分。只做一阶且截到 0，避免迭代反卷积把真实和弦音也消掉。
+    let compressed: Vec<f64> = chroma.iter().map(|value| value.max(0.0).sqrt()).collect();
+    let harmonic_corrected: Vec<f64> = (0..12)
+        .map(|class| {
+            (compressed[class] - FIFTH_HARMONIC_LEAKAGE * compressed[(class + 5) % 12]).max(0.0)
+        })
+        .collect();
+
     let mut scores: Vec<(f64, usize, bool)> = Vec::with_capacity(24);
     for tonic in 0..12 {
-        scores.push((pearson(chroma, &roll(&MAJOR_PROFILE, tonic)), tonic, false));
-        scores.push((pearson(chroma, &roll(&MINOR_PROFILE, tonic)), tonic, true));
+        scores.push((
+            pearson(&harmonic_corrected, &roll(&MAJOR_PROFILE, tonic)),
+            tonic,
+            false,
+        ));
+        scores.push((
+            pearson(&harmonic_corrected, &roll(&MINOR_PROFILE, tonic)),
+            tonic,
+            true,
+        ));
     }
     scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -323,6 +344,19 @@ mod tests {
         let got = key_from_chroma(&chroma);
         assert_eq!(got.key, "A minor");
         assert_eq!(got.camelot, "8A");
+    }
+
+    #[test]
+    fn fifth_harmonic_leakage_does_not_move_the_tonic_to_the_dominant() {
+        // 模拟每个真实音级都有 30% 能量泄漏到其纯五度。未经校正时，这类频谱
+        // 会让整批真实歌曲沿 Camelot 轮盘偏一格；校正后仍应识别原来的 C 大调。
+        let source = MAJOR_PROFILE;
+        let mut leaked = source;
+        for class in 0..12 {
+            leaked[(class + 7) % 12] += source[class] * FIFTH_HARMONIC_LEAKAGE;
+        }
+        let got = key_from_chroma(&leaked);
+        assert_eq!(got.camelot, "8B", "泄漏后的 chroma = {leaked:?}");
     }
 
     #[test]

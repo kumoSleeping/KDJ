@@ -1,4 +1,5 @@
 import type { Platform } from "../../types";
+import { HardDrive } from "lucide-react";
 
 /**
  * 四家平台的官方标志（单色字形）。
@@ -36,6 +37,7 @@ export const PLATFORM_BRAND: Partial<Record<Platform, string>> = {
 };
 
 export function PlatformMark({ id, size = 15 }: { id: Platform; size?: number }) {
+  if (id === "local") return <HardDrive size={size} strokeWidth={1.8} aria-hidden="true" />;
   const d = BRAND_PATH[id];
   if (!d) return null;
   return (

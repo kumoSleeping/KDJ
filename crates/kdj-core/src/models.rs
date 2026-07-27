@@ -763,6 +763,10 @@ pub struct LibraryStats {
     pub analyzed: i64,
     pub total_duration: f64,
     pub total_size: i64,
+    /// 已分析曲目的全库中位数。前端用它把响度显示成相对 100%，不拿当前分页假算。
+    pub energy_median: Option<f64>,
+    pub rms_db_median: Option<f64>,
+    pub peak_db_median: Option<f64>,
     pub by_camelot: std::collections::BTreeMap<String, i64>,
     pub by_bpm_bucket: std::collections::BTreeMap<String, i64>,
     pub by_platform: std::collections::BTreeMap<String, i64>,

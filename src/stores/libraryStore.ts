@@ -24,7 +24,7 @@ import type {
 
 /** "custom" = 文件夹清单里的手排顺序（拖动排序写进 .kdj.json）。 */
 export type TrackSort =
-  | "added_at" | "title" | "artist" | "album" | "bpm" | "camelot" | "energy" | "duration" | "custom";
+  | "added_at" | "title" | "artist" | "album" | "bpm" | "camelot" | "energy" | "duration" | "rating" | "custom";
 export type SortOrder = "asc" | "desc";
 /** 入库序 = "没有显式排序"。cycleSort 用它判断有没有主键。 */
 const DEFAULT_SORT: TrackSort = "added_at";
@@ -111,7 +111,18 @@ const quietJobs = new Set<string>();
  * 已经有一批没跑完时，新来的先不抢；跑完了才让位。
  */
 function claimProgress(current: AnalyzeProgress | null, next: AnalyzeProgress): AnalyzeProgress {
-  if (current && current.job_id !== next.job_id && current.done < current.total) return current;
+  // 多个自动分析批次可能同时排队。旧逻辑只要当前批次还是 0/20，就拒绝
+  // 其他 job 的所有事件；结果后端明明在满速分析、数据库持续增长，界面却永远
+  // 钉在第一个尚未拿到 worker 的 0/20。另一批已经 done>0 时，它才是真正在
+  // 工作的批次，应该接管进度显示；只有双方都尚未开始时才保住当前项。
+  if (
+    current &&
+    current.job_id !== next.job_id &&
+    current.done < current.total &&
+    next.done === 0
+  ) {
+    return current;
+  }
   return next;
 }
 

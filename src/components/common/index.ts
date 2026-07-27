@@ -16,3 +16,5 @@ export { Sheet } from "./Sheet";
 export type { SheetProps } from "./Sheet";
 export { ProgressBar } from "./ProgressBar";
 export type { ProgressBarProps, ProgressState } from "./ProgressBar";
+export { SelectionBar } from "./SelectionBar";
+export type { SelectionBarProps } from "./SelectionBar";

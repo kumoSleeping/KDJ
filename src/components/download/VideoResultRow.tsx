@@ -14,6 +14,7 @@ function errorText(error: unknown): string {
 
 /** 画质是"上限"而不是"精确档"：后端在可用流里挑不超过这个高度的最好的一条。 */
 const HEIGHT_LADDER = [2160, 1440, 1080, 720, 480, 360];
+export const VIDEO_DOWNLOAD_DND_TYPE = "application/x-kdj-video-download";
 
 /**
  * 画出一行视频要的最少信息。
@@ -108,7 +109,19 @@ export function VideoResultRow({
   const rowRef = useRef<HTMLTableRowElement>(null);
 
   const effectiveHeight = maxHeight ?? settings?.video_max_height ?? 1080;
+  const effectiveFormat = audioOnly ? "m4a" : (settings?.video_format ?? "mp4");
   const pages = info?.pages ?? [];
+
+  const cycleHeight = () => {
+    const index = HEIGHT_LADDER.indexOf(effectiveHeight);
+    setMaxHeight(HEIGHT_LADDER[(index + 1 + HEIGHT_LADDER.length) % HEIGHT_LADDER.length]);
+  };
+  const cycleFormat = () => {
+    if (audioOnly) return;
+    const formats: VideoFormat[] = ["mp4", "mkv", "mov"];
+    const index = formats.indexOf(effectiveFormat as VideoFormat);
+    void saveSettings({ video_format: formats[(index + 1 + formats.length) % formats.length] });
+  };
 
   /**
    * 关键词搜出来的视频没有分 P 和可用画质，得再问一次 B 站才知道。
@@ -172,7 +185,25 @@ export function VideoResultRow({
             右栏开预览。分 P / 画质那些控件自己消费点击，closest 一挡就分开了。 */}
         <div
           className="kd-video-row"
-          title="点击在右栏预览"
+          draggable={Boolean(bvid)}
+          title="点击在右栏预览；拖到右侧加入下载队列"
+          onDragStart={(event) => {
+            if (!bvid) {
+              event.preventDefault();
+              return;
+            }
+            event.dataTransfer.effectAllowed = "copy";
+            event.dataTransfer.setData(
+              VIDEO_DOWNLOAD_DND_TYPE,
+              JSON.stringify({
+                bvid,
+                page_index: pageIndex,
+                max_height: effectiveHeight,
+                audio_only: audioOnly,
+                transcode: true,
+              }),
+            );
+          }}
           onClick={(event) => {
             if (!bvid) return;
             if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
@@ -187,6 +218,7 @@ export function VideoResultRow({
                 src={cover}
                 alt=""
                 loading="lazy"
+                draggable={false}
                 referrerPolicy="no-referrer"
                 onError={(event) => {
                   event.currentTarget.style.display = "none";
@@ -213,72 +245,48 @@ export function VideoResultRow({
                   未登录
                 </span>
               )}
-              {info && info.options.length > 0 && (
-                <span className="kd-faint kd-truncate">
-                  可用 {info.options.map((option) => option.label).join(" / ")}
-                </span>
-              )}
             </div>
 
             <div className="kd-video-controls">
               {pages.length > 1 && (
-                <label className="kd-row" style={{ gap: "0.35rem" }}>
-                  分 P
-                  <select
-                    className="kd-select"
-                    data-size="sm"
-                    data-pages="true"
-                    value={pageIndex}
-                    onChange={(event) => setPageIndex(Number(event.target.value))}
+                <span className="kd-cycle-field">
+                  <span>分 P</span>
+                  <button
+                    type="button"
+                    className="kd-cycle-control"
+                    title={`${pages[pageIndex]?.title ?? `P${pageIndex + 1}`} · 点击切换下一分 P`}
+                    onClick={() => setPageIndex((pageIndex + 1) % pages.length)}
                   >
-                    {pages.map((page) => (
-                      <option key={page.index} value={page.index}>
-                        P{page.index + 1} · {page.title} · {formatDuration(page.duration)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                    P{pageIndex + 1}/{pages.length}
+                  </button>
+                </span>
               )}
 
-              <label className="kd-row" style={{ gap: "0.35rem" }}>
-                画质
-                <select
-                  className="kd-select"
-                  data-size="sm"
-                  value={effectiveHeight}
+              <span className="kd-cycle-field">
+                <span>画质</span>
+                <button
+                  type="button"
+                  className="kd-cycle-control"
                   disabled={audioOnly}
-                  onChange={(event) => setMaxHeight(Number(event.target.value))}
+                  title={`最高 ${effectiveHeight}p · 点击切换`}
+                  onClick={cycleHeight}
                 >
-                  {HEIGHT_LADDER.map((height) => (
-                    <option key={height} value={height}>
-                      {height}p
-                    </option>
-                  ))}
-                </select>
-              </label>
+                  {effectiveHeight}P
+                </button>
+              </span>
 
-              <label className="kd-row" style={{ gap: "0.35rem" }}>
-                格式
-                <select
-                  className="kd-select"
-                  data-size="sm"
-                  value={audioOnly ? "m4a" : (settings?.video_format ?? "mp4")}
+              <span className="kd-cycle-field">
+                <span>格式</span>
+                <button
+                  type="button"
+                  className="kd-cycle-control"
                   disabled={audioOnly}
-                  onChange={(event) =>
-                    void saveSettings({ video_format: event.target.value as VideoFormat })
-                  }
+                  title={`封装格式：${effectiveFormat.toUpperCase()} · 点击切换`}
+                  onClick={cycleFormat}
                 >
-                  {audioOnly ? (
-                    <option value="m4a">M4A</option>
-                  ) : (
-                    <>
-                      <option value="mp4">MP4</option>
-                      <option value="mkv">MKV</option>
-                      <option value="mov">MOV</option>
-                    </>
-                  )}
-                </select>
-              </label>
+                  {effectiveFormat.toUpperCase()}
+                </button>
+              </span>
 
               {/* 视频就是视频：默认下完整画面，这个勾才是"我这次只要声音" */}
               <label className="kd-check">

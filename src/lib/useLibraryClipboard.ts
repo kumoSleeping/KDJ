@@ -32,6 +32,11 @@ export function useLibraryClipboard(): void {
       const key = event.key.toLowerCase();
 
       if (key === "c" || key === "x") {
+        // 页面文字选区优先于“曲目剪贴板”。否则用户明明框住了标题/路径/错误
+        // 文案，Cmd+C 却被 preventDefault 后悄悄复制成曲目操作，体感就是全站
+        // 文字都不能复制。没有文字选区时才把快捷键解释为复制/剪切曲目。
+        const textSelection = window.getSelection();
+        if (textSelection && !textSelection.isCollapsed && textSelection.toString()) return;
         // 没选中就什么都不做——别把一个空剪贴板盖掉用户上一次复制的内容
         if (store.selectedIds.length === 0) return;
         event.preventDefault();

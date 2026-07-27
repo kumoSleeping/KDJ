@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, ListMusic, ListStart, LoaderCircle, Play } from "lucide-react";
+import { Check, FolderOpen, Library, ListMusic, ListStart, LoaderCircle, Play } from "lucide-react";
 import { api } from "../../lib/api";
 import { formatBpm } from "../../lib/format";
 import { useHarmonicScope } from "../../lib/harmonicScope";
+import { hasTextSelectionWithin } from "../../lib/textSelection";
 import { useLibraryStore } from "../../stores/libraryStore";
 import { useQueueStore } from "../../stores/queueStore";
 import type { HarmonicMatch, Track } from "../../types";
@@ -29,6 +30,10 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number; track: Track } | null>(null);
   const rowMenuRef = useRef<HTMLDivElement | null>(null);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  /** 复选框不是常驻装饰：桌面右键、触屏长按后才进入显式批选模式。 */
+  const [selectionMode, setSelectionMode] = useState(false);
+  const pressTimerRef = useRef<number | null>(null);
+  const suppressClickRef = useRef<number | null>(null);
   const [drop, setDrop] = useState<{ id: number; before: boolean } | null>(null);
   const scope = useHarmonicScope((state) => state.scope);
   const setScope = useHarmonicScope((state) => state.setScope);
@@ -40,7 +45,21 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
   const selected = new Set(selectedIds);
 
   useEffect(() => {
+    if (!selectionMode) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setSelectionMode(false);
+      setSelectedIds([]);
+      setRowMenu(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectionMode]);
+
+  useEffect(() => {
     setSelectedIds([]);
+    setSelectionMode(false);
     setRowMenu(null);
     setDrop(null);
   }, [track.id]);
@@ -109,6 +128,21 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
     setSelectedIds((ids) => (ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]));
   };
 
+  const cancelPress = () => {
+    if (pressTimerRef.current !== null) window.clearTimeout(pressTimerRef.current);
+    pressTimerRef.current = null;
+  };
+
+  /** 触屏没有右键：按住 480ms 打开与桌面右键完全相同的菜单。 */
+  const beginLongPress = (track: Track, x: number, y: number) => {
+    cancelPress();
+    pressTimerRef.current = window.setTimeout(() => {
+      setRowMenu({ x, y, track });
+      suppressClickRef.current = track.id;
+      pressTimerRef.current = null;
+    }, 480);
+  };
+
   const reorder = (targetId: number, before: boolean) => {
     if (!selectedIds.length || selectedIds.includes(targetId)) return;
     const moving = matches.filter((match) => selected.has(match.track.id));
@@ -122,26 +156,46 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
   /** 范围开关：三枚小按钮常驻在列表顶上，任何状态下都能切。 */
   const scopeBar = (
     <div className="kd-scope" role="group" aria-label="接歌范围">
-      <button type="button" aria-pressed={scope === "all"} onClick={() => setScope("all")}>
-        全部
+      <button
+        type="button"
+        aria-label="全部曲目"
+        title="从全部曲目中接歌"
+        aria-pressed={scope === "all"}
+        onClick={() => setScope("all")}
+      >
+        <Library size={14} />
       </button>
       <button
         type="button"
+        aria-label="当前文件夹"
         aria-pressed={scope === "folder"}
         onClick={() => setScope("folder")}
         title={folder ? `只在 ${folder} 里接` : "先在左边选一个文件夹；没选时等同于全部"}
       >
-        当前文件夹
+        <FolderOpen size={14} />
       </button>
       <button
         type="button"
+        aria-label="临时列表"
         aria-pressed={scope === "queue"}
         onClick={() => setScope("queue")}
         title="只播放临时列表，放空后停止"
       >
-        临时列表
+        <ListMusic size={14} />
       </button>
       {scope === "folder" && !folder && <span className="kd-faint">（没选文件夹，仍是全部）</span>}
+      {selectionMode && (
+        <button
+          type="button"
+          className="kd-scope-done"
+          onClick={() => {
+            setSelectionMode(false);
+            setSelectedIds([]);
+          }}
+        >
+          完成{selectedIds.length ? ` · ${selectedIds.length}` : ""}
+        </button>
+      )}
     </div>
   );
 
@@ -181,26 +235,44 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
         <div
           key={match.track.id}
           className="kd-queue-row"
+          data-selecting={selectionMode ? "true" : undefined}
           style={{ cursor: "pointer" }}
-          title="点一下播放；勾选后可批量加入或拖动排序"
+          title="点一下播放；Cmd/Ctrl 点击多选；右键或长按进入批选"
           aria-selected={selected.has(match.track.id)}
-          draggable
-          onClick={() => {
-            // 先选中再播：详情栏跟着换成这一首，接着往下接就是一条链
-            onSelect(match.track);
-            playTrack(match.track);
-          }}
-          onContextMenu={(event) => {
-            event.preventDefault();
-            if (!selected.has(match.track.id)) setSelectedIds([match.track.id]);
-            setRowMenu({ x: event.clientX, y: event.clientY, track: match.track });
-          }}
+          draggable={selected.has(match.track.id)}
           onDragStart={(event) => {
-            if (!selected.has(match.track.id)) setSelectedIds([match.track.id]);
             event.dataTransfer.effectAllowed = "copyMove";
             event.dataTransfer.setData("text/plain", String(match.track.id));
           }}
           onDragEnd={() => setDrop(null)}
+          onClick={(event) => {
+            if (hasTextSelectionWithin(event.currentTarget)) return;
+            if (suppressClickRef.current === match.track.id) {
+              suppressClickRef.current = null;
+              return;
+            }
+            if (selectionMode || event.metaKey || event.ctrlKey) {
+              toggleSelected(match.track.id);
+              return;
+            }
+            // 先选中再播：详情栏跟着换成这一首，接着往下接就是一条链
+            onSelect(match.track);
+            playTrack(match.track);
+          }}
+          onPointerDown={(event) => {
+            if (event.pointerType !== "mouse") {
+              beginLongPress(match.track, event.clientX, event.clientY);
+            }
+          }}
+          onPointerUp={cancelPress}
+          onPointerCancel={cancelPress}
+          onPointerLeave={cancelPress}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            cancelPress();
+            // 右键只打开菜单，复选框由菜单里的「选择」显式开启。
+            setRowMenu({ x: event.clientX, y: event.clientY, track: match.track });
+          }}
           onDragOver={(event) => {
             event.preventDefault();
             const rect = event.currentTarget.getBoundingClientRect();
@@ -219,31 +291,63 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
             if (target?.id === match.track.id) reorder(target.id, target.before);
           }}
         >
-          <button
-            type="button"
-            className="kd-harmonic-select"
-            aria-label={selected.has(match.track.id) ? "取消选择" : "选择曲目"}
-            aria-pressed={selected.has(match.track.id)}
-            onClick={(event) => {
-              event.stopPropagation();
-              toggleSelected(match.track.id);
-            }}
-          >
-            <Check size={11} style={{ opacity: selected.has(match.track.id) ? 1 : 0 }} />
-          </button>
+          {selectionMode && (
+            <button
+              type="button"
+              className="kd-harmonic-select"
+              aria-label={selected.has(match.track.id) ? "取消选择" : "选择曲目"}
+              aria-pressed={selected.has(match.track.id)}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleSelected(match.track.id);
+              }}
+            >
+              <Check size={9} style={{ opacity: selected.has(match.track.id) ? 1 : 0 }} />
+            </button>
+          )}
           <span className="kd-queue-title" title={match.track.title || match.track.filename}>
+            <span
+              className="kd-thumb"
+              draggable
+              title="拖动封面调整所选曲目顺序"
+              onDragStart={(event) => {
+                event.stopPropagation();
+                if (!selected.has(match.track.id)) setSelectedIds([match.track.id]);
+                event.dataTransfer.effectAllowed = "copyMove";
+                event.dataTransfer.setData("text/plain", String(match.track.id));
+              }}
+              onDragEnd={() => setDrop(null)}
+            >
+              <img
+                src={api.coverUrl(match.track.id, match.track.modified_at)}
+                alt=""
+                loading="lazy"
+                draggable={false}
+                onError={(event) => {
+                  event.currentTarget.style.visibility = "hidden";
+                }}
+              />
+            </span>
             {match.track.title || match.track.filename}
           </span>
-          <CamelotChip code={match.track.camelot} />
+          <span>
+            <CamelotChip code={match.track.camelot} />
+          </span>
           <div className="kd-queue-meta">
             {/* 艺人为空时整条不占位，免得留一个孤零零的破折号 */}
             {match.track.artist && <span className="kd-truncate">{match.track.artist}</span>}
             <span className="kd-toolbar-gap" />
-            <span className="kd-chip">{match.relation_label}</span>
-            <span title={`BPM ${formatBpm(match.track.bpm)}，相差 ${match.bpm_delta.toFixed(1)}`}>
+            <span className="kd-chip kd-harmonic-relation">{match.relation_label}</span>
+            <span
+              className="kd-harmonic-bpm"
+              title={`BPM ${formatBpm(match.track.bpm)}，相差 ${match.bpm_delta.toFixed(1)}`}
+            >
               {formatBpm(match.track.bpm)}
               {match.bpm_delta !== 0 && (
-                <span className="kd-faint">
+                <span
+                  className="kd-harmonic-delta"
+                  data-direction={match.bpm_delta > 0 ? "up" : "down"}
+                >
                   {" "}
                   ({match.bpm_delta > 0 ? "+" : ""}
                   {match.bpm_delta.toFixed(1)})
@@ -276,6 +380,17 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
           >
             <Play size={12} />
             播放
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setSelectionMode(true);
+              if (!selected.has(rowMenu.track.id)) toggleSelected(rowMenu.track.id);
+              setRowMenu(null);
+            }}
+          >
+            <Check size={12} />
+            选择
           </button>
           <button
             type="button"

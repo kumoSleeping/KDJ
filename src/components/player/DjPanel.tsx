@@ -6,7 +6,6 @@ import {
   useDjConfig,
 } from "../../lib/djMix";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
-import { Panel, PanelStack } from "../common";
 
 /**
  * 「接播设置」面板，住在右侧详情栏里，由播放条的 DJ 按钮呼出。
@@ -35,6 +34,12 @@ export function DjPanel() {
   const selected = useLibraryStore(selectSelectedTrack);
   const bpm = selected?.bpm ?? null;
   const bpmLabel = bpm ? `${Math.round(bpm)} BPM` : "120 BPM（未分析，按默认估）";
+  const transitionHint = DJ_TRANSITIONS.filter((item) => transitions.includes(item.id))
+    .map((item) => `${item.label}：${item.hint}`)
+    .join(" · ");
+  const effectHint = DJ_EFFECTS.filter((item) => effects.includes(item.id))
+    .map((item) => `${item.label}：${item.hint}`)
+    .join(" · ");
 
   return (
     <div className="kd-col" style={{ height: "100%", minHeight: 0 }}>
@@ -43,37 +48,34 @@ export function DjPanel() {
       </div>
 
       <div className="kd-scroll kd-djp" style={{ minHeight: 0 }}>
-        <PanelStack storageKey="kd-dj-panels-v3">
-        <Panel key="preset" heading="接歌方案" padded dense>
-          <p className="kd-djp-intro">
-            勾选多个后，每次接歌会从中随机取至少一个叠加组合。下一首先同步 BPM，
-            按本场抽到的曲线交接，结束后再缓慢回到原速。
-          </p>
-          <div className="kd-djp-options" aria-label="接歌方案">
+        <section className="kd-djp-section">
+          <h3>接歌方案</h3>
+          <div className="kd-djp-choices" aria-label="接歌方案">
             {DJ_TRANSITIONS.map((item) => {
               const checked = transitions.includes(item.id);
               return (
-              <button
-                key={item.id}
-                type="button"
-                role="checkbox"
-                aria-checked={checked}
-                className="kd-djp-option"
-                data-active={checked ? "true" : undefined}
-                onClick={() => toggleTransition(item.id)}
-              >
-                <span className="kd-djp-dot" aria-hidden="true" />
-                <span className="kd-djp-text">
-                  <span className="kd-djp-label">{item.label}</span>
-                  <span className="kd-djp-hint">{item.hint}</span>
-                </span>
-              </button>
+                <button
+                  key={item.id}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={checked}
+                  className="kd-djp-choice"
+                  data-active={checked ? "true" : undefined}
+                  onClick={() => toggleTransition(item.id)}
+                >
+                  <span className="kd-djp-choice-mark" aria-hidden="true" />
+                  {item.label}
+                </button>
               );
             })}
           </div>
-        </Panel>
+          <p className="kd-djp-note">
+            {transitionHint || "至少选择一种接歌方案"}。每次接歌会从已选方案中随机组合。
+          </p>
+        </section>
 
-        <Panel key="vocal" heading="人声处理" padded dense>
+        <section className="kd-djp-section">
+          <h3>人声处理</h3>
           <label className="kd-djp-check">
             <input
               type="checkbox"
@@ -83,16 +85,13 @@ export function DjPanel() {
             接歌时渐进削弱上一首的中置人声
           </label>
           <p className="kd-djp-note">
-            使用部分 Mid/Side 削弱，不再把原声完全切成 L−R。旧歌人声会退到后面，
-            但仍保留一半以上原声、立体声侧声道和补偿增益，避免整体突然变小。
+            保留立体声侧声道和补偿增益，让旧歌人声后退但不突然变小。
           </p>
-        </Panel>
+        </section>
 
-        <Panel key="effects" heading="效果器" padded dense>
-          <p className="kd-djp-intro">
-            可同时勾选，接歌起手时读取当前配置；干湿比会按小节自动推进，越接近结尾效果越强。
-          </p>
-          <div className="kd-djp-options" aria-label="效果器">
+        <section className="kd-djp-section">
+          <h3>效果器</h3>
+          <div className="kd-djp-choices" aria-label="效果器">
             {DJ_EFFECTS.map((item) => {
               const checked = effects.includes(item.id);
               return (
@@ -101,22 +100,23 @@ export function DjPanel() {
                   type="button"
                   role="checkbox"
                   aria-checked={checked}
-                  className="kd-djp-option"
+                  className="kd-djp-choice"
                   data-active={checked ? "true" : undefined}
                   onClick={() => toggleEffect(item.id)}
                 >
-                  <span className="kd-djp-dot" aria-hidden="true" />
-                  <span className="kd-djp-text">
-                    <span className="kd-djp-label">{item.label}</span>
-                    <span className="kd-djp-hint">{item.hint}</span>
-                  </span>
+                  <span className="kd-djp-choice-mark" aria-hidden="true" />
+                  {item.label}
                 </button>
               );
             })}
           </div>
-        </Panel>
+          <p className="kd-djp-note">
+            {effectHint || "未启用效果器"}。强度会在接歌过程中自动推进。
+          </p>
+        </section>
 
-        <Panel key="length" heading="接歌长度" padded dense>
+        <section className="kd-djp-section">
+          <h3>接歌长度</h3>
           <div className="kd-djp-segs" role="radiogroup" aria-label="接歌长度">
             {DJ_BARS_OPTIONS.map((value) => (
               <button
@@ -127,16 +127,15 @@ export function DjPanel() {
                 data-on={value === bars ? "true" : undefined}
                 onClick={() => setBars(value)}
               >
-                {value} 小节
+                {value}
               </button>
             ))}
+            <span>小节</span>
           </div>
           <p className="kd-djp-note">
-            按 {bpmLabel}，{bars} 小节 ≈ {formatSeconds(mixSeconds(bpm, bars))}。
-            小节按 4/4 拍算，以正在放的那首为准；起手点自动按尾段频谱估算。
+            {bpmLabel} · 约 {formatSeconds(mixSeconds(bpm, bars))} · 起手点自动按尾段频谱估算
           </p>
-        </Panel>
-        </PanelStack>
+        </section>
       </div>
     </div>
   );

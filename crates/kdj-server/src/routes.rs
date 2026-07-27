@@ -40,6 +40,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/accounts/{platform}/logout", post(logout))
         .route("/api/search", post(search))
         .route("/api/song/preview", post(song_preview))
+        .route("/api/song/preview/{token}", get(song_preview_stream))
         .route("/api/resolve", post(resolve))
         .route("/api/intake", post(intake))
         .route("/api/downloads", get(list_downloads).post(enqueue))
@@ -49,6 +50,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/video/resolve", post(video_resolve))
         .route("/api/video/download", post(video_download))
         .route("/api/video/preview", get(video_preview))
+        .route("/api/video/calibrate", post(video_calibrate))
         .route("/api/library/tracks", get(library_tracks))
         .route("/api/library/tracks/{id}", get(library_track))
         .route("/api/library/tracks/{id}", patch(library_patch))
@@ -228,13 +230,74 @@ async fn song_preview(
         return Err(ApiError::bad_request("不认识的平台"));
     };
     match provider.preview_url(&body.source).await? {
-        Some(url) => Ok(Json(json!({ "url": url }))),
+        Some(url) => {
+            let token = format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>());
+            let mut previews = state.song_previews.lock().unwrap();
+            previews.retain(|_, (_, created)| created.elapsed() < std::time::Duration::from_secs(1800));
+            previews.insert(token.clone(), (url, std::time::Instant::now()));
+            Ok(Json(json!({ "url": format!("/api/song/preview/{token}") })))
+        }
         // B 站等没有"歌曲试听"形状的平台：它们的预览走各自的路
         None => Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "这个平台不支持歌曲试听",
         )),
     }
+}
+
+/// 试听直链代理。平台 CDN 常返回 WebView 不认识的 Content-Type，或要求浏览器
+/// 无法稳定携带的请求上下文；统一从回环服务转发，并完整支持 Range 拖动。
+async fn song_preview_stream(
+    State(state): State<Arc<AppState>>,
+    AxumPath(token): AxumPath<String>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let url = state
+        .song_previews
+        .lock()
+        .unwrap()
+        .get(&token)
+        .map(|(url, _)| url.clone())
+        .ok_or_else(|| ApiError::not_found("试听地址已过期，请重新双击歌曲"))?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    let mut request = client.get(url);
+    if let Some(range) = headers.get(header::RANGE).and_then(|value| value.to_str().ok()) {
+        request = request.header(reqwest::header::RANGE, range);
+    }
+    let upstream = request
+        .send()
+        .await
+        .map_err(|err| ApiError::new(StatusCode::BAD_GATEWAY, format!("试听源连接失败：{err}")))?;
+    let status = StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::OK);
+    if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
+        return Err(ApiError::new(status, format!("试听源返回 HTTP {status}")));
+    }
+    let upstream_headers = upstream.headers().clone();
+    let content_type = upstream_headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.starts_with("audio/"))
+        .unwrap_or("audio/mpeg")
+        .to_string();
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CACHE_CONTROL, "no-store");
+    for name in [header::CONTENT_LENGTH, header::CONTENT_RANGE] {
+        if let Some(value) = upstream_headers.get(name.as_str()) {
+            builder = builder.header(name, value);
+        }
+    }
+    let stream = upstream.bytes_stream().map(|chunk| {
+        chunk.map_err(|err| std::io::Error::other(format!("试听流读取失败：{err}")))
+    });
+    builder
+        .body(axum::body::Body::from_stream(stream))
+        .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
 }
 
 /// 逐个平台试解析。返回 `(结果, 最后一次错误)`，结果为 None 表示没人认得这个链接。
@@ -562,6 +625,130 @@ async fn video_preview(
                 format!("构造预览响应失败：{err}"),
             )
         })
+}
+
+#[derive(Deserialize)]
+struct VideoCalibrateBody {
+    track_id: i64,
+    bvid: String,
+    #[serde(default)]
+    page: usize,
+}
+
+/// 低采样率响度包络：8kHz mono PCM 每 400 点算一个 RMS，最终 20Hz。
+fn pcm_envelope(bytes: &[u8]) -> Vec<f64> {
+    let samples: Vec<f64> = bytes
+        .chunks_exact(2)
+        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]) as f64 / i16::MAX as f64)
+        .collect();
+    let mut values: Vec<f64> = samples
+        .chunks(400)
+        .filter(|chunk| chunk.len() == 400)
+        .map(|chunk| {
+            let power = chunk.iter().map(|value| value * value).sum::<f64>() / chunk.len() as f64;
+            (1.0 + power.sqrt() * 100.0).ln()
+        })
+        .collect();
+    if values.is_empty() {
+        return values;
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / values.len() as f64;
+    let scale = variance.sqrt().max(1e-6);
+    for value in &mut values {
+        *value = (*value - mean) / scale;
+    }
+    values
+}
+
+fn decode_alignment_envelope(input: String, headers: Option<String>) -> Result<Vec<f64>, String> {
+    let ffmpeg = kdj_providers::ffmpeg::binary().map_err(|err| format!("{err:#}"))?;
+    let mut command = std::process::Command::new(ffmpeg);
+    command.args(["-v", "error", "-t", "210"]);
+    if let Some(headers) = headers {
+        command.args(["-headers", &headers]);
+    }
+    let output = command
+        .args(["-i", &input, "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1"])
+        .output()
+        .map_err(|err| format!("启动 ffmpeg 失败：{err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ffmpeg 解码失败：{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let envelope = pcm_envelope(&output.stdout);
+    if envelope.len() < 20 * 30 {
+        return Err("可用于校准的音频不足 30 秒".into());
+    }
+    Ok(envelope)
+}
+
+/// 在周期 20Hz 的响度包络上做归一化互相关。返回“视频相对本地音频”的偏移：
+/// 正数 = 视频前面有额外片头，协同播放应从视频该位置开始；负数 = 视频延迟起播。
+fn correlate_offset(local: &[f64], video: &[f64]) -> (i64, f64) {
+    let local = &local[..local.len().min(20 * 120)];
+    let mut best = (0i32, f64::NEG_INFINITY);
+    for lag in -(20 * 30)..=(20 * 150) {
+        let local_start = (-lag).max(0) as usize;
+        let video_start = lag.max(0) as usize;
+        let count = (local.len() - local_start).min(video.len().saturating_sub(video_start));
+        if count < 20 * 30 {
+            continue;
+        }
+        let score = local[local_start..local_start + count]
+            .iter()
+            .zip(&video[video_start..video_start + count])
+            .map(|(a, b)| a * b)
+            .sum::<f64>()
+            / count as f64;
+        if score > best.1 {
+            best = (lag, score);
+        }
+    }
+    (best.0 as i64 * 50, best.1)
+}
+
+/// 自动校准本地歌曲与 B 站视频音轨。只解码低采样率 PCM，不下载成品、不入库。
+async fn video_calibrate(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<VideoCalibrateBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let track = state
+        .library
+        .get(body.track_id)?
+        .ok_or_else(|| ApiError::not_found("用于校准的本地曲目不存在"))?;
+    if !Path::new(&track.path).is_file() {
+        return Err(ApiError::not_found("用于校准的本地音频文件已丢失"));
+    }
+    let (video_url, cookies) = state
+        .bilibili
+        .calibration_audio_source(&body.bvid, body.page)
+        .await
+        .map_err(|err| ApiError::new(StatusCode::BAD_GATEWAY, format!("获取视频音轨失败：{err:#}")))?;
+    let headers = format!(
+        "Referer: https://www.bilibili.com/\r\nUser-Agent: Mozilla/5.0\r\n{}",
+        if cookies.is_empty() { String::new() } else { format!("Cookie: {cookies}\r\n") }
+    );
+    let local_path = track.path;
+    let local_job = tokio::task::spawn_blocking(move || decode_alignment_envelope(local_path, None));
+    let video_job = tokio::task::spawn_blocking(move || decode_alignment_envelope(video_url, Some(headers)));
+    let (local, video) = tokio::join!(local_job, video_job);
+    let local = local
+        .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?
+        .map_err(|err| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, err))?;
+    let video = video
+        .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?
+        .map_err(|err| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, err))?;
+    let (offset_ms, score) = correlate_offset(&local, &video);
+    if !score.is_finite() || score < 0.12 {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("两段音频相似度不足，无法可靠自动校准（{score:.2}）"),
+        ));
+    }
+    Ok(Json(json!({ "offset_ms": offset_ms, "score": score })))
 }
 
 // ---------------------------------------------------------------- 曲库
@@ -2105,5 +2292,19 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
         );
         assert_eq!(merged, vec![path], "重复的和不存在的都不该进去");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn audio_correlation_finds_a_video_intro() {
+        // 20Hz 包络里前置 10 秒（200 点），自动校准应让视频从 +10s 开始。
+        let local: Vec<f64> = (0..1200)
+            .map(|index| (((index * 73 + index * index * 11) % 101) as f64 - 50.0) / 30.0)
+            .collect();
+        let mut video = vec![0.0; 200];
+        video.extend_from_slice(&local);
+        video.extend(std::iter::repeat_n(0.0, 300));
+        let (offset, score) = correlate_offset(&local, &video);
+        assert_eq!(offset, 10_000);
+        assert!(score > 0.5);
     }
 }

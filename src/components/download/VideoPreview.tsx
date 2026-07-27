@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Blend, Clapperboard, Disc3, Download, Minus, Play, Plus, Scissors, X } from "lucide-react";
+import { Blend, Clapperboard, Disc3, Download, LoaderCircle, Minus, Play, Plus, Scissors } from "lucide-react";
 import { api } from "../../lib/api";
 import {
   AUDIO_FOCUS_EVENT,
@@ -7,6 +7,7 @@ import {
   type AudioFocusDetail,
 } from "../../lib/audioFocus";
 import { deckGain, previewGain, useCrossfade } from "../../lib/crossfade";
+import { djEngine } from "../../lib/djMix";
 import { formatDuration } from "../../lib/format";
 import {
   MEDIA_SYNC_EVENT,
@@ -15,6 +16,7 @@ import {
 } from "../../lib/mediaSync";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
+import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { Button, InlineNotice } from "../common";
 
 /** 「预览这个视频」：结果行发出来，Workspace 接住后把预览面板放进右栏。 */
@@ -41,6 +43,7 @@ export function requestVideoPreview(req: VideoPreviewRequest): void {
 const BUCKETS = 480;
 /** 波形条高度：和底部播放条的 38px 一个量级，矮一点表明它是"副"进度条。 */
 const WAVE_HEIGHT = 34;
+const calibrationCache = new Map<string, { offsetMs: number; score: number }>();
 
 /**
  * 右栏的视频预览面板。
@@ -50,13 +53,7 @@ const WAVE_HEIGHT = 34;
  * 听过哪里哪里就有波形。样式对齐底部播放条那条波形（已播压暗、白线播放头、
  * 点击跳转），这块"随着声音长出来"的波形就是预览的进度条。
  */
-export function VideoPreview({
-  req,
-  onClose,
-}: {
-  req: VideoPreviewRequest;
-  onClose: () => void;
-}) {
+export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -65,6 +62,16 @@ export function VideoPreview({
   const analyserRef = useRef<AnalyserNode | null>(null);
   const sampleRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
   const bucketsRef = useRef<Float32Array>(new Float32Array(BUCKETS));
+  /** 自动校准的请求代数：预览卸载/换曲后，旧 Promise 不得重新打开协同。 */
+  const calibrationSeqRef = useRef(0);
+  /** 负 Offset 下延迟起播的定时器：留白期间视频停在 0 等着。 */
+  const delayTimerRef = useRef<number | null>(null);
+  const clearDelay = useCallback(() => {
+    if (delayTimerRef.current !== null) {
+      window.clearTimeout(delayTimerRef.current);
+      delayTimerRef.current = null;
+    }
+  }, []);
 
   const [playing, setPlaying] = useState(false);
   const [position, setPosition] = useState(0);
@@ -84,6 +91,9 @@ export function VideoPreview({
   const [offsetMs, setOffsetMs] = useState(0);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
+  const [syncError, setSyncError] = useState("");
+  const [calibrating, setCalibrating] = useState(false);
+  const selectedTrack = useLibraryStore(selectSelectedTrack);
   const settings = useAppStore((state) => state.settings);
   const mergeTasks = useDownloadStore((state) => state.mergeTasks);
 
@@ -116,11 +126,16 @@ export function VideoPreview({
 
   useEffect(
     () => () => {
+      calibrationSeqRef.current += 1;
+      clearDelay();
       void audioCtxRef.current?.close();
       // 预览没了协同也就没了：不收这一下，唱盘会永远停在推子分给它的音量上
       useCrossfade.getState().setCoplay(false);
+      // store 的 React effect 要到下一帧才恢复 deck；这里同步兜底，避免推子在
+      // 最右时退出后立刻点播放，进度在走但 element.volume 仍近似 0。
+      djEngine.setVolume(1);
     },
-    [],
+    [clearDelay],
   );
 
   // 别人开声（曲库开始预听）就自己停，见 audioFocus.ts 的约定。
@@ -146,11 +161,27 @@ export function VideoPreview({
       if (!video) return;
       const target = (detail.position ?? 0) + offsetMs / 1000;
       if (detail.action === "play") {
+        clearDelay();
         suppressSyncEventRef.current = true;
-        void video.play().catch(() => undefined).finally(() => {
+        if (target < 0) {
+          video.pause();
+          video.currentTime = 0;
           suppressSyncEventRef.current = false;
-        });
+          delayTimerRef.current = window.setTimeout(() => {
+            delayTimerRef.current = null;
+            suppressSyncEventRef.current = true;
+            void video.play().catch(() => undefined).finally(() => {
+              suppressSyncEventRef.current = false;
+            });
+          }, -target * 1000);
+        } else {
+          if (Math.abs(video.currentTime - target) > 0.12) video.currentTime = target;
+          void video.play().catch(() => undefined).finally(() => {
+            suppressSyncEventRef.current = false;
+          });
+        }
       } else if (detail.action === "pause") {
+        clearDelay();
         suppressSyncEventRef.current = true;
         video.pause();
         suppressSyncEventRef.current = false;
@@ -164,7 +195,7 @@ export function VideoPreview({
     };
     window.addEventListener(MEDIA_SYNC_EVENT, onMediaSync);
     return () => window.removeEventListener(MEDIA_SYNC_EVENT, onMediaSync);
-  }, [offsetMs]);
+  }, [offsetMs, clearDelay]);
 
   // 推子分给预览这一侧的音量。volume 挂在 <video> 上，AnalyserNode 采到的
   // 是衰减后的信号——波形跟着推子一起矮下去，正好和耳朵听到的一致。
@@ -260,16 +291,6 @@ export function VideoPreview({
     else video.pause();
   }, []);
 
-  /** 负 Offset 下延迟起播的定时器：留白期间视频停在 0 等着。 */
-  const delayTimerRef = useRef<number | null>(null);
-  const clearDelay = useCallback(() => {
-    if (delayTimerRef.current !== null) {
-      window.clearTimeout(delayTimerRef.current);
-      delayTimerRef.current = null;
-    }
-  }, []);
-  useEffect(() => clearDelay, [clearDelay]);
-
   /**
    * 拨协同开关。开 = 两边**同时从头来**：engage() 的 epoch 让唱盘倒回 0
    * 起播（见 PlayerBar），这边按 Offset 对位——正 Offset 成品掐头，视频
@@ -277,28 +298,67 @@ export function VideoPreview({
    * 听到的两轨关系就是下载回去的成品和唱盘的真实关系。
    * 关 = 预览让位，唱盘继续响。
    */
-  const toggleCoplay = useCallback(() => {
+  const startCoplay = useCallback((alignedOffsetMs: number) => {
     const video = videoRef.current;
     clearDelay();
-    if (useCrossfade.getState().coplay) {
-      setCoplay(false);
-      video?.pause();
-      return;
-    }
-    useCrossfade.getState().engage();
     if (!video) return;
-    if (offsetMs < 0) {
+    useCrossfade.getState().engage();
+    if (alignedOffsetMs < 0) {
       video.pause();
       video.currentTime = 0;
       delayTimerRef.current = window.setTimeout(() => {
         delayTimerRef.current = null;
         void video.play().catch(() => undefined);
-      }, -offsetMs);
+      }, -alignedOffsetMs);
     } else {
-      video.currentTime = offsetMs / 1000;
+      video.currentTime = alignedOffsetMs / 1000;
       void video.play().catch(() => undefined);
     }
-  }, [offsetMs, setCoplay, clearDelay]);
+  }, [clearDelay]);
+
+  const toggleCoplay = useCallback(() => {
+    const video = videoRef.current;
+    clearDelay();
+    if (useCrossfade.getState().coplay) {
+      setCoplay(false);
+      djEngine.setVolume(1);
+      video?.pause();
+      return;
+    }
+    if (!selectedTrack) {
+      setSyncError("自动校准需要先在曲库里选中一首本地歌曲");
+      return;
+    }
+    video?.pause();
+    const cacheKey = `${selectedTrack.id}:${req.bvid}:${req.page}`;
+    const cached = calibrationCache.get(cacheKey);
+    if (cached) {
+      setOffsetMs(cached.offsetMs);
+      setSyncError("");
+      startCoplay(cached.offsetMs);
+      return;
+    }
+    setCalibrating(true);
+    setSyncError("");
+    const requestSeq = ++calibrationSeqRef.current;
+    void api
+      .videoCalibrate(selectedTrack.id, req.bvid, req.page)
+      .then((result) => {
+        // 面板已卸载/替换，或校准期间用户换了本地曲目：结果属于旧会话，丢弃。
+        if (requestSeq !== calibrationSeqRef.current) return;
+        if (selectSelectedTrack(useLibraryStore.getState())?.id !== selectedTrack.id) return;
+        calibrationCache.set(cacheKey, { offsetMs: result.offset_ms, score: result.score });
+        setOffsetMs(result.offset_ms);
+        startCoplay(result.offset_ms);
+      })
+      .catch((reason: unknown) => {
+        if (requestSeq !== calibrationSeqRef.current) return;
+        setSyncError(`自动校准失败：${reason instanceof Error ? reason.message : String(reason)}`);
+      })
+      .finally(() => {
+        if (requestSeq === calibrationSeqRef.current) setCalibrating(false);
+      });
+  }, [clearDelay, req.bvid, req.page, selectedTrack, setCoplay, startCoplay]);
 
   /** ± 一下：Offset 记账，同时把视频 seek 同样的量，耳朵立刻听到新的对位。 */
   const nudge = useCallback((deltaMs: number) => {
@@ -346,17 +406,6 @@ export function VideoPreview({
         >
           {req.title}
         </span>
-        <span className="kd-toolbar-gap" />
-        <Button
-          variant="ghost"
-          size="sm"
-          iconOnly
-          aria-label="关闭预览"
-          title="关闭预览"
-          onClick={onClose}
-        >
-          <X size={12} />
-        </Button>
       </div>
 
       <div className="kd-preview-frame">
@@ -467,6 +516,7 @@ export function VideoPreview({
           data-on={coplay ? "true" : undefined}
           aria-pressed={coplay}
           aria-label="协同播放"
+          disabled={calibrating}
           title={
             coplay
               ? "协同播放中：预览和唱盘一起响，音量归推子管。点一下回到互斥出声"
@@ -474,7 +524,7 @@ export function VideoPreview({
           }
           onClick={toggleCoplay}
         >
-          <Blend size={14} />
+          {calibrating ? <LoaderCircle size={14} className="kd-spin" /> : <Blend size={14} />}
         </button>
         {/* 两端的脸就是两路声源：唱盘（左）和这块预览（右）。
             透明度跟着等功率增益走，推到哪边哪边的脸亮。 */}
@@ -505,6 +555,7 @@ export function VideoPreview({
           style={{ opacity: coplay ? 0.3 + 0.7 * previewGain(coplay, fadeX) : undefined }}
         />
       </div>
+      <InlineNotice text={syncError} />
 
       {/* Offset 校准 + 两条下载路。± 按走带键的裸图标语言；
           数值是唯一的"表"，等宽数字，点一下归零。 */}
@@ -564,7 +615,7 @@ export function VideoPreview({
           直接下载
         </Button>
       </div>
-      <InlineNotice text={sendError} onDismiss={() => setSendError("")} />
+      <InlineNotice text={sendError} />
     </div>
   );
 }

@@ -3,8 +3,8 @@
  *
  * 平时播放器只有一个 <audio>，换歌是硬切。开了 DJ 预设之后，换歌变成
  * 「两台唱机同时转」：下一首在暗处起播（BPM 拉到和当前一致），两边按预设的
- * 自动化曲线交接（交叉渐变 / 低频交棒 / 共振滤波扫频 / 人声消除），交接完
- * 再把新歌的速度慢慢抬回原速。这正是 DJ 台上「sync → mix → pitch back」的顺序。
+ * 自动化曲线交接（交叉渐变 / 低频交棒 / 共振滤波扫频 / 人声消除）。接入后
+ * 保持本场 master tempo，后续曲目继续向它同步，避免在满幅播放中重配保调变速器。
  *
  * 结构上引擎**拥有**两个 audio 元素（PlayerBar 不再自己渲染 <audio>）：
  * 交叉渐变要求两个元素同时出声，而「接完之后谁是正主」必须能互换——
@@ -164,8 +164,15 @@ const MIX_MIN_S = 2;
 const MIX_MAX_S = 60;
 /** 两边 BPM 差出这个倍率就放弃同步：拉伸 25% 以上人耳听着已经是变了一首歌。 */
 const SYNC_MAX_RATIO = 1.25;
-/** 交接完成后速度抬回原速的斜率：每 1% 的偏差花 0.8 秒，听不出台阶。 */
-const RAMP_S_PER_PCT = 0.8;
+/**
+ * 自动化结束后多留几个音频渲染量子再 pause 旧 deck。
+ *
+ * Gain 曲线走 AudioContext 的高精度时钟，收尾却只能靠主线程 setTimeout。两只钟
+ * 存在几毫秒偏差时，timer 可能在 gain 真正到 0 之前先 pause，非零采样被硬截断
+ * 就是一声很短的“哒”。80ms 不延长可闻过渡——曲线早已到 0——只让静音尾巴
+ * 安全落稳。
+ */
+const AUDIO_TAIL_SETTLE_MS = 80;
 /** 自动化曲线的采样点数。64 点对几秒到十几秒的曲线足够平滑。 */
 const CURVE_N = 64;
 /** 反馈总是严格低于 0.4；效果链再异常也不允许接近自激。 */
@@ -296,7 +303,9 @@ function reverbImpulse(ctx: AudioContext, seconds = 1.8): AudioBuffer {
 
 function createElement(): HTMLAudioElement {
   const el = document.createElement("audio");
-  el.preload = "metadata";
+  // 后台 deck 要在淡入前真正备好解码数据。metadata 只保证能读时长，canplay
+  // 随后再 seek 到 cue 时仍可能重新断粮，听起来就是进场第一拍前卡几十毫秒。
+  el.preload = "auto";
   // 必须在任何 src 赋值之前定死：中途改 crossOrigin 不影响已加载的资源，
   // 而没有它 MediaElementSource 只会输出静音（见文件头）
   el.crossOrigin = "anonymous";
@@ -442,7 +451,7 @@ function buildDeck(ctx: AudioContext, el: HTMLAudioElement): Deck {
 }
 
 /** 把一台 deck 的所有参数掰回直导线状态。 */
-function neutralize(ctx: AudioContext, deck: Deck): void {
+function neutralize(ctx: AudioContext, deck: Deck, faderGain = 1): void {
   const now = ctx.currentTime;
   for (const param of [
     deck.dry.gain,
@@ -476,7 +485,7 @@ function neutralize(ctx: AudioContext, deck: Deck): void {
   deck.lowpass.Q.setValueAtTime(0.7, now);
   deck.highpass.frequency.setValueAtTime(10, now);
   deck.highpass.Q.setValueAtTime(0.7, now);
-  deck.fader.gain.setValueAtTime(1, now);
+  deck.fader.gain.setValueAtTime(faderGain, now);
   deck.echoDelay.delayTime.setValueAtTime(0.25, now);
   deck.echoFeedback.gain.setValueAtTime(0.25, now);
   deck.echoWet.gain.setValueAtTime(0, now);
@@ -497,7 +506,6 @@ interface Pending {
   finishTimer: number | null;
   startListener: (() => void) | null;
   startTimeout: number | null;
-  rampTimer: number | null;
   /** Alarm 等临时节点在取消时必须立刻断开，不能留在 AudioContext 里继续响。 */
   effectStops: (() => void)[];
 }
@@ -517,37 +525,11 @@ function clearPending(): void {
   if (!pending) return;
   if (pending.finishTimer !== null) clearTimeout(pending.finishTimer);
   if (pending.startTimeout !== null) clearTimeout(pending.startTimeout);
-  if (pending.rampTimer !== null) clearInterval(pending.rampTimer);
   for (const stop of pending.effectStops) stop();
   if (pending.startListener) {
-    elements[frontIndex].removeEventListener("canplay", pending.startListener);
+    pending.startListener();
   }
   pending = null;
-}
-
-/**
- * 交接完成后把速度慢慢抬回原速。playbackRate 不是 AudioParam，
- * 只能主线程走表；50ms 一步、每步不到 0.1%，听感上是连续的。
- */
-function rampRateBack(el: HTMLAudioElement, from: number): void {
-  if (Math.abs(from - 1) < 0.001) return;
-  const seconds = Math.min(10, Math.max(2, Math.abs(from - 1) * 100 * RAMP_S_PER_PCT));
-  const startedAt = performance.now();
-  const timer = window.setInterval(() => {
-    const t = Math.min(1, (performance.now() - startedAt) / (seconds * 1000));
-    el.playbackRate = from + (1 - from) * t;
-    if (t >= 1) {
-      clearInterval(timer);
-      if (pending?.rampTimer === timer) pending = null;
-    }
-  }, 50);
-  pending = {
-    finishTimer: null,
-    startListener: null,
-    startTimeout: null,
-    rampTimer: timer,
-    effectStops: [],
-  };
 }
 
 /** 多选时每场随机取一个非空子集，因此全勾既可能单用，也可能叠加。 */
@@ -805,9 +787,23 @@ export const djEngine = {
     elements[1].volume = volume;
   },
 
+  /**
+   * 唤醒已经接管播放器输出的 Web Audio 图。
+   *
+   * 页面刷新后 warmup 会提前把 media element 接进 AudioContext，但浏览器会按
+   * 自动播放策略让新 context 保持 suspended。此时 audio.play() 可以成功、进度
+   * 也会走，声音却被停在音频图里——这正是“刷新后第一首必定静音”的来源。
+   * 播放入口必须在用户手势仍然有效时调用这里；effect 里再调用一次用于系统休眠、
+   * 音频设备切换后 context 被重新挂起的恢复场景。
+   */
+  resume(): void {
+    if (!ctx || ctx.state === "running") return;
+    void ctx.resume();
+  },
+
   /** 交接（含准备期）是否在进行。自动触发靠它防止一首歌里连开两场。 */
   isTransitioning(): boolean {
-    return pending !== null && pending.rampTimer === null;
+    return pending !== null;
   },
 
   /** 「顺其自然」档的起手提前量：交接本身的长度 + 一点挑歌/加载的余量。 */
@@ -889,14 +885,22 @@ export const djEngine = {
     const backIndex: 0 | 1 = frontIndex === 0 ? 1 : 0;
     const input = decks[backIndex];
 
-    const rate = syncRate(options.from.bpm, next.bpm);
-    const seconds = mixSeconds(options.from.bpm ?? next.bpm, options.bars);
-    const tempo = options.from.bpm ?? next.bpm ?? FALLBACK_BPM;
+    // 已经接进来的曲目可能仍维持本场 master tempo。后续必须按实际听到的 BPM
+    // 继续同步，不能拿文件标签里的原始 BPM，否则每接一首都会让速度基准漂移。
+    const effectiveFromBpm = options.from.bpm
+      ? options.from.bpm * Math.max(0.25, out.el.playbackRate || 1)
+      : null;
+    const rate = syncRate(effectiveFromBpm, next.bpm);
+    const seconds = mixSeconds(effectiveFromBpm ?? next.bpm, options.bars);
+    const tempo = effectiveFromBpm ?? next.bpm ?? FALLBACK_BPM;
     const beatSeconds = 60 / Math.max(1, tempo);
 
     input.el.pause();
     neutralize(ctx, input);
     input.fader.gain.setValueAtTime(0, ctx.currentTime); // 静音进场，曲线负责抬
+    // 在装载 / 起播之前就配置变速器，避免已经播放后突然切 playbackRate，触发
+    // WebKit 的 preservesPitch 时间拉伸器重新初始化。
+    input.el.playbackRate = rate;
     input.el.src = api.audioUrl(next.id);
     input.el.load();
 
@@ -905,53 +909,117 @@ export const djEngine = {
     // 起播点：用户摆的 cue 优先，其次第一拍（跳过前奏静音），再不行从头
     const cue = next.cue_ms !== null ? next.cue_ms / 1000 : (next.first_beat ?? 0);
 
+    let cueApplied = false;
+    let starting = false;
     const start = () => {
       if (!ctx || !decks || !pending) return;
-      pending.startListener = null;
-      pending.startTimeout = null;
-      try {
-        input.el.currentTime = cue;
-      } catch {
-        /* metadata 还没就位就 seek 会抛，从头放也能接 */
+      // canplay 可能是对 0 秒位置发出的。必须先 seek 到真正的 cue，再等目标位置
+      // 也达到 HAVE_FUTURE_DATA；否则淡入已开始，解码器却还在处理 Range 跳转。
+      if (!cueApplied) {
+        if (input.el.readyState < HTMLMediaElement.HAVE_METADATA) return;
+        try {
+          input.el.currentTime = cue;
+        } catch {
+          /* 极少数格式 metadata 到了仍不能 seek；保留从头接歌的回退 */
+        }
+        cueApplied = true;
       }
-      input.el.playbackRate = rate;
-      void input.el.play().catch(() => {
-        // 起播失败（文件坏了等）：掐掉这一场，旧歌继续放，
-        // PlayerBar 那边的 error 监听会把原因写到播放条上
-        djEngine.cancel();
-      });
-      schedule(transitions, options.effects, options.vocalCut, out, input, seconds, beatSeconds);
-      pending.finishTimer = window.setTimeout(() => {
-        // 交接结束：出让方谢幕，新歌把速度慢慢抬回原速
-        out.el.pause();
-        if (ctx && decks) neutralize(ctx, out);
-        pending = null;
-        rampRateBack(input.el, rate);
-      }, seconds * 1000);
+      if (
+        input.el.seeking ||
+        input.el.readyState < HTMLMediaElement.HAVE_FUTURE_DATA ||
+        starting
+      ) {
+        return;
+      }
+      starting = true;
+      const removePreparationListeners = pending.startListener;
+      pending.startListener = null;
+      removePreparationListeners?.();
+      if (pending.startTimeout !== null) clearTimeout(pending.startTimeout);
+      pending.startTimeout = null;
+      const active = pending;
+
+      const playOnBeat = () => {
+        if (pending !== active) return;
+        pending.startTimeout = null;
+        // play() fulfilled 才表示媒体流水线真的起动。旧歌在这几毫秒里继续满幅播放，
+        // 比先开淡入曲线、再等新歌解码稳定更不容易出现可闻的凹口。
+        void input.el
+          .play()
+          .then(() => {
+            if (!ctx || !decks || pending !== active) return;
+            schedule(
+              transitions,
+              options.effects,
+              options.vocalCut,
+              out,
+              input,
+              seconds,
+              beatSeconds,
+            );
+            pending.finishTimer = window.setTimeout(() => {
+              // 曲线已经在音频时钟上归零并稳定了一小段，再停媒体元素。不能在数学
+              // 终点同一毫秒 pause：主线程 timer 略早于音频线程就会硬切出 click。
+              out.el.pause();
+              // 退场 deck 在被下一首复用前始终保持真正静音。若这里把 fader 重置
+              // 到 1，WebKit pause 后偶尔吐出的残留解码帧仍可能漏成一声 click。
+              if (ctx && decks) neutralize(ctx, out, 0);
+              pending = null;
+            }, seconds * 1000 + AUDIO_TAIL_SETTLE_MS);
+          })
+          .catch(() => {
+            // 起播失败（文件坏了等）：掐掉这一场。PlayerBar 的 error 监听会显示原因。
+            if (pending === active) djEngine.cancel();
+          });
+      };
+
+      // BPM 相同不等于拍点相位相同。异步挑歌/加载完成的时刻是随机的，直接从
+      // next.first_beat 起播会让新歌第一拍落在旧歌两拍之间，两只底鼓挤成稳定的
+      // “哒哒”瞬态。已知旧歌第一拍时，最多等一拍，卡到它的下一个拍点再起播。
+      const fromBpm = options.from.bpm;
+      const fromFirstBeat = options.from.first_beat;
+      if (fromBpm && fromBpm > 0 && fromFirstBeat !== null) {
+        const sourceBeatSeconds = 60 / fromBpm;
+        const sourcePosition = Math.max(0, out.el.currentTime - fromFirstBeat);
+        const phase = ((sourcePosition % sourceBeatSeconds) + sourceBeatSeconds) % sourceBeatSeconds;
+        let sourceUntilBeat = (sourceBeatSeconds - phase) % sourceBeatSeconds;
+        const outgoingRate = Math.max(0.25, out.el.playbackRate || 1);
+        let waitMs = (sourceUntilBeat / outgoingRate) * 1000;
+        // 离拍点太近时主线程来不及稳定调度，宁可等下一拍，也不要落在拍后几十 ms。
+        if (waitMs < 80) {
+          sourceUntilBeat += sourceBeatSeconds;
+          waitMs = (sourceUntilBeat / outgoingRate) * 1000;
+        }
+        active.startTimeout = window.setTimeout(playOnBeat, waitMs);
+      } else {
+        playOnBeat();
+      }
     };
 
     const listener = () => {
-      if (pending?.startTimeout != null) clearTimeout(pending.startTimeout);
       start();
     };
     pending = {
       finishTimer: null,
       startListener: listener,
-      // 本地流几百毫秒内必有 canplay；兜底 5 秒后硬起播（边放边缓冲）
+      // 本地流几百毫秒内必有 canplay；兜底 5 秒后再尝试一次。正常路径必须等
+      // cue seek 后的 canplay，而不是拿 0 秒位置的缓冲状态直接起淡入。
       startTimeout: window.setTimeout(() => {
-        input.el.removeEventListener("canplay", listener);
         start();
       }, 5000),
-      rampTimer: null,
       effectStops: [],
     };
-    if (input.el.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
-      clearTimeout(pending.startTimeout!);
-      pending.startTimeout = null;
-      start();
-    } else {
-      input.el.addEventListener("canplay", listener, { once: true });
-    }
+    // canplay 在 seek 前后都可能各发一次，不能 once；start() 会检查 cue 是否已经
+    // 应用、目标位置是否停止 seeking，并用 starting 防止重复起播。
+    input.el.addEventListener("loadedmetadata", listener);
+    input.el.addEventListener("seeked", listener);
+    input.el.addEventListener("canplay", listener);
+    pending.startListener = () => {
+      input.el.removeEventListener("loadedmetadata", listener);
+      input.el.removeEventListener("seeked", listener);
+      input.el.removeEventListener("canplay", listener);
+    };
+    start();
     return true;
   },
 

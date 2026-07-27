@@ -1048,6 +1048,50 @@ impl LibraryService {
             },
         )?;
 
+        fn median(mut values: Vec<f64>) -> Option<f64> {
+            values.retain(|value| value.is_finite());
+            if values.is_empty() {
+                return None;
+            }
+            values.sort_by(f64::total_cmp);
+            let middle = values.len() / 2;
+            Some(if values.len() % 2 == 0 {
+                (values[middle - 1] + values[middle]) / 2.0
+            } else {
+                values[middle]
+            })
+        }
+
+        let mut energies = Vec::new();
+        let mut rms_values = Vec::new();
+        let mut peak_values = Vec::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT energy, rms_db, peak_db FROM tracks WHERE analyzed_at IS NOT NULL",
+            )?;
+            for row in stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                ))
+            })? {
+                let (energy, rms, peak) = row?;
+                if let Some(value) = energy {
+                    energies.push(value as f64);
+                }
+                if let Some(value) = rms {
+                    rms_values.push(value);
+                }
+                if let Some(value) = peak {
+                    peak_values.push(value);
+                }
+            }
+        }
+        let energy_median = median(energies);
+        let rms_db_median = median(rms_values);
+        let peak_db_median = median(peak_values);
+
         let mut raw_camelot: HashMap<String, i64> = HashMap::new();
         {
             let mut stmt = conn.prepare(
@@ -1109,6 +1153,9 @@ impl LibraryService {
             analyzed,
             total_duration,
             total_size,
+            energy_median,
+            rms_db_median,
+            peak_db_median,
             by_camelot,
             by_bpm_bucket,
             by_platform,
@@ -2211,7 +2258,7 @@ mod tests {
     #[test]
     fn stats_group_by_wheel_and_bucket_order() {
         let service = service();
-        insert(
+        let analyzed_id = insert(
             &service,
             Row {
                 path: "/lib/a.mp3",
@@ -2231,6 +2278,15 @@ mod tests {
             },
         );
 
+        service
+            .db()
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE tracks SET energy = 6, rms_db = -12.0, peak_db = -1.0 WHERE id = ?",
+                [analyzed_id],
+            )
+            .unwrap();
         let stats = service.stats().unwrap();
         assert_eq!(stats.total, 2);
         assert_eq!(stats.analyzed, 1);
@@ -2239,6 +2295,9 @@ mod tests {
         assert_eq!(stats.by_bpm_bucket.get("120-129"), Some(&1));
         assert_eq!(stats.by_bpm_bucket.get("<90"), Some(&1));
         assert_eq!(stats.by_platform.get("local"), Some(&2), "空来源算 local");
+        assert_eq!(stats.energy_median, Some(6.0));
+        assert_eq!(stats.rms_db_median, Some(-12.0));
+        assert_eq!(stats.peak_db_median, Some(-1.0));
     }
 
     #[test]

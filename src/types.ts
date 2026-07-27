@@ -370,6 +370,10 @@ export interface LibraryStats {
   analyzed: number;
   total_duration: number;
   total_size: number;
+  /** 旧后端可能不返回；前端缺失时退回原始 1–10 能量。 */
+  energy_median?: number | null;
+  rms_db_median?: number | null;
+  peak_db_median?: number | null;
   by_camelot: Record<string, number>;
   by_bpm_bucket: Record<string, number>;
   by_platform: Record<string, number>;

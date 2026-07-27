@@ -1,6 +1,5 @@
 import { useRef, useState } from "react";
-import { Link2, Rows3, Search } from "lucide-react";
-import type { Platform, Quality } from "../../types";
+import type { Platform } from "../../types";
 import { useAppStore } from "../../stores/appStore";
 import { PlatformMark } from "./PlatformMark";
 
@@ -10,9 +9,10 @@ export const SEARCH_PLATFORMS: ReadonlyArray<{ id: Platform; label: string; vide
   { id: "qqm", label: "QQ 音乐" },
   { id: "soundcloud", label: "SOUNDCLOUD" },
   { id: "bilibili", label: "哔哩哔哩", video: true },
+  { id: "local", label: "本地曲库" },
 ];
 
-export const DEFAULT_PRIORITY: readonly string[] = ["wyy", "qqm", "soundcloud", "bilibili"];
+export const DEFAULT_PRIORITY: readonly string[] = ["local", "wyy", "qqm", "soundcloud", "bilibili"];
 
 /** 平台选择那一行单独一个组件（SearchPlatforms），props 也分开列。 */
 export interface SearchPlatformProps {
@@ -28,13 +28,36 @@ export interface SearchBarProps extends SearchPlatformProps {
   batch: boolean;
   busy: boolean;
   onSubmit(): void;
-  quality: Quality | "";
-  onQualityChange(value: Quality | ""): void;
-  defaultQuality: string;
 }
 
-/** 只用来给单行输入换个图标，真正的链接判定在后端。 */
-const LOOKS_LIKE_URL = /^\s*https?:\/\//i;
+function RainbowSearchIcon() {
+  return (
+    <svg className="kd-search-rainbow" viewBox="0 0 24 24" aria-hidden="true">
+      <defs>
+        <linearGradient
+          id="kd-search-rainbow-stroke"
+          gradientUnits="userSpaceOnUse"
+          spreadMethod="repeat"
+          x1="-8"
+          y1="0"
+          x2="0"
+          y2="8"
+        >
+          <stop offset="0" stopColor="#38bdf8" />
+          <stop offset="0.33" stopColor="#8b5cf6" />
+          <stop offset="0.66" stopColor="#fb7299" />
+          <stop offset="1" stopColor="#38bdf8" />
+          <animate attributeName="x1" values="-8;0" dur="4.5s" repeatCount="indefinite" />
+          <animate attributeName="x2" values="0;8" dur="4.5s" repeatCount="indefinite" />
+          <animate attributeName="y1" values="0;8" dur="4.5s" repeatCount="indefinite" />
+          <animate attributeName="y2" values="8;16" dur="4.5s" repeatCount="indefinite" />
+        </linearGradient>
+      </defs>
+      <circle cx="11" cy="11" r="7.4" fill="none" stroke="url(#kd-search-rainbow-stroke)" strokeWidth="2.5" />
+      <path d="m16.4 16.4 4.3 4.3" fill="none" stroke="url(#kd-search-rainbow-stroke)" strokeWidth="2.5" strokeLinecap="square" />
+    </svg>
+  );
+}
 
 /**
  * 搜索条：**一个**控件，不是一排控件。
@@ -42,11 +65,12 @@ const LOOKS_LIKE_URL = /^\s*https?:\/\//i;
  * 上一版这里是六七个描边矩形并排——输入框一个框、框里的音质又一个框、
  * 框外四颗平台键各自还有一个框。每多画一条边就多一次"这是另一件东西"的
  * 暗示，可它们回答的全是同一个问题的三个部分：搜什么、搜哪儿、要什么音质。
- * 现在连最外圈也不画，整条搜索直接嵌进顶部；内部分区只靠 1px 竖分隔线和留白，
- * 谁也不再单独描边；
+ * 现在整个入口不画外轮廓：模式图标、动态动作标签和更大的主输入建立层级；
+ * 音质与平台只用细分隔线和留白分区，谁也不再单独描边；
  * 平台键的选中态只点亮品牌色，不靠边框或淡色方块。
  *
- * 输入框按 Enter 提交；批量文本按 Cmd/Ctrl+Enter，不再额外摆一个右上角提交图标。
+ * Enter 执行搜索、Shift+Enter 换行；左侧炫彩放大镜同时是提交键，
+ * 让第一次使用的人也不用猜快捷键，但不再铺红色按钮或描框。
  */
 export function SearchBar({
   query,
@@ -54,17 +78,13 @@ export function SearchBar({
   batch,
   busy,
   onSubmit,
-  quality,
-  onQualityChange,
-  defaultQuality,
   ...platformProps
 }: SearchBarProps) {
-  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
-  const isUrl = LOOKS_LIKE_URL.test(query);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const canSubmit = query.trim().length > 0 && !busy;
   return (
     <form
-      className="kd-toolbar"
+      className="kd-search-command"
       data-tauri-drag-region
       onSubmit={(event) => {
         event.preventDefault();
@@ -81,83 +101,40 @@ export function SearchBar({
           inputRef.current?.focus();
         }}
       >
-        {/* 前导图标顺带当模式指示：关键词用放大镜，链接用 Link2，贴成多行就变成"多条"图标。
-            批量模式下它贴顶——文本域有四行高，图标浮在正中间会跟第二行文字打架。 */}
-        <span className="kd-searchbar-lead" data-network="true" aria-hidden="true">
-          {batch ? <Rows3 size={14} /> : isUrl ? <Link2 size={14} /> : <Search size={14} />}
-        </span>
-
-        {batch ? (
+        <div className="kd-searchbar-copy">
+          <button
+            type="submit"
+            className="kd-searchbar-go"
+            disabled={!canSubmit}
+            aria-label={busy ? "正在搜索" : batch ? "开始批量解析" : "搜索"}
+            title="搜索（Enter；Shift + Enter 换行）"
+          >
+            <RainbowSearchIcon />
+          </button>
+          {!query && (
+            <span className="kd-search-placeholder" aria-hidden="true">
+              今天想听点什么？歌名、链接，都可以悄悄放在这里 ♫
+            </span>
+          )}
           <textarea
-            ref={(node) => {
-              inputRef.current = node;
-            }}
+            ref={inputRef}
             className="kd-searchbar-input"
-            rows={4}
+            rows={1}
             value={query}
-            placeholder={
-              "一行一条，或用逗号分隔。歌名和链接可以混着贴：\n" +
-              "Snow halation\nFive More Hours - Deorro\nhttps://music.163.com/playlist?id=..."
-            }
-            aria-label="批量关键词或链接"
+            placeholder=""
+            aria-label="关键词、单曲链接或歌单链接，支持多行"
             autoFocus
-            // Cmd/Ctrl+Enter 提交：文本域里回车是换行，不能拿来当提交键
             onKeyDown={(event) => {
-              if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && canSubmit) {
+              if (event.key === "Enter" && !event.shiftKey && canSubmit) {
                 event.preventDefault();
                 onSubmit();
               }
             }}
             onChange={(event) => onQueryChange(event.target.value)}
           />
-        ) : (
-          <input
-            ref={(node) => {
-              inputRef.current = node;
-            }}
-            className="kd-searchbar-input"
-            value={query}
-            placeholder="歌名 / 艺人，或直接粘贴歌单、单曲分享链接（多行内容自动批量）"
-            aria-label="搜索关键词或链接"
-            onChange={(event) => onQueryChange(event.target.value)}
-            // 多行文本贴进单行输入框会被浏览器压成一行，批量意图就丢了；
-            // 拦下来原样放进 query，换行一到位就自动切成批量文本域
-            onPaste={(event) => {
-              const text = event.clipboardData.getData("text");
-              if (!/[\r\n]/.test(text.trim())) return;
-              event.preventDefault();
-              const clean = text.replace(/\r\n?/g, "\n").trim();
-              onQueryChange(query.trim() ? `${query.trim()}\n${clean}` : clean);
-            }}
-          />
-        )}
-
-        {/* 右半边一组：音质 / 平台。分隔线只在"换了个话题"的地方画：
-            输入 │ 这次要什么音质 │ 这次搜哪儿。平台键之间不画线，
-            它们是同一类东西，靠间距就分得开。 */}
+        </div>
         <div className="kd-searchbar-tools">
-          <span className="kd-searchbar-sep" aria-hidden="true" />
-          <select
-            className="kd-searchbar-quality"
-            value={quality}
-            aria-label="下载音质"
-            title="这次下载用什么音质"
-            onChange={(event) => onQualityChange(event.target.value as Quality | "")}
-          >
-            <option value="">{defaultQuality.toUpperCase()}</option>
-            <option value="flac">FLAC</option>
-            <option value="320">320K</option>
-            <option value="128">128K</option>
-          </select>
-
-          <span className="kd-searchbar-sep" aria-hidden="true" />
-
-          {/* 四家平台就长在搜索条里，不另起一行：它们回答的是"这次搜哪儿"，
-              和输入框是同一个动作的两半；单开一行会让整个头部多占 40px，
-              竖屏下那是好几条曲目的高度。 */}
           <SearchPlatforms {...platformProps} />
-
-          {/* 不再放右上角提交图标：单行按 Enter，多行按 Cmd/Ctrl+Enter。 */}
         </div>
       </div>
     </form>
@@ -187,6 +164,7 @@ export function SearchPlatforms({
   soundcloudEnabled,
 }: SearchPlatformProps) {
   const saveSettings = useAppStore((state) => state.saveSettings);
+  const openAccountsPanel = useAppStore((state) => state.openAccountsPanel);
   const priority = useAppStore(
     (state) => state.settings?.platform_priority ?? (DEFAULT_PRIORITY as string[]),
   );
@@ -194,6 +172,9 @@ export function SearchPlatforms({
 
   const rank = (id: Platform) => {
     const index = priority.indexOf(id);
+    // 老设置里没有 local：第一次出现时默认贴着输入框；用户拖过一次后设置
+    // 会正式包含 local，此后完全尊重保存的位置。
+    if (id === "local" && index < 0) return -1;
     return index < 0 ? priority.length : index;
   };
   const ordered = [...SEARCH_PLATFORMS].sort((a, b) => rank(a.id) - rank(b.id));
@@ -234,6 +215,7 @@ export function SearchPlatforms({
                   : `${item.label} · 拖动排序：排前面的优先作为下载来源`
             }
             onDragStart={(event) => {
+              if (item.id !== "local") openAccountsPanel();
               event.dataTransfer.effectAllowed = "move";
               event.dataTransfer.setData("text/plain", item.id);
               setDragging(item.id);
@@ -244,10 +226,12 @@ export function SearchPlatforms({
             }}
             onDrop={(event) => {
               event.preventDefault();
+              if (item.id !== "local") openAccountsPanel();
               if (dragging) reorder(dragging, item.id);
               setDragging(null);
             }}
             onClick={() => {
+              if (item.id !== "local") openAccountsPanel();
               if (off) {
                 // 启用之后这颗按钮的"未启用"灰态当场就没了，还顺手被选中，
                 // 这本身就是回执，不必再说一遍"已启用 SoundCloud"

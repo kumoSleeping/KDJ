@@ -66,7 +66,8 @@ export function camelotColor(code: string | null | undefined): string {
   const parts = parseCamelot(code);
   if (!parts) return "transparent";
   const hue = ((parts.number - 1) * 30 + HUE_OFFSET) % 360;
-  const saturation = parts.letter === "A" ? 45 : 80;
+  // A/B 仍用饱和度区分，但 A 不能低到在浅色主题里变成灰字。
+  const saturation = parts.letter === "A" ? 60 : 80;
   const lightness = 66 + 6 * Math.cos(((hue - 240) * Math.PI) / 180);
   return `hsl(${hue} ${saturation}% ${Math.round(lightness)}%)`;
 }

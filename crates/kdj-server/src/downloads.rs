@@ -309,6 +309,25 @@ impl DownloadManager {
     }
 
     pub fn cancel(&self, id: &str) -> Option<DownloadTask> {
+        // 还没开始的任务没有产生文件、网络请求或进度，“取消”它就是从待办里
+        // 删掉，不应留下一条假的历史记录。先移出 map 再广播，等待闸门的 worker
+        // 会被 token 唤醒并自行退出，之后的 settle 找不到 entry 也不会把它加回来。
+        let removed_queued = {
+            let mut entries = self.entries.lock().unwrap();
+            match entries.get(id) {
+                Some(entry) if entry.task.state == TaskState::Queued => {
+                    let entry = entries.remove(id)?;
+                    entry.cancel.cancel();
+                    Some(entry.task)
+                }
+                _ => None,
+            }
+        };
+        if let Some(task) = removed_queued {
+            self.broadcast_list();
+            return Some(task);
+        }
+
         {
             let entries = self.entries.lock().unwrap();
             let entry = entries.get(id)?;
@@ -684,6 +703,17 @@ mod tests {
         );
         let task = manager.cancel("x").unwrap();
         assert_eq!(task.state, TaskState::Done, "完成的任务不该被点成已取消");
+    }
+
+    #[test]
+    fn cancelling_a_queued_task_removes_it_without_cancelled_history() {
+        let manager = manager();
+        let cancel = CancellationToken::new();
+        manager.insert(sample_task("x", TaskState::Queued, 1.0), cancel.clone());
+        let returned = manager.cancel("x").unwrap();
+        assert_eq!(returned.state, TaskState::Queued);
+        assert!(manager.get("x").is_none(), "尚未开始的任务应直接离开队列");
+        assert!(cancel.is_cancelled(), "等待下载闸门的 worker 也必须被唤醒退出");
     }
 
     #[test]

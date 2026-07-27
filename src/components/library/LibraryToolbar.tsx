@@ -1,10 +1,35 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { RotateCcw, Trash2 } from "lucide-react";
 import { useLibraryStore } from "../../stores/libraryStore";
+import {
+  endTrackDrag,
+  TRACK_DRAG_STATE_EVENT,
+  TRACK_TRASH_DROP_EVENT,
+  type TrackDragDetail,
+} from "../../lib/trackDrag";
 import { InlineNotice, ProgressBar } from "../common";
+
+function AnalysisGlyph() {
+  return (
+    <svg className="kd-analysis-glyph" viewBox="0 0 18 18" aria-hidden="true">
+      <rect x="2" y="6" width="2" height="6" />
+      <rect x="6" y="3" width="2" height="12" />
+      <rect x="10" y="5" width="2" height="8" />
+      <rect x="14" y="7" width="2" height="4" />
+      <circle className="kd-analysis-glyph-dot" cx="3" cy="15" r="1.25" />
+    </svg>
+  );
+}
 
 export function LibraryToolbar() {
   const scan = useLibraryStore((state) => state.scan);
   const analyze = useLibraryStore((state) => state.analyze);
+  const filter = useLibraryStore((state) => state.filter);
+  const queueView = useLibraryStore((state) => state.queueView);
+  const keyFilter = filter.key;
+  const setFilter = useLibraryStore((state) => state.setFilter);
+  const [dragIds, setDragIds] = useState<number[]>([]);
+  const [trashOver, setTrashOver] = useState(false);
   /** 出错就地贴在工具条下面。原来是弹窗，可弹窗飘走之后用户就不知道刚才哪一步没成了。 */
   const [notice, setNotice] = useState("");
   /**
@@ -14,6 +39,26 @@ export function LibraryToolbar() {
    * 所以不能靠 setState 清——组件下一次重渲染又会把它读回来。
    */
   const [dismissedScanJob, setDismissedScanJob] = useState("");
+
+  useEffect(() => {
+    const onDragState = (event: Event) => {
+      setDragIds((event as CustomEvent<TrackDragDetail>).detail?.ids ?? []);
+      setTrashOver(false);
+    };
+    window.addEventListener(TRACK_DRAG_STATE_EVENT, onDragState);
+    return () => window.removeEventListener(TRACK_DRAG_STATE_EVENT, onDragState);
+  }, []);
+
+  const energySteps: Array<number | null> = [null, 7, 8, 9, 10];
+  const energyIndex = energySteps.indexOf(filter.energyMin);
+  const nextEnergy = energySteps[(energyIndex + 1 + energySteps.length) % energySteps.length];
+  const nextAnalyzed = filter.analyzed === "all" ? "yes" : filter.analyzed === "yes" ? "no" : "all";
+  const hasFilter =
+    Boolean(filter.key) ||
+    filter.bpmMin !== null ||
+    filter.bpmMax !== null ||
+    filter.energyMin !== null ||
+    filter.analyzed !== "all";
 
   const scanning = scan !== null && scan.phase !== "done";
   /**
@@ -27,16 +72,81 @@ export function LibraryToolbar() {
 
   return (
     <>
-      {/* 筛选那一整条（调号 / BPM / 能量 / 重置）和「重新分析全部」都删了。
-          理由分两半：
-          · 筛选——真正在用的是右侧那个调号轮（点一格就按调筛曲库），
-            一排输入框摆在列表头上，占了一整行却没人去填；
-          · 重新分析全部——分析是这个软件自动该做的事（播放中插队 >
-            可视区域+选中 > 空闲后台补齐），摆一颗按钮反而让人以为不点就不会分析。
-          筛选状态本身没删：调号轮仍然能设，设了之后由列表头上的芯片负责显示和清除
-          （见 Workspace 的 activeFilter），不然点完轮子就没有出口了。
-
-          剩下这一段是**反馈**，不能跟着删：导入/分析的进度、失败原因、停止按钮。 */}
+      {(hasFilter || dragIds.length > 0) && <div className="kd-library-filterbar">
+        <span className="kd-library-filter-label">筛选</span>
+        <button
+          type="button"
+          className="kd-filter-control"
+          data-active={keyFilter ? "true" : undefined}
+          onClick={() => keyFilter && setFilter({ key: "" })}
+          title={keyFilter ? "清除调号筛选" : "在右侧调号轮中选择调号"}
+        >
+          调号 {keyFilter || "全部"}
+          {keyFilter && <span aria-hidden="true">×</span>}
+        </button>
+        <label className="kd-filter-range">
+          <span>BPM</span>
+          <input
+            type="number"
+            inputMode="numeric"
+            value={filter.bpmMin ?? ""}
+            placeholder="最低"
+            aria-label="最低 BPM"
+            onChange={(event) => setFilter({ bpmMin: event.target.value ? Number(event.target.value) : null })}
+          />
+          <span>–</span>
+          <input
+            type="number"
+            inputMode="numeric"
+            value={filter.bpmMax ?? ""}
+            placeholder="最高"
+            aria-label="最高 BPM"
+            onChange={(event) => setFilter({ bpmMax: event.target.value ? Number(event.target.value) : null })}
+          />
+        </label>
+        <button type="button" className="kd-filter-control" onClick={() => setFilter({ energyMin: nextEnergy })}>
+          能量 {filter.energyMin === null ? "全部" : `≥ ${filter.energyMin}`}
+        </button>
+        <button type="button" className="kd-filter-control" onClick={() => setFilter({ analyzed: nextAnalyzed })}>
+          {filter.analyzed === "all" ? "分析：全部" : filter.analyzed === "yes" ? "已分析" : "未分析"}
+        </button>
+        {hasFilter && (
+          <button
+            type="button"
+            className="kd-filter-reset"
+            title="清除上面四项筛选"
+            onClick={() =>
+              setFilter({ key: "", bpmMin: null, bpmMax: null, energyMin: null, analyzed: "all" })
+            }
+          >
+            <RotateCcw size={11} />
+            重置
+          </button>
+        )}
+        <span className="kd-toolbar-gap" />
+        {dragIds.length > 0 && (
+          <div
+            className="kd-track-trash-drop"
+            data-over={trashOver ? "true" : undefined}
+            onDragOver={(event) => {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+              setTrashOver(true);
+            }}
+            onDragLeave={() => setTrashOver(false)}
+            onDrop={(event) => {
+              event.preventDefault();
+              window.dispatchEvent(
+                new CustomEvent<TrackDragDetail>(TRACK_TRASH_DROP_EVENT, { detail: { ids: dragIds } }),
+              );
+              endTrackDrag();
+            }}
+          >
+            <Trash2 size={13} />
+            {queueView ? "移出临时列表" : "移到废纸篓"}
+          </div>
+        )}
+      </div>}
       {/* 用 analyze !== null 而不是 analyzing：后台补齐是一批 20 首连着跑的，
           跑完一批到下一批排上之间有个空档，按"在跑"算的话这一整行会闪一下，
           底下的曲目表跟着跳一次高度。跑完的那一批先停在 100% 上，
@@ -51,10 +161,6 @@ export function LibraryToolbar() {
           />
           {scanning && scan && (
             <span className="kd-row kd-grow" style={{ gap: "0.5rem", minWidth: 0 }}>
-              {/* 用户点的是「添加文件夹」，进度条上就不该冒出一个他没听说过的"扫描" */}
-              <span className="kd-chip" data-tone="theme">
-                导入
-              </span>
               <ProgressBar
                 className="kd-grow"
                 value={scan.total > 0 ? scan.done / scan.total : 0}
@@ -70,9 +176,7 @@ export function LibraryToolbar() {
           )}
           {analyze !== null && (
             <span className="kd-row kd-grow" style={{ gap: "0.5rem", minWidth: 0 }}>
-              <span className="kd-chip" data-tone="theme">
-                分析
-              </span>
+              <AnalysisGlyph />
               <span className="kd-muted kd-truncate" title={analyze.current}>
                 正在分析 {analyze.done}/{analyze.total} 首{analyze.current ? ` · ${analyze.current}` : ""}
               </span>

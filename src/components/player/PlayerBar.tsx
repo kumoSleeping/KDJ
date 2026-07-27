@@ -12,6 +12,7 @@ import {
   Repeat,
   Repeat1,
   Shuffle,
+  SlidersHorizontal,
   SkipBack,
   SkipForward,
   Square,
@@ -101,7 +102,10 @@ function MarqueeText({ className, text }: { className: string; text: string }) {
       // clientWidth 为 0 说明还没排上版（或者被藏起来了），这时量到的溢出是假的，
       // 会把短曲名也判成要滚
       if (!alive || !box.clientWidth) return;
-      const over = box.scrollWidth - box.clientWidth;
+      // text-overflow: ellipsis 会让外壳自己的 scrollWidth 在部分 Chromium 版本里
+      // 被压成 clientWidth；量真正承载文字的内层，才能知道完整标题有多宽。
+      const content = box.firstElementChild as HTMLElement | null;
+      const over = (content?.scrollWidth ?? box.scrollWidth) - box.clientWidth;
       // 留 1px 容差：亚像素排版常常差零点几，不留就会有一批"抖一下"的假滚动
       setShift(over > 1 ? over : 0);
     };
@@ -201,6 +205,11 @@ export function PlayerBar() {
   useEffect(() => {
     playingRef.current = playing;
   }, [playing]);
+  /** 播放状态既给 React 渲染，也给同一用户手势里的下一次事件判断；必须同步写 ref。 */
+  const commitPlaying = useCallback((next: boolean) => {
+    playingRef.current = next;
+    setPlaying(next);
+  }, []);
 
   /**
    * DJ 过渡切到 next：引擎起手 + UI 立即切过去。返回 false = 引擎没接手
@@ -221,12 +230,12 @@ export function PlayerBar() {
       selectTrack(next);
       setPosition(0);
       setDuration(next.duration ?? 0);
-      setPlaying(true);
+      commitPlaying(true);
       setNotice("");
       markPlayed(next.id);
       return true;
     },
-    [selectTrack, showTrackDetail],
+    [selectTrack, showTrackDetail, commitPlaying],
   );
 
   // 曲库表格双击 → 这里换曲并播放。用全局事件而不是共享 store，
@@ -234,6 +243,12 @@ export function PlayerBar() {
   useEffect(() => {
     const onPlay = (event: Event) => {
       const next = (event as CustomEvent<Track>).detail;
+      // PLAY_EVENT 通常由双击/右键等用户手势同步发出。趁手势仍有效唤醒
+      // 刷新后 suspended 的 Web Audio 图，否则 audio 在走、扬声器却是静音。
+      djEngine.resume();
+      // 协同已经关闭时，本地播放必须以满音量开始。不能只等下面监听 store 的
+      // effect：推子在最右时退出协同，紧接着点播放会撞上一个近似静音的窗口。
+      if (!useCrossfade.getState().coplay) djEngine.setVolume(1);
       showTrackDetail();
       // DJ 亮着且正在放别的歌：**所有**播放入口（双击、右键播放、自动续播
       // 挑的下一首）都从当前位置接歌，不硬切。视频预览不走这条事件，不受影响。
@@ -247,13 +262,13 @@ export function PlayerBar() {
       selectTrack(next);
       setPosition(0);
       setDuration(next.duration ?? 0);
-      setPlaying(true);
+      commitPlaying(true);
       // 手动点播的也记进"放过了"：不然自动续播会把用户刚听完的那首再接一遍
       markPlayed(next.id);
     };
     window.addEventListener(PLAY_EVENT, onPlay);
     return () => window.removeEventListener(PLAY_EVENT, onPlay);
-  }, [selectTrack, showTrackDetail, djSwitchTo]);
+  }, [selectTrack, showTrackDetail, djSwitchTo, commitPlaying]);
 
   // 起手点完全自动：优先按波形估计结尾器乐段；判断不出时按接歌长度倒推。
   useEffect(() => {
@@ -298,12 +313,8 @@ export function PlayerBar() {
     audio.src = api.audioUrl(track.id);
     audio.load();
     setNotice("");
-    if (playing) {
-      audio.play().catch((error: unknown) => {
-        setPlaying(false);
-        setNotice(`播放失败：${(error as Error).message}`);
-      });
-    }
+    // 播放只交给下面监听 playing/track 的 effect。这里再 play 一次会在暂停后
+    // 双击换曲时形成 load → play → play 竞态，其中一个 AbortError 又把状态停掉。
     // playing 不进依赖：它变化时由下面的 effect 处理，这里只管换曲。
     // frontEl 也不进：它只在 DJ 接歌互换时变，而那条路在上面已经 return 了
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -312,7 +323,19 @@ export function PlayerBar() {
   useEffect(() => {
     if (!track) return;
     if (playing) {
-      frontEl.play().catch(() => setPlaying(false));
+      // 除了首播，也接住系统休眠、切换音频设备后 context 再次被挂起的情况。
+      djEngine.resume();
+      if (!useCrossfade.getState().coplay) djEngine.setVolume(1);
+      setNotice("");
+      // DJ begin 已经在按「seek cue → 缓冲 → 设 BPM → 起播」准备新 deck。
+      // 这里若因为 frontEl/track 切换再 play 一次，新歌会先按默认位置暗中运行，
+      // 随后被 seek 和变速，正是进场临界点偶发短暂停顿的来源。
+      if (!djEngine.isTransitioning()) {
+        frontEl.play().catch((error: unknown) => {
+          commitPlaying(false);
+          setNotice(`播放失败：${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
     } else {
       // 停下要连暗处那台一起按住：过渡进行到一半按停止，
       // 只停正主的话退场中的旧歌还会自己淡完那几秒
@@ -331,9 +354,9 @@ export function PlayerBar() {
       if (detail.owner === "local-video" && detail.trackId !== track?.id) return;
       if (!track) return;
       if (detail.action === "play") {
-        setPlaying(true);
+        commitPlaying(true);
       } else if (detail.action === "pause") {
-        setPlaying(false);
+        commitPlaying(false);
       } else if (detail.action === "seek" && detail.position !== undefined) {
         frontEl.currentTime = Math.max(0, detail.position);
         setPosition(frontEl.currentTime);
@@ -347,7 +370,7 @@ export function PlayerBar() {
     };
     window.addEventListener(MEDIA_SYNC_EVENT, onMediaSync);
     return () => window.removeEventListener(MEDIA_SYNC_EVENT, onMediaSync);
-  }, [frontEl, track?.id]);
+  }, [frontEl, track?.id, commitPlaying]);
 
   // 播放器是同步时钟：视频只在明显漂移时纠偏，避免每个 timeupdate 都 seek
   // 造成画面抖动。播放/暂停/跳转动作仍然双向广播。
@@ -357,8 +380,11 @@ export function PlayerBar() {
       owner: "player",
       action: playing ? "play" : "pause",
       trackId: track.id,
+      // 视频恢复播放时必须从当前唱盘位置继续。省略 position 会被当成 0，
+      // 暂停后再播放就会把视频错误拉回 Offset 起点。
+      position: frontEl.currentTime,
     });
-  }, [playing, track?.id]);
+  }, [playing, track?.id, frontEl]);
 
   // 不做音量控制：这里只是预听，音量交给系统。软件里再放一个滑块只是多一个要照看的东西。
 
@@ -375,14 +401,23 @@ export function PlayerBar() {
   // 协同关掉时不动唱盘——关推子的人多半正听着唱盘这一侧。
   const fadeEpoch = useCrossfade((state) => state.epoch);
   useEffect(() => {
-    if (fadeEpoch === 0 || !track) return; // 0 = 还没开过协同
+    // epoch 会跨视频预览生命周期保留。PlayerBar 因 HMR/布局变化重挂载时，
+    // 旧 epoch 不能在 coplay 已关闭的情况下把歌曲擅自归零并重播。
+    if (!coplay || fadeEpoch === 0) return; // 0 = 还没开过协同
+    // 只“选中”但还没装进 deck 是最常见的协同入口。旧代码在 !track 时直接
+    // return，结果视频从头响了、底部歌曲仍是 0:00/0:00。先走正常播放入口，
+    // PLAY_EVENT 会把 selected 装入 deck 并从头启动。
+    if (!track) {
+      if (selected) playTrack(selected);
+      return;
+    }
     frontEl.currentTime = 0;
     setPosition(0);
     broadcastMediaSync({ owner: "player", action: "seek", trackId: track.id, position: 0 });
-    setPlaying(true);
+    commitPlaying(true);
     // track 不进依赖：只在拨开关那一下重启，换歌不该再从头来一遍
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fadeEpoch]);
+  }, [fadeEpoch, coplay]);
 
   // 详情页点波形跳转
   useEffect(() => {
@@ -413,7 +448,7 @@ export function PlayerBar() {
       if (owner === "player") return;
       // 协同播放中预览开声是意料之中的事，互斥对这一对失效
       if (owner === "preview" && useCrossfade.getState().coplay) return;
-      setPlaying(false);
+      commitPlaying(false);
     };
     window.addEventListener(AUDIO_FOCUS_EVENT, onFocus);
     return () => window.removeEventListener(AUDIO_FOCUS_EVENT, onFocus);
@@ -460,7 +495,7 @@ export function PlayerBar() {
       selectTrack(previous); // 同上：详情栏跟着回退
       setPosition(0);
       setDuration(previous.duration ?? 0);
-      setPlaying(true);
+      commitPlaying(true);
     }
   };
 
@@ -560,14 +595,14 @@ export function PlayerBar() {
       // 先把"当前这首放完了"记下来再挑，否则它自己会出现在候选里。
       const finished = track;
       if (!finished) {
-        setPlaying(false);
+        commitPlaying(false);
         return;
       }
       markPlayed(finished.id);
       void pickNext(finished).then((next) => {
         if (!next) {
           // 候选池空了（曲库太小 / 都放过了）就安静停下，不报错
-          setPlaying(false);
+          commitPlaying(false);
           return;
         }
         // 单曲循环挑回了自己：走 playTrack 的话 track.id 没变，
@@ -583,7 +618,7 @@ export function PlayerBar() {
     };
     const onError = () => {
       if (track) {
-        setPlaying(false);
+        commitPlaying(false);
         setNotice("这个文件放不了，可能已被移动，或者格式浏览器不支持");
       }
     };
@@ -649,40 +684,49 @@ export function PlayerBar() {
           window.dispatchEvent(new Event(DETAIL_EVENT));
         }}
       >
-        <span className="kd-player-disc" data-empty={!track ? "true" : undefined} aria-hidden="true">
-          {track ? (
-            <>
-              <Disc3 size={18} />
-              <img
-                src={api.coverUrl(track.id)}
-                alt=""
-                onError={(event) => {
-                  event.currentTarget.style.opacity = "0";
-                }}
-                onLoad={(event) => {
-                  event.currentTarget.style.opacity = "1";
-                }}
-              />
-            </>
-          ) : (
-            <Music2 size={16} />
-          )}
-        </span>
-        {/* 两行都走 MarqueeText：曲名再长也只能在这个盒子里滚，
-            越不过右边的播放键——那是这条上唯一的动作，绝不能被字盖住 */}
-        <span className="kd-player-meta" data-notice={notice ? "true" : undefined}>
-          <MarqueeText className="kd-player-title" text={titleText} />
-          {/* 视频通常没有艺人，因此第二行改成明确的视频类型标识；音频仍显示艺人，
-              空艺人继续留一行占位，避免切歌时整条文字上下跳。 */}
-          {video ? (
-            <span className="kd-player-artist kd-player-video-label">
-              <Clapperboard size={11} />
-              视频
+        {!displayTrack ? (
+          <span className="kd-player-empty">
+            <Music2 size={14} />
+            <span>选择曲目</span>
+          </span>
+        ) : (
+          <>
+            <span className="kd-player-disc" data-empty={!track ? "true" : undefined} aria-hidden="true">
+              {track ? (
+                <>
+                  <Disc3 size={18} />
+                  <img
+                    src={api.coverUrl(track.id)}
+                    alt=""
+                    onError={(event) => {
+                      event.currentTarget.style.opacity = "0";
+                    }}
+                    onLoad={(event) => {
+                      event.currentTarget.style.opacity = "1";
+                    }}
+                  />
+                </>
+              ) : (
+                <Music2 size={16} />
+              )}
             </span>
-          ) : (
-            <MarqueeText className="kd-player-artist" text={artistText} />
-          )}
-        </span>
+            {/* 两行都走 MarqueeText：曲名再长也只能在这个盒子里滚，
+                越不过右边的播放键——那是这条上唯一的动作，绝不能被字盖住 */}
+            <span className="kd-player-meta" data-notice={notice ? "true" : undefined}>
+              <MarqueeText className="kd-player-title" text={titleText} />
+              {/* 视频通常没有艺人，因此第二行改成明确的视频类型标识；音频仍显示艺人，
+                  空艺人继续留一行占位，避免切歌时整条文字上下跳。 */}
+              {video ? (
+                <span className="kd-player-artist kd-player-video-label">
+                  <Clapperboard size={11} />
+                  视频
+                </span>
+              ) : (
+                <MarqueeText className="kd-player-artist" text={artistText} />
+              )}
+            </span>
+          </>
+        )}
       </button>
       </div>
       <InlineNotice text={notice} onDismiss={() => setNotice("")} />
@@ -691,32 +735,37 @@ export function PlayerBar() {
           全是裸图标，没有按钮框——一条播放条上摆三个描边方块太吵，
           而且它们本来就在同一组里，靠间距分得开。 */}
       <div className="kd-player-transport">
-        {/* DJ 接歌：走带键左边的一颗小按钮。亮着 = 换歌不再硬切，而是把
-            下一首 BPM 同步后从当前位置按方案曲线接进来（见 lib/djMix.ts）。
-            点它在右侧详情栏开配置面板（DjPanel）——配置项多到弹窗装不下，
-            而且这个项目不养弹窗。 */}
+        {/* 接播拆成两个动作：Blend 只开关，旁边的调节图标只开设置。
+            开关和设置绑在一颗键上时，“只是想看看参数”也会误改播放行为。 */}
         <div className="kd-player-dj">
           <button
             type="button"
             className="kd-player-step kd-player-djbtn"
-            aria-label="接播设置"
+            aria-label={djEnabled ? "关闭自动接播" : "开启自动接播"}
             aria-pressed={djEnabled}
-            aria-expanded={showDjPanel}
             data-on={djEnabled ? "true" : undefined}
             title={
               !djEnabled
-                ? "接播设置：关。点一下开启并在右侧配置"
-                : `接播设置：${djTransitions
+                ? "自动接播：关。点一下开启"
+                : `自动接播：${djTransitions
                     .map((id) => DJ_TRANSITIONS.find((item) => item.id === id)?.label)
                     .filter(Boolean)
                     .join(" + ")}，${djBars} 小节。点一下关闭`
             }
-            onClick={() => {
-              toggleDjEnabled();
-              openDjPanel();
-            }}
+            onClick={toggleDjEnabled}
           >
             <Blend size={14} />
+          </button>
+          <button
+            type="button"
+            className="kd-player-step kd-player-djsettings"
+            aria-label="打开接播设置"
+            aria-expanded={showDjPanel}
+            data-open={showDjPanel ? "true" : undefined}
+            title="接播设置"
+            onClick={openDjPanel}
+          >
+            <SlidersHorizontal size={13} />
           </button>
         </div>
 
@@ -738,6 +787,9 @@ export function PlayerBar() {
           data-playing={playing ? "true" : undefined}
           disabled={!track && !selected}
           onClick={() => {
+            // 直接点播放键也是一条播放入口；必须在 click 调用栈里 resume，
+            // WebKit 才会把它认作用户允许的音频启动。
+            if (!playing) djEngine.resume();
             // 还没有在播的曲子时，播的就是曲库里当前选中的那首——
             // 「选中 → 按播放」和双击是等价的两条路。
             if (!track) {
@@ -750,7 +802,7 @@ export function PlayerBar() {
                 broadcastMediaSync({ owner: "player", action: "seek", trackId: track.id, position: 0 });
               }
             }
-            setPlaying((value) => !value);
+            commitPlaying(!playingRef.current);
             if (playing) setPosition(0);
           }}
         >

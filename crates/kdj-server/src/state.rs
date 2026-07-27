@@ -1,7 +1,8 @@
 //! 进程内共享状态：配置、曲库、provider 集合、事件总线。
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::Result;
 use kdj_core::models::Platform;
@@ -29,6 +30,8 @@ pub struct AppState {
     /// B 站的视频接口不在 `MusicProvider` trait 上（那是音乐管线的形状），
     /// 单独留一份具体类型的引用给 `/api/video/*` 用。
     pub bilibili: Arc<BilibiliProvider>,
+    /// 在线歌曲试听的短期代理票据：浏览器只拿本地 URL，不直接碰各平台 CDN。
+    pub song_previews: Mutex<HashMap<String, (String, Instant)>>,
     /// 正在跑的分析批次，供「停止分析」用。挂在这里而不是做成模块级 static：
     /// static 会被同进程里的多个 AppState（测试、将来的多实例）串在一起。
     pub analysis: crate::jobs::AnalysisRegistry,
@@ -57,6 +60,7 @@ impl AppState {
             library,
             providers,
             bilibili,
+            song_previews: Mutex::new(HashMap::new()),
             analysis: Default::default(),
         }))
     }

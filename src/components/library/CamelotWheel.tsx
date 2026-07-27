@@ -86,7 +86,12 @@ export function CamelotWheel({ code, size = 220, onPick }: CamelotWheelProps) {
       {segments.map((segment) => {
         const isCurrent = current !== null && segment.code === code;
         const isNeighbour = neighbours.has(segment.code);
-        const fill = isCurrent || isNeighbour ? camelotColor(segment.code) : "var(--kd-panel-inset)";
+        const accent = camelotColor(segment.code);
+        const fill = isCurrent
+          ? `color-mix(in oklab, ${accent} 38%, var(--kd-panel))`
+          : isNeighbour
+            ? `color-mix(in oklab, ${accent} 24%, var(--kd-panel))`
+            : "var(--kd-panel-inset)";
         return (
           <g
             key={segment.code}
@@ -97,7 +102,11 @@ export function CamelotWheel({ code, size = 220, onPick }: CamelotWheelProps) {
             <path
               d={segment.path}
               fill={fill}
-              stroke={isCurrent ? "var(--kd-theme)" : "var(--kd-line)"}
+              stroke={
+                isCurrent
+                  ? `color-mix(in oklab, ${accent} 72%, var(--kd-line))`
+                  : "var(--kd-line)"
+              }
               strokeWidth={isCurrent ? 2 : 1}
               opacity={isCurrent || isNeighbour ? 1 : 0.55}
             />
@@ -108,7 +117,7 @@ export function CamelotWheel({ code, size = 220, onPick }: CamelotWheelProps) {
               dominantBaseline="central"
               fontSize={size * 0.045}
               fontWeight={isCurrent ? 800 : 600}
-              fill={isCurrent || isNeighbour ? "#0b0b0d" : "var(--kd-faint)"}
+              fill={isCurrent || isNeighbour ? "var(--kd-text)" : "var(--kd-faint)"}
               style={{ pointerEvents: "none", fontVariantNumeric: "tabular-nums" }}
             >
               {segment.code}

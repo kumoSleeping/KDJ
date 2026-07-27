@@ -8,6 +8,8 @@ import { api } from "../lib/api";
 import type { DownloadRequest, DownloadTask, Quality, SongSource, WsEvent } from "../types";
 
 const ACTIVE_STATES = new Set(["queued", "running"]);
+/** 兼容仍在运行的旧后端：queued 取消会回一条 canceled，前端必须把它挡掉。 */
+const removedQueuedTasks = new Set<string>();
 
 interface Derived {
   list: DownloadTask[];
@@ -62,7 +64,9 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
     set({ loading: true });
     try {
       const tasks = await api.downloads();
-      const map = new Map(tasks.map((task) => [task.id, task]));
+      const map = new Map(
+        tasks.filter((task) => !removedQueuedTasks.has(task.id)).map((task) => [task.id, task]),
+      );
       set({ tasks: map, ...derive(map), loading: false, error: "" });
     } catch (error) {
       set({ loading: false, error: errorText(error) });
@@ -82,7 +86,21 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
   },
 
   async cancel(taskId) {
-    const task = await api.cancelDownload(taskId);
+    const wasQueued = get().tasks.get(taskId)?.state === "queued";
+    if (wasQueued) removedQueuedTasks.add(taskId);
+    let task: DownloadTask;
+    try {
+      task = await api.cancelDownload(taskId);
+    } catch (error) {
+      if (wasQueued) removedQueuedTasks.delete(taskId);
+      throw error;
+    }
+    if (wasQueued) {
+      const map = new Map(get().tasks);
+      map.delete(taskId);
+      set({ tasks: map, ...derive(map) });
+      return;
+    }
     get().mergeTasks([task]);
   },
 
@@ -101,11 +119,16 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
 
   handleEvent(event) {
     if (event.type === "download.updated") {
+      if (removedQueuedTasks.has(event.payload.id)) return;
       get().mergeTasks([event.payload]);
       return;
     }
     if (event.type === "download.list") {
-      const map = new Map(event.payload.map((task) => [task.id, task]));
+      const map = new Map(
+        event.payload
+          .filter((task) => !removedQueuedTasks.has(task.id))
+          .map((task) => [task.id, task]),
+      );
       set({ tasks: map, ...derive(map), error: "" });
     }
   },

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderOpen, ImagePlus, Pencil, Play, RotateCcw, Star, Trash2 } from "lucide-react";
+import { FolderOpen, ImagePlus, Pencil, Play, RotateCcw, Star, Trash2, Waypoints } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
 import { camelotToLabel } from "../../lib/camelot";
@@ -109,6 +109,7 @@ export function TrackDetail({ track }: { track: Track }) {
   const removeTrack = useLibraryStore((state) => state.removeTrack);
   const selectTrack = useLibraryStore((state) => state.selectTrack);
   const setFilter = useLibraryStore((state) => state.setFilter);
+  const keyFilter = useLibraryStore((state) => state.filter.key);
 
   const [position, setPosition] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
@@ -276,7 +277,7 @@ export function TrackDetail({ track }: { track: Track }) {
       </div>
 
       <div className="kd-row" style={{ flexWrap: "wrap", gap: "0.3rem" }}>
-        <Button size="sm" variant="primary" onClick={() => playTrack(track)}>
+        <Button size="sm" variant="ghost" onClick={() => playTrack(track)}>
           <Play size={12} />
           播放
         </Button>
@@ -299,14 +300,14 @@ export function TrackDetail({ track }: { track: Track }) {
         </Button>
         <Button
           size="sm"
-          variant="danger"
-          iconOnly
-          aria-label="移出曲库"
+          variant="ghost"
+          className="kd-detail-delete"
           disabled={busy}
           title="只移出曲库，不删文件"
           onClick={run("移出曲库", () => removeTrack(track.id, false))}
         >
           <Trash2 size={12} />
+          删除
         </Button>
       </div>
 
@@ -479,10 +480,9 @@ export function TrackDetail({ track }: { track: Track }) {
             <div className="kd-stat-hint">{track.music_key || camelotToLabel(track.camelot) || DASH}</div>
           </div>
           <div className="kd-stat">
-            <div className="kd-stat-label">能量</div>
+            <div className="kd-stat-label">相对响度</div>
             <div className="kd-stat-value kd-row" style={{ gap: "0.35rem" }}>
-              <EnergyMeter value={track.energy} />
-              <span>{track.energy ?? DASH}</span>
+              <EnergyMeter value={track.energy} rmsDb={track.rms_db} peakDb={track.peak_db} />
             </div>
             <div className="kd-stat-hint">
               {track.rms_db !== null ? `${track.rms_db.toFixed(1)} dBFS` : DASH}
@@ -503,7 +503,17 @@ export function TrackDetail({ track }: { track: Track }) {
         )}
       </Panel>
 
-      <Panel key="harmonic" heading="接下一首" padded dense>
+      <Panel
+        key="harmonic"
+        heading={
+          <span className="kd-row" style={{ gap: "0.35rem" }}>
+            <Waypoints size={16} strokeWidth={2.2} className="kd-panel-heading-icon" />
+            接下一首
+          </span>
+        }
+        padded
+        dense
+      >
         {/* 放宽筛选之后这里动辄三四十首，不封高度会把下面的面板挤到看不见 */}
         <div className="kd-scroll" style={{ maxHeight: "13rem" }}>
           <HarmonicList track={track} onSelect={selectTrack} />
@@ -572,7 +582,24 @@ export function TrackDetail({ track }: { track: Track }) {
           style={{ display: "flex", justifyContent: "center" }}
           title="亮起的是能和它接上的调；点任意一格按调筛选曲库"
         >
-          <CamelotWheel code={track.camelot} size={168} onPick={(code) => setFilter({ key: code })} />
+          <div className="kd-col" style={{ alignItems: "center", gap: "0.35rem" }}>
+            <CamelotWheel
+              code={track.camelot}
+              size={168}
+              onPick={(code) => setFilter({ key: keyFilter === code ? "" : code })}
+            />
+            {keyFilter && (
+              <button
+                type="button"
+                className="kd-wheel-filter"
+                title="清除调号筛选"
+                onClick={() => setFilter({ key: "" })}
+              >
+                正在筛选 {keyFilter}
+                <span aria-hidden="true">×</span>
+              </button>
+            )}
+          </div>
         </div>
       </Panel>
       </PanelStack>

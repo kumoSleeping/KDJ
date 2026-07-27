@@ -173,6 +173,42 @@ impl BilibiliProvider {
         Ok(url)
     }
 
+    /// 自动音频对齐给 ffmpeg 使用的预览源。URL 仍由同一套缓存/过期刷新逻辑
+    /// 产生；Cookie 单独返回，调用方必须连同 Referer/UA 一起传给 ffmpeg。
+    pub async fn preview_source(&self, bvid: &str, page_index: usize) -> Result<(String, String)> {
+        let bvid = normalize_bvid(bvid);
+        anyhow::ensure!(!bvid.is_empty(), "BV 号格式不正确");
+        Ok((self.preview_url(&bvid, page_index).await?, self.client.cookie_header()))
+    }
+
+    /// 自动校准只需要声音，必须优先拿 DASH 的纯音频 m4s。若复用预览 MP4，
+    /// ffmpeg 为了解出 210 秒声音仍要下载同长度的视频数据，一次校准会慢到二十秒。
+    pub async fn calibration_audio_source(
+        &self,
+        bvid: &str,
+        page_index: usize,
+    ) -> Result<(String, String)> {
+        let bvid = normalize_bvid(bvid);
+        anyhow::ensure!(!bvid.is_empty(), "BV 号格式不正确");
+        let info = self.client.view(&bvid).await?;
+        let pages: Vec<Value> = info
+            .get("pages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let index = page_index.min(pages.len().saturating_sub(1));
+        let cid = cid_at(&info, &pages, index);
+        let playurl = self.client.playurl(&bvid, cid, PREVIEW_QN, true).await?;
+        let parsed = streams::parse_playurl(&playurl);
+        let (_, audio) = streams::pick_best(&parsed, 1080);
+        let url = match audio {
+            Some(stream) => stream.url,
+            // 极少数视频只给 durl；仍能校准，只是会比纯音频流慢。
+            None => self.preview_url(&bvid, page_index).await?,
+        };
+        Ok((url, self.client.cookie_header()))
+    }
+
     /// 预览流：把 B 站 CDN 的响应（含 Range 语义）原样转出去。
     ///
     /// Referer / UA / Cookie 是防盗链三件套，webview 里的 `<video>` 一个都发不出来，

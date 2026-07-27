@@ -104,7 +104,11 @@ export const api = {
    * 歌曲试听直链（最低码率，不下载）。整个 SongSource 发过去：
    * QQ 的 media_mid、SoundCloud 的 transcoding_url 都在 payload 里。
    */
-  songPreview: (source: SongSource) => post<{ url: string }>("/song/preview", { source }),
+  songPreview: async (source: SongSource) => {
+    const result = await post<{ url: string }>("/song/preview", { source });
+    if (!result.url.startsWith("/")) return result;
+    return { url: `${bridge().baseUrl}${result.url}` };
+  },
   resolve: (url: string, limit = 500) => post<ResolveResponse>("/resolve", { url, limit }),
   intake: (body: IntakeRequest) => post<IntakeResponse>("/intake", body),
 
@@ -116,6 +120,12 @@ export const api = {
 
   videoResolve: (url: string) => post<VideoInfo>("/video/resolve", { url }),
   videoDownload: (body: VideoDownloadRequest) => post<DownloadTask>("/video/download", body),
+  videoCalibrate: (trackId: number, bvid: string, page = 0) =>
+    post<{ offset_ms: number; score: number }>("/video/calibrate", {
+      track_id: trackId,
+      bvid,
+      page,
+    }),
   /**
    * 视频预览流（后端代理 B 站 CDN，见 routes.rs::video_preview）。
    * 后端代理 B 站防盗链；本机 API 开放，无需额外令牌。

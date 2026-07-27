@@ -1,16 +1,17 @@
-import { Fragment } from "react";
+import { Fragment, useEffect, useRef } from "react";
 import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
   Disc3,
+  Download,
   LoaderCircle,
   ListMusic,
   SearchX,
 } from "lucide-react";
 import type { IntakeItem, IntakeKind, MergedGroup, VideoInfo } from "../../types";
 import { EmptyState } from "../common";
-import { MergedGroupRow, PLATFORM_LABEL } from "./MergedGroupRow";
+import { MergedGroupRow, PLATFORM_LABEL, SEARCH_DOWNLOAD_DND_TYPE } from "./MergedGroupRow";
 import {
   isVideoGroup,
   VideoResultRow,
@@ -41,7 +42,10 @@ export function selectionKey(itemIndex: number, groupId: string): string {
  * 所以视频行没有勾选框，只有它自己那颗「下载」。
  */
 export function selectableGroups(item: IntakeItem): MergedGroup[] {
-  return item.groups.filter((group) => !isVideoGroup(group));
+  return item.groups.filter(
+    (group) =>
+      !isVideoGroup(group) && group.sources.some((source) => source.platform !== "local"),
+  );
 }
 
 export interface ResultTableProps {
@@ -52,6 +56,8 @@ export interface ResultTableProps {
   /** 已处理过一次（用来区分"还没搜"和"搜了没结果"）。 */
   searched: boolean;
   selected: Set<string>;
+  selectionMode: boolean;
+  onSelectionModeChange(value: boolean): void;
   /** 展开了跨平台来源明细的组。 */
   expandedGroups: Set<string>;
   /** 折叠起来的"包"下标。 */
@@ -63,6 +69,7 @@ export interface ResultTableProps {
   onToggleItem(index: number): void;
   onToggleItemAll(index: number): void;
   onToggleAll(): void;
+  onDownloadItem(index: number): void;
 }
 
 /** 表头列（首列的全选框由组件自己渲染，所以不在这里）。 */
@@ -87,6 +94,8 @@ export function ResultTable({
   loading,
   searched,
   selected,
+  selectionMode,
+  onSelectionModeChange,
   expandedGroups,
   collapsedItems,
   sourceIndex,
@@ -96,8 +105,27 @@ export function ResultTable({
   onToggleItem,
   onToggleItemAll,
   onToggleAll,
+  onDownloadItem,
 }: ResultTableProps) {
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const toggleSelectRef = useRef(onToggleSelect);
+  toggleSelectRef.current = onToggleSelect;
+  const parentPressRef = useRef<number | null>(null);
+  const suppressParentClickRef = useRef<number | null>(null);
   const totalGroups = items.reduce((sum, item) => sum + item.groups.length, 0);
+
+  useEffect(() => {
+    if (!selectionMode && selected.size === 0) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      for (const key of selectedRef.current) toggleSelectRef.current(key);
+      onSelectionModeChange(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectionMode, selected.size, onSelectionModeChange]);
 
   if (loading && totalGroups === 0 && !video) {
     return (
@@ -143,13 +171,15 @@ export function ResultTable({
       {items.length > 0 && (
         <thead>
           <tr>
-            <th style={{ width: "2rem" }}>
-              <input
-                type="checkbox"
-                checked={allSelected}
-                aria-label="全选"
-                onChange={onToggleAll}
-              />
+            <th className="kd-selection-cell" data-active={selectionMode ? "true" : undefined}>
+              {selectionMode && (
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  aria-label="全选"
+                  onChange={onToggleAll}
+                />
+              )}
             </th>
             {HEAD_COLUMNS.map((column, index) => (
               <th
@@ -199,10 +229,38 @@ export function ResultTable({
                     last={position === item.groups.length - 1}
                     sourceIndex={sourceIndex[group.group_id] ?? group.best_source_index}
                     selected={selected.has(selectionKey(index, group.group_id))}
+                    selectable={group.sources.some((source) => source.platform !== "local")}
+                    selectionMode={selectionMode}
                     expanded={expandedGroups.has(group.group_id)}
                     onToggleSelect={() => onToggleSelect(selectionKey(index, group.group_id))}
+                    onEnterSelection={() => onSelectionModeChange(true)}
                     onToggleExpand={() => onToggleExpand(group.group_id)}
                     onPickSource={(sourceIdx) => onPickSource(group.group_id, sourceIdx)}
+                    onDragStart={(event) => {
+                      const currentKey = selectionKey(index, group.group_id);
+                      const draggingSelection = selected.has(currentKey);
+                      const groups = draggingSelection
+                        ? items.flatMap((entry, itemIndex) =>
+                            entry.groups.flatMap((candidate) =>
+                              selected.has(selectionKey(itemIndex, candidate.group_id))
+                                ? [candidate]
+                                : [],
+                            ),
+                          )
+                        : [group];
+                      const sources = groups.flatMap((candidate) => {
+                        const picked =
+                          candidate.sources[
+                            sourceIndex[candidate.group_id] ?? candidate.best_source_index
+                          ] ?? candidate.sources[0];
+                        return picked && picked.platform !== "local" ? [picked] : [];
+                      });
+                      event.dataTransfer.setData(
+                        SEARCH_DOWNLOAD_DND_TYPE,
+                        JSON.stringify(sources),
+                      );
+                      event.dataTransfer.effectAllowed = "copy";
+                    }}
                   />
                 ),
               );
@@ -211,16 +269,49 @@ export function ResultTable({
 
           return (
             <Fragment key={`${index}:${item.entry}`}>
-              <tr data-tree="parent" onClick={() => onToggleItem(index)}>
-                <td>
-                  <input
-                    type="checkbox"
-                    checked={itemSelected}
-                    disabled={pickable.length === 0}
-                    aria-label={`选择「${item.title || item.entry}」全部曲目`}
-                    onChange={() => onToggleItemAll(index)}
-                    onClick={(event) => event.stopPropagation()}
-                  />
+              <tr
+                data-tree="parent"
+                data-selecting={selectionMode ? "true" : undefined}
+                onClick={() => {
+                  if (suppressParentClickRef.current === index) {
+                    suppressParentClickRef.current = null;
+                    return;
+                  }
+                  onToggleItem(index);
+                }}
+                onPointerDown={(event) => {
+                  if (event.pointerType === "mouse") return;
+                  if (parentPressRef.current !== null) window.clearTimeout(parentPressRef.current);
+                  parentPressRef.current = window.setTimeout(() => {
+                    // 包行自身没有独立操作；长按只抑制随后那次误点击，不得直接
+                    // 开复选框。具体歌曲长按会打开和桌面相同的右键菜单。
+                    suppressParentClickRef.current = index;
+                    parentPressRef.current = null;
+                  }, 480);
+                }}
+                onPointerUp={() => {
+                  if (parentPressRef.current !== null) window.clearTimeout(parentPressRef.current);
+                  parentPressRef.current = null;
+                }}
+                onPointerCancel={() => {
+                  if (parentPressRef.current !== null) window.clearTimeout(parentPressRef.current);
+                  parentPressRef.current = null;
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                }}
+              >
+                <td className="kd-selection-cell" data-active={selectionMode ? "true" : undefined}>
+                  {selectionMode && (
+                    <input
+                      type="checkbox"
+                      checked={itemSelected}
+                      disabled={pickable.length === 0}
+                      aria-label={`选择「${item.title || item.entry}」全部曲目`}
+                      onChange={() => onToggleItemAll(index)}
+                      onClick={(event) => event.stopPropagation()}
+                    />
+                  )}
                 </td>
                 <td>
                   {item.groups.length > 0 &&
@@ -260,7 +351,22 @@ export function ResultTable({
                   </span>
                 </td>
                 <td colSpan={4} className="kd-td-num kd-muted">
-                  {item.groups.length > 0 ? `${item.groups.length} 首` : ""}
+                  <span className="kd-result-package-actions">
+                    {item.groups.length > 0 ? `${item.groups.length} 首` : ""}
+                    {(item.kind === "playlist" || item.kind === "album") && pickable.length > 0 && (
+                      <button
+                        type="button"
+                        className="kd-result-download-all"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onDownloadItem(index);
+                        }}
+                      >
+                        <Download size={12} />
+                        全部下载
+                      </button>
+                    )}
+                  </span>
                 </td>
               </tr>
               {rows}

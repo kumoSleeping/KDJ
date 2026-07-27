@@ -13,7 +13,10 @@ use serde_json::Value;
 use crate::models::{Quality, Theme, VideoFormat};
 
 pub const SETTINGS_FILENAME: &str = "settings.json";
-pub const DB_FILENAME: &str = "kdj.db";
+// 桌面版历史主库一直叫 kumodeck.db。改名会在同一 data_dir 静默创建一份空库，
+// 随后的自动扫描看起来像“曲库少了一半”，同时旧库 1428 首完全不再更新。
+// 数据文件名属于持久化契约，不跟 crate/package 的内部名称走。
+pub const DB_FILENAME: &str = "kumodeck.db";
 
 /// settings.json 里出现过的所有字段名。field-by-field 降级解析要用。
 const SETTINGS_FIELDS: &[&str] = &[

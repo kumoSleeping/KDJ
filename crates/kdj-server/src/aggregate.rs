@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
-use kdj_core::models::{MergedGroup, Platform, SearchRequest, SearchResponse, SongSource};
+use kdj_core::models::{MergedGroup, Platform, Quality, SearchRequest, SearchResponse, SongSource};
+use kdj_library::service::TrackQuery;
+use serde_json::json;
 
 use crate::state::AppState;
 
@@ -595,9 +597,13 @@ fn interleave(
 
 /// 优先有 flac 标记的源，其次平台优先级。
 fn best_source_index(sources: &[SongSource], table: &BTreeMap<Platform, f64>) -> usize {
+    // 本地来源的职责是提示“已经有了”，不是下载候选。有在线来源时绝不能
+    // 因为本地文件是 FLAC 就把它选成 best，前端随后会把 local 送进下载接口。
+    let has_online = sources.iter().any(|source| source.platform != Platform::Local);
     sources
         .iter()
         .enumerate()
+        .filter(|(_, source)| !has_online || source.platform != Platform::Local)
         .min_by(|(ia, a), (ib, b)| {
             let key = |index: usize, src: &SongSource| {
                 let has_flac = i32::from(src.max_quality == Some(kdj_core::models::Quality::Flac));
@@ -821,8 +827,55 @@ pub fn mark_in_library(groups: &mut [MergedGroup], known: &HashSet<String>) {
         group.in_library = group
             .sources
             .iter()
-            .any(|source| known.contains(&format!("{}:{}", source.platform, source.key)));
+            .any(|source| {
+                source.platform == Platform::Local
+                    || known.contains(&format!("{}:{}", source.platform, source.key))
+            });
     }
+}
+
+/// 只查已经进入 SQLite 曲库的文件。磁盘上没扫描过的文件不会出现在这里，
+/// 这正是“本地平台”与文件系统全文搜索的边界。
+fn search_local_library(state: &Arc<AppState>, query: &str, limit: usize) -> anyhow::Result<Vec<SongSource>> {
+    let page = state.library.list_tracks(&TrackQuery {
+        q: query.to_string(),
+        sort: "title".into(),
+        order: "asc".into(),
+        limit: limit.clamp(1, 2000) as i64,
+        ..TrackQuery::default()
+    })?;
+    Ok(page
+        .items
+        .into_iter()
+        .map(|track| {
+            let title = if track.title.trim().is_empty() {
+                track.filename.clone()
+            } else {
+                track.title.clone()
+            };
+            let max_quality = match track.format.to_ascii_lowercase().as_str() {
+                "flac" | "wav" | "aiff" | "aif" | "alac" => Some(Quality::Flac),
+                _ if track.bitrate.unwrap_or(0) >= 256_000 => Some(Quality::Q320),
+                _ => Some(Quality::Q128),
+            };
+            SongSource {
+                platform: Platform::Local,
+                key: track.id.to_string(),
+                title,
+                artists: if track.artist.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    vec![track.artist]
+                },
+                album: track.album,
+                duration: track.duration,
+                cover: String::new(),
+                max_quality,
+                vip: false,
+                payload: [("track_id".into(), json!(track.id))].into_iter().collect(),
+            }
+        })
+        .collect())
 }
 
 /// 并发搜索所有目标平台，然后聚合。
@@ -865,6 +918,16 @@ pub async fn search(state: &Arc<AppState>, payload: &SearchRequest) -> SearchRes
     }
 
     let mut per_platform: BTreeMap<Platform, Vec<SongSource>> = BTreeMap::new();
+    if payload.platforms.contains(&Platform::Local) {
+        match search_local_library(state, &payload.query, payload.limit) {
+            Ok(items) => {
+                per_platform.insert(Platform::Local, items);
+            }
+            Err(err) => {
+                errors.insert(Platform::Local.to_string(), format!("{err:#}"));
+            }
+        }
+    }
     for handle in handles {
         let Ok((platform, result)) = handle.await else {
             continue;
@@ -1142,6 +1205,26 @@ mod tests {
 
         mark_in_library(std::slice::from_mut(&mut group), &HashSet::from([key]));
         assert!(group.in_library, "曲库里已经有这一条来源，角标要亮");
+    }
+
+    #[test]
+    fn local_source_is_always_marked_as_in_library() {
+        let mut group = singleton_group(source(Platform::Local, "S", &["x"], 100.0));
+        mark_in_library(std::slice::from_mut(&mut group), &HashSet::new());
+        assert!(group.in_library, "本地平台只来自曲库数据库，本身就代表已入库");
+    }
+
+    #[test]
+    fn online_source_wins_download_choice_over_local_flac() {
+        let mut local = source(Platform::Local, "S", &["x"], 100.0);
+        local.max_quality = Some(Quality::Flac);
+        let online = source(Platform::Wyy, "S", &["x"], 100.0);
+        let table = priority_table(&[Platform::Local, Platform::Wyy]);
+        assert_eq!(
+            best_source_index(&[local, online], &table),
+            1,
+            "本地只提示已有，不能成为在线下载请求的 source"
+        );
     }
 
     #[test]

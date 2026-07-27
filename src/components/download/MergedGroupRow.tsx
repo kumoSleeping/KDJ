@@ -1,8 +1,12 @@
-import { Fragment } from "react";
-import { ChevronDown, ChevronRight, Check, Loader2, Play, Square } from "lucide-react";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { ChevronDown, ChevronRight, Check, Play } from "lucide-react";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
-import { requestSongPreview, sourceKey, toggleSongPreview, useSongPreview } from "../../lib/songPreview";
+import { api } from "../../lib/api";
+import { requestSongPreview } from "../../lib/songPreview";
+import { hasTextSelectionWithin } from "../../lib/textSelection";
 import type { MergedGroup, Platform, SongSource } from "../../types";
+import { playTrack } from "../library/TrackTable";
 
 /** 平台在表格里的短标签。混合搜索一行可能同时挂三个来源，全名太挤。 */
 export const PLATFORM_LABEL: Record<Platform, string> = {
@@ -13,19 +17,27 @@ export const PLATFORM_LABEL: Record<Platform, string> = {
   local: "本地",
 };
 
+/** 搜索结果 → 右侧下载队列的原生拖拽载荷。 */
+export const SEARCH_DOWNLOAD_DND_TYPE = "application/x-kdj-download-sources";
+
 export interface MergedGroupRowProps {
   group: MergedGroup;
   /** 当前选中的来源下标（用户可在展开后改）。 */
   sourceIndex: number;
   selected: boolean;
+  /** 纯本地结果只用于提示“已经有了”，不能送进在线下载队列。 */
+  selectable: boolean;
+  selectionMode: boolean;
   expanded: boolean;
   /** 挂在某个"包"（歌单/一次搜索）底下时缩进并画导引线。 */
   indent?: boolean;
   /** 包里的最后一行，竖导引线到此为止。 */
   last?: boolean;
   onToggleSelect(): void;
+  onEnterSelection(): void;
   onToggleExpand(): void;
   onPickSource(index: number): void;
+  onDragStart?(event: React.DragEvent<HTMLElement>): void;
 }
 
 function qualityLabel(source: SongSource): string {
@@ -37,45 +49,75 @@ export function MergedGroupRow({
   group,
   sourceIndex,
   selected,
+  selectable,
+  selectionMode,
   expanded,
   indent = false,
   last = false,
   onToggleSelect,
+  onEnterSelection,
   onToggleExpand,
   onPickSource,
+  onDragStart,
 }: MergedGroupRowProps) {
   const active = group.sources[sourceIndex] ?? group.sources[0];
   const multi = group.sources.length > 1;
+  const pressTimerRef = useRef<number | null>(null);
+  const suppressClickRef = useRef(false);
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
+  const rowMenuRef = useRef<HTMLDivElement | null>(null);
 
   /**
    * 试听放哪个来源：优先当前选中的；选中的是 B 站就退而求其次找一家音乐
    * 平台（B 站条目是视频，试听走视频预览那条路）。一家都没有就不给按钮。
    */
   const previewSource =
-    active && active.platform !== "bilibili"
+    active && active.platform !== "bilibili" && active.platform !== "local"
       ? active
-      : (group.sources.find((source) => source.platform !== "bilibili") ?? null);
-  const previewKey = previewSource ? sourceKey(previewSource) : null;
-  const playingKey = useSongPreview((state) => state.playingKey);
-  const loadingKey = useSongPreview((state) => state.loadingKey);
-  const previewErr = useSongPreview((state) => state.error);
-  const isPlaying = previewKey !== null && playingKey === previewKey;
-  const isLoading = previewKey !== null && loadingKey === previewKey;
-  const errText = previewErr && previewKey === previewErr.key ? previewErr.message : "";
-
-  const selectAndReveal = () => {
-    onToggleSelect();
+      : (group.sources.find(
+          (source) => source.platform !== "bilibili" && source.platform !== "local",
+        ) ?? null);
+  const revealPreview = () => {
     if (previewSource) requestSongPreview({ source: previewSource, title: group.title, artist: group.artists.join(", ") });
-    // 多来源歌曲的选中结果需要立刻可见：选中时自动展开来源明细，
-    // 但不在取消选中时强行收起，避免把用户手动展开的内容突然折叠。
-    if (!selected && multi && !expanded) onToggleExpand();
+    if (multi && !expanded) onToggleExpand();
   };
+
+  const toggleSelection = () => {
+    onToggleSelect();
+  };
+
+  const playGroup = () => {
+    if (previewSource) {
+      revealPreview();
+      return;
+    }
+    const local = group.sources.find((source) => source.platform === "local");
+    const trackId = Number(local?.payload?.track_id);
+    if (Number.isFinite(trackId) && trackId > 0) void api.track(trackId).then(playTrack);
+  };
+
+  useEffect(() => {
+    if (!rowMenu) return;
+    const close = (event: MouseEvent) => {
+      if (!rowMenuRef.current?.contains(event.target as Node)) setRowMenu(null);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setRowMenu(null);
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [rowMenu]);
 
   const thumbImg = group.cover && (
     <img
       src={thumbUrl(group.cover)}
       alt=""
       loading="lazy"
+      draggable={false}
       referrerPolicy="no-referrer"
       onError={(event) => {
         event.currentTarget.style.display = "none";
@@ -85,41 +127,18 @@ export function MergedGroupRow({
 
   const titleCell = (
     <>
-      {/* 小缩略图：一屏几十行，用最小档就够认人，尺寸写死所以不会因为
-          图片加载完把整行撑一下。有音乐来源时它兼职试听键——悬停浮出
-          播放脸，点一下拉最低码率的流试听，不占新的一列。 */}
-      {previewSource ? (
-        <button
-          type="button"
-          className="kd-thumb kd-thumb-play"
-          data-live={isPlaying || isLoading ? "true" : undefined}
-          title={
-            errText
-              ? `试听失败：${errText}`
-              : isPlaying
-                ? "停止试听"
-                : "试听（最低音质流媒体，不下载）"
-          }
-          aria-label={isPlaying ? `停止试听 ${group.title}` : `试听 ${group.title}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            void toggleSongPreview(previewSource);
-          }}
-        >
-          {thumbImg}
-          <span className="kd-thumb-glass" data-error={errText ? "true" : undefined}>
-            {isLoading ? (
-              <Loader2 size={12} className="kd-spin" />
-            ) : isPlaying ? (
-              <Square size={10} fill="currentColor" />
-            ) : (
-              <Play size={11} fill="currentColor" />
-            )}
-          </span>
-        </button>
-      ) : (
-        <span className="kd-thumb">{thumbImg}</span>
-      )}
+      {/* 封面只负责识别歌曲，不再叠播放三角。试听统一走整行双击。 */}
+      <span
+        className="kd-thumb"
+        draggable={selectable}
+        title={selectable ? "拖动封面把所选歌曲加入下载队列" : undefined}
+        onDragStart={(event) => {
+          event.stopPropagation();
+          onDragStart?.(event);
+        }}
+      >
+        {thumbImg}
+      </span>
       {group.title}
       {group.in_library && (
         <span className="kd-chip" data-tone="ok" style={{ marginLeft: "0.4rem" }}>
@@ -131,17 +150,66 @@ export function MergedGroupRow({
 
   return (
     <Fragment>
-      <tr aria-selected={selected} onClick={selectAndReveal}>
-        <td style={{ width: "2rem" }}>
-          <input
-            type="checkbox"
-            checked={selected}
-            aria-label={`选择 ${group.title}`}
-            onChange={selectAndReveal}
-            onClick={(event) => event.stopPropagation()}
-          />
+      <tr
+        aria-selected={selected}
+        data-selecting={selectionMode ? "true" : undefined}
+        // table-row 在 macOS WKWebView 里不是可靠的原生拖动源；选中后由每个 td 起拖。
+        draggable={false}
+        onClick={(event) => {
+          if (hasTextSelectionWithin(event.currentTarget)) return;
+          if (suppressClickRef.current) {
+            suppressClickRef.current = false;
+            return;
+          }
+          if (selectable && (selectionMode || event.metaKey || event.ctrlKey)) toggleSelection();
+        }}
+        onDoubleClick={() => {
+          if (!selectionMode) playGroup();
+        }}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setRowMenu({ x: event.clientX, y: event.clientY });
+        }}
+        onPointerDown={(event) => {
+          if (event.pointerType === "mouse") return;
+          const x = event.clientX;
+          const y = event.clientY;
+          pressTimerRef.current = window.setTimeout(() => {
+            setRowMenu({ x, y });
+            suppressClickRef.current = true;
+            pressTimerRef.current = null;
+          }, 480);
+        }}
+        onPointerUp={() => {
+          if (pressTimerRef.current !== null) window.clearTimeout(pressTimerRef.current);
+          pressTimerRef.current = null;
+        }}
+        onPointerCancel={() => {
+          if (pressTimerRef.current !== null) window.clearTimeout(pressTimerRef.current);
+          pressTimerRef.current = null;
+        }}
+      >
+        <td
+          draggable={selectable}
+          onDragStart={selectable ? onDragStart : undefined}
+          className="kd-selection-cell"
+          data-active={selectionMode ? "true" : undefined}
+        >
+          {selectionMode && selectable && (
+            <input
+              type="checkbox"
+              checked={selected}
+              aria-label={`选择 ${group.title}`}
+              onChange={toggleSelection}
+              onClick={(event) => event.stopPropagation()}
+            />
+          )}
         </td>
-        <td style={{ width: "1.6rem" }}>
+        <td
+          draggable={selectable}
+          onDragStart={selectable ? onDragStart : undefined}
+          style={{ width: "1.6rem" }}
+        >
           {multi && (
             <button
               type="button"
@@ -159,7 +227,12 @@ export function MergedGroupRow({
             </button>
           )}
         </td>
-        <td className="kd-td-strong" title={group.title}>
+        <td
+          draggable={selectable}
+          onDragStart={selectable ? onDragStart : undefined}
+          className="kd-td-strong"
+          title={group.title}
+        >
           {indent ? (
             <span className="kd-tree-indent kd-truncate" data-last={last ? "true" : undefined}>
               {titleCell}
@@ -168,12 +241,29 @@ export function MergedGroupRow({
             titleCell
           )}
         </td>
-        <td title={group.artists.join(", ")}>{group.artists.join(", ") || DASH}</td>
-        <td className="kd-muted" title={group.album}>
+        <td
+          draggable={selectable}
+          onDragStart={selectable ? onDragStart : undefined}
+          title={group.artists.join(", ")}
+        >
+          {group.artists.join(", ") || DASH}
+        </td>
+        <td
+          draggable={selectable}
+          onDragStart={selectable ? onDragStart : undefined}
+          className="kd-muted"
+          title={group.album}
+        >
           {group.album || DASH}
         </td>
-        <td className="kd-td-num">{formatDuration(group.duration)}</td>
-        <td>
+        <td
+          draggable={selectable}
+          onDragStart={selectable ? onDragStart : undefined}
+          className="kd-td-num"
+        >
+          {formatDuration(group.duration)}
+        </td>
+        <td draggable={selectable} onDragStart={selectable ? onDragStart : undefined}>
           <span className="kd-source-dots" title={group.sources.map((s) => PLATFORM_LABEL[s.platform]).join(" / ")}>
             {group.sources.map((source, index) => (
               <i
@@ -185,9 +275,25 @@ export function MergedGroupRow({
             ))}
           </span>
         </td>
-        <td className="kd-mono">{active ? PLATFORM_LABEL[active.platform] : DASH}</td>
-        <td className="kd-td-num kd-mono">{active ? qualityLabel(active) : DASH}</td>
-        <td style={{ width: "3rem" }}>
+        <td
+          draggable={selectable}
+          onDragStart={selectable ? onDragStart : undefined}
+          className="kd-mono"
+        >
+          {active ? PLATFORM_LABEL[active.platform] : DASH}
+        </td>
+        <td
+          draggable={selectable}
+          onDragStart={selectable ? onDragStart : undefined}
+          className="kd-td-num kd-mono"
+        >
+          {active ? qualityLabel(active) : DASH}
+        </td>
+        <td
+          draggable={selectable}
+          onDragStart={selectable ? onDragStart : undefined}
+          style={{ width: "3rem" }}
+        >
           {active?.vip && (
             <span className="kd-chip" data-tone="warn">
               VIP
@@ -198,7 +304,13 @@ export function MergedGroupRow({
 
       {expanded &&
         group.sources.map((source, index) => (
-          <tr key={`${source.platform}:${source.key}`} onClick={() => onPickSource(index)}>
+          <tr
+            key={`${source.platform}:${source.key}`}
+            data-local={source.platform === "local" ? "true" : undefined}
+            onClick={() => {
+              if (source.platform !== "local") onPickSource(index);
+            }}
+          >
             <td />
             <td />
             <td colSpan={3} className="kd-muted" style={{ paddingLeft: "1.4rem" }}>
@@ -222,6 +334,40 @@ export function MergedGroupRow({
             </td>
           </tr>
         ))}
+      {rowMenu &&
+        createPortal(
+          <div
+            ref={rowMenuRef}
+            className="kd-context-menu"
+            style={{ left: rowMenu.x, top: rowMenu.y }}
+            role="menu"
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setRowMenu(null);
+                playGroup();
+              }}
+            >
+              <Play size={12} />
+              播放
+            </button>
+            {selectable && (
+              <button
+                type="button"
+                onClick={() => {
+                  onEnterSelection();
+                  if (!selected) onToggleSelect();
+                  setRowMenu(null);
+                }}
+              >
+                <Check size={12} />
+                选择
+              </button>
+            )}
+          </div>,
+          document.body,
+        )}
     </Fragment>
   );
 }

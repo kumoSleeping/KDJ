@@ -5,9 +5,10 @@ import { DASH, folderName, formatBytes, formatPercent, formatSpeed } from "../..
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
-import type { DownloadTask, FolderNode, Settings, TaskState } from "../../types";
+import type { DownloadTask, FolderNode, Quality, Settings, SongSource, TaskState, VideoDownloadRequest } from "../../types";
 import { Button, EmptyState, InlineNotice, ProgressBar } from "../common";
-import { PLATFORM_LABEL } from "./MergedGroupRow";
+import { PLATFORM_LABEL, SEARCH_DOWNLOAD_DND_TYPE } from "./MergedGroupRow";
+import { VIDEO_DOWNLOAD_DND_TYPE } from "./VideoResultRow";
 
 const STATE_LABEL: Record<TaskState, string> = {
   queued: "排队",
@@ -119,16 +120,8 @@ function QueueRow({ task, onOpenFolder }: { task: DownloadTask; onOpenFolder(pat
   );
 }
 
-/** 「浏览…」不是一个目录，用不可能撞路径的值当哨兵。 */
-const BROWSE_SENTINEL = "\0browse";
-
-/**
- * 「保存到」的下拉：把能一键选到的目录全摆出来——系统下载（默认落点）、
- * 已加入曲库的文件夹、当前值——「浏览…」才去开目录选择器。
- * 这样浏览器预览壳（没有原生对话框，pickFolder 只能退化成手输路径）
- * 也有正经可选的项，手输只剩最后一条兜底路。
- */
-function SaveDirSelect({
+/** 保存目录是一个轻量路径按钮，不再渲染原生 select 和重复的下拉箭头。 */
+function SaveDirButton({
   icon,
   what,
   value,
@@ -139,52 +132,20 @@ function SaveDirSelect({
   value: string;
   onChange: (dir: string) => void;
 }) {
-  const settings = useAppStore((store) => store.settings);
-  const defaultDir = settings?.default_download_dir ?? "";
-  const libraryDirs = settings?.library_dirs ?? [];
-
-  // 当前值排最前（select 要有它才显示得对），去重后系统下载、曲库文件夹依次排开
-  const seen = new Set<string>();
-  const options: { dir: string; hint: string }[] = [];
-  const add = (dir: string, hint: string) => {
-    if (!dir || seen.has(dir)) return;
-    seen.add(dir);
-    options.push({ dir, hint });
-  };
-  add(value, "");
-  add(defaultDir, "系统下载");
-  for (const dir of libraryDirs) add(dir, "曲库");
-
   return (
-    <label className="kd-row" style={{ gap: "0.3rem" }} title={`${what}下载到 ${value}`}>
+    <button
+      type="button"
+      className="kd-save-dest"
+      title={`${what}下载到 ${value}；点击更换`}
+      onClick={() => {
+        void window.kdj?.pickFolder().then((dir) => {
+          if (dir) onChange(dir);
+        });
+      }}
+    >
       {icon}
-      <select
-        className="kd-select"
-        data-size="sm"
-        style={{ maxWidth: "9rem" }}
-        value={value}
-        onChange={(event) => {
-          const picked = event.target.value;
-          if (picked === BROWSE_SENTINEL) {
-            // select 的值不能停在「浏览…」上；用户取消选择时 value 没变，
-            // React 受控组件会自己把显示拉回当前目录
-            void window.kdj?.pickFolder().then((dir) => {
-              if (dir) onChange(dir);
-            });
-            return;
-          }
-          onChange(picked);
-        }}
-      >
-        {options.map(({ dir, hint }) => (
-          <option key={dir} value={dir} title={dir}>
-            {folderName(dir) || dir}
-            {dir === defaultDir ? " · 系统下载" : hint ? ` · ${hint}` : ""}
-          </option>
-        ))}
-        <option value={BROWSE_SENTINEL}>浏览…</option>
-      </select>
-    </label>
+      <span className="kd-truncate">{folderName(value) || value}</span>
+    </button>
   );
 }
 
@@ -200,24 +161,49 @@ function SaveDirRow({ onOpenFolder }: { onOpenFolder(path: string): void }) {
 
   const save = (key: keyof Pick<Settings, "download_dir" | "video_download_dir">) => (dir: string) =>
     void saveSettings({ [key]: dir });
+  const qualities: Quality[] = ["flac", "320", "128"];
+  const quality = settings.default_quality;
+  const qualityIndex = qualities.indexOf(quality);
+  const qualityLabel = quality === "flac" ? "FLAC" : `${quality}K`;
+  const sameDirectory = settings.download_dir === settings.video_download_dir;
 
   return (
-    <div className="kd-toolbar" data-slim="true">
-      <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>
-        保存到
-      </span>
-      <SaveDirSelect
-        icon={<Music2 size={11} />}
-        what="音乐"
-        value={settings.download_dir}
-        onChange={save("download_dir")}
-      />
-      <SaveDirSelect
-        icon={<Clapperboard size={11} />}
-        what="视频"
-        value={settings.video_download_dir}
-        onChange={save("video_download_dir")}
-      />
+    <div className="kd-toolbar kd-download-prefs" data-slim="true">
+      <button
+        type="button"
+        className="kd-download-quality"
+        title={`默认下载音质：${qualityLabel}。点击切换`}
+        onClick={() =>
+          void saveSettings({
+            default_quality: qualities[(qualityIndex + 1 + qualities.length) % qualities.length],
+          })
+        }
+      >
+        {qualityLabel}
+      </button>
+      {sameDirectory ? (
+        <SaveDirButton
+          icon={<span className="kd-row"><Music2 size={11} /><Clapperboard size={11} /></span>}
+          what="音乐和视频"
+          value={settings.download_dir}
+          onChange={(dir) => void saveSettings({ download_dir: dir, video_download_dir: dir })}
+        />
+      ) : (
+        <>
+          <SaveDirButton
+            icon={<Music2 size={11} />}
+            what="音乐"
+            value={settings.download_dir}
+            onChange={save("download_dir")}
+          />
+          <SaveDirButton
+            icon={<Clapperboard size={11} />}
+            what="视频"
+            value={settings.video_download_dir}
+            onChange={save("video_download_dir")}
+          />
+        </>
+      )}
       <span className="kd-toolbar-gap" />
       <Button
         variant="ghost"
@@ -237,6 +223,10 @@ export function QueuePanel() {
   const list = useDownloadStore((store) => store.list);
   const activeCount = useDownloadStore((store) => store.activeCount);
   const clear = useDownloadStore((store) => store.clear);
+  const enqueue = useDownloadStore((store) => store.enqueue);
+  const mergeTasks = useDownloadStore((store) => store.mergeTasks);
+  const settings = useAppStore((store) => store.settings);
+  const [dropActive, setDropActive] = useState(false);
   const folders = useLibraryStore((store) => store.folders);
   const setFilter = useLibraryStore((store) => store.setFilter);
   const setQueueView = useLibraryStore((store) => store.setQueueView);
@@ -275,7 +265,49 @@ export function QueuePanel() {
   };
 
   return (
-    <div className="kd-col" style={{ height: "100%", minHeight: 0 }}>
+    <div
+      className="kd-col kd-download-dropzone"
+      data-drop-active={dropActive ? "true" : undefined}
+      style={{ height: "100%", minHeight: 0 }}
+      onDragOver={(event) => {
+        const types = Array.from(event.dataTransfer.types);
+        if (!types.includes(SEARCH_DOWNLOAD_DND_TYPE) && !types.includes(VIDEO_DOWNLOAD_DND_TYPE)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        setDropActive(true);
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropActive(false);
+      }}
+      onDrop={(event) => {
+        setDropActive(false);
+        const videoRaw = event.dataTransfer.getData(VIDEO_DOWNLOAD_DND_TYPE);
+        if (videoRaw) {
+          event.preventDefault();
+          try {
+            const request = JSON.parse(videoRaw) as VideoDownloadRequest;
+            void api
+              .videoDownload(request)
+              .then((task) => mergeTasks([task]))
+              .catch((error: unknown) => setActionError(`加入视频队列失败：${(error as Error).message}`));
+          } catch {
+            setActionError("加入视频队列失败：拖动的数据无法识别");
+          }
+          return;
+        }
+        const raw = event.dataTransfer.getData(SEARCH_DOWNLOAD_DND_TYPE);
+        if (!raw) return;
+        event.preventDefault();
+        try {
+          const sources = JSON.parse(raw) as SongSource[];
+          void enqueue(sources, { quality: settings?.default_quality ?? null }).catch(
+            (error: unknown) => setActionError(`加入队列失败：${(error as Error).message}`),
+          );
+        } catch {
+          setActionError("加入队列失败：拖动的数据无法识别");
+        }
+      }}
+    >
       <div className="kd-toolbar">
         <strong>下载队列</strong>
         {/* 右栏死死的 22rem，标题+计数+两颗按钮量下来只剩 314px 可用。

@@ -57,8 +57,12 @@ export interface AppStore {
   hasResults: boolean;
   /** 右侧详情栏是否正显示「平台登录」面板（左下角齿轮呼出）。 */
   showAccounts: boolean;
+  /** 每次从平台图标显式打开账号面板都递增，用于重新拉开窄屏抽屉。 */
+  accountPanelEpoch: number;
   /** 右侧详情栏是否正显示「接播设置」面板（播放条 DJ 按钮呼出）。 */
   showDjPanel: boolean;
+  /** 每次显式点“接播设置”都递增；即使面板已是打开态，也能重新拉开窄屏抽屉。 */
+  djPanelEpoch: number;
   health: Health | null;
   settings: Settings | null;
   accounts: Account[];
@@ -74,6 +78,7 @@ export interface AppStore {
   /** 让右栏回到曲目详情；任何显式选歌/换歌入口都走它。 */
   showTrackDetail(): void;
   toggleAccounts(): void;
+  openAccountsPanel(): void;
   openDjPanel(): void;
   bootstrap(): Promise<void>;
   refreshAccounts(): Promise<void>;
@@ -88,7 +93,9 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   listMode: "library",
   hasResults: false,
   showAccounts: false,
+  accountPanelEpoch: 0,
   showDjPanel: false,
+  djPanelEpoch: 0,
   health: null,
   settings: null,
   accounts: [],
@@ -122,8 +129,16 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     set({ showAccounts: !get().showAccounts, showDjPanel: false });
   },
 
+  openAccountsPanel() {
+    set({
+      showAccounts: true,
+      showDjPanel: false,
+      accountPanelEpoch: get().accountPanelEpoch + 1,
+    });
+  },
+
   openDjPanel() {
-    set({ showDjPanel: true, showAccounts: false });
+    set({ showDjPanel: true, showAccounts: false, djPanelEpoch: get().djPanelEpoch + 1 });
   },
 
   bootstrap() {

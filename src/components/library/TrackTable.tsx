@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { cloneElement, useEffect, useRef, useState } from "react";
 import {
   Check,
   BarChart3,
+  Copy,
   FolderOpen,
   FolderSearch,
   Link2,
@@ -11,13 +12,21 @@ import {
   LoaderCircle,
   Play,
   RotateCcw,
+  Star,
   Trash2,
 } from "lucide-react";
 import { api } from "../../lib/api";
+import { hasTextSelectionWithin } from "../../lib/textSelection";
 import { observeTrackScroller } from "../../lib/autoAnalyze";
 import { getBridge } from "../../lib/bridge";
 import { isEditable } from "../../lib/useLibraryClipboard";
 import { camelotColor } from "../../lib/camelot";
+import {
+  announceTrackDrag,
+  endTrackDrag,
+  TRACK_TRASH_DROP_EVENT,
+  type TrackDragDetail,
+} from "../../lib/trackDrag";
 import { DASH, formatBpm, formatDuration, isVideoTrack } from "../../lib/format";
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import { useAppStore } from "../../stores/appStore";
@@ -29,7 +38,7 @@ import {
 } from "../../stores/libraryStore";
 import { useQueueStore } from "../../stores/queueStore";
 import type { FileDisposalMode, Track } from "../../types";
-import { Button, EmptyState, InlineNotice } from "../common";
+import { Button, EmptyState, InlineNotice, SelectionBar } from "../common";
 import { pickAndScanFolders, TRACK_DND_TYPE } from "./FolderTree";
 
 /** 双击曲目 = 播放。PlayerBar 监听同名事件，两边不用互相持有引用。 */
@@ -48,18 +57,45 @@ export function playTrack(track: Track): void {
 export const DETAIL_EVENT = "kd:show-detail";
 
 /** 1..10 的能量条。未分析时全灰。 */
-export function EnergyMeter({ value }: { value: number | null }) {
-  const level = value ?? 0;
+export function EnergyMeter({
+  value,
+  rmsDb = null,
+  peakDb = null,
+}: {
+  value: number | null;
+  rmsDb?: number | null;
+  peakDb?: number | null;
+}) {
+  const stats = useLibraryStore((state) => state.stats);
+  const rmsBaseline = stats?.rms_db_median;
+  const energyBaseline = stats?.energy_median;
+  const peakBaseline = stats?.peak_db_median;
+  const ratio =
+    rmsDb !== null && rmsBaseline !== null && rmsBaseline !== undefined
+      ? Math.pow(10, (rmsDb - rmsBaseline) / 20) * 100
+      : value !== null && energyBaseline
+        ? (value / energyBaseline) * 100
+        : null;
+  const peakDelta = peakDb !== null && peakBaseline != null ? peakDb - peakBaseline : 0;
+  const tone =
+    ratio === null
+      ? "empty"
+      : ratio > 135 || peakDelta > 1.5
+        ? "danger"
+        : ratio > 118 || peakDelta > 0.8
+          ? "hot"
+          : ratio > 105
+            ? "warm"
+            : "ok";
+  const details = [
+    ratio !== null ? `相对曲库基准 ${Math.round(ratio)}%` : "曲库基准尚未建立",
+    value !== null ? `能量 ${value}/10` : "",
+    rmsDb !== null ? `RMS ${rmsDb.toFixed(1)} dB` : "",
+    peakDb !== null ? `Peak ${peakDb.toFixed(1)} dB` : "",
+  ].filter(Boolean);
   return (
-    <span className="kd-energy" title={value ? `能量 ${value}/10` : "未分析"}>
-      {Array.from({ length: 10 }, (_, index) => (
-        <i
-          key={index}
-          data-on={index < level ? "true" : "false"}
-          // 高度随档位递增，扫一眼就能比较，不用去读数字
-          style={{ height: `${35 + index * 6.5}%` }}
-        />
-      ))}
+    <span className="kd-loudness-number" data-tone={tone} title={details.join(" · ")}>
+      {ratio !== null ? `${Math.round(ratio)}%` : DASH}
     </span>
   );
 }
@@ -76,7 +112,8 @@ export function CamelotChip({ code }: { code: string }) {
   return (
     <span
       className="kd-camelot"
-      style={{ background: `color-mix(in srgb, ${camelotColor(code)} 32%, var(--kd-panel))` }}
+      // 原色只负责提供色相；深浅主题各自决定填充、边框和文字亮度。
+      style={{ "--kd-key-color": camelotColor(code) } as React.CSSProperties}
     >
       {code}
     </span>
@@ -96,7 +133,7 @@ interface Column {
  * 列宽策略：**标题永远不参与压缩，其余列按优先级让位——但都不消失**。
  *
  * 标题是唯一无法从别处推断的信息（BPM/KEY/时长都是数字，看一眼就知道），
- * 所以标题是唯一**不写 width** 的列，在 `table-layout: fixed` 下自动吃掉剩余空间。
+ * 标题直接拿固定的高优先宽度；依赖“吃剩余”会在以后新增列时又悄悄缩回去。
  *
  * 艺人和专辑用 `clamp(下限, 理想值, 上限)`：面板一窄就先缩到下限，
  * 把省出来的宽度让给标题。下限故意留得能看见几个字 + 省略号——
@@ -104,20 +141,21 @@ interface Column {
  * 专辑的下限比艺人更小，所以挤压时它先让。
  */
 const COLUMNS: Column[] = [
-  { id: "title", label: "标题", key: "title" },
+  { id: "title", label: "标题", width: "14rem", key: "title" },
   // 标题单元格里还装着封面缩略图 + 「视频」角标（约 70px），它们都算在标题头上，
   // 所以其余列的预留只能更抠：艺人/专辑的理想占比与上限都压小
   //（曲库里一大片视频行这两列本来就全是"—"），数字列给到刚好放下内容为止。
-  { id: "artist", label: "艺人", width: "clamp(3.2rem, 9%, 9rem)", key: "artist" },
-  { id: "album", label: "专辑", width: "clamp(2.6rem, 7%, 7rem)", key: "album" },
+  { id: "artist", label: "艺人", width: "6.5rem", key: "artist" },
+  { id: "album", label: "专辑", width: "5.75rem", key: "album" },
   { id: "bpm", label: "BPM", width: "4.2rem", align: "num", key: "bpm" },
   // 单元格两侧各有 0.6rem 内边距，色块本身最小 2.6rem；3.4rem 会让
   // 色块超出内容区，td 的 text-overflow: ellipsis 就会在它后面补出一个点。
   { id: "camelot", label: "KEY", width: "4rem", key: "camelot" },
-  // 能量表本体 10 根柱 ≈ 39px，3.8rem 足够，不裁柱子
-  { id: "energy", label: "能量", width: "3.8rem", key: "energy" },
+  // 现在只显示彩色百分比，不再为已经删除的响度轨道预留宽度。
+  { id: "energy", label: "响度", width: "3.8rem", key: "energy" },
   { id: "duration", label: "时长", width: "4rem", align: "num", key: "duration" },
   { id: null, label: "格式", width: "3.4rem", key: "format" },
+  { id: "rating", label: "评分", width: "4.2rem", key: "rating" },
 ];
 
 /* ------------------------------------------------------------ 列的自由组合 */
@@ -179,20 +217,33 @@ export interface TrackTableProps {
 }
 
 /** 每列的单元格。列可以被拖排 / 隐藏（见 COLUMN_PREFS_KEY），所以按 key 取，不写死顺序。 */
-function trackCell(track: Track, key: string) {
+function trackCell(
+  track: Track,
+  key: string,
+  selectionControl?: React.ReactNode,
+  onTrackDragStart?: (event: React.DragEvent<HTMLSpanElement>) => void,
+  onRate?: (rating: number) => void,
+) {
   switch (key) {
     case "title":
       return (
         <td key={key} data-col="title" className="kd-td-strong" title={track.title || track.filename}>
+          {selectionControl}
           {/* 内嵌封面缩略图。没图时 onError 藏掉 img，底下的灰格子当占位，
               行高不会跳。lazy：一页 200 行，只拉滚到眼前的。
               版本号挂 modified_at：换封面会更新它，列表里的小图才能跟着换——
               封面响应带 max-age=3600，不带版本号要干等缓存过期。 */}
-          <span className="kd-thumb">
+          <span
+            className="kd-thumb"
+            draggable={Boolean(onTrackDragStart)}
+            onDragStart={onTrackDragStart}
+            title={onTrackDragStart ? "拖动封面移动所选曲目" : undefined}
+          >
             <img
               src={api.coverUrl(track.id, track.modified_at)}
               alt=""
               loading="lazy"
+              draggable={false}
               onError={(event) => {
                 event.currentTarget.style.visibility = "hidden";
               }}
@@ -244,7 +295,7 @@ function trackCell(track: Track, key: string) {
     case "energy":
       return (
         <td key={key} data-col="energy">
-          <EnergyMeter value={track.energy} />
+          <EnergyMeter value={track.energy} rmsDb={track.rms_db} peakDb={track.peak_db} />
         </td>
       );
     case "duration":
@@ -257,6 +308,29 @@ function trackCell(track: Track, key: string) {
       return (
         <td key={key} data-col="format" className="kd-mono kd-muted">
           {track.format.toUpperCase() || DASH}
+        </td>
+      );
+    case "rating":
+      return (
+        <td key={key} data-col="rating">
+          <span className="kd-table-rating" role="group" aria-label={`当前评分 ${track.rating || 0} 星`}>
+            {[1, 2, 3, 4, 5].map((value) => (
+              <button
+                key={value}
+                type="button"
+                draggable={false}
+                aria-label={`${value} 星`}
+                title={`${value} 星${track.rating === value ? "；再次点击清除评分" : ""}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onRate?.(track.rating === value ? 0 : value);
+                }}
+                onDoubleClick={(event) => event.stopPropagation()}
+              >
+                <Star size={11} fill={value <= track.rating ? "currentColor" : "none"} />
+              </button>
+            ))}
+          </span>
         </td>
       );
     default:
@@ -293,9 +367,33 @@ export function TrackTable({
   const startAnalyze = useLibraryStore((state) => state.startAnalyze);
   const addToQueue = useQueueStore((state) => state.add);
   const removeFromQueue = useQueueStore((state) => state.remove);
+  const copyToClipboard = useLibraryStore((state) => state.copyToClipboard);
+  const updateTrack = useLibraryStore((state) => state.updateTrack);
   const selected = new Set(selectedIds);
+  /** 桌面右键 / 触屏长按后才显示行内小复选框；Cmd/Ctrl 多选不需要它。 */
+  const [selectionMode, setSelectionMode] = useState(false);
+  const pressTimerRef = useRef<number | null>(null);
+  const suppressClickRef = useRef<number | null>(null);
   /** 行内拖动的插入位置指示：悬停行上半 = 插到它前面。 */
   const [drop, setDrop] = useState<{ id: number; before: boolean } | null>(null);
+
+  // Esc 的语义是取消这一轮显式批选：菜单、复选框和选区一起收掉。
+  useEffect(() => {
+    if (!selectionMode && selectedIds.length <= 1) return;
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a" && !isEditable(event.target)) {
+        event.preventDefault();
+        useLibraryStore.getState().selectAll();
+        return;
+      }
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setSelectionMode(false);
+      useLibraryStore.getState().select(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectionMode, selectedIds.length]);
 
   /* ------------------------------------------------ 行右键菜单（多选操作） */
   /**
@@ -311,6 +409,19 @@ export function TrackTable({
   const rowMenuRef = useRef<HTMLDivElement | null>(null);
   /** 删除失败的原因。表格没有别的报错位置，就近显示在滚动区顶部。 */
   const [notice, setNotice] = useState("");
+
+  const cancelPress = () => {
+    if (pressTimerRef.current !== null) window.clearTimeout(pressTimerRef.current);
+    pressTimerRef.current = null;
+  };
+  const beginLongPress = (track: Track, x: number, y: number) => {
+    cancelPress();
+    pressTimerRef.current = window.setTimeout(() => {
+      setRowMenu({ x, y, track });
+      suppressClickRef.current = track.id;
+      pressTimerRef.current = null;
+    }, 480);
+  };
 
   // 点别处 / Esc 关掉行菜单（和列菜单同一套；两个菜单不会同时开）
   useEffect(() => {
@@ -389,6 +500,26 @@ export function TrackTable({
     // deleteWithNotice 闭包里只有稳定的 store action 和 setNotice，不用进依赖
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trashSupported]);
+
+  useEffect(() => {
+    const onTrashDrop = (event: Event) => {
+      const ids = (event as CustomEvent<TrackDragDetail>).detail?.ids ?? [];
+      if (ids.length === 0) return;
+      if (queueView) {
+        removeFromQueue(ids);
+        return;
+      }
+      if (!trashSupported) {
+        setNotice("这个系统没有可恢复的废纸篓，不能通过拖放删除文件");
+        return;
+      }
+      deleteWithNotice(ids, "trash");
+    };
+    window.addEventListener(TRACK_TRASH_DROP_EVENT, onTrashDrop);
+    return () => window.removeEventListener(TRACK_TRASH_DROP_EVENT, onTrashDrop);
+    // deleteWithNotice 只封装稳定的 store action；不让每次渲染重挂全局事件。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queueView, trashSupported, removeFromQueue]);
 
   /* ------------------------------------------------ 回到正在播的那首 */
   const scrollerRef = useRef<HTMLDivElement | null>(null);
@@ -506,6 +637,24 @@ export function TrackTable({
         if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) onScrollEnd();
       }}
     >
+      {(selectionMode || selectedIds.length > 1) && (
+        <SelectionBar
+          count={selectedIds.length}
+          onSelectAll={() => useLibraryStore.getState().selectAll()}
+          onClear={() => useLibraryStore.getState().select(null)}
+          onDone={() => {
+            setSelectionMode(false);
+            useLibraryStore.getState().select(null);
+          }}
+        >
+          <Button variant="ghost" size="sm" disabled={selectedIds.length === 0} onClick={() => copyToClipboard("link")}>
+            <Copy size={12} /> 复制
+          </Button>
+          <Button variant="ghost" size="sm" disabled={selectedIds.length === 0} onClick={() => copyToClipboard("move")}>
+            剪切
+          </Button>
+        </SelectionBar>
+      )}
       {/* data-kind 区分曲库表和搜索结果表（两者共用 .kd-table，但结果表里有
           视频大行那套自排版，套不得两行式）；data-layout 是两行式的开关，
           见 TrackTableProps.layout 里为什么不能交给容器宽度判。 */}
@@ -527,7 +676,15 @@ export function TrackTable({
                 className={column.align === "num" ? "kd-td-num" : undefined}
                 data-sortable={column.id ? "true" : undefined}
                 onClick={column.id ? () => onSort(column.id as TrackSort) : undefined}
-                data-sort={column.id === sort ? "1" : column.id === sort2 ? "2" : undefined}
+                data-sort={
+                  column.id !== null
+                    ? column.id === sort
+                      ? "1"
+                      : column.id === sort2
+                        ? "2"
+                        : undefined
+                    : undefined
+                }
                 draggable
                 onDragStart={(event) => {
                   setDragCol(column.key);
@@ -575,10 +732,10 @@ export function TrackTable({
                 {column.label}
                 {/* ①②：哪个是主、哪个是副，光靠箭头分不出来。
                     数字标出层级，箭头标出方向，两件事各归各的符号。 */}
-                {column.id === sort && (
+                {column.id !== null && column.id === sort && (
                   <span className="kd-sort-mark">①{order === "asc" ? "↑" : "↓"}</span>
                 )}
-                {column.id !== sort && column.id === sort2 && (
+                {column.id !== null && column.id !== sort && column.id === sort2 && (
                   <span className="kd-sort-mark" data-second="true">
                     ②{order2 === "asc" ? "↑" : "↓"}
                   </span>
@@ -594,8 +751,33 @@ export function TrackTable({
               aria-selected={selected.has(track.id)}
               data-focus={track.id === selectedId ? "true" : undefined}
               data-drop={drop?.id === track.id ? (drop.before ? "before" : "after") : undefined}
-              draggable
+              data-selecting={selectionMode ? "true" : undefined}
+              // 普通单选行保留文字框选；Cmd/Ctrl 形成真正的多选后，整行都可拖。
+              // 单条仍可直接拖封面，不需要先进入多选。
+              // WebKit 对 table-row 的原生 draggable 支持不稳定，真正的拖动源放到每个 td；
+              // 事件冒泡到这里统一决定“单条还是整个选区”。
+              draggable={false}
+              onDragStart={(event) => {
+                const ids = selected.has(track.id) ? selectedIds : [track.id];
+                if (!selected.has(track.id)) onSelect(track.id, "replace");
+                event.dataTransfer.setData(TRACK_DND_TYPE, JSON.stringify(ids));
+                event.dataTransfer.effectAllowed = "copyMove";
+                announceTrackDrag(ids);
+              }}
+              onDragEnd={() => {
+                setDrop(null);
+                endTrackDrag();
+              }}
               onClick={(event) => {
+                if (hasTextSelectionWithin(event.currentTarget)) return;
+                if (suppressClickRef.current === track.id) {
+                  suppressClickRef.current = null;
+                  return;
+                }
+                if (selectionMode) {
+                  onSelect(track.id, "toggle");
+                  return;
+                }
                 const mode = selectMode(event);
                 onSelect(track.id, mode);
                 // 竖屏点一下 = 播放：触屏上没有"双击"这个自然动作，而点一首歌
@@ -603,23 +785,23 @@ export function TrackTable({
                 // 详情入口挪去了播放条的「正在播」块（见 PlayerBar.DETAIL_EVENT）
                 if (layout === "narrow" && mode === "replace") playFromTable(track);
               }}
-              onDoubleClick={() => playFromTable(track)}
+              onPointerDown={(event) => {
+                if (event.pointerType !== "mouse") {
+                  beginLongPress(track, event.clientX, event.clientY);
+                }
+              }}
+              onPointerUp={cancelPress}
+              onPointerCancel={cancelPress}
+              onPointerLeave={cancelPress}
+              onDoubleClick={() => {
+                if (!selectionMode) playFromTable(track);
+              }}
               onContextMenu={(event) => {
                 event.preventDefault();
-                // 右键没选中的行 = 先选中它（和访达一致）；
-                // 右键选区里的行则保住整批选区，菜单作用于整批
-                if (!selected.has(track.id)) onSelect(track.id, "replace");
+                cancelPress();
+                // 右键只开菜单；用户明确点菜单里的「选择」后才显示复选框。
                 setRowMenu({ x: event.clientX, y: event.clientY, track });
               }}
-              onDragStart={(event) => {
-                // 拖没选中的行 = 先选中它再拖，和访达一致；
-                // 拖选中的行则整批一起走，不改选区。
-                const ids = selected.has(track.id) ? selectedIds : [track.id];
-                if (!selected.has(track.id)) onSelect(track.id, "replace");
-                event.dataTransfer.setData(TRACK_DND_TYPE, JSON.stringify(ids));
-                event.dataTransfer.effectAllowed = "copyMove";
-              }}
-              onDragEnd={() => setDrop(null)}
               // 同一份拖拽载荷两种落点：拖到左边文件夹树=移动文件，
               // 落在列表行上=换顺序（只在单文件夹视图开）。
               onDragOver={
@@ -661,7 +843,50 @@ export function TrackTable({
                   : undefined
               }
             >
-              {visibleColumns.map((column) => trackCell(track, column.key))}
+              {visibleColumns.map((column) => {
+                const cell = trackCell(
+                  track,
+                  column.key,
+                  column.key === "title" && selectionMode ? (
+                    <button
+                      type="button"
+                      className="kd-row-select"
+                      aria-label={selected.has(track.id) ? "取消选择" : "选择曲目"}
+                      aria-pressed={selected.has(track.id)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onSelect(track.id, "toggle");
+                      }}
+                    >
+                      <Check size={9} />
+                    </button>
+                  ) : undefined,
+                  column.key === "title"
+                    ? (event) => {
+                        event.stopPropagation();
+                        // 整行不再 draggable：否则 Chromium 把框选文字解释为拖歌曲。
+                        // 封面是明确且稳定的拖拽把手。
+                        const ids = selected.has(track.id) ? selectedIds : [track.id];
+                        if (!selected.has(track.id)) onSelect(track.id, "replace");
+                        event.dataTransfer.setData(TRACK_DND_TYPE, JSON.stringify(ids));
+                        event.dataTransfer.effectAllowed = "copyMove";
+                        event.dataTransfer.setDragImage(event.currentTarget, 8, 8);
+                        setDrop(null);
+                        announceTrackDrag(ids);
+                      }
+                    : undefined,
+                  column.key === "rating"
+                    ? (rating) => {
+                        void updateTrack(track.id, { rating });
+                      }
+                    : undefined,
+                ) as React.ReactElement<React.TdHTMLAttributes<HTMLTableCellElement>>;
+                return cloneElement(cell, {
+                  // <tr draggable> 在 macOS WKWebView 中不会可靠触发 dragstart。
+                  // 每个格子都是真实拖动源：未选行拖单条，选中行拖整个选区。
+                  draggable: true,
+                });
+              })}
             </tr>
           ))}
         </tbody>
@@ -731,6 +956,27 @@ export function TrackTable({
           >
             <Play size={12} />
             播放
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setSelectionMode(true);
+              if (!selected.has(rowMenu.track.id)) onSelect(rowMenu.track.id, "toggle");
+              setRowMenu(null);
+            }}
+          >
+            <Check size={12} />
+            选择
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              copyToClipboard("link");
+              setRowMenu(null);
+            }}
+          >
+            <Copy size={12} />
+            复制{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}
           </button>
           <button type="button" onClick={() => { setRowMenu(null); void startAnalyze(menuIds, true); }}>
             <BarChart3 size={12} />

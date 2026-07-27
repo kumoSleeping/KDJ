@@ -155,7 +155,8 @@ export function Waveform({
         height,
         background: "var(--kd-panel-inset)",
         cursor: seekable && total > 0 ? "pointer" : "default",
-        overflow: "hidden",
+        // 播放头需要越过波形上下边界，像 DAW/AU 的时间游标；canvas 本身不会溢出。
+        overflow: "visible",
       }}
       onClick={
         seekable
@@ -210,14 +211,11 @@ export function Waveform({
 
       {ratio !== null && (
         <span
+          className="kd-wave-playhead"
           style={{
             position: "absolute",
             left: `${ratio * 100}%`,
-            top: 0,
-            bottom: 0,
             width: 1,
-            background: "#fff",
-            boxShadow: "0 0 3px rgba(0,0,0,0.8)",
             pointerEvents: "none",
           }}
         />
