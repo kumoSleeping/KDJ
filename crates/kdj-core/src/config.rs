@@ -68,7 +68,7 @@ pub struct Settings {
     pub video_max_height: i64,
     #[serde(default)]
     pub video_transcode: bool,
-    /// 视频单独一个下载目录：视频动辄几百 MB，混进音乐目录会把曲库扫描搅乱。
+    /// 旧版视频目录字段，仅为兼容已有配置保留；下载统一使用 download_dir。
     #[serde(default = "default_video_dir")]
     pub video_download_dir: String,
     #[serde(default = "default_video_format")]
@@ -247,15 +247,9 @@ impl AppConfig {
         self.inner.read().unwrap().download_dir.clone()
     }
 
-    /// 视频下载目录。留空 = 跟随音频下载目录（老配置升上来就是这种情况）。
+    /// 音频与视频统一落到同一个默认下载目录。
     pub fn video_dir(&self) -> PathBuf {
-        let guard = self.inner.read().unwrap();
-        let raw = guard.settings.video_download_dir.trim();
-        if raw.is_empty() {
-            guard.download_dir.clone()
-        } else {
-            expand_user(raw)
-        }
+        self.download_dir()
     }
 
     pub fn to_settings(&self) -> Settings {
@@ -456,7 +450,7 @@ mod tests {
         let dir = scratch("videodir");
         let config = AppConfig::create(dir.join("data"), dir.join("dl"), 0);
         let mut settings = config.to_settings();
-        settings.video_download_dir = "  ".into();
+        settings.video_download_dir = dir.join("legacy-video").to_string_lossy().into_owned();
         config.apply_settings(settings);
         assert_eq!(config.video_dir(), config.download_dir());
     }

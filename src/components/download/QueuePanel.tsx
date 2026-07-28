@@ -40,7 +40,6 @@ function stateLabel(task: DownloadTask): string {
 
 function kindLabel(task: DownloadTask): string | null {
   if (task.kind === "vj_export") return "VJ";
-  if (task.kind === "video") return "视频";
   return null;
 }
 
@@ -92,9 +91,11 @@ function QueueRow({ task, onOpenTask }: { task: DownloadTask; onOpenTask(task: D
             {kind}
           </span>
         ) : null}
-        <span className="kd-chip" data-tone={STATE_TONE[task.state]}>
-          {stateLabel(task)}
-        </span>
+        {task.state !== "queued" ? (
+          <span className="kd-chip" data-tone={STATE_TONE[task.state]}>
+            {stateLabel(task)}
+          </span>
+        ) : null}
         {active ? (
           <Button
             variant="ghost"
@@ -215,7 +216,7 @@ function QueueRow({ task, onOpenTask }: { task: DownloadTask; onOpenTask(task: D
 /**
  * 队列头两行工具条：
  * 1) 开始 / 清空 / 计数 / 音质 / 画质
- * 2) 音乐 / 视频各自的默认保存目录（拖进文件夹时仍以目标文件夹为准）
+ * 2) 音频和视频共用的默认保存目录（拖进文件夹时仍以目标文件夹为准）
  */
 function QueuePrefsBar({
   canStart,
@@ -247,7 +248,6 @@ function QueuePrefsBar({
   const heightIndex = VIDEO_HEIGHTS.indexOf(height);
   const heightLabel = `${height > 0 ? height : 1080}p`;
   const downloadDir = settings.download_dir;
-  const videoDir = settings.video_download_dir.trim() || downloadDir;
 
   return (
     <div className="kd-download-prefs">
@@ -314,37 +314,18 @@ function QueuePrefsBar({
       </div>
 
       <div className="kd-toolbar kd-download-prefs-dirs" data-slim="true">
-        <span className="kd-muted" style={{ fontSize: "var(--kd-size-xs)", flex: "none" }}>
-          音乐
-        </span>
         <button
           type="button"
           className="kd-save-dest"
-          title={`音乐默认下载目录（拖进文件夹时以目标文件夹为准）。点击更换：${downloadDir}`}
+          title={`默认下载目录（拖进文件夹时以目标文件夹为准）。点击更换：${downloadDir}`}
           onClick={() => {
             void window.kdj?.pickFolder().then((dir) => {
-              if (dir) void saveSettings({ download_dir: dir });
+              if (dir) void saveSettings({ download_dir: dir, video_download_dir: dir });
             });
           }}
         >
           <FolderOpen size={11} />
           <span className="kd-truncate">{downloadDir || "未设置"}</span>
-        </button>
-        <span className="kd-muted" style={{ fontSize: "var(--kd-size-xs)", flex: "none" }}>
-          视频
-        </span>
-        <button
-          type="button"
-          className="kd-save-dest"
-          title={`视频默认下载目录（拖进文件夹时以目标文件夹为准）。点击更换：${videoDir}`}
-          onClick={() => {
-            void window.kdj?.pickFolder().then((dir) => {
-              if (dir) void saveSettings({ video_download_dir: dir });
-            });
-          }}
-        >
-          <FolderOpen size={11} />
-          <span className="kd-truncate">{videoDir || "未设置"}</span>
         </button>
       </div>
     </div>

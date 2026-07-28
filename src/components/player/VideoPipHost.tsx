@@ -443,12 +443,32 @@ export function VideoPipHost() {
     const onEnter = () => useVideoPip.getState().setSystemPip(true);
     const onLeave = () => useVideoPip.getState().setSystemPip(false);
     const onPlay = () => {
-      if (useVideoPip.getState().session?.source === "network") {
+      const pip = useVideoPip.getState();
+      if (pip.session?.source === "network") {
         announceAudioFocus("preview");
+      } else if (pip.session?.source === "local" && pip.active && pip.mode === "float") {
+        // 本地小窗本身静音，真正的声音由主播放条输出；原生 PiP 控件也会走这里。
+        broadcastMediaSync({
+          owner: "local-video",
+          action: "play",
+          trackId: pip.session.trackId,
+          position: video.currentTime,
+        });
       }
-      useVideoPip.getState().setPlaying(true);
+      pip.setPlaying(true);
     };
-    const onPause = () => useVideoPip.getState().setPlaying(false);
+    const onPause = () => {
+      const pip = useVideoPip.getState();
+      pip.setPlaying(false);
+      if (pip.session?.source === "local" && pip.active && pip.mode === "float") {
+        broadcastMediaSync({
+          owner: "local-video",
+          action: "pause",
+          trackId: pip.session.trackId,
+          position: video.currentTime,
+        });
+      }
+    };
     const onTime = () => useVideoPip.getState().setPosition(video.currentTime);
     const onMeta = () =>
       useVideoPip

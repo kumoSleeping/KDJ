@@ -248,7 +248,7 @@ export function NarrowFolderRail({ expanded, onToggle }: { expanded: boolean; on
             <FolderGlyph
               path={node.path}
               audioDir={settings?.download_dir}
-              videoDir={settings?.video_download_dir}
+              videoDir={settings?.download_dir}
               root={node.is_root}
               open={false}
               size={14}
@@ -622,7 +622,7 @@ export function FolderTree() {
             <FolderGlyph
               path={node.path}
               audioDir={settings?.download_dir}
-              videoDir={settings?.video_download_dir}
+              videoDir={settings?.download_dir}
               root={node.is_root}
               open={open && node.children.length > 0}
               size={13}
@@ -843,52 +843,23 @@ export function FolderTree() {
           </button>
           {(() => {
             const path = menu.node.path;
-            const audioPath = cleanPath(settings?.download_dir);
-            const videoRaw = settings?.video_download_dir?.trim() ?? "";
-            const videoPath = cleanPath(videoRaw || settings?.download_dir);
-            const isAudio = cleanPath(path) === audioPath;
-            const isVideo = cleanPath(path) === videoPath;
-            // 音乐/视频目录还绑在一起时，设下载文件夹两边一起改，和下载栏同一语义。
-            const linked = audioPath !== "" && audioPath === videoPath;
+            const downloadPath = cleanPath(settings?.download_dir);
+            const isDownload = cleanPath(path) === downloadPath;
             return (
-              <>
-                <button
-                  type="button"
-                  disabled={isAudio && (linked || isVideo)}
-                  title={
-                    isAudio && (linked || isVideo)
-                      ? "已经是当前下载文件夹"
-                      : linked
-                        ? "下载的音乐和视频都会进这里"
-                        : "下载的音乐会进这里"
-                  }
-                  onClick={() => {
-                    setMenu(null);
-                    void saveSettings(
-                      linked
-                        ? { download_dir: path, video_download_dir: path }
-                        : { download_dir: path },
-                    ).catch((error: unknown) => setNotice((error as Error).message));
-                  }}
-                >
-                  <Music2 size={12} />
-                  设为下载文件夹{isAudio ? " · 当前" : ""}
-                </button>
-                <button
-                  type="button"
-                  disabled={isVideo}
-                  title={isVideo ? "已经是当前视频下载目录" : "只把视频下载指到这里；音乐目录不动"}
-                  onClick={() => {
-                    setMenu(null);
-                    void saveSettings({ video_download_dir: path }).catch((error: unknown) =>
-                      setNotice((error as Error).message),
-                    );
-                  }}
-                >
-                  <Clapperboard size={12} />
-                  设为视频下载目录{isVideo ? " · 当前" : ""}
-                </button>
-              </>
+              <button
+                type="button"
+                disabled={isDownload}
+                title={isDownload ? "已经是当前下载文件夹" : "下载的音频和视频都会进这里"}
+                onClick={() => {
+                  setMenu(null);
+                  void saveSettings({ download_dir: path, video_download_dir: path }).catch(
+                    (error: unknown) => setNotice((error as Error).message),
+                  );
+                }}
+              >
+                <Music2 size={12} />
+                设为下载文件夹{isDownload ? " · 当前" : ""}
+              </button>
             );
           })()}
           {/* 粘贴：底栏那颗按钮删掉之后，这里是它唯一的界面入口。

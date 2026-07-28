@@ -40,7 +40,7 @@ export interface Settings {
   netease_use_download_api: boolean;
   video_max_height: number;
   video_transcode: boolean;
-  /** 视频单独的下载目录，和音乐分开。 */
+  /** 旧版兼容字段；音频与视频现在统一使用 download_dir。 */
   video_download_dir: string;
   video_format: VideoFormat;
   /** 平台按钮显示顺序 = 下载来源优先级（拖动排序的结果）。 */

@@ -214,7 +214,7 @@ export function VideoResultRow({
             分 P / 画质那些控件自己消费点击，closest 一挡就分开了。 */}
         <div
           className="kd-video-row"
-          title="点击预览视频；拖到下载队列或左侧文件夹"
+          title="双击预览视频；拖到下载队列或左侧文件夹"
           onPointerDown={(event) => {
             if (!bvid) return;
             pointerDragCleanupRef.current?.();
@@ -234,16 +234,15 @@ export function VideoResultRow({
               },
             );
           }}
-          onClick={(event) => {
+          onClick={() => {
+            // 单击只保留行内操作；播放必须等完整的 dblclick，避免第一下就出声。
+            if (suppressClickRef.current) suppressClickRef.current = false;
+          }}
+          onDoubleClick={(event) => {
             if (suppressClickRef.current) {
               suppressClickRef.current = false;
               return;
             }
-            if (!bvid) return;
-            if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
-            requestVideoPreview({ bvid, title, author, page: pageIndex, cover });
-          }}
-          onDoubleClick={(event) => {
             if (!bvid) return;
             if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
             requestVideoPreview({ bvid, title, author, page: pageIndex, cover });
