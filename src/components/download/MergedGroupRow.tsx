@@ -1,11 +1,12 @@
-import { Fragment, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { ChevronDown, ChevronRight, Check, Play } from "lucide-react";
+import { Fragment, useRef, useState } from "react";
+import { ChevronDown, ChevronRight, Check, Copy, Play } from "lucide-react";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { api } from "../../lib/api";
 import { requestSongPreview } from "../../lib/songPreview";
-import { hasTextSelectionWithin } from "../../lib/textSelection";
+import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import type { MergedGroup, Platform, SongSource } from "../../types";
+import { copyText } from "../../lib/copyText";
+import { ContextMenu } from "../common";
 import { playTrack } from "../library/TrackTable";
 
 /** 平台在表格里的短标签。混合搜索一行可能同时挂三个来源，全名太挤。 */
@@ -17,8 +18,8 @@ export const PLATFORM_LABEL: Record<Platform, string> = {
   local: "本地",
 };
 
-/** 搜索结果 → 右侧下载队列的原生拖拽载荷。 */
-export const SEARCH_DOWNLOAD_DND_TYPE = "application/x-kdj-download-sources";
+/** @deprecated 请从 `lib/searchDrag` 引用；保留 re-export 以免旧 import 断掉。 */
+export { SEARCH_DOWNLOAD_DND_TYPE } from "../../lib/searchDrag";
 
 export interface MergedGroupRowProps {
   group: MergedGroup;
@@ -38,6 +39,7 @@ export interface MergedGroupRowProps {
   onToggleExpand(): void;
   onPickSource(index: number): void;
   onDragStart?(event: React.DragEvent<HTMLElement>): void;
+  onDragEnd?(): void;
 }
 
 function qualityLabel(source: SongSource): string {
@@ -59,13 +61,13 @@ export function MergedGroupRow({
   onToggleExpand,
   onPickSource,
   onDragStart,
+  onDragEnd,
 }: MergedGroupRowProps) {
   const active = group.sources[sourceIndex] ?? group.sources[0];
   const multi = group.sources.length > 1;
   const pressTimerRef = useRef<number | null>(null);
   const suppressClickRef = useRef(false);
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
-  const rowMenuRef = useRef<HTMLDivElement | null>(null);
 
   /**
    * 试听放哪个来源：优先当前选中的；选中的是 B 站就退而求其次找一家音乐
@@ -77,40 +79,26 @@ export function MergedGroupRow({
       : (group.sources.find(
           (source) => source.platform !== "bilibili" && source.platform !== "local",
         ) ?? null);
-  const revealPreview = () => {
-    if (previewSource) requestSongPreview({ source: previewSource, title: group.title, artist: group.artists.join(", ") });
-    if (multi && !expanded) onToggleExpand();
-  };
-
   const toggleSelection = () => {
     onToggleSelect();
   };
 
+  /** 双击 / 右键「播放」才会顶替主播放条；单击绝不碰正在播的。 */
   const playGroup = () => {
     if (previewSource) {
-      revealPreview();
+      requestSongPreview({
+        source: previewSource,
+        title: group.title,
+        artist: group.artists.join(", "),
+        autoPlay: true,
+      });
+      if (multi && !expanded) onToggleExpand();
       return;
     }
     const local = group.sources.find((source) => source.platform === "local");
     const trackId = Number(local?.payload?.track_id);
     if (Number.isFinite(trackId) && trackId > 0) void api.track(trackId).then(playTrack);
   };
-
-  useEffect(() => {
-    if (!rowMenu) return;
-    const close = (event: MouseEvent) => {
-      if (!rowMenuRef.current?.contains(event.target as Node)) setRowMenu(null);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setRowMenu(null);
-    };
-    window.addEventListener("mousedown", close);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [rowMenu]);
 
   const thumbImg = group.cover && (
     <img
@@ -131,11 +119,13 @@ export function MergedGroupRow({
       <span
         className="kd-thumb"
         draggable={selectable}
-        title={selectable ? "拖动封面把所选歌曲加入下载队列" : undefined}
+        title={selectable ? "拖到下载队列，或拖进左侧文件夹直接入队" : undefined}
         onDragStart={(event) => {
           event.stopPropagation();
+          clearTextSelection();
           onDragStart?.(event);
         }}
+        onDragEnd={() => onDragEnd?.()}
       >
         {thumbImg}
       </span>
@@ -161,7 +151,15 @@ export function MergedGroupRow({
             suppressClickRef.current = false;
             return;
           }
-          if (selectable && (selectionMode || event.metaKey || event.ctrlKey)) toggleSelection();
+          // 控件自己消费点击（展开、勾选），和视频行同一条 closest 规则
+          if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+          if (selectable && (selectionMode || event.metaKey || event.ctrlKey)) {
+            toggleSelection();
+            return;
+          }
+          // 单击不装播放条、不开播——正在播的别被随手点一下顶掉。
+          // 多来源组仍可展开看各平台；要听用双击或右键「播放」。
+          if (multi && !expanded) onToggleExpand();
         }}
         onDoubleClick={() => {
           if (!selectionMode) playGroup();
@@ -192,6 +190,7 @@ export function MergedGroupRow({
         <td
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
+          onDragEnd={selectable ? onDragEnd : undefined}
           className="kd-selection-cell"
           data-active={selectionMode ? "true" : undefined}
         >
@@ -208,6 +207,7 @@ export function MergedGroupRow({
         <td
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
+          onDragEnd={selectable ? onDragEnd : undefined}
           style={{ width: "1.6rem" }}
         >
           {multi && (
@@ -230,6 +230,7 @@ export function MergedGroupRow({
         <td
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
+          onDragEnd={selectable ? onDragEnd : undefined}
           className="kd-td-strong"
           title={group.title}
         >
@@ -244,6 +245,7 @@ export function MergedGroupRow({
         <td
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
+          onDragEnd={selectable ? onDragEnd : undefined}
           title={group.artists.join(", ")}
         >
           {group.artists.join(", ") || DASH}
@@ -251,6 +253,7 @@ export function MergedGroupRow({
         <td
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
+          onDragEnd={selectable ? onDragEnd : undefined}
           className="kd-muted"
           title={group.album}
         >
@@ -259,11 +262,13 @@ export function MergedGroupRow({
         <td
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
+          onDragEnd={selectable ? onDragEnd : undefined}
           className="kd-td-num"
         >
           {formatDuration(group.duration)}
         </td>
-        <td draggable={selectable} onDragStart={selectable ? onDragStart : undefined}>
+        <td draggable={selectable} onDragStart={selectable ? onDragStart : undefined}
+          onDragEnd={selectable ? onDragEnd : undefined}>
           <span className="kd-source-dots" title={group.sources.map((s) => PLATFORM_LABEL[s.platform]).join(" / ")}>
             {group.sources.map((source, index) => (
               <i
@@ -278,6 +283,7 @@ export function MergedGroupRow({
         <td
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
+          onDragEnd={selectable ? onDragEnd : undefined}
           className="kd-mono"
         >
           {active ? PLATFORM_LABEL[active.platform] : DASH}
@@ -285,6 +291,7 @@ export function MergedGroupRow({
         <td
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
+          onDragEnd={selectable ? onDragEnd : undefined}
           className="kd-td-num kd-mono"
         >
           {active ? qualityLabel(active) : DASH}
@@ -292,6 +299,7 @@ export function MergedGroupRow({
         <td
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
+          onDragEnd={selectable ? onDragEnd : undefined}
           style={{ width: "3rem" }}
         >
           {active?.vip && (
@@ -308,7 +316,19 @@ export function MergedGroupRow({
             key={`${source.platform}:${source.key}`}
             data-local={source.platform === "local" ? "true" : undefined}
             onClick={() => {
-              if (source.platform !== "local") onPickSource(index);
+              if (source.platform === "local") return;
+              // 单击只选定下载来源，不顶替正在播的
+              onPickSource(index);
+            }}
+            onDoubleClick={() => {
+              if (source.platform === "local" || source.platform === "bilibili") return;
+              onPickSource(index);
+              requestSongPreview({
+                source,
+                title: source.title || group.title,
+                artist: source.artists.join(", ") || group.artists.join(", "),
+                autoPlay: true,
+              });
             }}
           >
             <td />
@@ -334,40 +354,43 @@ export function MergedGroupRow({
             </td>
           </tr>
         ))}
-      {rowMenu &&
-        createPortal(
-          <div
-            ref={rowMenuRef}
-            className="kd-context-menu"
-            style={{ left: rowMenu.x, top: rowMenu.y }}
-            role="menu"
+      {rowMenu && (
+        <ContextMenu x={rowMenu.x} y={rowMenu.y} onClose={() => setRowMenu(null)}>
+          <button
+            type="button"
+            onClick={() => {
+              setRowMenu(null);
+              playGroup();
+            }}
           >
+            <Play size={12} />
+            播放
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void copyText(group.title);
+              setRowMenu(null);
+            }}
+          >
+            <Copy size={12} />
+            复制标题
+          </button>
+          {selectable && (
             <button
               type="button"
               onClick={() => {
+                onEnterSelection();
+                if (!selected) onToggleSelect();
                 setRowMenu(null);
-                playGroup();
               }}
             >
-              <Play size={12} />
-              播放
+              <Check size={12} />
+              选择
             </button>
-            {selectable && (
-              <button
-                type="button"
-                onClick={() => {
-                  onEnterSelection();
-                  if (!selected) onToggleSelect();
-                  setRowMenu(null);
-                }}
-              >
-                <Check size={12} />
-                选择
-              </button>
-            )}
-          </div>,
-          document.body,
-        )}
+          )}
+        </ContextMenu>
+      )}
     </Fragment>
   );
 }

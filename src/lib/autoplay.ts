@@ -19,6 +19,24 @@ import type { HarmonicMatch, Track } from "../types";
 /** 本次运行放过的曲目。刷新页面即清空——这是有意的，见文件头。 */
 const played = new Set<number>();
 
+/** 本次运行已经探过的封面；随机候选反复撞到同一首时不重复请求图片。 */
+const coverAvailability = new Map<string, Promise<boolean>>();
+
+async function hasCover(track: Track): Promise<boolean> {
+  const key = `${track.id}:${track.modified_at}`;
+  let pending = coverAvailability.get(key);
+  if (!pending) {
+    pending = fetch(api.coverUrl(track.id, track.modified_at))
+      .then((response) => {
+        void response.body?.cancel();
+        return response.ok && (response.headers.get("content-type") ?? "").startsWith("image/");
+      })
+      .catch(() => false);
+    coverAvailability.set(key, pending);
+  }
+  return pending;
+}
+
 /**
  * 播放历史栈，「上一首」按它回退。
  *
@@ -132,7 +150,11 @@ function sameSong(a: Track, b: Track): boolean {
  * `manual` = 用户自己按了「下一首」。区别只影响单曲循环：循环的是**自动**续播，
  * 人伸手按下一首就是想逃出这首歌，这时按招牌的调性接歌给他挑。
  */
-export async function pickNext(current: Track, manual = false): Promise<Track | null> {
+export async function pickNext(
+  current: Track,
+  manual = false,
+  preferred: Track | null = null,
+): Promise<Track | null> {
   const { mode } = usePlayMode.getState();
   const { scope } = useHarmonicScope.getState();
   const folder = scope === "folder" ? useLibraryStore.getState().filter.folder : "";
@@ -146,8 +168,47 @@ export async function pickNext(current: Track, manual = false): Promise<Track | 
   if (scope === "queue") return null;
 
   if (mode === "one" && !manual) return current;
+  // previewNext 已经替右侧唱盘挑好一首时直接兑现预告。队列仍在它前面消费，
+  // 所以用户临时插队后，显式点歌永远比旧预告优先。
+  if (preferred && preferred.id !== current.id && !(mode === "one" && manual)) {
+    return preferred;
+  }
   if (mode === "order") return nextInOrder(current, folder);
   if (mode === "shuffle") return randomPick(current, folder);
+  return harmonicPick(current, folder);
+}
+
+/**
+ * 只看「下一首会是谁」，不消费点歌队列。
+ *
+ * 播放条右侧唱盘会提前展示候选，因此不能直接复用 pickNext：pickNext 的队列
+ * 语义是 KTV 式“取走队头”，只为画一张封面就调用会让歌还没播便从队列消失。
+ * 随机模式在这里会真正抽一次；PlayerBar 会保留这个结果，并在实际续播时把它
+ * 作为 preferred 交回 pickNext，保证唱盘上预告的和随后听到的是同一首。
+ */
+export async function previewNext(
+  current: Track,
+  manual = false,
+  /**
+   * 只用于"换一首候选"这类预览动作。它不改变播放历史，也绝不能影响
+   * 点歌队列；队列仍然是明确指定的下一首，不能被随机按钮跳过。
+   */
+  excludeIds: ReadonlySet<number> = new Set(),
+): Promise<Track | null> {
+  const { mode } = usePlayMode.getState();
+  const { scope } = useHarmonicScope.getState();
+  const folder = scope === "folder" ? useLibraryStore.getState().filter.folder : "";
+
+  const queued = useQueueStore
+    .getState()
+    .list()
+    .find((candidate) => candidate.id !== current.id);
+  if (queued) return queued;
+  if (scope === "queue") return null;
+
+  if (mode === "one" && !manual) return current;
+  if (mode === "order") return nextInOrder(current, folder);
+  if (mode === "shuffle") return randomPick(current, folder, excludeIds);
   return harmonicPick(current, folder);
 }
 
@@ -235,22 +296,37 @@ async function nextInOrder(current: Track, folder: string): Promise<Track | null
  * 随机播放：范围内随机挑一首。
  *
  * 不把整个范围拉下来再抽——问一次总数，随机一个 offset 只取一条。
- * 先试几次"没放过的"（不然小曲库里随机会反复撞同几首），
- * 全放过了就放宽到"不是当前这首"，随机模式不该有停下来的一天。
+ * 先试几次"没放过的"（不然小曲库里随机会反复撞同几首），并在这些随机
+ * 候选中优先拿有封面的。点歌队列不走这里，所以用户明确指定的曲目绝不会
+ * 因为没封面被算法擅自替换。全放过了再放宽到"不是当前这首"。
  */
-async function randomPick(current: Track, folder: string): Promise<Track | null> {
+async function randomPick(
+  current: Track,
+  folder: string,
+  excludeIds: ReadonlySet<number> = new Set(),
+): Promise<Track | null> {
   try {
     const probe = await api.tracks({ folder, limit: 1, offset: 0 });
     if (probe.total <= 1) return null;
     let fallback: Track | null = null;
-    for (let attempt = 0; attempt < 8; attempt++) {
+    const fresh: Track[] = [];
+    const seen = new Set<number>();
+    for (let attempt = 0; attempt < 8 && fresh.length < 4; attempt++) {
       const offset = Math.floor(Math.random() * probe.total);
       const candidate = (await api.tracks({ folder, limit: 1, offset })).items[0];
-      if (!candidate || candidate.id === current.id) continue;
-      if (!played.has(candidate.id) && !sameSong(current, candidate)) return candidate;
+      if (
+        !candidate ||
+        candidate.id === current.id ||
+        excludeIds.has(candidate.id) ||
+        seen.has(candidate.id)
+      ) continue;
+      seen.add(candidate.id);
+      if (!played.has(candidate.id) && !sameSong(current, candidate)) fresh.push(candidate);
       fallback = candidate;
     }
-    return fallback;
+    if (!fresh.length) return fallback;
+    const withCover = await Promise.all(fresh.map(hasCover));
+    return fresh[withCover.findIndex(Boolean)] ?? fresh[0];
   } catch {
     return null;
   }

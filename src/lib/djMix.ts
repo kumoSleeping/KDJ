@@ -18,7 +18,7 @@
  */
 
 import { create } from "zustand";
-import { api } from "./api";
+import { mediaUrlForTrack } from "./streamTrack";
 import type { Track } from "../types";
 
 /* ---------------------------------------------------------------- 配置 */
@@ -212,7 +212,235 @@ function syncRate(fromBpm: number | null, toBpm: number | null): number {
 
 /** preservesPitch 还没进所有 TS lib 的 HTMLMediaElement，包一层。 */
 function setPreservesPitch(el: HTMLAudioElement, value: boolean): void {
-  (el as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = value;
+  const media = el as HTMLAudioElement & {
+    preservesPitch?: boolean;
+    webkitPreservesPitch?: boolean;
+  };
+  media.preservesPitch = value;
+  media.webkitPreservesPitch = value;
+}
+
+/* --------------------------------------------- 暂停/播放：唱盘启转 / 刹停 */
+
+/**
+ * 当前 deck 是流式 HTMLMediaElement。WebKit 连续改 playbackRate 会反复重建
+ * 媒体变速器，实际听感是卡顿和重新接通时的 click，而不是连续的唱盘变速。
+ *
+ * 因此这里采用流式 deck 的稳定方案：音乐只走音频时钟上的推子曲线，再叠一层
+ * 很轻的合成电机启转／刹停声。所有频率和增益都由 AudioParam 自动化，不在
+ * 主线程逐帧改解码器，也不改变原曲频谱。
+ */
+// 基础播放控制保留半秒启停包络：状态立即切换，声音用清晰可辨的淡入淡出落地。
+const TRANSPORT_START_SEC = 0.5;
+const TRANSPORT_STOP_SEC = 0.5;
+const TRANSPORT_CURVE_N = 64;
+/** 曲线归零后留两个左右的音频渲染量子，再 pause，避免非零采样被硬截断。 */
+const TRANSPORT_SETTLE_MS = 24;
+
+let transportGen = 0;
+let transportTimer: number | null = null;
+let transportResolve: ((active: boolean) => void) | null = null;
+let stopTransportSound: (() => void) | null = null;
+
+function abortTransport(): void {
+  transportGen += 1;
+  if (transportTimer !== null) {
+    window.clearTimeout(transportTimer);
+    transportTimer = null;
+  }
+  stopTransportSound?.();
+  stopTransportSound = null;
+  // 清 timer 不能把等待它的 Promise 永久悬空。快速连点播放/暂停时旧操作必须
+  // 立刻结束，否则会不断积累未完成的 softPause 调用。
+  transportResolve?.(false);
+  transportResolve = null;
+}
+
+function frontDeckOrNull(): Deck | null {
+  return decks ? decks[frontIndex] : null;
+}
+
+/** 硬切/普通起播前：保证正主链路可听（上次软停可能把 fader 留在 0）。 */
+function restoreFrontOutput(): void {
+  if (!ctx || !decks) return;
+  neutralize(ctx, decks[frontIndex], 1);
+}
+
+function waitTransport(ms: number, gen: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    transportResolve = resolve;
+    transportTimer = window.setTimeout(() => {
+      transportTimer = null;
+      transportResolve = null;
+      resolve(gen === transportGen);
+    }, ms);
+  });
+}
+
+/** 五次 S 曲线：两端速度、加速度都为 0，尤其适合听感敏感的启停末端。 */
+function smootherstep(progress: number): number {
+  const value = Math.min(1, Math.max(0, progress));
+  return value * value * value * (value * (value * 6 - 15) + 10);
+}
+
+/** 保留自动化此刻的实际值，快速反向操作时不让增益突然跳到旧端点。 */
+function holdParam(param: AudioParam, now: number): number {
+  if (typeof param.cancelAndHoldAtTime === "function") {
+    param.cancelAndHoldAtTime(now);
+  } else {
+    const value = param.value;
+    param.cancelScheduledValues(now);
+    param.setValueAtTime(value, now);
+  }
+  return param.value;
+}
+
+function transportGainCurve(from: number, direction: "out" | "in"): Float32Array {
+  const out = new Float32Array(TRANSPORT_CURVE_N);
+  for (let index = 0; index < TRANSPORT_CURVE_N; index += 1) {
+    const progress = index / (TRANSPORT_CURVE_N - 1);
+    if (direction === "out") {
+      // 前 32% 只轻微 duck；剩余 68% 用五次 S 曲线贴地。末端斜率为 0，
+      // 不会像 cos 曲线那样到零点时仍带着速度，听起来仿佛突然被截断。
+      if (progress <= 0.32) {
+        out[index] = from * (1 - 0.12 * smootherstep(progress / 0.32));
+      } else {
+        const fade = (progress - 0.32) / 0.68;
+        out[index] = from * 0.88 * (1 - smootherstep(fade));
+      }
+    } else {
+      // 直接控制的是振幅增益，不是 UI 百分比。等功率 sin 曲线起始斜率过大，
+      // 前几十毫秒会冲出过多音量，听起来像“崩”一下。线性振幅让 0.5 秒内
+      // 每一小段增加量一致，既不在开头猛冲，也不会像 S 曲线前静音后突升。
+      out[index] = from + (1 - from) * progress;
+    }
+  }
+  return out;
+}
+
+function scheduleTransport(
+  deck: Deck,
+  direction: "out" | "in",
+  seconds: number,
+): void {
+  if (!ctx) return;
+  const now = ctx.currentTime;
+  const heldGain = Math.min(1, Math.max(0, holdParam(deck.fader.gain, now)));
+  // 如果在 DJ 接歌中途按暂停，先取消仍在运行的 EQ/filter/effect 自动化，恢复
+  // 全频中性链路；只保留当前推子电平，避免暂停后再播放仍带着半截滤波。
+  neutralize(ctx, deck, heldGain);
+  deck.fader.gain.setValueCurveAtTime(
+    transportGainCurve(heldGain, direction),
+    now,
+    seconds,
+  );
+}
+
+function motorEnvelopeCurve(direction: "out" | "in"): Float32Array {
+  const out = new Float32Array(TRANSPORT_CURVE_N);
+  const attackEnd = direction === "in" ? 0.14 : 0.09;
+  const fadeStart = direction === "in" ? 0.5 : 0.42;
+  const peak = 0.14;
+  const sustain = direction === "in" ? 0.08 : 0.095;
+  for (let index = 0; index < TRANSPORT_CURVE_N; index += 1) {
+    const progress = index / (TRANSPORT_CURVE_N - 1);
+    if (progress <= attackEnd) {
+      out[index] = peak * smootherstep(progress / attackEnd);
+    } else if (progress <= fadeStart) {
+      const settle = (progress - attackEnd) / (fadeStart - attackEnd);
+      out[index] = peak + (sustain - peak) * smootherstep(settle);
+    } else {
+      const fade = (progress - fadeStart) / (1 - fadeStart);
+      out[index] = sustain * (1 - smootherstep(fade));
+    }
+  }
+  return out;
+}
+
+/**
+ * 合成一声很轻的 platter motor：锯齿基音提供机械谐波，正弦二次谐波让小扬声器
+ * 也听得见；低通去掉刺耳高频。节点只活几百毫秒，曲线全交给音频线程。
+ */
+function playTransportSound(deck: Deck, direction: "out" | "in", seconds: number): void {
+  if (!ctx) return;
+  stopTransportSound?.();
+
+  const now = ctx.currentTime;
+  const fundamental = ctx.createOscillator();
+  const harmonic = ctx.createOscillator();
+  const fundamentalGain = ctx.createGain();
+  const harmonicGain = ctx.createGain();
+  const tone = ctx.createBiquadFilter();
+  const motorGain = ctx.createGain();
+
+  fundamental.type = "sawtooth";
+  harmonic.type = "sine";
+  tone.type = "lowpass";
+  // 共振只作用在合成 motor 层，不碰原曲。Q=2.4 是温和隆起，远低于旧算法
+  // 直接扫原曲时刺耳的 Q=11；截止频率跟着启转／刹停方向缓慢移动。
+  const toneFromHz = direction === "in" ? 260 : 440;
+  const toneToHz = direction === "in" ? 440 : 220;
+  tone.frequency.setValueAtTime(toneFromHz, now);
+  tone.frequency.exponentialRampToValueAtTime(toneToHz, now + seconds);
+  tone.Q.setValueAtTime(1.6, now);
+  tone.Q.linearRampToValueAtTime(2.4, now + seconds * 0.62);
+  tone.Q.linearRampToValueAtTime(1.2, now + seconds);
+  fundamentalGain.gain.setValueAtTime(0.72, now);
+  harmonicGain.gain.setValueAtTime(0.28, now);
+  motorGain.gain.setValueAtTime(0, now);
+
+  // 纯 40–80Hz 在笔记本扬声器上几乎听不见；把基音抬到仍有“电机感”但能可靠
+  // 还原的 62–118Hz，二次谐波落在 124–236Hz。
+  const fromHz = direction === "in" ? 62 : 118;
+  const toHz = direction === "in" ? 118 : 45;
+  fundamental.frequency.setValueAtTime(fromHz, now);
+  fundamental.frequency.exponentialRampToValueAtTime(toHz, now + seconds);
+  harmonic.frequency.setValueAtTime(fromHz * 2, now);
+  harmonic.frequency.exponentialRampToValueAtTime(toHz * 2, now + seconds);
+
+  // 包络首尾及其斜率都精确归零；oscillator 在静音后才 stop，不会留下截断感。
+  motorGain.gain.setValueCurveAtTime(motorEnvelopeCurve(direction), now, seconds);
+
+  fundamental.connect(fundamentalGain);
+  harmonic.connect(harmonicGain);
+  fundamentalGain.connect(tone);
+  harmonicGain.connect(tone);
+  tone.connect(motorGain);
+  motorGain.connect(deck.fxLimiter);
+
+  fundamental.start(now);
+  harmonic.start(now);
+  fundamental.stop(now + seconds + TRANSPORT_SETTLE_MS / 1000);
+  harmonic.stop(now + seconds + TRANSPORT_SETTLE_MS / 1000);
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    fundamental.disconnect();
+    harmonic.disconnect();
+    fundamentalGain.disconnect();
+    harmonicGain.disconnect();
+    tone.disconnect();
+    motorGain.disconnect();
+    if (stopTransportSound === stop) stopTransportSound = null;
+  };
+  const stop = () => {
+    if (cleaned) return;
+    const stopAt = ctx!.currentTime + 0.015;
+    const gain = holdParam(motorGain.gain, ctx!.currentTime);
+    motorGain.gain.setValueAtTime(Math.max(0.0001, gain), ctx!.currentTime);
+    motorGain.gain.exponentialRampToValueAtTime(0.0001, stopAt);
+    try {
+      fundamental.stop(stopAt);
+      harmonic.stop(stopAt);
+    } catch {
+      cleanup();
+    }
+    if (stopTransportSound === stop) stopTransportSound = null;
+  };
+  fundamental.onended = cleanup;
+  stopTransportSound = stop;
 }
 
 /* ------------------------------------------------------- 自动化曲线工具 */
@@ -300,6 +528,8 @@ function reverbImpulse(ctx: AudioContext, seconds = 1.8): AudioBuffer {
   }
   return buffer;
 }
+
+let sharedReverbImpulse: AudioBuffer | null = null;
 
 function createElement(): HTMLAudioElement {
   const el = document.createElement("audio");
@@ -413,7 +643,10 @@ function buildDeck(ctx: AudioContext, el: HTMLAudioElement): Deck {
   hydrantFilter.type = "highpass";
   hydrantFilter.frequency.value = 120;
   hydrantFilter.Q.value = 1;
-  hydrantReverb.buffer = reverbImpulse(ctx);
+  // 两台 deck 的卷积核可以安全共用。避免启动时在 WebView 主线程重复生成约三十万
+  // 个随机采样，减轻第一次打开播放器时偶发的短卡顿。
+  sharedReverbImpulse ??= reverbImpulse(ctx);
+  hydrantReverb.buffer = sharedReverbImpulse;
   hydrantWet.gain.value = 0;
   highpass.connect(hydrantDelay);
   hydrantDelay.connect(hydrantFilter);
@@ -521,6 +754,26 @@ let broken = false;
 let frontIndex: 0 | 1 = 0;
 let pending: Pending | null = null;
 
+export type DjTransitionPhase = "idle" | "preparing" | "mixing";
+export interface DjTransitionState {
+  phase: DjTransitionPhase;
+  /** 当前正主 deck；0 映射左唱盘，1 映射右唱盘。 */
+  frontIndex: 0 | 1;
+}
+
+let transitionPhase: DjTransitionPhase = "idle";
+const transitionListeners = new Set<(state: DjTransitionState) => void>();
+
+function transitionState(): DjTransitionState {
+  return { phase: transitionPhase, frontIndex };
+}
+
+function setTransitionPhase(phase: DjTransitionPhase): void {
+  transitionPhase = phase;
+  const state = transitionState();
+  for (const listener of transitionListeners) listener(state);
+}
+
 function clearPending(): void {
   if (!pending) return;
   if (pending.finishTimer !== null) clearTimeout(pending.finishTimer);
@@ -530,6 +783,7 @@ function clearPending(): void {
     pending.startListener();
   }
   pending = null;
+  setTransitionPhase("idle");
 }
 
 /** 多选时每场随机取一个非空子集，因此全勾既可能单用，也可能叠加。 */
@@ -777,6 +1031,21 @@ export const djEngine = {
     return elements[frontIndex];
   },
 
+  /** 播放条的左右唱盘与真实双 deck 共用同一个编号。 */
+  transitionState(): DjTransitionState {
+    return transitionState();
+  },
+
+  /**
+   * 监听准备 / 同时播放 / 交接完成。除了声音状态，也让唱盘在同一时刻启停；
+   * 订阅时立刻回放当前状态，避免组件重挂载后猜错哪一边是正主。
+   */
+  subscribeTransition(listener: (state: DjTransitionState) => void): () => void {
+    transitionListeners.add(listener);
+    listener(transitionState());
+    return () => transitionListeners.delete(listener);
+  },
+
   /**
    * 协同播放的推子音量（见 lib/crossfade.ts）落在元素 volume 上，
    * 和引擎里的 Web Audio 增益是相乘关系，互不打架。两台一起设：
@@ -878,6 +1147,9 @@ export const djEngine = {
 
     const transitions = chooseTransitions(options.transitions);
 
+    // 启停声还没收尾时就接歌：先结束旧 transport，避免两声 motor 叠在一起。
+    abortTransport();
+
     // 上一场还没收尾就来了新的一场：把上一场立刻掐掉。此刻的 front 马上要
     // 变成出让方，速度停在哪儿就是哪儿——它反正在退场，别让它跳。
     clearPending();
@@ -901,7 +1173,7 @@ export const djEngine = {
     // 在装载 / 起播之前就配置变速器，避免已经播放后突然切 playbackRate，触发
     // WebKit 的 preservesPitch 时间拉伸器重新初始化。
     input.el.playbackRate = rate;
-    input.el.src = api.audioUrl(next.id);
+    input.el.src = mediaUrlForTrack(next);
     input.el.load();
 
     frontIndex = backIndex;
@@ -957,6 +1229,7 @@ export const djEngine = {
               seconds,
               beatSeconds,
             );
+            setTransitionPhase("mixing");
             pending.finishTimer = window.setTimeout(() => {
               // 曲线已经在音频时钟上归零并稳定了一小段，再停媒体元素。不能在数学
               // 终点同一毫秒 pause：主线程 timer 略早于音频线程就会硬切出 click。
@@ -965,6 +1238,7 @@ export const djEngine = {
               // 到 1，WebKit pause 后偶尔吐出的残留解码帧仍可能漏成一声 click。
               if (ctx && decks) neutralize(ctx, out, 0);
               pending = null;
+              setTransitionPhase("idle");
             }, seconds * 1000 + AUDIO_TAIL_SETTLE_MS);
           })
           .catch(() => {
@@ -1019,6 +1293,7 @@ export const djEngine = {
       input.el.removeEventListener("seeked", listener);
       input.el.removeEventListener("canplay", listener);
     };
+    setTransitionPhase("preparing");
     start();
     return true;
   },
@@ -1028,13 +1303,126 @@ export const djEngine = {
    * 用户硬切歌 / 按停止 / 关掉预设时调。对着一台从没动过的引擎调它是空操作。
    */
   cancel(): void {
+    abortTransport();
     clearPending();
     if (!ctx || !decks) return;
     const backIndex = frontIndex === 0 ? 1 : 0;
+    // 先静音再 pause，避免过渡中途硬切非正主 deck 时漏出一个非零采样。
+    neutralize(ctx, decks[backIndex], 0);
     decks[backIndex].el.pause();
-    neutralize(ctx, decks[backIndex]);
     neutralize(ctx, decks[frontIndex]);
     decks[frontIndex].el.playbackRate = 1;
+  },
+
+  /** 普通起播前调用：避免上次软停把 fader 留在 0 导致「按了播放却没声」。 */
+  ensureAudible(): void {
+    abortTransport();
+    restoreFrontOutput();
+  },
+
+  /**
+   * 主按钮软停：保持原曲全频与正常速度，叠加 motor 刹停声，末尾推子收 0。
+   */
+  async softPause(motorSound = true, seconds = TRANSPORT_STOP_SEC): Promise<void> {
+    abortTransport();
+    const gen = transportGen;
+    clearPending();
+    const el = elements[frontIndex];
+    if (decks) {
+      const back = decks[frontIndex === 0 ? 1 : 0];
+      if (ctx) neutralize(ctx, back, 0);
+      back.el.pause();
+    }
+    if (el.paused) {
+      restoreFrontOutput();
+      return;
+    }
+    const deck = frontDeckOrNull();
+    // 播放中途才建 MediaElementSource 会爆一下；图还没暖好就硬停，别硬接。
+    if (!ctx || !deck) {
+      el.pause();
+      return;
+    }
+    scheduleTransport(deck, "out", seconds);
+    if (motorSound) playTransportSound(deck, "out", seconds);
+    const ok = await waitTransport(seconds * 1000 + TRANSPORT_SETTLE_MS, gen);
+    if (!ok) return;
+    el.pause();
+    // 停住后保持静音链路；下次 softPlay/ensureAudible 再打开。
+    neutralize(ctx, deck, 0);
+  },
+
+  /**
+   * 主按钮软起：全频推子平滑抬起，同时叠加一声电机启转。
+   * 接歌过渡进行中不要调——那条路自己管起播。
+   */
+  async softPlay(
+    el: HTMLAudioElement = elements[frontIndex],
+    motorSound = true,
+    seconds = TRANSPORT_START_SEC,
+  ): Promise<void> {
+    abortTransport();
+    const gen = transportGen;
+    djEngine.resume();
+    djEngine.warmup();
+    const deck = frontDeckOrNull();
+    if (!ctx || !deck || el !== deck.el) {
+      restoreFrontOutput();
+      await el.play();
+      return;
+    }
+    // 真正停住时从静音起播；若是在淡出途中快速反悔，则保留此刻增益并直接
+    // 反向淡入，不能先砍到 0，否则快速连点仍会听见一个断口。
+    const arm = ctx.currentTime;
+    const startGain = el.paused
+      ? 0
+      : Math.min(1, Math.max(0, holdParam(deck.fader.gain, arm)));
+    neutralize(ctx, deck, startGain);
+    await el.play();
+    if (gen !== transportGen) return;
+    scheduleTransport(deck, "in", seconds);
+    if (motorSound) playTransportSound(deck, "in", seconds);
+    const ok = await waitTransport(seconds * 1000 + TRANSPORT_SETTLE_MS, gen);
+    if (!ok) return;
+    neutralize(ctx, deck, 1);
+  },
+
+  /**
+   * 关应用 / 刷新页面前瞬间静音。
+   * softPause 仍要等待短淡出，窗口已经在拆了，来不及——直接把增益掐到 0
+   * 再 pause，避免媒体元素被硬卸时泄出一声 click。
+   */
+  silenceForExit(): void {
+    abortTransport();
+    clearPending();
+    for (const el of elements) {
+      try {
+        el.volume = 0;
+        el.muted = true;
+        el.pause();
+      } catch {
+        /* 拆页时 DOM 可能已经半死 */
+      }
+    }
+    if (ctx && decks) {
+      const now = ctx.currentTime;
+      for (const deck of decks) {
+        try {
+          deck.fader.gain.cancelScheduledValues(now);
+          deck.fader.gain.setValueAtTime(0, now);
+          deck.el.volume = 0;
+          deck.el.muted = true;
+          deck.el.pause();
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        void ctx.suspend();
+      } catch {
+        /* ignore */
+      }
+    }
   },
 };
 

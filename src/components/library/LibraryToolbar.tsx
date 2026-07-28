@@ -2,28 +2,15 @@ import { useEffect, useState } from "react";
 import { RotateCcw, Trash2 } from "lucide-react";
 import { useLibraryStore } from "../../stores/libraryStore";
 import {
-  endTrackDrag,
+  finishTrackDrop,
   TRACK_DRAG_STATE_EVENT,
   TRACK_TRASH_DROP_EVENT,
   type TrackDragDetail,
 } from "../../lib/trackDrag";
-import { InlineNotice, ProgressBar } from "../common";
-
-function AnalysisGlyph() {
-  return (
-    <svg className="kd-analysis-glyph" viewBox="0 0 18 18" aria-hidden="true">
-      <rect x="2" y="6" width="2" height="6" />
-      <rect x="6" y="3" width="2" height="12" />
-      <rect x="10" y="5" width="2" height="8" />
-      <rect x="14" y="7" width="2" height="4" />
-      <circle className="kd-analysis-glyph-dot" cx="3" cy="15" r="1.25" />
-    </svg>
-  );
-}
+import { InlineNotice } from "../common";
 
 export function LibraryToolbar() {
   const scan = useLibraryStore((state) => state.scan);
-  const analyze = useLibraryStore((state) => state.analyze);
   const filter = useLibraryStore((state) => state.filter);
   const queueView = useLibraryStore((state) => state.queueView);
   const keyFilter = filter.key;
@@ -60,7 +47,6 @@ export function LibraryToolbar() {
     filter.energyMin !== null ||
     filter.analyzed !== "all";
 
-  const scanning = scan !== null && scan.phase !== "done";
   /**
    * 导入失败。`startScan` 的 Promise 只等到"任务起来了"，真正的失败发生在之后，
    * 所以 catch 不到——不看这条事件的话，界面上失败和"一首都没扫到"完全一样。
@@ -72,86 +58,97 @@ export function LibraryToolbar() {
 
   return (
     <>
-      {(hasFilter || dragIds.length > 0) && <div className="kd-library-filterbar">
-        <span className="kd-library-filter-label">筛选</span>
-        <button
-          type="button"
-          className="kd-filter-control"
-          data-active={keyFilter ? "true" : undefined}
-          onClick={() => keyFilter && setFilter({ key: "" })}
-          title={keyFilter ? "清除调号筛选" : "在右侧调号轮中选择调号"}
-        >
-          调号 {keyFilter || "全部"}
-          {keyFilter && <span aria-hidden="true">×</span>}
-        </button>
-        <label className="kd-filter-range">
-          <span>BPM</span>
-          <input
-            type="number"
-            inputMode="numeric"
-            value={filter.bpmMin ?? ""}
-            placeholder="最低"
-            aria-label="最低 BPM"
-            onChange={(event) => setFilter({ bpmMin: event.target.value ? Number(event.target.value) : null })}
-          />
-          <span>–</span>
-          <input
-            type="number"
-            inputMode="numeric"
-            value={filter.bpmMax ?? ""}
-            placeholder="最高"
-            aria-label="最高 BPM"
-            onChange={(event) => setFilter({ bpmMax: event.target.value ? Number(event.target.value) : null })}
-          />
-        </label>
-        <button type="button" className="kd-filter-control" onClick={() => setFilter({ energyMin: nextEnergy })}>
-          能量 {filter.energyMin === null ? "全部" : `≥ ${filter.energyMin}`}
-        </button>
-        <button type="button" className="kd-filter-control" onClick={() => setFilter({ analyzed: nextAnalyzed })}>
-          {filter.analyzed === "all" ? "分析：全部" : filter.analyzed === "yes" ? "已分析" : "未分析"}
-        </button>
-        {hasFilter && (
+      {hasFilter && (
+        <div className="kd-library-filterbar">
+          <span className="kd-library-filter-label">筛选</span>
           <button
             type="button"
-            className="kd-filter-reset"
-            title="清除上面四项筛选"
-            onClick={() =>
-              setFilter({ key: "", bpmMin: null, bpmMax: null, energyMin: null, analyzed: "all" })
-            }
+            className="kd-filter-control"
+            data-active={keyFilter ? "true" : undefined}
+            onClick={() => keyFilter && setFilter({ key: "" })}
+            title={keyFilter ? "清除调号筛选" : "在右侧调号轮中选择调号"}
           >
-            <RotateCcw size={11} />
-            重置
+            调号 {keyFilter || "全部"}
+            {keyFilter && <span aria-hidden="true">×</span>}
           </button>
-        )}
-        <span className="kd-toolbar-gap" />
-        {dragIds.length > 0 && (
-          <div
-            className="kd-track-trash-drop"
-            data-over={trashOver ? "true" : undefined}
-            onDragOver={(event) => {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = "move";
-              setTrashOver(true);
-            }}
-            onDragLeave={() => setTrashOver(false)}
-            onDrop={(event) => {
-              event.preventDefault();
-              window.dispatchEvent(
-                new CustomEvent<TrackDragDetail>(TRACK_TRASH_DROP_EVENT, { detail: { ids: dragIds } }),
-              );
-              endTrackDrag();
-            }}
-          >
-            <Trash2 size={13} />
-            {queueView ? "移出临时列表" : "移到废纸篓"}
-          </div>
-        )}
-      </div>}
-      {/* 用 analyze !== null 而不是 analyzing：后台补齐是一批 20 首连着跑的，
-          跑完一批到下一批排上之间有个空档，按"在跑"算的话这一整行会闪一下，
-          底下的曲目表跟着跳一次高度。跑完的那一批先停在 100% 上，
-          确认后面没有下一批了才由 autoAnalyze 收走。 */}
-      {(scanning || analyze !== null || notice || importError) && (
+          <label className="kd-filter-range">
+            <span>BPM</span>
+            <input
+              type="number"
+              inputMode="numeric"
+              value={filter.bpmMin ?? ""}
+              placeholder="最低"
+              aria-label="最低 BPM"
+              onChange={(event) =>
+                setFilter({ bpmMin: event.target.value ? Number(event.target.value) : null })
+              }
+            />
+            <span>–</span>
+            <input
+              type="number"
+              inputMode="numeric"
+              value={filter.bpmMax ?? ""}
+              placeholder="最高"
+              aria-label="最高 BPM"
+              onChange={(event) =>
+                setFilter({ bpmMax: event.target.value ? Number(event.target.value) : null })
+              }
+            />
+          </label>
+          <button type="button" className="kd-filter-control" onClick={() => setFilter({ energyMin: nextEnergy })}>
+            能量 {filter.energyMin === null ? "全部" : `≥ ${filter.energyMin}`}
+          </button>
+          <button type="button" className="kd-filter-control" onClick={() => setFilter({ analyzed: nextAnalyzed })}>
+            {filter.analyzed === "all" ? "分析：全部" : filter.analyzed === "yes" ? "已分析" : "未分析"}
+          </button>
+          {hasFilter && (
+            <button
+              type="button"
+              className="kd-filter-reset"
+              title="清除上面四项筛选"
+              onClick={() =>
+                setFilter({ key: "", bpmMin: null, bpmMax: null, energyMin: null, analyzed: "all" })
+              }
+            >
+              <RotateCcw size={11} />
+              重置
+            </button>
+          )}
+        </div>
+      )}
+      {/*
+        这个落点必须常驻并脱离文档流。旧实现会在 dragstart 后临时插入整条筛选栏，
+        把作为拖动源的表格向下挤；WKWebView 随后会截到筛选栏/表头作为拖动预览，
+        严重时还会取消本应落到左侧文件夹的 drop。
+
+        常驻节点只切 visibility，不在拖动过程中挂载、卸载或改变表格几何位置。
+      */}
+      <div
+        className="kd-track-trash-drop"
+        data-kd-track-trash-target="true"
+        data-visible={dragIds.length > 0 ? "true" : undefined}
+        data-over={trashOver ? "true" : undefined}
+        aria-hidden={dragIds.length === 0}
+        onDragOver={(event) => {
+          if (dragIds.length === 0) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          setTrashOver(true);
+        }}
+        onDragLeave={() => setTrashOver(false)}
+        onDrop={(event) => {
+          if (dragIds.length === 0) return;
+          event.preventDefault();
+          window.dispatchEvent(
+            new CustomEvent<TrackDragDetail>(TRACK_TRASH_DROP_EVENT, { detail: { ids: dragIds } }),
+          );
+          finishTrackDrop();
+        }}
+      >
+        <Trash2 size={13} />
+        {queueView ? "移出临时列表" : "移到废纸篓"}
+      </div>
+      {(notice || importError) && (
         <div className="kd-toolbar" style={{ gap: "0.75rem" }}>
           <InlineNotice className="kd-grow" text={notice} onDismiss={() => setNotice("")} />
           <InlineNotice
@@ -159,29 +156,6 @@ export function LibraryToolbar() {
             text={importError}
             onDismiss={() => scan && setDismissedScanJob(scan.job_id)}
           />
-          {scanning && scan && (
-            <span className="kd-row kd-grow" style={{ gap: "0.5rem", minWidth: 0 }}>
-              <ProgressBar
-                className="kd-grow"
-                value={scan.total > 0 ? scan.done / scan.total : 0}
-                indeterminate={scan.total === 0}
-              />
-              <span className="kd-num kd-muted">
-                {scan.done}/{scan.total}
-              </span>
-              <span className="kd-truncate kd-faint" style={{ maxWidth: "14rem" }} title={scan.current}>
-                {scan.current}
-              </span>
-            </span>
-          )}
-          {analyze !== null && (
-            <span className="kd-row kd-grow" style={{ gap: "0.5rem", minWidth: 0 }}>
-              <AnalysisGlyph />
-              <span className="kd-muted kd-truncate" title={analyze.current}>
-                正在分析 {analyze.done}/{analyze.total} 首{analyze.current ? ` · ${analyze.current}` : ""}
-              </span>
-            </span>
-          )}
         </div>
       )}
     </>

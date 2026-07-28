@@ -10,6 +10,7 @@ import type {
   DownloadTask,
   FileOp,
   FileDisposalMode,
+  FolderForgetResult,
   FolderOpResult,
   FolderTree,
   HarmonicMatch,
@@ -32,6 +33,7 @@ import type {
   TrackPatchResult,
   VideoDownloadRequest,
   VideoInfo,
+  VjExportRequest,
   Waveform,
   WsEvent,
 } from "../types";
@@ -116,10 +118,14 @@ export const api = {
   enqueue: (body: DownloadRequest) => post<DownloadTask[]>("/downloads", body),
   startDownloads: () => post<{ started: boolean }>("/downloads/start"),
   cancelDownload: (id: string) => post<DownloadTask>(`/downloads/${id}/cancel`),
+  /** 只移除一条已结束的队列记录，避免「清空」影响其他历史任务。 */
+  removeDownload: (id: string) => request<{ removed: boolean }>(`/downloads/${id}`, { method: "DELETE" }),
   clearDownloads: () => post<{ removed: number }>("/downloads/clear"),
 
   videoResolve: (url: string) => post<VideoInfo>("/video/resolve", { url }),
   videoDownload: (body: VideoDownloadRequest) => post<DownloadTask>("/video/download", body),
+  /** 按顺序导出 VJ：由下载队列统一调度、显示进度并支持取消。 */
+  vjExport: (body: VjExportRequest) => post<DownloadTask>("/vj/export", body),
   videoCalibrate: (trackId: number, bvid: string, page = 0) =>
     post<{ offset_ms: number; score: number }>("/video/calibrate", {
       track_id: trackId,
@@ -206,6 +212,8 @@ export const api = {
   renameFolder: (path: string, name: string) =>
     post<FolderTree>("/library/folders/rename", { path, name }),
   deleteFolder: (path: string) => post<FolderTree>("/library/folders/delete", { path }),
+  /** 从软件移出文件夹：摘掉库记录 / 曲库根登记，磁盘文件不动。 */
+  forgetFolder: (path: string) => post<FolderForgetResult>("/library/folders/forget", { path }),
   initFolders: (path = "") => post<FolderTree>("/library/folders/init", { path }),
   moveFolder: (path: string, destParent: string) =>
     post<FolderTree>("/library/folders/move", { path, dest_parent: destParent }),

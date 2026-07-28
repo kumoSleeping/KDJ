@@ -13,10 +13,34 @@ import {
 import { playTrack } from "./TrackTable";
 import type { Track } from "../../types";
 
+/** 累计漂移超过这个才纠偏。太紧会每几百毫秒 seek 一次，画面就一卡一卡。 */
+const DRIFT_SEC = 0.4;
+/** 两次纠偏最短间隔，避免 seek 落地还没稳又被下一次 position 推开。 */
+const CORRECT_MIN_MS = 500;
+
 export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidden?: boolean }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const suppressSyncEventRef = useRef(false);
+  // 程序化 seek/play/pause 会异步冒泡 seeked/play/pause；挡住回传，
+  // 否则视频会把纠偏当作用户拖动，反过来拽音频时钟，形成卡顿环。
+  const suppressSyncRef = useRef(false);
+  const lastCorrectAtRef = useRef(0);
   const [error, setError] = useState("");
+
+  const withSuppressed = (run: () => void, holdMs = 0) => {
+    suppressSyncRef.current = true;
+    run();
+    if (holdMs <= 0) {
+      suppressSyncRef.current = false;
+      return;
+    }
+    const video = videoRef.current;
+    const release = () => {
+      suppressSyncRef.current = false;
+      video?.removeEventListener("seeked", release);
+    };
+    video?.addEventListener("seeked", release, { once: true });
+    window.setTimeout(release, holdMs);
+  };
 
   useEffect(() => {
     const onFocus = (event: Event) => {
@@ -34,21 +58,31 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
       const video = videoRef.current;
       if (!video) return;
       if (detail.action === "play") {
-        suppressSyncEventRef.current = true;
-        void video.play().catch(() => undefined).finally(() => {
-          suppressSyncEventRef.current = false;
-        });
+        withSuppressed(() => {
+          void video.play().catch(() => undefined);
+        }, 200);
       } else if (detail.action === "pause") {
-        suppressSyncEventRef.current = true;
-        video.pause();
-        suppressSyncEventRef.current = false;
+        withSuppressed(() => {
+          video.pause();
+        });
       } else if (detail.action === "seek" || detail.action === "position") {
         const target = detail.position ?? 0;
-        if (Number.isFinite(target) && Math.abs(video.currentTime - target) > 0.12) {
-          suppressSyncEventRef.current = true;
-          video.currentTime = Math.max(0, target);
-          suppressSyncEventRef.current = false;
+        if (!Number.isFinite(target)) return;
+        const drift = Math.abs(video.currentTime - target);
+        // 用户显式 seek：立刻跟上；position 心跳：只在双方都在播且明显漂移时纠偏。
+        // 视频已暂停时跟着音频心跳 seek，只会把静止画面拽得一卡一卡。
+        if (detail.action === "position") {
+          if (video.paused) return;
+          if (drift <= DRIFT_SEC) return;
+          const now = performance.now();
+          if (now - lastCorrectAtRef.current < CORRECT_MIN_MS) return;
+          lastCorrectAtRef.current = now;
+        } else if (drift <= 0.05) {
+          return;
         }
+        withSuppressed(() => {
+          video.currentTime = Math.max(0, target);
+        }, 500);
       }
     };
     window.addEventListener(MEDIA_SYNC_EVENT, onMediaSync);
@@ -66,18 +100,21 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
     const startAt = Number.isFinite(position) ? Math.max(0, position as number) : 0;
     if (state.action === "play") {
       const start = () => {
-        video.currentTime = startAt;
-        suppressSyncEventRef.current = true;
-        void video.play().catch(() => undefined).finally(() => {
-          suppressSyncEventRef.current = false;
-        });
+        withSuppressed(() => {
+          video.currentTime = startAt;
+          void video.play().catch(() => undefined);
+        }, 500);
       };
       video.addEventListener("loadedmetadata", start, { once: true });
       video.load();
       if (video.readyState >= HTMLMediaElement.HAVE_METADATA) start();
       return () => video.removeEventListener("loadedmetadata", start);
     }
-    if (Number.isFinite(position)) video.currentTime = startAt;
+    if (Number.isFinite(position)) {
+      withSuppressed(() => {
+        video.currentTime = startAt;
+      }, 500);
+    }
   }, [track.id]);
 
   return (
@@ -103,39 +140,35 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
           controls={!hidden}
           muted
           playsInline
-          // 正在播放的视频在播放器里有一个不可见的后台实例，详情面板只需接上
-          // 已经跑着的时钟；非播放时仍不主动读取大视频文件。
-          preload={hidden ? "auto" : "none"}
+          preload={hidden ? "none" : "metadata"}
           poster={api.coverUrl(track.id, track.modified_at)}
           src={api.videoUrl(track.id)}
           onPlay={() => {
             setError("");
+            // 后台实例只跟时钟，不回传、不抢播入口，避免双实例互拽。
+            if (hidden || suppressSyncRef.current) return;
             // 视频控件是本地视频的播放入口；让播放器加载同一曲目的音轨，
             // 之后由播放器时钟持续校正视频，避免两条媒体各自漂移。
-            if (!suppressSyncEventRef.current) playTrack(track);
-            if (!suppressSyncEventRef.current) {
-              broadcastMediaSync({ owner: "local-video", action: "play", trackId: track.id });
-            }
+            playTrack(track);
+            broadcastMediaSync({ owner: "local-video", action: "play", trackId: track.id });
           }}
           onPause={() => {
-            if (!suppressSyncEventRef.current) {
-              broadcastMediaSync({ owner: "local-video", action: "pause", trackId: track.id });
-            }
+            if (hidden || suppressSyncRef.current) return;
+            broadcastMediaSync({ owner: "local-video", action: "pause", trackId: track.id });
           }}
           onSeeked={(event) => {
-            if (!suppressSyncEventRef.current) {
-              broadcastMediaSync({
-                owner: "local-video",
-                action: "seek",
-                trackId: track.id,
-                position: event.currentTarget.currentTime,
-              });
-            }
+            if (suppressSyncRef.current || hidden) return;
+            broadcastMediaSync({
+              owner: "local-video",
+              action: "seek",
+              trackId: track.id,
+              position: event.currentTarget.currentTime,
+            });
           }}
           onError={() => setError("这个视频容器或编码暂不受系统 WebView 支持")}
         />
       </div>
-      {error && <p className="kd-djp-note">{error}</p>}
+      {error && !hidden && <p className="kd-djp-note">{error}</p>}
     </div>
   );
 }

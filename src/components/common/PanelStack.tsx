@@ -1,5 +1,6 @@
-import { Children, isValidElement, useState, type ReactNode } from "react";
+import { Children, isValidElement, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { GripVertical } from "lucide-react";
+import { clearTextSelection } from "../../lib/textSelection";
 
 export interface PanelStackProps {
   /** localStorage 的键。不同的面板栈各存各的顺序。 */
@@ -38,6 +39,14 @@ export function PanelStack({ storageKey, children }: PanelStackProps) {
   const [dragging, setDragging] = useState<string | null>(null);
   /** 悬停到哪块上了——用来画插入位置的横线。 */
   const [over, setOver] = useState<string | null>(null);
+  const pointerDragCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(
+    () => () => {
+      pointerDragCleanupRef.current?.();
+    },
+    [],
+  );
 
   const items = Children.toArray(children).filter(isValidElement);
   // React 给 Children.toArray 的 key 加了 ".$" 前缀，剥掉才是我们写的那个
@@ -56,9 +65,74 @@ export function PanelStack({ storageKey, children }: PanelStackProps) {
     // 新面板的 id，拿它当基准会让新面板在第一次拖动时凭空跳位
     const ids = sorted.map(idOf);
     const next = ids.filter((id) => id !== from);
-    next.splice(ids.indexOf(to), 0, from);
+    // 目标在移除源面板后可能向前挪一格，必须按 next 找位置；否则从上往下拖
+    // 会落到目标的下面，看起来就像排序失效。
+    next.splice(next.indexOf(to), 0, from);
     localStorage.setItem(storageKey, JSON.stringify(next));
     setOrder(next);
+  };
+
+  /**
+   * WKWebView 的原生 draggable 会偶发只触发 dragstart、却不触发 drop，
+   * 所以面板排序直接跟踪指针；松开时按坐标找目标面板。这也让触摸屏可用。
+   */
+  const beginPointerDrag = (event: ReactPointerEvent<HTMLButtonElement>, from: string) => {
+    if (!event.isPrimary || (event.pointerType === "mouse" && event.button !== 0)) return;
+    event.preventDefault();
+
+    pointerDragCleanupRef.current?.();
+    setDragging(null);
+    setOver(null);
+
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let active = false;
+
+    const slotAt = (x: number, y: number) => {
+      const hit = document.elementFromPoint(x, y) as HTMLElement | null;
+      const slot = hit?.closest<HTMLElement>(".kd-panel-slot[data-panel-stack]");
+      return slot?.dataset.panelStack === storageKey ? slot : null;
+    };
+    const stopTracking = () => {
+      window.removeEventListener("pointermove", onMove, true);
+      window.removeEventListener("pointerup", onUp, true);
+      window.removeEventListener("pointercancel", onCancel, true);
+      pointerDragCleanupRef.current = null;
+    };
+    const finish = () => {
+      stopTracking();
+      setDragging(null);
+      setOver(null);
+    };
+    const onMove = (move: PointerEvent) => {
+      if (move.pointerId !== pointerId) return;
+      const distance = Math.hypot(move.clientX - startX, move.clientY - startY);
+      if (!active && distance < 4) return;
+      move.preventDefault();
+      if (!active) {
+        active = true;
+        clearTextSelection();
+        setDragging(from);
+      }
+      const target = slotAt(move.clientX, move.clientY)?.dataset.panelId ?? null;
+      setOver((current) => (current === target ? current : target));
+    };
+    const onUp = (up: PointerEvent) => {
+      if (up.pointerId !== pointerId) return;
+      const target = slotAt(up.clientX, up.clientY)?.dataset.panelId ?? null;
+      const shouldCommit = active && target !== null;
+      finish();
+      if (shouldCommit) commit(from, target);
+    };
+    const onCancel = (cancel: PointerEvent) => {
+      if (cancel.pointerId === pointerId) finish();
+    };
+
+    pointerDragCleanupRef.current = stopTracking;
+    window.addEventListener("pointermove", onMove, { capture: true, passive: false });
+    window.addEventListener("pointerup", onUp, true);
+    window.addEventListener("pointercancel", onCancel, true);
   };
 
   return (
@@ -69,20 +143,10 @@ export function PanelStack({ storageKey, children }: PanelStackProps) {
           <div
             key={id}
             className="kd-panel-slot"
+            data-panel-stack={storageKey}
+            data-panel-id={id}
             data-dragging={dragging === id ? "true" : undefined}
             data-over={over === id && dragging !== id ? "true" : undefined}
-            onDragOver={(event) => {
-              if (!dragging) return;
-              event.preventDefault();
-              setOver(id);
-            }}
-            onDragLeave={() => setOver((current) => (current === id ? null : current))}
-            onDrop={(event) => {
-              event.preventDefault();
-              if (dragging) commit(dragging, id);
-              setDragging(null);
-              setOver(null);
-            }}
           >
             {/* 只有这个把手可拖：整块可拖的话，面板里那些按钮、输入框、
                 波形上的点击拖动全都会先被拖拽劫走 */}
@@ -91,17 +155,7 @@ export function PanelStack({ storageKey, children }: PanelStackProps) {
               className="kd-panel-grip"
               aria-label="拖动调整面板顺序"
               title="拖动调整顺序"
-              draggable
-              onDragStart={(event) => {
-                setDragging(id);
-                event.dataTransfer.effectAllowed = "move";
-                // Firefox 不设 data 就不触发 drag 事件
-                event.dataTransfer.setData("text/plain", id);
-              }}
-              onDragEnd={() => {
-                setDragging(null);
-                setOver(null);
-              }}
+              onPointerDown={(event) => beginPointerDrag(event, id)}
             >
               <GripVertical size={12} />
             </button>

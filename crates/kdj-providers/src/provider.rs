@@ -9,7 +9,7 @@
 //! provider 不知道别人的存在，加第五个平台不用改任何已有实现。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -18,12 +18,11 @@ use kdj_core::models::{
 };
 use tokio_util::sync::CancellationToken;
 
-/// provider 需要的全部外部配置，由上层从 `Settings` 组装后注入。
-///
-/// provider 不读全局配置、不落自己的 settings 文件——这样才好测试、好多实例。
+/// 下载过程中会读到的可变设置。放进 `Arc<RwLock<_>>`，所有 provider 的
+/// `ProviderContext` clone 共享同一份——改设置不用重建 provider，也不会继续
+/// 往启动时的旧目录里灌文件（用户以为「下到 A，结果歌在 B / 列表里消失」）。
 #[derive(Debug, Clone)]
-pub struct ProviderContext {
-    pub data_dir: PathBuf,
+pub struct ProviderLiveSettings {
     pub download_dir: PathBuf,
     pub filename_template: String,
     pub default_quality: Quality,
@@ -34,7 +33,61 @@ pub struct ProviderContext {
     pub video_format: String,
 }
 
+/// provider 需要的全部外部配置，由上层从 `Settings` 组装后注入。
+///
+/// provider 不读全局配置、不落自己的 settings 文件——这样才好测试、好多实例。
+#[derive(Debug, Clone)]
+pub struct ProviderContext {
+    pub data_dir: PathBuf,
+    live: Arc<RwLock<ProviderLiveSettings>>,
+}
+
 impl ProviderContext {
+    pub fn new(data_dir: PathBuf, live: ProviderLiveSettings) -> Self {
+        Self {
+            data_dir,
+            live: Arc::new(RwLock::new(live)),
+        }
+    }
+
+    /// 刷新所有共享这份 context 的 provider 看到的下载目录 / 模板等。
+    pub fn apply_live(&self, live: ProviderLiveSettings) {
+        *self
+            .live
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = live;
+    }
+
+    fn live(&self) -> std::sync::RwLockReadGuard<'_, ProviderLiveSettings> {
+        self.live
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    pub fn download_dir(&self) -> PathBuf {
+        self.live().download_dir.clone()
+    }
+
+    pub fn filename_template(&self) -> String {
+        self.live().filename_template.clone()
+    }
+
+    pub fn default_quality(&self) -> Quality {
+        self.live().default_quality
+    }
+
+    pub fn netease_use_download_api(&self) -> bool {
+        self.live().netease_use_download_api
+    }
+
+    pub fn soundcloud_enabled(&self) -> bool {
+        self.live().soundcloud_enabled
+    }
+
+    pub fn video_format(&self) -> String {
+        self.live().video_format.clone()
+    }
+
     /// 各平台登录态落盘目录。
     pub fn session_dir(&self) -> PathBuf {
         self.data_dir.join("sessions")
@@ -42,14 +95,19 @@ impl ProviderContext {
 
     /// 按平台分子目录存放下载文件，顺手建目录。
     pub fn platform_dir(&self, platform: Platform) -> std::io::Result<PathBuf> {
-        let target = self.download_dir.join(platform.download_dir_name());
+        let target = self.download_dir().join(platform.download_dir_name());
         std::fs::create_dir_all(&target)?;
         Ok(target)
     }
 
     /// 视频落盘目录。和音频分开：视频动辄几百 MB，混进音乐目录会被曲库扫描一起扫走。
     pub fn video_output_dir(&self) -> std::io::Result<PathBuf> {
-        let target = self.video_dir.clone().unwrap_or_else(|| self.download_dir.clone());
+        let live = self.live();
+        let target = live
+            .video_dir
+            .clone()
+            .unwrap_or_else(|| live.download_dir.clone());
+        drop(live);
         std::fs::create_dir_all(&target)?;
         Ok(target)
     }

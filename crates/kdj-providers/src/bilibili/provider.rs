@@ -338,10 +338,13 @@ impl BilibiliProvider {
                 PlayUrlData::Single { container, .. } => container.clone(),
                 _ => "mp4".to_string(),
             }
-        } else if self.ctx.video_format.is_empty() {
-            "mp4".to_string()
         } else {
-            self.ctx.video_format.clone()
+            let format = self.ctx.video_format();
+            if format.is_empty() {
+                "mp4".to_string()
+            } else {
+                format
+            }
         };
         let mut stem = sanitize_filename_value(&title, &bvid);
         if req.offset_ms != 0 {
@@ -772,7 +775,6 @@ impl MusicProvider for BilibiliProvider {
     /// 让 downloader 不用特判平台。
     async fn download(&self, job: DownloadJob<'_>) -> Result<PathBuf> {
         let req = VideoDownloadRequest {
-            url: String::new(),
             bvid: job.source.key.clone(),
             page_index: job
                 .source
@@ -782,9 +784,10 @@ impl MusicProvider for BilibiliProvider {
                 .unwrap_or(0) as usize,
             // 搜索结果没有逐条选画质的入口，1080 是不吃亏的默认
             max_height: 1080,
-            audio_only: false,
-            transcode: false,
-            offset_ms: 0,
+            title: job.source.title.clone(),
+            artist: job.source.artist_text(),
+            cover: job.source.cover.clone(),
+            ..Default::default()
         };
         self.download_video(&req, &job.cancel, &job.progress).await
     }

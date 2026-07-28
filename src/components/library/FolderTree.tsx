@@ -1,47 +1,56 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
   BarChart3,
+  Clapperboard,
   ClipboardPaste,
   Folder,
+  FolderDown,
   FolderInput,
   FolderOpen,
   FolderPlus,
   HardDrive,
   Library,
   ListMusic,
-  Music2,
-  Clapperboard,
+  ListX,
   MoreHorizontal,
+  Music2,
   PanelLeftClose,
   PanelLeftOpen,
   PencilLine,
   Trash2,
 } from "lucide-react";
 import { api } from "../../lib/api";
-import { hasTextSelectionWithin } from "../../lib/textSelection";
+import { FOLDER_DROP_PATH_ATTR } from "../../lib/folderDrop";
+import {
+  enqueueSearchDrop,
+  isSearchDownloadDrag,
+} from "../../lib/searchDrag";
+import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
+import {
+  finishTrackDrop,
+  isTrackDrag,
+  readTrackDragIds,
+  TRACK_DND_TYPE,
+} from "../../lib/trackDrag";
 import { useAppStore } from "../../stores/appStore";
 import { useLibraryStore } from "../../stores/libraryStore";
 import { useQueueStore } from "../../stores/queueStore";
+import { useVjExportStore } from "../../stores/vjExportStore";
 import type { FolderNode } from "../../types";
-import { InlineNotice } from "../common";
+import { ContextMenu, InlineNotice } from "../common";
 
-/** 拖曲目到文件夹用的 MIME。自定义类型才能在 dragover 阶段就认出是不是自家的拖拽。 */
-export const TRACK_DND_TYPE = "application/x-kdj-tracks";
+/** @deprecated 请从 `lib/trackDrag` 引用；保留 re-export 以免旧 import 断掉。 */
+export { TRACK_DND_TYPE };
 /** 拖文件夹换顺序用的 MIME，和上面分开，dragover 时才好区别对待。 */
 const FOLDER_DND_TYPE = "application/x-kdj-folder";
 const QUEUE_DROP_TARGET = "__kd_queue__";
 
 function trackIdsFromDrop(event: React.DragEvent): number[] {
-  try {
-    const parsed: unknown = JSON.parse(event.dataTransfer.getData(TRACK_DND_TYPE));
-    return Array.isArray(parsed)
-      ? parsed.filter((id): id is number => typeof id === "number" && Number.isFinite(id))
-      : [];
-  } catch {
-    return [];
-  }
+  const ids = readTrackDragIds(event.dataTransfer);
+  finishTrackDrop();
+  return ids;
 }
 
 async function enqueueTrackIds(ids: number[]): Promise<{ added: number; failed: number }> {
@@ -54,27 +63,57 @@ async function enqueueTrackIds(ids: number[]): Promise<{ added: number; failed: 
 
 const cleanPath = (path: string | undefined) => (path ?? "").replace(/\/+$/, "");
 
-function FolderPurposeMarks({ path, audioDir, videoDir }: { path: string; audioDir?: string; videoDir?: string }) {
+function folderPurpose(path: string, audioDir?: string, videoDir?: string) {
   const normalized = cleanPath(path);
   const audio = normalized !== "" && normalized === cleanPath(audioDir);
   const video = normalized !== "" && normalized === cleanPath(videoDir?.trim() ? videoDir : audioDir);
   if (!audio && !video) return null;
+  return {
+    audio,
+    video,
+    label: audio && video ? "默认音乐和视频下载目录" : audio ? "默认音乐下载目录" : "默认视频下载目录",
+  };
+}
+
+/**
+ * 文件夹类型与“默认下载落点”只占一个图标位。
+ * 旧版在 Folder 后面再排 Music/Clapperboard，看起来像两个独立操作；
+ * 默认目录现在直接用 FolderDown，具体是音乐、视频还是两者仍由 title 说明。
+ */
+function FolderGlyph({
+  path,
+  audioDir,
+  videoDir,
+  root,
+  open,
+  size,
+}: {
+  path: string;
+  audioDir?: string;
+  videoDir?: string;
+  root: boolean;
+  open: boolean;
+  size: number;
+}) {
+  const purpose = folderPurpose(path, audioDir, videoDir);
+  if (purpose) {
+    return (
+      <span className="kd-folder-purpose" title={purpose.label} aria-label={purpose.label}>
+        <FolderDown size={size} />
+      </span>
+    );
+  }
   return (
-    <span
-      className="kd-folder-purpose"
-      title={audio && video ? "默认音乐和视频下载目录" : audio ? "默认音乐下载目录" : "默认视频下载目录"}
-    >
-      {audio && <Music2 size={10} />}
-      {video && <Clapperboard size={10} />}
-    </span>
+    root ? <HardDrive size={size} /> : open ? <FolderOpen size={size} /> : <Folder size={size} />
   );
 }
 
-/** 所有“添加音乐”入口共用同一个动作：选目录后登记、扫描并自动分析。 */
+/** 所有“添加音乐”入口共用同一个动作：选目录后登记、扫描；是否自动分析由全局开关决定。 */
 export async function pickAndScanFolders(): Promise<void> {
   const paths = await window.kdj?.pickFolders();
   if (!paths?.length) return;
-  await useLibraryStore.getState().startScan(paths, true);
+  const autoAnalyze = useAppStore.getState().settings?.auto_analyze ?? true;
+  await useLibraryStore.getState().startScan(paths, autoAnalyze);
 }
 
 function flattenFolders(nodes: FolderNode[]): FolderNode[] {
@@ -91,11 +130,16 @@ export function NarrowFolderRail({ expanded, onToggle }: { expanded: boolean; on
   const queueView = useLibraryStore((state) => state.queueView);
   const setFilter = useLibraryStore((state) => state.setFilter);
   const setQueueView = useLibraryStore((state) => state.setQueueView);
-  const setListMode = useAppStore((state) => state.setListMode);
   const settings = useAppStore((state) => state.settings);
   const applyFolderOp = useLibraryStore((state) => state.applyFolderOp);
   const [error, setError] = useState("");
   const [narrowDrop, setNarrowDrop] = useState("");
+
+  useEffect(() => {
+    const clearDrop = () => setNarrowDrop("");
+    window.addEventListener("dragend", clearDrop, true);
+    return () => window.removeEventListener("dragend", clearDrop, true);
+  }, []);
 
   if (expanded) {
     return (
@@ -112,7 +156,6 @@ export function NarrowFolderRail({ expanded, onToggle }: { expanded: boolean; on
   const choose = (folder: string) => {
     setQueueView(false);
     setFilter({ folder, folderDeep: false });
-    setListMode("library");
   };
   return (
     <aside className="kd-narrow-folder-rail kd-scroll" aria-label="快捷文件夹栏">
@@ -135,15 +178,15 @@ export function NarrowFolderRail({ expanded, onToggle }: { expanded: boolean; on
         data-active={queueView || undefined}
         data-drop={narrowDrop === QUEUE_DROP_TARGET ? "true" : undefined}
         title="临时列表"
-        onClick={() => { setQueueView(true); setListMode("library"); }}
-        onDragOver={(event) => {
-          if (!event.dataTransfer.types.includes(TRACK_DND_TYPE)) return;
+        onClick={() => { setQueueView(true); }}
+        onDragOverCapture={(event) => {
+          if (!isTrackDrag(event)) return;
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
           setNarrowDrop(QUEUE_DROP_TARGET);
         }}
         onDragLeave={() => setNarrowDrop("")}
-        onDrop={(event) => {
+        onDropCapture={(event) => {
           event.preventDefault();
           const ids = trackIdsFromDrop(event);
           setNarrowDrop("");
@@ -167,29 +210,48 @@ export function NarrowFolderRail({ expanded, onToggle }: { expanded: boolean; on
         <button
           key={node.path}
           type="button"
+          {...{ [FOLDER_DROP_PATH_ATTR]: node.path }}
           data-active={!queueView && filter.folder === node.path || undefined}
+          data-drop={narrowDrop === node.path ? "true" : undefined}
           title={node.path}
           onClick={() => choose(node.path)}
-          onDragOver={(event) => {
-            if (!event.dataTransfer.types.includes(TRACK_DND_TYPE)) return;
+          onDragOverCapture={(event) => {
+            if (isSearchDownloadDrag(event)) {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "copy";
+              setNarrowDrop(node.path);
+              return;
+            }
+            if (!isTrackDrag(event)) return;
             event.preventDefault();
-            event.dataTransfer.dropEffect = event.altKey ? "copy" : "move";
+            event.dataTransfer.dropEffect = event.altKey ? "move" : "copy";
+            setNarrowDrop(node.path);
           }}
-          onDrop={(event) => {
+          onDragLeave={() => setNarrowDrop((current) => (current === node.path ? "" : current))}
+          onDropCapture={(event) => {
             event.preventDefault();
+            setNarrowDrop("");
+            if (isSearchDownloadDrag(event)) {
+              void enqueueSearchDrop(event, node.path).catch((reason: unknown) =>
+                setError((reason as Error).message),
+              );
+              return;
+            }
             const ids = trackIdsFromDrop(event);
             if (ids.length === 0) return;
-            void applyFolderOp(ids, node.path, event.altKey ? "link" : "move").catch(
+            void applyFolderOp(ids, node.path, event.altKey ? "move" : "link").catch(
               (reason: unknown) => setError((reason as Error).message),
             );
           }}
         >
           <span className="kd-narrow-folder-icons">
-            {node.is_root ? <HardDrive size={14} /> : <Folder size={14} />}
-            <FolderPurposeMarks
+            <FolderGlyph
               path={node.path}
               audioDir={settings?.download_dir}
               videoDir={settings?.video_download_dir}
+              root={node.is_root}
+              open={false}
+              size={14}
             />
           </span>
           <small>{node.name}</small>
@@ -255,11 +317,12 @@ export function FolderTree() {
   const paste = useLibraryStore((state) => state.paste);
   const startScan = useLibraryStore((state) => state.startScan);
   const startAnalyze = useLibraryStore((state) => state.startAnalyze);
-  // 动了文件夹或曲库搜索 = 现在关心的是本地，把中间那对切回曲库。
-  // 搜索结果不丢，列表面板顶边的标签随时能切回去。
-  const setListMode = useAppStore((state) => state.setListMode);
+  const forgetFolder = useLibraryStore((state) => state.forgetFolder);
   const settings = useAppStore((state) => state.settings);
+  const saveSettings = useAppStore((state) => state.saveSettings);
   const queueCount = useQueueStore((state) => state.ids.length);
+  /** 移出曲库的二次确认：第一次上膛，第二次才执行（和曲目表删文件同套路）。 */
+  const [forgetArmed, setForgetArmed] = useState("");
 
   const roots = folders?.roots ?? [];
   const [expanded, setExpanded] = useExpanded(roots);
@@ -267,6 +330,7 @@ export function FolderTree() {
   const [dropTarget, setDropTarget] = useState("");
   const [dropEdge, setDropEdge] = useState<"" | "before" | "after">("");
   const [menu, setMenu] = useState<MenuState | null>(null);
+  const [newFolder, setNewFolder] = useState<{ parent: string; name: string; saving: boolean } | null>(null);
   /**
    * 文件夹操作失败就地贴在这一栏底下。原来走的是全局弹窗，
    * 但拖拽/改名这类操作的"哪里出错了"必须和被操作的那棵树待在一起，
@@ -274,10 +338,18 @@ export function FolderTree() {
    */
   const [notice, setNotice] = useState("");
 
+  useEffect(() => {
+    const clearDrop = () => {
+      setDropTarget("");
+      setDropEdge("");
+    };
+    window.addEventListener("dragend", clearDrop, true);
+    return () => window.removeEventListener("dragend", clearDrop, true);
+  }, []);
+
   /**
-   * 「添加文件夹」是一个动作，不是一次作业：选完目录之后登记曲库根、扫描、
-   * 把新曲目排进分析队列这三件事全在后台自动做完，用户不需要再点第二下。
-   * 所以 `startScan` 的 analyze 恒为 true——它是这个动作语义的一部分，不是可选项。
+   * 「添加文件夹」是一个动作：选完目录之后登记曲库根并扫描；自动分析开着时，
+   * 新曲目会继续在后台分析，关掉时只入库，用户可稍后从右键菜单手动分析。
    *
    * 失败原因分两处：这里 catch 得到的是"任务都没起来"（比如挑的路径没权限），
    * 真正扫描过程中的失败随 `scan.progress` 的终局事件走，显示在曲目表上方
@@ -293,8 +365,6 @@ export function FolderTree() {
       setNotice(`添加文件夹失败：${(error as Error).message}`);
     }
   };
-  const menuRef = useRef<HTMLDivElement | null>(null);
-
   useEffect(() => {
     if (useLibraryStore.getState().folders === null) void refreshFolders();
   }, [refreshFolders]);
@@ -308,22 +378,10 @@ export function FolderTree() {
     });
   }, [folders]);
 
-  // 点别处 / 按 Esc 关掉右键菜单
+  // 换节点时清掉「移出」上膛态（关闭由 ContextMenu 自己处理）
   useEffect(() => {
-    if (!menu) return;
-    const close = (event: MouseEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) setMenu(null);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenu(null);
-    };
-    window.addEventListener("mousedown", close);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [menu]);
+    setForgetArmed("");
+  }, [menu?.node.path]);
 
   const toggle = (path: string) =>
     setExpanded((prev) => {
@@ -335,7 +393,7 @@ export function FolderTree() {
 
   /**
    * 点开一个还没入库的目录 = 顺手把它导进来。用户不该为了看见歌先去点一次「添加文件夹」。
-   * 和「添加文件夹」一样，导入完自动排进分析队列——分析是后台该自己做完的事。
+   * 自动分析开着时导入完继续排队；暂停时只导入。
    * 进行中的反馈就是那颗计数徽标变成「…」，不再弹窗。
    */
   const importPending = (node: FolderNode) => {
@@ -350,7 +408,7 @@ export function FolderTree() {
 
   const runOp = (ids: number[], dest: string, alt: boolean) => {
     if (ids.length === 0) return;
-    const op = alt ? "link" : "move";
+    const op = alt ? "move" : "link";
     setNotice("");
     void applyFolderOp(ids, dest, op)
       .then((result) => {
@@ -391,6 +449,25 @@ export function FolderTree() {
       .catch((error: unknown) => setNotice(`排序保存失败：${(error as Error).message}`));
   };
 
+  const commitNewFolder = () => {
+    if (!newFolder || newFolder.saving) return;
+    const name = newFolder.name.trim();
+    if (!name) {
+      setNewFolder(null);
+      return;
+    }
+    setNewFolder({ ...newFolder, saving: true });
+    setNotice("");
+    void api
+      .createFolder(newFolder.parent, name)
+      .then(() => refreshFolders())
+      .then(() => setNewFolder(null))
+      .catch((error: unknown) => {
+        setNewFolder((current) => current ? { ...current, saving: false } : current);
+        setNotice(`新建文件夹失败：${(error as Error).message}`);
+      });
+  };
+
   const render = (node: FolderNode, depth: number) => {
     const open = expanded.has(node.path);
     // 临时列表视图开着时没有任何文件夹算"当前"——中列显示的不是文件夹内容
@@ -399,6 +476,7 @@ export function FolderTree() {
       <div key={node.path}>
         <div
           className="kd-folder"
+          {...{ [FOLDER_DROP_PATH_ATTR]: node.path }}
           data-active={active}
           data-drop={dropTarget === node.path && dropEdge === ""}
           data-edge={dropTarget === node.path ? dropEdge || undefined : undefined}
@@ -408,7 +486,6 @@ export function FolderTree() {
           // 而且它没有"父目录的清单"可写。
           onClick={(event) => {
             if (hasTextSelectionWithin(event.currentTarget)) return;
-            setListMode("library");
             // 进文件夹默认按手排顺序看（set 是按演出顺序排的）；
             // 回到全库时手排没有意义，还原成默认的按入库时间。
             setFilter(
@@ -422,8 +499,8 @@ export function FolderTree() {
             event.preventDefault();
             setMenu({ node, x: event.clientX, y: event.clientY });
           }}
-          onDragOver={(event) => {
-            const types = event.dataTransfer.types;
+          onDragOverCapture={(event) => {
+            const types = Array.from(event.dataTransfer.types);
             if (types.includes(FOLDER_DND_TYPE)) {
               event.preventDefault();
               event.dataTransfer.dropEffect = "move";
@@ -435,10 +512,17 @@ export function FolderTree() {
               setDropEdge(ratio < 0.3 ? "before" : ratio > 0.7 ? "after" : "");
               return;
             }
-            if (!types.includes(TRACK_DND_TYPE)) return;
+            if (isSearchDownloadDrag(event)) {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "copy";
+              setDropTarget(node.path);
+              setDropEdge("");
+              return;
+            }
+            if (!isTrackDrag(event)) return;
             event.preventDefault();
-            // Option/Alt = 链接，其余 = 移动。光标形状先把这个意图说清楚。
-            event.dataTransfer.dropEffect = event.altKey ? "copy" : "move";
+            // 默认创建硬链接；按住 Option/Alt 才移动原文件。光标先把意图说清楚。
+            event.dataTransfer.dropEffect = event.altKey ? "move" : "copy";
             setDropTarget(node.path);
             setDropEdge("");
           }}
@@ -449,7 +533,7 @@ export function FolderTree() {
               return "";
             })
           }
-          onDrop={(event) => {
+          onDropCapture={(event) => {
             event.preventDefault();
             const edge = dropEdge;
             setDropTarget("");
@@ -490,13 +574,16 @@ export function FolderTree() {
               }
               return;
             }
-            const raw = event.dataTransfer.getData(TRACK_DND_TYPE);
-            if (!raw) return;
-            try {
-              runOp(JSON.parse(raw) as number[], node.path, event.altKey);
-            } catch {
-              setNotice("拖拽数据读不出来");
+            if (isSearchDownloadDrag(event)) {
+              // 搜到的歌/视频拖进文件夹 = 入队并落进这里；左表立刻出现待下载行。
+              void enqueueSearchDrop(event, node.path).catch((error: unknown) =>
+                setNotice((error as Error).message),
+              );
+              return;
             }
+            const ids = trackIdsFromDrop(event);
+            if (ids.length === 0) return;
+            runOp(ids, node.path, event.altKey);
           }}
         >
           <button
@@ -524,6 +611,7 @@ export function FolderTree() {
             onDragStart={(event) => {
               if (node.is_root) return;
               event.stopPropagation();
+              clearTextSelection();
               event.dataTransfer.setData(
                 FOLDER_DND_TYPE,
                 JSON.stringify({ parent: node.parent, name: node.name } satisfies DragInfo),
@@ -531,19 +619,15 @@ export function FolderTree() {
               event.dataTransfer.effectAllowed = "move";
             }}
           >
-            {node.is_root ? (
-              <HardDrive size={13} />
-            ) : open && node.children.length > 0 ? (
-              <FolderOpen size={13} />
-            ) : (
-              <Folder size={13} />
-            )}
+            <FolderGlyph
+              path={node.path}
+              audioDir={settings?.download_dir}
+              videoDir={settings?.video_download_dir}
+              root={node.is_root}
+              open={open && node.children.length > 0}
+              size={13}
+            />
           </span>
-          <FolderPurposeMarks
-            path={node.path}
-            audioDir={settings?.download_dir}
-            videoDir={settings?.video_download_dir}
-          />
           <span className="kd-truncate">{node.name}</span>
           {/* 未入库的用不同的样子标出来，点一下就导入——空文件夹和"没扫过"是两回事 */}
           {node.pending_count > 0 ? (
@@ -570,6 +654,28 @@ export function FolderTree() {
             <MoreHorizontal size={12} />
           </button>
         </div>
+        {newFolder?.parent === node.path && (
+          <div
+            className="kd-folder kd-folder-new"
+            style={{ paddingLeft: `${0.35 + (depth + 1) * 0.85}rem` }}
+          >
+            <span className="kd-folder-caret" />
+            <Folder size={13} />
+            <input
+              autoFocus
+              aria-label="新文件夹名称"
+              value={newFolder.name}
+              disabled={newFolder.saving}
+              onFocus={(event) => event.currentTarget.select()}
+              onChange={(event) => setNewFolder({ ...newFolder, name: event.target.value })}
+              onKeyDown={(event) => {
+                event.stopPropagation();
+                if (event.key === "Enter") commitNewFolder();
+                if (event.key === "Escape") setNewFolder(null);
+              }}
+            />
+          </div>
+        )}
         {open && node.children.map((child) => render(child, depth + 1))}
       </div>
     );
@@ -605,11 +711,10 @@ export function FolderTree() {
           data-drop={dropTarget === QUEUE_DROP_TARGET}
           style={{ paddingLeft: "0.35rem" }}
           onClick={() => {
-            setListMode("library");
             setQueueView(true);
           }}
-          onDragOver={(event) => {
-            if (!event.dataTransfer.types.includes(TRACK_DND_TYPE)) return;
+          onDragOverCapture={(event) => {
+            if (!isTrackDrag(event)) return;
             event.preventDefault();
             event.dataTransfer.dropEffect = "copy";
             setDropTarget(QUEUE_DROP_TARGET);
@@ -618,7 +723,7 @@ export function FolderTree() {
           onDragLeave={() =>
             setDropTarget((current) => (current === QUEUE_DROP_TARGET ? "" : current))
           }
-          onDrop={(event) => {
+          onDropCapture={(event) => {
             event.preventDefault();
             const ids = trackIdsFromDrop(event);
             setDropTarget("");
@@ -638,7 +743,6 @@ export function FolderTree() {
           data-active={filter.folder === "" && !queueView}
           style={{ paddingLeft: "0.35rem" }}
           onClick={() => {
-            setListMode("library");
             setFilter({ folder: "", sort: "added_at", order: "desc" });
           }}
         >
@@ -668,22 +772,14 @@ export function FolderTree() {
       />
 
       {menu && (
-        <div
-          ref={menuRef}
-          className="kd-context-menu"
-          style={{ left: menu.x, top: menu.y }}
-          role="menu"
-        >
+        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
           <button
             type="button"
             onClick={() => {
+              const parent = menu.node.path;
               setMenu(null);
-              const name = prompt("新文件夹名称");
-              if (!name) return;
-              void api
-                .createFolder(menu.node.path, name)
-                .then(() => refreshFolders())
-                .catch((error: unknown) => setNotice((error as Error).message));
+              setExpanded((current) => new Set(current).add(parent));
+              setNewFolder({ parent, name: "新建文件夹", saving: false });
             }}
           >
             <FolderPlus size={12} />
@@ -733,6 +829,68 @@ export function FolderTree() {
             <BarChart3 size={12} />
             分析此文件夹
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              const folder = menu.node.path;
+              setMenu(null);
+              useAppStore.getState().openVjExportPanel();
+              void useVjExportStore.getState().open(folder);
+            }}
+          >
+            <Clapperboard size={12} />
+            按顺序导出 VJ
+          </button>
+          {(() => {
+            const path = menu.node.path;
+            const audioPath = cleanPath(settings?.download_dir);
+            const videoRaw = settings?.video_download_dir?.trim() ?? "";
+            const videoPath = cleanPath(videoRaw || settings?.download_dir);
+            const isAudio = cleanPath(path) === audioPath;
+            const isVideo = cleanPath(path) === videoPath;
+            // 音乐/视频目录还绑在一起时，设下载文件夹两边一起改，和下载栏同一语义。
+            const linked = audioPath !== "" && audioPath === videoPath;
+            return (
+              <>
+                <button
+                  type="button"
+                  disabled={isAudio && (linked || isVideo)}
+                  title={
+                    isAudio && (linked || isVideo)
+                      ? "已经是当前下载文件夹"
+                      : linked
+                        ? "下载的音乐和视频都会进这里"
+                        : "下载的音乐会进这里"
+                  }
+                  onClick={() => {
+                    setMenu(null);
+                    void saveSettings(
+                      linked
+                        ? { download_dir: path, video_download_dir: path }
+                        : { download_dir: path },
+                    ).catch((error: unknown) => setNotice((error as Error).message));
+                  }}
+                >
+                  <Music2 size={12} />
+                  设为下载文件夹{isAudio ? " · 当前" : ""}
+                </button>
+                <button
+                  type="button"
+                  disabled={isVideo}
+                  title={isVideo ? "已经是当前视频下载目录" : "只把视频下载指到这里；音乐目录不动"}
+                  onClick={() => {
+                    setMenu(null);
+                    void saveSettings({ video_download_dir: path }).catch((error: unknown) =>
+                      setNotice((error as Error).message),
+                    );
+                  }}
+                >
+                  <Clapperboard size={12} />
+                  设为视频下载目录{isVideo ? " · 当前" : ""}
+                </button>
+              </>
+            );
+          })()}
           {/* 粘贴：底栏那颗按钮删掉之后，这里是它唯一的界面入口。
               键盘走 Cmd/Ctrl+V（见 useLibraryClipboard）。 */}
           <button
@@ -766,13 +924,58 @@ export function FolderTree() {
           <button
             type="button"
             data-danger="true"
+            title={
+              menu.node.is_root
+                ? "注销这个曲库根，并把下面的歌从软件里摘掉；磁盘文件不动"
+                : "把这个文件夹里的歌从软件里摘掉；磁盘文件不动"
+            }
+            onClick={() => {
+              const path = menu.node.path;
+              const count = menu.node.total_count;
+              const isRoot = menu.node.is_root;
+              // 有曲目时上膛一次，避免右键误触把整库摘空
+              if (count > 0 && forgetArmed !== path) {
+                setForgetArmed(path);
+                return;
+              }
+              setMenu(null);
+              setForgetArmed("");
+              void forgetFolder(path)
+                .then(async (removed) => {
+                  try {
+                    const next = await api.getSettings();
+                    useAppStore.setState({ settings: next });
+                  } catch {
+                    /* 设置晚一拍不挡主流程 */
+                  }
+                  setNotice(
+                    removed > 0
+                      ? `已移出曲库 ${removed} 首（文件仍在磁盘）`
+                      : isRoot
+                        ? "已移出曲库根目录（文件仍在磁盘）"
+                        : "这个文件夹里本来就没有入库曲目",
+                  );
+                })
+                .catch((error: unknown) => setNotice((error as Error).message));
+            }}
+          >
+            <ListX size={12} />
+            {forgetArmed === menu.node.path && menu.node.total_count > 0
+              ? `确认移出 ${menu.node.total_count} 首？文件保留`
+              : menu.node.is_root
+                ? `移出曲库根${menu.node.total_count > 0 ? `（${menu.node.total_count} 首）` : ""}（保留文件）`
+                : `移出曲库${menu.node.total_count > 0 ? `（${menu.node.total_count} 首）` : ""}（保留文件）`}
+          </button>
+          <button
+            type="button"
+            data-danger="true"
             disabled={menu.node.is_root || menu.node.total_count > 0}
             title={
               menu.node.is_root
-                ? "曲库根目录去设置里移除"
+                ? "曲库根请用上面的「移出曲库根」；这里只删磁盘上空文件夹"
                 : menu.node.total_count > 0
-                  ? "里面还有曲目，先移走再删"
-                  : undefined
+                  ? "里面还有曲目，先移出曲库或移走再删"
+                  : "从磁盘删除这个空文件夹"
             }
             onClick={() => {
               setMenu(null);
@@ -788,7 +991,7 @@ export function FolderTree() {
             <Trash2 size={12} />
             删除空文件夹
           </button>
-        </div>
+        </ContextMenu>
       )}
     </div>
   );

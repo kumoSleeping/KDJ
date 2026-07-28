@@ -1,0 +1,51 @@
+/** 左侧真实文件夹的稳定 DOM 标记；不要拿 title 当数据接口。 */
+export const FOLDER_DROP_PATH_ATTR = "data-kd-folder-drop-path";
+/** 当前曲目表也能接搜索结果；值就是这张表正在看的目标文件夹。 */
+export const SEARCH_DROP_PATH_ATTR = "data-kd-search-drop-path";
+/** 下载队列的稳定落点标记，供 WKWebView 丢失原生 drop 时由 dragend 坐标兜底。 */
+export const SEARCH_QUEUE_DROP_ATTR = "data-kd-search-queue-drop";
+
+/**
+ * 原生 drop 在 WKWebView 里偶尔不送达，但 dragend 仍带着松手坐标。
+ * 用坐标重新命中文件夹，让 dragend 能作为最后一道可靠兜底。
+ */
+export function folderDropElementAt(clientX: number, clientY: number): HTMLElement | null {
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+  return document
+    .elementFromPoint(clientX, clientY)
+    ?.closest<HTMLElement>(`[${FOLDER_DROP_PATH_ATTR}]`) ?? null;
+}
+
+export function folderDropPathAt(clientX: number, clientY: number): string {
+  return folderDropElementAt(clientX, clientY)?.getAttribute(FOLDER_DROP_PATH_ATTR)?.trim() ?? "";
+}
+
+/**
+ * 搜索结果可落在文件夹树，也可落在当前曲目表。
+ *
+ * WKWebView 丢失原生 drop 时，dragend 兜底必须同时认识这两个区域；旧实现只认
+ * 文件夹树，所以拖到截图里的左侧曲目表会被当成「松在空白处」，请求根本没入队。
+ */
+export function searchQueueDropElementAt(clientX: number, clientY: number): HTMLElement | null {
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+  return document
+    .elementFromPoint(clientX, clientY)
+    ?.closest<HTMLElement>(`[${SEARCH_QUEUE_DROP_ATTR}]`) ?? null;
+}
+
+export function searchQueueDropAt(clientX: number, clientY: number): boolean {
+  return Boolean(searchQueueDropElementAt(clientX, clientY));
+}
+
+export function searchDropElementAt(clientX: number, clientY: number): HTMLElement | null {
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+  const hit = document.elementFromPoint(clientX, clientY);
+  return hit?.closest<HTMLElement>(`[${SEARCH_DROP_PATH_ATTR}]`) ?? folderDropElementAt(clientX, clientY);
+}
+
+export function searchDropPathAt(clientX: number, clientY: number): string {
+  const target = searchDropElementAt(clientX, clientY);
+  return target?.getAttribute(SEARCH_DROP_PATH_ATTR)?.trim()
+    || target?.getAttribute(FOLDER_DROP_PATH_ATTR)?.trim()
+    || "";
+}

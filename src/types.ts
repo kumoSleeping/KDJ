@@ -5,7 +5,7 @@
 
 export type Platform = "wyy" | "qqm" | "soundcloud" | "bilibili" | "local";
 export type Quality = "flac" | "320" | "128";
-export type TaskState = "queued" | "running" | "done" | "failed" | "canceled";
+export type TaskState = "queued" | "running" | "processing" | "done" | "failed" | "canceled";
 export type AccountState = "missing" | "valid" | "expired" | "unknown";
 export type QrStateValue = "waiting" | "scanned" | "done" | "expired" | "refused" | "error";
 
@@ -45,8 +45,12 @@ export interface Settings {
   video_format: VideoFormat;
   /** 平台按钮显示顺序 = 下载来源优先级（拖动排序的结果）。 */
   platform_priority: string[];
+  /** 搜索时勾选的来源平台（点选结果；与排序独立）。 */
+  search_platforms: string[];
   /** 入队后是否立刻开始下载；关着就攒在队列里等这个开关拨开。 */
   auto_start_downloads: boolean;
+  /** 播放条使用分析波形；关掉时显示常规进度条。 */
+  player_waveform: boolean;
   /**
    * 只读派生字段（后端 GET/PUT /api/settings 附带）：全新安装的默认下载落点
    * ——系统「下载」目录 + KDJ。「保存到」菜单里的「系统下载」项用它。
@@ -163,11 +167,15 @@ export interface DownloadRequest {
   sources: SongSource[];
   quality?: Quality | null;
   analyze?: boolean | null;
+  /** 下载完成后挪进这个曲库文件夹；空 = 默认下载目录。 */
+  dest_dir?: string;
 }
+
+export type DownloadTaskKind = "audio" | "video" | "vj_export";
 
 export interface DownloadTask {
   id: string;
-  kind: "audio" | "video";
+  kind: DownloadTaskKind;
   platform: Platform;
   title: string;
   artist: string;
@@ -180,6 +188,10 @@ export interface DownloadTask {
   path: string;
   error: string;
   track_id: number | null;
+  /** 入队时指定的目标文件夹；前端用来在对应列表画「待下载」行。 */
+  dest_dir?: string;
+  /** 仅前端：搜索结果带来的封面 URL，占位行用来避免只剩 BV 号。 */
+  cover?: string;
   created_at: number;
   updated_at: number;
 }
@@ -217,6 +229,28 @@ export interface VideoDownloadRequest {
   transcode?: boolean;
   /** 成品起点偏移（毫秒）：正=掐头，负=开头补黑场/静音。见 models.rs。 */
   offset_ms?: number;
+  /** 下载完成后挪进这个曲库文件夹；空 = 默认视频目录。 */
+  dest_dir?: string;
+  /** 搜索结果展示信息：入队立刻用，刷新后仍能从任务列表还原。 */
+  title?: string;
+  artist?: string;
+  cover?: string;
+}
+
+/** 「按顺序导出 VJ」入队请求；与下载队列共用 DownloadTask。 */
+export interface VjExportRequest {
+  folder: string;
+  track_ids: number[];
+  use_in_out_points: boolean;
+  snap_nearest_beat: boolean;
+  snap_whole_bar: boolean;
+  /** 固定秒数的淡入淡出；按小节时传 0。 */
+  fade_seconds: number;
+  /** 以上一首 BPM 换算的淡入淡出小节数；固定秒数时传 0。 */
+  fade_bars: number;
+  quality: "1080p" | "720p" | "480p";
+  keep_audio: boolean;
+  unify_gain: boolean;
 }
 
 export interface Track {
@@ -248,6 +282,8 @@ export interface Track {
   color: string;
   comment: string;
   cue_ms: number | null;
+  /** 结束点（毫秒），与 cue_ms 成对。 */
+  end_ms: number | null;
   source_platform: string;
   source_key: string;
   analyzed_at: string | null;
@@ -285,6 +321,12 @@ export interface FolderTree {
   outside: number;
 }
 
+/** 从软件移出文件夹：摘库记录，不删磁盘。 */
+export interface FolderForgetResult {
+  removed: number;
+  tree: FolderTree;
+}
+
 export type FileOp = "move" | "link";
 
 export interface FolderOpResult {
@@ -308,6 +350,7 @@ export interface TrackPatch {
   color?: string;
   comment?: string;
   cue_ms?: number;
+  end_ms?: number;
   title?: string;
   artist?: string;
   album?: string;
@@ -440,7 +483,7 @@ export interface KdjBridge {
    * 各给各的操作（安卓开 Release 页下 APK，浏览器开发布页）。
    */
   applyUpdate?: null | ((onProgress?: (progress: UpdateProgress) => void) => Promise<void>);
-  windowControl: (action: "minimize" | "maximize" | "close") => void;
+  windowControl: (action: "minimize" | "maximize" | "close" | "drag") => void;
   onSidecarLog: (cb: (line: string) => void) => () => void;
 }
 

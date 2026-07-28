@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
@@ -21,3 +21,11 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# tauri:dev 默认是 debug：波形/分析在未优化下单曲要几十秒，播放条会一直空着。
+# `package."*"` 只覆盖 crates.io 依赖，不覆盖 workspace member——所以 kdj-analysis
+# 必须单独开。业务 UI / 路由 crate 仍保持未优化，增量编译友好。
+[profile.dev.package."*"]
+opt-level = 2
+[profile.dev.package.kdj-analysis]
+opt-level = 2

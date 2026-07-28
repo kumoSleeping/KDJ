@@ -12,7 +12,7 @@ use kdj_providers::bilibili::BilibiliProvider;
 use kdj_providers::netease::NeteaseProvider;
 use kdj_providers::qqmusic::QqMusicProvider;
 use kdj_providers::soundcloud::SoundCloudProvider;
-use kdj_providers::{MusicProvider, ProviderContext};
+use kdj_providers::{MusicProvider, ProviderContext, ProviderLiveSettings};
 
 /// 账号页和搜索页的平台顺序。`local` 不是真的 provider，不在这里。
 pub const PLATFORMS: [Platform; 4] = [
@@ -30,11 +30,15 @@ pub struct AppState {
     /// B 站的视频接口不在 `MusicProvider` trait 上（那是音乐管线的形状），
     /// 单独留一份具体类型的引用给 `/api/video/*` 用。
     pub bilibili: Arc<BilibiliProvider>,
+    /// 所有 provider 共享的 live 设置句柄；`PUT /api/settings` 后刷这份即可。
+    provider_ctx: ProviderContext,
     /// 在线歌曲试听的短期代理票据：浏览器只拿本地 URL，不直接碰各平台 CDN。
     pub song_previews: Mutex<HashMap<String, (String, Instant)>>,
     /// 正在跑的分析批次，供「停止分析」用。挂在这里而不是做成模块级 static：
     /// static 会被同进程里的多个 AppState（测试、将来的多实例）串在一起。
     pub analysis: crate::jobs::AnalysisRegistry,
+    /// 波形单飞：同一首歌的并发请求共享一次解码。
+    pub waveforms: Arc<crate::waveform::WaveformCoordinator>,
 }
 
 impl AppState {
@@ -46,7 +50,7 @@ impl AppState {
         let netease = Arc::new(NeteaseProvider::new(ctx.clone())?);
         let qqmusic = Arc::new(QqMusicProvider::new(ctx.clone())?);
         let soundcloud = Arc::new(SoundCloudProvider::new(ctx.clone())?);
-        let bilibili = Arc::new(BilibiliProvider::new(ctx)?);
+        let bilibili = Arc::new(BilibiliProvider::new(ctx.clone())?);
 
         let mut providers: BTreeMap<Platform, Arc<dyn MusicProvider>> = BTreeMap::new();
         providers.insert(Platform::Wyy, netease);
@@ -60,8 +64,10 @@ impl AppState {
             library,
             providers,
             bilibili,
+            provider_ctx: ctx,
             song_previews: Mutex::new(HashMap::new()),
             analysis: Default::default(),
+            waveforms: Arc::new(crate::waveform::WaveformCoordinator::new()),
         }))
     }
 
@@ -69,21 +75,21 @@ impl AppState {
         self.providers.get(&platform)
     }
 
-    /// provider 的上下文是按当前设置现算的。
-    ///
-    /// Python 版是所有 provider 共享一个可变的 `ProviderContext` 实例，改字段就全生效。
-    /// Rust 这边 provider 各自持有一份不可变副本，所以设置变更后要重建——
-    /// 但下载目录/文件名模板这些是**每次下载时**读的，所以只需要在
-    /// `PUT /api/settings` 之后刷新一次即可。
+    /// 把当前 settings 刷进所有 provider 共享的 live 配置。
+    pub fn sync_provider_context(&self) {
+        self.provider_ctx
+            .apply_live(provider_live_settings(&self.config));
+    }
+
+    /// provider 的上下文是按当前设置现算的（新开一份，不共享 live）。
     pub fn context(&self) -> ProviderContext {
         provider_context(&self.config)
     }
 }
 
-fn provider_context(config: &AppConfig) -> ProviderContext {
+fn provider_live_settings(config: &AppConfig) -> ProviderLiveSettings {
     let settings = config.to_settings();
-    ProviderContext {
-        data_dir: config.data_dir.clone(),
+    ProviderLiveSettings {
         download_dir: config.download_dir(),
         filename_template: settings.filename_template,
         default_quality: settings.default_quality,
@@ -92,4 +98,8 @@ fn provider_context(config: &AppConfig) -> ProviderContext {
         video_dir: Some(config.video_dir()),
         video_format: settings.video_format.ext().to_string(),
     }
+}
+
+fn provider_context(config: &AppConfig) -> ProviderContext {
+    ProviderContext::new(config.data_dir.clone(), provider_live_settings(config))
 }

@@ -1,5 +1,5 @@
 import type { Platform } from "../../types";
-import { HardDrive } from "lucide-react";
+import { Folder } from "lucide-react";
 
 /**
  * 四家平台的官方标志（单色字形）。
@@ -37,7 +37,11 @@ export const PLATFORM_BRAND: Partial<Record<Platform, string>> = {
 };
 
 export function PlatformMark({ id, size = 15 }: { id: Platform; size?: number }) {
-  if (id === "local") return <HardDrive size={size} strokeWidth={1.8} aria-hidden="true" />;
+  // 本地 = 在曲库全部文件夹里搜，用和左侧树一样的文件夹标，别用磁盘。
+  // 实心品牌标是 fill 路径；描边图标略加重，视觉重量才跟得上。
+  if (id === "local") {
+    return <Folder size={size} strokeWidth={2.1} absoluteStrokeWidth aria-hidden="true" />;
+  }
   const d = BRAND_PATH[id];
   if (!d) return null;
   return (

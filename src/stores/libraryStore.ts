@@ -57,6 +57,25 @@ export interface LibraryFilter {
   order2: SortOrder;
 }
 
+const FOLDER_SESSION_KEY = "kd-library-folder";
+
+function readSessionFolder(): string {
+  try {
+    return sessionStorage.getItem(FOLDER_SESSION_KEY)?.trim() || "";
+  } catch {
+    return "";
+  }
+}
+
+function writeSessionFolder(folder: string): void {
+  try {
+    if (folder.trim()) sessionStorage.setItem(FOLDER_SESSION_KEY, folder);
+    else sessionStorage.removeItem(FOLDER_SESSION_KEY);
+  } catch {
+    /* private mode */
+  }
+}
+
 export const DEFAULT_FILTER: LibraryFilter = {
   q: "",
   key: "",
@@ -163,6 +182,11 @@ export interface LibraryStore {
   /** 多选集合。单选时就是 [selectedId]。 */
   selectedIds: number[];
   /**
+   * 显式批选模式（右键 / 长按进入）。Cmd/Ctrl 点选不必开它，
+   * 但活动区要靠它决定要不要露出「完成 / 复制」那一排。
+   */
+  selectionMode: boolean;
+  /**
    * 页外选中的暂存：从「接下一首」点的歌大多不在当前这页 200 行里，
    * 只存 id 的话详情栏会因为在页里找不到而变空。带着整个对象选中就没这个洞。
    */
@@ -205,6 +229,7 @@ export interface LibraryStore {
   /** 用完整对象选中（推荐列表这类"来源不在当前页"的入口用这个）。 */
   selectTrack(track: Track): void;
   selectAll(): void;
+  setSelectionMode(on: boolean): void;
   copyToClipboard(op: FileOp): void;
   paste(dest: string): Promise<FolderOpResult | null>;
   applyFolderOp(ids: number[], dest: string, op: FileOp): Promise<FolderOpResult>;
@@ -243,6 +268,11 @@ export interface LibraryStore {
    * 返回后端的失败清单（track id → 原因）；没删成的那些行会留在列表里。
    */
   removeTracks(ids: number[], file: FileDisposalMode): Promise<Record<string, string>>;
+  /**
+   * 从软件移出文件夹：摘掉库记录（根目录还会注销曲库登记），磁盘文件不动。
+   * 返回被摘掉的曲目数，供界面提示。
+   */
+  forgetFolder(path: string): Promise<number>;
   handleEvent(event: WsEvent): void;
 }
 
@@ -252,9 +282,11 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   loading: false,
   loadingMore: false,
   error: "",
-  filter: { ...DEFAULT_FILTER },
+  // 刷新后仍回到刚才打开的文件夹，待下载行才对得上 dest_dir。
+  filter: { ...DEFAULT_FILTER, folder: readSessionFolder() },
   selectedId: null,
   selectedIds: [],
+  selectionMode: false,
   selectedTrack: null,
   clipboard: null,
   folders: null,
@@ -310,6 +342,7 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
       queueView: on,
       selectedId: null,
       selectedIds: [],
+      selectionMode: false,
       selectedTrack: null,
     });
     void get().refresh();
@@ -374,8 +407,10 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     cancelPending();
     // 动了筛选/排序/搜索 = 想看曲库查询结果了，临时列表视图自动让位
     const leavingQueue = get().queueView;
+    const filter = { ...get().filter, ...patch };
+    if ("folder" in patch) writeSessionFolder(filter.folder);
     set({
-      filter: { ...get().filter, ...patch },
+      filter,
       queueView: false,
       ...(leavingQueue
         ? { selectedId: null, selectedIds: [], selectedTrack: null }
@@ -390,6 +425,7 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   resetFilter() {
     cancelPending();
     const leavingQueue = get().queueView;
+    writeSessionFolder("");
     set({
       filter: { ...DEFAULT_FILTER },
       queueView: false,
@@ -412,7 +448,7 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     // 按 id 选中都发生在当前页里，页外暂存到这里就过期了
     set({ selectedTrack: null });
     if (id === null) {
-      set({ selectedId: null, selectedIds: [] });
+      set({ selectedId: null, selectedIds: [], selectionMode: false });
       return;
     }
     const { selectedId, selectedIds, tracks } = get();
@@ -446,6 +482,10 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
       selectedIds: tracks.map((track) => track.id),
       selectedId: get().selectedId ?? (tracks[0]?.id ?? null),
     });
+  },
+
+  setSelectionMode(on) {
+    set({ selectionMode: on });
   },
 
   copyToClipboard(op) {
@@ -579,6 +619,21 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
       void get().refreshFolders();
     }
     return result.errors;
+  },
+
+  async forgetFolder(path) {
+    const result = await api.forgetFolder(path);
+    const filter = get().filter;
+    const folderGone =
+      filter.folder === path ||
+      filter.folder.startsWith(`${path}/`) ||
+      filter.folder.startsWith(`${path}\\`);
+    set({
+      folders: result.tree,
+      filter: folderGone ? { ...filter, folder: "" } : filter,
+    });
+    await Promise.all([get().refresh(), get().refreshStats()]);
+    return result.removed;
   },
 
   handleEvent(event) {

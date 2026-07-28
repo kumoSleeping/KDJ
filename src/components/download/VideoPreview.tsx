@@ -28,6 +28,8 @@ export interface VideoPreviewRequest {
   author: string;
   /** 分 P 下标，从 0 起。 */
   page: number;
+  /** 搜索结果封面，底栏浮动预览时用来占位，避免只剩场记板图标。 */
+  cover?: string;
 }
 
 export function requestVideoPreview(req: VideoPreviewRequest): void {
@@ -151,9 +153,20 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
     return () => window.removeEventListener(AUDIO_FOCUS_EVENT, onFocus);
   }, []);
 
-  // 协同播放时播放器是主时钟。视频只在累计漂移超过 120ms 时纠偏，
-  // 这样不会因为每次 timeupdate 都 seek 而让画面出现细小跳动。
+  // 协同播放时播放器是主时钟。视频只在累计漂移超过阈值时纠偏；
+  // 纠偏期间必须挡住 seeked 回传，否则会反过来拽音频时钟，画面一卡一卡。
+  const lastCorrectAtRef = useRef(0);
   useEffect(() => {
+    const holdSuppress = (ms: number) => {
+      suppressSyncEventRef.current = true;
+      const video = videoRef.current;
+      const release = () => {
+        suppressSyncEventRef.current = false;
+        video?.removeEventListener("seeked", release);
+      };
+      video?.addEventListener("seeked", release, { once: true });
+      window.setTimeout(release, ms);
+    };
     const onMediaSync = (event: Event) => {
       const detail = (event as CustomEvent<MediaSyncDetail>).detail;
       if (detail.owner !== "player" || !useCrossfade.getState().coplay) return;
@@ -162,35 +175,42 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
       const target = (detail.position ?? 0) + offsetMs / 1000;
       if (detail.action === "play") {
         clearDelay();
-        suppressSyncEventRef.current = true;
         if (target < 0) {
+          holdSuppress(200);
           video.pause();
           video.currentTime = 0;
-          suppressSyncEventRef.current = false;
           delayTimerRef.current = window.setTimeout(() => {
             delayTimerRef.current = null;
-            suppressSyncEventRef.current = true;
-            void video.play().catch(() => undefined).finally(() => {
-              suppressSyncEventRef.current = false;
-            });
+            holdSuppress(200);
+            void video.play().catch(() => undefined);
           }, -target * 1000);
         } else {
-          if (Math.abs(video.currentTime - target) > 0.12) video.currentTime = target;
-          void video.play().catch(() => undefined).finally(() => {
-            suppressSyncEventRef.current = false;
-          });
+          if (Math.abs(video.currentTime - target) > 0.4) {
+            holdSuppress(500);
+            video.currentTime = target;
+          } else {
+            holdSuppress(200);
+          }
+          void video.play().catch(() => undefined);
         }
       } else if (detail.action === "pause") {
         clearDelay();
-        suppressSyncEventRef.current = true;
+        holdSuppress(200);
         video.pause();
-        suppressSyncEventRef.current = false;
       } else if (detail.action === "seek" || detail.action === "position") {
-        if (Number.isFinite(target) && Math.abs(video.currentTime - target) > 0.12) {
-          suppressSyncEventRef.current = true;
-          video.currentTime = Math.max(0, target);
-          suppressSyncEventRef.current = false;
+        if (!Number.isFinite(target)) return;
+        const drift = Math.abs(video.currentTime - target);
+        if (detail.action === "position") {
+          if (video.paused) return;
+          if (drift <= 0.4) return;
+          const now = performance.now();
+          if (now - lastCorrectAtRef.current < 500) return;
+          lastCorrectAtRef.current = now;
+        } else if (drift <= 0.05) {
+          return;
         }
+        holdSuppress(500);
+        video.currentTime = Math.max(0, target);
       }
     };
     window.addEventListener(MEDIA_SYNC_EVENT, onMediaSync);
@@ -380,16 +400,24 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
           // 恒真，理由同 VideoResultRow：不转码的封装一部分软件打不开
           transcode: true,
           offset_ms: withOffset ? Math.round(offsetMs) : 0,
+          title: req.title.trim() || undefined,
+          artist: req.author.trim() || undefined,
         });
         // 任务当场出现在底下的队列面板里，就是"已加入队列"最好的回执
-        mergeTasks([task]);
+        mergeTasks([
+          {
+            ...task,
+            title: req.title.trim() || task.title,
+            artist: req.author.trim() || task.artist,
+          },
+        ]);
       } catch (err) {
         setSendError(`下载失败：${err instanceof Error ? err.message : String(err)}`);
       } finally {
         setSending(false);
       }
     },
-    [req.bvid, req.page, settings?.video_max_height, offsetMs, mergeTasks],
+    [req.bvid, req.page, req.title, req.author, settings?.video_max_height, offsetMs, mergeTasks],
   );
 
   const offsetText = `${offsetMs < 0 ? "" : "+"}${(offsetMs / 1000).toFixed(2)}s`;

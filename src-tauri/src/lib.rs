@@ -312,7 +312,7 @@ async fn pick_folders(_app: tauri::AppHandle) -> Vec<String> {
     Vec::new()
 }
 
-/// 自绘标题栏的三个按钮。`maximize` 是**切换**，和 Electron 版一致。
+/// 自绘标题栏的窗口动作。`maximize` 是切换；`drag` 用于 Overlay 顶栏拖动。
 #[tauri::command]
 fn window_control(_window: tauri::Window, action: String) -> Result<(), String> {
     #[cfg(desktop)]
@@ -325,6 +325,8 @@ fn window_control(_window: tauri::Window, action: String) -> Result<(), String> 
                 Err(err) => Err(err),
             },
             "close" => _window.close(),
+            // data-tauri-drag-region 在 macOS Overlay 下经常失灵；顶栏 mousedown 显式开拖。
+            "drag" => _window.start_dragging(),
             other => return Err(format!("未知的窗口动作：{other}")),
         };
         return result.map_err(|err| err.to_string());

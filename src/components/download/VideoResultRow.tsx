@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Download, Music4 } from "lucide-react";
+import { Copy, Download, Music4 } from "lucide-react";
 import { api } from "../../lib/api";
-import { DASH, formatDuration } from "../../lib/format";
+import { copyText } from "../../lib/copyText";
+import { DASH, formatDuration, thumbUrl } from "../../lib/format";
+import { beginVideoPointerDrag } from "../../lib/searchDrag";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import type { MergedGroup, VideoFormat, VideoInfo } from "../../types";
-import { Button, InlineNotice } from "../common";
+import { Button, ContextMenu, InlineNotice } from "../common";
 import { requestVideoPreview } from "./VideoPreview";
 
 function errorText(error: unknown): string {
@@ -14,7 +16,8 @@ function errorText(error: unknown): string {
 
 /** 画质是"上限"而不是"精确档"：后端在可用流里挑不超过这个高度的最好的一条。 */
 const HEIGHT_LADDER = [2160, 1440, 1080, 720, 480, 360];
-export const VIDEO_DOWNLOAD_DND_TYPE = "application/x-kdj-video-download";
+/** @deprecated 请从 `lib/searchDrag` 引用；保留 re-export 以免旧 import 断掉。 */
+export { VIDEO_DOWNLOAD_DND_TYPE } from "../../lib/searchDrag";
 
 /**
  * 画出一行视频要的最少信息。
@@ -97,6 +100,7 @@ export function VideoResultRow({
 }: VideoResultRowProps) {
   const settings = useAppStore((state) => state.settings);
   const saveSettings = useAppStore((state) => state.saveSettings);
+  const openQueuePanel = useAppStore((state) => state.openQueuePanel);
   const mergeTasks = useDownloadStore((state) => state.mergeTasks);
 
   const [info, setInfo] = useState<VideoInfo | null>(given ?? resolvedCache.get(bvid) ?? null);
@@ -107,6 +111,10 @@ export function VideoResultRow({
   /** 下载失败的原因，贴在这一行自己的按钮旁边——参数还在，再按一次就是重试。 */
   const [sendError, setSendError] = useState("");
   const rowRef = useRef<HTMLTableRowElement>(null);
+  const pointerDragCleanupRef = useRef<(() => void) | null>(null);
+  const suppressClickRef = useRef(false);
+
+  useEffect(() => () => pointerDragCleanupRef.current?.(), []);
 
   const effectiveHeight = maxHeight ?? settings?.video_max_height ?? 1080;
   const effectiveFormat = audioOnly ? "m4a" : (settings?.video_format ?? "mp4");
@@ -167,47 +175,78 @@ export function VideoResultRow({
         // 而且必须显式写 true——后端 apply_video_defaults 见 false 会当成"没指定"，
         // 落回全局设置里的 video_transcode（默认 false），等于这行白写。
         transcode: true,
+        title: title.trim() || undefined,
+        artist: author.trim() || undefined,
+        cover: cover.trim() || undefined,
       });
       // 和音频走同一个队列 store，右边那栏就是同一个 QueuePanel——
-      // 任务当场出现在那里，就是"已加入队列"最好的回执
-      mergeTasks([task]);
+      // 任务当场出现在那里，就是"已加入队列"最好的回执。
+      mergeTasks([
+        {
+          ...task,
+          title: title.trim() || task.title,
+          artist: author.trim() || task.artist,
+          cover: cover.trim() || task.cover || undefined,
+        },
+      ]);
+      openQueuePanel();
     } catch (error) {
       setSendError(`下载失败：${errorText(error)}`);
     } finally {
       setSending(false);
     }
-  }, [bvid, pageIndex, effectiveHeight, audioOnly, mergeTasks]);
+  }, [bvid, pageIndex, effectiveHeight, audioOnly, title, author, cover, mergeTasks, openQueuePanel]);
+
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
 
   return (
-    <tr ref={rowRef} data-video="true">
+    <tr
+      ref={rowRef}
+      data-video="true"
+      onContextMenu={(event) => {
+        if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+        event.preventDefault();
+        setRowMenu({ x: event.clientX, y: event.clientY });
+      }}
+    >
       <td colSpan={colSpan}>
-        {/* 没有单独的「预览」按钮：点行身任意留白（封面、标题、元信息）就在
-            右栏开预览。分 P / 画质那些控件自己消费点击，closest 一挡就分开了。 */}
+        {/* 没有单独的「预览」按钮：点行身按底栏三态（右栏/浮动/系统画中画）开预览。
+            分 P / 画质那些控件自己消费点击，closest 一挡就分开了。 */}
         <div
           className="kd-video-row"
-          draggable={Boolean(bvid)}
-          title="点击在右栏预览；拖到右侧加入下载队列"
-          onDragStart={(event) => {
-            if (!bvid) {
-              event.preventDefault();
-              return;
-            }
-            event.dataTransfer.effectAllowed = "copy";
-            event.dataTransfer.setData(
-              VIDEO_DOWNLOAD_DND_TYPE,
-              JSON.stringify({
+          title="点击预览视频；拖到下载队列或左侧文件夹"
+          onPointerDown={(event) => {
+            if (!bvid) return;
+            pointerDragCleanupRef.current?.();
+            pointerDragCleanupRef.current = beginVideoPointerDrag(
+              event.nativeEvent,
+              {
                 bvid,
                 page_index: pageIndex,
                 max_height: effectiveHeight,
                 audio_only: audioOnly,
                 transcode: true,
-              }),
+              },
+              { title, artist: author, cover },
+              (error) => setSendError(`拖入失败：${errorText(error)}`),
+              () => {
+                suppressClickRef.current = true;
+              },
             );
           }}
           onClick={(event) => {
+            if (suppressClickRef.current) {
+              suppressClickRef.current = false;
+              return;
+            }
             if (!bvid) return;
             if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
-            requestVideoPreview({ bvid, title, author, page: pageIndex });
+            requestVideoPreview({ bvid, title, author, page: pageIndex, cover });
+          }}
+          onDoubleClick={(event) => {
+            if (!bvid) return;
+            if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+            requestVideoPreview({ bvid, title, author, page: pageIndex, cover });
           }}
         >
           {/* 封面按 16:9 摆：视频封面本来就是宽的，裁成方块等于把画面切掉一半。
@@ -215,7 +254,7 @@ export function VideoResultRow({
           <span className="kd-video-cover">
             {cover && (
               <img
-                src={cover}
+                src={thumbUrl(cover, 160)}
                 alt=""
                 loading="lazy"
                 draggable={false}
@@ -315,6 +354,44 @@ export function VideoResultRow({
             <InlineNotice text={sendError} onDismiss={() => setSendError("")} />
           </div>
         </div>
+        {rowMenu && (
+          <ContextMenu x={rowMenu.x} y={rowMenu.y} onClose={() => setRowMenu(null)}>
+            <button
+              type="button"
+              onClick={() => {
+                void copyText(title);
+                setRowMenu(null);
+              }}
+            >
+              <Copy size={12} />
+              复制标题
+            </button>
+            {author ? (
+              <button
+                type="button"
+                onClick={() => {
+                  void copyText(author);
+                  setRowMenu(null);
+                }}
+              >
+                <Copy size={12} />
+                复制 UP 主
+              </button>
+            ) : null}
+            {bvid ? (
+              <button
+                type="button"
+                onClick={() => {
+                  void copyText(bvid);
+                  setRowMenu(null);
+                }}
+              >
+                <Copy size={12} />
+                复制 BV 号
+              </button>
+            ) : null}
+          </ContextMenu>
+        )}
       </td>
     </tr>
   );

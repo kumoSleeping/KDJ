@@ -3,10 +3,12 @@ import { Check, FolderOpen, Library, ListMusic, ListStart, LoaderCircle, Play } 
 import { api } from "../../lib/api";
 import { formatBpm } from "../../lib/format";
 import { useHarmonicScope } from "../../lib/harmonicScope";
-import { hasTextSelectionWithin } from "../../lib/textSelection";
+import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
+import { endTrackDrag, writeTrackDragData } from "../../lib/trackDrag";
 import { useLibraryStore } from "../../stores/libraryStore";
 import { useQueueStore } from "../../stores/queueStore";
 import type { HarmonicMatch, Track } from "../../types";
+import { ContextMenu } from "../common";
 import { CamelotChip, playTrack } from "./TrackTable";
 
 export interface HarmonicListProps {
@@ -28,7 +30,6 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number; track: Track } | null>(null);
-  const rowMenuRef = useRef<HTMLDivElement | null>(null);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   /** 复选框不是常驻装饰：桌面右键、触屏长按后才进入显式批选模式。 */
   const [selectionMode, setSelectionMode] = useState(false);
@@ -63,22 +64,6 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
     setRowMenu(null);
     setDrop(null);
   }, [track.id]);
-
-  useEffect(() => {
-    if (!rowMenu) return;
-    const close = (event: MouseEvent) => {
-      if (!rowMenuRef.current?.contains(event.target as Node)) setRowMenu(null);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setRowMenu(null);
-    };
-    window.addEventListener("mousedown", close);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [rowMenu]);
 
   useEffect(() => {
     if (scope === "queue") {
@@ -239,12 +224,17 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
           style={{ cursor: "pointer" }}
           title="点一下播放；Cmd/Ctrl 点击多选；右键或长按进入批选"
           aria-selected={selected.has(match.track.id)}
-          draggable={selected.has(match.track.id)}
+          draggable
           onDragStart={(event) => {
-            event.dataTransfer.effectAllowed = "copyMove";
-            event.dataTransfer.setData("text/plain", String(match.track.id));
+            clearTextSelection();
+            const ids = selected.has(match.track.id) ? selectedIds : [match.track.id];
+            if (!selected.has(match.track.id)) setSelectedIds([match.track.id]);
+            writeTrackDragData(event.dataTransfer, ids);
           }}
-          onDragEnd={() => setDrop(null)}
+          onDragEnd={() => {
+            setDrop(null);
+            endTrackDrag();
+          }}
           onClick={(event) => {
             if (hasTextSelectionWithin(event.currentTarget)) return;
             if (suppressClickRef.current === match.track.id) {
@@ -312,11 +302,14 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
               title="拖动封面调整所选曲目顺序"
               onDragStart={(event) => {
                 event.stopPropagation();
+                const ids = selected.has(match.track.id) ? selectedIds : [match.track.id];
                 if (!selected.has(match.track.id)) setSelectedIds([match.track.id]);
-                event.dataTransfer.effectAllowed = "copyMove";
-                event.dataTransfer.setData("text/plain", String(match.track.id));
+                writeTrackDragData(event.dataTransfer, ids);
               }}
-              onDragEnd={() => setDrop(null)}
+              onDragEnd={() => {
+                setDrop(null);
+                endTrackDrag();
+              }}
             >
               <img
                 src={api.coverUrl(match.track.id, match.track.modified_at)}
@@ -354,22 +347,11 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
                 </span>
               )}
             </span>
-            {/* tempo_ratio ≠ 1 表示要靠半速/倍速接，DJ 得知道 */}
-            {Math.abs(match.tempo_ratio - 1) > 0.01 && (
-              <span className="kd-chip" data-tone="warn">
-                ×{match.tempo_ratio.toFixed(2)}
-              </span>
-            )}
           </div>
         </div>
       ))}
       {rowMenu && (
-        <div
-          ref={rowMenuRef}
-          className="kd-context-menu"
-          style={{ left: rowMenu.x, top: rowMenu.y }}
-          role="menu"
-        >
+        <ContextMenu x={rowMenu.x} y={rowMenu.y} onClose={() => setRowMenu(null)}>
           <button
             type="button"
             onClick={() => {
@@ -412,7 +394,7 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
             <ListStart size={12} />
             下一首播放（插队）{menuTracks.length > 1 ? `（${menuTracks.length} 首）` : ""}
           </button>
-        </div>
+        </ContextMenu>
       )}
     </div>
   );

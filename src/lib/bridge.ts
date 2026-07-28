@@ -4,6 +4,7 @@
  */
 
 import type { KdjBridge, UpdateInfo, UpdateProgress } from "../types";
+import { djEngine } from "./djMix";
 
 declare global {
   interface Window {
@@ -15,6 +16,21 @@ declare global {
     __TAURI_INTERNALS__?: {
       invoke: <T>(cmd: string, args?: Record<string, unknown>, options?: unknown) => Promise<T>;
     };
+  }
+}
+
+/** 关窗前同步静音：异步 import 会赶不上 webview 拆掉。 */
+function silenceMediaForExit(): void {
+  try {
+    djEngine.silenceForExit();
+    for (const node of document.querySelectorAll("audio, video")) {
+      const media = node as HTMLMediaElement;
+      media.muted = true;
+      media.volume = 0;
+      media.pause();
+    }
+  } catch {
+    /* 拆页途中 DOM / 音频图可能已半死 */
   }
 }
 
@@ -105,6 +121,8 @@ async function createTauriBridge(): Promise<KdjBridge> {
     // 契约里 windowControl 是同步的（Electron 走 ipcRenderer.send 不等回包），
     // 改成 async 会波及所有窗口控制入口，所以这里 fire-and-forget 保持签名不变
     windowControl: (action) => {
+      // 自绘关闭键：先静音再关窗，否则 webview 拆掉时 MediaElement 会硬断爆音
+      if (action === "close") silenceMediaForExit();
       void tauriInvoke("window_control", { action }).catch(() => {});
     },
     // 纯 Rust 版没有 sidecar 子进程，日志直接落在 Rust 侧，这里给个空退订函数

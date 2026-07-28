@@ -36,7 +36,9 @@ const SETTINGS_FIELDS: &[&str] = &[
     "video_download_dir",
     "video_format",
     "platform_priority",
+    "search_platforms",
     "auto_start_downloads",
+    "player_waveform",
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -74,9 +76,15 @@ pub struct Settings {
     /// 平台按钮的显示顺序 = 下载来源优先级（前端拖动排序后存这里）
     #[serde(default = "default_platform_priority")]
     pub platform_priority: Vec<String>,
+    /// 搜索时勾选的来源平台（前端点选后存这里；与排序独立）
+    #[serde(default = "default_search_platforms")]
+    pub search_platforms: Vec<String>,
     /// 入队后是否立刻开始下载。DJ 常常先攒一批再统一下，默认攒着。
     #[serde(default)]
     pub auto_start_downloads: bool,
+    /// 播放条默认展示分析波形；可切回传统进度条，给偏好简洁界面的用户。
+    #[serde(default = "yes")]
+    pub player_waveform: bool,
 }
 
 impl Settings {
@@ -98,7 +106,9 @@ impl Settings {
             video_download_dir: default_video_dir(),
             video_format: default_video_format(),
             platform_priority: default_platform_priority(),
+            search_platforms: default_search_platforms(),
             auto_start_downloads: false,
+            player_waveform: true,
         }
     }
 }
@@ -129,6 +139,14 @@ fn default_platform_priority() -> Vec<String> {
         "wyy".to_string(),
         "qqm".to_string(),
         "soundcloud".to_string(),
+        "bilibili".to_string(),
+        "local".to_string(),
+    ]
+}
+fn default_search_platforms() -> Vec<String> {
+    vec![
+        "wyy".to_string(),
+        "qqm".to_string(),
         "bilibili".to_string(),
     ]
 }

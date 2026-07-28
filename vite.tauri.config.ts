@@ -4,7 +4,7 @@
  * 和 vite.config.ts（Electron 那份，保持不动）的区别有三点：
  *
  *  1. 不加载 electron 插件——Tauri 不需要 main/preload 两个 CJS 产物；
- *  2. 端口固定 5275 且 strictPort。`src-tauri/tauri.conf.json` 的 devUrl 写死了它，
+ *  2. 端口固定 5274 且 strictPort。`src-tauri/tauri.conf.json` 的 devUrl 写死了它，
  *     端口一漂移 dev 窗口就是白屏，而且白屏不会报错，很难一眼看出根因；
  *  3. 产物落 `dist-tauri/` 而不是 `dist/`。两个壳会并存一段时间，
  *     共用一个 outDir 意味着「刚打完 Electron 包再跑 tauri build」会拿到上一份产物。
@@ -46,7 +46,7 @@ export default defineConfig({
   clearScreen: false,
   envPrefix: ["VITE_", "TAURI_ENV_"],
   server: {
-    port: 5275,
+    port: 5274,
     strictPort: true,
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: 5276 } : undefined,

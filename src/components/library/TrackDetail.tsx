@@ -9,9 +9,10 @@ import type { Track, TrackPatch } from "../../types";
 import { Button, Field, InlineNotice, Panel, PanelStack } from "../common";
 import { CamelotWheel } from "./CamelotWheel";
 import { HarmonicList } from "./HarmonicList";
+import { useVideoPip } from "../../lib/videoPip";
 import { LocalVideoPlayer } from "./LocalVideoPlayer";
 import { VjSearchPanel } from "./VjSearchPanel";
-import { Waveform } from "./Waveform";
+import { pointPatch, Waveform } from "./Waveform";
 import { CamelotChip, EnergyMeter, playTrack } from "./TrackTable";
 
 /** PlayerBar 播放时广播的位置，用来在节拍网格上画播放头。 */
@@ -110,6 +111,14 @@ export function TrackDetail({ track }: { track: Track }) {
   const selectTrack = useLibraryStore((state) => state.selectTrack);
   const setFilter = useLibraryStore((state) => state.setFilter);
   const keyFilter = useLibraryStore((state) => state.filter.key);
+  // 小窗/系统 PiP 已接管这支本地视频时，详情里不再挂第二路解码
+  const pipOwnsVideo = useVideoPip(
+    (state) =>
+      state.active &&
+      state.mode !== "panel" &&
+      state.session?.source === "local" &&
+      state.session.trackId === track.id,
+  );
 
   const [position, setPosition] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
@@ -316,7 +325,7 @@ export function TrackDetail({ track }: { track: Track }) {
       {/* 这几块的顺序用户可以拖着调，长期记住——整理曲库时想先看元数据，
           排 set 时想先看接下一首，与其替他选一个，不如让他拖一次然后不用再想。 */}
       <PanelStack storageKey="kd-detail-panels">
-      {isVideoTrack(track.format) && (
+      {isVideoTrack(track.format) && !pipOwnsVideo && (
         <Panel key="video" heading="视频播放" padded={false} dense>
           <LocalVideoPlayer track={track} />
         </Panel>
@@ -492,8 +501,25 @@ export function TrackDetail({ track }: { track: Track }) {
 
         {/* 只留波形。原来波形下面还有一条"首拍附近 16 秒的拍子网格"，
             但它是由 bpm+first_beat 外推出来的，既不能编辑也不能对齐，看着像装饰，已删。 */}
-        <Waveform trackId={track.id} position={position} height={64} />
+        <Waveform
+          trackId={track.id}
+          position={position}
+          cueMs={track.cue_ms}
+          endMs={track.end_ms}
+          height={64}
+          onSetPoint={async (kind, at) => {
+            const patch = pointPatch(kind, at, track.cue_ms, track.end_ms);
+            if (typeof patch === "string") return patch;
+            await updateTrack(track.id, patch);
+          }}
+        />
         <div className="kd-row kd-faint" style={{ marginTop: "0.35rem", fontSize: "var(--kd-size-xs)" }}>
+          开始{" "}
+          {track.cue_ms !== null ? `${(track.cue_ms / 1000).toFixed(2)}s` : DASH}
+          <span className="kd-toolbar-gap" />
+          结束{" "}
+          {track.end_ms !== null ? `${(track.end_ms / 1000).toFixed(2)}s` : DASH}
+          <span className="kd-toolbar-gap" />
           首拍 {track.first_beat !== null ? `${track.first_beat.toFixed(3)}s` : DASH}
           <span className="kd-toolbar-gap" />
           {track.analyzed_at ? `分析于 ${formatDate(track.analyzed_at)}` : "未分析"}
@@ -506,8 +532,8 @@ export function TrackDetail({ track }: { track: Track }) {
       <Panel
         key="harmonic"
         heading={
-          <span className="kd-row" style={{ gap: "0.35rem" }}>
-            <Waypoints size={16} strokeWidth={2.2} className="kd-panel-heading-icon" />
+          <span className="kd-row kd-harmonic-heading" style={{ gap: "0.35rem" }}>
+            <Waypoints size={16} strokeWidth={1.75} className="kd-panel-heading-icon" />
             接下一首
           </span>
         }

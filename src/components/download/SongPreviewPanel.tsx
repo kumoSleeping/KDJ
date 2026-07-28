@@ -2,14 +2,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { LoaderCircle, Music2, Pause, Play } from "lucide-react";
 import { api } from "../../lib/api";
 import { announceAudioFocus } from "../../lib/audioFocus";
-import { formatDuration } from "../../lib/format";
+import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import type { SongPreviewRequest } from "../../lib/songPreview";
 import { InlineNotice } from "../common";
+import { PLATFORM_LABEL } from "./MergedGroupRow";
 
 /**
  * 在线试听没有曲库分析出来的真实频谱数据，因此用标题稳定生成一组中性波形柱，
  * 只承担“可点击时间轴”的视觉职责；播放进度、时长和跳转都来自真实 audio。
  * 不把媒体接进 AudioContext：部分平台直链没有 CORS，强接会让声音变成静音。
+ *
+ * 元信息只用搜索结果里已经带回来的网络字段（封面 / 专辑 / 平台 / VIP），
+ * 不下载、不分析、也不挂「搜 VJ」——那些是本地曲目详情的事。
  */
 function previewBars(seed: string, count = 72): number[] {
   let state = 2166136261;
@@ -25,6 +29,17 @@ function previewBars(seed: string, count = 72): number[] {
   });
 }
 
+function MetaRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="kd-row" style={{ justifyContent: "space-between", gap: "0.75rem" }}>
+      <span className="kd-muted kd-nowrap">{label}</span>
+      <span className="kd-truncate" style={{ textAlign: "right" }}>
+        {children}
+      </span>
+    </div>
+  );
+}
+
 export function SongPreviewPanel({ request }: { request: SongPreviewRequest }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [url, setUrl] = useState("");
@@ -32,11 +47,15 @@ export function SongPreviewPanel({ request }: { request: SongPreviewRequest }) {
   const [playing, setPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
+  const source = request.source;
+  const cover = source.cover || "";
+  const listedDuration = source.duration ?? 0;
   const bars = useMemo(
     () => previewBars(`${request.title}\u0000${request.artist}`),
     [request.title, request.artist],
   );
-  const ratio = duration > 0 ? Math.min(1, Math.max(0, position / duration)) : 0;
+  const effectiveDuration = duration > 0 ? duration : listedDuration;
+  const ratio = effectiveDuration > 0 ? Math.min(1, Math.max(0, position / effectiveDuration)) : 0;
 
   useEffect(() => {
     let alive = true;
@@ -59,10 +78,10 @@ export function SongPreviewPanel({ request }: { request: SongPreviewRequest }) {
     };
   }, [request]);
 
-  // URL 是异步解析回来的，仅写 autoPlay 在部分 WebView 中不会重新触发播放。
-  // 等这一轮 render 把 <audio> 真正挂进 DOM，再显式 play，并把拒绝原因留在面板里。
+  // 仅双击 / 「播放」入口带 autoPlay。单击只开右栏时不自动出声，和视频预览一致。
+  // URL 异步回来后等 <audio> 挂进 DOM 再显式 play；部分 WebView 单靠属性不会重触发。
   useEffect(() => {
-    if (!url) return;
+    if (!url || !request.autoPlay) return;
     const frame = requestAnimationFrame(() => {
       const audio = audioRef.current;
       if (!audio) return;
@@ -73,7 +92,7 @@ export function SongPreviewPanel({ request }: { request: SongPreviewRequest }) {
       });
     });
     return () => cancelAnimationFrame(frame);
-  }, [url]);
+  }, [url, request.autoPlay]);
 
   return (
     <section className="kd-song-preview">
@@ -85,13 +104,45 @@ export function SongPreviewPanel({ request }: { request: SongPreviewRequest }) {
         <span className="kd-muted kd-truncate">{request.artist || "未知艺人"}</span>
       </div>
 
-      <div className="kd-song-preview-body">
+      <div className="kd-song-preview-body kd-scroll kd-grow">
+        <div className="kd-row" style={{ gap: "0.75rem", alignItems: "stretch" }}>
+          <span className="kd-song-preview-cover" aria-hidden={cover ? undefined : true}>
+            {cover ? (
+              <img
+                src={thumbUrl(cover)}
+                alt=""
+                loading="lazy"
+                draggable={false}
+                referrerPolicy="no-referrer"
+                onError={(event) => {
+                  event.currentTarget.style.display = "none";
+                }}
+              />
+            ) : (
+              <Music2 size={22} />
+            )}
+          </span>
+          <div className="kd-col kd-grow" style={{ gap: "0.35rem", minWidth: 0 }}>
+            <MetaRow label="专辑">{source.album || DASH}</MetaRow>
+            <MetaRow label="平台">
+              <span className="kd-row" style={{ gap: "0.35rem", justifyContent: "flex-end" }}>
+                {PLATFORM_LABEL[source.platform] ?? source.platform}
+                {source.vip && (
+                  <span className="kd-chip" data-tone="warn">
+                    VIP
+                  </span>
+                )}
+              </span>
+            </MetaRow>
+            <MetaRow label="时长">{formatDuration(listedDuration || duration)}</MetaRow>
+          </div>
+        </div>
+
         {url ? (
           <>
             <audio
               ref={audioRef}
               hidden
-              autoPlay
               preload="auto"
               src={url}
               onPlay={() => {
@@ -136,13 +187,13 @@ export function SongPreviewPanel({ request }: { request: SongPreviewRequest }) {
                 role="slider"
                 aria-label="试听进度"
                 aria-valuemin={0}
-                aria-valuemax={duration}
+                aria-valuemax={effectiveDuration}
                 aria-valuenow={position}
                 onClick={(event) => {
                   const audio = audioRef.current;
-                  if (!audio || duration <= 0) return;
+                  if (!audio || effectiveDuration <= 0) return;
                   const rect = event.currentTarget.getBoundingClientRect();
-                  audio.currentTime = ((event.clientX - rect.left) / rect.width) * duration;
+                  audio.currentTime = ((event.clientX - rect.left) / rect.width) * effectiveDuration;
                   setPosition(audio.currentTime);
                 }}
               >
@@ -155,7 +206,7 @@ export function SongPreviewPanel({ request }: { request: SongPreviewRequest }) {
                 <span className="kd-song-preview-head" style={{ left: `${ratio * 100}%` }} />
               </div>
               <span className="kd-song-preview-time">
-                {formatDuration(position)} / {formatDuration(duration)}
+                {formatDuration(position)} / {formatDuration(effectiveDuration)}
               </span>
             </div>
           </>
@@ -163,6 +214,9 @@ export function SongPreviewPanel({ request }: { request: SongPreviewRequest }) {
           <LoaderCircle className="kd-spin" size={17} />
         )}
         <InlineNotice text={error} />
+        <p className="kd-faint" style={{ fontSize: "var(--kd-size-xs)", lineHeight: 1.5 }}>
+          在线试听，不下载、不入库。BPM / 调号等分析信息需要先下载进曲库。
+        </p>
       </div>
     </section>
   );

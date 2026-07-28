@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../lib/api";
 import type { Waveform as WaveformData } from "../../types";
+import { ContextMenu } from "../common";
 
 /** 点波形跳转：PlayerBar 监听它，和 kd:play / kd:position 一套约定。 */
 export const SEEK_EVENT = "kd:seek";
@@ -23,6 +24,15 @@ export interface WaveformProps {
   trackId: number;
   /** 播放位置（秒）。传 null 就不画播放头。 */
   position?: number | null;
+  /** 开始点（毫秒）。有值时顶部画主题色小三角。 */
+  cueMs?: number | null;
+  /** 结束点（毫秒）。有值时顶部画主题色小三角。 */
+  endMs?: number | null;
+  /**
+   * 右键设起止点。返回错误文案则菜单旁提示；返回 void/空串表示成功。
+   * 不传则不挂右键菜单。
+   */
+  onSetPoint?: (kind: "start" | "end", positionSec: number) => void | string | Promise<void | string>;
   height?: number;
   /** 已播部分压暗，凸显未播部分（底部进度条用）。 */
   dimPlayed?: boolean;
@@ -97,9 +107,33 @@ function draw(canvas: HTMLCanvasElement, wave: WaveformData, cssWidth: number, c
   }
 }
 
+function markerRatio(ms: number | null | undefined, totalSec: number): number | null {
+  if (ms == null || totalSec <= 0) return null;
+  return Math.min(1, Math.max(0, ms / 1000 / totalSec));
+}
+
+/** 校验起止点并生成 patch；不合法返回中文原因。 */
+export function pointPatch(
+  kind: "start" | "end",
+  positionSec: number,
+  cueMs: number | null | undefined,
+  endMs: number | null | undefined,
+): { cue_ms: number } | { end_ms: number } | string {
+  const ms = Math.max(0, Math.round(positionSec * 1000));
+  if (kind === "start") {
+    if (endMs != null && ms >= endMs) return "开始点必须早于结束点";
+    return { cue_ms: ms };
+  }
+  if (cueMs != null && ms <= cueMs) return "结束点必须晚于开始点";
+  return { end_ms: ms };
+}
+
 export function Waveform({
   trackId,
   position = null,
+  cueMs = null,
+  endMs = null,
+  onSetPoint,
   height = 56,
   dimPlayed = false,
   seekable = true,
@@ -107,6 +141,9 @@ export function Waveform({
 }: WaveformProps) {
   const [wave, setWave] = useState<WaveformData | null>(() => cache.get(trackId) ?? null);
   const [error, setError] = useState("");
+  // 右键设点永远取当时正在播放的位置，不能让鼠标点到波形哪里就误落到哪里。
+  const [menu, setMenu] = useState<{ x: number; y: number; position: number } | null>(null);
+  const [menuError, setMenuError] = useState("");
   const hostRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -131,11 +168,17 @@ export function Waveform({
 
   // 只在数据/尺寸变化时重画。播放头和已播遮罩都是 DOM 层，
   // 位置每 200ms 变一次也不会触发 canvas 重绘。
+  // clientWidth===0 时跳过：flex 首帧常为 0，硬画会留下空白 canvas，
+  // 等 ResizeObserver 给出真实宽度再画。
   useEffect(() => {
     const host = hostRef.current;
     const canvas = canvasRef.current;
     if (!host || !canvas || !wave) return;
-    const render = () => draw(canvas, wave, host.clientWidth, height);
+    const render = () => {
+      const width = host.clientWidth;
+      if (width <= 0) return;
+      draw(canvas, wave, width, height);
+    };
     render();
     const observer = new ResizeObserver(render);
     observer.observe(host);
@@ -144,7 +187,24 @@ export function Waveform({
 
   const total = wave?.duration ?? 0;
   const ratio = total > 0 && position !== null ? Math.min(1, Math.max(0, position / total)) : null;
+  const cueRatio = markerRatio(cueMs, total);
+  const endRatio = markerRatio(endMs, total);
   const ready = wave !== null && wave.amp.length > 0;
+
+  const applyPoint = async (kind: "start" | "end") => {
+    if (!menu || !onSetPoint) return;
+    setMenuError("");
+    try {
+      const result = await onSetPoint(kind, menu.position);
+      if (typeof result === "string" && result) {
+        setMenuError(result);
+        return;
+      }
+      setMenu(null);
+    } catch (reason: unknown) {
+      setMenuError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
 
   return (
     <div
@@ -155,22 +215,32 @@ export function Waveform({
         height,
         background: "var(--kd-panel-inset)",
         cursor: seekable && total > 0 ? "pointer" : "default",
-        // 播放头需要越过波形上下边界，像 DAW/AU 的时间游标；canvas 本身不会溢出。
-        overflow: "visible",
+        overflow: "hidden",
       }}
-      onClick={
-        seekable
+      // 滑轨是原生控件，由 WKWebView 自己完成屏幕坐标 → 进度换算；不用 div/canvas
+      // click 的 clientX，在 Retina 缩放或底栏重排后不会把按下错投给曲目表。
+      onPointerDownCapture={(event) => event.stopPropagation()}
+      onContextMenu={
+        onSetPoint
           ? (event) => {
-              if (total <= 0) return;
-              const rect = event.currentTarget.getBoundingClientRect();
-              const at = ((event.clientX - rect.left) / rect.width) * total;
-              window.dispatchEvent(
-                new CustomEvent<SeekDetail>(SEEK_EVENT, { detail: { trackId, position: at } }),
-              );
+              event.preventDefault();
+              // 没有播放头（例如详情里看的不是正在播放的歌）就不猜一个位置。
+              // 用户明确要的是“当前播放位置”，不是右键落点。
+              if (position === null || total <= 0) return;
+              setMenuError("");
+              setMenu({ x: event.clientX, y: event.clientY, position });
             }
           : undefined
       }
-      title={seekable && total > 0 ? "点击跳转" : undefined}
+      title={
+        onSetPoint
+          ? position !== null
+            ? "点击跳转；右键在当前播放位置设开始/结束点"
+            : "点击跳转；播放时可右键设开始/结束点"
+          : seekable && total > 0
+            ? "点击跳转"
+            : undefined
+      }
     >
       <canvas
         ref={canvasRef}
@@ -180,16 +250,12 @@ export function Waveform({
       />
       {!ready && (
         <div
-          className="kd-muted"
-          style={{
-            height: "100%",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: "var(--kd-size-xs)",
-          }}
+          className="kd-wave-loading"
+          role="status"
+          aria-label={error ? `波形不可用：${error}` : "正在加载波形"}
+          title={error ? `波形不可用：${error}` : undefined}
         >
-          {error ? `波形不可用：${error}` : "正在生成波形…"}
+          <span className="kd-wave-loading-bar" data-error={error ? "true" : undefined} />
         </div>
       )}
 
@@ -209,6 +275,24 @@ export function Waveform({
         />
       )}
 
+      {cueRatio !== null && (
+        <span
+          className="kd-wave-marker"
+          data-kind="start"
+          style={{ left: `${cueRatio * 100}%` }}
+          title={`开始 ${((cueMs ?? 0) / 1000).toFixed(2)}s`}
+          aria-hidden="true"
+        />
+      )}
+      {endRatio !== null && (
+        <span
+          className="kd-wave-marker"
+          style={{ left: `${endRatio * 100}%` }}
+          title={`结束 ${((endMs ?? 0) / 1000).toFixed(2)}s`}
+          aria-hidden="true"
+        />
+      )}
+
       {ratio !== null && (
         <span
           className="kd-wave-playhead"
@@ -219,6 +303,62 @@ export function Waveform({
             pointerEvents: "none",
           }}
         />
+      )}
+
+      {seekable && (
+        <input
+          type="range"
+          min={0}
+          max={Math.max(total, 1)}
+          step="0.001"
+          value={total > 0 && position !== null ? Math.min(total, Math.max(0, position)) : 0}
+          disabled={total <= 0}
+          aria-label="频谱波形，点击跳转"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+          onInput={(event) => {
+            event.stopPropagation();
+            if (menu || total <= 0) return;
+            window.dispatchEvent(
+              new CustomEvent<SeekDetail>(SEEK_EVENT, {
+                detail: { trackId, position: Number(event.currentTarget.value) },
+              }),
+            );
+          }}
+          style={{
+            position: "absolute",
+            zIndex: 5,
+            inset: 0,
+            width: "100%",
+            height: "100%",
+            margin: 0,
+            cursor: "pointer",
+            opacity: 0,
+          }}
+        />
+      )}
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => {
+            setMenu(null);
+            setMenuError("");
+          }}
+        >
+          <button type="button" onClick={() => void applyPoint("start")}>
+            将当前点设为开始点
+          </button>
+          <button type="button" onClick={() => void applyPoint("end")}>
+            将当前点设为结束点
+          </button>
+          {menuError ? (
+            <p className="kd-wave-menu-error" role="alert">
+              {menuError}
+            </p>
+          ) : null}
+        </ContextMenu>
       )}
     </div>
   );

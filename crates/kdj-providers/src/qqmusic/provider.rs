@@ -30,9 +30,30 @@ use crate::provider::{
 use crate::tags;
 
 const LABEL: &str = "QQ 音乐";
-const CDN_FALLBACK: &str = "https://dl.stream.qqmusic.qq.com/";
+/// `isure` 是 QQ 音乐网页和主流开源实现使用的通用音频域名；只有动态调度
+/// 没给出可用 HTTPS 节点时才落到这里，避免把所有用户锁死在某个 `sjyN` 机房。
+const CDN_FALLBACK: &str = "https://isure.stream.qqmusic.qq.com/";
 const QR_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const PROFILE_TTL: Duration = Duration::from_secs(300);
+
+fn is_qq_audio_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else { return false };
+    let Some(host) = parsed.host_str() else { return false };
+    parsed.scheme() == "https"
+        && (host == "stream.qqmusic.qq.com" || host.ends_with(".stream.qqmusic.qq.com"))
+}
+
+/// 按 QQ 返回的顺序选择动态 CDN。vkey 和 cdnDispatch 都可能带 `sip`；顺序
+/// 本身就是腾讯按当前网络给出的调度结果，不能再硬编码某个 `sjyN` 节点。
+/// 只接受 QQ 音乐自己的 HTTPS 音频域名，避免把服务端回包直接变成任意 SSRF。
+fn pick_cdn_base(data: &Value) -> Option<String> {
+    data.get("sip")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|base| is_qq_audio_url(base))
+        .map(|base| format!("{}/", base.trim_end_matches('/')))
+}
 
 /// 主页接口的字段在 QQ 音乐不同版本之间变过几次：旧回包是 `Info.Pic`，
 /// 新版和 qqmusic-api-python 使用 `base_info.avatar`。头像字段本身也有时是
@@ -271,7 +292,12 @@ impl QqMusicProvider {
             let url = if purl.starts_with("http://") || purl.starts_with("https://") {
                 purl.to_string()
             } else {
-                format!("{}{purl}", self.cdn_base().await)
+                // vkey 回包里的 sip 与这张 vkey 同源，优先级高于另打一遍 dispatch。
+                let base = match pick_cdn_base(&data) {
+                    Some(base) => base,
+                    None => self.cdn_base().await,
+                };
+                format!("{base}{purl}")
             };
             return Ok(Some((url, ext)));
         }
@@ -296,19 +322,7 @@ impl QqMusicProvider {
             .await
         {
             Ok(data) => {
-                let picked = data
-                    .get("sip")
-                    .and_then(Value::as_array)
-                    .and_then(|list| {
-                        list.iter()
-                            .filter_map(Value::as_str)
-                            .find(|base| {
-                                base.starts_with("https://")
-                                    && base.contains("sjy6.stream.qqmusic.qq.com")
-                            })
-                            .map(str::to_string)
-                    })
-                    .unwrap_or_else(|| CDN_FALLBACK.to_string());
+                let picked = pick_cdn_base(&data).unwrap_or_else(|| CDN_FALLBACK.to_string());
                 let refresh = data
                     .get("refresh_time")
                     .and_then(Value::as_u64)
@@ -671,7 +685,7 @@ impl MusicProvider for QqMusicProvider {
         job.check_canceled()?;
 
         let filename = render_filename(
-            &self.ctx.filename_template,
+            &self.ctx.filename_template(),
             &source.title,
             &source.artist_text(),
             &source.album,
@@ -682,10 +696,18 @@ impl MusicProvider for QqMusicProvider {
         remove_existing(&final_path);
 
         let guard = AtomicDownload::new(&final_path);
-        let response = self
+        // QQ 网页端下载会带来源页；部分 CDN 对裸 GET 的缓存/防盗链策略不同。
+        // 登录态只传给腾讯自己的音频域名，使最终 GET 与取得 vkey 的账号一致。
+        let mut request = self
             .client
             .http()
             .get(&url)
+            .header(reqwest::header::REFERER, "http://y.qq.com");
+        let cookie = self.client.cookie_header();
+        if !cookie.is_empty() && is_qq_audio_url(&url) {
+            request = request.header(reqwest::header::COOKIE, cookie);
+        }
+        let response = request
             .send()
             .await
             .context("QQ 音乐音频下载失败")?
@@ -945,6 +967,27 @@ const _: fn() -> Credential = Credential::default;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cdn_picker_keeps_dispatch_order_without_locking_to_one_pop() {
+        let data = json!({"sip": [
+            "http://insecure.stream.qqmusic.qq.com/",
+            "https://shj2.stream.qqmusic.qq.com/",
+            "https://sjy6.stream.qqmusic.qq.com/"
+        ]});
+        assert_eq!(pick_cdn_base(&data), Some("https://shj2.stream.qqmusic.qq.com/".into()));
+    }
+
+    #[test]
+    fn cdn_picker_rejects_non_qq_hosts() {
+        let data = json!({"sip": [
+            "https://attacker.example/",
+            "https://stream.qqmusic.qq.com.evil.example/"
+        ]});
+        assert_eq!(pick_cdn_base(&data), None);
+        assert!(is_qq_audio_url("https://isure.stream.qqmusic.qq.com/file.mp3"));
+        assert!(!is_qq_audio_url("https://stream.qqmusic.qq.com.evil.example/file.mp3"));
+    }
 
     #[test]
     fn profile_avatar_accepts_new_and_legacy_homepage_shapes() {

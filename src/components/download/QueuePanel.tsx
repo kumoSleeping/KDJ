@@ -1,30 +1,60 @@
 import { useState } from "react";
-import { Clapperboard, FolderOpen, Inbox, Music2, Play, Trash2, X } from "lucide-react";
+import { Copy, FolderOpen, Inbox, Play, Trash2, X } from "lucide-react";
 import { api } from "../../lib/api";
+import { copyText } from "../../lib/copyText";
 import { DASH, folderName, formatBytes, formatPercent, formatSpeed } from "../../lib/format";
+import { SEARCH_QUEUE_DROP_ATTR } from "../../lib/folderDrop";
+import {
+  enqueueSearchQueuePayload,
+  finishSearchDrop,
+  isSearchDownloadDrag,
+  readSearchDrop,
+} from "../../lib/searchDrag";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
-import type { DownloadTask, FolderNode, Quality, Settings, SongSource, TaskState, VideoDownloadRequest } from "../../types";
-import { Button, EmptyState, InlineNotice, ProgressBar } from "../common";
-import { PLATFORM_LABEL, SEARCH_DOWNLOAD_DND_TYPE } from "./MergedGroupRow";
-import { VIDEO_DOWNLOAD_DND_TYPE } from "./VideoResultRow";
+import type { DownloadTask, FolderNode, Quality, TaskState } from "../../types";
+import { Button, ContextMenu, EmptyState, InlineNotice, ProgressBar } from "../common";
+import { PLATFORM_LABEL } from "./MergedGroupRow";
 
 const STATE_LABEL: Record<TaskState, string> = {
   queued: "排队",
-  running: "下载中",
+  running: "进行中",
+  processing: "处理中",
   done: "完成",
   failed: "失败",
   canceled: "已取消",
 };
 
+function stateLabel(task: DownloadTask): string {
+  if (task.state === "running") {
+    return task.kind === "vj_export" ? "导出中" : "下载中";
+  }
+  if (task.state === "processing") {
+    // B 站 DASH 的音画流下载完之后，FFmpeg 仍须合并；开启转码时同一阶段
+    // 还会重编码，随后再移动并入库。没有把两种情况都硬叫「转码中」。
+    return task.kind === "video" ? "合并媒体中" : "整理入库中";
+  }
+  return STATE_LABEL[task.state];
+}
+
+function kindLabel(task: DownloadTask): string | null {
+  if (task.kind === "vj_export") return "VJ";
+  if (task.kind === "video") return "视频";
+  return null;
+}
+
 const STATE_TONE: Record<TaskState, "theme" | "ok" | "warn" | "danger"> = {
   queued: "warn",
   running: "theme",
+  processing: "theme",
   done: "ok",
   failed: "danger",
   canceled: "warn",
 };
+
+/** 和视频结果行同一套高度阶梯：点一下切一档。 */
+const VIDEO_HEIGHTS = [2160, 1440, 1080, 720, 480, 360];
 
 function progressState(state: TaskState): "running" | "done" | "failed" {
   if (state === "done") return "done";
@@ -32,23 +62,38 @@ function progressState(state: TaskState): "running" | "done" | "failed" {
   return "running";
 }
 
-function QueueRow({ task, onOpenFolder }: { task: DownloadTask; onOpenFolder(path: string): void }) {
+function QueueRow({ task, onOpenTask }: { task: DownloadTask; onOpenTask(task: DownloadTask): void }) {
   const cancel = useDownloadStore((store) => store.cancel);
+  const remove = useDownloadStore((store) => store.remove);
   /** 取消这一条失败时的原因，和任务自己的 error 共用行尾那一行。 */
   const [cancelError, setCancelError] = useState("");
-  const active = task.state === "queued" || task.state === "running";
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const active =
+    task.state === "queued" || task.state === "running" || task.state === "processing";
   // 后端拿不到 Content-Length 时 total_bytes 是 0，此时进度条走不确定态，
   // 否则会一直停在 0% 让人以为卡死了
   const unknownTotal = task.state === "running" && task.total_bytes <= 0;
+  const kind = kindLabel(task);
 
   return (
-    <div className="kd-queue-row">
+    <div
+      className="kd-queue-row"
+      onContextMenu={(event) => {
+        event.preventDefault();
+        setMenu({ x: event.clientX, y: event.clientY });
+      }}
+    >
       <span className="kd-queue-title" title={`${task.title} — ${task.artist}`}>
         {task.title}
       </span>
       <span className="kd-row" style={{ gap: "0.3rem" }}>
+        {kind ? (
+          <span className="kd-chip" data-tone="theme">
+            {kind}
+          </span>
+        ) : null}
         <span className="kd-chip" data-tone={STATE_TONE[task.state]}>
-          {STATE_LABEL[task.state]}
+          {stateLabel(task)}
         </span>
         {active ? (
           <Button
@@ -66,15 +111,24 @@ function QueueRow({ task, onOpenFolder }: { task: DownloadTask; onOpenFolder(pat
             <X size={12} />
           </Button>
         ) : task.state === "done" && task.path ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            iconOnly
-            aria-label="在文件夹中显示"
-            onClick={() => onOpenFolder(task.path)}
+          <button
+            type="button"
+            className="kd-text-action"
+            aria-label={task.track_id == null ? "在访达中显示下载文件" : "在曲库中打开所在文件夹"}
+            onClick={() => onOpenTask(task)}
           >
-            <FolderOpen size={12} />
-          </Button>
+            {task.track_id == null ? "定位" : "打开"}
+          </button>
+        ) : null}
+        {!active ? (
+          <button
+            type="button"
+            className="kd-text-action"
+            aria-label="移除队列记录"
+            onClick={() => void remove(task.id).catch((error: unknown) => setCancelError(`移除失败：${(error as Error).message}`))}
+          >
+            移除
+          </button>
         ) : null}
       </span>
 
@@ -83,8 +137,19 @@ function QueueRow({ task, onOpenFolder }: { task: DownloadTask; onOpenFolder(pat
         <span className="kd-faint">·</span>
         <span className="kd-mono">{PLATFORM_LABEL[task.platform] ?? task.platform}</span>
         {task.quality && <span className="kd-mono">{task.quality.toUpperCase()}</span>}
+        {task.dest_dir?.trim() ? (
+          <>
+            <span className="kd-faint">·</span>
+            <span className="kd-mono" title={task.dest_dir}>
+              → {folderName(task.dest_dir)}
+            </span>
+          </>
+        ) : null}
         <span className="kd-toolbar-gap" />
         {task.state === "running" && <span>{formatSpeed(task.speed_bps)}</span>}
+        {task.state === "processing" && (
+          <span className="kd-muted">下载完成，正在生成文件</span>
+        )}
         {task.total_bytes > 0 && (
           <span>
             {formatBytes(task.downloaded_bytes)} / {formatBytes(task.total_bytes)}
@@ -98,7 +163,7 @@ function QueueRow({ task, onOpenFolder }: { task: DownloadTask; onOpenFolder(pat
           <ProgressBar
             value={task.progress}
             state={progressState(task.state)}
-            indeterminate={unknownTotal}
+            indeterminate={unknownTotal || task.state === "processing"}
           />
         </div>
       )}
@@ -116,105 +181,172 @@ function QueueRow({ task, onOpenFolder }: { task: DownloadTask; onOpenFolder(pat
           <InlineNotice text={cancelError} onDismiss={() => setCancelError("")} />
         </div>
       )}
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
+          <button
+            type="button"
+            onClick={() => {
+              void copyText(task.title);
+              setMenu(null);
+            }}
+          >
+            <Copy size={12} />
+            复制标题
+          </button>
+          {task.artist ? (
+            <button
+              type="button"
+              onClick={() => {
+                void copyText(task.artist);
+                setMenu(null);
+              }}
+            >
+              <Copy size={12} />
+              复制艺人
+            </button>
+          ) : null}
+        </ContextMenu>
+      )}
     </div>
   );
 }
 
-/** 保存目录是一个轻量路径按钮，不再渲染原生 select 和重复的下拉箭头。 */
-function SaveDirButton({
-  icon,
-  what,
-  value,
-  onChange,
-}: {
-  icon: React.ReactNode;
-  what: string;
-  value: string;
-  onChange: (dir: string) => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="kd-save-dest"
-      title={`${what}下载到 ${value}；点击更换`}
-      onClick={() => {
-        void window.kdj?.pickFolder().then((dir) => {
-          if (dir) onChange(dir);
-        });
-      }}
-    >
-      {icon}
-      <span className="kd-truncate">{folderName(value) || value}</span>
-    </button>
-  );
-}
-
 /**
- * 保存目录就放在队列头上：任务往哪落、想换个地方落，都是在看队列时冒出来的念头。
- * 音乐和视频各一个下拉，选完存回设置。原来塞在搜索框上的那个目录按钮删了——
- * 搜索的时候人在想"找什么"，不是"存哪里"。
+ * 队列头两行工具条：
+ * 1) 开始 / 清空 / 计数 / 音质 / 画质
+ * 2) 音乐 / 视频各自的默认保存目录（拖进文件夹时仍以目标文件夹为准）
  */
-function SaveDirRow({ onOpenFolder }: { onOpenFolder(path: string): void }) {
+function QueuePrefsBar({
+  canStart,
+  queuedCount,
+  finishedCount,
+  activeCount,
+  totalCount,
+  onStart,
+  onClear,
+}: {
+  canStart: boolean;
+  queuedCount: number;
+  finishedCount: number;
+  activeCount: number;
+  totalCount: number;
+  onStart(): void;
+  onClear(): void;
+}) {
   const settings = useAppStore((store) => store.settings);
   const saveSettings = useAppStore((store) => store.saveSettings);
   if (!settings) return null;
 
-  const save = (key: keyof Pick<Settings, "download_dir" | "video_download_dir">) => (dir: string) =>
-    void saveSettings({ [key]: dir });
   const qualities: Quality[] = ["flac", "320", "128"];
   const quality = settings.default_quality;
   const qualityIndex = qualities.indexOf(quality);
   const qualityLabel = quality === "flac" ? "FLAC" : `${quality}K`;
-  const sameDirectory = settings.download_dir === settings.video_download_dir;
+
+  const height = settings.video_max_height;
+  const heightIndex = VIDEO_HEIGHTS.indexOf(height);
+  const heightLabel = `${height > 0 ? height : 1080}p`;
+  const downloadDir = settings.download_dir;
+  const videoDir = settings.video_download_dir.trim() || downloadDir;
 
   return (
-    <div className="kd-toolbar kd-download-prefs" data-slim="true">
-      <button
-        type="button"
-        className="kd-download-quality"
-        title={`默认下载音质：${qualityLabel}。点击切换`}
-        onClick={() =>
-          void saveSettings({
-            default_quality: qualities[(qualityIndex + 1 + qualities.length) % qualities.length],
-          })
-        }
-      >
-        {qualityLabel}
-      </button>
-      {sameDirectory ? (
-        <SaveDirButton
-          icon={<span className="kd-row"><Music2 size={11} /><Clapperboard size={11} /></span>}
-          what="音乐和视频"
-          value={settings.download_dir}
-          onChange={(dir) => void saveSettings({ download_dir: dir, video_download_dir: dir })}
-        />
-      ) : (
-        <>
-          <SaveDirButton
-            icon={<Music2 size={11} />}
-            what="音乐"
-            value={settings.download_dir}
-            onChange={save("download_dir")}
-          />
-          <SaveDirButton
-            icon={<Clapperboard size={11} />}
-            what="视频"
-            value={settings.video_download_dir}
-            onChange={save("video_download_dir")}
-          />
-        </>
-      )}
-      <span className="kd-toolbar-gap" />
-      <Button
-        variant="ghost"
-        size="sm"
-        iconOnly
-        aria-label="在面板中打开音乐下载目录"
-        title="在面板中打开音乐下载目录"
-        onClick={() => onOpenFolder(settings.download_dir)}
-      >
-        <FolderOpen size={12} />
-      </Button>
+    <div className="kd-download-prefs">
+      <div className="kd-toolbar" data-slim="true">
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={!canStart}
+          title={
+            canStart
+              ? `开始排队中的 ${queuedCount} 个任务（下载 / 导出）`
+              : "队列里没有排队中的任务"
+          }
+          onClick={onStart}
+        >
+          <Play size={12} />
+          开始
+        </Button>
+        <button
+          type="button"
+          className="kd-text-action"
+          disabled={finishedCount <= 0}
+          title="清掉已完成 / 失败 / 已取消的记录，进行中的留着"
+          onClick={onClear}
+        >
+          <Trash2 size={12} />
+          清空
+        </button>
+
+        <span
+          className="kd-muted"
+          style={{ fontSize: "var(--kd-size-xs)" }}
+          title={`${activeCount} 个在下 / 队列共 ${totalCount} 个`}
+        >
+          {activeCount}/{totalCount}
+        </span>
+
+        <span className="kd-toolbar-gap" />
+
+        <button
+          type="button"
+          className="kd-download-quality"
+          title={`默认下载音质：${qualityLabel}。点击切换`}
+          onClick={() =>
+            void saveSettings({
+              default_quality: qualities[(qualityIndex + 1 + qualities.length) % qualities.length],
+            })
+          }
+        >
+          {qualityLabel}
+        </button>
+        <button
+          type="button"
+          className="kd-download-quality"
+          title={`默认视频画质上限：${heightLabel}。点击切换`}
+          onClick={() => {
+            const next =
+              VIDEO_HEIGHTS[(heightIndex + 1 + VIDEO_HEIGHTS.length) % VIDEO_HEIGHTS.length] ?? 1080;
+            void saveSettings({ video_max_height: next });
+          }}
+        >
+          {heightLabel}
+        </button>
+      </div>
+
+      <div className="kd-toolbar kd-download-prefs-dirs" data-slim="true">
+        <span className="kd-muted" style={{ fontSize: "var(--kd-size-xs)", flex: "none" }}>
+          音乐
+        </span>
+        <button
+          type="button"
+          className="kd-save-dest"
+          title={`音乐默认下载目录（拖进文件夹时以目标文件夹为准）。点击更换：${downloadDir}`}
+          onClick={() => {
+            void window.kdj?.pickFolder().then((dir) => {
+              if (dir) void saveSettings({ download_dir: dir });
+            });
+          }}
+        >
+          <FolderOpen size={11} />
+          <span className="kd-truncate">{downloadDir || "未设置"}</span>
+        </button>
+        <span className="kd-muted" style={{ fontSize: "var(--kd-size-xs)", flex: "none" }}>
+          视频
+        </span>
+        <button
+          type="button"
+          className="kd-save-dest"
+          title={`视频默认下载目录（拖进文件夹时以目标文件夹为准）。点击更换：${videoDir}`}
+          onClick={() => {
+            void window.kdj?.pickFolder().then((dir) => {
+              if (dir) void saveSettings({ video_download_dir: dir });
+            });
+          }}
+        >
+          <FolderOpen size={11} />
+          <span className="kd-truncate">{videoDir || "未设置"}</span>
+        </button>
+      </div>
     </div>
   );
 }
@@ -223,9 +355,6 @@ export function QueuePanel() {
   const list = useDownloadStore((store) => store.list);
   const activeCount = useDownloadStore((store) => store.activeCount);
   const clear = useDownloadStore((store) => store.clear);
-  const enqueue = useDownloadStore((store) => store.enqueue);
-  const mergeTasks = useDownloadStore((store) => store.mergeTasks);
-  const settings = useAppStore((store) => store.settings);
   const [dropActive, setDropActive] = useState(false);
   const folders = useLibraryStore((store) => store.folders);
   const setFilter = useLibraryStore((store) => store.setFilter);
@@ -243,7 +372,17 @@ export function QueuePanel() {
   /** 队列头上两个动作共用一条错误行：一次只按得动一个，堆两条只会把列表往下挤。 */
   const [actionError, setActionError] = useState("");
 
-  const openFolder = (path: string) => {
+  const openTask = (task: DownloadTask) => {
+    const path = task.path;
+    // 没有曲库 id 说明它只是下到了默认视频目录，或入库失败。旧逻辑仍把应用
+    // 筛选切到那个曲库外目录，得到一张空表，看起来就像文件消失；此时直接在
+    // 系统文件管理器中定位成品才是可执行的答案。
+    if (task.track_id == null) {
+      void window.kdj?.revealPath(path).catch((error: unknown) =>
+        setActionError(`定位下载文件失败：${(error as Error).message}`),
+      );
+      return;
+    }
     const wanted = path.replaceAll("\\", "/").replace(/\/+$/, "");
     let best = "";
     const visit = (nodes: FolderNode[]) => {
@@ -268,10 +407,10 @@ export function QueuePanel() {
     <div
       className="kd-col kd-download-dropzone"
       data-drop-active={dropActive ? "true" : undefined}
+      {...{ [SEARCH_QUEUE_DROP_ATTR]: "true" }}
       style={{ height: "100%", minHeight: 0 }}
       onDragOver={(event) => {
-        const types = Array.from(event.dataTransfer.types);
-        if (!types.includes(SEARCH_DOWNLOAD_DND_TYPE) && !types.includes(VIDEO_DOWNLOAD_DND_TYPE)) return;
+        if (!isSearchDownloadDrag(event)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = "copy";
         setDropActive(true);
@@ -281,102 +420,50 @@ export function QueuePanel() {
       }}
       onDrop={(event) => {
         setDropActive(false);
-        const videoRaw = event.dataTransfer.getData(VIDEO_DOWNLOAD_DND_TYPE);
-        if (videoRaw) {
-          event.preventDefault();
-          try {
-            const request = JSON.parse(videoRaw) as VideoDownloadRequest;
-            void api
-              .videoDownload(request)
-              .then((task) => mergeTasks([task]))
-              .catch((error: unknown) => setActionError(`加入视频队列失败：${(error as Error).message}`));
-          } catch {
-            setActionError("加入视频队列失败：拖动的数据无法识别");
-          }
-          return;
-        }
-        const raw = event.dataTransfer.getData(SEARCH_DOWNLOAD_DND_TYPE);
-        if (!raw) return;
+        const payload = readSearchDrop(event.dataTransfer);
+        finishSearchDrop();
+        if (!payload) return;
         event.preventDefault();
-        try {
-          const sources = JSON.parse(raw) as SongSource[];
-          void enqueue(sources, { quality: settings?.default_quality ?? null }).catch(
-            (error: unknown) => setActionError(`加入队列失败：${(error as Error).message}`),
-          );
-        } catch {
-          setActionError("加入队列失败：拖动的数据无法识别");
-        }
+        void enqueueSearchQueuePayload(payload).catch((error: unknown) =>
+          setActionError(`加入队列失败：${(error as Error).message}`),
+        );
       }}
     >
-      <div className="kd-toolbar">
-        <strong>下载队列</strong>
-        {/* 右栏死死的 22rem，标题+计数+两颗按钮量下来只剩 314px 可用。
-            计数压到 xs 还砍掉「总计」二字，是为了给三四位数的总量留出富余——
-            队列一破百就换行的话，这一行白排了。「进行」贴在前一个数上，
-            后一个数是什么不用再标 */}
-        <span
-          className="kd-muted"
-          style={{ fontSize: "var(--kd-size-xs)" }}
-          title={`${activeCount} 个在下 / 队列共 ${list.length} 个`}
-        >
-          {activeCount} 进行 / {list.length}
-        </span>
-        <span className="kd-toolbar-gap" />
-        {/* 这一格里唯一的红：整个面板上"现在把东西下下来"就这一个动作 */}
-        <Button
-          variant="primary"
-          size="sm"
-          disabled={!canStart}
-          title={
-            canStart
-              ? `开始下载排队中的 ${queuedCount} 个任务`
-              : "队列里没有排队中的任务"
-          }
-          onClick={() => {
-            setActionError("");
-            void (async () => {
-              try {
-                await api.startDownloads();
-              } catch (error: unknown) {
-                setActionError(`开始下载失败：${(error as Error).message}`);
-              }
-            })();
-          }}
-        >
-          <Play size={12} />
-          开始下载
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={finishedCount <= 0}
-          title="清掉已完成 / 失败 / 已取消的记录，进行中的留着"
-          onClick={() => {
-            setActionError("");
-            void clear().catch((error: unknown) =>
-              setActionError(`清空失败：${(error as Error).message}`),
-            );
-          }}
-        >
-          <Trash2 size={12} />
-          清空
-        </Button>
-      </div>
+      <QueuePrefsBar
+        canStart={canStart}
+        queuedCount={queuedCount}
+        finishedCount={finishedCount}
+        activeCount={activeCount}
+        totalCount={list.length}
+        onStart={() => {
+          setActionError("");
+          void (async () => {
+            try {
+              await api.startDownloads();
+            } catch (error: unknown) {
+              setActionError(`开始下载失败：${(error as Error).message}`);
+            }
+          })();
+        }}
+        onClear={() => {
+          setActionError("");
+          void clear().catch((error: unknown) =>
+            setActionError(`清空失败：${(error as Error).message}`),
+          );
+        }}
+      />
 
-      {/* 就贴在动作那条工具条底下 */}
       <InlineNotice text={actionError} onDismiss={() => setActionError("")} block />
-
-      <SaveDirRow onOpenFolder={openFolder} />
 
       <div className="kd-scroll kd-grow" style={{ minHeight: 0 }}>
         {list.length === 0 ? (
           <EmptyState
             icon={<Inbox size={20} />}
             title="队列是空的"
-            hint="在左边勾选歌曲，底部会出现「加入队列」。"
+            hint="把搜索结果拖进左边文件夹，或勾选后点「加入队列」。"
           />
         ) : (
-          list.map((task) => <QueueRow key={task.id} task={task} onOpenFolder={openFolder} />)
+          list.map((task) => <QueueRow key={task.id} task={task} onOpenTask={openTask} />)
         )}
       </div>
     </div>

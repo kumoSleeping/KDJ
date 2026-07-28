@@ -1,10 +1,13 @@
 //! 下载队列：并发控制、进度上报、取消。
 
 use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use anyhow::{bail, Context, Result};
 use kdj_core::models::{
-    DownloadTask, Platform, Quality, SongSource, TaskKind, TaskState, VideoDownloadRequest,
+    DownloadTask, Platform, Quality, SongSource, TaskKind, TaskState, Track, VideoDownloadRequest,
+    VjExportRequest,
 };
 use kdj_core::EventHub;
 use kdj_providers::DownloadJob;
@@ -247,6 +250,16 @@ impl DownloadManager {
             } else {
                 0.0
             };
+            // DASH 的最后一个字节只代表音/视频流已到齐；之后仍可能要让 FFmpeg
+            // 合并（或按设置转码）、原子落盘、移入目标目录并入库。以前 UI 在这段
+            // 时间继续写「下载中 100%」，看起来像卡死。总量已知且收齐就立刻切相位。
+            let entered_processing = total > 0
+                && downloaded >= total
+                && entry.task.state == TaskState::Running;
+            if entered_processing {
+                entry.task.state = TaskState::Processing;
+                entry.task.speed_bps = 0.0;
+            }
             entry.samples.push_back((now, downloaded));
             if entry.samples.len() > SPEED_SAMPLES {
                 entry.samples.pop_front();
@@ -254,7 +267,8 @@ impl DownloadManager {
             entry.task.speed_bps = window_speed(&mut entry.samples, now);
             entry.task.updated_at = now_secs();
 
-            let due = now - entry.last_emit >= PROGRESS_MIN_INTERVAL
+            let due = entered_processing
+                || now - entry.last_emit >= PROGRESS_MIN_INTERVAL
                 || entry.task.progress - entry.last_progress >= PROGRESS_MIN_DELTA;
             if !due {
                 return;
@@ -271,6 +285,26 @@ impl DownloadManager {
     /// 已经落到终态的不再改：取消是在下载循环的**下一次**回调才生效的，
     /// 「点了取消 → 最后一块正好下完」这条时序会把「已取消」翻回「已完成」。
     fn finish(&self, id: &str, path: &std::path::Path, track_id: Option<i64>) {
+        self.finish_file(id, path, TaskState::Done, "", track_id);
+    }
+
+    /// 文件已经落盘，但写进曲库失败：必须保留成品路径并明确标失败。
+    ///
+    /// 旧逻辑仍调用 `finish(..., None)`，右栏因此显示「完成」，左表却永远没有对应
+    /// 曲目——正是最像“视频消失了”的状态。下载成功和入库成功是两段结果，目标
+    /// 文件夹下载只有两段都成功才能标 Done。
+    fn fail_after_download(&self, id: &str, path: &std::path::Path, error: &str) {
+        self.finish_file(id, path, TaskState::Failed, error, None);
+    }
+
+    fn finish_file(
+        &self,
+        id: &str,
+        path: &std::path::Path,
+        state: TaskState,
+        error: &str,
+        track_id: Option<i64>,
+    ) {
         {
             let entries = self.entries.lock().unwrap();
             match entries.get(id) {
@@ -286,11 +320,12 @@ impl DownloadManager {
             .unwrap_or_default()
             .to_ascii_lowercase();
         self.update(id, |task| {
-            task.state = TaskState::Done;
-            task.progress = 1.0;
+            task.state = state;
+            task.progress = if state == TaskState::Done { 1.0 } else { task.progress };
             // 收尾还挂着最后一次的瞬时速度的话，完成的条目会一直显示 "3.2 MB/s"
             task.speed_bps = 0.0;
             task.path = path.to_string_lossy().into_owned();
+            task.error = error.to_string();
             task.track_id = track_id;
             if size > 0 {
                 task.downloaded_bytes = size;
@@ -339,6 +374,20 @@ impl DownloadManager {
         }
         self.settle(id, TaskState::Canceled, "已取消")
             .or_else(|| self.get(id))
+    }
+
+    /// 只移除一条已结束任务。用于清理某次导出记录，不能误伤同队列中的其他任务。
+    pub fn remove_finished(&self, id: &str) -> Option<DownloadTask> {
+        let removed = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries.get(id)?;
+            if !is_terminal(entry.task.state) {
+                return None;
+            }
+            entries.remove(id).map(|entry| entry.task)
+        };
+        self.broadcast_list();
+        removed
     }
 
     /// 清掉所有已结束的任务，返回清掉几条。
@@ -405,7 +454,15 @@ async fn wait_until_started(
     }
 }
 
-fn new_task(kind: TaskKind, platform: Platform, title: &str, artist: &str, quality: String) -> DownloadTask {
+fn new_task(
+    kind: TaskKind,
+    platform: Platform,
+    title: &str,
+    artist: &str,
+    quality: String,
+    dest_dir: String,
+    cover: String,
+) -> DownloadTask {
     let now = now_secs();
     DownloadTask {
         id: new_id(),
@@ -427,9 +484,38 @@ fn new_task(kind: TaskKind, platform: Platform, title: &str, artist: &str, quali
         path: String::new(),
         error: String::new(),
         track_id: None,
+        dest_dir,
+        cover,
         created_at: now,
         updated_at: now,
     }
+}
+
+/// 下完后若指定了目标文件夹，挪进去（须在曲库根目录内）。
+fn relocate_download(state: &AppState, path: &Path, dest_dir: &str) -> Result<PathBuf, String> {
+    let dest_dir = dest_dir.trim();
+    if dest_dir.is_empty() {
+        return Ok(path.to_path_buf());
+    }
+    let roots: Vec<PathBuf> = state
+        .config
+        .to_settings()
+        .library_dirs
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    if roots.is_empty() {
+        return Err("还没有配置曲库目录".into());
+    }
+    let dest = kdj_library::folders::ensure_inside(Path::new(dest_dir), &roots)
+        .map_err(|err| format!("{err:#}"))?;
+    if !dest.is_dir() {
+        return Err("目标不是文件夹".into());
+    }
+    if path.parent() == Some(dest.as_path()) {
+        return Ok(path.to_path_buf());
+    }
+    kdj_library::folders::move_file(path, &dest).map_err(|err| format!("{err:#}"))
 }
 
 /// 建一条音频下载任务并在后台跑。
@@ -439,6 +525,7 @@ pub fn enqueue_audio(
     source: SongSource,
     quality: Quality,
     analyze: bool,
+    dest_dir: String,
 ) -> DownloadTask {
     let task = new_task(
         TaskKind::Audio,
@@ -446,6 +533,8 @@ pub fn enqueue_audio(
         &source.title,
         &source.artist_text(),
         quality.as_str().to_string(),
+        dest_dir.clone(),
+        source.cover.clone(),
     );
     let cancel = CancellationToken::new();
     manager.insert(task.clone(), cancel.clone());
@@ -453,7 +542,18 @@ pub fn enqueue_audio(
 
     let id = task.id.clone();
     tokio::spawn(async move {
-        run_audio(state, manager, id, source, quality, analyze, cancel, queued_generation).await;
+        run_audio(
+            state,
+            manager,
+            id,
+            source,
+            quality,
+            analyze,
+            dest_dir,
+            cancel,
+            queued_generation,
+        )
+        .await;
     });
     task
 }
@@ -466,6 +566,7 @@ async fn run_audio(
     source: SongSource,
     quality: Quality,
     analyze: bool,
+    dest_dir: String,
     cancel: CancellationToken,
     queued_generation: u64,
 ) {
@@ -510,23 +611,41 @@ async fn run_audio(
             manager.settle(&id, TaskState::Canceled, "已取消");
         }
         Ok(path) => {
+            let path = match relocate_download(&state, &path, &dest_dir) {
+                Ok(path) => path,
+                Err(message) => {
+                    manager.settle(
+                        &id,
+                        TaskState::Failed,
+                        &format!("已下载但移入目标文件夹失败：{message}"),
+                    );
+                    return;
+                }
+            };
             // 下载完立刻入库，并把来源信息带上，这样曲库里能看出这首是从哪来的
-            let track_id = state
-                .library
-                .upsert_file(&path, source.platform.as_str(), &source.key)
-                .ok();
-            manager.finish(&id, &path, track_id);
-            if let Some(track_id) = track_id {
-                state.hub.publish_library_updated(&[track_id]);
-                if analyze {
-                    match state.library.pending_analysis_ids(Some(&[track_id]), false) {
-                        Ok(pending) if !pending.is_empty() => {
-                            // 下载完顺手分析是后台活，「停止分析」应该停得掉
-                            crate::jobs::spawn_analysis(state.clone(), pending, false);
-                        }
-                        Ok(_) => {}
-                        Err(err) => tracing::warn!("取待分析队列失败：{err:#}"),
+            let track_id = match state.library.upsert_file(
+                &path,
+                source.platform.as_str(),
+                &source.key,
+            ) {
+                Ok(id) => id,
+                Err(err) => {
+                    let message = format!("文件已下载，但加入曲库失败：{err:#}");
+                    tracing::error!("{} {}", message, path.display());
+                    manager.fail_after_download(&id, &path, &message);
+                    return;
+                }
+            };
+            manager.finish(&id, &path, Some(track_id));
+            state.hub.publish_library_updated(&[track_id]);
+            if analyze {
+                match state.library.pending_analysis_ids(Some(&[track_id]), false) {
+                    Ok(pending) if !pending.is_empty() => {
+                        // 下载完顺手分析是后台活，「停止分析」应该停得掉
+                        crate::jobs::spawn_analysis(state.clone(), pending, false);
                     }
+                    Ok(_) => {}
+                    Err(err) => tracing::warn!("取待分析队列失败：{err:#}"),
                 }
             }
         }
@@ -556,6 +675,267 @@ fn video_placeholder_title(req: &VideoDownloadRequest) -> String {
     "视频".to_string()
 }
 
+/// 一段已验证的 VJ 裁切。`duration` 是裁切后的有效时长，专门用于把淡入淡出
+/// 夹在两段都留有内容的范围内。
+struct VjClipPlan {
+    track: Track,
+    start: f64,
+    end: f64,
+    duration: f64,
+}
+
+/// 把时间吸到分析出的第一拍网格。没有可信 BPM 或第一拍时宁可不动，不能用
+/// 文件开头假装 downbeat；整小节就是每 4 拍取一个点。
+fn snap_vj_time(track: &Track, time: f64, whole_bar: bool) -> Option<f64> {
+    let bpm = track.bpm.filter(|bpm| bpm.is_finite() && *bpm > 0.0)?;
+    let first_beat = track.first_beat.filter(|beat| beat.is_finite() && *beat >= 0.0)?;
+    let step = 60.0 / bpm * if whole_bar { 4.0 } else { 1.0 };
+    Some(first_beat + ((time - first_beat) / step).round() * step)
+}
+
+fn vj_interval(
+    track: &Track,
+    use_in_out_points: bool,
+    snap_nearest_beat: bool,
+    snap_whole_bar: bool,
+) -> Result<(f64, f64)> {
+    let duration = track
+        .duration
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .or_else(|| kdj_providers::tags::read_duration_secs(Path::new(&track.path)))
+        .context("读不到素材时长；请重新扫描该 VJ 后再导出")?;
+    let start = if use_in_out_points {
+        track.cue_ms.unwrap_or(0).max(0) as f64 / 1000.0
+    } else {
+        0.0
+    };
+    let end = if use_in_out_points {
+        track.end_ms.map(|value| value as f64 / 1000.0).unwrap_or(duration)
+    } else {
+        duration
+    }
+    .min(duration);
+    let (start, end) = if snap_nearest_beat {
+        let snapped_start = snap_vj_time(track, start, snap_whole_bar)
+            .map(|value| value.clamp(0.0, duration))
+            .unwrap_or(start);
+        let snapped_end = snap_vj_time(track, end, snap_whole_bar)
+            .map(|value| value.clamp(0.0, duration))
+            .unwrap_or(end);
+        // 一个短片段吸到同一拍会成为零长度，保留用户原来的精确裁切比导出失败好。
+        if snapped_end - snapped_start >= 0.1 {
+            (snapped_start, snapped_end)
+        } else {
+            (start, end)
+        }
+    } else {
+        (start, end)
+    };
+    if !start.is_finite() || !end.is_finite() || end - start < 0.1 {
+        bail!("{} 的开始 / 结束点没有可导出的内容", track.filename);
+    }
+    Ok((start, end))
+}
+
+/// 把请求里的 id 严格按用户给出的次序取回。不能用 SQL 的 `IN` 排序：它会悄悄
+/// 丢掉用户在面板里排好的顺序，VJ 接歌就完全变味了。
+fn vj_clip_plans(state: &AppState, req: &VjExportRequest) -> Result<Vec<VjClipPlan>> {
+    let selected_folder = kdj_library::service::normalize_path(Path::new(&req.folder));
+    req.track_ids
+        .iter()
+        .map(|id| {
+            let track = state
+                .library
+                .get(*id)?
+                .with_context(|| format!("曲目不存在：{id}"))?;
+            let parent = Path::new(&track.path)
+                .parent()
+                .map(kdj_library::service::normalize_path)
+                .unwrap_or_default();
+            if parent != selected_folder {
+                bail!("{} 不在本次选择的文件夹内", track.filename);
+            }
+            if !Path::new(&track.path).is_file() {
+                bail!("找不到 VJ 素材：{}", track.path);
+            }
+            let (start, end) = vj_interval(
+                &track,
+                req.use_in_out_points,
+                req.snap_nearest_beat,
+                req.snap_whole_bar,
+            )?;
+            Ok(VjClipPlan {
+                track,
+                start,
+                end,
+                duration: end - start,
+            })
+        })
+        .collect()
+}
+
+/// 小节模式的每个过渡都取**上一首**的 BPM：退场素材的节拍才是观众正在听的节拍。
+/// 未分析素材按 120 BPM 兜底，保证导出不会因一条缺分析数据而失败。
+fn vj_fade_seconds(req: &VjExportRequest, previous: &Track) -> f64 {
+    if req.fade_bars > 0 {
+        let bpm = previous.bpm.filter(|bpm| bpm.is_finite() && *bpm > 0.0).unwrap_or(120.0);
+        f64::from(req.fade_bars) * 4.0 * 60.0 / bpm
+    } else {
+        req.fade_seconds
+    }
+}
+
+fn vj_output_path(state: &AppState) -> Result<(PathBuf, PathBuf)> {
+    // 所有导出与普通下载遵从用户设置的同一个默认下载目录，不额外套 VJ 子文件夹。
+    let directory = state.config.download_dir();
+    std::fs::create_dir_all(&directory).context("创建 VJ 导出目录失败")?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let output = directory.join(format!("VJ Export {stamp}.mp4"));
+    let partial = directory.join(format!("VJ Export {stamp}.partial.mp4"));
+    Ok((output, partial))
+}
+
+/// 建一条「按顺序导出 VJ」任务，走同一条下载队列和取消令牌。
+pub fn enqueue_vj_export(
+    state: Arc<AppState>,
+    manager: Arc<DownloadManager>,
+    req: VjExportRequest,
+    folder_label: &str,
+) -> DownloadTask {
+    let count = req.track_ids.len();
+    let title = if folder_label.is_empty() {
+        "VJ 导出".into()
+    } else {
+        format!("VJ 导出 · {folder_label}")
+    };
+    let artist = format!("{count} 首");
+    let quality = if req.quality.trim().is_empty() {
+        "1080p".into()
+    } else {
+        req.quality.trim().to_string()
+    };
+    let task = new_task(
+        TaskKind::VjExport,
+        Platform::Local,
+        &title,
+        &artist,
+        quality,
+        state.config.download_dir().to_string_lossy().into_owned(),
+        String::new(),
+    );
+    let cancel = CancellationToken::new();
+    manager.insert(task.clone(), cancel.clone());
+    let queued_generation = manager.start_generation();
+
+    let id = task.id.clone();
+    tokio::spawn(async move {
+        if !wait_until_started(&manager, &cancel, queued_generation).await {
+            return;
+        }
+        let permits = manager.permits();
+        let Ok(_permit) = permits.acquire_owned().await else {
+            return;
+        };
+        if cancel.is_cancelled() {
+            return;
+        }
+        run_vj_export(state, manager, id, req, cancel).await;
+    });
+    task
+}
+
+async fn run_vj_export(
+    state: Arc<AppState>,
+    manager: Arc<DownloadManager>,
+    id: String,
+    req: VjExportRequest,
+    cancel: CancellationToken,
+) {
+    manager.start(&id);
+    if !kdj_providers::ffmpeg::available() {
+        manager.settle(&id, TaskState::Failed, "系统里没有 ffmpeg，无法渲染 VJ 导出");
+        return;
+    }
+    let result: Result<PathBuf> = async {
+        let plans = vj_clip_plans(&state, &req)?;
+        let mut clips = Vec::with_capacity(plans.len());
+        for (index, plan) in plans.iter().enumerate() {
+            let desired_fade = plans
+                .get(index + 1)
+                .map(|_| vj_fade_seconds(&req, &plan.track))
+                .unwrap_or(0.0);
+            // 不让一次过长的淡化吞掉任一首；ffmpeg 的 xfade 也要求这个约束。
+            let next_duration = plans.get(index + 1).map(|next| next.duration).unwrap_or(0.0);
+            let fade_to_next = if next_duration > 0.0 {
+                desired_fade.max(0.0).min(plan.duration * 0.5).min(next_duration * 0.5)
+            } else {
+                0.0
+            };
+            clips.push(kdj_providers::ffmpeg::VjExportClip {
+                source: PathBuf::from(&plan.track.path),
+                start: plan.start,
+                end: plan.end,
+                fade_to_next,
+            });
+        }
+        let (output, partial) = vj_output_path(&state)?;
+        let encoder = kdj_providers::ffmpeg::preferred_vj_video_encoder();
+        let args = kdj_providers::ffmpeg::vj_export_args_with_encoder(
+            &clips,
+            &partial,
+            &req.quality,
+            req.keep_audio,
+            req.keep_audio && req.unify_gain,
+            encoder,
+        )?;
+        manager.update(&id, |task| task.state = TaskState::Processing);
+        let log = partial.with_extension("log");
+        let rendered = kdj_providers::ffmpeg::run(&args, &log, &cancel).await;
+        if let Err(err) = rendered {
+            // FFmpeg 能列出硬件编码器不代表本机驱动 / 会话一定可实际打开；失败后
+            // 无需用户改设置，立刻用 libx264 重试同一份临时文件。
+            if encoder != kdj_providers::ffmpeg::VjVideoEncoder::Software && !cancel.is_cancelled() {
+                tracing::warn!(?encoder, "VJ 硬件编码失败，回退到 libx264：{err:#}");
+                let fallback = kdj_providers::ffmpeg::vj_export_args_with_encoder(
+                    &clips,
+                    &partial,
+                    &req.quality,
+                    req.keep_audio,
+                    req.keep_audio && req.unify_gain,
+                    kdj_providers::ffmpeg::VjVideoEncoder::Software,
+                )?;
+                kdj_providers::ffmpeg::run(&fallback, &log, &cancel).await?;
+            } else {
+                let _ = std::fs::remove_file(&partial);
+                return Err(err);
+            }
+        }
+        if std::fs::metadata(&partial).map(|meta| meta.len()).unwrap_or(0) == 0 {
+            bail!("FFmpeg 没有写出 VJ 成品");
+        }
+        std::fs::rename(&partial, &output).context("提交 VJ 成品失败")?;
+        Ok(output)
+    }
+    .await;
+
+    match result {
+        Ok(path) if cancel.is_cancelled() => {
+            let _ = std::fs::remove_file(path);
+            manager.settle(&id, TaskState::Canceled, "已取消");
+        }
+        Ok(path) => manager.finish(&id, &path, None),
+        Err(_err) if cancel.is_cancelled() => {
+            manager.settle(&id, TaskState::Canceled, "已取消");
+        }
+        Err(err) => {
+            manager.settle(&id, TaskState::Failed, &format!("{err:#}"));
+        }
+    };
+}
+
 /// 建一条视频下载任务。
 pub fn enqueue_video(
     state: Arc<AppState>,
@@ -568,12 +948,23 @@ pub fn enqueue_video(
     } else {
         format!("{}p", req.max_height)
     };
+    let dest_dir = req.dest_dir.clone();
+    let title = {
+        let hint = req.title.trim();
+        if hint.is_empty() {
+            video_placeholder_title(&req)
+        } else {
+            hint.to_string()
+        }
+    };
     let task = new_task(
         TaskKind::Video,
         Platform::Bilibili,
-        &video_placeholder_title(&req),
-        "",
+        &title,
+        req.artist.trim(),
         quality,
+        dest_dir,
+        req.cover.trim().to_string(),
     );
     let cancel = CancellationToken::new();
     manager.insert(task.clone(), cancel.clone());
@@ -605,8 +996,19 @@ pub fn enqueue_video(
         match state.bilibili.resolve_video(&probe).await {
             Ok(info) if !info.title.is_empty() => {
                 manager.update(&id, |task| {
-                    task.title = info.title.clone();
-                    task.artist = info.author.clone();
+                    // 入队时搜索结果可能已经盖过标题/封面；解析结果只补空缺，别把好的冲掉。
+                    if task.title.is_empty()
+                        || task.title == "未命名"
+                        || task.title.starts_with("BV")
+                    {
+                        task.title = info.title.clone();
+                    }
+                    if task.artist.trim().is_empty() {
+                        task.artist = info.author.clone();
+                    }
+                    if task.cover.trim().is_empty() && !info.cover.trim().is_empty() {
+                        task.cover = info.cover.clone();
+                    }
                 });
             }
             Ok(_) => {}
@@ -625,9 +1027,30 @@ pub fn enqueue_video(
                 manager.settle(&id, TaskState::Canceled, "已取消");
             }
             Ok(path) => {
-                // 只要音轨时产物是音频，进曲库；完整视频不进（会把曲库搅乱）
-                let track_id = if req.audio_only {
-                    state.library.upsert_file(&path, "bilibili", &req.bvid).ok()
+                let path = match relocate_download(&state, &path, &req.dest_dir) {
+                    Ok(path) => path,
+                    Err(message) => {
+                        manager.settle(
+                            &id,
+                            TaskState::Failed,
+                            &format!("已下载但移入目标文件夹失败：{message}"),
+                        );
+                        return;
+                    }
+                };
+                // 只要音轨：进曲库。完整视频默认不进（免得搅乱曲库），
+                // 但拖进某个文件夹时用户就是要它出现在那里——dest_dir 非空也入库。
+                let should_import = req.audio_only || !req.dest_dir.trim().is_empty();
+                let track_id = if should_import {
+                    match state.library.upsert_file(&path, "bilibili", &req.bvid) {
+                        Ok(id) => Some(id),
+                        Err(err) => {
+                            let message = format!("视频已下载，但加入曲库失败：{err:#}");
+                            tracing::error!("{} {}", message, path.display());
+                            manager.fail_after_download(&id, &path, &message);
+                            return;
+                        }
+                    }
                 } else {
                     None
                 };
@@ -674,9 +1097,49 @@ mod tests {
             path: String::new(),
             error: String::new(),
             track_id: None,
+            dest_dir: String::new(),
+            cover: String::new(),
             created_at,
             updated_at: created_at,
         }
+    }
+
+    #[test]
+    fn vj_trims_snap_to_analyzed_beats_or_bars() {
+        let track = Track {
+            duration: Some(20.0),
+            bpm: Some(120.0),
+            first_beat: Some(0.2),
+            cue_ms: Some(1100),
+            end_ms: Some(4500),
+            ..Default::default()
+        };
+        let beats = vj_interval(&track, true, true, false).unwrap();
+        assert_eq!(beats, (1.2, 4.7));
+        let bars = vj_interval(&track, true, true, true).unwrap();
+        assert_eq!(bars, (0.2, 4.2));
+
+        let no_grid = Track {
+            first_beat: None,
+            ..track.clone()
+        };
+        assert_eq!(vj_interval(&no_grid, true, true, false).unwrap(), (1.1, 4.5));
+    }
+
+    #[test]
+    fn vj_bar_fade_uses_the_outgoing_tracks_bpm() {
+        let req = VjExportRequest {
+            fade_bars: 4,
+            fade_seconds: 99.0,
+            ..Default::default()
+        };
+        let previous = Track {
+            bpm: Some(100.0),
+            ..Default::default()
+        };
+        // 4 小节 × 4 拍 × (60 / 100) 秒；不能误拿下一首或固定秒数。
+        assert!((vj_fade_seconds(&req, &previous) - 9.6).abs() < 1e-9);
+        assert!((vj_fade_seconds(&req, &Track::default()) - 8.0).abs() < 1e-9);
     }
 
     #[test]
@@ -692,6 +1155,23 @@ mod tests {
         );
         let ids: Vec<String> = manager.list().into_iter().map(|task| task.id).collect();
         assert_eq!(ids, vec!["a", "b"], "队列面板按入队时间排，不是按 id");
+    }
+
+    #[test]
+    fn removing_one_finished_task_keeps_other_queue_history() {
+        let manager = manager();
+        manager.insert(
+            sample_task("done", TaskState::Done, 1.0),
+            CancellationToken::new(),
+        );
+        manager.insert(
+            sample_task("running", TaskState::Running, 2.0),
+            CancellationToken::new(),
+        );
+        assert!(manager.remove_finished("done").is_some());
+        assert!(manager.get("done").is_none());
+        assert!(manager.get("running").is_some());
+        assert!(manager.remove_finished("running").is_none());
     }
 
     #[test]
@@ -781,6 +1261,20 @@ mod tests {
         assert!((task.progress - 0.25).abs() < 1e-9);
         assert_eq!(task.downloaded_bytes, 50);
         assert_eq!(task.total_bytes, 200);
+    }
+
+    #[test]
+    fn reaching_known_total_enters_processing_before_the_post_download_work() {
+        let manager = manager();
+        manager.insert(
+            sample_task("x", TaskState::Running, 1.0),
+            CancellationToken::new(),
+        );
+        manager.progress("x", 100, 100);
+        let task = manager.get("x").unwrap();
+        assert_eq!(task.state, TaskState::Processing);
+        assert_eq!(task.progress, 1.0);
+        assert_eq!(task.speed_bps, 0.0, "处理阶段不应留着旧下载速度");
     }
 
     #[test]
@@ -955,8 +1449,38 @@ mod tests {
 
     #[test]
     fn empty_titles_get_a_placeholder() {
-        let task = new_task(TaskKind::Audio, Platform::Wyy, "", "", "flac".into());
+        let task = new_task(
+            TaskKind::Audio,
+            Platform::Wyy,
+            "",
+            "",
+            "flac".into(),
+            String::new(),
+            String::new(),
+        );
         assert_eq!(task.title, "未命名");
+    }
+
+    #[test]
+    fn a_downloaded_file_that_failed_to_enter_the_library_is_not_reported_done() {
+        let dir = std::env::temp_dir().join(format!("kdj-import-failed-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("kept.mp4");
+        std::fs::write(&path, b"complete file").unwrap();
+
+        let manager = manager();
+        manager.insert(
+            sample_task("x", TaskState::Running, 1.0),
+            CancellationToken::new(),
+        );
+        manager.fail_after_download("x", &path, "加入曲库失败");
+
+        let task = manager.get("x").unwrap();
+        assert_eq!(task.state, TaskState::Failed, "入库失败不能对用户谎报完成");
+        assert_eq!(task.path, path.to_string_lossy(), "成品路径必须保住，方便定位和补救");
+        assert_eq!(task.error, "加入曲库失败");
+        assert!(task.downloaded_bytes > 0, "已经下完的体积不能清零");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

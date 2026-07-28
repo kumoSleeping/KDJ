@@ -12,15 +12,11 @@ import { useLibraryStore } from "./libraryStore";
 import { useQueueStore } from "./queueStore";
 
 /**
- * 中间列表 + 右侧面板是**成对**切换的，两个标签常驻在列表面板顶边：
- *   library = 曲目表 + 曲目详情（本地）
- *   search  = 搜索结果 + 下载队列（在线）
- * 页面本身不换，只换这一对。搜索时自动切到 search、点文件夹自动切回 library；
- * 随时可以手动点标签切——切走不丢内容。
+ * hasResults 只管中间搜索半栏是否展开；右栏下载队列只看 showQueue。
+ * 搜完（含搜 VJ）不再自动把右栏切成队列——真有任务入队时再 openQueuePanel。
  *
- * 视频曾经是并列的第三个标签，现在并回了 search：贴 B 站链接和搜关键词都是
- * "去网上找东西下"，分成两个标签之后每次都要先想"我刚才那条落在哪个标签里"。
- * 视频和歌的差别只体现在结果行的长相上（见 VideoResultRow）。
+ * 视频曾经是并列的第三个标签，现在并回了搜索半栏：贴 B 站链接和搜关键词都是
+ * "去网上找东西下"。视频和歌的差别只体现在结果行的长相上（见 VideoResultRow）。
  */
 export type ListMode = "library" | "search";
 
@@ -55,14 +51,26 @@ export interface AppStore {
   listMode: ListMode;
   /** 有没有搜过（哪怕结果为空）。决定要不要显示切换开关。 */
   hasResults: boolean;
-  /** 右侧详情栏是否正显示「平台登录」面板（左下角齿轮呼出）。 */
+  /** 右侧详情栏是否正显示「平台登录」面板（顶栏登录按钮呼出）。 */
   showAccounts: boolean;
-  /** 每次从平台图标显式打开账号面板都递增，用于重新拉开窄屏抽屉。 */
+  /** 每次显式打开账号面板都递增，用于重新拉开窄屏抽屉。 */
   accountPanelEpoch: number;
   /** 右侧详情栏是否正显示「接播设置」面板（播放条 DJ 按钮呼出）。 */
   showDjPanel: boolean;
   /** 每次显式点“接播设置”都递增；即使面板已是打开态，也能重新拉开窄屏抽屉。 */
   djPanelEpoch: number;
+  /** 强制把右栏/抽屉切到下载队列（曲库页也能看队列，不必先搜一次）。 */
+  showQueue: boolean;
+  queuePanelEpoch: number;
+  /** 右栏/抽屉显示搜索结果预览（音频试听或视频预览），与下载队列互斥。 */
+  showPreview: boolean;
+  previewPanelEpoch: number;
+  /** 单栏布局下用抽屉装文件夹树（宽屏左栏常驻，不必走这条）。 */
+  showFolders: boolean;
+  foldersPanelEpoch: number;
+  /** 右栏显示「按顺序导出 VJ」设置面板。 */
+  showVjExport: boolean;
+  vjExportPanelEpoch: number;
   health: Health | null;
   settings: Settings | null;
   accounts: Account[];
@@ -80,10 +88,34 @@ export interface AppStore {
   toggleAccounts(): void;
   openAccountsPanel(): void;
   openDjPanel(): void;
+  toggleQueuePanel(): void;
+  openQueuePanel(): void;
+  /** 打开预览旁路（点搜索结果音频/视频时走这条，不跟下载队列挤一栏）。 */
+  openPreviewPanel(): void;
+  toggleFoldersPanel(): void;
+  openFoldersPanel(): void;
+  /** 打开「按顺序导出 VJ」旁路（由文件夹右键触发）。 */
+  openVjExportPanel(): void;
+  /** 只收起旁路面板，不改 listMode（窄屏抽屉点关闭 / 下拖时用）。 */
+  dismissOverlay(): void;
+  /** 当前打开的旁路面板种类；没有则 null。供浏览历史 / 撤销使用。 */
+  currentOverlay(): "accounts" | "dj" | "queue" | "preview" | "folders" | "vjExport" | null;
   bootstrap(): Promise<void>;
   refreshAccounts(): Promise<void>;
   saveSettings(patch: Partial<Settings>): Promise<void>;
   handleEvent(event: WsEvent): void;
+}
+
+/** 打开某一块旁路面板时，把其余旁路关掉——互斥，避免关 A 露出 B。 */
+function clearOverlays() {
+  return {
+    showAccounts: false,
+    showDjPanel: false,
+    showQueue: false,
+    showPreview: false,
+    showFolders: false,
+    showVjExport: false,
+  } as const;
 }
 
 /** StrictMode 下 effect 会跑两次，用同一个 promise 挡掉重复的启动请求。 */
@@ -96,6 +128,14 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   accountPanelEpoch: 0,
   showDjPanel: false,
   djPanelEpoch: 0,
+  showQueue: false,
+  queuePanelEpoch: 0,
+  showPreview: false,
+  previewPanelEpoch: 0,
+  showFolders: false,
+  foldersPanelEpoch: 0,
+  showVjExport: false,
+  vjExportPanelEpoch: 0,
   health: null,
   settings: null,
   accounts: [],
@@ -105,40 +145,117 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   savingSettings: false,
 
   setListMode(mode) {
-    // 用户点了曲库/搜索/文件夹，就是在切换当前关注的内容；账号和接播设置
+    // 用户点了曲库/搜索/文件夹，就是在切换当前关注的内容；旁路面板
     // 应该自动让位，不能逼用户先找到右上角的关闭按钮。
-    set({ listMode: mode, showAccounts: false, showDjPanel: false });
+    set({ listMode: mode, ...clearOverlays() });
   },
 
   setHasResults(value) {
-    set({
-      hasResults: value,
-      listMode: value ? "search" : "library",
-      showAccounts: false,
-      showDjPanel: false,
-    });
+    // 只撑开中间搜索半栏；不改 listMode、不清旁路——右栏继续留着曲目详情，
+    // 等真有下载任务再 openQueuePanel。
+    set({ hasResults: value });
   },
 
   showTrackDetail() {
-    set({ listMode: "library", showAccounts: false, showDjPanel: false });
+    set({ listMode: "library", ...clearOverlays() });
   },
 
-  // 账号面板和 DJ 面板共用右栏那一个位置，互斥：开一个就把另一个顶掉，
+  // 旁路面板共用右栏/抽屉那一个位置，互斥：开一个就把另一个顶掉，
   // 不然"关掉 A 露出的是 B"会让人以为关错了东西
   toggleAccounts() {
-    set({ showAccounts: !get().showAccounts, showDjPanel: false });
+    const open = !get().showAccounts;
+    set({
+      ...clearOverlays(),
+      showAccounts: open,
+      accountPanelEpoch: open ? get().accountPanelEpoch + 1 : get().accountPanelEpoch,
+    });
   },
 
   openAccountsPanel() {
     set({
+      ...clearOverlays(),
       showAccounts: true,
-      showDjPanel: false,
       accountPanelEpoch: get().accountPanelEpoch + 1,
     });
   },
 
   openDjPanel() {
-    set({ showDjPanel: true, showAccounts: false, djPanelEpoch: get().djPanelEpoch + 1 });
+    set({
+      ...clearOverlays(),
+      showDjPanel: true,
+      djPanelEpoch: get().djPanelEpoch + 1,
+    });
+  },
+
+  toggleQueuePanel() {
+    const open = !get().showQueue;
+    set({
+      ...clearOverlays(),
+      showQueue: open,
+      queuePanelEpoch: open ? get().queuePanelEpoch + 1 : get().queuePanelEpoch,
+    });
+  },
+
+  openQueuePanel() {
+    set({
+      ...clearOverlays(),
+      showQueue: true,
+      queuePanelEpoch: get().queuePanelEpoch + 1,
+    });
+  },
+
+  openPreviewPanel() {
+    set({
+      ...clearOverlays(),
+      showPreview: true,
+      previewPanelEpoch: get().previewPanelEpoch + 1,
+    });
+  },
+
+  toggleFoldersPanel() {
+    const open = !get().showFolders;
+    set({
+      ...clearOverlays(),
+      showFolders: open,
+      foldersPanelEpoch: open ? get().foldersPanelEpoch + 1 : get().foldersPanelEpoch,
+    });
+  },
+
+  openFoldersPanel() {
+    set({
+      ...clearOverlays(),
+      showFolders: true,
+      foldersPanelEpoch: get().foldersPanelEpoch + 1,
+    });
+  },
+
+  openVjExportPanel() {
+    set({
+      ...clearOverlays(),
+      showVjExport: true,
+      vjExportPanelEpoch: get().vjExportPanelEpoch + 1,
+    });
+  },
+
+  currentOverlay() {
+    const state = get();
+    if (state.showFolders) return "folders";
+    if (state.showAccounts) return "accounts";
+    if (state.showDjPanel) return "dj";
+    if (state.showPreview) return "preview";
+    if (state.showQueue) return "queue";
+    if (state.showVjExport) return "vjExport";
+    return null;
+  },
+
+  dismissOverlay() {
+    const overlay = get().currentOverlay();
+    set({ ...clearOverlays() });
+    if (overlay) {
+      void import("./navStore").then(({ useNavStore }) => {
+        useNavStore.getState().rememberDismiss(overlay);
+      });
+    }
   },
 
   bootstrap() {

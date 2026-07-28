@@ -176,7 +176,7 @@ impl NeteaseProvider {
         let mut last_code = None;
         for step in quality.gradient() {
             let (level, _) = level_of(*step);
-            let body = if self.ctx.netease_use_download_api {
+            let body = if self.ctx.netease_use_download_api() {
                 self.client
                     .eapi(
                         "/eapi/song/enhance/download/url/v1",
@@ -212,7 +212,7 @@ impl NeteaseProvider {
         }
 
         // player-v1 全梯度都空时退回 legacy 接口，老账号/老曲目还能捞一把
-        if !self.ctx.netease_use_download_api {
+        if !self.ctx.netease_use_download_api() {
             let body = self
                 .client
                 .eapi(
@@ -522,7 +522,7 @@ impl MusicProvider for NeteaseProvider {
         job.check_canceled()?;
 
         let filename = render_filename(
-            &self.ctx.filename_template,
+            &self.ctx.filename_template(),
             &source.title,
             &source.artist_text(),
             &source.album,

@@ -74,7 +74,9 @@ pub fn spawn_scan(state: Arc<AppState>, paths: Vec<String>, recursive: bool, ana
         hub.publish("scan.progress", &scan_done_event(&job, total, total, None));
         hub.publish_library_updated(&track_ids);
 
-        if analyze && !track_ids.is_empty() {
+        // 扫描可能比用户点「暂停自动分析」早开始许久。这里重新读设置，
+        // 才不会在暂停后仍把刚导入的一整批曲目塞进分析队列。
+        if analyze && state.config.to_settings().auto_analyze && !track_ids.is_empty() {
             match state.library.pending_analysis_ids(Some(&track_ids), false) {
                 Ok(pending) => {
                     // 扫描顺带跑的批量分析是后台活，「停止分析」应该停得掉
@@ -136,6 +138,35 @@ impl Drop for AnalysisPermit<'_> {
 }
 
 static ANALYSIS_GATE: AnalysisGate = AnalysisGate::new(ANALYSIS_WORKERS);
+
+/// 交互路径（波形）占用时 > 0。分析线程在**歌与歌之间**看到它就让路，
+/// 不会去抢分析闸门（抢闸门会把自己堵在当前那两首的长解码后面）。
+static INTERACTIVE_YIELD: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// 标记「交互优先」：后台分析暂停接下一首，正在解的那一两首跑完即可。
+pub fn yield_analysis_permits() -> AnalysisYield {
+    INTERACTIVE_YIELD.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    AnalysisYield
+}
+
+/// 见 [`yield_analysis_permits`]。
+pub struct AnalysisYield;
+
+impl Drop for AnalysisYield {
+    fn drop(&mut self) {
+        INTERACTIVE_YIELD.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+fn wait_if_interactive_yield(cancel: &CancellationToken) {
+    while INTERACTIVE_YIELD.load(std::sync::atomic::Ordering::Acquire) > 0 {
+        if cancel.is_cancelled() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
 
 // ---------------------------------------------------------------- 停止分析
 
@@ -278,9 +309,21 @@ pub fn spawn_analysis(state: Arc<AppState>, track_ids: Vec<i64>, priority: bool)
                     for track_id in chunk {
                         // 先排队拿全局额度，**拿到之后**再看取消：闸门里等了
                         // 半分钟才轮到的线程，看到的必须是最新的取消状态
-                        let _permit = (!priority).then(|| ANALYSIS_GATE.acquire());
                         // 每首歌之间查一次。查在循环顶上而不是分析中途：
                         // 解码/FFT 是一整块 CPU 活，切进去只能靠杀线程
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        // 播放条在算波形时让路：必须在拿闸门**之前**等，
+                        // 否则两个 worker 占着 permit 睡大觉，波形还是抢不到 CPU。
+                        // 插队分析（正在播的那首）不让。
+                        if !priority {
+                            wait_if_interactive_yield(&cancel);
+                            if cancel.is_cancelled() {
+                                break;
+                            }
+                        }
+                        let _permit = (!priority).then(|| ANALYSIS_GATE.acquire());
                         if cancel.is_cancelled() {
                             break;
                         }
@@ -292,6 +335,19 @@ pub fn spawn_analysis(state: Arc<AppState>, track_ids: Vec<i64>, priority: bool)
                         if let Err(err) = state.library.save_analysis(track_id, &result) {
                             tracing::warn!("保存分析结果失败 {track_id}：{err:#}");
                             continue;
+                        }
+                        // 异步预热默认档波形：不占分析闸门，避免拖慢 BPM；
+                        // 播到这首时缓存多半已经写好。
+                        {
+                            let warm_path = path.clone();
+                            let warm_dir = state.config.data_dir.join("waveform");
+                            let _ = std::thread::Builder::new()
+                                .name("wave-warm".into())
+                                .spawn(move || {
+                                    crate::waveform::warm_default_cache(
+                                        track_id, &warm_path, &warm_dir,
+                                    );
+                                });
                         }
                         if write_tags {
                             let _ = kdj_providers::tags::write_analysis_tags(

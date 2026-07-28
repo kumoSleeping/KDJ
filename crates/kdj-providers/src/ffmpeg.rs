@@ -19,6 +19,86 @@ pub const FFMPEG_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const TRANSCODE_CRF: u32 = 20;
 const TRANSCODE_PRESET: &str = "veryfast";
 
+/// 一段 VJ 在最终片子里的有效区间。`fade_to_next` 是它退给下一段的交叠秒数。
+#[derive(Debug, Clone)]
+pub struct VjExportClip {
+    pub source: PathBuf,
+    pub start: f64,
+    pub end: f64,
+    pub fade_to_next: f64,
+}
+
+/// VJ 合成的 H.264 编码器。滤镜仍在 CPU 上跑；这里加速的是最重的最终视频编码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VjVideoEncoder {
+    Software,
+    VideoToolbox,
+    Nvenc,
+    Amf,
+    Qsv,
+}
+
+impl VjVideoEncoder {
+    fn ffmpeg_name(self) -> &'static str {
+        match self {
+            VjVideoEncoder::Software => "libx264",
+            VjVideoEncoder::VideoToolbox => "h264_videotoolbox",
+            VjVideoEncoder::Nvenc => "h264_nvenc",
+            VjVideoEncoder::Amf => "h264_amf",
+            VjVideoEncoder::Qsv => "h264_qsv",
+        }
+    }
+}
+
+/// 检测当前这份 FFmpeg 是否编进了指定编码器。只按操作系统猜显卡会误判：例如
+/// Windows 机器可能没有 NVIDIA 驱动，精简 FFmpeg 也可能根本没有带 NVENC。
+fn has_encoder(name: &str) -> bool {
+    let Ok(binary) = binary() else {
+        return false;
+    };
+    let Ok(output) = std::process::Command::new(binary)
+        .args(["-hide_banner", "-encoders"])
+        .output()
+    else {
+        return false;
+    };
+    let listing = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    listing.lines().any(|line| line.split_whitespace().any(|word| word == name))
+}
+
+/// 按运行平台挑这台机器真实可用的硬件 H.264 编码器；检测不到则稳定回退 libx264。
+/// Windows 优先独显 NVENC，其次 AMD AMF、Intel QSV；macOS（包括 M 系列）走
+/// VideoToolbox。仅在**已列出的编码器**上启用，绝不把不存在的硬件参数塞给 FFmpeg。
+pub fn preferred_vj_video_encoder() -> VjVideoEncoder {
+    let candidates: &[VjVideoEncoder] = if cfg!(target_os = "macos") {
+        &[VjVideoEncoder::VideoToolbox]
+    } else if cfg!(target_os = "windows") {
+        &[VjVideoEncoder::Nvenc, VjVideoEncoder::Amf, VjVideoEncoder::Qsv]
+    } else {
+        // Linux 发行版和驱动组合差异很大；VAAPI 还要求额外 hwupload 滤镜，
+        // 在这里盲开反而会让普通桌面导出失败。已有 NVENC 则可以安全使用。
+        &[VjVideoEncoder::Nvenc]
+    };
+    candidates
+        .iter()
+        .copied()
+        .find(|encoder| has_encoder(encoder.ffmpeg_name()))
+        .unwrap_or(VjVideoEncoder::Software)
+}
+
+/// 输出画布。所有输入先等比缩放、居中补边，交叉淡入淡出才不会因素材尺寸不同失败。
+pub fn vj_canvas(quality: &str) -> (u32, u32) {
+    match quality {
+        "480p" => (854, 480),
+        "720p" => (1280, 720),
+        _ => (1920, 1080),
+    }
+}
+
 /// 机器上有没有 ffmpeg。`/api/health` 要回这个值。
 pub fn available() -> bool {
     binary().is_ok()
@@ -181,6 +261,156 @@ pub fn extract_audio_args(source: &Path, output: &Path, copy: bool, offset_ms: i
     args
 }
 
+/// 将顺序 VJ 渲为一条 H.264/AAC MP4。所有片段都会重编码，因为 xfade 既需要
+/// 统一画布，也无法对不同编码参数的源文件做流拷贝。
+///
+/// `fade_to_next` 为 0 时就是硬切；大于 0 时画面和声音同时淡入淡出。调用方在
+/// 传入前已按上一首的 BPM/小节计算并夹住时长，因此这里不猜节拍，只忠实执行。
+pub fn vj_export_args(
+    clips: &[VjExportClip],
+    output: &Path,
+    quality: &str,
+    keep_audio: bool,
+    unify_gain: bool,
+) -> Result<Vec<String>> {
+    vj_export_args_with_encoder(
+        clips,
+        output,
+        quality,
+        keep_audio,
+        unify_gain,
+        preferred_vj_video_encoder(),
+    )
+}
+
+/// 同 [`vj_export_args`]；`encoder` 留给调用端做硬件失败后的软件回退。
+pub fn vj_export_args_with_encoder(
+    clips: &[VjExportClip],
+    output: &Path,
+    quality: &str,
+    keep_audio: bool,
+    unify_gain: bool,
+    encoder: VjVideoEncoder,
+) -> Result<Vec<String>> {
+    if clips.is_empty() {
+        bail!("没有可导出的 VJ 片段");
+    }
+    let (width, height) = vj_canvas(quality);
+    let mut args = vec!["-y".to_string()];
+    for clip in clips {
+        if !clip.start.is_finite() || !clip.end.is_finite() || clip.end <= clip.start {
+            bail!("VJ 片段的裁切范围无效：{}", clip.source.display());
+        }
+        args.extend(["-i".to_string(), clip.source.to_string_lossy().into_owned()]);
+    }
+
+    let mut filters = Vec::new();
+    for (index, clip) in clips.iter().enumerate() {
+        filters.push(format!(
+            "[{index}:v]trim=start={:.3}:end={:.3},setpts=PTS-STARTPTS,scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[v{index}]",
+            clip.start, clip.end
+        ));
+        if keep_audio {
+            let gain = if unify_gain {
+                // 每段各自拉到同一目标响度，交叠区再由 acrossfade 做等长交叉。
+                ",loudnorm=I=-16:TP=-1.5:LRA=11"
+            } else {
+                ""
+            };
+            filters.push(format!(
+                "[{index}:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS{gain}[a{index}]",
+                clip.start, clip.end
+            ));
+        }
+    }
+
+    let mut video = "v0".to_string();
+    let mut audio = "a0".to_string();
+    let mut timeline = clips[0].end - clips[0].start;
+    for index in 1..clips.len() {
+        let next = &clips[index];
+        let next_duration = next.end - next.start;
+        let requested = clips[index - 1].fade_to_next;
+        // 即使调用端漏夹，也绝不把 xfade 的 offset 送成负数或让某段完全被吞掉。
+        let fade = requested
+            .max(0.0)
+            .min(timeline * 0.5)
+            .min(next_duration * 0.5);
+        let out_video = format!("vx{index}");
+        if fade > 0.001 {
+            let offset = (timeline - fade).max(0.0);
+            filters.push(format!(
+                "[{video}][v{index}]xfade=transition=fade:duration={fade:.3}:offset={offset:.3}[{out_video}]"
+            ));
+            if keep_audio {
+                let out_audio = format!("ax{index}");
+                filters.push(format!(
+                    "[{audio}][a{index}]acrossfade=d={fade:.3}:c1=tri:c2=tri[{out_audio}]"
+                ));
+                audio = out_audio;
+            }
+            timeline = offset + next_duration;
+        } else {
+            filters.push(format!(
+                "[{video}][v{index}]concat=n=2:v=1:a=0[{out_video}]"
+            ));
+            if keep_audio {
+                let out_audio = format!("ax{index}");
+                filters.push(format!(
+                    "[{audio}][a{index}]concat=n=2:v=0:a=1[{out_audio}]"
+                ));
+                audio = out_audio;
+            }
+            timeline += next_duration;
+        }
+        video = out_video;
+    }
+
+    args.extend([
+        "-filter_complex".to_string(),
+        filters.join(";"),
+        "-map".to_string(),
+        format!("[{video}]"),
+    ]);
+    if keep_audio {
+        args.extend(["-map".to_string(), format!("[{audio}]")]);
+    } else {
+        args.push("-an".to_string());
+    }
+    if encoder == VjVideoEncoder::Software {
+        args.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                TRANSCODE_PRESET,
+                "-crf",
+                &TRANSCODE_CRF.to_string(),
+            ]
+            .map(str::to_string),
+        );
+    } else {
+        // 各硬件编码器都支持基础码率控制；不混用 x264 的 CRF / preset 私有参数。
+        // 这样 VideoToolbox、NVENC、AMF、QSV 都是一条可移植的命令。
+        let bitrate = match quality {
+            "480p" => "2M",
+            "720p" => "5M",
+            _ => "8M",
+        };
+        args.extend(["-c:v", encoder.ffmpeg_name(), "-b:v", bitrate].map(str::to_string));
+    }
+    args.extend(["-pix_fmt", "yuv420p"].map(str::to_string));
+    if keep_audio {
+        args.extend(["-c:a", "aac", "-b:a", "192k"].map(str::to_string));
+    }
+    args.extend([
+        "-movflags".to_string(),
+        "+faststart".to_string(),
+        output.to_string_lossy().into_owned(),
+    ]);
+    Ok(args)
+}
+
 // ---------------------------------------------------------------- 抽封面帧
 
 /// 抽一帧的超时。混流可以跑半小时（`FFMPEG_TIMEOUT`），抽一帧不行：
@@ -340,6 +570,174 @@ mod tests {
     }
 
     #[test]
+    fn vj_export_crossfades_video_and_audio_with_a_normalized_canvas() {
+        let args = vj_export_args(
+            &[
+                VjExportClip {
+                    source: PathBuf::from("first.mp4"),
+                    start: 1.0,
+                    end: 11.0,
+                    fade_to_next: 4.0,
+                },
+                VjExportClip {
+                    source: PathBuf::from("next.mov"),
+                    start: 0.0,
+                    end: 8.0,
+                    fade_to_next: 0.0,
+                },
+            ],
+            Path::new("mix.mp4"),
+            "720p",
+            true,
+            true,
+        )
+        .unwrap();
+        let args = as_str(&args);
+        let filter = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "-filter_complex").then_some(pair[1]))
+            .unwrap();
+        assert!(filter.contains("scale=1280:720"));
+        assert!(filter.contains("xfade=transition=fade:duration=4.000:offset=6.000"));
+        assert!(filter.contains("acrossfade=d=4.000"));
+        assert!(filter.contains("loudnorm=I=-16"));
+        assert!(args.windows(2).any(|pair| pair == ["-map", "[vx1]"]));
+        assert!(args.windows(2).any(|pair| pair == ["-map", "[ax1]"]));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_prefers_videotoolbox_when_ffmpeg_provides_it() {
+        if has_encoder("h264_videotoolbox") {
+            assert_eq!(preferred_vj_video_encoder(), VjVideoEncoder::VideoToolbox);
+        }
+    }
+
+    #[test]
+    fn vj_hardware_encoder_uses_portable_bitrate_controls() {
+        let args = vj_export_args_with_encoder(
+            &[VjExportClip {
+                source: PathBuf::from("clip.mp4"),
+                start: 0.0,
+                end: 4.0,
+                fade_to_next: 0.0,
+            }],
+            Path::new("mix.mp4"),
+            "720p",
+            false,
+            false,
+            VjVideoEncoder::VideoToolbox,
+        )
+        .unwrap();
+        let args = as_str(&args);
+        assert!(args.windows(2).any(|pair| pair == ["-c:v", "h264_videotoolbox"]));
+        assert!(args.windows(2).any(|pair| pair == ["-b:v", "5M"]));
+        assert!(!args.contains(&"-crf"));
+        assert!(!args.contains(&"-preset"));
+    }
+
+    #[test]
+    fn vj_export_hard_cuts_and_can_drop_audio() {
+        let args = vj_export_args(
+            &[
+                VjExportClip {
+                    source: PathBuf::from("first.mp4"),
+                    start: 0.0,
+                    end: 4.0,
+                    fade_to_next: 0.0,
+                },
+                VjExportClip {
+                    source: PathBuf::from("next.mp4"),
+                    start: 0.0,
+                    end: 4.0,
+                    fade_to_next: 0.0,
+                },
+            ],
+            Path::new("mix.mp4"),
+            "480p",
+            false,
+            false,
+        )
+        .unwrap();
+        let args = as_str(&args);
+        let filter = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "-filter_complex").then_some(pair[1]))
+            .unwrap();
+        assert!(filter.contains("concat=n=2:v=1:a=0"));
+        assert!(!filter.contains("[0:a]"));
+        assert!(args.contains(&"-an"));
+        assert!(!args.contains(&"-c:a"));
+    }
+
+    #[tokio::test]
+    async fn vj_export_renders_a_single_crossfaded_movie() {
+        if !available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("kdj-vj-export-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cancel = CancellationToken::new();
+        let first = dir.join("first.mp4");
+        let second = dir.join("second.mp4");
+        for (path, color, hz) in [(&first, "red", "440"), (&second, "blue", "660")] {
+            let source = [
+                "-y".to_string(),
+                "-f".to_string(),
+                "lavfi".to_string(),
+                "-i".to_string(),
+                format!("color=c={color}:s=320x180:r=30"),
+                "-f".to_string(),
+                "lavfi".to_string(),
+                "-i".to_string(),
+                format!("sine=frequency={hz}:sample_rate=48000"),
+                "-t".to_string(),
+                "3".to_string(),
+                "-c:v".to_string(),
+                "libx264".to_string(),
+                "-c:a".to_string(),
+                "aac".to_string(),
+                "-shortest".to_string(),
+                path.to_string_lossy().into_owned(),
+            ];
+            run(&source, &path.with_extension("source.log"), &cancel)
+                .await
+                .unwrap();
+        }
+        let output = dir.join("crossfade.mp4");
+        let args = vj_export_args(
+            &[
+                VjExportClip {
+                    source: first,
+                    start: 0.0,
+                    end: 3.0,
+                    fade_to_next: 1.0,
+                },
+                VjExportClip {
+                    source: second,
+                    start: 0.0,
+                    end: 3.0,
+                    fade_to_next: 0.0,
+                },
+            ],
+            &output,
+            "480p",
+            true,
+            false,
+        )
+        .unwrap();
+        run(&args, &dir.join("export.log"), &cancel).await.unwrap();
+        assert!(std::fs::metadata(&output).unwrap().len() > 0);
+        let duration = crate::tags::read_duration_secs(&output).unwrap();
+        assert!(
+            (duration - 5.0).abs() < 0.25,
+            "两段各 3 秒、交叠 1 秒，成品应约为 5 秒，实际 {duration}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn dash_mux_copies_both_streams_without_reencoding() {
         let args = mux_args(
             &[PathBuf::from("v.m4s"), PathBuf::from("a.m4s")],
@@ -352,22 +750,46 @@ mod tests {
         assert_eq!(
             args,
             vec![
-                "-y", "-i", "v.m4s", "-i", "a.m4s", "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
-                "-movflags", "+faststart", "out.mp4"
+                "-y",
+                "-i",
+                "v.m4s",
+                "-i",
+                "a.m4s",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                "out.mp4"
             ]
         );
     }
 
     #[test]
     fn single_input_marks_the_audio_stream_optional() {
-        let args = mux_args(&[PathBuf::from("s.flv")], Path::new("out.mp4"), false, 1080, 0);
+        let args = mux_args(
+            &[PathBuf::from("s.flv")],
+            Path::new("out.mp4"),
+            false,
+            1080,
+            0,
+        );
         // `0:a:0?` 的问号不能丢：有些 flv 真的没有音轨，丢了整条命令就失败
         assert!(as_str(&args).contains(&"0:a:0?"));
     }
 
     #[test]
     fn transcode_scales_without_upscaling() {
-        let args = mux_args(&[PathBuf::from("v.m4s")], Path::new("out.mp4"), true, 720, 0);
+        let args = mux_args(
+            &[PathBuf::from("v.m4s")],
+            Path::new("out.mp4"),
+            true,
+            720,
+            0,
+        );
         let args = as_str(&args);
         assert!(args.contains(&"libx264"));
         // min(...) 保证不会把 480p 的源放大到 720p
@@ -406,9 +828,17 @@ mod tests {
 
     #[test]
     fn a_negative_offset_pads_black_video_and_matching_silence() {
-        let args = mux_args(&[PathBuf::from("v.m4s")], Path::new("out.mp4"), true, 1080, -800);
+        let args = mux_args(
+            &[PathBuf::from("v.m4s")],
+            Path::new("out.mp4"),
+            true,
+            1080,
+            -800,
+        );
         let args = as_str(&args);
-        assert!(args.iter().any(|arg| arg.contains("tpad=start_duration=0.800")));
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("tpad=start_duration=0.800")));
         // 画面补了黑场，声音必须补等长静音
         assert!(args.windows(2).any(|w| w == ["-af", "adelay=800:all=1"]));
         assert!(!args.contains(&"-ss"));
@@ -487,7 +917,10 @@ mod tests {
         let image = image::RgbImage::from_pixel(16, 16, image::Rgb([level, level, level]));
         let mut out = Vec::new();
         image::DynamicImage::ImageRgb8(image)
-            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg)
+            .write_to(
+                &mut std::io::Cursor::new(&mut out),
+                image::ImageFormat::Jpeg,
+            )
             .unwrap();
         out
     }
@@ -538,7 +971,9 @@ mod tests {
         run(&make, &log, &cancel).await.unwrap();
 
         let shot = dir.join("frame.jpg");
-        extract_frame(&video, &shot, 1.0, &log, &cancel).await.unwrap();
+        extract_frame(&video, &shot, 1.0, &log, &cancel)
+            .await
+            .unwrap();
 
         let data = std::fs::read(&shot).unwrap();
         assert!(data.starts_with(b"\xff\xd8\xff"), "得是一张真的 JPEG");

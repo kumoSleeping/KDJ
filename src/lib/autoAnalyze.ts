@@ -25,6 +25,7 @@ import { api } from "./api";
 import { useAppStore } from "../stores/appStore";
 import { useDownloadStore } from "../stores/downloadStore";
 import { selectAnalyzing, useLibraryStore } from "../stores/libraryStore";
+import { isStreamTrack } from "./streamTrack";
 import type { Track } from "../types";
 
 /**
@@ -112,10 +113,13 @@ function autoEnabled(): boolean {
  *
  * 批量可能排了几百首，正在放的这首等在队尾出不来 BPM/调号，
  * 而「现在放的是什么速度、什么调」恰恰是最急着要知道的一条。
- * 这条路径**不看** autoAnalyzeSuspended：按播放是明确的当下动作，
- * 而且只有一首歌的开销，不属于用户按「停止」时想停掉的那种后台活。
+ * 这条路径也服从「暂停自动分析」：暂停后，播放本身不会悄悄重新启动分析。
+ * 用户仍可从文件夹或曲目菜单显式发起手动分析。
  */
 export function analyzePlaying(track: Track): void {
+  // 在线试听没有本地文件，分析接口只会 404
+  if (isStreamTrack(track)) return;
+  if (!autoEnabled()) return;
   if (track.analyzed_at || jumped.has(track.id)) return;
   jumped.add(track.id);
   queued.add(track.id);

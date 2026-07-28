@@ -415,6 +415,10 @@ impl LibraryService {
             assignments.push("cue_ms = ?");
             values.push(SqlValue::Integer(cue_ms));
         }
+        if let Some(end_ms) = patch.end_ms {
+            assignments.push("end_ms = ?");
+            values.push(SqlValue::Integer(end_ms));
+        }
 
         let stamp = now_iso();
         if !assignments.is_empty() {
@@ -573,6 +577,36 @@ impl LibraryService {
             let _ = std::fs::remove_file(&path);
         }
         Ok(true)
+    }
+
+    /// 把某个目录（含子目录）下的曲目从库里摘掉，**不动磁盘文件**。
+    ///
+    /// 「移出曲库根 / 移出此文件夹」走这条：用户只是不想再在软件里看到这批歌，
+    /// 不是要清盘。返回被摘掉的 track id，方便广播 `library.updated`。
+    pub fn forget_under(&self, dir: &Path) -> Result<Vec<i64>> {
+        let prefix = format!("{}{SEP}", normalize_path(dir));
+        let like = format!("{}%", escape_like(&prefix));
+        let conn = self.db.conn()?;
+        let mut stmt = conn.prepare("SELECT id FROM tracks WHERE path LIKE ? ESCAPE '\\'")?;
+        let ids: Vec<i64> = stmt
+            .query_map([&like], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        if ids.is_empty() {
+            return Ok(ids);
+        }
+        conn.execute(
+            "DELETE FROM tags WHERE track_id IN \
+             (SELECT id FROM tracks WHERE path LIKE ? ESCAPE '\\')",
+            [&like],
+        )?;
+        conn.execute(
+            "DELETE FROM playlist_items WHERE track_id IN \
+             (SELECT id FROM tracks WHERE path LIKE ? ESCAPE '\\')",
+            [&like],
+        )?;
+        conn.execute("DELETE FROM tracks WHERE path LIKE ? ESCAPE '\\'", [&like])?;
+        Ok(ids)
     }
 
     /// 把一个音频文件写进库，返回 track id。同一路径重复调用是幂等的。
@@ -1234,7 +1268,7 @@ impl LibraryService {
         const COLUMNS: &str = "title, artist, album, genre, year, duration, bitrate, \
              samplerate, channels, format, bpm, bpm_confidence, first_beat, music_key, camelot, \
              open_key, key_confidence, energy, rms_db, peak_db, rating, color, comment, cue_ms, \
-             source_platform, source_key, analyzed_at, analysis_error";
+             end_ms, source_platform, source_key, analyzed_at, analysis_error";
         let assignments: Vec<String> = COLUMNS
             .split(',')
             .map(|name| format!("{} = ?", name.trim()))
@@ -1350,6 +1384,7 @@ fn row_to_track(row: &Row) -> Track {
         color: text(row, "color"),
         comment: text(row, "comment"),
         cue_ms: row.get("cue_ms").ok().flatten(),
+        end_ms: row.get("end_ms").ok().flatten(),
         source_platform: {
             let value = text(row, "source_platform");
             if value.is_empty() {
@@ -1671,6 +1706,23 @@ mod tests {
         assert_eq!(names, vec!["c.mp3", "a.mp3", "b.mp3"]);
         assert_eq!(page.total, 3);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forget_under_removes_db_rows_only() {
+        let service = service();
+        let keep = format!("{ROOT}{SEP}keep.mp3");
+        let gone_a = format!("{ROOT}{SEP}set{SEP}a.mp3");
+        let gone_b = format!("{ROOT}{SEP}set{SEP}nested{SEP}b.mp3");
+        insert(&service, Row { path: &keep, ..Default::default() });
+        insert(&service, Row { path: &gone_a, ..Default::default() });
+        insert(&service, Row { path: &gone_b, ..Default::default() });
+
+        let folder = format!("{ROOT}{SEP}set");
+        let removed = service.forget_under(Path::new(&folder)).unwrap();
+        assert_eq!(removed.len(), 2);
+        let left = service.all_paths().unwrap();
+        assert_eq!(left, vec![keep], "只摘目标目录下的，别的根里的歌还在");
     }
 
     #[test]

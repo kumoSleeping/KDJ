@@ -1,18 +1,37 @@
 import { useRef, useState } from "react";
 import type { Platform } from "../../types";
+import { clearTextSelection } from "../../lib/textSelection";
 import { useAppStore } from "../../stores/appStore";
 import { PlatformMark } from "./PlatformMark";
 
-/** 平台一览。哔哩哔哩挂着视频小标志：贴 B 站链接会自动走视频解析。 */
+/** 平台一览（仅在线源）。本地曲库在左侧树里浏览，不再占搜索来源位。 */
 export const SEARCH_PLATFORMS: ReadonlyArray<{ id: Platform; label: string; video?: boolean }> = [
   { id: "wyy", label: "网易云" },
   { id: "qqm", label: "QQ 音乐" },
   { id: "soundcloud", label: "SOUNDCLOUD" },
   { id: "bilibili", label: "哔哩哔哩", video: true },
-  { id: "local", label: "本地曲库" },
 ];
 
-export const DEFAULT_PRIORITY: readonly string[] = ["local", "wyy", "qqm", "soundcloud", "bilibili"];
+export const DEFAULT_PRIORITY: readonly string[] = ["wyy", "qqm", "soundcloud", "bilibili"];
+/** 默认勾选：网易云 / QQ / B 站；SoundCloud 需先启用。 */
+export const DEFAULT_SEARCH_PLATFORMS: readonly Platform[] = ["wyy", "qqm", "bilibili"];
+
+/** 补齐缺失平台；丢掉已下线的 local 等旧项。 */
+function normalizePriority(priority: readonly string[]): Platform[] {
+  const known = SEARCH_PLATFORMS.map((item) => item.id);
+  const ordered = priority.filter((id): id is Platform => known.includes(id as Platform));
+  for (const id of known) {
+    if (!ordered.includes(id)) ordered.push(id);
+  }
+  return ordered;
+}
+
+/** 勾选列表：只保留仍在线的平台；空/缺省回落到默认勾选。 */
+export function normalizeSearchPlatforms(selected: readonly string[] | undefined): Platform[] {
+  const known = SEARCH_PLATFORMS.map((item) => item.id);
+  const next = (selected ?? []).filter((id): id is Platform => known.includes(id as Platform));
+  return next.length > 0 ? next : [...DEFAULT_SEARCH_PLATFORMS];
+}
 
 /** 平台选择那一行单独一个组件（SearchPlatforms），props 也分开列。 */
 export interface SearchPlatformProps {
@@ -28,6 +47,8 @@ export interface SearchBarProps extends SearchPlatformProps {
   batch: boolean;
   busy: boolean;
   onSubmit(): void;
+  /** 竖屏/极窄：输入与平台拆成两段。 */
+  stacked?: boolean;
 }
 
 function RainbowSearchIcon() {
@@ -62,15 +83,8 @@ function RainbowSearchIcon() {
 /**
  * 搜索条：**一个**控件，不是一排控件。
  *
- * 上一版这里是六七个描边矩形并排——输入框一个框、框里的音质又一个框、
- * 框外四颗平台键各自还有一个框。每多画一条边就多一次"这是另一件东西"的
- * 暗示，可它们回答的全是同一个问题的三个部分：搜什么、搜哪儿、要什么音质。
- * 现在整个入口不画外轮廓：模式图标、动态动作标签和更大的主输入建立层级；
- * 音质与平台只用细分隔线和留白分区，谁也不再单独描边；
- * 平台键的选中态只点亮品牌色，不靠边框或淡色方块。
- *
- * Enter 执行搜索、Shift+Enter 换行；左侧炫彩放大镜同时是提交键，
- * 让第一次使用的人也不用猜快捷键，但不再铺红色按钮或描框。
+ * 搜索来源在最前，随后才是搜索输入；这样四个平台键和下方工作条的四个入口
+ * 可以一一对齐。平台键只负责来源多选与顺序，登录仍有独立入口。
  */
 export function SearchBar({
   query,
@@ -78,6 +92,7 @@ export function SearchBar({
   batch,
   busy,
   onSubmit,
+  stacked = false,
   ...platformProps
 }: SearchBarProps) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -85,7 +100,7 @@ export function SearchBar({
   return (
     <form
       className="kd-search-command"
-      data-tauri-drag-region
+      data-stacked={stacked || undefined}
       onSubmit={(event) => {
         event.preventDefault();
         if (canSubmit) onSubmit();
@@ -94,13 +109,15 @@ export function SearchBar({
       <div
         className="kd-searchbar kd-grow"
         data-batch={batch || undefined}
+        data-stacked={stacked || undefined}
         onClick={(event) => {
-          // 整片顶部搜索区都是输入入口；但真实控件仍处理自己的点击，不能点音质
-          // 下拉时把焦点强行抢回输入框，也不能破坏平台选择和提交。
           if ((event.target as HTMLElement).closest("button, select, input, textarea")) return;
           inputRef.current?.focus();
         }}
       >
+        <div className="kd-searchbar-tools">
+          <SearchPlatforms {...platformProps} />
+        </div>
         <div className="kd-searchbar-copy">
           <button
             type="submit"
@@ -113,7 +130,7 @@ export function SearchBar({
           </button>
           {!query && (
             <span className="kd-search-placeholder" aria-hidden="true">
-              今天想听点什么？歌名、链接，都可以悄悄放在这里 ♫
+              {stacked ? "歌名、链接都可以放这里" : "今天想听点什么？歌名、链接，都可以悄悄放在这里 ♫"}
             </span>
           )}
           <textarea
@@ -123,7 +140,6 @@ export function SearchBar({
             value={query}
             placeholder=""
             aria-label="关键词、单曲链接或歌单链接，支持多行"
-            autoFocus
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey && canSubmit) {
                 event.preventDefault();
@@ -133,30 +149,13 @@ export function SearchBar({
             onChange={(event) => onQueryChange(event.target.value)}
           />
         </div>
-        <div className="kd-searchbar-tools">
-          <SearchPlatforms {...platformProps} />
-        </div>
       </div>
     </form>
   );
 }
 
 /**
- * 搜索平台。四颗只有标志的键，长在搜索条右半边。
- *
- * 只放各家的标志，不写名字：四个中文/英文名横着排要占掉半条工具栏，
- * 而这四家的品牌色和形状本来就是用户脑子里的第一识别项。名字进 title，
- * 需要确认的时候悬停一下就有。
- *
- * 每颗**不再各自描边**。四个方框并排看上去像四个独立控件，可它们其实是
- * 一组多选；现在选中 = 上品牌色 + 一层同色淡底，没选中 = 中性灰，
- * 状态一样读得出来，少了四条边。
- *
- * 按钮顺序 = 下载来源优先级：同一首歌几个平台都有时，默认从排最前的那家下。
- * 顺序可以直接拖动调整，存在设置里（platform_priority）。
- *
- * 「混合去重」的开关删掉了、恒为开：跨平台同一首歌不合并的话，
- * 搜一次出四条一模一样的结果，没有人会想要那个。
+ * 搜索平台。只负责来源多选与拖动排序——不再打开账号面板。
  */
 export function SearchPlatforms({
   platforms,
@@ -164,36 +163,31 @@ export function SearchPlatforms({
   soundcloudEnabled,
 }: SearchPlatformProps) {
   const saveSettings = useAppStore((state) => state.saveSettings);
-  const openAccountsPanel = useAppStore((state) => state.openAccountsPanel);
   const priority = useAppStore(
     (state) => state.settings?.platform_priority ?? (DEFAULT_PRIORITY as string[]),
   );
   const [dragging, setDragging] = useState<Platform | null>(null);
+  // dragover 比 setState 重渲染更早：必须用 ref，否则 preventDefault 来不及，整段拖不动。
+  const draggingRef = useRef<Platform | null>(null);
 
-  const rank = (id: Platform) => {
-    const index = priority.indexOf(id);
-    // 老设置里没有 local：第一次出现时默认贴着输入框；用户拖过一次后设置
-    // 会正式包含 local，此后完全尊重保存的位置。
-    if (id === "local" && index < 0) return -1;
-    return index < 0 ? priority.length : index;
-  };
-  const ordered = [...SEARCH_PLATFORMS].sort((a, b) => rank(a.id) - rank(b.id));
+  const orderedIds = normalizePriority(priority);
+  const ordered = orderedIds
+    .map((id) => SEARCH_PLATFORMS.find((item) => item.id === id))
+    .filter((item): item is (typeof SEARCH_PLATFORMS)[number] => Boolean(item));
 
-  /** 把 from 拖到 to 的位置上（其余项相对顺序不变）。 */
   const reorder = (from: Platform, to: Platform) => {
     if (from === to) return;
     const current = ordered.map((item) => item.id);
     const next = current.filter((id) => id !== from);
-    next.splice(next.indexOf(to) + (current.indexOf(from) < current.indexOf(to) ? 1 : 0), 0, from);
+    const at = next.indexOf(to);
+    if (at < 0) return;
+    next.splice(at, 0, from);
     void saveSettings({ platform_priority: next });
   };
 
   return (
     <div className="kd-plats" role="group" aria-label="搜索平台（拖动排序 = 来源优先级）">
       {ordered.map((item) => {
-        // SoundCloud 默认关着（走 yt-dlp，慢且不稳）。但按钮直接置灰是个死胡同：
-        // 用户点不动，也没人告诉他为什么。改成点一下就把开关打开——
-        // 他的意图很明确，没道理逼他跑去设置里再找一遍。
         const off = item.id === "soundcloud" && !soundcloudEnabled;
         return (
           <button
@@ -206,7 +200,6 @@ export function SearchPlatforms({
             data-off={off || undefined}
             data-dragging={dragging === item.id || undefined}
             draggable
-            // 名字进 title：按钮上只有标志，悬停才说是谁
             title={
               off
                 ? `${item.label}：未启用，点一下就启用`
@@ -215,26 +208,31 @@ export function SearchPlatforms({
                   : `${item.label} · 拖动排序：排前面的优先作为下载来源`
             }
             onDragStart={(event) => {
-              if (item.id !== "local") openAccountsPanel();
+              clearTextSelection();
               event.dataTransfer.effectAllowed = "move";
               event.dataTransfer.setData("text/plain", item.id);
+              draggingRef.current = item.id;
               setDragging(item.id);
             }}
-            onDragEnd={() => setDragging(null)}
+            onDragEnd={() => {
+              draggingRef.current = null;
+              setDragging(null);
+            }}
             onDragOver={(event) => {
-              if (dragging && dragging !== item.id) event.preventDefault();
+              if (draggingRef.current && draggingRef.current !== item.id) {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+              }
             }}
             onDrop={(event) => {
               event.preventDefault();
-              if (item.id !== "local") openAccountsPanel();
-              if (dragging) reorder(dragging, item.id);
+              const from = draggingRef.current;
+              if (from) reorder(from, item.id);
+              draggingRef.current = null;
               setDragging(null);
             }}
             onClick={() => {
-              if (item.id !== "local") openAccountsPanel();
               if (off) {
-                // 启用之后这颗按钮的"未启用"灰态当场就没了，还顺手被选中，
-                // 这本身就是回执，不必再说一遍"已启用 SoundCloud"
                 void saveSettings({ soundcloud_enabled: true });
                 if (!platforms.includes(item.id)) onTogglePlatform(item.id);
                 return;

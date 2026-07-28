@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { X } from "lucide-react";
 
 export interface SheetProps {
   open: boolean;
@@ -14,8 +15,7 @@ export interface SheetProps {
  * 看一眼这首的详情 → 回列表接着扫"，抽屉只盖住下半屏，上面那截列表还在，
  * 心里知道自己停在哪。换成全屏页就变成了"进去/出来"，每次都要重新找位置。
  *
- * 三种关法都给：抓着把手往下拖、点背景、按 Esc。手机上第一种最顺手，
- * 桌面窄窗口下后两种更快——不知道用户是哪种，就都留着。
+ * 关法：抓着把手往下拖、点背景、按 Esc、右上角淡色小叉。
  */
 export function Sheet({ open, title, onClose, children }: SheetProps) {
   /** 拖动时的即时位移（px）。松手时要么归零、要么关掉。 */
@@ -52,6 +52,7 @@ export function Sheet({ open, title, onClose, children }: SheetProps) {
         <div
           className="kd-sheet-grab"
           onPointerDown={(event) => {
+            if ((event.target as HTMLElement).closest("button")) return;
             startY.current = event.clientY;
             event.currentTarget.setPointerCapture(event.pointerId);
           }}
@@ -61,6 +62,7 @@ export function Sheet({ open, title, onClose, children }: SheetProps) {
             setDrag(Math.max(0, event.clientY - startY.current));
           }}
           onPointerUp={(event) => {
+            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
             event.currentTarget.releasePointerCapture(event.pointerId);
             // 拖过 110px 才算"要关"。阈值太小的话，滚动列表时手指的
             // 轻微下滑会把抽屉误关掉
@@ -69,7 +71,18 @@ export function Sheet({ open, title, onClose, children }: SheetProps) {
           }}
         >
           <span className="kd-sheet-bar" aria-hidden="true" />
-          <span className="kd-sheet-title">{title}</span>
+          <div className="kd-sheet-grab-row">
+            <span className="kd-sheet-title">{title}</span>
+            <button
+              type="button"
+              className="kd-sheet-close"
+              aria-label="关闭"
+              title="关闭"
+              onClick={onClose}
+            >
+              <X size={14} strokeWidth={2} />
+            </button>
+          </div>
         </div>
         <div className="kd-sheet-body kd-scroll">{children}</div>
       </div>

@@ -50,7 +50,7 @@ impl SoundCloudProvider {
     }
 
     fn ensure_enabled(&self) -> Result<()> {
-        anyhow::ensure!(self.ctx.soundcloud_enabled, "{DISABLED_MESSAGE}");
+        anyhow::ensure!(self.ctx.soundcloud_enabled(), "{DISABLED_MESSAGE}");
         Ok(())
     }
 
@@ -177,7 +177,7 @@ impl MusicProvider for SoundCloudProvider {
     }
 
     async fn account(&self) -> Account {
-        let mut account = if self.ctx.soundcloud_enabled {
+        let mut account = if self.ctx.soundcloud_enabled() {
             Account::new(Platform::Soundcloud, LABEL, AccountState::Valid, "已启用")
         } else {
             Account::new(
@@ -206,7 +206,7 @@ impl MusicProvider for SoundCloudProvider {
 
     async fn search(&self, keyword: &str, limit: usize) -> Result<Vec<SongSource>> {
         let keyword = keyword.trim();
-        if !self.ctx.soundcloud_enabled || keyword.is_empty() {
+        if !self.ctx.soundcloud_enabled() || keyword.is_empty() {
             return Ok(Vec::new());
         }
         let limit = effective_limit(limit, 20);
@@ -318,7 +318,7 @@ impl MusicProvider for SoundCloudProvider {
 
         let output_dir = self.ctx.platform_dir(Platform::Soundcloud)?;
         let filename = render_filename(
-            &self.ctx.filename_template,
+            &self.ctx.filename_template(),
             &source.title,
             &source.artist_text(),
             &source.album,

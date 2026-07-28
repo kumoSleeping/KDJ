@@ -311,7 +311,7 @@ impl QqClient {
         comm
     }
 
-    fn cookie_header(&self) -> String {
+    pub(crate) fn cookie_header(&self) -> String {
         let credential = self.credential.read().unwrap();
         if !credential.is_present() {
             return String::new();

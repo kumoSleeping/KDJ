@@ -17,7 +17,7 @@ use kdj_library::service::{FileDisposal, TrackQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::downloads::{enqueue_audio, enqueue_video, DownloadManager};
+use crate::downloads::{enqueue_audio, enqueue_video, enqueue_vj_export, DownloadManager};
 use crate::error::{ApiError, ApiResult};
 use crate::state::{AppState, PLATFORMS};
 
@@ -44,6 +44,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/resolve", post(resolve))
         .route("/api/intake", post(intake))
         .route("/api/downloads", get(list_downloads).post(enqueue))
+        .route("/api/downloads/{id}", delete(remove_download))
         .route("/api/downloads/start", post(start_downloads))
         .route("/api/downloads/{id}/cancel", post(cancel_download))
         .route("/api/downloads/clear", post(clear_downloads))
@@ -51,6 +52,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/video/download", post(video_download))
         .route("/api/video/preview", get(video_preview))
         .route("/api/video/calibrate", post(video_calibrate))
+        .route("/api/vj/export", post(vj_export))
         .route("/api/library/tracks", get(library_tracks))
         .route("/api/library/tracks/{id}", get(library_track))
         .route("/api/library/tracks/{id}", patch(library_patch))
@@ -67,6 +69,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/library/folders/create", post(folder_create))
         .route("/api/library/folders/rename", post(folder_rename))
         .route("/api/library/folders/delete", post(folder_delete))
+        .route("/api/library/folders/forget", post(folder_forget))
         .route("/api/library/folders/init", post(folder_init))
         .route("/api/library/folders/move", post(folder_move))
         .route("/api/library/folders/order", post(folder_order))
@@ -131,6 +134,7 @@ async fn put_settings(
     Json(payload): Json<Settings>,
 ) -> Json<SettingsView> {
     let settings = state.config.apply_settings(payload);
+    state.sync_provider_context();
     ctx.downloads.set_concurrency(settings.concurrent_downloads);
     // auto_start_downloads 保留在配置契约中兼容旧 settings.json，但下载队列现在
     // 使用一次性 generation 放行，避免点击「开始下载」后把未来新任务也自动启动。
@@ -496,6 +500,7 @@ async fn enqueue(
         // 而队列里什么都没有——这是最容易被当成"下载坏了"的一种表现
         return Err(ApiError::bad_request("没有要下载的曲目"));
     }
+    let dest_dir = normalize_dest_dir(&state, &payload.dest_dir)?;
     let settings = state.config.to_settings();
     let quality = payload.quality.unwrap_or(settings.default_quality);
     let analyze = payload.analyze.unwrap_or(settings.auto_analyze);
@@ -509,6 +514,7 @@ async fn enqueue(
                 source,
                 quality,
                 analyze,
+                dest_dir.clone(),
             )
         })
         .collect();
@@ -529,6 +535,25 @@ async fn cancel_download(
 
 async fn clear_downloads(axum::Extension(ctx): axum::Extension<Ctx>) -> Json<serde_json::Value> {
     Json(json!({ "removed": ctx.downloads.clear_finished() }))
+}
+
+/// 移除一条已经结束的任务记录。运行中的条目必须先取消，不能在它还持有进程时
+/// 直接从队列地图里拔掉。
+async fn remove_download(
+    AxumPath(id): AxumPath<String>,
+    axum::Extension(ctx): axum::Extension<Ctx>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let task = ctx
+        .downloads
+        .get(&id)
+        .ok_or_else(|| ApiError::not_found("任务不存在"))?;
+    if !matches!(task.state, TaskState::Done | TaskState::Failed | TaskState::Canceled) {
+        return Err(ApiError::bad_request("只能移除已结束的任务；请先取消"));
+    }
+    ctx.downloads
+        .remove_finished(&id)
+        .ok_or_else(|| ApiError::bad_request("任务无法移除"))?;
+    Ok(Json(json!({ "removed": true })))
 }
 
 // ---------------------------------------------------------------- 视频
@@ -575,10 +600,57 @@ async fn video_download(
         return Err(ApiError::bad_request("缺少视频链接或 BV 号"));
     }
     apply_video_defaults(&mut payload, &state.config.to_settings());
+    payload.dest_dir = normalize_dest_dir(&state, &payload.dest_dir)?;
     // 立刻入队、立刻返回。真正的标题要向 B 站请求一次才知道，那一跳放在
     // 下载任务自己的线程里做（见 `enqueue_video`）——在这里同步等的话，
     // 点一次「下载」按钮要卡上几秒才有反应，限流时更久。
     let task = enqueue_video(state.clone(), ctx.downloads.clone(), payload);
+    ctx.downloads.broadcast_list();
+    Ok(Json(task))
+}
+
+fn normalize_vj_quality(raw: &str) -> ApiResult<String> {
+    match raw.trim() {
+        "1080p" | "720p" | "480p" => Ok(raw.trim().to_string()),
+        "" => Ok("1080p".into()),
+        other => Err(ApiError::bad_request(format!("不支持的导出质量：{other}"))),
+    }
+}
+
+async fn vj_export(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(ctx): axum::Extension<Ctx>,
+    Json(mut payload): Json<VjExportRequest>,
+) -> ApiResult<Json<DownloadTask>> {
+    if payload.track_ids.is_empty() {
+        return Err(ApiError::bad_request("没有要导出的曲目"));
+    }
+    // 文件夹必须在曲库里；normalize_dest_dir 顺带校验「是目录」。
+    payload.folder = normalize_dest_dir(&state, &payload.folder)?;
+    if payload.folder.is_empty() {
+        return Err(ApiError::bad_request("缺少导出源文件夹"));
+    }
+    payload.quality = normalize_vj_quality(&payload.quality)?;
+    if !payload.fade_seconds.is_finite() || !(0.0..=120.0).contains(&payload.fade_seconds) {
+        return Err(ApiError::bad_request("淡入淡出秒数应在 0 到 120 之间"));
+    }
+    if payload.fade_bars > 32 {
+        return Err(ApiError::bad_request("淡入淡出小节数不能超过 32"));
+    }
+    // 小节是更精确的音乐语义；两者误传时优先按上一首的小节计算。
+    if payload.fade_bars > 0 {
+        payload.fade_seconds = 0.0;
+    }
+    // 整节开时隐含拍对齐（和前端开关语义一致）。
+    if payload.snap_whole_bar {
+        payload.snap_nearest_beat = true;
+    }
+    let folder_label = Path::new(&payload.folder)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(payload.folder.as_str())
+        .to_string();
+    let task = enqueue_vj_export(state.clone(), ctx.downloads.clone(), payload, &folder_label);
     ctx.downloads.broadcast_list();
     Ok(Json(task))
 }
@@ -1061,6 +1133,20 @@ fn require_roots(state: &AppState) -> ApiResult<Vec<PathBuf>> {
     Ok(roots)
 }
 
+/// 校验下载目标文件夹：空串放行；非空必须是曲库根内的真实目录。
+fn normalize_dest_dir(state: &AppState, raw: &str) -> ApiResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    let roots = require_roots(state)?;
+    let dest = kdj_library::folders::ensure_inside(Path::new(trimmed), &roots)?;
+    if !dest.is_dir() {
+        return Err(ApiError::bad_request("目标不是文件夹"));
+    }
+    Ok(dest.to_string_lossy().into_owned())
+}
+
 fn folder_tree(state: &AppState) -> ApiResult<FolderTree> {
     let paths = state.library.all_paths()?;
     let roots: Vec<String> = library_roots(state)
@@ -1107,6 +1193,74 @@ async fn folder_delete(
 ) -> ApiResult<Json<FolderTree>> {
     kdj_library::folders::delete_folder(Path::new(&payload.path), &require_roots(&state)?)?;
     Ok(Json(folder_tree(&state)?))
+}
+
+/// 从软件里移出文件夹：库记录摘掉、曲库根注销，磁盘文件一字不动。
+///
+/// 根目录：从 `library_dirs` 拿掉，下面的歌全部移出曲库。
+/// 子目录：只移出该目录（含子级）下的曲目，文件夹树里那个空壳还在——
+/// 因为文件夹模式认的是磁盘真实目录，不是虚拟分组。
+async fn folder_forget(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<FolderForgetRequest>,
+) -> ApiResult<Json<FolderForgetResult>> {
+    let roots = require_roots(&state)?;
+    let target = kdj_library::folders::ensure_inside(Path::new(&payload.path), &roots)?;
+    let removed_ids = state.library.forget_under(&target)?;
+    // 恰好是某个曲库根（或设置里登记在它底下的子根）才注销；
+    // 普通子目录只摘曲目，不改 library_dirs。
+    let mut settings = state.config.to_settings();
+    let next_roots = unregister_library_roots(&settings.library_dirs, &target);
+    if next_roots != settings.library_dirs {
+        // 下载目录还指着刚移出的根时，改指到剩下的第一个曲库根；
+        // 一个都不剩就原样留着——下载栏仍能显示路径，用户自己换。
+        let forgotten = target.to_string_lossy();
+        let fallback = next_roots.first().cloned();
+        if path_equals_or_within(&settings.download_dir, &forgotten) {
+            if let Some(dir) = fallback.clone() {
+                settings.download_dir = dir;
+            }
+        }
+        if path_equals_or_within(&settings.video_download_dir, &forgotten) {
+            if let Some(dir) = fallback {
+                settings.video_download_dir = dir;
+            }
+        }
+        settings.library_dirs = next_roots;
+        state.config.apply_settings(settings);
+        state.sync_provider_context();
+    }
+    if !removed_ids.is_empty() {
+        state.hub.publish_library_updated(&removed_ids);
+    }
+    Ok(Json(FolderForgetResult {
+        removed: removed_ids.len(),
+        tree: folder_tree(&state)?,
+    }))
+}
+
+/// `candidate` 是否就是 `root`，或落在它下面。两边都按库里同一套归一化比。
+fn path_equals_or_within(candidate: &str, root: &str) -> bool {
+    let raw = candidate.trim();
+    if raw.is_empty() {
+        return false;
+    }
+    let candidate = PathBuf::from(kdj_library::service::normalize_path(Path::new(raw)));
+    let root = PathBuf::from(kdj_library::service::normalize_path(Path::new(root)));
+    kdj_core::paths::is_within(&root, &candidate)
+}
+
+/// 从曲库根列表里拿掉 `target` 本身，以及登记在它下面的子路径。
+fn unregister_library_roots(existing: &[String], target: &Path) -> Vec<String> {
+    let target = PathBuf::from(kdj_library::service::normalize_path(target));
+    existing
+        .iter()
+        .filter(|item| {
+            let path = PathBuf::from(kdj_library::service::normalize_path(Path::new(item)));
+            !kdj_core::paths::is_within(&target, &path)
+        })
+        .cloned()
+        .collect()
 }
 
 async fn folder_init(
@@ -1799,6 +1953,7 @@ fn default_buckets() -> usize {
 /// 整轨彩色波形：每列一个高度 + 一个 RGB，前端直接一列一根柱子地画。
 ///
 /// 结果按 `(id, buckets, mtime)` 缓存到 `data/waveform/`，第二次是秒开。
+/// 未命中时走 [`crate::waveform::WaveformCoordinator`]：单飞 + 给分析让路。
 async fn library_waveform(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<i64>,
@@ -1814,48 +1969,14 @@ async fn library_waveform(
         return Err(ApiError::not_found("音频文件已丢失"));
     }
 
-    let mtime = file_mtime(&path);
-    // v2 = 三条包络 → 每列一色的格式变更。不带版本号的话，旧缓存会以旧结构
-    // 被原样返回，前端拿到没有 amp 的对象只会画出一片空白。
     let cache_dir = state.config.data_dir.join("waveform");
-    let cache_file = cache_dir.join(format!("{id}-v2-{buckets}-{mtime}.json"));
-    if let Ok(text) = std::fs::read_to_string(&cache_file) {
-        if let Ok(cached) = serde_json::from_str::<Waveform>(&text) {
-            return Ok(Json(cached));
-        }
-    }
-
-    // 解码 + STFT 是 CPU 密集的，别占着 async 执行器
-    let decode_path = path.clone();
-    let mut wave = tokio::task::spawn_blocking(move || {
-        let decoded = kdj_analysis::decode::decode_audio(
-            &decode_path,
-            kdj_analysis::waveform::WAVEFORM_SR,
-            None,
-        )?;
-        Ok::<_, anyhow::Error>(kdj_analysis::waveform::band_waveform(
-            &decoded.samples,
-            decoded.sample_rate as f64,
-            buckets,
-        ))
-    })
-    .await
-    .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("{err}")))?
-    .map_err(|err| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("解码失败：{err:#}")))?;
-
-    if wave.amp.is_empty() {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "文件没有可解码的音频",
-        ));
-    }
-    wave.track_id = id;
-
-    // 缓存写不了不影响这次结果
-    let _ = std::fs::create_dir_all(&cache_dir);
-    if let Ok(body) = serde_json::to_string(&wave) {
-        let _ = std::fs::write(&cache_file, body);
-    }
+    let wave = state
+        .waveforms
+        .get_or_compute(id, path, buckets, cache_dir)
+        .await
+        .map_err(|err| {
+            ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("{err:#}"))
+        })?;
     Ok(Json(wave))
 }
 
@@ -2291,6 +2412,39 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
             &[path.clone(), base.join("不存在").to_string_lossy().into_owned()],
         );
         assert_eq!(merged, vec![path], "重复的和不存在的都不该进去");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn forgetting_a_root_drops_it_and_nested_registered_paths() {
+        let base = scratch("forget-root");
+        let music = base.join("music");
+        let nested = music.join("set");
+        let other = base.join("other");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let existing = vec![
+            music.to_string_lossy().into_owned(),
+            nested.to_string_lossy().into_owned(),
+            other.to_string_lossy().into_owned(),
+        ];
+        let next = unregister_library_roots(&existing, &music);
+        assert_eq!(
+            next,
+            vec![other.to_string_lossy().into_owned()],
+            "移出根目录时，登记在它底下的子路径一并拿掉"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn forgetting_a_subdir_does_not_unregister_its_root() {
+        let base = scratch("forget-sub");
+        let sub = base.join("温州");
+        std::fs::create_dir_all(&sub).unwrap();
+        let existing = vec![base.to_string_lossy().into_owned()];
+        let next = unregister_library_roots(&existing, &sub);
+        assert_eq!(next, existing, "移出子目录只摘曲目，根目录登记还在");
         let _ = std::fs::remove_dir_all(&base);
     }
 

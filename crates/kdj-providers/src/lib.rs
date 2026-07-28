@@ -11,5 +11,5 @@ pub mod soundcloud;
 pub mod qqmusic;
 
 pub use provider::{
-    Capabilities, DownloadJob, MusicProvider, ProgressSink, ProviderContext,
+    Capabilities, DownloadJob, MusicProvider, ProgressSink, ProviderContext, ProviderLiveSettings,
 };

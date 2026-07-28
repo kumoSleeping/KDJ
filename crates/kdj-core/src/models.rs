@@ -112,6 +112,8 @@ impl Default for Quality {
 pub enum TaskState {
     Queued,
     Running,
+    /// 媒体字节已拉完，正在由 FFmpeg 合并/转码，或移动、入库。
+    Processing,
     Done,
     Failed,
     Canceled,
@@ -399,13 +401,18 @@ pub struct DownloadRequest {
     /// None = 跟随设置
     #[serde(default)]
     pub analyze: Option<bool>,
+    /// 下载完成后挪进这个曲库文件夹（绝对路径）。空 = 留在默认下载目录。
+    #[serde(default)]
+    pub dest_dir: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum TaskKind {
     Audio,
     Video,
+    /// 本地曲库按顺序拼成 VJ 片子；走同一条下载队列统一调度 / 取消 / 清理。
+    VjExport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -430,6 +437,12 @@ pub struct DownloadTask {
     pub error: String,
     #[serde(default)]
     pub track_id: Option<i64>,
+    /// 入队时指定的目标曲库文件夹；前端用来在对应文件夹列表里画「待下载」行。
+    #[serde(default)]
+    pub dest_dir: String,
+    /// 搜索结果带来的封面 URL；刷新页面后左表待下载行还要能画出缩略图。
+    #[serde(default)]
+    pub cover: String,
     pub created_at: f64,
     pub updated_at: f64,
 }
@@ -489,6 +502,46 @@ pub struct VideoDownloadRequest {
     /// 0（默认）= 原样，走 copy 快路径；非零会强制重编码（见 ffmpeg.rs）。
     #[serde(default)]
     pub offset_ms: i64,
+    /// 下载完成后挪进这个曲库文件夹。空 = 留在默认视频目录。
+    #[serde(default)]
+    pub dest_dir: String,
+    /// 搜索结果里的标题/UP 主/封面。有则入队立刻用，别等 B 站二次解析，刷新也不丢。
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub cover: String,
+}
+
+/// 「按顺序导出 VJ」入队请求。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VjExportRequest {
+    /// 源文件夹（曲库内绝对路径）；展示用，也作后续写回参考。
+    #[serde(default)]
+    pub folder: String,
+    /// 本次导出顺序（曲目 id）。
+    #[serde(default)]
+    pub track_ids: Vec<i64>,
+    #[serde(default = "default_true")]
+    pub use_in_out_points: bool,
+    #[serde(default)]
+    pub snap_nearest_beat: bool,
+    #[serde(default)]
+    pub snap_whole_bar: bool,
+    /// 固定秒数的淡入淡出；和 `fade_bars` 二选一，后者优先。
+    #[serde(default)]
+    pub fade_seconds: f64,
+    /// 淡入淡出按几小节走。每次衔接都以上一首的 BPM 换算，未分析时按 120 BPM。
+    #[serde(default)]
+    pub fade_bars: u8,
+    /// `1080p` / `720p` / `480p`
+    #[serde(default = "default_vj_quality")]
+    pub quality: String,
+    #[serde(default = "default_true")]
+    pub keep_audio: bool,
+    #[serde(default = "default_true")]
+    pub unify_gain: bool,
 }
 
 // ---------------------------------------------------------------- 曲库
@@ -548,6 +601,9 @@ pub struct Track {
     pub comment: String,
     #[serde(default)]
     pub cue_ms: Option<i64>,
+    /// 结束点（毫秒）。与 cue_ms 成对，供导出裁切等使用。
+    #[serde(default)]
+    pub end_ms: Option<i64>,
     #[serde(default = "default_local")]
     pub source_platform: String,
     #[serde(default)]
@@ -584,6 +640,7 @@ pub struct TrackPatch {
     pub color: Option<String>,
     pub comment: Option<String>,
     pub cue_ms: Option<i64>,
+    pub end_ms: Option<i64>,
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
@@ -735,6 +792,19 @@ pub struct FolderDeleteRequest {
     pub path: String,
 }
 
+/// 从软件里移出某文件夹：摘掉库记录 / 曲库根登记，不删磁盘内容。
+#[derive(Debug, Clone, Deserialize)]
+pub struct FolderForgetRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderForgetResult {
+    /// 从库里摘掉的曲目数（文件仍在磁盘上）。
+    pub removed: usize,
+    pub tree: FolderTree,
+}
+
 /// 把 path 这个文件夹整个搬进 dest_parent。
 #[derive(Debug, Clone, Deserialize)]
 pub struct FolderMoveRequest {
@@ -802,6 +872,9 @@ fn default_qr_ttl() -> u32 {
 }
 fn default_video_height() -> i64 {
     1080
+}
+fn default_vj_quality() -> String {
+    "1080p".into()
 }
 fn default_local() -> String {
     "local".to_string()

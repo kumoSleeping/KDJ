@@ -7,7 +7,7 @@
 //! **不要凭直觉改**——Python 版的注释里已经记了两次"试过 X，实测更差"的结论。
 
 use crate::dsp::{
-    self, autocorrelate, hann_window, interp_at, mel_filterbank, median, moving_average,
+    self, autocorrelate, hann_window, interp_at, median, mel_filterbank, moving_average,
     parabolic_peak, percentile, HOP, MEL_FMAX, MEL_FMIN, N_FFT, N_MELS,
 };
 
@@ -207,12 +207,30 @@ fn promote_low_tempo(bpm_raw: f64, candidates: &[f64]) -> f64 {
     if bpm_raw >= 100.0 {
         return bpm_raw;
     }
+
+    // 3:2 误判通常来自每三个八分音符形成的强重音。只要 1.5× 层已经进入
+    // 自相关候选集，它几乎总是实际四分音符速度；先处理它，不让更高的倍频抢走。
+    if let Some(candidate) = candidates
+        .iter()
+        .copied()
+        .find(|candidate| (1.45..=1.55).contains(&(*candidate / bpm_raw)))
+    {
+        return candidate;
+    }
+
+    // 2:1 不同：80/160、98/196 都可能是音乐上合理的 metrical level。
+    // 真实曲库对拍显示 75–84 与 90–99 的主峰通常就是专业 DJ 软件采用的层级；
+    // 旧逻辑“低于 100 一律找最高倍频”会把大量 80/90 BPM 曲目错误翻倍。
+    let allow_double = bpm_raw < 75.0 || (85.0..90.0).contains(&bpm_raw);
+    if !allow_double {
+        return bpm_raw;
+    }
     candidates
         .iter()
         .copied()
         .filter(|candidate| {
             let ratio = *candidate / bpm_raw;
-            (1.45..=1.55).contains(&ratio) || (1.95..=2.05).contains(&ratio)
+            (1.95..=2.05).contains(&ratio)
         })
         .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .unwrap_or(bpm_raw)
@@ -220,7 +238,8 @@ fn promote_low_tempo(bpm_raw: f64, candidates: &[f64]) -> f64 {
 
 /// 返回 `(最终 bpm, 自相关粗估 bpm)`。倍频修正在这里做。
 pub fn choose_tempo(env: &[f64], fps: f64) -> (f64, f64) {
-    let cands = tempo_candidates(env, fps, 3);
+    // 五个峰仍很便宜，却能保住 4:3 层级较弱的那一支（真实曲库里常落在第 4 峰）。
+    let cands = tempo_candidates(env, fps, 5);
     let Some(&bpm_raw) = cands.first() else {
         return (0.0, 0.0);
     };
@@ -230,8 +249,27 @@ pub fn choose_tempo(env: &[f64], fps: f64) -> (f64, f64) {
     //
     // 仅对低于 100 的主峰做一次“明显的快速脉冲”救援：很多动画/偶像曲的
     // 强拍落在半速（85→171）或三拍分组（93→141），而实际 DJ 网格使用较快
-    // 的那层。候选必须已经是自相关前三峰且精确接近 1.5×/2×，不会凭空倍速。
-    (promote_low_tempo(bpm_raw, &cands), bpm_raw)
+    // 的那层。候选必须已经是自相关强峰且精确接近 1.5×/2×，不会凭空倍速。
+    let promoted = promote_low_tempo(bpm_raw, &cands);
+    if (promoted - bpm_raw).abs() > 1e-9 {
+        return (promoted, bpm_raw);
+    }
+
+    // 高速主峰也可能只是细分拍。这里只在同一速度族内部比较梳状对比度：
+    // 半速必须比高速更像“拍上强、拍间弱”；3:4 层则允许很小余量，因为
+    // shuffle / 三连音编曲的四分音符并不一定拥有更强的全频瞬态。
+    let raw_score = comb_score(env, 60.0 * fps / bpm_raw);
+    let slower = cands.iter().copied().find(|candidate| {
+        let ratio = *candidate / bpm_raw;
+        let candidate_score = comb_score(env, 60.0 * fps / *candidate);
+        ((0.48..=0.52).contains(&ratio)
+            && (((155.0..=165.0).contains(&bpm_raw) && candidate_score > raw_score)
+                || ((150.0..155.0).contains(&bpm_raw) && candidate_score > 3.0 * raw_score)))
+            || ((100.0..=125.0).contains(&bpm_raw)
+                && (0.73..=0.77).contains(&ratio)
+                && candidate_score >= 0.85 * raw_score)
+    });
+    (slower.unwrap_or(bpm_raw), bpm_raw)
 }
 
 // ---------------------------------------------------------------- 节拍跟踪（Ellis DP）
@@ -443,7 +481,8 @@ fn refine_period(frames: &[usize], fallback: f64) -> (f64, f64) {
         .collect();
 
     // 最长连续内点段
-    let (mut best_start, mut best_len, mut cur_start, mut cur_len) = (0usize, 0usize, 0usize, 0usize);
+    let (mut best_start, mut best_len, mut cur_start, mut cur_len) =
+        (0usize, 0usize, 0usize, 0usize);
     for (i, ok) in inlier.iter().enumerate() {
         if *ok {
             if cur_len == 0 {
@@ -571,7 +610,7 @@ mod tests {
     #[test]
     fn recovers_the_tempo_of_a_synthetic_click_track() {
         let sr = 22050.0;
-        for bpm in [90.0, 120.0, 128.0, 140.0] {
+        for bpm in [90.0, 120.0, 128.0, 140.0, 160.0] {
             let samples = click_track(bpm, 30.0, sr);
             let got = analyze_tempo(&samples, sr);
             let error = (got.bpm - bpm).abs();
@@ -587,13 +626,21 @@ mod tests {
     fn beat_grid_is_monotonic_and_starts_near_zero() {
         let sr = 22050.0;
         let got = analyze_tempo(&click_track(128.0, 30.0, sr), sr);
-        assert!(got.beat_times.len() > 40, "拍点太少：{}", got.beat_times.len());
+        assert!(
+            got.beat_times.len() > 40,
+            "拍点太少：{}",
+            got.beat_times.len()
+        );
         assert!(
             got.beat_times.windows(2).all(|pair| pair[1] > pair[0]),
             "拍点必须严格递增"
         );
         assert_eq!(got.first_beat, got.beat_times[0]);
-        assert!(got.first_beat < 1.0, "第一拍应当靠近开头：{}", got.first_beat);
+        assert!(
+            got.first_beat < 1.0,
+            "第一拍应当靠近开头：{}",
+            got.first_beat
+        );
         assert!((got.beat_interval - 60.0 / got.bpm).abs() < 1e-5);
     }
 
@@ -621,6 +668,9 @@ mod tests {
     fn low_tempo_promotion_only_accepts_explicit_fast_pulses() {
         assert!((promote_low_tempo(92.94, &[92.94, 141.10, 69.95]) - 141.10).abs() < 1e-9);
         assert!((promote_low_tempo(85.74, &[85.74, 171.30, 113.58]) - 171.30).abs() < 1e-9);
+        // 80/160 与 98/196 是最容易被旧规则误翻倍的 DJ metrical level。
+        assert!((promote_low_tempo(82.0, &[82.0, 164.0, 109.3]) - 82.0).abs() < 1e-9);
+        assert!((promote_low_tempo(98.5, &[98.5, 197.0, 131.3]) - 98.5).abs() < 1e-9);
         // 4:3 的次级节奏不是整曲速度，不能把 92.5 擅自提到 123.3。
         assert!((promote_low_tempo(92.5, &[92.5, 123.3, 73.9]) - 92.5).abs() < 1e-9);
         // 100 以上的强主峰不再被三连音候选拉走（final phase 的回归形状）。
@@ -638,7 +688,9 @@ mod tests {
     fn refine_period_beats_the_median_on_quantized_frames() {
         // 真周期 14.85 帧（≈174 BPM @ 43 fps），拍点只有整数分辨率
         let true_period = 14.85f64;
-        let frames: Vec<usize> = (0..60).map(|i| (i as f64 * true_period).round() as usize).collect();
+        let frames: Vec<usize> = (0..60)
+            .map(|i| (i as f64 * true_period).round() as usize)
+            .collect();
         let (refined, confidence) = refine_period(&frames, 15.0);
         assert!(
             (refined - true_period).abs() < 0.05,

@@ -1,5 +1,7 @@
 export { Button } from "./Button";
 export type { ButtonProps, ButtonSize, ButtonVariant } from "./Button";
+export { ContextMenu } from "./ContextMenu";
+export type { ContextMenuProps } from "./ContextMenu";
 export { CornerBadge } from "./CornerBadge";
 export type { BadgeTone, CornerBadgeProps } from "./CornerBadge";
 export { EmptyState } from "./EmptyState";

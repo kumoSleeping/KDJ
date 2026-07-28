@@ -11,7 +11,8 @@ import {
 } from "lucide-react";
 import type { IntakeItem, IntakeKind, MergedGroup, VideoInfo } from "../../types";
 import { EmptyState } from "../common";
-import { MergedGroupRow, PLATFORM_LABEL, SEARCH_DOWNLOAD_DND_TYPE } from "./MergedGroupRow";
+import { MergedGroupRow, PLATFORM_LABEL } from "./MergedGroupRow";
+import { endSearchDrag, writeSearchSourcesDrag } from "../../lib/searchDrag";
 import {
   isVideoGroup,
   VideoResultRow,
@@ -249,18 +250,28 @@ export function ResultTable({
                           )
                         : [group];
                       const sources = groups.flatMap((candidate) => {
-                        const picked =
+                        const preferred =
                           candidate.sources[
                             sourceIndex[candidate.group_id] ?? candidate.best_source_index
                           ] ?? candidate.sources[0];
-                        return picked && picked.platform !== "local" ? [picked] : [];
+                        // 本地来源只表示“库里已有”，不能送进下载接口。正常情况下后端
+                        // best_source_index 已避开它；旧缓存或手动来源索引仍可能指向 local，
+                        // 拖放时必须退回该组第一条在线来源，不能生成一个空载荷。
+                        const picked =
+                          preferred?.platform !== "local"
+                            ? preferred
+                            : candidate.sources.find((source) => source.platform !== "local");
+                        if (!picked) return [];
+                        // 列表封面用的是合并组的 cover（可能来自另一家平台）；
+                        // 入选源自己常常是空的——不盖回去，待下载行就会空着方框。
+                        const cover = picked.cover?.trim() || candidate.cover?.trim() || "";
+                        return cover && cover !== picked.cover
+                          ? [{ ...picked, cover }]
+                          : [picked];
                       });
-                      event.dataTransfer.setData(
-                        SEARCH_DOWNLOAD_DND_TYPE,
-                        JSON.stringify(sources),
-                      );
-                      event.dataTransfer.effectAllowed = "copy";
+                      writeSearchSourcesDrag(event.dataTransfer, sources);
                     }}
+                    onDragEnd={() => endSearchDrag()}
                   />
                 ),
               );

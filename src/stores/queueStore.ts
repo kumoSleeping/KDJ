@@ -23,6 +23,8 @@ interface QueueStore {
 
   /** 入队。front=true 插到队头（「下一首播放」的插队语义）。重复入队 = 挪位置。 */
   add(tracks: Track[], front?: boolean): void;
+  /** 只替换下一首；保留它之后已经排好的曲目。 */
+  replaceNext(track: Track, exceptId?: number): void;
   remove(ids: number[]): void;
   clear(): void;
   /** 弹出队头（跳过 exceptId，通常是正在放的这首）。播放消耗走这里。 */
@@ -66,6 +68,25 @@ export const useQueueStore = create<QueueStore>((set, get) => ({
     const nextIds = front ? [...adding, ...rest] : [...rest, ...adding];
     const nextById = { ...byId };
     for (const track of tracks) nextById[track.id] = track;
+    set({ ids: nextIds, byId: nextById });
+    save(nextIds, nextById);
+  },
+
+  replaceNext(track, exceptId) {
+    const { ids, byId } = get();
+    // “下一首”是第一个不是当前曲目的队列项；当前曲若意外仍在队列里要原位保留。
+    const oldNextIndex = ids.findIndex((id) => id !== exceptId);
+    const oldNextId = oldNextIndex >= 0 ? ids[oldNextIndex] : null;
+    const withoutNew = ids.filter((id) => id !== track.id);
+    const insertionIndex =
+      oldNextId === null
+        ? withoutNew.length
+        : Math.max(0, withoutNew.indexOf(oldNextId));
+    const rest = oldNextId === null
+      ? withoutNew
+      : withoutNew.filter((id) => id !== oldNextId);
+    const nextIds = [...rest.slice(0, insertionIndex), track.id, ...rest.slice(insertionIndex)];
+    const nextById = { ...byId, [track.id]: track };
     set({ ids: nextIds, byId: nextById });
     save(nextIds, nextById);
   },

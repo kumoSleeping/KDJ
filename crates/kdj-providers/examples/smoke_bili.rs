@@ -8,16 +8,18 @@ use tokio_util::sync::CancellationToken;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let dir = std::env::temp_dir().join("kdj-smoke-bili");
-    let ctx = ProviderContext {
-        data_dir: dir.clone(),
-        download_dir: dir.join("dl"),
-        filename_template: "{title} - {artist}".into(),
-        default_quality: Quality::Flac,
-        netease_use_download_api: false,
-        soundcloud_enabled: false,
-        video_dir: Some(dir.join("video")),
-        video_format: "mp4".into(),
-    };
+    let ctx = ProviderContext::new(
+        dir.clone(),
+        kdj_providers::ProviderLiveSettings {
+            download_dir: dir.join("dl"),
+            filename_template: "{title} - {artist}".into(),
+            default_quality: Quality::Flac,
+            netease_use_download_api: false,
+            soundcloud_enabled: false,
+            video_dir: Some(dir.join("video")),
+            video_format: "mp4".into(),
+        },
+    );
     let provider = BilibiliProvider::new(ctx)?;
     let target = std::env::args().nth(1).unwrap_or_else(|| "BV1GJ411x7h7".into());
 

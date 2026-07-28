@@ -2,9 +2,10 @@ import { cloneElement, useEffect, useRef, useState } from "react";
 import {
   Check,
   BarChart3,
+  CircleAlert,
   Copy,
+  Download,
   FolderOpen,
-  FolderSearch,
   Link2,
   ListMusic,
   ListStart,
@@ -14,39 +15,43 @@ import {
   RotateCcw,
   Star,
   Trash2,
+  Video,
 } from "lucide-react";
 import { api } from "../../lib/api";
-import { hasTextSelectionWithin } from "../../lib/textSelection";
+import { copyText } from "../../lib/copyText";
+import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import { observeTrackScroller } from "../../lib/autoAnalyze";
 import { getBridge } from "../../lib/bridge";
 import { isEditable } from "../../lib/useLibraryClipboard";
 import { camelotColor } from "../../lib/camelot";
 import {
   announceTrackDrag,
-  endTrackDrag,
+  claimActiveTrackDragIds,
+  finishTrackDrop,
+  isTrackDrag,
+  readTrackDragIds,
   TRACK_TRASH_DROP_EVENT,
   type TrackDragDetail,
 } from "../../lib/trackDrag";
-import { DASH, formatBpm, formatDuration, isVideoTrack } from "../../lib/format";
+import { folderDropElementAt, FOLDER_DROP_PATH_ATTR } from "../../lib/folderDrop";
+import { DASH, formatBpm, formatDuration, isVideoTrack, thumbUrl } from "../../lib/format";
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import { useAppStore } from "../../stores/appStore";
+import { useDownloadStore } from "../../stores/downloadStore";
 import {
   useLibraryStore,
   type SelectMode,
   type SortOrder,
   type TrackSort,
 } from "../../stores/libraryStore";
+import type { DownloadTask } from "../../types";
 import { useQueueStore } from "../../stores/queueStore";
 import type { FileDisposalMode, Track } from "../../types";
-import { Button, EmptyState, InlineNotice, SelectionBar } from "../common";
-import { pickAndScanFolders, TRACK_DND_TYPE } from "./FolderTree";
+import { playTrack } from "../../lib/playTrack";
+import { ContextMenu, EmptyState, InlineNotice } from "../common";
 
-/** 双击曲目 = 播放。PlayerBar 监听同名事件，两边不用互相持有引用。 */
-export const PLAY_EVENT = "kd:play";
-
-export function playTrack(track: Track): void {
-  window.dispatchEvent(new CustomEvent<Track>(PLAY_EVENT, { detail: track }));
-}
+/** @deprecated 请从 `lib/playTrack` 引用；保留 re-export 以免旧 import 断掉。 */
+export { PLAY_EVENT, playTrack, parsePlayRequest, type PlayRequest } from "../../lib/playTrack";
 
 /**
  * 点播放条的「正在播」块时由 PlayerBar 广播：回到曲库页、看这首歌。
@@ -216,6 +221,92 @@ export interface TrackTableProps {
   onReorder?(ids: number[], targetId: number, before: boolean): void;
 }
 
+/**
+ * 曲库表的封面格。
+ *
+ * 后端重启、首次视频抽帧排队时会短暂断开/超时；旧版一收到一次 img error 就直接
+ * 写 `visibility: hidden`，服务恢复后浏览器也不会再请求，于是抽帧早就成功了列表
+ * 仍永远空白。视频封面用 fetch 先确认 HTTP 成功、转成 Blob URL 后才交给 img；
+ * 这样 WKWebView 不会把开发时后端重启造成的图片加载失败永久黏在原节点上。普通
+ * 音频没有内嵌图很常见，仍直接退回灰色占位，避免为每一首无图文件轮询。
+ */
+function TrackCoverThumb({
+  track,
+  onTrackDragStart,
+}: {
+  track: Track;
+  onTrackDragStart?: (event: React.DragEvent<HTMLSpanElement>) => void;
+}) {
+  const [attempt, setAttempt] = useState(0);
+  const [hidden, setHidden] = useState(false);
+  const [videoCover, setVideoCover] = useState("");
+  const retryTimer = useRef<number | null>(null);
+  const isVideo = isVideoTrack(track.format);
+
+  useEffect(() => {
+    setAttempt(0);
+    setHidden(false);
+  }, [track.id, track.modified_at]);
+
+  useEffect(() => {
+    if (!isVideo) return;
+    const controller = new AbortController();
+    let alive = true;
+    let objectUrl = "";
+    setVideoCover("");
+
+    void fetch(api.coverUrl(track.id, `${track.modified_at}-${attempt}`), {
+      signal: controller.signal,
+      cache: "no-store",
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error(`封面 HTTP ${response.status}`);
+        return response.blob();
+      })
+      .then((blob) => {
+        objectUrl = URL.createObjectURL(blob);
+        if (alive) setVideoCover(objectUrl);
+      })
+      .catch(() => {
+        if (!alive || controller.signal.aborted || attempt >= 12) return;
+        // 后端热重启 / 首次抽帧排队时稍候再试。每次换 URL，失败缓存不会卡住重试。
+        retryTimer.current = window.setTimeout(() => {
+          retryTimer.current = null;
+          setAttempt((value) => value + 1);
+        }, 3000);
+      });
+
+    return () => {
+      alive = false;
+      controller.abort();
+      if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [attempt, isVideo, track.id, track.modified_at]);
+
+  return (
+    <span
+      className="kd-thumb"
+      draggable={Boolean(onTrackDragStart)}
+      onDragStart={onTrackDragStart}
+      title={onTrackDragStart ? "拖动封面移动所选曲目" : undefined}
+    >
+      {isVideo ? (
+        videoCover ? <img key={videoCover} src={videoCover} alt="" draggable={false} /> : null
+      ) : (
+        <img
+          src={api.coverUrl(track.id, track.modified_at)}
+          alt=""
+          loading="lazy"
+          draggable={false}
+          style={hidden ? { visibility: "hidden" } : undefined}
+          onError={() => setHidden(true)}
+        />
+      )}
+    </span>
+  );
+}
+
 /** 每列的单元格。列可以被拖排 / 隐藏（见 COLUMN_PREFS_KEY），所以按 key 取，不写死顺序。 */
 function trackCell(
   track: Track,
@@ -229,26 +320,9 @@ function trackCell(
       return (
         <td key={key} data-col="title" className="kd-td-strong" title={track.title || track.filename}>
           {selectionControl}
-          {/* 内嵌封面缩略图。没图时 onError 藏掉 img，底下的灰格子当占位，
-              行高不会跳。lazy：一页 200 行，只拉滚到眼前的。
-              版本号挂 modified_at：换封面会更新它，列表里的小图才能跟着换——
-              封面响应带 max-age=3600，不带版本号要干等缓存过期。 */}
-          <span
-            className="kd-thumb"
-            draggable={Boolean(onTrackDragStart)}
-            onDragStart={onTrackDragStart}
-            title={onTrackDragStart ? "拖动封面移动所选曲目" : undefined}
-          >
-            <img
-              src={api.coverUrl(track.id, track.modified_at)}
-              alt=""
-              loading="lazy"
-              draggable={false}
-              onError={(event) => {
-                event.currentTarget.style.visibility = "hidden";
-              }}
-            />
-          </span>
+          {/* lazy：一页 200 行，只在滚到眼前时请求。视频首帧由 TrackCoverThumb
+              在服务短暂重启或抽帧排队时重试，不能一次失败就永久变成灰格。 */}
+          <TrackCoverThumb track={track} onTrackDragStart={onTrackDragStart} />
           {/* 同一首歌在两个文件夹里各出现一次时，这个标记回答"为什么"：
               不是占了两份空间，是同一份数据的两个名字。 */}
           {track.link && (
@@ -259,10 +333,13 @@ function trackCell(
               <Link2 size={11} />
             </span>
           )}
-          {/* 视频角标：曲库里混着 VJ 素材和 MV，不标一下和音频完全分不出来。
-              紧贴标题文字放，读起来是「[封面] 视频 标题」。
-              中性色不用红色——这是状态不是动作。 */}
-          {isVideoTrack(track.format) && <span className="kd-badge-video">视频</span>}
+          {/* 媒介类型和链接状态都是这首文件的附属信息：排在封面后、标题前，
+              有多个时并列显示，完整含义由悬停提示说明。 */}
+          {isVideoTrack(track.format) && (
+            <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
+              <Video size={11} aria-hidden="true" />
+            </span>
+          )}
           {track.title || track.filename}
         </td>
       );
@@ -345,6 +422,53 @@ function selectMode(event: React.MouseEvent): SelectMode {
   return "replace";
 }
 
+function sameFolderPath(a: string, b: string): boolean {
+  const norm = (path: string) => path.replaceAll("\\", "/").replace(/\/+$/, "");
+  return Boolean(a) && norm(a) === norm(b);
+}
+
+const PENDING_STATES = new Set(["queued", "running", "failed"]);
+
+function pendingLabel(task: DownloadTask): string {
+  if (task.state === "running") {
+    const pct = Math.round(Math.max(0, Math.min(1, task.progress)) * 100);
+    return pct > 0 ? `下载中 ${pct}%` : "下载中";
+  }
+  if (task.state === "failed") return task.error ? `失败：${task.error}` : "下载失败";
+  if (task.state === "done") return "入库中";
+  return "待下载";
+}
+
+function PendingStateMark({ task }: { task: DownloadTask }) {
+  const label = pendingLabel(task);
+  const icon =
+    task.state === "running" ? (
+      <LoaderCircle size={12} className="kd-spin" />
+    ) : task.state === "failed" ? (
+      <CircleAlert size={12} />
+    ) : task.state === "done" ? (
+      <Check size={12} />
+    ) : (
+      <Download size={12} />
+    );
+
+  return (
+    <span className="kd-pending-mark" data-state={task.state} title={label} role="img" aria-label={label}>
+      {icon}
+    </span>
+  );
+}
+
+/** 当前文件夹下载任务的即时反馈；文件实际入库后由正式曲目行替代。 */
+function isPendingForFolder(task: DownloadTask, filterFolder: string, tracks: Track[]): boolean {
+  if (task.kind === "vj_export") return false;
+  if (!task.dest_dir || !sameFolderPath(task.dest_dir, filterFolder)) return false;
+  if (PENDING_STATES.has(task.state)) return true;
+  if (task.state !== "done") return false;
+  if (task.track_id == null) return true;
+  return !tracks.some((track) => track.id === task.track_id);
+}
+
 export function TrackTable({
   tracks,
   loading,
@@ -363,17 +487,23 @@ export function TrackTable({
 }: TrackTableProps) {
   const loadingMore = useLibraryStore((state) => state.loadingMore);
   const queueView = useLibraryStore((state) => state.queueView);
+  const filterFolder = useLibraryStore((state) => state.filter.folder);
   const removeTracks = useLibraryStore((state) => state.removeTracks);
   const startAnalyze = useLibraryStore((state) => state.startAnalyze);
   const addToQueue = useQueueStore((state) => state.add);
   const removeFromQueue = useQueueStore((state) => state.remove);
   const copyToClipboard = useLibraryStore((state) => state.copyToClipboard);
   const updateTrack = useLibraryStore((state) => state.updateTrack);
+  const selectionMode = useLibraryStore((state) => state.selectionMode);
+  const setSelectionMode = useLibraryStore((state) => state.setSelectionMode);
+  const downloadTasks = useDownloadStore((state) => state.list);
+  const pendingDownloads = queueView
+    ? []
+    : downloadTasks.filter((task) => isPendingForFolder(task, filterFolder, tracks));
   const selected = new Set(selectedIds);
-  /** 桌面右键 / 触屏长按后才显示行内小复选框；Cmd/Ctrl 多选不需要它。 */
-  const [selectionMode, setSelectionMode] = useState(false);
   const pressTimerRef = useRef<number | null>(null);
   const suppressClickRef = useRef<number | null>(null);
+  const pointerDragCleanupRef = useRef<(() => void) | null>(null);
   /** 行内拖动的插入位置指示：悬停行上半 = 插到它前面。 */
   const [drop, setDrop] = useState<{ id: number; before: boolean } | null>(null);
 
@@ -404,11 +534,152 @@ export function TrackTable({
   const backendPlatform = useAppStore((state) => state.health?.platform ?? "");
   const trashSupported = backendPlatform !== "android" && backendPlatform !== "ios";
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number; track: Track } | null>(null);
+  const [pendingMenu, setPendingMenu] = useState<{
+    x: number;
+    y: number;
+    task: DownloadTask;
+  } | null>(null);
   /** 永久删除的二次确认：第一次点只是上膛，菜单一关就退膛。 */
   const [armed, setArmed] = useState(false);
-  const rowMenuRef = useRef<HTMLDivElement | null>(null);
   /** 删除失败的原因。表格没有别的报错位置，就近显示在滚动区顶部。 */
   const [notice, setNotice] = useState("");
+
+  useEffect(
+    () => () => {
+      pointerDragCleanupRef.current?.();
+    },
+    [],
+  );
+
+  /**
+   * 本地曲目不用 WebKit 的原生 draggable：它经常把按住移动解释成框选/多选，
+   * 或只发 dragstart 不发 drop。这里直接跟踪指针，松手时按坐标命中文件夹。
+   */
+  const beginTrackPointerDrag = (event: React.PointerEvent<HTMLTableRowElement>, track: Track) => {
+    if (event.pointerType !== "mouse" || event.button !== 0) return;
+    if ((event.target as HTMLElement).closest("button, input, select, textarea, a, label")) return;
+
+    pointerDragCleanupRef.current?.();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const pointerId = event.pointerId;
+    const ids = selected.has(track.id) ? [...selectedIds] : [track.id];
+    let dragging = false;
+    let ghost: HTMLDivElement | null = null;
+
+    const clearTargets = () => {
+      document
+        .querySelectorAll<HTMLElement>("[data-kd-pointer-track-over]")
+        .forEach((node) => node.removeAttribute("data-kd-pointer-track-over"));
+    };
+    const hitAt = (x: number, y: number) => document.elementFromPoint(x, y) as HTMLElement | null;
+    const paintTarget = (x: number, y: number) => {
+      clearTargets();
+      const folder = folderDropElementAt(x, y);
+      if (folder) {
+        folder.setAttribute("data-kd-pointer-track-over", "folder");
+        return;
+      }
+      const hit = hitAt(x, y);
+      const trash = hit?.closest<HTMLElement>("[data-kd-track-trash-target]");
+      if (trash) {
+        trash.setAttribute("data-kd-pointer-track-over", "trash");
+        return;
+      }
+      if (!reorderable) return;
+      const row = hit?.closest<HTMLElement>("tr[data-kd-track-id]");
+      if (!row) return;
+      const rect = row.getBoundingClientRect();
+      row.setAttribute("data-kd-pointer-track-over", y < rect.top + rect.height / 2 ? "before" : "after");
+    };
+    const cleanup = () => {
+      window.removeEventListener("pointermove", onMove, true);
+      window.removeEventListener("pointerup", onUp, true);
+      window.removeEventListener("pointercancel", onCancel, true);
+      clearTargets();
+      ghost?.remove();
+      ghost = null;
+      delete document.body.dataset.kdTrackPointerDragging;
+      pointerDragCleanupRef.current = null;
+    };
+    const activate = (x: number, y: number) => {
+      dragging = true;
+      clearTextSelection();
+      cancelPress();
+      suppressClickRef.current = track.id;
+      if (!selected.has(track.id)) onSelect(track.id, "replace");
+      announceTrackDrag(ids);
+      document.body.dataset.kdTrackPointerDragging = "true";
+      ghost = document.createElement("div");
+      ghost.className = "kd-track-pointer-ghost";
+      ghost.textContent = ids.length > 1 ? `移动 ${ids.length} 首曲目` : (track.title || track.filename);
+      document.body.appendChild(ghost);
+      ghost.style.transform = `translate3d(${x + 12}px, ${y + 12}px, 0)`;
+      paintTarget(x, y);
+    };
+    const onMove = (move: PointerEvent) => {
+      if (move.pointerId !== pointerId) return;
+      const distance = Math.hypot(move.clientX - startX, move.clientY - startY);
+      if (!dragging && distance < 5) return;
+      move.preventDefault();
+      if (!dragging) activate(move.clientX, move.clientY);
+      ghost?.style.setProperty("transform", `translate3d(${move.clientX + 12}px, ${move.clientY + 12}px, 0)`);
+      paintTarget(move.clientX, move.clientY);
+    };
+    const onUp = (up: PointerEvent) => {
+      if (up.pointerId !== pointerId) return;
+      const folder = folderDropElementAt(up.clientX, up.clientY);
+      const hit = hitAt(up.clientX, up.clientY);
+      const trash = hit?.closest<HTMLElement>("[data-kd-track-trash-target]");
+      const row = reorderable ? hit?.closest<HTMLElement>("tr[data-kd-track-id]") : null;
+      const rowEdge = row?.getAttribute("data-kd-pointer-track-over");
+      cleanup();
+      if (!dragging) return;
+      up.preventDefault();
+
+      if (folder) {
+        const dest = folder.getAttribute(FOLDER_DROP_PATH_ATTR)?.trim() ?? "";
+        const claimed = claimActiveTrackDragIds();
+        if (!dest || claimed.length === 0) return;
+        const op = up.altKey ? "move" : "link";
+        void useLibraryStore
+          .getState()
+          .applyFolderOp(claimed, dest, op)
+          .then((result) => {
+            const failed = Object.keys(result.errors).length;
+            if (failed > 0) setNotice(`已${op === "link" ? "链接" : "移动"} ${result.track_ids.length} 首，${failed} 首失败`);
+          })
+          .catch((error: unknown) => setNotice(`操作失败：${(error as Error).message}`));
+        return;
+      }
+      if (trash) {
+        window.dispatchEvent(
+          new CustomEvent<TrackDragDetail>(TRACK_TRASH_DROP_EVENT, { detail: { ids } }),
+        );
+        finishTrackDrop();
+        return;
+      }
+      if (row && (rowEdge === "before" || rowEdge === "after")) {
+        const targetId = Number(row.dataset.kdTrackId);
+        finishTrackDrop();
+        if (Number.isFinite(targetId) && !ids.includes(targetId)) {
+          onReorder?.(ids, targetId, rowEdge === "before");
+        }
+        return;
+      }
+      finishTrackDrop();
+    };
+    const onCancel = (cancel: PointerEvent) => {
+      if (cancel.pointerId !== pointerId) return;
+      cleanup();
+      if (dragging) finishTrackDrop();
+    };
+
+    pointerDragCleanupRef.current = cleanup;
+    window.addEventListener("pointermove", onMove, { capture: true, passive: false });
+    window.addEventListener("pointerup", onUp, true);
+    window.addEventListener("pointercancel", onCancel, true);
+  };
 
   const cancelPress = () => {
     if (pressTimerRef.current !== null) window.clearTimeout(pressTimerRef.current);
@@ -423,22 +694,6 @@ export function TrackTable({
     }, 480);
   };
 
-  // 点别处 / Esc 关掉行菜单（和列菜单同一套；两个菜单不会同时开）
-  useEffect(() => {
-    if (!rowMenu) return;
-    const close = (event: MouseEvent) => {
-      if (!rowMenuRef.current?.contains(event.target as Node)) setRowMenu(null);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setRowMenu(null);
-    };
-    window.addEventListener("mousedown", close);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [rowMenu]);
   // 菜单开合都退膛：残留的"已确认"状态比误删只差一次点击
   useEffect(() => setArmed(false), [rowMenu]);
 
@@ -548,24 +803,6 @@ export function TrackTable({
   const [overCol, setOverCol] = useState<string | null>(null);
   /** 右键列头弹出的「选列」菜单的位置。null = 没开。 */
   const [colMenu, setColMenu] = useState<{ x: number; y: number } | null>(null);
-  const colMenuRef = useRef<HTMLDivElement | null>(null);
-
-  // 点别处 / 按 Esc 关掉选列菜单（同 FolderTree 的右键菜单）
-  useEffect(() => {
-    if (!colMenu) return;
-    const close = (event: MouseEvent) => {
-      if (!colMenuRef.current?.contains(event.target as Node)) setColMenu(null);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setColMenu(null);
-    };
-    window.addEventListener("mousedown", close);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", close);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [colMenu]);
 
   const saveColPrefs = (next: ColumnPrefs) => {
     localStorage.setItem(COLUMN_PREFS_KEY, JSON.stringify(next));
@@ -591,11 +828,11 @@ export function TrackTable({
     saveColPrefs({ ...colPrefs, order: next });
   };
 
-  if (loading && tracks.length === 0) {
+  if (loading && tracks.length === 0 && pendingDownloads.length === 0) {
     return <EmptyState icon={<LoaderCircle className="kd-spin" size={22} />} title="正在读取曲库" />;
   }
 
-  if (tracks.length === 0) {
+  if (tracks.length === 0 && pendingDownloads.length === 0) {
     if (queueView) {
       return (
         <EmptyState
@@ -607,14 +844,9 @@ export function TrackTable({
     }
     return (
       <EmptyState
-        icon={<FolderSearch size={22} />}
-        title="把本地音乐带进 KDJ"
-        hint="选择音乐文件夹后，曲目会自动导入并在后台分析 BPM、调号和能量；也可以直接用顶部搜索下载歌曲。"
-        action={
-          <Button variant="primary" onClick={() => void pickAndScanFolders()}>
-            添加音乐文件夹
-          </Button>
-        }
+        icon={<FolderOpen size={22} />}
+        title={filterFolder ? "这个文件夹是空的" : "还没有曲目"}
+        hint="把音频或视频拖进来"
       />
     );
   }
@@ -637,24 +869,7 @@ export function TrackTable({
         if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) onScrollEnd();
       }}
     >
-      {(selectionMode || selectedIds.length > 1) && (
-        <SelectionBar
-          count={selectedIds.length}
-          onSelectAll={() => useLibraryStore.getState().selectAll()}
-          onClear={() => useLibraryStore.getState().select(null)}
-          onDone={() => {
-            setSelectionMode(false);
-            useLibraryStore.getState().select(null);
-          }}
-        >
-          <Button variant="ghost" size="sm" disabled={selectedIds.length === 0} onClick={() => copyToClipboard("link")}>
-            <Copy size={12} /> 复制
-          </Button>
-          <Button variant="ghost" size="sm" disabled={selectedIds.length === 0} onClick={() => copyToClipboard("move")}>
-            剪切
-          </Button>
-        </SelectionBar>
-      )}
+      {/* 批选动作在曲库半栏 LibraryWorkRail，这里不再单独占一条。 */}
       {/* data-kind 区分曲库表和搜索结果表（两者共用 .kd-table，但结果表里有
           视频大行那套自排版，套不得两行式）；data-layout 是两行式的开关，
           见 TrackTableProps.layout 里为什么不能交给容器宽度判。 */}
@@ -745,29 +960,65 @@ export function TrackTable({
           </tr>
         </thead>
         <tbody>
+          {pendingDownloads.map((task) => (
+            <tr
+              key={`pending:${task.id}`}
+              data-pending="true"
+              data-pending-state={task.state}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setRowMenu(null);
+                setPendingMenu({ x: event.clientX, y: event.clientY, task });
+              }}
+            >
+              {visibleColumns.map((column) => {
+                if (column.key === "title") {
+                  return (
+                    <td key={column.key} data-col="title" className="kd-td-strong" title={task.title || "未命名"}>
+                      <span className="kd-pending-title">
+                        <span className="kd-thumb" aria-hidden="true">
+                          {task.cover ? (
+                            <img
+                              src={thumbUrl(task.cover)}
+                              alt=""
+                              loading="lazy"
+                              draggable={false}
+                              referrerPolicy="no-referrer"
+                              onError={(event) => { event.currentTarget.style.visibility = "hidden"; }}
+                            />
+                          ) : null}
+                        </span>
+                        {task.kind === "video" && (
+                          <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
+                            <Video size={11} aria-hidden="true" />
+                          </span>
+                        )}
+                        <PendingStateMark task={task} />
+                        <span className="kd-truncate">{task.title || "未命名"}</span>
+                      </span>
+                    </td>
+                  );
+                }
+                if (column.key === "artist") {
+                  return <td key={column.key} data-col="artist" title={task.artist || undefined}><span className="kd-truncate">{task.artist || DASH}</span></td>;
+                }
+                if (column.key === "format") {
+                  return <td key={column.key} data-col="format">{task.kind === "video" ? "视频" : task.quality || DASH}</td>;
+                }
+                return <td key={column.key} data-col={column.key} />;
+              })}
+            </tr>
+          ))}
           {tracks.map((track) => (
             <tr
               key={track.id}
               aria-selected={selected.has(track.id)}
+              data-kd-track-id={track.id}
               data-focus={track.id === selectedId ? "true" : undefined}
               data-drop={drop?.id === track.id ? (drop.before ? "before" : "after") : undefined}
               data-selecting={selectionMode ? "true" : undefined}
-              // 普通单选行保留文字框选；Cmd/Ctrl 形成真正的多选后，整行都可拖。
-              // 单条仍可直接拖封面，不需要先进入多选。
-              // WebKit 对 table-row 的原生 draggable 支持不稳定，真正的拖动源放到每个 td；
-              // 事件冒泡到这里统一决定“单条还是整个选区”。
+              // 曲目移动走 pointer 状态机，不再把“框选文字还是原生拖动”交给 WKWebView 猜。
               draggable={false}
-              onDragStart={(event) => {
-                const ids = selected.has(track.id) ? selectedIds : [track.id];
-                if (!selected.has(track.id)) onSelect(track.id, "replace");
-                event.dataTransfer.setData(TRACK_DND_TYPE, JSON.stringify(ids));
-                event.dataTransfer.effectAllowed = "copyMove";
-                announceTrackDrag(ids);
-              }}
-              onDragEnd={() => {
-                setDrop(null);
-                endTrackDrag();
-              }}
               onClick={(event) => {
                 if (hasTextSelectionWithin(event.currentTarget)) return;
                 if (suppressClickRef.current === track.id) {
@@ -786,7 +1037,9 @@ export function TrackTable({
                 if (layout === "narrow" && mode === "replace") playFromTable(track);
               }}
               onPointerDown={(event) => {
-                if (event.pointerType !== "mouse") {
+                if (event.pointerType === "mouse") {
+                  beginTrackPointerDrag(event, track);
+                } else {
                   beginLongPress(track, event.clientX, event.clientY);
                 }
               }}
@@ -799,6 +1052,7 @@ export function TrackTable({
               onContextMenu={(event) => {
                 event.preventDefault();
                 cancelPress();
+                setPendingMenu(null);
                 // 右键只开菜单；用户明确点菜单里的「选择」后才显示复选框。
                 setRowMenu({ x: event.clientX, y: event.clientY, track });
               }}
@@ -807,7 +1061,7 @@ export function TrackTable({
               onDragOver={
                 reorderable
                   ? (event) => {
-                      if (!event.dataTransfer.types.includes(TRACK_DND_TYPE)) return;
+                      if (!isTrackDrag(event)) return;
                       event.preventDefault();
                       event.dataTransfer.dropEffect = "move";
                       const rect = event.currentTarget.getBoundingClientRect();
@@ -828,17 +1082,14 @@ export function TrackTable({
               onDrop={
                 reorderable
                   ? (event) => {
-                      const raw = event.dataTransfer.getData(TRACK_DND_TYPE);
                       const target = drop;
                       setDrop(null);
-                      if (!raw || !target || target.id !== track.id) return;
+                      if (!target || target.id !== track.id) return;
+                      const ids = readTrackDragIds(event.dataTransfer);
+                      finishTrackDrop();
+                      if (ids.length === 0) return;
                       event.preventDefault();
-                      try {
-                        const ids = JSON.parse(raw) as number[];
-                        if (!ids.includes(track.id)) onReorder?.(ids, track.id, target.before);
-                      } catch {
-                        // 载荷不是我们的格式（比如从别处拖进来的文件），忽略
-                      }
+                      if (!ids.includes(track.id)) onReorder?.(ids, track.id, target.before);
                     }
                   : undefined
               }
@@ -861,31 +1112,23 @@ export function TrackTable({
                       <Check size={9} />
                     </button>
                   ) : undefined,
-                  column.key === "title"
-                    ? (event) => {
-                        event.stopPropagation();
-                        // 整行不再 draggable：否则 Chromium 把框选文字解释为拖歌曲。
-                        // 封面是明确且稳定的拖拽把手。
-                        const ids = selected.has(track.id) ? selectedIds : [track.id];
-                        if (!selected.has(track.id)) onSelect(track.id, "replace");
-                        event.dataTransfer.setData(TRACK_DND_TYPE, JSON.stringify(ids));
-                        event.dataTransfer.effectAllowed = "copyMove";
-                        event.dataTransfer.setDragImage(event.currentTarget, 8, 8);
-                        setDrop(null);
-                        announceTrackDrag(ids);
-                      }
-                    : undefined,
+                  undefined,
                   column.key === "rating"
                     ? (rating) => {
                         void updateTrack(track.id, { rating });
                       }
                     : undefined,
                 ) as React.ReactElement<React.TdHTMLAttributes<HTMLTableCellElement>>;
+                // 普通 span 是 WebKit 最稳定的拖动源。让它铺满格子，避免只有封面
+                // 那十几个像素能拖；td + tr 则作为旧版 WebKit 的冗余兜底。
+                const dragSurface = (
+                  <span className="kd-track-drag-surface" draggable={false}>
+                    {cell.props.children}
+                  </span>
+                );
                 return cloneElement(cell, {
-                  // <tr draggable> 在 macOS WKWebView 中不会可靠触发 dragstart。
-                  // 每个格子都是真实拖动源：未选行拖单条，选中行拖整个选区。
-                  draggable: true,
-                });
+                  draggable: false,
+                }, dragSurface);
               })}
             </tr>
           ))}
@@ -894,12 +1137,7 @@ export function TrackTable({
       {/* 选列菜单。开着的时候点勾选不关闭——一次通常要调好几列，
           调一列关一次等于逼用户右键三回。点别处 / Esc / 恢复默认才关。 */}
       {colMenu && (
-        <div
-          ref={colMenuRef}
-          className="kd-context-menu"
-          style={{ left: colMenu.x, top: colMenu.y }}
-          role="menu"
-        >
+        <ContextMenu x={colMenu.x} y={colMenu.y} onClose={() => setColMenu(null)}>
           {orderedColumns.map((column) => {
             const isHidden = colPrefs.hidden.includes(column.key);
             const isTitle = column.key === "title";
@@ -935,18 +1173,27 @@ export function TrackTable({
             <RotateCcw size={12} />
             恢复默认列
           </button>
-        </div>
+        </ContextMenu>
       )}
       {/* 行右键菜单：多选操作的家。删除的三种去向都在这儿——
           回收站（能反悔）、永久删除（安卓等没有回收站的平台，点两次确认）、
           只移出曲库（文件不动）。条目带数量，删的是几首一目了然。 */}
+      {pendingMenu && (
+        <ContextMenu x={pendingMenu.x} y={pendingMenu.y} onClose={() => setPendingMenu(null)}>
+          <button type="button" onClick={() => { void copyText(pendingMenu.task.title || ""); setPendingMenu(null); }}>
+            <Copy size={12} />
+            复制标题
+          </button>
+          {pendingMenu.task.artist ? (
+            <button type="button" onClick={() => { void copyText(pendingMenu.task.artist); setPendingMenu(null); }}>
+              <Copy size={12} />
+              复制艺人
+            </button>
+          ) : null}
+        </ContextMenu>
+      )}
       {rowMenu && (
-        <div
-          ref={rowMenuRef}
-          className="kd-context-menu"
-          style={{ left: rowMenu.x, top: rowMenu.y }}
-          role="menu"
-        >
+        <ContextMenu x={rowMenu.x} y={rowMenu.y} onClose={() => setRowMenu(null)}>
           <button
             type="button"
             onClick={() => {
@@ -971,12 +1218,22 @@ export function TrackTable({
           <button
             type="button"
             onClick={() => {
+              void copyText(rowMenu.track.title || rowMenu.track.filename || "");
+              setRowMenu(null);
+            }}
+          >
+            <Copy size={12} />
+            复制标题
+          </button>
+          <button
+            type="button"
+            onClick={() => {
               copyToClipboard("link");
               setRowMenu(null);
             }}
           >
             <Copy size={12} />
-            复制{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}
+            复制曲目{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}
           </button>
           <button type="button" onClick={() => { setRowMenu(null); void startAnalyze(menuIds, true); }}>
             <BarChart3 size={12} />
@@ -1042,7 +1299,7 @@ export function TrackTable({
             <ListX size={12} />
             移出曲库{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}（保留文件）
           </button>
-        </div>
+        </ContextMenu>
       )}
       {/* 删除失败的原因就近浮在滚动区里：表格没有自己的状态栏 */}
       {notice && (

@@ -10,3 +10,9 @@ export function hasTextSelectionWithin(container: Node): boolean {
       (selection.focusNode && container.contains(selection.focusNode)),
   );
 }
+
+/** 拖拽起手时清掉选区，避免「拖一下变成全选文本」盖过真正的拖动。 */
+export function clearTextSelection(): void {
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed) selection.removeAllRanges();
+}

@@ -6,29 +6,28 @@ import { create } from "zustand";
  * 这些词是拿来**拼进 B 站搜索框**的，所以选词标准只有一条：
  * 加上它之后，搜出来的东西是不是更可能是"能当 VJ 素材用的画面"。
  *
- * 默认这十个的来路：
- *   MV / 官方 / PV   —— 原版画面，画质最好，最常用
- *   AMV / MAD        —— 动画剪辑，B 站上这两个 tag 的量最大
- *   手书             —— 手绘动画，画风独特，适合慢歌
- *   现场 / Live      —— 演出实录，接现场感的段落
- *   混剪             —— 多素材剪辑，节奏快
- *   歌词版           —— 纯字幕画面，垫场或者不想抢视觉时用
- *   4K               —— 直接筛画质，投到大屏上差别很明显
- *   循环             —— 可无缝循环的素材，长段落垫底
+ * 默认列表来自实际常用配置：
+ *   MV / 官方 / PV   —— 原版画面
+ *   MAD / 手书       —— 二次创作与手绘
+ *   现场             —— 演出实录
+ *   4K               —— 画质
+ *   ニコカラ         —— 卡拉 OK / 歌词向素材
+ *   投屏             —— 可投屏用的画面
  */
 export const DEFAULT_VJ_KEYWORDS = [
   "MV",
   "官方",
   "PV",
-  "AMV",
   "MAD",
   "手书",
   "现场",
-  "混剪",
-  "歌词版",
   "4K",
-  "循环",
+  "ニコカラ",
+  "投屏",
 ];
+
+/** 新装 / 重置后默认勾上的词。 */
+export const DEFAULT_VJ_PICKED = ["MV", "4K", "ニコカラ"];
 
 const KEYWORDS_KEY = "kd-vj-keywords";
 const ARTIST_KEY = "kd-vj-with-artist";
@@ -63,10 +62,12 @@ interface VjKeywordState {
 
 function loadPicked(): string[] {
   try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(PICKED_KEY) ?? "[]");
-    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+    const raw = localStorage.getItem(PICKED_KEY);
+    if (raw === null) return DEFAULT_VJ_PICKED;
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : DEFAULT_VJ_PICKED;
   } catch {
-    return [];
+    return DEFAULT_VJ_PICKED;
   }
 }
 
@@ -110,10 +111,8 @@ export const useVjKeywords = create<VjKeywordState>((set, get) => ({
 
   reset() {
     localStorage.removeItem(KEYWORDS_KEY);
-    // 勾选一起清：恢复默认之后原来勾的可能已经不在列表里了，
-    // 留着就是一个看不见却仍在参与拼词的幽灵
     localStorage.removeItem(PICKED_KEY);
-    set({ keywords: DEFAULT_VJ_KEYWORDS, picked: [] });
+    set({ keywords: DEFAULT_VJ_KEYWORDS, picked: DEFAULT_VJ_PICKED });
   },
 
   setWithArtist(value) {
