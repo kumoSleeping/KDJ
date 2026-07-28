@@ -103,12 +103,36 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "v$VERSION" -m "KDJ v$VERSION" "$GITHUB_SHA"
           git push origin "v$VERSION"
-          # Release 先建好（产物晚点由打包线传进来）。--generate-notes 用
-          # 上个 tag 到现在的提交自动写变更记录。
+          # Release 先建好（产物晚点由打包线传进来）。下载说明放在自动生成的
+          # 变更记录前面，文件名必须与 rust-build / rust-android 的产物保持一致。
+          base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION"
+          {
+            echo "## 下载"
+            echo
+            echo "请根据系统选择安装包："
+            echo
+            echo "### Windows"
+            echo "- **Windows 10/11 64 位（推荐）**：[下载 EXE 安装程序]($base_url/KDJ_${VERSION}_x64-setup.exe)"
+            echo "- **Windows 10/11 64 位（企业或批量部署）**：[下载 MSI 安装程序]($base_url/KDJ_${VERSION}_x64_en-US.msi)"
+            echo
+            echo "### macOS"
+            echo "- **Apple Silicon 与 Intel Mac 通用**：[下载 DMG 安装包]($base_url/KDJ_${VERSION}_universal.dmg)"
+            echo
+            echo "### Linux（x86_64）"
+            echo "- **Ubuntu / Debian**：[下载 DEB 安装包]($base_url/KDJ_${VERSION}_amd64.deb)"
+            echo "- **Fedora / RHEL / openSUSE**：[下载 RPM 安装包]($base_url/KDJ-${VERSION}-1.x86_64.rpm)"
+            echo "- **其他发行版**：[下载 AppImage]($base_url/KDJ_${VERSION}_amd64.AppImage)"
+            echo
+            echo "### Android"
+            echo "- **ARM 32/64 位设备**：[下载 APK]($base_url/app-universal-release.apk)"
+            echo
+            echo "> .sig、.app.tar.gz 和 latest.json 是自动更新所需文件，普通用户无需下载。"
+          } > release-notes.md
+
           gh release create "v$VERSION" \
             --title "KDJ v$VERSION" \
             --generate-notes \
-            --notes "> 产物由 rust-build / rust-android 两条流水线上传，跑完前这里可能暂时是空的。"
+            --notes-file release-notes.md
 
       - name: 调度打包线到 tag 上
         run: |

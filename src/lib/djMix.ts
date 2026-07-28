@@ -1156,6 +1156,10 @@ export const djEngine = {
     const out = decks[frontIndex];
     const backIndex: 0 | 1 = frontIndex === 0 ? 1 : 0;
     const input = decks[backIndex];
+    // 上一场若被提前打断，当前正主可能仍挂着进场用的高通/低频削减曲线。
+    // clearPending 只负责摘 timer/listener，必须在把它当作新出让方前恢复全频；
+    // 否则第二次接歌会把半截滤波继续带下去，直到用户 seek/重播才被 transport 清掉。
+    neutralize(ctx, out);
 
     // 已经接进来的曲目可能仍维持本场 master tempo。后续必须按实际听到的 BPM
     // 继续同步，不能拿文件标签里的原始 BPM，否则每接一首都会让速度基准漂移。
@@ -1236,7 +1240,13 @@ export const djEngine = {
               out.el.pause();
               // 退场 deck 在被下一首复用前始终保持真正静音。若这里把 fader 重置
               // 到 1，WebKit pause 后偶尔吐出的残留解码帧仍可能漏成一声 click。
-              if (ctx && decks) neutralize(ctx, out, 0);
+              // 进场 deck 也要显式归中性：正常情况下曲线终点已经是全频，但
+              // AudioContext 暂停/设备切换会让音频时钟落后于主线程 timer，不能把
+              // “最后一个采样点碰巧执行了”当成效果清理机制。
+              if (ctx && decks) {
+                neutralize(ctx, out, 0);
+                neutralize(ctx, input);
+              }
               pending = null;
               setTransitionPhase("idle");
             }, seconds * 1000 + AUDIO_TAIL_SETTLE_MS);

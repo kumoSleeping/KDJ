@@ -96,6 +96,9 @@ export function SearchBar({
   ...platformProps
 }: SearchBarProps) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Some third-party dictation IMEs report Enter before React's isComposing
+  // flag settles. Keep our own composition state and also honor keyCode 229.
+  const composingRef = useRef(false);
   const canSubmit = query.trim().length > 0 && !busy;
   return (
     <form
@@ -140,8 +143,16 @@ export function SearchBar({
             value={query}
             placeholder=""
             aria-label="关键词、单曲链接或歌单链接，支持多行"
+            onCompositionStart={() => {
+              composingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              composingRef.current = false;
+            }}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey && canSubmit) {
+              const nativeEvent = event.nativeEvent;
+              const composing = composingRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229;
+              if (event.key === "Enter" && !event.shiftKey && !composing && canSubmit) {
                 event.preventDefault();
                 onSubmit();
               }
