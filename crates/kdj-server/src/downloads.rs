@@ -798,6 +798,17 @@ fn vj_output_path(state: &AppState) -> Result<(PathBuf, PathBuf)> {
     Ok((output, partial))
 }
 
+/// 默认下载目录可能只是系统 Downloads，也可能正好是用户登记过的曲库文件夹。
+/// 后一种情况下，VJ 成品必须像拖进文件夹的普通视频一样立刻入库；否则文件已经
+/// 在磁盘上，左表和文件夹计数却一直少一首，只能靠用户再手动扫描一次。
+fn vj_output_belongs_to_library(path: &Path, library_dirs: &[String]) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let roots: Vec<PathBuf> = library_dirs.iter().map(PathBuf::from).collect();
+    !roots.is_empty() && kdj_library::folders::ensure_inside(parent, &roots).is_ok()
+}
+
 /// 建一条「按顺序导出 VJ」任务，走同一条下载队列和取消令牌。
 pub fn enqueue_vj_export(
     state: Arc<AppState>,
@@ -917,6 +928,9 @@ async fn run_vj_export(
             bail!("FFmpeg 没有写出 VJ 成品");
         }
         std::fs::rename(&partial, &output).context("提交 VJ 成品失败")?;
+        // 成功日志只是 FFmpeg 诊断用的临时物；留在导出文件夹里会让成品旁边
+        // 永远多一份 `*.partial.log`，看起来像导出没有真正收尾。
+        let _ = std::fs::remove_file(&log);
         Ok(output)
     }
     .await;
@@ -926,7 +940,26 @@ async fn run_vj_export(
             let _ = std::fs::remove_file(path);
             manager.settle(&id, TaskState::Canceled, "已取消");
         }
-        Ok(path) => manager.finish(&id, &path, None),
+        Ok(path) => {
+            let settings = state.config.to_settings();
+            let track_id = if vj_output_belongs_to_library(&path, &settings.library_dirs) {
+                match state.library.upsert_file(&path, "local", "") {
+                    Ok(track_id) => Some(track_id),
+                    Err(err) => {
+                        let message = format!("VJ 已导出，但加入曲库失败：{err:#}");
+                        tracing::error!("{} {}", message, path.display());
+                        manager.fail_after_download(&id, &path, &message);
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            manager.finish(&id, &path, track_id);
+            if let Some(track_id) = track_id {
+                state.hub.publish_library_updated(&[track_id]);
+            }
+        }
         Err(_err) if cancel.is_cancelled() => {
             manager.settle(&id, TaskState::Canceled, "已取消");
         }
@@ -1102,6 +1135,22 @@ mod tests {
             created_at,
             updated_at: created_at,
         }
+    }
+
+    #[test]
+    fn vj_outputs_inside_a_library_are_imported_like_regular_videos() {
+        let base = std::env::temp_dir().join(format!("kdj-vj-library-{}", std::process::id()));
+        let library = base.join("library");
+        let inside = library.join("set/VJ Export 1.mp4");
+        let outside = base.join("downloads/VJ Export 2.mp4");
+        std::fs::create_dir_all(inside.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        let roots = vec![library.to_string_lossy().into_owned()];
+
+        assert!(vj_output_belongs_to_library(&inside, &roots));
+        assert!(!vj_output_belongs_to_library(&outside, &roots));
+        assert!(!vj_output_belongs_to_library(&inside, &[]));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

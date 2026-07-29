@@ -9,6 +9,7 @@ import { useLibraryStore } from "../../stores/libraryStore";
 import { useQueueStore } from "../../stores/queueStore";
 import type { HarmonicMatch, Track } from "../../types";
 import { ContextMenu } from "../common";
+import { CoverImage } from "../common/VinylPlaceholder";
 import { CamelotChip, playTrack } from "./TrackTable";
 
 export interface HarmonicListProps {
@@ -311,14 +312,9 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
                 endTrackDrag();
               }}
             >
-              <img
+              <CoverImage
                 src={api.coverUrl(match.track.id, match.track.modified_at)}
-                alt=""
                 loading="lazy"
-                draggable={false}
-                onError={(event) => {
-                  event.currentTarget.style.visibility = "hidden";
-                }}
               />
             </span>
             {match.track.title || match.track.filename}

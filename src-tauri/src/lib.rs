@@ -153,7 +153,10 @@ async fn check_desktop_update(app: tauri::AppHandle) -> Result<DesktopUpdateInfo
 
     let current = app.package_info().version.to_string();
     let updater = app.updater().map_err(|err| err.to_string())?;
-    let update = updater.check().await.map_err(|err| err.to_string())?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|err| format!("读取更新清单失败（发行包可能仍在构建中）：{err}"))?;
     Ok(match update {
         Some(update) => DesktopUpdateInfo {
             current,

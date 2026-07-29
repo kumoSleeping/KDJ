@@ -9,6 +9,11 @@ import { Button, InlineNotice } from "../common";
 // （`.kd-set-*` 那套右列写死 240px，在详情栏宽度下会把左边的名字压成竖排）
 import { settingRow } from "./AccountRow";
 
+/** Tauri invoke 的 Rust `Err(String)` 会直接 reject 字符串，不是 JavaScript Error。 */
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * 「检查更新」一行，长得和上面那几行账号一样。
  *
@@ -44,7 +49,7 @@ export function UpdateRow() {
       setInfo(await (bridge.checkUpdate ? bridge.checkUpdate() : api.checkUpdate()));
     } catch (error) {
       setInfo(null);
-      setNotice(`检查更新失败：${(error as Error).message}`);
+      setNotice(`检查更新失败：${errorText(error)}`);
     } finally {
       setBusy("");
     }
@@ -65,7 +70,7 @@ export function UpdateRow() {
       // 成功的话进程会被 restart 掉，下面这行永远不会执行到
       await bridge.applyUpdate?.(setProgress);
     } catch (error) {
-      setNotice(`更新失败：${(error as Error).message}`);
+      setNotice(`更新失败：${errorText(error)}`);
       setBusy("");
       setProgress(null);
     }

@@ -18,6 +18,10 @@ use symphonia::core::probe::Hint;
 
 pub const DEFAULT_SR: u32 = 22050;
 
+fn known_sample_rate(rate: Option<u32>) -> Option<u32> {
+    rate.filter(|rate| *rate > 0)
+}
+
 #[derive(Debug)]
 pub struct DecodedAudio {
     /// 单声道 f32
@@ -70,11 +74,14 @@ pub fn decode_audio_from(
         .context("文件里没有可解码的音轨")?;
     let track_id = track.id;
     let params = track.codec_params.clone();
-    let source_sr = params.sample_rate.unwrap_or(DEFAULT_SR);
+    // 部分 FFmpeg 生成的 AAC（实际 96 kHz）在 MP4 codec params 里会暂时报 0 Hz，
+    // 真正解出首包后 `SignalSpec::rate` 才是正确值。0 不能参与时长或重采样：
+    // target / 0 会变成 inf，随后 Vec 按 usize::MAX 预分配并以 capacity overflow panic。
+    let mut source_sr = known_sample_rate(params.sample_rate).unwrap_or(DEFAULT_SR);
     let channels = params.channels.map(|c| c.count()).unwrap_or(1).max(1);
     let duration = params
         .n_frames
-        .zip(params.sample_rate)
+        .zip(known_sample_rate(params.sample_rate))
         .map(|(frames, rate)| frames as f64 / rate as f64);
 
     let mut decoder = symphonia::default::get_codecs()
@@ -95,10 +102,6 @@ pub fn decode_audio_from(
         }
         decoder.reset();
     }
-
-    // 需要多少源采样点就够了（留一点余量给重采样的边界）
-    let wanted_source_samples =
-        max_seconds.map(|secs| ((secs + 1.0) * source_sr as f64) as usize * channels);
 
     let mut mono: Vec<f32> = Vec::new();
     let mut buffer: Option<SampleBuffer<f32>> = None;
@@ -135,6 +138,11 @@ pub fn decode_audio_from(
             }
         };
         let spec = *audio.spec();
+        // codec params 缺失/报 0 时，以解码器首包的真实采样率为准。wanted 的上限也
+        // 必须用这份值算，否则 96 kHz 素材会只截到预期时长的约四分之一。
+        if spec.rate > 0 {
+            source_sr = spec.rate;
+        }
         let slot = buffer.get_or_insert_with(|| {
             SampleBuffer::<f32>::new(audio.capacity() as u64, spec)
         });
@@ -155,6 +163,8 @@ pub fn decode_audio_from(
         for frame in interleaved.chunks(ch) {
             mono.push(frame.iter().sum::<f32>() * gain);
         }
+        let wanted_source_samples = max_seconds
+            .map(|secs| ((secs + 1.0) * source_sr as f64) as usize * ch);
         if wanted_source_samples.is_some_and(|wanted| decoded_samples >= wanted) {
             break;
         }
@@ -249,6 +259,14 @@ fn resample(input: &[f32], from_sr: u32, to_sr: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_container_sample_rates_fall_back_instead_of_overflowing() {
+        assert_eq!(known_sample_rate(Some(0)), None);
+        let rate = known_sample_rate(Some(0)).unwrap_or(DEFAULT_SR);
+        let out = resample(&[0.0, 1.0, 0.0], rate, DEFAULT_SR);
+        assert_eq!(out, vec![0.0, 1.0, 0.0]);
+    }
 
     #[test]
     fn resampling_halves_the_length_when_halving_the_rate() {

@@ -638,6 +638,14 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   handleEvent(event) {
     switch (event.type) {
+      case "download.updated": {
+        // 下载 / VJ 导出写进曲库后，曲目表会由紧随其后的 library.updated 回刷；
+        // 文件夹树还要单独重算计数，否则磁盘和表里都已有成品，树上仍少一首。
+        if (event.payload.state === "done" && event.payload.track_id != null) {
+          void get().refreshFolders();
+        }
+        return;
+      }
       case "scan.progress": {
         set({ scan: event.payload });
         if (event.payload.phase === "done") {

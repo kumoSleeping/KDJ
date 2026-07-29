@@ -16,6 +16,11 @@
 - Do not use `electron/`, `sidecar/`, or `electron-builder.yml` as evidence for the current architecture.
 - Do not add new Electron/Python compatibility code. Port any still-useful behavior to Rust instead.
 
+## Release
+
+- A release push MUST update `package.json`, `package-lock.json`, `Cargo.toml`, `Cargo.lock`, and `src-tauri/tauri.conf.json` to the same intended version before committing.
+- Verify the intended version is newer than the latest `v*` tag; never push release changes under the previous version number.
+
 ## Validation
 
 - Frontend: `npm run typecheck` and `npm run tauri:web:build`.

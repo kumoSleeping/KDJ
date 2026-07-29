@@ -13,7 +13,7 @@
  * | 档 | 谁 | 怎么落地 |
  * | --- | --- | --- |
  * | 高 | 正在播放的那一首 | priority=true，单独一批，不和「停止」一起被掐 |
- * | 中 | 可视区域 + 选中 | 立刻提交；批内**真正看得见的行排在预取余量前面** |
+ * | 中 | 选中项邻近曲目 + 可视区域 | 立刻提交；选中项按距离向前后扩散，视口内行排在预取余量前面 |
  * | 低 | 后台补齐 | 用户刚看过列表的那阵子不提交，把 CPU 让出来 |
  *
  * 自动路径一律不传 force：那是**为了省时间**（1400 首重算约 30 分钟），
@@ -34,6 +34,12 @@ import type { Track } from "../types";
  * 和曲库筛选那 250ms 拉开一档：排队比筛选更贵，宁可多等一会。
  */
 const SELECTION_DEBOUNCE_MS = 500;
+
+/**
+ * 选中一首后优先分析当前页面里离它最近的曲目。21 = 本曲 + 前后各 10 首，
+ * 足够覆盖用户接下来连续试听的一小段，又不会一次提交整页抢占 CPU。
+ */
+const SELECTION_NEIGHBOR_BATCH = 21;
 
 /**
  * 滚动去抖。**滚动过程中一条请求都不发**：飞过去的那几十屏是"路过"不是"在看"，
@@ -144,29 +150,35 @@ function scheduleSelection(): void {
 }
 
 /**
- * 把选中里还没分析的排进**普通**队列——不插队：插队通道是留给正在放的那一首的，
- * 随手点几下就把它挤掉的话，用户听着的这首反而最后才出结果。
+ * 把当前页面里选中项附近的曲目排进**普通**队列。顺序是选中项、前一首、后一首、
+ * 前两首、后两首……，后端按收到的顺序分块时，用户接下来最可能点到的歌会先出结果。
+ * 不走插队通道：那条通道仍只留给正在播放的曲目。
  */
 async function analyzeSelection(): Promise<void> {
   if (!autoEnabled()) return;
   const state = useLibraryStore.getState();
-  const chosen = new Set(state.selectedIds);
-  if (chosen.size === 0) return;
+  const anchorId = state.selectedId;
+  if (anchorId === null) return;
 
-  const ids = state.tracks
-    .filter((track) => chosen.has(track.id) && !track.analyzed_at && !queued.has(track.id))
-    .map((track) => track.id);
-  // 页外选中（从和声推荐点进来的那种）不在当前这页 200 行里，单独看一眼
-  const outside = state.selectedTrack;
-  if (
-    outside &&
-    chosen.has(outside.id) &&
-    !outside.analyzed_at &&
-    !queued.has(outside.id) &&
-    !ids.includes(outside.id)
-  ) {
-    ids.push(outside.id);
+  const anchor = state.tracks.findIndex((track) => track.id === anchorId);
+  const candidates: Track[] = [];
+  if (anchor >= 0) {
+    candidates.push(state.tracks[anchor]);
+    for (let distance = 1; candidates.length < SELECTION_NEIGHBOR_BATCH; distance += 1) {
+      const before = state.tracks[anchor - distance];
+      const after = state.tracks[anchor + distance];
+      if (!before && !after) break;
+      if (before) candidates.push(before);
+      if (after && candidates.length < SELECTION_NEIGHBOR_BATCH) candidates.push(after);
+    }
+  } else if (state.selectedTrack?.id === anchorId) {
+    // 从和声推荐等页外入口选中的曲目不属于当前页面，不能臆造它的邻居。
+    candidates.push(state.selectedTrack);
   }
+
+  const ids = candidates
+    .filter((track) => !track.analyzed_at && !queued.has(track.id))
+    .map((track) => track.id);
   if (ids.length === 0) return;
 
   for (const id of ids) queued.add(id);

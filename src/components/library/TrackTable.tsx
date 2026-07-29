@@ -18,6 +18,7 @@ import {
   Video,
 } from "lucide-react";
 import { api } from "../../lib/api";
+import { CoverImage } from "../common/VinylPlaceholder";
 import { copyText } from "../../lib/copyText";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import { observeTrackScroller } from "../../lib/autoAnalyze";
@@ -238,14 +239,12 @@ function TrackCoverThumb({
   onTrackDragStart?: (event: React.DragEvent<HTMLSpanElement>) => void;
 }) {
   const [attempt, setAttempt] = useState(0);
-  const [hidden, setHidden] = useState(false);
   const [videoCover, setVideoCover] = useState("");
   const retryTimer = useRef<number | null>(null);
   const isVideo = isVideoTrack(track.format);
 
   useEffect(() => {
     setAttempt(0);
-    setHidden(false);
   }, [track.id, track.modified_at]);
 
   useEffect(() => {
@@ -294,14 +293,7 @@ function TrackCoverThumb({
       {isVideo ? (
         videoCover ? <img key={videoCover} src={videoCover} alt="" draggable={false} /> : null
       ) : (
-        <img
-          src={api.coverUrl(track.id, track.modified_at)}
-          alt=""
-          loading="lazy"
-          draggable={false}
-          style={hidden ? { visibility: "hidden" } : undefined}
-          onError={() => setHidden(true)}
-        />
+        <CoverImage src={api.coverUrl(track.id, track.modified_at)} loading="lazy" />
       )}
     </span>
   );
@@ -427,12 +419,16 @@ function sameFolderPath(a: string, b: string): boolean {
   return Boolean(a) && norm(a) === norm(b);
 }
 
-const PENDING_STATES = new Set(["queued", "running", "failed"]);
+const PENDING_STATES = new Set(["queued", "running", "processing", "failed"]);
 
 function pendingLabel(task: DownloadTask): string {
   if (task.state === "running") {
     const pct = Math.round(Math.max(0, Math.min(1, task.progress)) * 100);
-    return pct > 0 ? `下载中 ${pct}%` : "下载中";
+    const action = task.kind === "vj_export" ? "导出中" : "下载中";
+    return pct > 0 ? `${action} ${pct}%` : action;
+  }
+  if (task.state === "processing") {
+    return task.kind === "vj_export" ? "正在生成 VJ" : "正在生成文件";
   }
   if (task.state === "failed") return task.error ? `失败：${task.error}` : "下载失败";
   if (task.state === "done") return "入库中";
@@ -442,7 +438,7 @@ function pendingLabel(task: DownloadTask): string {
 function PendingStateMark({ task }: { task: DownloadTask }) {
   const label = pendingLabel(task);
   const icon =
-    task.state === "running" ? (
+    task.state === "running" || task.state === "processing" ? (
       <LoaderCircle size={12} className="kd-spin" />
     ) : task.state === "failed" ? (
       <CircleAlert size={12} />
@@ -461,7 +457,6 @@ function PendingStateMark({ task }: { task: DownloadTask }) {
 
 /** 当前文件夹下载任务的即时反馈；文件实际入库后由正式曲目行替代。 */
 function isPendingForFolder(task: DownloadTask, filterFolder: string, tracks: Track[]): boolean {
-  if (task.kind === "vj_export") return false;
   if (!task.dest_dir || !sameFolderPath(task.dest_dir, filterFolder)) return false;
   if (PENDING_STATES.has(task.state)) return true;
   if (task.state !== "done") return false;
@@ -988,7 +983,7 @@ export function TrackTable({
                             />
                           ) : null}
                         </span>
-                        {task.kind === "video" && (
+                        {(task.kind === "video" || task.kind === "vj_export") && (
                           <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
                             <Video size={11} aria-hidden="true" />
                           </span>
@@ -1003,7 +998,7 @@ export function TrackTable({
                   return <td key={column.key} data-col="artist" title={task.artist || undefined}><span className="kd-truncate">{task.artist || DASH}</span></td>;
                 }
                 if (column.key === "format") {
-                  return <td key={column.key} data-col="format">{task.kind === "video" ? "视频" : task.quality || DASH}</td>;
+                  return <td key={column.key} data-col="format">{task.kind === "video" || task.kind === "vj_export" ? "视频" : task.quality || DASH}</td>;
                 }
                 return <td key={column.key} data-col={column.key} />;
               })}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderOpen, ImagePlus, Pencil, Play, RotateCcw, Star, Trash2, Waypoints } from "lucide-react";
+import { FolderOpen, Pencil, Play, RotateCcw, Star, Trash2, Waypoints } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
 import { camelotToLabel } from "../../lib/camelot";
@@ -7,6 +7,7 @@ import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isVideoTrack 
 import { useLibraryStore } from "../../stores/libraryStore";
 import type { Track, TrackPatch } from "../../types";
 import { Button, Field, InlineNotice, Panel, PanelStack } from "../common";
+import { VinylPlaceholder } from "../common/VinylPlaceholder";
 import { CamelotWheel } from "./CamelotWheel";
 import { HarmonicList } from "./HarmonicList";
 import { useVideoPip } from "../../lib/videoPip";
@@ -256,7 +257,7 @@ export function TrackDetail({ track }: { track: Track }) {
               onError={() => setHasCover(false)}
             />
           ) : (
-            <ImagePlus size={18} className="kd-faint" />
+            <VinylPlaceholder />
           )}
         </div>
         <input
