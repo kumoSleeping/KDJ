@@ -430,6 +430,27 @@ export function PlayerBar() {
   const transportHandledRef = useRef(false);
   /** shadow deck 异步换手时，连续点击只有最后一个目标能更新正主元素。 */
   const seekGenerationRef = useRef(0);
+  /**
+   * 视频有多份呈现（浮窗、详情、系统 PiP），同一次校时可能经 seeked 再回到这里。
+   * 去重必须放在真正调用音频引擎的边界，而不能只相信任一 UI 的 suppress 标记。
+   */
+  const lastCommittedSeekRef = useRef<{ trackId: number; position: number; at: number } | null>(null);
+  const shouldCommitSeek = useCallback((trackId: number, position: number) => {
+    const now = performance.now();
+    const previous = lastCommittedSeekRef.current;
+    if (
+      previous &&
+      previous.trackId === trackId &&
+      now - previous.at < 750 &&
+      // 回声落地时视频已经继续走了几十到几百毫秒，不能只按浮点完全相等去重。
+      // 真正的快速跳远仍远大于 1 秒，会正常提交。
+      Math.abs(previous.position - position) < 1
+    ) {
+      return false;
+    }
+    lastCommittedSeekRef.current = { trackId, position, at: now };
+    return true;
+  }, []);
   /** 原生播放器换 source 会短暂回 idle；这不是用户/系统按了暂停。 */
   const nativeLoadInFlightRef = useRef(false);
   /** 后台队列已自行切歌时，React 只接管显示，不能再次 load 把进度打回开头。 */
@@ -470,8 +491,12 @@ export function PlayerBar() {
           const current = trackRef.current;
           if (current) {
             const source = mediaUrlForTrack(current);
+            // 接歌刚结束时不要立刻整首 fetch + decodeAudioData。第一次 seek 与这份
+            // 后台解码抢同一个 WebKit 媒体解码器，正是“自动过渡后必卡一次、后来
+            // 正常”的稳定差异；直接点播提前解 PCM 的路径不变。接歌曲统一保留热的
+            // HTMLMedia 管线，并只准备静音 shadow Deck。
+            djEngine.releaseDecodedPlayback();
             djEngine.prepareSeek(source);
-            djEngine.prepareDecodedSeek(current, source);
           }
         }
       }),
@@ -583,6 +608,18 @@ export function PlayerBar() {
     window.addEventListener(PLAY_EVENT, onPlay);
     return () => window.removeEventListener(PLAY_EVENT, onPlay);
   }, [selectTrack, showTrackDetail, djSwitchTo, commitPlaying]);
+
+  // 本地视频会话只能属于正在走带的那首。自动续播 / DJ 过渡直接在 PlayerBar
+  // 内部 setTrack，不一定经过 playTrack（后者原本才会清视频会话）；因此旧视频会在
+  // 音频换手后继续静音播放。DJ 过渡期间旧歌还在退场，等 phase 回 idle 再关画面；
+  // 普通硬切则立即拆掉旧视频和系统 PiP。
+  useEffect(() => {
+    const pip = useVideoPip.getState();
+    if (pip.session?.source !== "local") return;
+    if (track?.id === pip.session.trackId) return;
+    if (djTransition.phase !== "idle") return;
+    pip.clear();
+  }, [track?.id, djTransition.phase]);
 
   // 起手点：开关开且有结束点 → 按结束点倒推接歌长度；否则波形估尾段，再不行按长度倒推。
   useEffect(() => {
@@ -760,10 +797,12 @@ export function PlayerBar() {
         });
       }
     } else {
-      // 停下要连暗处那台一起按住：过渡进行到一半按停止，
-      // 只停正主的话退场中的旧歌还会自己淡完那几秒
+      // 停下要连暗处那台一起按住。cancel/seekAbort 可能同步互换正主，不能再用
+      // effect 闭包里的旧 frontEl，否则会把暗台暂停两次、真正正主却继续响。
       djEngine.cancel();
-      djEngine.hardPause(frontEl);
+      const currentFront = djEngine.frontElement();
+      djEngine.hardPause(currentFront);
+      if (currentFront !== frontElRef.current) setFrontEl(currentFront);
     }
   }, [playing, track, frontEl, nativePlayer, commitPlaying]);
 
@@ -783,6 +822,7 @@ export function PlayerBar() {
         commitPlaying(false);
       } else if (detail.action === "seek" && detail.position !== undefined) {
         const at = Math.max(0, detail.position);
+        if (!shouldCommitSeek(track.id, at)) return;
         if (nativePlayer) {
           void nativePlayer.seek(at);
         } else {
@@ -801,7 +841,7 @@ export function PlayerBar() {
     };
     window.addEventListener(MEDIA_SYNC_EVENT, onMediaSync);
     return () => window.removeEventListener(MEDIA_SYNC_EVENT, onMediaSync);
-  }, [frontEl, track?.id, nativePlayer, commitPlaying]);
+  }, [frontEl, track?.id, nativePlayer, commitPlaying, shouldCommitSeek]);
 
   // 播放器是同步时钟：视频只在明显漂移时纠偏，避免每个 timeupdate 都 seek
   // 造成画面抖动。播放/暂停/跳转动作仍然双向广播。
@@ -873,6 +913,7 @@ export function PlayerBar() {
       // 都会重建 shadow deck / 发 Range 请求，越拖积压越多，看起来像整条波形黏住。
       setPosition(target);
       if (detail.preview) return;
+      if (!shouldCommitSeek(track.id, target)) return;
       const generation = ++seekGenerationRef.current;
       broadcastMediaSync({
         owner: "player",
@@ -893,7 +934,7 @@ export function PlayerBar() {
     };
     window.addEventListener(SEEK_EVENT, onSeek);
     return () => window.removeEventListener(SEEK_EVENT, onSeek);
-  }, [track, nativePlayer]);
+  }, [track, nativePlayer, shouldCommitSeek]);
 
   // 和视频预览互斥出声（见 audioFocus.ts）：这边一开始放就喊一嗓子，
   // 预览听到会自己暂停；反过来预览开声时这边也自动停，只暂停不清进度。
@@ -1095,13 +1136,17 @@ export function PlayerBar() {
       });
     } else if (nextPlaying) {
       djEngine.ensureAudible();
-      void djEngine.hardPlay(frontElRef.current).catch((error: unknown) => {
+      const currentFront = djEngine.frontElement();
+      if (currentFront !== frontElRef.current) setFrontEl(currentFront);
+      void djEngine.hardPlay(currentFront).catch((error: unknown) => {
         commitPlaying(false);
         setNotice(`播放失败：${error instanceof Error ? error.message : String(error)}`);
       });
     } else {
       djEngine.cancel();
-      djEngine.hardPause(frontElRef.current);
+      const currentFront = djEngine.frontElement();
+      if (currentFront !== frontElRef.current) setFrontEl(currentFront);
+      djEngine.hardPause(currentFront);
     }
     commitPlaying(nextPlaying);
   }, [nativePlayer, commitPlaying]);
@@ -1691,7 +1736,17 @@ export function PlayerBar() {
               ? "播放 / 暂停预览（空格）"
               : "播放 / 暂停（空格）"
           }
-          onClick={toggleTransport}
+          onPointerDown={(event) => {
+            if (event.button !== 0) return;
+            // 走带键按下就生效，不等 pointerup 后的 click；触摸、鼠标长按时都不会
+            // 多拖几十到几百毫秒才停声。preventDefault 同时避免随后再合成一次 click。
+            event.preventDefault();
+            toggleTransport();
+          }}
+          onClick={(event) => {
+            // 键盘激活没有 pointerdown，detail=0；鼠标/触摸已在上面处理，不能执行两次。
+            if (event.detail === 0) toggleTransport();
+          }}
         >
           {(pipDriving && pipSession?.source === "network" ? pipPlaying : playing) ? (
             <Pause size={14} fill="currentColor" />

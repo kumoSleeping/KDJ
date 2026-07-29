@@ -815,6 +815,8 @@ let pending: Pending | null = null;
 type SeekAbortMode = "restore" | "target";
 let seekAbort: ((mode: SeekAbortMode) => void) | null = null;
 let seekBusy = false;
+/** seek/过渡操作代数；新操作或 pause/cancel 会让旧异步回调自动失效。 */
+let seekOperationGeneration = 0;
 
 function abortSeamlessSeek(mode: SeekAbortMode): void {
   const abort = seekAbort;
@@ -953,6 +955,60 @@ function createPcmRun(deckIndex: 0 | 1, sourceUrl: string, offset: number, when:
   return run;
 }
 
+function seekHotMediaElement(
+  deckIndex: 0 | 1,
+  at: number,
+  shouldPlay: boolean,
+  generation: number,
+): Promise<HTMLAudioElement> {
+  const el = elements[deckIndex];
+  seekBusy = true;
+  return new Promise((resolve) => {
+    let done = false;
+    let timeout: number | null = null;
+    const cleanup = () => {
+      el.removeEventListener("seeked", finish);
+      el.removeEventListener("canplay", finish);
+      if (timeout !== null) window.clearTimeout(timeout);
+    };
+    const complete = () => {
+      if (done) return;
+      done = true;
+      cleanup();
+      if (generation === seekOperationGeneration) seekBusy = false;
+      resolve(el);
+    };
+    const finish = () => {
+      if (done) return;
+      if (generation !== seekOperationGeneration) {
+        complete();
+        return;
+      }
+      if (el.seeking || el.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) return;
+      if (shouldPlay && el.paused) void el.play().then(complete).catch(complete);
+      else {
+        if (!shouldPlay) el.pause();
+        complete();
+      }
+    };
+    el.addEventListener("seeked", finish);
+    el.addEventListener("canplay", finish);
+    timeout = window.setTimeout(() => {
+      if (generation === seekOperationGeneration && shouldPlay && el.paused) {
+        void el.play().catch(() => undefined);
+      }
+      complete();
+    }, SEEK_READY_TIMEOUT_MS);
+    try {
+      el.currentTime = at;
+    } catch {
+      complete();
+      return;
+    }
+    finish();
+  });
+}
+
 function releaseDecodedPlayback(): void {
   decodeGeneration += 1;
   pcmSeekGeneration += 1;
@@ -990,7 +1046,7 @@ function setTransitionPhase(phase: DjTransitionPhase): void {
   for (const listener of transitionListeners) listener(state);
 }
 
-function clearPending(): void {
+function clearPending(notifyIdle = true): void {
   if (!pending) return;
   if (pending.finishTimer !== null) clearTimeout(pending.finishTimer);
   if (pending.startTimeout !== null) clearTimeout(pending.startTimeout);
@@ -999,7 +1055,7 @@ function clearPending(): void {
     pending.startListener();
   }
   pending = null;
-  setTransitionPhase("idle");
+  if (notifyIdle) setTransitionPhase("idle");
 }
 
 /** 多选时每场随机取一个非空子集，因此全勾既可能单用，也可能叠加。 */
@@ -1386,6 +1442,10 @@ export const djEngine = {
   prepareDecodedSeek(track: Track, source: string): void {
     releaseDecodedPlayback();
     if (!djEngine.warmup() || !ctx) return;
+    // DJ 接歌会保留 BPM 同步后的 playbackRate，而 AudioBufferSource 不能做
+    // preservesPitch。此前仍在后台整首 fetch + decode，既永远不会被 seek 采用，
+    // 又恰好与接歌后的第一次跳转争用 WebKit 解码器，造成必现卡顿和控制迟钝。
+    if (Math.abs((decks?.[frontIndex].el.playbackRate || 1) - 1) >= 0.0001) return;
     const duration = track.duration ?? 0;
     const channels = Math.max(1, track.channels ?? 2);
     const estimatedRate = Math.max(8000, ctx.sampleRate);
@@ -1490,6 +1550,7 @@ export const djEngine = {
    */
   seamlessSeek(source: string, target: number, shouldPlay: boolean): Promise<HTMLAudioElement> {
     const at = Math.max(0, target);
+    seekOperationGeneration += 1;
     abortTransport();
     // 新目标只撤掉上一轮尚未落地的准备，不能把旧轮目标先硬切出来。
     abortSeamlessSeek("restore");
@@ -1565,12 +1626,48 @@ export const djEngine = {
     let outIndex: 0 | 1 = frontIndex;
     let inputIndex: 0 | 1 = frontIndex === 0 ? 1 : 0;
     if (wasTransitioning) {
-      // begin 已把 front 指向新歌，但 preparing 时真正出声的还是另一台。手动 seek
-      // 以 UI 里的新歌为目标：旧歌继续托底，新歌 deck 直接改到点击位置。
+      // UI 的正主从 begin 起就是进场曲。用户此时点波形，意图是结束混音并在
+      // 第二首内部跳转，不是先把第二首掐掉、把第一首拉回满幅，再重新接一次。
+      // 后一种旧流程会稳定制造一次可闻的“回抽/卡顿”。先顺向收完到第二首，
+      // 然后直接 seek 这台已经在播放、时间拉伸器也已热好的 element。
       inputIndex = frontIndex;
       outIndex = frontIndex === 0 ? 1 : 0;
-      clearPending();
-      frontIndex = outIndex;
+      const out = decks[outIndex];
+      const input = decks[inputIndex];
+      const generation = seekOperationGeneration;
+      const now = ctx.currentTime;
+      const outGain = Math.min(1, Math.max(0, holdParam(out.fader.gain, now)));
+      const inputGain = Math.min(1, Math.max(0, holdParam(input.fader.gain, now)));
+      clearPending(false);
+      out.fader.gain.cancelScheduledValues(now);
+      input.fader.gain.cancelScheduledValues(now);
+      out.fader.gain.setValueAtTime(outGain, now);
+      input.fader.gain.setValueAtTime(inputGain, now);
+      out.fader.gain.linearRampToValueAtTime(0, now + SEEK_HANDOFF_SEC);
+      input.fader.gain.linearRampToValueAtTime(1, now + SEEK_HANDOFF_SEC);
+      seekBusy = true;
+      return new Promise((resolve) => {
+        window.setTimeout(() => {
+          if (generation !== seekOperationGeneration || !ctx || !decks) {
+            resolve(elements[frontIndex]);
+            return;
+          }
+          neutralize(ctx, out, 0);
+          out.el.pause();
+          neutralize(ctx, input, 1);
+          frontIndex = inputIndex;
+
+          void seekHotMediaElement(inputIndex, at, shouldPlay, generation).then((el) => {
+            if (
+              generation === seekOperationGeneration &&
+              transitionPhase !== "idle"
+            ) {
+              setTransitionPhase("idle");
+            }
+            resolve(el);
+          });
+        }, SEEK_HANDOFF_SEC * 1000);
+      });
     }
 
     const out = decks[outIndex];
@@ -1611,7 +1708,7 @@ export const djEngine = {
         neutralize(ctx, other, 0);
         other.el.pause();
         if (play) void chosen.el.play().catch(() => undefined);
-        setTransitionPhase("idle");
+        if (transitionPhase !== "idle") setTransitionPhase("idle");
         return chosen.el;
       };
 
@@ -1682,7 +1779,8 @@ export const djEngine = {
         out.fader.gain.setValueCurveAtTime(seekOutCurve, switchAt, SEEK_HANDOFF_SEC);
         input.fader.gain.setValueCurveAtTime(seekInCurve, switchAt, SEEK_HANDOFF_SEC);
         frontIndex = inputIndex;
-        setTransitionPhase("idle");
+        // seekBusy 在 settle 结束前保持 true，PlayerBar 即使立即采用新 frontElement，
+        // 也不会执行 ensureAudible 打断当前包络；因此无需延迟 Promise/控制响应。
         resolve(input.el);
 
         settleTimer = window.setTimeout(() => {
@@ -1704,6 +1802,9 @@ export const djEngine = {
           }
           seekBusy = false;
           seekAbort = null;
+          // 交接曲线和旧 deck pause 都真正结束后才发布 idle。订阅方此时再预热
+          // 备用 deck，不会反过来截断正在执行的 seek。
+          if (transitionPhase !== "idle") setTransitionPhase("idle");
         }, (SEEK_HANDOFF_LEAD_SEC + SEEK_HANDOFF_SEC) * 1000 + SEEK_SETTLE_MS);
       };
 
@@ -1739,6 +1840,7 @@ export const djEngine = {
    * 返回 false = 引擎不可用，调用方走普通换歌。
    */
   begin(next: Track, options: DjBeginOptions): boolean {
+    seekOperationGeneration += 1;
     abortSeamlessSeek("target");
     if (!options.transitions.length || !djEngine.warmup() || !ctx || !decks) return false;
     void ctx.resume();
@@ -1919,10 +2021,18 @@ export const djEngine = {
    * 用户硬切歌 / 按停止 / 关掉预设时调。对着一台从没动过的引擎调它是空操作。
    */
   cancel(): void {
+    seekOperationGeneration += 1;
+    seekBusy = false;
     abortTransport();
     abortSeamlessSeek("target");
-    clearPending();
-    if (!ctx || !decks) return;
+    // 先原子地停完两台，再发布 idle。以前 clearPending() 会先通知 PlayerBar，
+    // idle 订阅立刻启动静音预热，与这次 pause/cancel 在同一调用栈里互相抢 play/pause。
+    const wasTransitioning = transitionPhase !== "idle";
+    clearPending(false);
+    if (!ctx || !decks) {
+      if (wasTransitioning) setTransitionPhase("idle");
+      return;
+    }
     const backIndex = frontIndex === 0 ? 1 : 0;
     // 先静音再 pause，避免过渡中途硬切非正主 deck 时漏出一个非零采样。
     neutralize(ctx, decks[backIndex], 0);
@@ -1931,6 +2041,7 @@ export const djEngine = {
     if (pcmPaused?.deckIndex === backIndex) pcmPaused = null;
     neutralize(ctx, decks[frontIndex]);
     decks[frontIndex].el.playbackRate = 1;
+    if (wasTransitioning) setTransitionPhase("idle");
   },
 
   /** 普通起播前调用：避免上次软停把 fader 留在 0 导致「按了播放却没声」。 */

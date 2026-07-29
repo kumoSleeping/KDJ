@@ -32,7 +32,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   return (
     <div className="kd-row" style={{ justifyContent: "space-between", gap: "0.75rem" }}>
       <span className="kd-muted kd-nowrap">{label}</span>
-      <span className="kd-truncate" style={{ textAlign: "right" }}>
+      <span className="kd-muted kd-truncate" style={{ textAlign: "right" }}>
         {children}
       </span>
     </div>

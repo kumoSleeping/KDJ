@@ -31,8 +31,8 @@ use super::{login, qn_for_height};
 use crate::ffmpeg;
 use crate::net::{ensure_media_url, AtomicDownload};
 use crate::provider::{
-    effective_limit, qr_data_url_from_text, str_field, Capabilities, DownloadJob, MusicProvider,
-    ProgressSink, ProviderContext,
+    effective_limit, qr_data_url_from_text, str_field, unique_download_path, Capabilities,
+    DownloadJob, MusicProvider, ProgressSink, ProviderContext,
 };
 
 const LABEL: &str = "哔哩哔哩";
@@ -256,12 +256,19 @@ impl BilibiliProvider {
         if !status.is_success() {
             bail!("哔哩哔哩预览流返回 HTTP {}", status.as_u16());
         }
-        let content_type = response
+        let upstream_content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
-            .unwrap_or("video/mp4")
-            .to_string();
+            .unwrap_or_default();
+        // 部分 B 站 CDN 把 durl MP4 标成 application/octet-stream。浏览器下载能猜，
+        // WKWebView 的媒体管线会直接 NotSupportedError；这里知道请求的就是单流 MP4，
+        // 必须给媒体元素稳定的类型。
+        let content_type = if upstream_content_type.starts_with("video/") {
+            upstream_content_type.to_string()
+        } else {
+            "video/mp4".to_string()
+        };
         let content_range = response
             .headers()
             .get(reqwest::header::CONTENT_RANGE)
@@ -324,7 +331,7 @@ impl BilibiliProvider {
         let (video_stream, audio_stream) = streams::pick_best(&parsed, max_height);
 
         let title = compose_title(&info, &pages, index, &bvid);
-        // 视频平铺在设置里指定的视频目录下；只要音轨时回到音频那边的 bilibili/ 子目录
+        // 视频平铺在设置里指定的视频目录下；只要音轨时回到下载根目录
         let output_dir = if req.audio_only {
             self.ctx.platform_dir(Platform::Bilibili)?
         } else {
@@ -352,8 +359,8 @@ impl BilibiliProvider {
             // 而且拿到手的人得知道这份的开头被动过
             stem.push_str(&format!(" (off{:+.2}s)", req.offset_ms as f64 / 1000.0));
         }
-        let output_path =
-            output_dir.join(finalize_filename(&format!("{stem}.{extension}"), &extension));
+        let filename = finalize_filename(&format!("{stem}.{extension}"), &extension);
+        let output_path = unique_download_path(&output_dir, &filename);
 
         // 每个任务一个独立的暂存目录：并发下载时不能互相删对方的 .partial
         let temp_dir = output_dir.join(format!(

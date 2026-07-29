@@ -17,7 +17,7 @@ use tokio::io::AsyncWriteExt as _;
 
 use crate::net::{host_is, AtomicDownload};
 use crate::provider::{
-    effective_limit, no_login, remove_existing, str_field, Capabilities, DownloadJob, MusicProvider,
+    effective_limit, no_login, str_field, unique_download_path, Capabilities, DownloadJob, MusicProvider,
     ProviderContext,
 };
 use crate::tags;
@@ -325,8 +325,7 @@ impl MusicProvider for SoundCloudProvider {
             &source.key,
             &ext,
         );
-        let final_path = output_dir.join(filename);
-        remove_existing(&final_path);
+        let final_path = unique_download_path(&output_dir, &filename);
 
         let guard = AtomicDownload::new(&final_path);
         let response = self

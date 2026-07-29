@@ -54,6 +54,7 @@ export type VideoPipSession =
       trackId: number;
       title: string;
       author: string;
+      autoPlay: boolean;
     };
 
 function isMode(value: string | null): value is VideoPreviewMode {
@@ -93,8 +94,15 @@ function broadcastApply(mode: VideoPreviewMode): void {
   );
 }
 
-export function requestLocalVideo(track: Track): void {
-  window.dispatchEvent(new CustomEvent<Track>(LOCAL_VIDEO_EVENT, { detail: track }));
+export interface LocalVideoRequest {
+  track: Track;
+  autoPlay: boolean;
+}
+
+export function requestLocalVideo(track: Track, autoPlay = true): void {
+  window.dispatchEvent(
+    new CustomEvent<LocalVideoRequest>(LOCAL_VIDEO_EVENT, { detail: { track, autoPlay } }),
+  );
 }
 
 export function seekVideoPip(position: number): void {

@@ -24,7 +24,7 @@ use super::client::{new_search_id, Credential, QqClient, QqPlatform};
 use super::login;
 use crate::net::{host_is, AtomicDownload};
 use crate::provider::{
-    effective_limit, first_truthy, is_truthy, loose_int, qr_data_url_from_png, remove_existing,
+    effective_limit, first_truthy, is_truthy, loose_int, qr_data_url_from_png, unique_download_path,
     str_field, Capabilities, DownloadJob, MusicProvider, ProviderContext,
 };
 use crate::tags;
@@ -752,8 +752,7 @@ impl MusicProvider for QqMusicProvider {
             &source.key,
             ext,
         );
-        let final_path = output_dir.join(filename);
-        remove_existing(&final_path);
+        let final_path = unique_download_path(&output_dir, &filename);
 
         let guard = AtomicDownload::new(&final_path);
         // QQ 网页端下载会带来源页；部分 CDN 对裸 GET 的缓存/防盗链策略不同。

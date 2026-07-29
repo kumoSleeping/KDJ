@@ -23,7 +23,7 @@ export function playTrack(track: Track, autoPlay = true): void {
   // 请求先于 React 换曲渲染发出；已有磁盘缓存时，波形通常能在组件挂载前进内存。
   prefetchWaveform(track);
   if (isVideoTrack(track.format)) {
-    requestLocalVideo(track);
+    requestLocalVideo(track, autoPlay);
   } else if (useVideoPip.getState().active) {
     useVideoPip.getState().clear();
   }

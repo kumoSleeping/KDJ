@@ -1649,22 +1649,107 @@ async fn library_audio(
     audio_response(&path, total, mime_for(&path), raw_range.as_deref()).await
 }
 
-/// 本地视频原文件流。和音频端点共用 Range 实现，拖进度条不会重新下载整份文件。
+#[derive(Default, Deserialize)]
+struct LibraryVideoParams {
+    /// WebView 明确拒绝原文件后，转为所有平台都能解的 H.264/AAC MP4。
+    #[serde(default)]
+    compat: bool,
+}
+
+/// WebView 兼容视频缓存。普通 MP4/MOV 仍直接 Range 原文件；只有媒体元素明确报
+/// NotSupportedError 后才走这里，避免每次播放都无谓重编码。
+async fn compatible_video(path: &Path, track_id: i64, cache_dir: &Path) -> ApiResult<PathBuf> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+
+    type CompatLocks = std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>;
+    static LOCKS: OnceLock<CompatLocks> = OnceLock::new();
+
+    let mtime = file_mtime(path);
+    let target = cache_dir.join(format!("{track_id}-{mtime}.mp4"));
+    let lock = {
+        let mut locks = LOCKS
+            .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(target.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _guard = lock.lock().await;
+    if std::fs::metadata(&target)
+        .map(|meta| meta.len() > 0)
+        .unwrap_or(false)
+    {
+        return Ok(target);
+    }
+    if !kdj_providers::ffmpeg::available() {
+        return Err(ApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "系统 WebView 不支持这个视频编码，且没有找到 FFmpeg 用于兼容转换",
+        ));
+    }
+    std::fs::create_dir_all(cache_dir).map_err(|err| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("建立视频兼容缓存失败：{err}"),
+        )
+    })?;
+    let tmp = cache_dir.join(format!("{track_id}-{mtime}.partial.mp4"));
+    let log = cache_dir.join(format!("{track_id}-{mtime}.log"));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    // 统一到 H.264/AAC + yuv420p，并把 moov 移到文件头；这是 WKWebView、Chromium
+    // WebView 和系统画中画共同支持的最小交集。4K 素材降到 2160p，普通素材不放大。
+    let args = kdj_providers::ffmpeg::mux_args(&[path.to_path_buf()], &tmp, true, 2160, 0);
+    if let Err(err) = kdj_providers::ffmpeg::run(&args, &log, &cancel).await {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("视频兼容转换失败：{err}"),
+        ));
+    }
+    if !std::fs::metadata(&tmp)
+        .map(|meta| meta.len() > 0)
+        .unwrap_or(false)
+    {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "视频兼容转换没有产生有效文件",
+        ));
+    }
+    std::fs::rename(&tmp, &target).map_err(|err| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("保存视频兼容缓存失败：{err}"),
+        )
+    })?;
+    let _ = std::fs::remove_file(&log);
+    Ok(target)
+}
+
+/// 本地视频流。默认 Range 原文件；WebView 不支持其容器/编码时由前端以
+/// `compat=true` 重试，后端一次性生成通用 MP4 缓存。
 async fn library_video(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<i64>,
+    Query(params): Query<LibraryVideoParams>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     let track = state
         .library
         .get(id)?
         .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
-    let path = PathBuf::from(&track.path);
+    let mut path = PathBuf::from(&track.path);
     if !path.is_file() {
         return Err(ApiError::not_found("视频文件已丢失"));
     }
     if !is_video_container(&path) {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "这不是视频曲目"));
+    }
+    if params.compat {
+        path =
+            compatible_video(&path, track.id, &state.config.data_dir.join("video-cache")).await?;
     }
     let total = tokio::fs::metadata(&path)
         .await
@@ -1805,7 +1890,8 @@ fn video_mime_for(path: &Path) -> String {
         .to_ascii_lowercase()
         .as_str()
     {
-        "mp4" | "m4v" | "mov" => "video/mp4",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
         "webm" => "video/webm",
         "mkv" => "video/x-matroska",
         _ => "application/octet-stream",
@@ -2353,6 +2439,13 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
         assert_eq!(mime_for(Path::new("a.FLAC")), "audio/flac");
         assert_eq!(mime_for(Path::new("a.m4a")), "audio/mp4");
         assert_eq!(mime_for(Path::new("a.xyz")), "application/octet-stream");
+    }
+
+    #[test]
+    fn video_mime_types_do_not_disguise_quicktime_as_mp4() {
+        assert_eq!(video_mime_for(Path::new("a.mp4")), "video/mp4");
+        assert_eq!(video_mime_for(Path::new("a.MOV")), "video/quicktime");
+        assert_eq!(video_mime_for(Path::new("a.webm")), "video/webm");
     }
 
     fn scratch(name: &str) -> PathBuf {

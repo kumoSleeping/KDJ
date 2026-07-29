@@ -139,10 +139,10 @@ export function SearchBar({
           <SearchPlatforms {...platformProps} />
         </div>
         <span className="kd-searchbar-sep" aria-hidden="true" />
-        <div className="kd-searchbar-copy">
+        <div className="kd-searchbar-copy" data-empty={!query || undefined}>
           {!query && (
             <span className="kd-search-placeholder" aria-hidden="true">
-              {stacked ? "歌名、链接都可以放这里" : "今天想听点什么？歌名、链接都可以放这里"}
+              喵喵喵?
             </span>
           )}
           <textarea

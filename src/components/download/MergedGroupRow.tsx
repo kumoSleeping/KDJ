@@ -8,6 +8,7 @@ import type { MergedGroup, Platform, SongSource } from "../../types";
 import { copyText } from "../../lib/copyText";
 import { ContextMenu } from "../common";
 import { playTrack } from "../library/TrackTable";
+import { PlatformMark } from "./PlatformMark";
 
 /** 平台在表格里的短标签。混合搜索一行可能同时挂三个来源，全名太挤。 */
 export const PLATFORM_LABEL: Record<Platform, string> = {
@@ -141,6 +142,17 @@ export function MergedGroupRow({
     </>
   );
 
+  // 同一平台可能挂多条候选源；图标列只按平台去重，当前选中那条所属平台高亮。
+  const platformMarks: Array<{ platform: Platform; active: boolean }> = [];
+  for (const [index, source] of group.sources.entries()) {
+    const existing = platformMarks.find((mark) => mark.platform === source.platform);
+    if (existing) {
+      if (index === sourceIndex) existing.active = true;
+      continue;
+    }
+    platformMarks.push({ platform: source.platform, active: index === sourceIndex });
+  }
+
   return (
     <Fragment>
       <tr
@@ -256,6 +268,7 @@ export function MergedGroupRow({
           onDragStart={selectable ? onDragStart : undefined}
           onDragEnd={selectable ? onDragEnd : undefined}
           className="kd-td-strong"
+          data-col="title"
           title={group.title}
         >
           {indent ? (
@@ -294,14 +307,19 @@ export function MergedGroupRow({
         </td>
         <td draggable={selectable} onDragStart={selectable ? onDragStart : undefined}
           onDragEnd={selectable ? onDragEnd : undefined}>
-          <span className="kd-source-dots" title={group.sources.map((s) => PLATFORM_LABEL[s.platform]).join(" / ")}>
-            {group.sources.map((source, index) => (
-              <i
-                key={`${source.platform}:${source.key}`}
+          <span
+            className="kd-source-dots"
+            title={platformMarks.map((mark) => PLATFORM_LABEL[mark.platform]).join(" / ")}
+          >
+            {platformMarks.map((mark) => (
+              <span
+                key={mark.platform}
                 className="kd-source-dot"
-                data-platform={source.platform}
-                data-active={index === sourceIndex ? "true" : "false"}
-              />
+                data-platform={mark.platform}
+                data-active={mark.active ? "true" : "false"}
+              >
+                <PlatformMark id={mark.platform} size={12} />
+              </span>
             ))}
           </span>
         </td>

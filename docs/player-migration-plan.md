@@ -4,6 +4,25 @@
 
 Move playback ownership out of React and expose one typed player contract to the UI and the Tauri backend. Mobile playback must survive WebView suspension; existing desktop DJ behavior must not disappear during migration.
 
+## Current status
+
+The boundary exists only for mobile. `src/lib/unifiedPlayer.ts` currently exposes the Android/iOS native adapter, while desktop `PlayerBar` still calls the Web Audio `djEngine` directly. `crates/kdj-player` contains tested realtime mixer primitives and a fixed two-track CPAL output prototype, but it is not registered in `src-tauri` and is not the running desktop player.
+
+The macOS “first seek after DJ transition” incident is tracked in `docs/player-webkit-seek.md`. It confirms that Stage 4 is required for cross-platform desktop behavior; a shared HTTP backend does not make WebView-owned audio output platform-independent.
+
+## Next implementation slice
+
+Do not add another WebKit-specific branch to `djMix.ts`. The next owned change is a desktop-native vertical slice behind a runtime flag:
+
+1. Add `src-tauri/src/player_runtime.rs`. One control task owns deck preparation, revisions, the `kdj-player` controller and the CPAL stream. Tauri command handlers only send typed requests to this owner.
+2. Extend `kdj-player` with a prepared Deck bank that can replace A/B sources while the callback is running. Decode/allocation/drop stay off the audio callback; retired PCM returns to the control task for destruction.
+3. Add desktop-native load, prepare, play, pause, seek, handoff, gain, rate, EQ, snapshot and dispose commands plus one state event payload. Source and seek revisions fence stale async completion.
+4. Extend `src/lib/unifiedPlayer.ts` with an implementation-neutral contract and add a desktop adapter. `PlayerBar` must use that contract instead of importing `djEngine` directly.
+5. Port pitch-preserving tempo and the enabled DJ effects before making desktop-native the default. A sample-rate step that changes pitch is not parity.
+6. Keep the browser adapter only for web development until native parity passes; then remove desktop runtime calls into `djMix.ts` rather than maintaining two official engines.
+
+The first cutover gate is basic desktop load/play/pause/seek with callback-clock tests. The DJ cutover gate additionally requires dynamic two-deck preparation, pitch-preserving rate, sample-clock handoff and interruption/device-change tests on macOS and Windows.
+
 ## Runtime boundary
 
 ```text

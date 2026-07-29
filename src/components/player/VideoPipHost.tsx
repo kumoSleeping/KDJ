@@ -28,6 +28,7 @@ import {
   VIDEO_PIP_TOGGLE_EVENT,
   useVideoPip,
   type ApplyVideoModeDetail,
+  type LocalVideoRequest,
   type VideoPipSeekDetail,
   type VideoPreviewMode,
   type VideoPipSession,
@@ -43,7 +44,6 @@ import {
   VIDEO_PREVIEW_EVENT,
   type VideoPreviewRequest,
 } from "../download/VideoPreview";
-import type { Track } from "../../types";
 
 const FLOAT_MIN_W = 240;
 const FLOAT_MAX_W = 720;
@@ -73,16 +73,55 @@ function clampFloatBox(
   };
 }
 
-function canSystemPip(): boolean {
-  return typeof document !== "undefined" && document.pictureInPictureEnabled;
+type WebKitPresentationMode = "inline" | "picture-in-picture" | "fullscreen";
+type WebKitPipVideo = HTMLVideoElement & {
+  webkitPresentationMode?: WebKitPresentationMode;
+  webkitSupportsPresentationMode?: (mode: WebKitPresentationMode) => boolean;
+  webkitSetPresentationMode?: (mode: WebKitPresentationMode) => void;
+};
+
+/** WKWebView/Safari 主要实现 webkitPresentationMode；Chromium/WebView2 用标准 PiP。 */
+function supportsWebKitPip(video: HTMLVideoElement | null): video is WebKitPipVideo {
+  if (!video) return false;
+  const webkit = video as WebKitPipVideo;
+  return Boolean(
+    webkit.webkitSetPresentationMode &&
+      webkit.webkitSupportsPresentationMode?.("picture-in-picture"),
+  );
+}
+
+function canSystemPip(video: HTMLVideoElement | null = null): boolean {
+  const webkitApi =
+    supportsWebKitPip(video) ||
+    (typeof HTMLVideoElement !== "undefined" &&
+      "webkitSetPresentationMode" in HTMLVideoElement.prototype);
+  const standardApi =
+    typeof document !== "undefined" &&
+    document.pictureInPictureEnabled &&
+    typeof HTMLVideoElement !== "undefined" &&
+    "requestPictureInPicture" in HTMLVideoElement.prototype;
+  return webkitApi || standardApi;
 }
 
 async function enterSystemPip(video: HTMLVideoElement): Promise<boolean> {
-  if (!canSystemPip()) return false;
-  try {
-    if (document.pictureInPictureElement !== video) {
-      await video.requestPictureInPicture();
+  // macOS/iOS 的 WKWebView 即使暴露标准方法也可能以 NotSupportedError 拒绝；
+  // 原生 WebKit presentation mode 才是这里可靠的系统级小窗入口。
+  if (supportsWebKitPip(video)) {
+    try {
+      video.webkitSetPresentationMode?.("picture-in-picture");
+      const entered = video.webkitPresentationMode === "picture-in-picture";
+      useVideoPip.getState().setSystemPip(entered);
+      if (entered) return true;
+    } catch {
+      // 再试标准 API；不同 WebKit/系统版本实现不一致。
     }
+  }
+  if (!document.pictureInPictureEnabled || typeof video.requestPictureInPicture !== "function") {
+    useVideoPip.getState().setSystemPip(false);
+    return false;
+  }
+  try {
+    if (document.pictureInPictureElement !== video) await video.requestPictureInPicture();
     useVideoPip.getState().setSystemPip(true);
     return true;
   } catch {
@@ -92,6 +131,13 @@ async function enterSystemPip(video: HTMLVideoElement): Promise<boolean> {
 }
 
 async function exitSystemPip(video: HTMLVideoElement | null): Promise<void> {
+  if (supportsWebKitPip(video) && video.webkitPresentationMode === "picture-in-picture") {
+    try {
+      video.webkitSetPresentationMode?.("inline");
+    } catch {
+      /* ignore */
+    }
+  }
   if (video && document.pictureInPictureElement === video) {
     try {
       await document.exitPictureInPicture();
@@ -126,14 +172,15 @@ function mediaUrl(session: VideoPipSession): string {
 
 /** panel 档的旁路 UI（右栏 / 曲库详情），与宿主 <video> 启停分开。 */
 function applyPanelChrome(session: VideoPipSession, mode: VideoPreviewMode): void {
+  // 网络视频右栏预览面板暂时关闭：panel 档也退回浮动小窗，细项改在下载队列里配。
+  if (mode === "panel" && session.source === "network") {
+    if (useAppStore.getState().showPreview) useAppStore.getState().dismissOverlay();
+    return;
+  }
   if (mode === "panel") {
-    if (session.source === "network") {
-      useAppStore.getState().openPreviewPanel();
-    } else {
-      if (useAppStore.getState().showPreview) useAppStore.getState().dismissOverlay();
-      // 钉住曲目详情右栏（见 Workspace DETAIL_EVENT），别只清 overlay 却不展开
-      window.dispatchEvent(new Event("kd:show-detail"));
-    }
+    if (useAppStore.getState().showPreview) useAppStore.getState().dismissOverlay();
+    // 钉住曲目详情右栏（见 Workspace DETAIL_EVENT），别只清 overlay 却不展开
+    window.dispatchEvent(new Event("kd:show-detail"));
     return;
   }
   if (useAppStore.getState().showPreview) {
@@ -145,6 +192,9 @@ export function VideoPipHost() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const floatRef = useRef<HTMLDivElement | null>(null);
   const loadedKeyRef = useRef<string | null>(null);
+  const compatRetryKeyRef = useRef<string | null>(null);
+  const desiredPlayingRef = useRef(false);
+  const pendingScrubRef = useRef<number | null>(null);
   const dragRef = useRef<{
     pointerId: number;
     startX: number;
@@ -189,6 +239,8 @@ export function VideoPipHost() {
       video.load();
     }
     loadedKeyRef.current = null;
+    compatRetryKeyRef.current = null;
+    desiredPlayingRef.current = false;
     useVideoPip.getState().setPlaying(false);
   };
 
@@ -196,24 +248,65 @@ export function VideoPipHost() {
     const video = videoRef.current;
     if (!video) return;
     const nextKey = sessionKey(next);
-    const needLoad = loadedKeyRef.current !== nextKey;
+    const shouldPlay =
+      desiredPlayingRef.current || next.source === "network" || next.autoPlay;
+    desiredPlayingRef.current = shouldPlay;
     useVideoPip.getState().setError("");
     video.muted = next.source === "local";
-    if (needLoad) {
+    if (loadedKeyRef.current !== nextKey) {
+      compatRetryKeyRef.current = null;
       video.src = mediaUrl(next);
       video.load();
       loadedKeyRef.current = nextKey;
     }
+    if (!shouldPlay) {
+      video.pause();
+      useVideoPip.getState().setPlaying(false);
+      return;
+    }
     if (next.source === "network") announceAudioFocus("preview");
-    void video
-      .play()
-      .then(() => useVideoPip.getState().setPlaying(true))
-      .catch((reason: unknown) => {
-        useVideoPip
-          .getState()
-          .setError(reason instanceof Error ? reason.message : String(reason));
-        useVideoPip.getState().setPlaying(false);
-      });
+    void video.play().catch((reason: unknown) => {
+      if (!desiredPlayingRef.current) return;
+      const unsupported =
+        (reason instanceof DOMException && reason.name === "NotSupportedError") ||
+        video.error?.code === 4; // MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
+      if (next.source === "local" && unsupported && compatRetryKeyRef.current !== nextKey) {
+        compatRetryKeyRef.current = nextKey;
+        loadedKeyRef.current = `${nextKey}:compat`;
+        useVideoPip.getState().setError("正在转换为系统播放器兼容格式…");
+        video.src = api.videoUrl(next.trackId, true);
+        video.load();
+        void video
+          .play()
+          .then(() => {
+            if (!desiredPlayingRef.current) {
+              video.pause();
+              return;
+            }
+            useVideoPip.getState().setError("");
+          })
+          .catch((compatReason: unknown) => {
+            if (!desiredPlayingRef.current) return;
+            useVideoPip.getState().setPlaying(false);
+            useVideoPip
+              .getState()
+              .setError(
+                `这个视频无法转换为兼容格式：${compatReason instanceof Error ? compatReason.message : String(compatReason)}`,
+              );
+          });
+        return;
+      }
+      useVideoPip.getState().setPlaying(false);
+      useVideoPip
+        .getState()
+        .setError(
+          unsupported
+            ? "系统播放器不支持这个视频容器或编码"
+            : reason instanceof Error
+              ? reason.message
+              : String(reason),
+        );
+    });
   };
 
   // 事件只负责写入 session；真正装 src / 出小窗交给下面的 effect，
@@ -223,6 +316,7 @@ export function VideoPipHost() {
       const detail = (event as CustomEvent<VideoPreviewRequest>).detail;
       if (!detail?.bvid) return;
       const pip = useVideoPip.getState();
+      desiredPlayingRef.current = true;
       pip.setSession({
         source: "network",
         bvid: detail.bvid,
@@ -244,14 +338,17 @@ export function VideoPipHost() {
       );
     };
     const onLocal = (event: Event) => {
-      const track = (event as CustomEvent<Track>).detail;
+      const detail = (event as CustomEvent<LocalVideoRequest>).detail;
+      const track = detail?.track;
       if (!track || !Number.isFinite(track.id) || track.id <= 0) return;
       const pip = useVideoPip.getState();
+      desiredPlayingRef.current = detail.autoPlay !== false;
       const next: VideoPipSession = {
         source: "local",
         trackId: track.id,
         title: track.title || track.filename,
         author: track.artist || "",
+        autoPlay: detail.autoPlay !== false,
       };
       pip.setSession(next);
       applyPanelChrome(next, pip.mode);
@@ -316,21 +413,20 @@ export function VideoPipHost() {
   useEffect(() => {
     let hideTimer = 0;
     const maybeAutoPip = () => {
-      if (!canSystemPip()) return;
       const pip = useVideoPip.getState();
       if (!pip.active || pip.mode !== "float" || pip.systemPip || !pip.playing) return;
       const video = videoRef.current;
-      if (!video || video.paused) return;
+      if (!video || video.paused || !canSystemPip(video)) return;
       void enterSystemPip(video);
     };
     const scheduleAutoPip = () => {
       window.clearTimeout(hideTimer);
-      // 短延迟：点标题栏 / 菜单时的瞬时失焦别误触
+      // 失焦回调仍处在这次用户交互附近，先同步尝试，避免延迟后 WebKit 已经暂停
+      // 或丢掉 user activation；短 timer 只负责兜底尚未完成的可见性切换。
+      maybeAutoPip();
       hideTimer = window.setTimeout(() => {
-        if (document.visibilityState === "hidden" || !document.hasFocus()) {
-          maybeAutoPip();
-        }
-      }, 280);
+        if (document.visibilityState === "hidden" || !document.hasFocus()) maybeAutoPip();
+      }, 80);
     };
     const onVisibility = () => {
       if (document.visibilityState === "hidden") scheduleAutoPip();
@@ -359,14 +455,30 @@ export function VideoPipHost() {
     };
     const onToggle = () => {
       const video = videoRef.current;
-      if (!video || !useVideoPip.getState().active) return;
+      const current = useVideoPip.getState().session;
+      if (!video || !current || !useVideoPip.getState().active) return;
       if (video.paused) {
-        if (useVideoPip.getState().session?.source === "network") {
-          announceAudioFocus("preview");
+        desiredPlayingRef.current = true;
+        if (current.source === "local") {
+          broadcastMediaSync({
+            owner: "local-video",
+            action: "play",
+            trackId: current.trackId,
+            position: video.currentTime,
+          });
         }
-        void video.play().catch(() => undefined);
+        ensureHostPlaying(current);
       } else {
+        desiredPlayingRef.current = false;
         video.pause();
+        if (current.source === "local") {
+          broadcastMediaSync({
+            owner: "local-video",
+            action: "pause",
+            trackId: current.trackId,
+            position: video.currentTime,
+          });
+        }
       }
     };
     window.addEventListener(VIDEO_PIP_SEEK_EVENT, onSeek);
@@ -386,12 +498,14 @@ export function VideoPipHost() {
       const video = videoRef.current;
       if (!video) return;
       if (detail.action === "play") {
+        desiredPlayingRef.current = true;
         const target = detail.position;
         if (Number.isFinite(target) && Math.abs(video.currentTime - (target as number)) > 0.35) {
           video.currentTime = Math.max(0, target as number);
         }
         void video.play().catch(() => undefined);
       } else if (detail.action === "pause") {
+        desiredPlayingRef.current = false;
         video.pause();
       } else if (detail.action === "seek" || detail.action === "position") {
         const target = detail.position ?? 0;
@@ -399,10 +513,9 @@ export function VideoPipHost() {
         if (Math.abs(video.currentTime - target) > 0.35) {
           video.currentTime = Math.max(0, target);
         }
-        // 主条在播而小窗因错过 play 事件停住时，靠 position 心跳拉起来
-        if (detail.action === "position" && video.paused) {
-          void video.play().catch(() => undefined);
-        }
+        // position 只校时，绝不能改变走带状态。播放器软停期间仍可能再发出
+        // 一两个 timeupdate；若在这里看到 paused 就 play，会把刚暂停的小窗拉起，
+        // onPlay 又反向通知 PlayerBar 播放，最终表现成视频怎样都暂停不了。
       }
     };
     const onSync = (event: Event) => {
@@ -412,17 +525,28 @@ export function VideoPipHost() {
     // PlayerBar 的 play 广播往往早于本监听挂上（兄弟节点 effect 顺序），
     // 和 LocalVideoPlayer 一样接一次缓存时钟。
     const latest = getLatestPlayerSync(trackId);
+    let bootFrame = 0;
+    let boot: (() => void) | null = null;
     if (latest) {
-      const boot = () => applySync(latest);
+      // metadata 可能在用户已经按下暂停后才到。执行时重新读取状态，不能把挂载
+      // 当刻捕获的旧 play 重新应用，否则慢加载的视频同样会“暂停后自己播放”。
+      boot = () => {
+        const current = getLatestPlayerSync(trackId);
+        if (current) applySync(current);
+      };
       const video = videoRef.current;
       if (video && video.readyState >= HTMLMediaElement.HAVE_METADATA) boot();
       else {
         video?.addEventListener("loadedmetadata", boot, { once: true });
         // 源可能还没被 presentation effect 装上，下一帧再试
-        requestAnimationFrame(boot);
+        bootFrame = requestAnimationFrame(boot);
       }
     }
-    return () => window.removeEventListener(MEDIA_SYNC_EVENT, onSync);
+    return () => {
+      window.removeEventListener(MEDIA_SYNC_EVENT, onSync);
+      if (boot) videoRef.current?.removeEventListener("loadedmetadata", boot);
+      if (bootFrame) cancelAnimationFrame(bootFrame);
+    };
   }, [isLocal, session]);
 
   useEffect(() => {
@@ -431,6 +555,7 @@ export function VideoPipHost() {
       if (owner === "preview") return;
       // 本地小窗静音跟时钟，主播放条开声不该把它掐掉
       if (useVideoPip.getState().session?.source === "local") return;
+      desiredPlayingRef.current = false;
       videoRef.current?.pause();
     };
     window.addEventListener(AUDIO_FOCUS_EVENT, onFocus);
@@ -442,30 +567,55 @@ export function VideoPipHost() {
     if (!video) return;
     const onEnter = () => useVideoPip.getState().setSystemPip(true);
     const onLeave = () => useVideoPip.getState().setSystemPip(false);
+    const onWebKitPresentation = () => {
+      const webkit = video as WebKitPipVideo;
+      useVideoPip
+        .getState()
+        .setSystemPip(webkit.webkitPresentationMode === "picture-in-picture");
+    };
     const onPlay = () => {
       const pip = useVideoPip.getState();
-      if (pip.session?.source === "network") {
-        announceAudioFocus("preview");
-      } else if (pip.session?.source === "local" && pip.active && pip.mode === "float") {
-        // 本地小窗本身静音，真正的声音由主播放条输出；原生 PiP 控件也会走这里。
-        broadcastMediaSync({
-          owner: "local-video",
-          action: "play",
-          trackId: pip.session.trackId,
-          position: video.currentTime,
-        });
+      if (pip.session?.source === "network") announceAudioFocus("preview");
+      // 普通 play 多数来自 PlayerBar 同步或首次装载，不得反向再控制播放器。
+      // 只有系统 PiP 原生控件的动作没有我们的 click 入口，需要在这里回传。
+      if (pip.systemPip && !desiredPlayingRef.current) {
+        desiredPlayingRef.current = true;
+        if (pip.session?.source === "local") {
+          broadcastMediaSync({
+            owner: "local-video",
+            action: "play",
+            trackId: pip.session.trackId,
+            position: video.currentTime,
+          });
+        }
       }
       pip.setPlaying(true);
     };
     const onPause = () => {
       const pip = useVideoPip.getState();
       pip.setPlaying(false);
-      if (pip.session?.source === "local" && pip.active && pip.mode === "float") {
-        broadcastMediaSync({
-          owner: "local-video",
-          action: "pause",
-          trackId: pip.session.trackId,
-          position: video.currentTime,
+      if (pip.systemPip) {
+        // 系统小窗里的暂停来自原生控件；尊重它，不做后台自动恢复。
+        const wasDesired = desiredPlayingRef.current;
+        desiredPlayingRef.current = false;
+        if (pip.session?.source === "local" && wasDesired) {
+          broadcastMediaSync({
+            owner: "local-video",
+            action: "pause",
+            trackId: pip.session.trackId,
+            position: video.currentTime,
+          });
+        }
+        return;
+      }
+      // WKWebView 在应用失焦时偶尔主动 pause。走带意图仍是播放时立即转系统
+      // 小窗并恢复；backgroundThrottling=disabled 负责不支持 PiP 平台的时钟降级。
+      if (desiredPlayingRef.current &&
+          (document.visibilityState === "hidden" || !document.hasFocus())) {
+        void enterSystemPip(video).then(() => {
+          if (desiredPlayingRef.current && video.paused) {
+            void video.play().catch(() => undefined);
+          }
         });
       }
     };
@@ -481,6 +631,7 @@ export function VideoPipHost() {
     };
     video.addEventListener("enterpictureinpicture", onEnter);
     video.addEventListener("leavepictureinpicture", onLeave);
+    video.addEventListener("webkitpresentationmodechanged", onWebKitPresentation);
     video.addEventListener("play", onPlay);
     video.addEventListener("pause", onPause);
     video.addEventListener("timeupdate", onTime);
@@ -490,6 +641,7 @@ export function VideoPipHost() {
     return () => {
       video.removeEventListener("enterpictureinpicture", onEnter);
       video.removeEventListener("leavepictureinpicture", onLeave);
+      video.removeEventListener("webkitpresentationmodechanged", onWebKitPresentation);
       video.removeEventListener("play", onPlay);
       video.removeEventListener("pause", onPause);
       video.removeEventListener("timeupdate", onTime);
@@ -506,29 +658,18 @@ export function VideoPipHost() {
   };
 
   const toggle = () => {
-    const video = videoRef.current;
-    if (!video) return;
-    if (video.paused) {
-      if (!isLocal) announceAudioFocus("preview");
-      void video.play().catch((reason: unknown) => {
-        useVideoPip
-          .getState()
-          .setError(reason instanceof Error ? reason.message : String(reason));
-      });
-    } else {
-      video.pause();
-    }
+    window.dispatchEvent(new Event(VIDEO_PIP_TOGGLE_EVENT));
   };
 
-  const seekTo = (at: number) => {
+  const seekTo = (at: number, syncPlayer = true) => {
     const video = videoRef.current;
     const current = useVideoPip.getState().session;
     if (!video || !current || !Number.isFinite(at)) return;
     const next = Math.max(0, duration > 0 ? Math.min(duration, at) : at);
     video.currentTime = next;
     useVideoPip.getState().setPosition(next);
-    if (current.source === "local") {
-      // 小窗是静音跟时钟：拖进度要拽主条音轨，不然画面跳了声音还在旧位置
+    if (current.source === "local" && syncPlayer) {
+      // 小窗是静音跟时钟：提交拖动时拽主条音轨，画面预览阶段不反复重建 Deck。
       broadcastMediaSync({
         owner: "local-video",
         action: "seek",
@@ -544,7 +685,11 @@ export function VideoPipHost() {
     const rect = node.getBoundingClientRect();
     if (rect.width <= 0) return;
     const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-    seekTo(ratio * duration);
+    const at = ratio * duration;
+    pendingScrubRef.current = at;
+    // 每个 pointermove 只预览画面。若每一步都让双 Deck 做无缝 seek，相邻目标
+    // 会在约 0.1 秒的交接窗里反复起音，听起来就是“哒哒”两下。
+    seekTo(at, false);
   };
 
   const onDragPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -733,6 +878,12 @@ export function VideoPipHost() {
                 if (event.currentTarget.hasPointerCapture(event.pointerId)) {
                   event.currentTarget.releasePointerCapture(event.pointerId);
                 }
+                const at = pendingScrubRef.current;
+                pendingScrubRef.current = null;
+                if (at !== null) seekTo(at, true);
+              }}
+              onPointerCancel={() => {
+                pendingScrubRef.current = null;
               }}
             >
               <span

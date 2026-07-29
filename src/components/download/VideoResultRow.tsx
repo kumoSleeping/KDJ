@@ -1,21 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Copy, Download, Music4 } from "lucide-react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Copy, Download } from "lucide-react";
 import { api } from "../../lib/api";
 import { copyText } from "../../lib/copyText";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
+import { rememberVideoEnqueue } from "../../lib/queueTaskDraft";
 import { beginVideoPointerDrag } from "../../lib/searchDrag";
+import { clearTextSelection } from "../../lib/textSelection";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
-import type { MergedGroup, VideoFormat, VideoInfo } from "../../types";
-import { Button, ContextMenu, InlineNotice } from "../common";
+import type { MergedGroup, VideoDownloadRequest, VideoInfo } from "../../types";
+import { ContextMenu, InlineNotice } from "../common";
+import { PlatformMark } from "./PlatformMark";
 import { requestVideoPreview } from "./VideoPreview";
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** 画质是"上限"而不是"精确档"：后端在可用流里挑不超过这个高度的最好的一条。 */
-const HEIGHT_LADDER = [2160, 1440, 1080, 720, 480, 360];
 /** @deprecated 请从 `lib/searchDrag` 引用；保留 re-export 以免旧 import 断掉。 */
 export { VIDEO_DOWNLOAD_DND_TYPE } from "../../lib/searchDrag";
 
@@ -48,7 +49,6 @@ export function isVideoGroup(group: MergedGroup): boolean {
 export function videoSeedFromGroup(group: MergedGroup): VideoSeed {
   const source = group.sources[0];
   return {
-    // key 就是 bvid，payload 里那份是同一个值；两处都取一下免得哪天只填了一处
     bvid: String(source?.payload?.bvid ?? source?.key ?? ""),
     title: group.title,
     author: group.artists.join(", "),
@@ -67,27 +67,20 @@ export function videoSeedFromInfo(info: VideoInfo): VideoSeed {
   };
 }
 
-/**
- * 解析结果按 bvid 缓存。
- * 切标签、滚回去、重搜同一个关键词都会把行重新挂载一遍，
- * 每次都打一趟 B 站纯属白费，还平白增加被风控的机会。
- */
+/** 解析结果按 bvid 缓存，避免滚回去又打一趟 B 站。 */
 const resolvedCache = new Map<string, VideoInfo>();
 
 export interface VideoResultRowProps extends VideoSeed {
   /** 已经解析好的完整信息（贴链接那条路）。不给就等这行滚进视口自己去解析。 */
   info?: VideoInfo | null;
-  /** 视频行横跨整张表，列数由表头决定。 */
-  colSpan: number;
+  /** 保留兼容；现已改成普通多列表格行，不再横跨。 */
+  colSpan?: number;
 }
 
 /**
- * 搜索结果里的一条视频。
- *
- * 视频和歌不是两个板块，只是同一张结果表里长得不一样的两种行：
- * 一首歌一行文字就说完了，视频得先看见画面才知道是不是要的那个，
- * 所以这行占两倍高度、左边放 16:9 的封面、右边把"要下哪一档"的旋钮全摆出来。
- * 原来那个独立的视频面板做的就是这件事，只是它自己霸占了一个标签页。
+ * 搜索结果里的一条视频——外观对齐音频的 MergedGroupRow：
+ * 封面 + 标题 / 艺人 / 时长 / 来源图标 / 下载自 / 音质，行首下载键。
+ * 分 P、画质、Offset 等细项挪到「下载队列」里逐条配置。
  */
 export function VideoResultRow({
   bvid,
@@ -96,46 +89,24 @@ export function VideoResultRow({
   cover,
   duration,
   info: given,
-  colSpan,
 }: VideoResultRowProps) {
   const settings = useAppStore((state) => state.settings);
-  const saveSettings = useAppStore((state) => state.saveSettings);
   const openQueuePanel = useAppStore((state) => state.openQueuePanel);
   const mergeTasks = useDownloadStore((state) => state.mergeTasks);
 
   const [info, setInfo] = useState<VideoInfo | null>(given ?? resolvedCache.get(bvid) ?? null);
-  const [pageIndex, setPageIndex] = useState(0);
-  const [maxHeight, setMaxHeight] = useState<number | null>(null);
-  const [audioOnly, setAudioOnly] = useState(false);
   const [sending, setSending] = useState(false);
-  /** 下载失败的原因，贴在这一行自己的按钮旁边——参数还在，再按一次就是重试。 */
   const [sendError, setSendError] = useState("");
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
   const rowRef = useRef<HTMLTableRowElement>(null);
   const pointerDragCleanupRef = useRef<(() => void) | null>(null);
   const suppressClickRef = useRef(false);
 
   useEffect(() => () => pointerDragCleanupRef.current?.(), []);
 
-  const effectiveHeight = maxHeight ?? settings?.video_max_height ?? 1080;
-  const effectiveFormat = audioOnly ? "m4a" : (settings?.video_format ?? "mp4");
-  const pages = info?.pages ?? [];
+  const effectiveHeight = settings?.video_max_height ?? 1080;
+  const qualityLabel = `${effectiveHeight}P`;
 
-  const cycleHeight = () => {
-    const index = HEIGHT_LADDER.indexOf(effectiveHeight);
-    setMaxHeight(HEIGHT_LADDER[(index + 1 + HEIGHT_LADDER.length) % HEIGHT_LADDER.length]);
-  };
-  const cycleFormat = () => {
-    if (audioOnly) return;
-    const formats: VideoFormat[] = ["mp4", "mkv", "mov"];
-    const index = formats.indexOf(effectiveFormat as VideoFormat);
-    void saveSettings({ video_format: formats[(index + 1 + formats.length) % formats.length] });
-  };
-
-  /**
-   * 关键词搜出来的视频没有分 P 和可用画质，得再问一次 B 站才知道。
-   * 一屏几十条一起打过去正是最容易触发风控的形状（见 HANDOFF 的坑表），
-   * 所以等这一行真的滚进视口了再解析——不看的那些根本不发请求。
-   */
   useEffect(() => {
     if (info) return;
     const node = rowRef.current;
@@ -150,8 +121,6 @@ export function VideoResultRow({
           resolvedCache.set(bvid, result);
           if (alive) setInfo(result);
         })
-        // 解析只是**补充**分 P / 可用画质，失败了照样能按当前参数下载。
-        // 往行里塞一条错误反而会把真正该看的"下载失败"挤下去。
         .catch(() => undefined);
     });
     observer.observe(node);
@@ -161,26 +130,26 @@ export function VideoResultRow({
     };
   }, [bvid, info]);
 
+  const buildRequest = useCallback((): VideoDownloadRequest => {
+    return {
+      bvid,
+      page_index: 0,
+      max_height: effectiveHeight,
+      audio_only: false,
+      transcode: true,
+      title: title.trim() || undefined,
+      artist: author.trim() || undefined,
+      cover: cover.trim() || undefined,
+    };
+  }, [bvid, effectiveHeight, title, author, cover]);
+
   const download = useCallback(async () => {
     setSending(true);
     setSendError("");
     try {
-      const task = await api.videoDownload({
-        bvid,
-        page_index: pageIndex,
-        max_height: effectiveHeight,
-        audio_only: audioOnly,
-        // 恒真，没有开关：不转码只是把 B 站的原始流直接封进容器，
-        // Resolume / Final Cut / 一部分播放器打不开那种封装，下下来是废的。
-        // 而且必须显式写 true——后端 apply_video_defaults 见 false 会当成"没指定"，
-        // 落回全局设置里的 video_transcode（默认 false），等于这行白写。
-        transcode: true,
-        title: title.trim() || undefined,
-        artist: author.trim() || undefined,
-        cover: cover.trim() || undefined,
-      });
-      // 和音频走同一个队列 store，右边那栏就是同一个 QueuePanel——
-      // 任务当场出现在那里，就是"已加入队列"最好的回执。
+      const request = buildRequest();
+      const task = await api.videoDownload(request);
+      rememberVideoEnqueue(task.id, request);
       mergeTasks([
         {
           ...task,
@@ -195,203 +164,178 @@ export function VideoResultRow({
     } finally {
       setSending(false);
     }
-  }, [bvid, pageIndex, effectiveHeight, audioOnly, title, author, cover, mergeTasks, openQueuePanel]);
+  }, [buildRequest, title, author, cover, mergeTasks, openQueuePanel]);
 
-  const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
+  const bindPointerDrag = (event: React.PointerEvent) => {
+    if (!bvid) return;
+    pointerDragCleanupRef.current?.();
+    pointerDragCleanupRef.current = beginVideoPointerDrag(
+      event.nativeEvent,
+      {
+        bvid,
+        page_index: 0,
+        max_height: effectiveHeight,
+        audio_only: false,
+        transcode: true,
+      },
+      { title, artist: author, cover },
+      (error) => setSendError(`拖入失败：${errorText(error)}`),
+      () => {
+        suppressClickRef.current = true;
+      },
+    );
+  };
+
+  const thumbImg = cover && (
+    <img
+      src={thumbUrl(cover)}
+      alt=""
+      loading="lazy"
+      draggable={false}
+      referrerPolicy="no-referrer"
+      onError={(event) => {
+        event.currentTarget.style.display = "none";
+      }}
+    />
+  );
+
+  const cellDrag = {
+    draggable: true as const,
+    onDragStart: (event: React.DragEvent) => {
+      // HTML5 drag 留给外层；WKWebView 里真正靠 pointer drag。
+      event.preventDefault();
+    },
+  };
 
   return (
-    <tr
-      ref={rowRef}
-      data-video="true"
-      onContextMenu={(event) => {
-        if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
-        event.preventDefault();
-        setRowMenu({ x: event.clientX, y: event.clientY });
-      }}
-    >
-      <td colSpan={colSpan}>
-        {/* 没有单独的「预览」按钮：点行身按底栏三态（右栏/浮动/系统画中画）开预览。
-            分 P / 画质那些控件自己消费点击，closest 一挡就分开了。 */}
-        <div
-          className="kd-video-row"
-          title="双击预览视频；拖到下载队列或左侧文件夹"
-          onPointerDown={(event) => {
-            if (!bvid) return;
-            pointerDragCleanupRef.current?.();
-            pointerDragCleanupRef.current = beginVideoPointerDrag(
-              event.nativeEvent,
-              {
-                bvid,
-                page_index: pageIndex,
-                max_height: effectiveHeight,
-                audio_only: audioOnly,
-                transcode: true,
-              },
-              { title, artist: author, cover },
-              (error) => setSendError(`拖入失败：${errorText(error)}`),
-              () => {
-                suppressClickRef.current = true;
-              },
-            );
-          }}
-          onClick={() => {
-            // 单击只保留行内操作；播放必须等完整的 dblclick，避免第一下就出声。
-            if (suppressClickRef.current) suppressClickRef.current = false;
-          }}
-          onDoubleClick={(event) => {
-            if (suppressClickRef.current) {
-              suppressClickRef.current = false;
-              return;
-            }
-            if (!bvid) return;
-            if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
-            requestVideoPreview({ bvid, title, author, page: pageIndex, cover });
-          }}
-        >
-          {/* 封面按 16:9 摆：视频封面本来就是宽的，裁成方块等于把画面切掉一半。
-              尺寸由 CSS 写死，图片加载完不会把整行顶一下。 */}
-          <span className="kd-video-cover">
-            {cover && (
-              <img
-                src={thumbUrl(cover, 160)}
-                alt=""
-                loading="lazy"
-                draggable={false}
-                referrerPolicy="no-referrer"
-                onError={(event) => {
-                  event.currentTarget.style.display = "none";
-                }}
-              />
-            )}
+    <Fragment>
+      <tr
+        ref={rowRef}
+        data-video="true"
+        onContextMenu={(event) => {
+          if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+          event.preventDefault();
+          setRowMenu({ x: event.clientX, y: event.clientY });
+        }}
+        onDoubleClick={(event) => {
+          if (suppressClickRef.current) {
+            suppressClickRef.current = false;
+            return;
+          }
+          if (!bvid) return;
+          if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+          requestVideoPreview({ bvid, title, author, page: 0, cover });
+        }}
+        onPointerDown={(event) => {
+          if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+          bindPointerDrag(event);
+        }}
+        onClick={() => {
+          if (suppressClickRef.current) suppressClickRef.current = false;
+        }}
+        title="双击预览视频；点下载加入队列后可在队列里调分 P / 画质 / Offset"
+      >
+        <td className="kd-selection-cell" {...cellDrag} />
+        <td className="kd-result-lead" {...cellDrag}>
+          <span className="kd-result-lead-actions">
+            <button
+              type="button"
+              className="kd-result-lead-btn"
+              aria-label={`下载 ${title}`}
+              title="加入下载队列（细项在队列里配）"
+              disabled={sending || !bvid}
+              onClick={(event) => {
+                event.stopPropagation();
+                void download();
+              }}
+            >
+              <Download size={13} />
+            </button>
+            <span className="kd-result-lead-spacer" aria-hidden="true" />
           </span>
-
-          <div className="kd-video-body">
-            <div className="kd-video-title kd-truncate" title={title}>
-              {title}
-            </div>
-
-            <div className="kd-video-meta">
-              <span className="kd-truncate">{author || DASH}</span>
-              <span>{formatDuration(duration)}</span>
-              <span className="kd-mono">{bvid}</span>
-              {/* 只在未登录时出声：高清晰度和会员视频拿不到，这时候才需要解释 */}
-              {info && !info.logged_in && (
-                <span
-                  style={{ color: "var(--kd-warn)" }}
-                  title="未登录：高清晰度和会员视频拿不到。去列表标签行最右边的「登录」扫码"
-                >
-                  未登录
-                </span>
-              )}
-            </div>
-
-            <div className="kd-video-controls">
-              {pages.length > 1 && (
-                <span className="kd-cycle-field">
-                  <span>分 P</span>
-                  <button
-                    type="button"
-                    className="kd-cycle-control"
-                    title={`${pages[pageIndex]?.title ?? `P${pageIndex + 1}`} · 点击切换下一分 P`}
-                    onClick={() => setPageIndex((pageIndex + 1) % pages.length)}
-                  >
-                    P{pageIndex + 1}/{pages.length}
-                  </button>
-                </span>
-              )}
-
-              <span className="kd-cycle-field">
-                <span>画质</span>
-                <button
-                  type="button"
-                  className="kd-cycle-control"
-                  disabled={audioOnly}
-                  title={`最高 ${effectiveHeight}p · 点击切换`}
-                  onClick={cycleHeight}
-                >
-                  {effectiveHeight}P
-                </button>
-              </span>
-
-              <span className="kd-cycle-field">
-                <span>格式</span>
-                <button
-                  type="button"
-                  className="kd-cycle-control"
-                  disabled={audioOnly}
-                  title={`封装格式：${effectiveFormat.toUpperCase()} · 点击切换`}
-                  onClick={cycleFormat}
-                >
-                  {effectiveFormat.toUpperCase()}
-                </button>
-              </span>
-
-              {/* 视频就是视频：默认下完整画面，这个勾才是"我这次只要声音" */}
-              <label className="kd-check">
-                <input
-                  type="checkbox"
-                  checked={audioOnly}
-                  onChange={(event) => setAudioOnly(event.target.checked)}
-                />
-                <Music4 size={12} />
-                只要音轨
-              </label>
-
-              {/* 「转码」开关删了，恒转码（见 download 里的注释）：这个勾唯一的用处是
-                  换取速度，代价是有概率下到一个打不开的文件——赌注和收益不对等，
-                  而且要下完拖进剪辑软件才发现输了。 */}
-
-              <span className="kd-toolbar-gap" />
-              {/* 中性而不是红：搜索一屏能出十几条视频行，每行一颗红按钮就是
-                  十几个"强调"，等于没有强调。红色留给底部那颗批量入队的主按钮。 */}
-              <Button size="sm" disabled={sending} onClick={() => void download()}>
-                <Download size={12} />
-                下载
-              </Button>
-            </div>
-
+        </td>
+        <td className="kd-td-strong" data-col="title" title={title} {...cellDrag}>
+          <span
+            className="kd-thumb"
+            onPointerDown={(event) => {
+              event.stopPropagation();
+              clearTextSelection();
+              bindPointerDrag(event);
+            }}
+          >
+            {thumbImg}
+          </span>
+          {title}
+        </td>
+        <td data-col="artist" title={author || undefined} {...cellDrag}>
+          {author || DASH}
+        </td>
+        <td data-col="album" {...cellDrag}>
+          {DASH}
+        </td>
+        <td className="kd-td-num" {...cellDrag}>
+          {formatDuration(duration ?? info?.duration ?? null)}
+        </td>
+        <td {...cellDrag}>
+          <span className="kd-source-dots" title="B站">
+            <span className="kd-source-dot" data-platform="bilibili" data-active="true">
+              <PlatformMark id="bilibili" size={12} />
+            </span>
+          </span>
+        </td>
+        <td className="kd-mono" {...cellDrag}>
+          B站
+        </td>
+        <td className="kd-td-num kd-mono" {...cellDrag}>
+          {qualityLabel}
+        </td>
+        <td style={{ width: "3rem" }} {...cellDrag} />
+      </tr>
+      {sendError ? (
+        <tr data-video="true">
+          <td colSpan={10}>
             <InlineNotice text={sendError} onDismiss={() => setSendError("")} />
-          </div>
-        </div>
-        {rowMenu && (
-          <ContextMenu x={rowMenu.x} y={rowMenu.y} onClose={() => setRowMenu(null)}>
+          </td>
+        </tr>
+      ) : null}
+      {rowMenu && (
+        <ContextMenu x={rowMenu.x} y={rowMenu.y} onClose={() => setRowMenu(null)}>
+          <button
+            type="button"
+            onClick={() => {
+              void copyText(title);
+              setRowMenu(null);
+            }}
+          >
+            <Copy size={12} />
+            复制标题
+          </button>
+          {author ? (
             <button
               type="button"
               onClick={() => {
-                void copyText(title);
+                void copyText(author);
                 setRowMenu(null);
               }}
             >
               <Copy size={12} />
-              复制标题
+              复制 UP 主
             </button>
-            {author ? (
-              <button
-                type="button"
-                onClick={() => {
-                  void copyText(author);
-                  setRowMenu(null);
-                }}
-              >
-                <Copy size={12} />
-                复制 UP 主
-              </button>
-            ) : null}
-            {bvid ? (
-              <button
-                type="button"
-                onClick={() => {
-                  void copyText(bvid);
-                  setRowMenu(null);
-                }}
-              >
-                <Copy size={12} />
-                复制 BV 号
-              </button>
-            ) : null}
-          </ContextMenu>
-        )}
-      </td>
-    </tr>
+          ) : null}
+          {bvid ? (
+            <button
+              type="button"
+              onClick={() => {
+                void copyText(bvid);
+                setRowMenu(null);
+              }}
+            >
+              <Copy size={12} />
+              复制 BV 号
+            </button>
+          ) : null}
+        </ContextMenu>
+      )}
+    </Fragment>
   );
 }

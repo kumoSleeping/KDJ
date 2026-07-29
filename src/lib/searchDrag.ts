@@ -12,6 +12,7 @@ import {
   searchQueueDropElementAt,
 } from "./folderDrop";
 import { withDownloadDisplay } from "./downloadDisplay";
+import { rememberVideoEnqueue } from "./queueTaskDraft";
 import { useAppStore } from "../stores/appStore";
 import { useDownloadStore } from "../stores/downloadStore";
 import { useLibraryStore } from "../stores/libraryStore";
@@ -326,6 +327,12 @@ export async function enqueueSearchQueuePayload(payload: ActiveSearchDrag): Prom
       artist: payload.artist,
       cover: payload.cover,
     });
+    rememberVideoEnqueue(task.id, {
+      ...payload.request,
+      title: payload.title,
+      artist: payload.artist,
+      cover: payload.cover,
+    });
     downloads.mergeTasks([
       withDownloadDisplay(task, {
         title: payload.title,
@@ -390,13 +397,15 @@ export async function enqueueSearchPayload(
       },
     ]);
     try {
-      const task = await api.videoDownload({
+      const request = {
         ...payload.request,
         dest_dir: dest,
         title,
         artist,
         cover: cover || undefined,
-      });
+      };
+      const task = await api.videoDownload(request);
+      rememberVideoEnqueue(task.id, request);
       downloads.removeLocal(optimisticId);
       downloads.mergeTasks([
         withDownloadDisplay(task, { title, artist, cover, dest_dir: dest }),

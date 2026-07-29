@@ -10,12 +10,14 @@ import {
   isSearchDownloadDrag,
   readSearchDrop,
 } from "../../lib/searchDrag";
+import { forgetQueueDraft } from "../../lib/queueTaskDraft";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
 import type { DownloadTask, FolderNode, Quality, TaskState } from "../../types";
 import { Button, ContextMenu, EmptyState, InlineNotice, ProgressBar } from "../common";
 import { PLATFORM_LABEL } from "./MergedGroupRow";
+import { QueueRowConfig } from "./QueueRowConfig";
 
 const STATE_LABEL: Record<TaskState, string> = {
   queued: "排队",
@@ -61,7 +63,19 @@ function progressState(state: TaskState): "running" | "done" | "failed" {
   return "running";
 }
 
-function QueueRow({ task, onOpenTask }: { task: DownloadTask; onOpenTask(task: DownloadTask): void }) {
+function QueueRow({
+  task,
+  expanded,
+  onToggle,
+  onExpandId,
+  onOpenTask,
+}: {
+  task: DownloadTask;
+  expanded: boolean;
+  onToggle(): void;
+  onExpandId(id: string): void;
+  onOpenTask(task: DownloadTask): void;
+}) {
   const cancel = useDownloadStore((store) => store.cancel);
   const remove = useDownloadStore((store) => store.remove);
   /** 取消这一条失败时的原因，和任务自己的 error 共用行尾那一行。 */
@@ -73,19 +87,26 @@ function QueueRow({ task, onOpenTask }: { task: DownloadTask; onOpenTask(task: D
   // 否则会一直停在 0% 让人以为卡死了
   const unknownTotal = task.state === "running" && task.total_bytes <= 0;
   const kind = kindLabel(task);
+  const configurable = task.kind === "video" || task.kind === "audio";
 
   return (
     <div
       className="kd-queue-row"
+      data-expanded={expanded || undefined}
+      data-configurable={configurable || undefined}
+      onClick={() => {
+        if (configurable) onToggle();
+      }}
       onContextMenu={(event) => {
         event.preventDefault();
         setMenu({ x: event.clientX, y: event.clientY });
       }}
+      title={configurable ? (expanded ? "收起配置" : "点开配置本条下载参数") : undefined}
     >
       <span className="kd-queue-title" title={`${task.title} — ${task.artist}`}>
         {task.title}
       </span>
-      <span className="kd-row" style={{ gap: "0.3rem" }}>
+      <span className="kd-row" style={{ gap: "0.3rem" }} onClick={(event) => event.stopPropagation()}>
         {kind ? (
           <span className="kd-chip" data-tone="theme">
             {kind}
@@ -104,9 +125,11 @@ function QueueRow({ task, onOpenTask }: { task: DownloadTask; onOpenTask(task: D
             aria-label="取消"
             onClick={() => {
               setCancelError("");
-              void cancel(task.id).catch((error: unknown) =>
-                setCancelError(`取消失败：${(error as Error).message}`),
-              );
+              void cancel(task.id)
+                .then(() => forgetQueueDraft(task.id))
+                .catch((error: unknown) =>
+                  setCancelError(`取消失败：${(error as Error).message}`),
+                );
             }}
           >
             <X size={12} />
@@ -126,7 +149,11 @@ function QueueRow({ task, onOpenTask }: { task: DownloadTask; onOpenTask(task: D
             type="button"
             className="kd-text-action"
             aria-label="移除队列记录"
-            onClick={() => void remove(task.id).catch((error: unknown) => setCancelError(`移除失败：${(error as Error).message}`))}
+            onClick={() =>
+              void remove(task.id)
+                .then(() => forgetQueueDraft(task.id))
+                .catch((error: unknown) => setCancelError(`移除失败：${(error as Error).message}`))
+            }
           >
             移除
           </button>
@@ -160,7 +187,7 @@ function QueueRow({ task, onOpenTask }: { task: DownloadTask; onOpenTask(task: D
       </div>
 
       {active && (
-        <div style={{ gridColumn: "1 / -1" }}>
+        <div style={{ gridColumn: "1 / -1" }} onClick={(event) => event.stopPropagation()}>
           <ProgressBar
             value={task.progress}
             state={progressState(task.state)}
@@ -178,10 +205,18 @@ function QueueRow({ task, onOpenTask }: { task: DownloadTask; onOpenTask(task: D
       {/* 取消失败是"我按了但没反应"，必须留在这一条上：任务还在跑，
           光看进度条根本分不清是没点上还是后端拒绝了 */}
       {cancelError && (
-        <div style={{ gridColumn: "1 / -1" }}>
+        <div style={{ gridColumn: "1 / -1" }} onClick={(event) => event.stopPropagation()}>
           <InlineNotice text={cancelError} onDismiss={() => setCancelError("")} />
         </div>
       )}
+
+      <div style={{ gridColumn: "1 / -1" }} onClick={(event) => event.stopPropagation()}>
+        <QueueRowConfig
+          task={task}
+          open={expanded}
+          onTaskReplaced={onExpandId}
+        />
+      </div>
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
@@ -337,6 +372,7 @@ export function QueuePanel() {
   const activeCount = useDownloadStore((store) => store.activeCount);
   const clear = useDownloadStore((store) => store.clear);
   const [dropActive, setDropActive] = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const folders = useLibraryStore((store) => store.folders);
   const setFilter = useLibraryStore((store) => store.setFilter);
   const setQueueView = useLibraryStore((store) => store.setQueueView);
@@ -444,7 +480,16 @@ export function QueuePanel() {
             hint="把搜索结果拖进左边文件夹，或勾选后点「加入队列」。"
           />
         ) : (
-          list.map((task) => <QueueRow key={task.id} task={task} onOpenTask={openTask} />)
+          list.map((task) => (
+            <QueueRow
+              key={task.id}
+              task={task}
+              expanded={expandedId === task.id}
+              onToggle={() => setExpandedId((current) => (current === task.id ? null : task.id))}
+              onExpandId={setExpandedId}
+              onOpenTask={openTask}
+            />
+          ))
         )}
       </div>
     </div>

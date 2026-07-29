@@ -1430,7 +1430,7 @@ export function TrackTable({
           )}
           <button type="button" onClick={() => runDelete("keep")}>
             <ListX size={12} />
-            移出曲库{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}（保留文件）
+            移出曲库{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}
           </button>
         </ContextMenu>
       )}

@@ -93,9 +93,9 @@ impl ProviderContext {
         self.data_dir.join("sessions")
     }
 
-    /// 按平台分子目录存放下载文件，顺手建目录。
-    pub fn platform_dir(&self, platform: Platform) -> std::io::Result<PathBuf> {
-        let target = self.download_dir().join(platform.download_dir_name());
+    /// 下载落盘目录。直接用设置里的下载根目录，不再按平台分子目录。
+    pub fn platform_dir(&self, _platform: Platform) -> std::io::Result<PathBuf> {
+        let target = self.download_dir();
         std::fs::create_dir_all(&target)?;
         Ok(target)
     }
@@ -325,9 +325,35 @@ fn upscale_qr(data: &[u8]) -> Option<Vec<u8>> {
     Some(png)
 }
 
-/// 用来把下载目录里已存在的同名文件先删掉（Python 版的 `if filepath.exists(): unlink()`）。
-pub fn remove_existing(path: &Path) {
-    let _ = std::fs::remove_file(path);
+/// 同名时加 ` (2)`、` (3)`……，不覆盖已有文件。
+pub fn unique_download_path(directory: &Path, filename: &str) -> PathBuf {
+    let target = directory.join(filename);
+    if !target.exists() {
+        return target;
+    }
+    let path = Path::new(filename);
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let suffix = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    for index in 2..10_000 {
+        let candidate = directory.join(format!("{stem} ({index}){suffix}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    directory.join(format!("{stem} ({})", uuid_lite()))
+}
+
+fn uuid_lite() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0)
 }
 
 /// 取一个字符串字段，**空串等同于缺失**。
@@ -456,8 +482,62 @@ mod tests {
     }
 
     #[test]
-    fn platform_dirs_match_the_python_layout() {
-        // 改这些名字等于把老用户已经下好的文件"搬家"
+    fn platform_dir_is_flat_download_root() {
+        let root = std::env::temp_dir().join(format!(
+            "kdj-platform-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let ctx = ProviderContext::new(
+            root.join("data"),
+            ProviderLiveSettings {
+                download_dir: root.join("dl"),
+                filename_template: "{title} - {artist}".into(),
+                default_quality: Quality::Flac,
+                netease_use_download_api: false,
+                soundcloud_enabled: false,
+                video_dir: None,
+                video_format: "mp4".into(),
+            },
+        );
+        let target = ctx.platform_dir(Platform::Wyy).unwrap();
+        assert_eq!(target, root.join("dl"));
+        assert!(target.is_dir());
+        assert!(!target.join("netease").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unique_download_path_adds_suffix_on_collision() {
+        let root = std::env::temp_dir().join(format!(
+            "kdj-unique-dl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let first = unique_download_path(&root, "song.mp3");
+        assert_eq!(first.file_name().unwrap(), "song.mp3");
+        std::fs::write(&first, b"a").unwrap();
+        let second = unique_download_path(&root, "song.mp3");
+        assert_eq!(second.file_name().unwrap(), "song (2).mp3");
+        std::fs::write(&second, b"b").unwrap();
+        let third = unique_download_path(&root, "song.mp3");
+        assert_eq!(third.file_name().unwrap(), "song (3).mp3");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn download_dir_names_stay_stable_for_legacy_paths() {
+        // 历史子目录名仍保留在枚举上，避免误改把老用户文件路径语义弄乱
         assert_eq!(Platform::Wyy.download_dir_name(), "netease");
         assert_eq!(Platform::Qqm.download_dir_name(), "qqmusic");
         assert_eq!(Platform::Bilibili.download_dir_name(), "bilibili");

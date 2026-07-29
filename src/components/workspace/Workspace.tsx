@@ -97,7 +97,6 @@ export function Workspace() {
   const listMode = useAppStore((state) => state.listMode);
   const hasResults = useAppStore((state) => state.hasResults);
   const openQueuePanel = useAppStore((state) => state.openQueuePanel);
-  const openPreviewPanel = useAppStore((state) => state.openPreviewPanel);
   const setHasResults = useAppStore((state) => state.setHasResults);
   const videoPipMode = useVideoPip((state) => state.mode);
   const videoPipSession = useVideoPip((state) => state.session);
@@ -464,28 +463,21 @@ export function Workspace() {
     return () => window.removeEventListener(DETAIL_EVENT, onDetail);
   }, [layout, portrait, showTrackDetail]);
 
-  // 网络视频：右栏面板档才拉开预览板块；浮动档要关掉这块，别占右栏
+  // 网络视频：右栏预览面板暂时关闭，不再自动拉开预览板块。
   useEffect(() => {
     if (videoPipMode === "panel" && videoPipSession?.source === "network") {
-      if (asideLockedRef.current) return;
-      if (!useAppStore.getState().showPreview) previewJumpRef.current = true;
-      openPreviewPanel();
-      if (layout === "narrow") setSheet("aside");
-      return;
+      if (useAppStore.getState().showPreview) useAppStore.getState().dismissOverlay();
     }
-    if (useAppStore.getState().showPreview) {
-      useAppStore.getState().dismissOverlay();
-    }
-  }, [videoPipMode, videoPipSession, layout, openPreviewPanel]);
+  }, [videoPipMode, videoPipSession]);
 
   // 右栏那份内容只写一遍，宽屏塞进 <aside>、窄屏塞进抽屉——
   // 写两份的话，以后加一种面板必然漏改一处
   // 下载队列只在显式打开 / 真正入队时出现；搜索半栏另看 hasResults。
-  // 歌曲试听走主播放条；网络视频在「右栏面板」模式下才占这里。
+  // 歌曲试听走主播放条；网络视频右栏预览暂时关闭。
   // 空闲不挂「选一首看详情」占位——没旁路内容时右栏整块消失，列表吃满宽。
   const queueAside = showQueue;
-  const previewAside =
-    showPreview && videoPipMode === "panel" && videoPipSession?.source === "network";
+  // 暂时关掉右栏网络视频预览面板：细项改到下载队列里配；双击仍走浮动 / 系统 PiP。
+  const previewAside = false;
   const overlayAside =
     showFolders || showSettings || showVjExport || previewAside || queueAside;
   const detailAside = detailPinned && Boolean(selected) && !overlayAside;
@@ -990,6 +982,7 @@ export function Workspace() {
             />
           }
         />
+        <div className="kd-stage">
         <div
           className="kd-split"
           data-folders="true"
@@ -1273,18 +1266,19 @@ export function Workspace() {
           </div>
 
         </div>
-      </div>
 
-      {/* 单栏：右栏与文件夹都进同一套侧方抽屉。 */}
-      {layout === "narrow" && (
-        <Sheet
-          open={sheet === "aside" && hasAsideContent}
-          title={asideLabel || "面板"}
-          onClose={closeAside}
-        >
-          {asidePanel}
-        </Sheet>
-      )}
+        {/* 单栏：右栏进侧方抽屉，只盖中间舞台，不压顶栏/播放条。 */}
+        {layout === "narrow" && (
+          <Sheet
+            open={sheet === "aside" && hasAsideContent}
+            title={asideLabel || "面板"}
+            onClose={closeAside}
+          >
+            {asidePanel}
+          </Sheet>
+        )}
+        </div>
+      </div>
     </section>
   );
 }

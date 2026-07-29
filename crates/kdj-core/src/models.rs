@@ -40,8 +40,8 @@ impl Platform {
         }
     }
 
-    /// 下载落盘的子目录名。和 Python 版 `ctx.platform_dir(...)` 传的字符串一致，
-    /// 改这里等于把老用户已经下好的文件"搬家"，不要动。
+    /// 下载落盘的历史子目录名（曾用于按平台分文件夹）。
+    /// 新下载已改为直接落在下载根目录；保留此方法只是避免旧路径语义被误改。
     pub fn download_dir_name(self) -> &'static str {
         match self {
             Platform::Wyy => "netease",

@@ -23,24 +23,39 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
   // 程序化 seek/play/pause 会异步冒泡 seeked/play/pause；挡住回传，
   // 否则视频会把纠偏当作用户拖动，反过来拽音频时钟，形成卡顿环。
   const suppressSyncRef = useRef(false);
+  const suppressGenerationRef = useRef(0);
   const lastCorrectAtRef = useRef(0);
+  const userSeekTimerRef = useRef(0);
   const [error, setError] = useState("");
 
   const withSuppressed = (run: () => void, holdMs = 0) => {
+    const generation = ++suppressGenerationRef.current;
     suppressSyncRef.current = true;
     run();
-    if (holdMs <= 0) {
-      suppressSyncRef.current = false;
-      return;
-    }
     const video = videoRef.current;
     const release = () => {
-      suppressSyncRef.current = false;
       video?.removeEventListener("seeked", release);
+      // target 上的原生 seeked listener 先于 React 的委托 onSeeked 执行。这里若
+      // 同步清 ref，React 随后会把程序化纠偏误认成用户 seek，再命令音频跳一次；
+      // 那个第二次起音正好晚一个视频 seek 落地时间，听起来就是约 0.1 秒的“哒哒”。
+      queueMicrotask(() => {
+        if (suppressGenerationRef.current === generation) suppressSyncRef.current = false;
+      });
     };
-    video?.addEventListener("seeked", release, { once: true });
-    window.setTimeout(release, holdMs);
+    if (holdMs > 0) {
+      video?.addEventListener("seeked", release, { once: true });
+      window.setTimeout(release, holdMs);
+    } else {
+      release();
+    }
   };
+
+  useEffect(
+    () => () => {
+      window.clearTimeout(userSeekTimerRef.current);
+    },
+    [track.id],
+  );
 
   useEffect(() => {
     const onFocus = (event: Event) => {
@@ -64,7 +79,7 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
       } else if (detail.action === "pause") {
         withSuppressed(() => {
           video.pause();
-        });
+        }, 100);
       } else if (detail.action === "seek" || detail.action === "position") {
         const target = detail.position ?? 0;
         if (!Number.isFinite(target)) return;
@@ -158,12 +173,18 @@ export function LocalVideoPlayer({ track, hidden = false }: { track: Track; hidd
           }}
           onSeeked={(event) => {
             if (suppressSyncRef.current || hidden) return;
-            broadcastMediaSync({
-              owner: "local-video",
-              action: "seek",
-              trackId: track.id,
-              position: event.currentTarget.currentTime,
-            });
+            const position = event.currentTarget.currentTime;
+            // 原生视频控件快速拖动会连续落地多个 seeked。双 Deck 若逐个接手，前一个
+            // 目标刚起音就被后一个目标再起一次，形成约 0.1 秒间隔的“哒哒”声。
+            window.clearTimeout(userSeekTimerRef.current);
+            userSeekTimerRef.current = window.setTimeout(() => {
+              broadcastMediaSync({
+                owner: "local-video",
+                action: "seek",
+                trackId: track.id,
+                position,
+              });
+            }, 80);
           }}
           onError={() => setError("这个视频容器或编码暂不受系统 WebView 支持")}
         />

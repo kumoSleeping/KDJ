@@ -17,9 +17,9 @@ tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
 anyhow = "1.0.104"
-kdj-core = { version = "0.2.2", path = "../crates/kdj-core" }
-kdj-library = { version = "0.2.2", path = "../crates/kdj-library" }
-kdj-server = { version = "0.2.2", path = "../crates/kdj-server" }
+kdj-core = { version = "0.2.11", path = "../crates/kdj-core" }
+kdj-library = { version = "0.2.11", path = "../crates/kdj-library" }
+kdj-server = { version = "0.2.11", path = "../crates/kdj-server" }
 rand = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }
 # tauri.conf.json 里一有 `plugins` 段，`generate_context!` 展开出来的代码就会

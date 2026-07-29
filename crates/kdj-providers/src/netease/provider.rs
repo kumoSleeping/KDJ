@@ -25,7 +25,7 @@ use tokio::io::AsyncWriteExt as _;
 use super::client::{expect_ok, payload, NeteaseClient};
 use crate::net::{host_is, AtomicDownload};
 use crate::provider::{
-    effective_limit, first_truthy, is_truthy, loose_int, qr_data_url_from_text, remove_existing,
+    effective_limit, first_truthy, is_truthy, loose_int, qr_data_url_from_text, unique_download_path,
     str_field, Capabilities, DownloadJob, MusicProvider, ProviderContext,
 };
 use crate::tags;
@@ -529,8 +529,7 @@ impl MusicProvider for NeteaseProvider {
             &source.key,
             &ext,
         );
-        let final_path = output_dir.join(filename);
-        remove_existing(&final_path);
+        let final_path = unique_download_path(&output_dir, &filename);
 
         let guard = AtomicDownload::new(&final_path);
         let response = self

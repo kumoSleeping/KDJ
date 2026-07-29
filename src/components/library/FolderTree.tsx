@@ -328,10 +328,14 @@ export function FolderTree() {
   const settings = useAppStore((state) => state.settings);
   const saveSettings = useAppStore((state) => state.saveSettings);
   const queueCount = useQueueStore((state) => state.ids.length);
+  const statsTotal = useLibraryStore((state) => state.stats?.total);
   /** 移出曲库的二次确认：第一次上膛，第二次才执行（和曲目表删文件同套路）。 */
   const [forgetArmed, setForgetArmed] = useState("");
 
   const roots = folders?.roots ?? [];
+  const allTrackCount =
+    statsTotal ??
+    roots.reduce((sum, root) => sum + root.total_count, 0) + (folders?.outside ?? 0);
   const [expanded, setExpanded] = useExpanded(roots);
   const [importing, setImporting] = useState("");
   const [dropTarget, setDropTarget] = useState("");
@@ -741,9 +745,8 @@ export function FolderTree() {
         >
           <span className="kd-folder-caret" />
           <ListMusic size={13} />
-          <span className="kd-truncate">
-            临时列表 <span className="kd-folder-count">({queueCount})</span>
-          </span>
+          <span className="kd-truncate">临时列表</span>
+          <span className="kd-folder-count">{queueCount}</span>
         </div>
         <div
           className="kd-folder"
@@ -756,6 +759,7 @@ export function FolderTree() {
           <span className="kd-folder-caret" />
           <Library size={13} />
           <span className="kd-truncate">全部曲目</span>
+          <span className="kd-folder-count">{allTrackCount}</span>
         </div>
         {roots.map((root) => render(root, 0))}
         {roots.length === 0 && (
@@ -952,8 +956,8 @@ export function FolderTree() {
             {forgetArmed === menu.node.path && menu.node.total_count > 0
               ? `确认移出 ${menu.node.total_count} 首？文件保留`
               : menu.node.is_root
-                ? `移出曲库根${menu.node.total_count > 0 ? `（${menu.node.total_count} 首）` : ""}（保留文件）`
-                : `移出曲库${menu.node.total_count > 0 ? `（${menu.node.total_count} 首）` : ""}（保留文件）`}
+                ? `移出曲库根${menu.node.total_count > 0 ? `（${menu.node.total_count} 首）` : ""}`
+                : `移出曲库${menu.node.total_count > 0 ? `（${menu.node.total_count} 首）` : ""}`}
           </button>
           <button
             type="button"

@@ -61,6 +61,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const suppressSyncEventRef = useRef(false);
+  const suppressGenerationRef = useRef(0);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const sampleRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
   const bucketsRef = useRef<Float32Array>(new Float32Array(BUCKETS));
@@ -158,11 +159,18 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
   const lastCorrectAtRef = useRef(0);
   useEffect(() => {
     const holdSuppress = (ms: number) => {
+      const generation = ++suppressGenerationRef.current;
       suppressSyncEventRef.current = true;
       const video = videoRef.current;
       const release = () => {
-        suppressSyncEventRef.current = false;
         video?.removeEventListener("seeked", release);
+        // React 的 onSeeked 在原生 target listener 之后才运行；延后释放才能保证
+        // 程序化校时不会被当作用户跳转反向送回播放器。
+        queueMicrotask(() => {
+          if (suppressGenerationRef.current === generation) {
+            suppressSyncEventRef.current = false;
+          }
+        });
       };
       video?.addEventListener("seeked", release, { once: true });
       window.setTimeout(release, ms);

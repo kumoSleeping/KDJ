@@ -228,9 +228,9 @@ export const api = {
     const { baseUrl } = bridge();
     return `${baseUrl}/api/library/audio/${id}`;
   },
-  videoUrl: (id: number) => {
+  videoUrl: (id: number, compatible = false) => {
     const { baseUrl } = bridge();
-    return `${baseUrl}/api/library/video/${id}`;
+    return `${baseUrl}/api/library/video/${id}${compatible ? "?compat=true" : ""}`;
   },
   /**
    * `version` 是 cache-buster，不是后端认识的参数。

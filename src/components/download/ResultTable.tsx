@@ -75,14 +75,20 @@ export interface ResultTableProps {
   onDownloadGroup(group: MergedGroup): void;
 }
 
-/** 表头列（首列的全选框由组件自己渲染，所以不在这里）。 */
-const HEAD_COLUMNS: ReadonlyArray<{ label: string; width?: string; num?: boolean }> = [
+/** 表头列（首列的全选框由组件自己渲染，所以不在这里）。
+ * 标题 / 艺人 / 专辑宽度对齐曲库 TrackTable：标题固定 14rem，不参与压缩。 */
+const HEAD_COLUMNS: ReadonlyArray<{
+  label: string;
+  width?: string;
+  num?: boolean;
+  col?: string;
+}> = [
   { label: "", width: "3.4rem" },
-  { label: "标题" },
-  { label: "艺人", width: "18%" },
-  { label: "专辑", width: "16%" },
+  { label: "标题", width: "14rem", col: "title" },
+  { label: "艺人", width: "6.5rem", col: "artist" },
+  { label: "专辑", width: "5.75rem", col: "album" },
   { label: "时长", width: "4.5rem", num: true },
-  { label: "来源", width: "3.5rem" },
+  { label: "来源", width: "4.5rem" },
   { label: "下载自", width: "4.5rem" },
   { label: "音质", width: "4rem", num: true },
   { label: "", width: "3rem" },
@@ -188,6 +194,7 @@ export function ResultTable({
             {HEAD_COLUMNS.map((column, index) => (
               <th
                 key={column.label || `spacer-${index}`}
+                data-col={column.col}
                 style={column.width ? { width: column.width } : undefined}
                 className={column.num ? "kd-td-num" : undefined}
               >

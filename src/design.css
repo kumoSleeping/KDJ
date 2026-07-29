@@ -307,20 +307,12 @@ textarea {
   --kd-traffic-pad: 72px;
 }
 .kd-app[data-mobile="true"] {
-  /* 移动端顶栏必须留足：状态栏 / 刘海 / Dynamic Island 都不能压住操作。 */
-  --kd-chrome-top: calc(72px + max(env(safe-area-inset-top, 0px), 44px));
+  /* 顶栏高度跟桌面一致，不在竖屏/移动端额外加高。 */
   --kd-traffic-pad: 0px;
   --kd-player-h: 78px;
 }
-/* 竖屏再加一截帽檐，右侧工具避开系统区。 */
-.kd-app[data-mobile="true"][data-portrait="true"] {
-  --kd-chrome-top: calc(84px + max(env(safe-area-inset-top, 0px), 52px));
-}
-/* 桌面竖屏预览：加高顶栏；左侧空给红绿灯，工具全在右侧。 */
-.kd-app[data-mac="true"][data-portrait="true"] {
-  --kd-chrome-top: 56px;
-}
-.kd-app:not([data-mac="true"]):not([data-mobile="true"]) {
+/* 非 Mac（含移动端）顶栏与普通客户端一致。 */
+.kd-app:not([data-mac="true"]) {
   --kd-chrome-top: 28px;
   --kd-traffic-pad: 0px;
 }
@@ -330,25 +322,6 @@ textarea {
 .kd-app[data-mobile="true"] .kd-player {
   padding-bottom: max(env(safe-area-inset-bottom, 0px), 22px);
   height: calc(var(--kd-player-h) + max(env(safe-area-inset-bottom, 0px), 22px));
-}
-/* 顶栏内容贴底排：右侧历史/设置躲开刘海，左侧不放键。 */
-.kd-app[data-mobile="true"] .kd-app-chrome,
-.kd-app[data-portrait="true"] .kd-app-chrome {
-  align-items: flex-end;
-  box-sizing: border-box;
-  padding-bottom: 0.4rem;
-}
-.kd-app[data-mobile="true"] .kd-app-chrome {
-  padding-top: max(env(safe-area-inset-top, 0px), 44px);
-  padding-left: 0.55rem;
-  padding-right: 0.45rem;
-}
-.kd-app[data-mobile="true"][data-portrait="true"] .kd-app-chrome {
-  padding-top: max(env(safe-area-inset-top, 0px), 52px);
-  padding-bottom: 0.5rem;
-}
-.kd-app[data-mac="true"][data-portrait="true"] .kd-app-chrome {
-  padding-bottom: 0.35rem;
 }
 /* 竖屏：历史键并入右侧，尺寸对齐原来的设置/下载，后者不放大。 */
 .kd-app[data-portrait="true"] .kd-app-chrome[data-history-end="true"] .kd-app-chrome-actions {
@@ -408,6 +381,20 @@ textarea {
   /* 顶栏左区与侧栏同宽；拖宽时 JS 写在这一层，chrome / split 一起吃。 */
   --kd-left: 15rem;
   --kd-right: 25rem;
+}
+/* 顶栏下方的舞台：列表 + 窄屏 Sheet。Sheet 绝对铺满这里，不盖顶栏/底栏。 */
+.kd-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.kd-stage > .kd-split {
+  flex: 1;
+  min-height: 0;
 }
 .kd-pad {
   padding: 1.25rem;
@@ -854,7 +841,7 @@ textarea {
   color: var(--kd-faint);
   font-size: var(--kd-size-xs);
 }
-/* 例外：搜索平台按钮激活时上各家品牌色（和来源小方块同一组色值），认色比认字快。
+/* 例外：搜索平台按钮激活时上各家品牌色（和来源图标同一组色值），认色比认字快。
    网易云红底配白字；QQ 绿和 SC 橙偏亮，配深字才够对比。 */
 .kd-segment > button[data-platform="wyy"][aria-pressed="true"] {
   background: #e63329;
@@ -2011,18 +1998,16 @@ tr:hover .kd-thumb-glass,
 /* ------------------------------------------------------------------
  * 结果表里的视频行
  *
- * 一首歌一行字就交代完了，视频得先看见画面才知道是不是要的那个，
- * 所以它横跨整张表、占两倍行高，把封面和"要下哪一档"的旋钮都摆开。
- * 混排在同一张表里而不是另开一个标签：找东西下载本来就是一件事。
+ * 外观已与音频 MergedGroupRow 对齐；细项（分 P / 画质 / Offset）改到队列里配。
+ * 仍标 data-video，便于拖动与双击预览走视频专用路径。
  * ---------------------------------------------------------------- */
-.kd-table tbody tr[data-video="true"] > td {
-  /* 目标是普通行的两倍高（用户原话"两个篇幅"）。写成 min-height 而不是 height：
-     标题换行、下载失败多出一条提示时该长就得长，锁死只会把内容裁掉。 */
-  height: auto;
-  min-height: calc(var(--kd-row-h) * 2);
-  padding: 0.3rem 0.6rem;
-  /* 表格默认那套单行省略号在这儿不适用：内部是自己排的多行块 */
-  white-space: normal;
+.kd-table tbody tr[data-video="true"] {
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+body[data-kd-search-pointer-dragging="true"] .kd-table tbody tr[data-video="true"] {
+  cursor: grabbing;
 }
 .kd-video-row {
   display: flex;
@@ -2562,7 +2547,6 @@ button.kd-result-lead-btn:hover {
   to { opacity: 1; }
 }
 .kd-pop-panel {
-  will-change: transform;
   animation: kd-pop-in var(--kd-pop-dur) var(--kd-pop-ease) both;
 }
 .kd-pop-scrim {
@@ -2618,8 +2602,9 @@ button.kd-result-lead-btn:hover {
 .kd-player {
   position: relative;
   /* 曲目表是滚动层且带虚拟行；播放器必须建立自己的堆叠上下文。否则 WKWebView
-     在底栏波形的部分区域会把鼠标按下交给表格，既选错歌又让 seek 看起来偏移。 */
-  z-index: 10;
+     在底栏波形的部分区域会把鼠标按下交给表格，既选错歌又让 seek 看起来偏移。
+     z-index 高于 Sheet(50)：抽屉只盖中间区，底栏播放永远可点。 */
+  z-index: 60;
   isolation: isolate;
   display: grid;
   /* 控制组按整条底栏居中；唱盘绝对定位在两端，不再拿两块宽列挤短波形。 */
@@ -3548,6 +3533,124 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   padding: 0.55rem 0.75rem;
   border-bottom: none;
 }
+.kd-queue-row[data-configurable="true"] {
+  cursor: pointer;
+}
+.kd-queue-row[data-configurable="true"]:hover {
+  background: var(--kd-hover);
+}
+.kd-queue-row[data-expanded="true"] {
+  background: var(--kd-hover);
+}
+.kd-queue-config {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.35rem 0 0.15rem;
+  border-top: 1px solid var(--kd-line-soft);
+  margin-top: 0.15rem;
+}
+.kd-queue-config-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem 0.75rem;
+}
+.kd-queue-config-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.kd-queue-config-label {
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.kd-queue-radio {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  color: var(--kd-text-body);
+  font-size: var(--kd-size-sm);
+  cursor: pointer;
+}
+.kd-queue-radio > input {
+  margin-top: 0.2rem;
+}
+.kd-queue-bind {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding-left: 1.35rem;
+}
+.kd-queue-bind-slot {
+  min-height: 2.2rem;
+  display: flex;
+  align-items: center;
+  padding: 0.35rem 0.55rem;
+  border: 1px dashed var(--kd-line);
+  background: var(--kd-panel-inset);
+  color: var(--kd-text-body);
+  font-size: var(--kd-size-sm);
+}
+.kd-queue-bind-slot[data-hot="true"] {
+  border-color: var(--kd-theme);
+  background: color-mix(in srgb, var(--kd-theme) 8%, var(--kd-panel-inset));
+}
+.kd-queue-bind-search {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid var(--kd-line-soft);
+  background: var(--kd-panel);
+  color: var(--kd-muted);
+}
+.kd-queue-bind-search > input {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--kd-text);
+  font: inherit;
+  font-size: var(--kd-size-sm);
+  outline: none;
+}
+.kd-queue-bind-hits {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--kd-line-soft);
+  background: var(--kd-panel);
+  max-height: 10rem;
+  overflow: auto;
+}
+.kd-queue-bind-hits > li > button {
+  appearance: none;
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.7fr);
+  gap: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--kd-size-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.kd-queue-bind-hits > li > button:hover {
+  background: var(--kd-hover);
+}
+.kd-queue-config-error {
+  margin: 0;
+  color: var(--kd-danger);
+  font-size: var(--kd-size-xs);
+}
 .kd-harmonic-relation {
   color: var(--kd-muted);
 }
@@ -4124,32 +4227,38 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
  * ========================================================== */
 .kd-source-dots {
   display: inline-flex;
+  align-items: center;
   gap: 3px;
 }
-/* 来源小方块按平台配色，认色比认字快。取各家的品牌色：
-   网易云橙红、QQ 音乐绿、SoundCloud 偏黄的橙、B 站蓝。
-   没被选中的那个压暗到 40%，一眼能看出"这首哪几个平台有 / 现在下哪个"。 */
+/* 来源用品牌标志 + 品牌色。没被选中的压暗到 40%，一眼能看出
+   "这首哪几个平台有 / 现在下哪个"。色值与 .kd-plat / .kd-activity-plat 对齐。 */
 .kd-source-dot {
-  width: 6px;
-  height: 6px;
-  background: var(--kd-faint);
+  display: inline-flex;
+  flex: none;
+  color: var(--kd-faint);
   opacity: 0.4;
+}
+.kd-source-dot > svg {
+  display: block;
+  overflow: visible;
 }
 .kd-source-dot[data-active="true"] {
   opacity: 1;
 }
 .kd-source-dot[data-platform="wyy"] {
-  background: #e63329;
+  color: #e02020;
 }
 .kd-source-dot[data-platform="qqm"] {
-  background: #31c27c;
+  color: #31c27c;
 }
 .kd-source-dot[data-platform="soundcloud"] {
-  background: #ff8800;
+  color: #ff5500;
 }
 .kd-source-dot[data-platform="bilibili"] {
-  /* 和平台按钮同一个 B 站粉，别一个粉一个蓝 */
-  background: #fb7299;
+  color: #fb7299;
+}
+.kd-source-dot[data-platform="local"] {
+  color: #3b82f6;
 }
 
 .kd-cover {
@@ -4829,9 +4938,10 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   background: var(--kd-theme);
 }
 
-/* —— 侧方抽屉（账号 / 队列 / 接播 / 详情 / 文件夹共用尺度） —— */
+/* —— 侧方抽屉（账号 / 队列 / 接播 / 详情 / 文件夹共用尺度） ——
+   挂在 .kd-stage 内，inset 铺满中间区；顶栏与底栏播放始终露出。 */
 .kd-sheet-scrim {
-  position: fixed;
+  position: absolute;
   inset: 0;
   z-index: 50;
   /* 轻透明遮罩：能看见底下列表，不是死灰蒙层。 */
@@ -4839,9 +4949,12 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   display: flex;
   justify-content: flex-end;
   align-items: stretch;
+  /* 避免入场时整层合成导致中间区跟着抖。 */
+  contain: paint;
+  transform: translateZ(0);
 }
 .kd-sheet {
-  /* 占七成屏宽，左侧三成留给透明遮罩，点遮罩即可关掉。 */
+  /* 占七成中间区宽，左侧三成留给透明遮罩，点遮罩即可关掉。 */
   width: var(--kd-sheet-w);
   max-width: 100%;
   height: 100%;
@@ -4850,6 +4963,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   background: var(--kd-panel);
   border-left: 1px solid var(--kd-line);
   box-shadow: var(--kd-shadow-float);
+  contain: layout paint;
 }
 .kd-sheet-head {
   flex: none;
@@ -4992,6 +5106,30 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   padding-left: 0;
   background: transparent;
 }
+.kd-searchbar-copy[data-empty]:focus-within::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  left: 0.15rem;
+  top: 50%;
+  width: 1px;
+  height: 1.15em;
+  border-radius: 1px;
+  background: var(--kd-theme);
+  transform: translateY(-50%);
+  animation: kd-search-caret-blink 1.05s steps(1, end) infinite;
+  pointer-events: none;
+}
+@keyframes kd-search-caret-blink {
+  0%,
+  52% {
+    opacity: 1;
+  }
+  53%,
+  100% {
+    opacity: 0;
+  }
+}
 .kd-search-placeholder {
   position: absolute;
   z-index: 0;
@@ -5048,6 +5186,10 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   font-size: var(--kd-size);
   font-weight: 400;
   font-family: inherit;
+  caret-color: var(--kd-theme);
+}
+.kd-searchbar-copy[data-empty] .kd-searchbar-input {
+  caret-color: transparent;
 }
 textarea.kd-searchbar-input {
   height: 2rem;
@@ -5502,9 +5644,9 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   color: var(--kd-faint);
   text-align: right;
 }
-/* 搜索结果表里有视频大行那套自排的多行块，需要的宽度更大 */
+/* 搜索结果表：标题对齐曲库 14rem，横向不够就自己滚 */
 .kd-table:not([data-kind="library"]) {
-  min-width: 44rem;
+  min-width: 52rem;
 }
 
 /* 排序只显示方向箭头；主、副层级由交互状态保留，不再用 ①② 占据表头。

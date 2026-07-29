@@ -10,7 +10,8 @@ export interface SheetProps {
 /**
  * 从右侧滑入的旁路面板。窄屏下用它装原本在右栏里的东西。
  *
- * 占约 70% 屏宽，左侧用轻透明遮罩；点遮罩、按 Esc、或把面板往右拖即可关闭。
+ * 只盖顶栏与底栏播放之间的中间区（不遮顶栏、不压播放条）。
+ * 占约 70% 中间区宽，左侧用轻透明遮罩；点遮罩、按 Esc、或把面板往右拖即可关闭。
  * 入场动画刻意做得很短很轻，不拖泥带水。
  */
 export function Sheet({ open, title, onClose, children }: SheetProps) {
