@@ -1,60 +1,66 @@
-# KDJ
+<div align="center">
+  <img src="src-tauri/icons/128x128.png" width="96" alt="KDJ 图标">
+  <h1>KDJ</h1>
+  <p><strong>下载 / 管理 / 播放 / 混合</strong></p>
 
-面向 DJ 的跨平台桌面工作台：**多平台音乐下载 + 视频扒轨 + 曲库分析（BPM / 调性 / 能量 / 和声混音）**。
+  <p>
+    <a href="https://github.com/kumoSleeping/KDJ/releases/latest">
+      <img src="https://img.shields.io/github/v/release/kumoSleeping/KDJ?style=flat-square&label=Release" alt="最新版本">
+    </a>
+    <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-222?style=flat-square" alt="支持 macOS、Windows 和 Linux">
+    <img src="https://img.shields.io/badge/license-MIT-222?style=flat-square" alt="MIT License">
+  </p>
 
-> **当前唯一正式技术栈：Rust + Tauri。** 旧 Electron 壳与 Python sidecar 已停用，
-> 仅保留为历史参考；不得再用于开发、运行、测试或打包。
+</div>
 
-算法承接自已经在生产环境跑通的机器人插件
-（`kumocode_v2/entari_plugin_kumo_music_dl`、`entari_plugin_kumo_video_dl`），
-按桌面端的交互重新组织；界面沿用 `pi-web-platform` 的视觉语言：**零圆角 + 红色角标 + 扁平卡片**。
+![KDJ 曲库界面](docs/readme-assets/01-library.png)
 
-## 三个板块
+KDJ 把跨平台搜歌、下载、本地曲库和音乐分析放进一个桌面应用。无需在多个网站、下载器和标签工具之间来回切换，准备音乐可以是一条连续的工作流。
 
-| 板块 | 能做什么 |
-| --- | --- |
-| **下载**（主） | 网易云 / QQ 音乐 / SoundCloud 的关键词搜索、**跨平台混合搜索去重**、歌单与分享链接解析、扫码登录、批量下载、音质梯度自动降级（FLAC → 320 → 128） |
-| **曲库**（核心） | 目录扫描入库 → **BPM + 节拍网格**、**调性 + Camelot 轮**、能量分级 → 和声混音推荐、标签写回文件（Rekordbox / Serato / Traktor 都能读） |
-| **视频**（次） | 哔哩哔哩视频下载，支持 **只扒音轨（.m4a）** —— 现场 / Mashup 素材的高频路径 |
+## 核心功能
 
-## 跑起来
+- **一次搜索多个平台** — 聚合网易云音乐、QQ 音乐、SoundCloud 与哔哩哔哩结果，并自动合并重复曲目。
+- **整理自己的曲库** — 直接管理电脑中的常见音频和视频文件，按文件夹组织，不改变原有的存放习惯。
+- **看懂每一首歌** — 自动分析 BPM、调性、Camelot 编号、响度与能量，快速找到适合衔接的下一首。
+- **获取音乐与画面** — 支持关键词、分享链接和歌单；可下载 B 站视频，也可只保留音轨。
+- **在应用内试听与编排** — 波形预览、和声推荐、自动接播与交叉渐变，让选曲到排 Set 更顺手。
+
+## 开始使用
+
+1. 前往 [Releases](https://github.com/kumoSleeping/KDJ/releases/latest)，下载适合系统的安装包。
+2. 打开 KDJ，添加已有的音乐文件夹，或先搜索并下载曲目。
+3. 等待自动分析完成，即可按 BPM、调性、能量和文件夹筛选曲库。
+
+KDJ 支持 macOS、Windows 和 Linux。部分来源允许扫码登录，以访问你账号本身有权播放或下载的内容。
+
+> [!NOTE]
+> 常规曲库管理和音乐分析不依赖 FFmpeg。视频混流、抽取视频音轨及 VJ 导出等功能需要系统已安装 [FFmpeg](https://ffmpeg.org/download.html)。
+
+## 为开发者构建
+
+需要 Node.js 20+、Rust 1.85+，以及对应平台的 [Tauri 2 系统依赖](https://v2.tauri.app/start/prerequisites/)。
 
 ```bash
-# 前置：Node 20+、Rust 1.85+、Tauri 平台依赖、ffmpeg
+git clone https://github.com/kumoSleeping/KDJ.git
+cd KDJ
 npm install
-npm run dev               # Rust + Tauri 桌面开发
-npm run typecheck         # 前端类型检查
-npm run build             # Tauri 正式构建
+npm run dev
 ```
 
-`npm run dev` 等价于 `npm run tauri:dev`。应用后端编进 Tauri 进程，不启动 Electron，
-也不启动 Python sidecar。
+常用命令：
 
-## 结构
-
-```
-crates/         Rust：核心模型、平台 provider、分析、曲库与 HTTP 服务
-src-tauri/      Tauri 桌面壳与 Rust 后端生命周期
-src/            React 19 + zustand 前端
-electron/       已停用，只读历史代码
-sidecar/        已停用，只读 Python 参考实现
-docs/rust-port/ Rust 重写架构与迁移记录
+```bash
+npm run typecheck        # 前端类型检查
+npm run tauri:web:build # 构建前端
+npm run build            # 构建桌面安装包
 ```
 
-- 当前架构：[`docs/rust-port/00-architecture.md`](docs/rust-port/00-architecture.md)
-- Rust 交接说明：[`docs/rust-port/HANDOFF.md`](docs/rust-port/HANDOFF.md)
+KDJ 使用 React 19 构建界面，Rust 负责曲库、分析、下载与播放能力，并通过 Tauri 2 提供原生桌面体验。
 
-## 分析算法
+## 使用说明
 
-当前分析实现位于 `crates/kdj-analysis/`，使用纯 Rust DSP 与 Symphonia 解码：
+KDJ 只提供媒体管理与技术工具。使用搜索、试听和下载功能时，请遵守所在地区的法律法规、内容平台条款及版权要求。
 
-- **BPM**：mel 频谱通量 → 起音包络 → 自相关（对数正态先验抑制倍频）→ 梳状滤波打分选倍频 →
-  Ellis 动态规划节拍跟踪 → 由拍间隔中位数回算精修 BPM，并给出首拍偏移与整条节拍网格。
-- **调性**：谐波增强 → 音级色度（chroma）→ Krumhansl-Schmuckler 24 调模板相关 → Camelot / Open Key。
-- **能量**：RMS / 峰值 / 波峰因数 → 1–10 分级。
+## 许可证
 
-细节见 [`docs/rust-port/03-analysis-pipeline.md`](docs/rust-port/03-analysis-pipeline.md)。
-
-## 不在 Demo 1 范围内
-
-Rekordbox/Serato 曲库互导与云同步。
+KDJ 以 [MIT](https://opensource.org/license/mit) 许可证发布。
