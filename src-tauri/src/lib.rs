@@ -538,6 +538,10 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init());
+    // 移动端播放必须脱离 WebView 生命周期：Android 由 MediaSessionService 承载，
+    // iOS 由 AVPlayer + AVAudioSession 承载。桌面暂时保留现有 DJ 适配器，插件不入包。
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let builder = builder.plugin(tauri_plugin_native_audio::init());
     // updater/process 只在桌面注册：安卓的更新走 Release 页下 APK
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let builder = builder

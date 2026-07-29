@@ -72,6 +72,7 @@ import { prefetchWaveform } from "../../lib/waveformCache";
 import { DETAIL_EVENT } from "../library/TrackTable";
 import { pointPatch, SEEK_EVENT, Waveform, type SeekDetail } from "../library/Waveform";
 import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
+import { nativeMobilePlayer, usesNativeMobilePlayer } from "../../lib/unifiedPlayer";
 
 /** 广播播放位置的节流间隔：节拍网格的播放头不需要每帧更新。 */
 const POSITION_BROADCAST_MS = 200;
@@ -289,6 +290,8 @@ function PlayerDeck({
 }
 
 export function PlayerBar() {
+  const mobileNative = usesNativeMobilePlayer();
+  const nativePlayer = mobileNative ? nativeMobilePlayer() : null;
   const selected = useLibraryStore(selectSelectedTrack);
   const selectTrack = useLibraryStore((state) => state.selectTrack);
   const updateTrack = useLibraryStore((state) => state.updateTrack);
@@ -303,9 +306,13 @@ export function PlayerBar() {
   const libraryOrder = useLibraryStore((state) => state.filter.order);
   const coplay = useCrossfade((state) => state.coplay);
   const fadeX = useCrossfade((state) => state.x);
-  const djEnabled = useDjConfig((state) => state.enabled);
+  const djConfigured = useDjConfig((state) => state.enabled);
+  // 阶段 1 的移动 owner 是系统连续播放服务；实时双 Deck 尚未达到等价前，
+  // 明确标成不可用，不能亮着 DJ 灯却偷偷退化成硬切。
+  const djEnabled = djConfigured && !mobileNative;
   const djTransitions = useDjConfig((state) => state.transitions);
   const djBars = useDjConfig((state) => state.bars);
+  const applyInOutPoints = useDjConfig((state) => state.applyInOutPoints);
   const toggleDjEnabled = useDjConfig((state) => state.toggleEnabled);
   const showSettings = useAppStore((state) => state.showSettings);
   const showTrackDetail = useAppStore((state) => state.showTrackDetail);
@@ -342,6 +349,11 @@ export function PlayerBar() {
    * null = 没算出来（没波形/判不出人声退场），回退按长度倒推。
    */
   const djOutroRef = useRef<{ trackId: number; at: number | null }>({ trackId: -1, at: null });
+  /**
+   * 自动续播硬切下一首时：记下目标曲目 id。换 src 后若开关开着且有开始点，seek 过去。
+   * 手动点播不置位，仍从曲头起。
+   */
+  const autoInOutCueRef = useRef<number | null>(null);
 
   const [track, setTrack] = useState<Track | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -418,6 +430,10 @@ export function PlayerBar() {
   const transportHandledRef = useRef(false);
   /** shadow deck 异步换手时，连续点击只有最后一个目标能更新正主元素。 */
   const seekGenerationRef = useRef(0);
+  /** 原生播放器换 source 会短暂回 idle；这不是用户/系统按了暂停。 */
+  const nativeLoadInFlightRef = useRef(false);
+  /** 后台队列已自行切歌时，React 只接管显示，不能再次 load 把进度打回开头。 */
+  const nativeAdoptedTrackIdRef = useRef<number | null>(null);
 
   // 上次退出时两台唱盘各留着哪一首，只存 id；恢复时重新取最新 Track，避免把
   // 分析前的旧 BPM / 封面版本快照跨会话带回来。曲目被删了就让预测逻辑补位。
@@ -471,12 +487,26 @@ export function PlayerBar() {
    */
   const djSwitchTo = useCallback(
     (next: Track, from: Track): boolean => {
+      // 移动端的播放 owner 是系统媒体服务，不让 Web Audio 再开第二条输出链。
+      // DJ 保留在桌面适配器，等 Rust 双 Deck 达到功能等价后再切移动端。
+      if (mobileNative) return false;
       // 在线试听没有 BPM/波形，接歌过渡意义不大，硬切更稳
       if (isStreamTrack(next) || isStreamTrack(from)) return false;
-      const { enabled, transitions, effects, bars, vocalCut } = useDjConfig.getState();
+      const { enabled, transitions, effects, bars, vocalCut, applyInOutPoints } =
+        useDjConfig.getState();
       if (!enabled) return false;
       const outgoingIndex = visualActiveIndexRef.current;
-      if (!djEngine.begin(next, { transitions, effects, from, bars, vocalCut })) return false;
+      if (
+        !djEngine.begin(next, {
+          transitions,
+          effects,
+          from,
+          bars,
+          vocalCut,
+          applyInOutPoints,
+        })
+      )
+        return false;
       const incomingIndex: 0 | 1 = outgoingIndex === 0 ? 1 : 0;
       const visual = { outgoingIndex, incomingIndex, from, next };
       transitionVisualRef.current = visual;
@@ -493,7 +523,7 @@ export function PlayerBar() {
       markPlayed(next.id);
       return true;
     },
-    [selectTrack, showTrackDetail, commitPlaying],
+    [mobileNative, selectTrack, showTrackDetail, commitPlaying],
   );
 
   // 曲库表格双击 / 在线试听 → 这里换曲并播放。用全局事件而不是共享 store，
@@ -554,16 +584,25 @@ export function PlayerBar() {
     return () => window.removeEventListener(PLAY_EVENT, onPlay);
   }, [selectTrack, showTrackDetail, djSwitchTo, commitPlaying]);
 
-  // 起手点完全自动：优先按波形估计结尾器乐段；判断不出时按接歌长度倒推。
+  // 起手点：开关开且有结束点 → 按结束点倒推接歌长度；否则波形估尾段，再不行按长度倒推。
   useEffect(() => {
     djOutroRef.current = { trackId: track?.id ?? -1, at: null };
     if (!track || !djEnabled || isStreamTrack(track)) return;
+    const lead = mixSeconds(track.bpm, djBars);
+    if (applyInOutPoints && track.end_ms != null) {
+      const endSec = track.end_ms / 1000;
+      djOutroRef.current = {
+        trackId: track.id,
+        at: Math.max(0, endSec - lead),
+      };
+      return;
+    }
     let alive = true;
     api
       .waveform(track.id)
       .then((wave) => {
         if (!alive) return;
-        const at = findOutroStart(wave, mixSeconds(track.bpm, djBars));
+        const at = findOutroStart(wave, lead);
         djOutroRef.current = { trackId: track.id, at };
       })
       .catch(() => {
@@ -572,7 +611,7 @@ export function PlayerBar() {
     return () => {
       alive = false;
     };
-  }, [track?.id, djEnabled, djBars]);
+  }, [track?.id, track?.end_ms, djEnabled, djBars, applyInOutPoints]);
 
   // 放到一首还没分析的歌 → 让它插队分析。去重、和"选中即分析"共享一份
   // 排队记号的逻辑都在 autoAnalyze 里，这里只负责把"在放哪一首"告诉它。
@@ -580,9 +619,40 @@ export function PlayerBar() {
     if (track) analyzePlaying(track);
   }, [track?.id, track?.analyzed_at]);
 
-  // 换曲：换 src 后必须 load()，否则 Chromium 会继续放上一首的缓冲
+  // 换曲：移动端把 source 和锁屏元数据交给系统播放器；桌面仍由 DJ adapter
+  // 持有双 deck。两条实现只在这一处选择，其他播放入口不感知平台。
   useEffect(() => {
     if (!track) return;
+    if (nativePlayer) {
+      if (nativeAdoptedTrackIdRef.current === track.id) {
+        nativeAdoptedTrackIdRef.current = null;
+        setNotice("");
+        return;
+      }
+      const source = mediaUrlForTrack(track);
+      nativeLoadInFlightRef.current = true;
+      void nativePlayer
+        .load({
+          src: source,
+          track,
+          artworkUrl: isStreamTrack(track)
+            ? streamCoverUrl(track)
+            : api.coverUrl(track.id, track.modified_at),
+        })
+        .then((state) => {
+          setPosition(state.currentTime);
+          setDuration(state.duration || track.duration || 0);
+          setNotice("");
+        })
+        .catch((error: unknown) => {
+          commitPlaying(false);
+          setNotice(`播放失败：${error instanceof Error ? error.message : String(error)}`);
+        })
+        .finally(() => {
+          nativeLoadInFlightRef.current = false;
+        });
+      return;
+    }
     // DJ 接歌换上来的曲：引擎已经装好 src、正按曲线进场，这里再动手
     // 就是把进行到一半的过渡掐断重来
     if (djViaRef.current === track.id) {
@@ -600,6 +670,25 @@ export function PlayerBar() {
     const source = mediaUrlForTrack(track);
     audio.src = source;
     audio.load();
+    // 自动续播且开关开着：硬切后落到开始点，别从头放前奏。
+    if (autoInOutCueRef.current === track.id) {
+      autoInOutCueRef.current = null;
+      const cueSec = track.cue_ms != null ? track.cue_ms / 1000 : null;
+      if (cueSec != null && cueSec > 0) {
+        const applyCue = () => {
+          try {
+            audio.currentTime = cueSec;
+          } catch {
+            /* metadata 未到时忽略，seeked/canplay 还会再试 */
+          }
+          setPosition(cueSec);
+        };
+        if (audio.readyState >= HTMLMediaElement.HAVE_METADATA) applyCue();
+        else audio.addEventListener("loadedmetadata", applyCue, { once: true });
+      }
+    } else {
+      autoInOutCueRef.current = null;
+    }
     // shadow 只作解码尚未完成时的回退；正常路径后台准备当前曲目的受限 PCM。
     djEngine.prepareSeek(source);
     djEngine.prepareDecodedSeek(track, source);
@@ -609,10 +698,46 @@ export function PlayerBar() {
     // playing 不进依赖：它变化时由下面的 effect 处理，这里只管换曲。
     // frontEl 也不进：它只在 DJ 接歌互换时变，而那条路在上面已经 return 了
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [track?.id]);
+  }, [track?.id, nativePlayer, commitPlaying]);
+
+  // 把用户明确排好的下一首预装进系统播放器。更新队尾只修改 Media3 timeline
+  // 的非当前项，不重建正在发声的 MediaSource，因此不会因排队操作产生卡顿。
+  useEffect(() => {
+    if (!nativePlayer || !track) return;
+    const tracks = [
+      track,
+      ...queueIds
+        .filter((id) => id !== track.id)
+        .map((id) => queueById[id])
+        .filter((item): item is Track => Boolean(item)),
+    ];
+    void nativePlayer.setQueue(
+      tracks.map((item) => ({
+        src: mediaUrlForTrack(item),
+        track: item,
+        artworkUrl: isStreamTrack(item)
+          ? streamCoverUrl(item)
+          : api.coverUrl(item.id, item.modified_at),
+      })),
+    ).catch((error: unknown) => {
+      setNotice(`后台队列同步失败：${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, [nativePlayer, track?.id, queueIds, queueById]);
 
   useEffect(() => {
     if (!track) return;
+    if (nativePlayer) {
+      if (transportHandledRef.current) {
+        transportHandledRef.current = false;
+        return;
+      }
+      const operation = playing ? nativePlayer.play() : nativePlayer.pause();
+      void operation.catch((error: unknown) => {
+        commitPlaying(false);
+        setNotice(`播放失败：${error instanceof Error ? error.message : String(error)}`);
+      });
+      return;
+    }
     if (transportHandledRef.current) {
       transportHandledRef.current = false;
       return;
@@ -640,7 +765,7 @@ export function PlayerBar() {
       djEngine.cancel();
       djEngine.hardPause(frontEl);
     }
-  }, [playing, track, frontEl, commitPlaying]);
+  }, [playing, track, frontEl, nativePlayer, commitPlaying]);
 
   // 视频可以从自己的控件发出播放/暂停/跳转；协同预览没有 trackId，
   // 本地视频则必须只接收当前曲目的消息，避免详情切换后误控旧视频。
@@ -658,9 +783,13 @@ export function PlayerBar() {
         commitPlaying(false);
       } else if (detail.action === "seek" && detail.position !== undefined) {
         const at = Math.max(0, detail.position);
-        void djEngine
-          .seamlessSeek(mediaUrlForTrack(track), at, playingRef.current)
-          .then(setFrontEl);
+        if (nativePlayer) {
+          void nativePlayer.seek(at);
+        } else {
+          void djEngine
+            .seamlessSeek(mediaUrlForTrack(track), at, playingRef.current)
+            .then(setFrontEl);
+        }
         setPosition(at);
         broadcastMediaSync({
           owner: "player",
@@ -672,7 +801,7 @@ export function PlayerBar() {
     };
     window.addEventListener(MEDIA_SYNC_EVENT, onMediaSync);
     return () => window.removeEventListener(MEDIA_SYNC_EVENT, onMediaSync);
-  }, [frontEl, track?.id, commitPlaying]);
+  }, [frontEl, track?.id, nativePlayer, commitPlaying]);
 
   // 播放器是同步时钟：视频只在明显漂移时纠偏，避免每个 timeupdate 都 seek
   // 造成画面抖动。播放/暂停/跳转动作仍然双向广播。
@@ -684,9 +813,9 @@ export function PlayerBar() {
       trackId: track.id,
       // 视频恢复播放时必须从当前唱盘位置继续。省略 position 会被当成 0，
       // 暂停后再播放就会把视频错误拉回 Offset 起点。
-      position: djEngine.currentTime(frontEl),
+      position: nativePlayer?.state().currentTime ?? djEngine.currentTime(frontEl),
     });
-  }, [playing, track?.id, frontEl]);
+  }, [playing, track?.id, frontEl, nativePlayer]);
 
   // 不做音量控制：这里只是预听，音量交给系统。软件里再放一个滑块只是多一个要照看的东西。
 
@@ -696,9 +825,12 @@ export function PlayerBar() {
     playerVolumeRef.current = playerVolume;
     localStorage.setItem("kd-player-volume", String(playerVolume));
     if (playerVolume > 0) volumeBeforeMuteRef.current = playerVolume;
-    // 用户音量与协同交叉推子相乘；两台 deck 一起设，接歌中途也保持一致。
-    djEngine.setVolume(playerVolume * deckGain(coplay, fadeX));
-  }, [playerVolume, coplay, fadeX]);
+    // 用户音量与协同交叉推子相乘；移动端直接落到系统 player，桌面两台 deck
+    // 一起设，接歌中途也保持一致。
+    const effective = playerVolume * deckGain(coplay, fadeX);
+    if (nativePlayer) void nativePlayer.setVolume(effective);
+    else djEngine.setVolume(effective);
+  }, [playerVolume, coplay, fadeX, nativePlayer]);
 
   // 拨开协同播放（epoch +1）= 「两边同时从头来」：唱盘倒回 0 起播，
   // 预览那侧按 Offset 自己对位。不从头对齐的话，两条时间线的相对位置
@@ -716,9 +848,13 @@ export function PlayerBar() {
       if (selected) playTrack(selected);
       return;
     }
-    void djEngine
-      .seamlessSeek(mediaUrlForTrack(track), 0, playingRef.current)
-      .then(setFrontEl);
+    if (nativePlayer) {
+      void nativePlayer.seek(0);
+    } else {
+      void djEngine
+        .seamlessSeek(mediaUrlForTrack(track), 0, playingRef.current)
+        .then(setFrontEl);
+    }
     setPosition(0);
     broadcastMediaSync({ owner: "player", action: "seek", trackId: track.id, position: 0 });
     commitPlaying(true);
@@ -744,16 +880,20 @@ export function PlayerBar() {
         trackId: track.id,
         position: target,
       });
-      void djEngine
-        .seamlessSeek(mediaUrlForTrack(track), target, playingRef.current)
-        .then((element) => {
-          if (generation !== seekGenerationRef.current) return;
-          setFrontEl(element);
-        });
+      if (nativePlayer) {
+        void nativePlayer.seek(target);
+      } else {
+        void djEngine
+          .seamlessSeek(mediaUrlForTrack(track), target, playingRef.current)
+          .then((element) => {
+            if (generation !== seekGenerationRef.current) return;
+            setFrontEl(element);
+          });
+      }
     };
     window.addEventListener(SEEK_EVENT, onSeek);
     return () => window.removeEventListener(SEEK_EVENT, onSeek);
-  }, [track]);
+  }, [track, nativePlayer]);
 
   // 和视频预览互斥出声（见 audioFocus.ts）：这边一开始放就喊一嗓子，
   // 预览听到会自己暂停；反过来预览开声时这边也自动停，只暂停不清进度。
@@ -786,6 +926,71 @@ export function PlayerBar() {
     },
     [track],
   );
+
+  // 原生播放器即使 WebView 暂停也持续走时钟；回到前台后事件会带回权威状态。
+  // ended 仍复用下面那条自动续播规则，避免原生/桌面各维护一套播放模式逻辑。
+  useEffect(() => {
+    if (!nativePlayer) return;
+    void nativePlayer.initialize().catch((error: unknown) => {
+      setNotice(`原生播放器初始化失败：${error instanceof Error ? error.message : String(error)}`);
+    });
+    const unsubscribe = nativePlayer.subscribe((state, previous) => {
+      positionRef.current = state.currentTime;
+      durationRef.current = state.duration || durationRef.current;
+      setPosition(state.currentTime);
+      if (state.duration > 0) setDuration(state.duration);
+
+      let current = trackRef.current;
+      if (state.trackId !== null && state.trackId !== current?.id) {
+        const adopted = useQueueStore.getState().byId[state.trackId];
+        if (adopted) {
+          nativeAdoptedTrackIdRef.current = adopted.id;
+          useQueueStore.getState().remove([adopted.id]);
+          trackRef.current = adopted;
+          current = adopted;
+          setTrack(adopted);
+          selectTrack(adopted);
+          markPlayed(adopted.id);
+          setNotice("");
+        }
+      }
+      if (current) {
+        broadcast(state.currentTime);
+        broadcastMediaSync({
+          owner: "player",
+          action: "position",
+          trackId: current.id,
+          position: state.currentTime,
+        });
+      }
+
+      if (state.playing && !playingRef.current) commitPlaying(true);
+      if (
+        state.status === "idle" &&
+        previous.playing &&
+        !nativeLoadInFlightRef.current &&
+        playingRef.current
+      ) {
+        commitPlaying(false);
+      }
+      if (state.status === "ended" && previous.status !== "ended") {
+        commitPlaying(false);
+        frontElRef.current.dispatchEvent(new Event("ended"));
+      }
+      if (state.status === "error") {
+        commitPlaying(false);
+        setNotice(state.error || "原生播放器无法播放这个文件");
+      }
+    });
+    const syncAfterResume = () => {
+      if (document.visibilityState === "visible") void nativePlayer.refresh();
+    };
+    document.addEventListener("visibilitychange", syncAfterResume);
+    return () => {
+      unsubscribe();
+      document.removeEventListener("visibilitychange", syncAfterResume);
+    };
+  }, [nativePlayer, broadcast, commitPlaying, selectTrack]);
 
   /**
    * 「上一首」= 沿播放历史回退，不是"曲库里的前一行"。
@@ -836,7 +1041,10 @@ export function PlayerBar() {
           djGaveUpRef.current = track.id;
           return true;
         }
-        if (!djSwitchTo(next, track)) playTrack(next);
+        if (!djSwitchTo(next, track)) {
+          if (useDjConfig.getState().applyInOutPoints) autoInOutCueRef.current = next.id;
+          playTrack(next);
+        }
         return true;
       } finally {
         djBusyRef.current = false;
@@ -855,7 +1063,10 @@ export function PlayerBar() {
     markPlayed(track.id);
     const next = await pickNext(track, true, predictedRef.current);
     // 候选池空了就安静停下，不报错——这是锦上添花的功能
-    if (next) playTrack(next);
+    if (next) {
+      if (useDjConfig.getState().applyInOutPoints) autoInOutCueRef.current = next.id;
+      playTrack(next);
+    }
   };
 
   /**
@@ -868,7 +1079,7 @@ export function PlayerBar() {
       toggleVideoPip();
       return;
     }
-    if (!playingRef.current) djEngine.resume();
+    if (!playingRef.current && !nativePlayer) djEngine.resume();
     if (!trackRef.current) {
       const pick = selectedRef.current;
       if (pick) playTrack(pick);
@@ -876,7 +1087,13 @@ export function PlayerBar() {
     }
     const nextPlaying = !playingRef.current;
     transportHandledRef.current = true;
-    if (nextPlaying) {
+    if (nativePlayer) {
+      const operation = nextPlaying ? nativePlayer.play() : nativePlayer.pause();
+      void operation.catch((error: unknown) => {
+        commitPlaying(false);
+        setNotice(`播放失败：${error instanceof Error ? error.message : String(error)}`);
+      });
+    } else if (nextPlaying) {
       djEngine.ensureAudible();
       void djEngine.hardPlay(frontElRef.current).catch((error: unknown) => {
         commitPlaying(false);
@@ -887,7 +1104,7 @@ export function PlayerBar() {
       djEngine.hardPause(frontElRef.current);
     }
     commitPlaying(nextPlaying);
-  }, [commitPlaying]);
+  }, [nativePlayer, commitPlaying]);
 
   /** 相对跳转：网络预览走 PiP 事件，曲库曲目走 SEEK_EVENT（和点波形同一条路）。 */
   const seekBy = useCallback((delta: number) => {
@@ -955,14 +1172,52 @@ export function PlayerBar() {
         trackId: track?.id,
         position: seconds,
       });
-      // 曲末自动接歌：优先从频谱判出的尾段起手，判不出就按过渡长度倒推。
+      // 曲末自动接歌：优先结束点（开关开着时），其次频谱尾段，再按过渡长度倒推。
       // 太短的音频（demo/音效）不接。
-      if (!djEnabled || !playing || !track) return;
+      if (!playing || !track) return;
+      // 未开 DJ 时：开关开着且有结束点 → 到点硬切下一首。
+      if (
+        !djEnabled &&
+        applyInOutPoints &&
+        track.end_ms != null &&
+        seconds >= track.end_ms / 1000 &&
+        !djBusyRef.current
+      ) {
+        djBusyRef.current = true;
+        markPlayed(track.id);
+        void pickNext(track, false, predictedRef.current)
+          .then((next) => {
+            if (!next) {
+              commitPlaying(false);
+              return;
+            }
+            if (next.id === track.id) {
+              const cueSec =
+                applyInOutPoints && track.cue_ms != null ? track.cue_ms / 1000 : 0;
+              if (nativePlayer) {
+                void nativePlayer.seek(cueSec).then(() => nativePlayer.play());
+              } else {
+                audio.currentTime = cueSec;
+                void audio.play();
+              }
+              setPosition(cueSec);
+              return;
+            }
+            autoInOutCueRef.current = applyInOutPoints ? next.id : null;
+            playTrack(next);
+          })
+          .finally(() => {
+            djBusyRef.current = false;
+          });
+        return;
+      }
+      if (!djEnabled) return;
       const total =
         Number.isFinite(audio.duration) && audio.duration > 0
           ? audio.duration
           : (track.duration ?? 0);
-      if (total < 30) return;
+      // 用户设了结束点时不论长短都按点切；没设时太短的 demo/音效不接。
+      if (total < 30 && !(applyInOutPoints && track.end_ms != null)) return;
       const remain = total - seconds;
       if (remain <= 0) return;
       const outro = djOutroRef.current;
@@ -1011,11 +1266,23 @@ export function PlayerBar() {
         // 单曲循环挑回了自己：走 playTrack 的话 track.id 没变，
         // 换 src 的 effect 不会重跑，音频会停在 ended 上不动——直接倒带重放
         if (next.id === finished.id) {
-          audio.currentTime = 0;
-          void audio.play();
+          const cueSec =
+            useDjConfig.getState().applyInOutPoints && finished.cue_ms != null
+              ? finished.cue_ms / 1000
+              : 0;
+          if (nativePlayer) {
+            void nativePlayer.seek(cueSec).then(() => nativePlayer.play());
+          } else {
+            audio.currentTime = cueSec;
+            void audio.play();
+          }
+          setPosition(cueSec);
           return;
         }
         // 走和双击列表同一条路：播放器不必知道谁触发了播放
+        autoInOutCueRef.current = useDjConfig.getState().applyInOutPoints
+          ? next.id
+          : null;
         playTrack(next);
       });
     };
@@ -1035,7 +1302,7 @@ export function PlayerBar() {
       audio.removeEventListener("ended", onEnded);
       audio.removeEventListener("error", onError);
     };
-  }, [frontEl, track, playing, djEnabled, djBars, broadcast, djNext, commitPlaying]);
+  }, [frontEl, track, playing, djEnabled, djBars, applyInOutPoints, broadcast, djNext, nativePlayer, commitPlaying]);
 
   // 跳转统一由 Waveform 发 kd:seek 事件，上面那个监听负责落到 <audio> 上
 
@@ -1345,13 +1612,16 @@ export function PlayerBar() {
             aria-label={djEnabled ? "关闭自动接播" : "开启自动接播"}
             aria-pressed={djEnabled}
             data-on={djEnabled ? "true" : undefined}
+            disabled={mobileNative}
             title={
-              !djEnabled
-                ? "自动接播：关。点一下开启"
-                : `自动接播：${djTransitions
-                    .map((id) => DJ_TRANSITIONS.find((item) => item.id === id)?.label)
-                    .filter(Boolean)
-                    .join(" + ")}，${djBars} 小节。点一下关闭`
+              mobileNative
+                ? "移动端实时 DJ 引擎迁移中；普通播放已使用原生后台播放器"
+                : !djEnabled
+                  ? "自动接播：关。点一下开启"
+                  : `自动接播：${djTransitions
+                      .map((id) => DJ_TRANSITIONS.find((item) => item.id === id)?.label)
+                      .filter(Boolean)
+                      .join(" + ")}，${djBars} 小节。点一下关闭`
             }
             onClick={toggleDjEnabled}
           >
@@ -1616,7 +1886,8 @@ export function PlayerBar() {
               if (duration <= 0) return;
               const rect = event.currentTarget.getBoundingClientRect();
               const at = ((event.clientX - rect.left) / rect.width) * duration;
-              frontEl.currentTime = at;
+              if (nativePlayer) void nativePlayer.seek(at);
+              else frontEl.currentTime = at;
               setPosition(at);
             }}
           >

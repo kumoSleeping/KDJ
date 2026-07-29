@@ -45,11 +45,18 @@ jobs:
           set -euo pipefail
           tauri=$(jq -r '.version' src-tauri/tauri.conf.json)
           npm=$(jq -r '.version' package.json)
+          npm_lock=$(jq -r '.version' package-lock.json)
           cargo=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)
-          if [ "$tauri" != "$npm" ] || [ "$tauri" != "$cargo" ]; then
-            echo "::error::版本号不一致：tauri=$tauri package.json=$npm Cargo.toml=$cargo"
+          cargo_lock=$(awk '/name = "kdj-app"/{found=1; next} found && /version = /{gsub(/[" ]/, "", $3); print $3; exit}' Cargo.lock)
+          if [ "$tauri" != "$npm" ] || [ "$tauri" != "$npm_lock" ] || \
+             [ "$tauri" != "$cargo" ] || [ "$tauri" != "$cargo_lock" ]; then
+            echo "::error::版本号不一致：tauri=$tauri package=$npm package-lock=$npm_lock cargo=$cargo cargo-lock=$cargo_lock"
             exit 1
           fi
+          grep -q '^version.workspace = true$' src-tauri/Cargo.toml || {
+            echo "::error::src-tauri/Cargo.toml 未继承 workspace 版本"
+            exit 1
+          }
 
       - name: 检测版本号是否已发行
         id: probe
@@ -135,7 +142,8 @@ jobs:
             echo "- **其他发行版**：[下载 AppImage]($base_url/KDJ_${VERSION}_amd64.AppImage)"
             echo
             echo "### Android"
-            echo "- **ARM 32/64 位设备**：[下载 APK]($base_url/app-universal-release.apk)"
+            echo "- **大多数新设备（ARM64，推荐）**：[下载 APK]($base_url/app-arm64-release.apk)"
+            echo "- **较旧的 32 位 ARM 设备**：[下载 APK]($base_url/app-arm-release.apk)"
             echo
             echo "> .sig、.app.tar.gz 和 latest.json 是自动更新所需文件，普通用户无需下载。"
           } > release-notes.md

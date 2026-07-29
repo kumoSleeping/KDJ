@@ -1,0 +1,12 @@
+[package]
+name = "kdj-player"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "=1.0.104"
+cpal = "=0.18.1"
+rtrb = "=0.3.4"
+symphonia = { version = "=0.5.5", features = ["aac", "alac", "mp3", "isomp4", "ogg", "vorbis", "flac", "wav", "pcm"] }

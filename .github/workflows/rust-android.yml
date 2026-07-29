@@ -183,26 +183,35 @@ jobs:
       #   3. **16KB page size**：Android 15 起要求 .so 按 16KB 对齐，
       #      老 NDK 编出来的库在新机器上会加载失败——这也是钉 r27 的理由之一。
       #      r27c 编出来的库还没装进真机验证过。
-      #   4. **minSdk**：Tauri 2 要求 API 24+，WebView 版本太老的机器直接白屏。
+      #   4. **minSdk**：原生后台播放器要求 API 26+（Android 8），与实时音频
+      #      后续使用的 AAudio 下限一致；更老系统由安装器直接拒绝，不能运行时崩溃。
       #
       # 时间预期：冷编一次 aarch64 全图（约 600 个 crate）在根 Cargo.toml 的
       # release 档下（opt-level=z + lto + codegen-units=1）**要按小时算**。
       # 上面的 rust-cache 因此是刚需，不是优化。
       - name: tauri android build --apk
         if: steps.shell.outputs.present == 'true'
-        run: npx --yes @tauri-apps/cli@^2 android build --apk --target aarch64 --target armv7
+        # Rust 主库本身约 14 MiB；把 arm64/armv7 塞进同一个 universal APK 会让
+        # 每位用户下载两套互斥机器码。按 ABI 拆包才能守住单包 20 MiB 预算。
+        run: npx --yes @tauri-apps/cli@^2 android build --apk --split-per-abi --target aarch64 --target armv7
+
+      - name: APK 单包体积门禁
+        if: steps.shell.outputs.present == 'true'
+        run: ./scripts/check-android-apk-size.sh
 
       - name: 验证正式 APK 确实已签名
         if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           set -euo pipefail
-          apk=$(find src-tauri/gen/android/app/build/outputs/apk -path '*/release/*-release.apk' -print -quit)
-          if [ -z "$apk" ]; then
+          mapfile -t apks < <(find src-tauri/gen/android/app/build/outputs/apk -path '*/release/*-release.apk' -print | sort)
+          if [ "${#apks[@]}" -eq 0 ]; then
             echo "::error::没有找到已签名的 *-release.apk"
             exit 1
           fi
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs -v "$apk"
+          for apk in "${apks[@]}"; do
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs -v "$apk"
+          done
 
       - name: 上传 APK
         if: steps.shell.outputs.present == 'true'

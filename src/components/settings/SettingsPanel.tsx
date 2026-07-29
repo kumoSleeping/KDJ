@@ -168,10 +168,12 @@ export function SettingsPanel() {
   const effects = useDjConfig((state) => state.effects);
   const bars = useDjConfig((state) => state.bars);
   const vocalCut = useDjConfig((state) => state.vocalCut);
+  const applyInOutPoints = useDjConfig((state) => state.applyInOutPoints);
   const toggleTransition = useDjConfig((state) => state.toggleTransition);
   const toggleEffect = useDjConfig((state) => state.toggleEffect);
   const setBars = useDjConfig((state) => state.setBars);
   const setVocalCut = useDjConfig((state) => state.setVocalCut);
+  const setApplyInOutPoints = useDjConfig((state) => state.setApplyInOutPoints);
 
   const widePlay = useTrackClickPrefs((state) => state.widePlay);
   const narrowPlay = useTrackClickPrefs((state) => state.narrowPlay);
@@ -287,6 +289,12 @@ export function SettingsPanel() {
                 label="人声渐消"
                 title="接歌时渐进削弱上一首的中置人声；保留立体声侧声道和补偿增益。"
                 onChange={() => setVocalCut(!vocalCut)}
+              />
+              <Switch
+                checked={applyInOutPoints}
+                label="应用开始 / 结束点"
+                title="自动接播与自动续播时：有开始点就从那里起播，有结束点就到点切下一首；关掉则按首拍起播、波形尾段切歌。"
+                onChange={() => setApplyInOutPoints(!applyInOutPoints)}
               />
               {DJ_EFFECTS.map((item) => (
                 <Switch

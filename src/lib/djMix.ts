@@ -62,6 +62,11 @@ interface DjConfig {
   bars: number;
   /** 接歌期间渐进剔除上一首的人声（中置声道消除），任何方案都能叠加。 */
   vocalCut: boolean;
+  /**
+   * 自动接播 / 自动续播时应用曲目的开始点与结束点：
+   * 开 → 从 cue 起播、到 end 切下一首；关 → 首拍起播、波形尾段切歌。
+   */
+  applyInOutPoints: boolean;
 }
 
 const DEFAULT_CONFIG: DjConfig = {
@@ -70,13 +75,16 @@ const DEFAULT_CONFIG: DjConfig = {
   effects: [],
   bars: 8,
   vocalCut: false,
+  // 默认开：接播本来就会用 cue；顺带让结束点也参与自动切歌。
+  applyInOutPoints: true,
 };
 
 function loadDjConfig(): DjConfig {
   try {
     const raw: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
     if (raw && typeof raw === "object") {
-      const { enabled, transitions, effects, preset, bars, vocalCut } = raw as Record<string, unknown>;
+      const { enabled, transitions, effects, preset, bars, vocalCut, applyInOutPoints } =
+        raw as Record<string, unknown>;
       const pickNumber = (value: unknown, allowed: readonly number[], fallback: number) =>
         allowed.includes(value as number) ? (value as number) : fallback;
       const selected = pickIds(transitions, isTransition);
@@ -87,6 +95,8 @@ function loadDjConfig(): DjConfig {
         effects: pickIds(effects, isEffect),
         bars: pickNumber(bars, DJ_BARS_OPTIONS, DEFAULT_CONFIG.bars),
         vocalCut: vocalCut === true,
+        // 缺字段按开：旧配置没有这项时保持「cue 起播」的既有行为。
+        applyInOutPoints: applyInOutPoints !== false,
       };
     }
     // 旧版只存了预设名。"vocal" 已从预设降级成独立开关，语义原样迁过来
@@ -106,13 +116,14 @@ interface DjConfigState extends DjConfig {
   toggleEffect(effect: DjEffect): void;
   setBars(bars: number): void;
   setVocalCut(value: boolean): void;
+  setApplyInOutPoints(value: boolean): void;
 }
 
 function saveDjConfig(state: DjConfig): void {
-  const { enabled, transitions, effects, bars, vocalCut } = state;
+  const { enabled, transitions, effects, bars, vocalCut, applyInOutPoints } = state;
   localStorage.setItem(
     STORAGE_KEY,
-    JSON.stringify({ enabled, transitions, effects, bars, vocalCut }),
+    JSON.stringify({ enabled, transitions, effects, bars, vocalCut, applyInOutPoints }),
   );
 }
 
@@ -149,6 +160,10 @@ export const useDjConfig = create<DjConfigState>((set, get) => ({
   },
   setVocalCut(vocalCut) {
     set({ vocalCut });
+    saveDjConfig(get());
+  },
+  setApplyInOutPoints(applyInOutPoints) {
+    set({ applyInOutPoints });
     saveDjConfig(get());
   },
 }));
@@ -211,6 +226,11 @@ function syncRate(fromBpm: number | null, toBpm: number | null): number {
 }
 
 /** preservesPitch 还没进所有 TS lib 的 HTMLMediaElement，包一层。 */
+/** 移动壳的长期播放由系统播放器持有，不能再让 WebView 建第二条音频图。 */
+function nativeMobilePlaybackOwnsOutput(): boolean {
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+}
+
 function setPreservesPitch(el: HTMLAudioElement, value: boolean): void {
   const media = el as HTMLAudioElement & {
     preservesPitch?: boolean;
@@ -1170,6 +1190,8 @@ export interface DjBeginOptions {
   bars: number;
   /** 接歌期间渐进剔除出让方的人声（中置声道消除）。 */
   vocalCut: boolean;
+  /** 为 true 时新歌从 cue_ms 起播；否则从首拍（或曲头）起。 */
+  applyInOutPoints?: boolean;
 }
 
 /**
@@ -1294,6 +1316,7 @@ export const djEngine = {
    * 真正建 deck 留到 begin：因此开关接播不会把正在放的声音短暂重接一次。
    */
   prime(): boolean {
+    if (nativeMobilePlaybackOwnsOutput()) return false;
     if (broken) return false;
     try {
       ctx ??= new AudioContext();
@@ -1312,6 +1335,7 @@ export const djEngine = {
    * 时临时重接正在出声的 MediaElement，产生爆音或短暂停顿。
    */
   warmup(): boolean {
+    if (nativeMobilePlaybackOwnsOutput()) return false;
     if (broken) return false;
     if (decks) {
       void ctx?.resume();
@@ -1760,8 +1784,11 @@ export const djEngine = {
 
     frontIndex = backIndex;
 
-    // 起播点：用户摆的 cue 优先，其次第一拍（跳过前奏静音），再不行从头
-    const cue = next.cue_ms !== null ? next.cue_ms / 1000 : (next.first_beat ?? 0);
+    // 起播点：开关打开且用户摆了 cue → 用 cue；否则第一拍（跳过前奏静音），再不行从头
+    const cue =
+      options.applyInOutPoints && next.cue_ms !== null
+        ? next.cue_ms / 1000
+        : (next.first_beat ?? 0);
 
     let cueApplied = false;
     let starting = false;
@@ -2032,7 +2059,7 @@ export const djEngine = {
 // 不会绕过浏览器的用户手势限制；真正播放仍由播放器的用户操作触发。
 // 这消除了第一次自动接歌时的重接爆音和偶发停顿。
 try {
-  djEngine.warmup();
+  if (!nativeMobilePlaybackOwnsOutput()) djEngine.warmup();
 } catch {
   // warmup 自己会把 broken 记住，后续自动回退到普通硬切。
 }

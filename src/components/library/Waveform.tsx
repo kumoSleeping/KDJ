@@ -302,6 +302,7 @@ export function Waveform({
       {endRatio !== null && (
         <span
           className="kd-wave-marker"
+          data-kind="end"
           style={{ left: `${endRatio * 100}%` }}
           title={`结束 ${((endMs ?? 0) / 1000).toFixed(2)}s`}
           aria-hidden="true"

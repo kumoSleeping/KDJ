@@ -4,13 +4,14 @@ members = [
     "crates/kdj-core",
     "crates/kdj-providers",
     "crates/kdj-analysis",
+    "crates/kdj-player",
     "crates/kdj-library",
     "crates/kdj-server",
     "src-tauri",
 ]
 
 [workspace.package]
-version = "0.2.9"
+version = "0.2.10"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"

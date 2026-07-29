@@ -3271,7 +3271,7 @@ button.kd-result-lead-btn:hover {
     0 0 3px rgba(0, 0, 0, 0.55);
 }
 
-/* 起止点：顶部主题色三角。比旧的白色略大，浅/深色波形上都能一眼看见。 */
+/* 起止点：只留顶部主题色三角，不画竖线——竖线会压住下面的波形柱。 */
 .kd-wave-marker {
   position: absolute;
   top: 0;
@@ -3284,19 +3284,6 @@ button.kd-result-lead-btn:hover {
   transform: translateX(-50%);
   pointer-events: none;
   filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.65));
-}
-.kd-wave-marker::after {
-  content: "";
-  position: absolute;
-  left: -0.5px;
-  top: 8px;
-  width: 2px;
-  height: 28px;
-  background: color-mix(in srgb, var(--kd-theme) 78%, transparent);
-}
-/* 开始点只保留顶部三角，别让竖线压住下面的波形；结束点仍用线提示裁切边界。 */
-.kd-wave-marker[data-kind="start"]::after {
-  display: none;
 }
 .kd-wave-menu-error {
   margin: 0.15rem 0.35rem 0.25rem;

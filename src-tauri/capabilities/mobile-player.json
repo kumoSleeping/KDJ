@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "mobile-player",
+  "description": "移动端原生播放器。播放生命周期由 Android MediaSessionService / iOS AVPlayer 持有，不依赖 WebView 常驻。",
+  "windows": ["main"],
+  "platforms": ["android", "iOS"],
+  "permissions": ["native-audio:default"]
+}

@@ -1,6 +1,6 @@
 {
   "name": "kdj",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "private": true,
   "description": "KDJ — DJ 曲库与多平台音乐/视频下载工作台",
   "scripts": {
@@ -19,9 +19,11 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
+    "@tauri-apps/api": "2.11.0",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "tauri-plugin-native-audio-api": "file:plugins/native-audio/guest-js",
     "zustand": "^5.0.2"
   },
   "devDependencies": {

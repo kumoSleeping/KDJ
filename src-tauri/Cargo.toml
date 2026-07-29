@@ -40,6 +40,11 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+# Vendored from tauri-plugin-native-audio 1.0.5 (f9186d9) so KDJ can audit and
+# extend the mobile transport contract without trusting an unpinned moving branch.
+tauri-plugin-native-audio = { version = "=1.0.5", path = "../plugins/native-audio" }
+
 [features]
 # `tauri build` 会自动带上这个 feature，`generate_context!` 才会去读
 # frontendDist 把前端产物嵌进二进制；不带的时候（`cargo build` / `tauri dev`）
