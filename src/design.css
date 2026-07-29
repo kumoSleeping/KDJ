@@ -1635,20 +1635,27 @@ body[data-kd-track-pointer-dragging="true"] * {
   object-fit: cover;
   display: block;
 }
-/* 无封面歌曲共用的小黑胶唱盘。百分比尺寸让 22px 列表缩略图和 64px 详情封面同形缩放。 */
+/* 无封面歌曲共用的小黑胶唱盘。唱片自己就是轮廓，不再套一层方形封面框。 */
+.kd-thumb:has(> .kd-vinyl-placeholder),
+.kd-cover:has(> .kd-vinyl-placeholder) {
+  overflow: visible;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
 .kd-vinyl-placeholder {
   position: relative;
   display: grid;
   place-items: center;
-  width: 78%;
-  height: 78%;
-  margin: 11%;
-  border: 1px solid rgb(255 255 255 / 8%);
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  border: 1px solid transparent;
   border-radius: 50% !important;
-  background:
-    radial-gradient(circle at 34% 28%, rgb(255 255 255 / 14%) 0 2%, transparent 3% 100%),
-    repeating-radial-gradient(circle at center, #202024 0 1px, #09090a 1.5px 3px);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 38%);
+  background: radial-gradient(circle, #202023 0 42%, #151517 43% 70%, #09090a 71% 100%);
+  box-shadow:
+    0 2px 4px rgb(0 0 0 / 48%),
+    inset 0 0 5px rgb(0 0 0 / 46%);
 }
 .kd-vinyl-placeholder-label {
   display: block;
@@ -1659,6 +1666,14 @@ body[data-kd-track-pointer-dragging="true"] * {
   background:
     radial-gradient(circle, var(--kd-panel) 0 12%, transparent 14%),
     var(--kd-theme);
+  box-shadow: 0 0 4px rgb(0 0 0 / 58%);
+}
+:root[data-theme="light"] .kd-vinyl-placeholder {
+  border-color: transparent;
+  background: radial-gradient(circle, #242427 0 42%, #18181a 43% 70%, #0b0b0c 71% 100%);
+  box-shadow:
+    0 2px 4px rgb(0 0 0 / 22%),
+    inset 0 0 5px rgb(0 0 0 / 38%);
 }
 /* 缩略图兼职试听键（歌行）：不占新列，悬停行时浮出播放脸。
    position 给浮层定位用；按钮形态只是把 span 的壳换掉，尺寸边框全同。 */
@@ -3421,6 +3436,87 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   color: var(--kd-text);
   border-color: var(--kd-line);
 }
+.kd-library-commandbar {
+  flex: none;
+  width: 100%;
+  height: 1.9rem;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  overflow: hidden;
+}
+.kd-library-command-actions {
+  min-width: 0;
+  flex: 1 1 auto;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.65rem;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+.kd-library-command-actions::-webkit-scrollbar {
+  display: none;
+}
+.kd-library-command-actions > svg {
+  flex: none;
+}
+.kd-library-inline-search {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.65rem;
+  color: var(--kd-muted);
+}
+.kd-library-inline-search:focus-within {
+  color: var(--kd-text);
+}
+.kd-library-inline-search > svg {
+  flex: none;
+}
+.kd-library-inline-search > input {
+  appearance: none;
+  min-width: 0;
+  flex: 1;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--kd-text);
+  font: inherit;
+  font-size: var(--kd-size-sm);
+}
+.kd-library-inline-search > input::placeholder {
+  color: var(--kd-faint);
+}
+.kd-library-inline-search > input::-webkit-search-cancel-button {
+  display: none;
+}
+.kd-library-inline-search > button {
+  appearance: none;
+  flex: none;
+  width: 1.35rem;
+  height: 1.35rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+.kd-library-inline-search > button:hover {
+  color: var(--kd-text);
+}
 .kd-library-filterbar {
   display: flex;
   align-items: center;
@@ -3608,6 +3704,19 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
     inset 0 0 0 1px rgba(255, 255, 255, 0.035);
   animation: kd-player-vinyl-spin 2.8s linear infinite;
   animation-play-state: paused;
+}
+/* 底部播放器左右唱盘只靠光影塑形，不画轮廓线。亮色投影刻意收窄，避免碰到栏边被裁切。 */
+:root:not([data-theme="light"]) .kd-player-disc-record {
+  border-color: transparent;
+  box-shadow:
+    0 4px 9px rgba(0, 0, 0, 0.64),
+    inset 0 0 9px rgba(0, 0, 0, 0.34);
+}
+:root[data-theme="light"] .kd-player-disc-record {
+  border-color: transparent;
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.2),
+    inset 0 0 7px rgba(0, 0, 0, 0.24);
 }
 .kd-player-disc-record > img {
   width: 70%;
@@ -4894,7 +5003,11 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 }
 /* 标题 14rem；艺人和专辑恢复到能正常读出内容的宽度。 */
 .kd-table[data-kind="library"] {
-  min-width: 50.5rem;
+  min-width: 53.7rem;
+}
+.kd-table[data-kind="library"] [data-col="index"] {
+  color: var(--kd-faint);
+  text-align: right;
 }
 /* 搜索结果表里有视频大行那套自排的多行块，需要的宽度更大 */
 .kd-table:not([data-kind="library"]) {
@@ -4939,7 +5052,8 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 0.15rem;
+  /* 只多放开一点；中间列仍按内容宽度参与网格，左右歌名会优先省略而不会相撞。 */
+  gap: 0.25rem;
 }
 .kd-player-step {
   appearance: none;

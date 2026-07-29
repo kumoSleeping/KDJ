@@ -26,4 +26,5 @@
 - Frontend: `npm run typecheck` and `npm run tauri:web:build`.
 - Rust: use the narrowest relevant `cargo test`/`cargo check`, then workspace validation when appropriate.
 - GUI: launch only through `npm run tauri:dev`.
-- After every app change, fully stop the existing Tauri app and restart it with `npm run tauri:dev` before reporting completion; do not rely on Vite HMR as final validation.
+- Pure frontend changes under `src/` or frontend CSS SHOULD use Vite HMR in the running Tauri dev session; do not fully restart the app for each frontend-only edit.
+- Rust backend, `src-tauri/`, Tauri configuration, native capability, or startup changes MUST be validated by fully stopping and restarting `npm run tauri:dev` before reporting completion.

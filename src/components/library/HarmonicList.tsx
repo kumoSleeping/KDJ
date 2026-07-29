@@ -388,7 +388,7 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
             }}
           >
             <ListStart size={12} />
-            下一首播放（插队）{menuTracks.length > 1 ? `（${menuTracks.length} 首）` : ""}
+            下一首播放{menuTracks.length > 1 ? `（${menuTracks.length} 首）` : ""}
           </button>
         </ContextMenu>
       )}

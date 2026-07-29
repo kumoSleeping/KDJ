@@ -71,8 +71,6 @@ import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackD
 
 /** 广播播放位置的节流间隔：节拍网格的播放头不需要每帧更新。 */
 const POSITION_BROADCAST_MS = 200;
-/** 拖动跳转只做极短防爆音包络；比播放按钮的唱机式软启停更强调即时响应。 */
-const SEEK_FADE_SEC = 0.08;
 
 /**
  * 播放模式按钮的脸。一颗按钮循环切换，图标就是当前模式——
@@ -382,7 +380,7 @@ export function PlayerBar() {
   }, []);
   /** 只有底栏主按钮使用短淡入淡出；换曲、同步等路径仍保持直接响应。 */
   const fadeTransportRef = useRef(false);
-  /** 连续拖动进度时只允许最后一个跳转在淡出后真正落点。 */
+  /** shadow deck 异步换手时，连续点击只有最后一个目标能更新正主元素。 */
   const seekGenerationRef = useRef(0);
 
   // 上次退出时两台唱盘各留着哪一首，只存 id；恢复时重新取最新 Track，避免把
@@ -417,6 +415,12 @@ export function PlayerBar() {
           }
           transitionVisualRef.current = null;
           setTransitionVisual(null);
+          const current = trackRef.current;
+          if (current) {
+            const source = mediaUrlForTrack(current);
+            djEngine.prepareSeek(source);
+            djEngine.prepareDecodedSeek(current, source);
+          }
         }
       }),
     [],
@@ -553,10 +557,17 @@ export function PlayerBar() {
     }
     // 硬切歌（双击列表、回上一首）顺手掐掉可能还在进行的过渡：
     // 不掐的话暗处退场那台 deck 还会再响好几秒
+    djEngine.releaseDecodedPlayback();
     djEngine.cancel();
-    const audio = frontEl;
-    audio.src = mediaUrlForTrack(track);
+    // cancel 可能刚把尚在准备的 shadow deck 定为目标正主，不能继续使用旧闭包里的元素。
+    const audio = djEngine.frontElement();
+    setFrontEl(audio);
+    const source = mediaUrlForTrack(track);
+    audio.src = source;
     audio.load();
+    // shadow 只作解码尚未完成时的回退；正常路径后台准备当前曲目的受限 PCM。
+    djEngine.prepareSeek(source);
+    djEngine.prepareDecodedSeek(track, source);
     setNotice("");
     // 播放只交给下面监听 playing/track 的 effect。这里再 play 一次会在暂停后
     // 双击换曲时形成 load → play → play 竞态，其中一个 AbortError 又把状态停掉。
@@ -582,7 +593,7 @@ export function PlayerBar() {
         // 容易被听成媒体解码卡顿或爆音。DJ 接歌效果仍保留自己的音效。
         const start = fade
           ? djEngine.softPlay(frontEl, false)
-          : (djEngine.ensureAudible(), frontEl.play());
+          : (djEngine.ensureAudible(), djEngine.hardPlay(frontEl));
         void start.catch((error: unknown) => {
           commitPlaying(false);
           setNotice(`播放失败：${error instanceof Error ? error.message : String(error)}`);
@@ -595,7 +606,7 @@ export function PlayerBar() {
       // 停下要连暗处那台一起按住：过渡进行到一半按停止，
       // 只停正主的话退场中的旧歌还会自己淡完那几秒
       djEngine.cancel();
-      frontEl.pause();
+      djEngine.hardPause(frontEl);
     }
   }, [playing, track, frontEl, commitPlaying]);
 
@@ -615,7 +626,9 @@ export function PlayerBar() {
         commitPlaying(false);
       } else if (detail.action === "seek" && detail.position !== undefined) {
         const at = Math.max(0, detail.position);
-        frontEl.currentTime = at;
+        void djEngine
+          .seamlessSeek(mediaUrlForTrack(track), at, playingRef.current)
+          .then(setFrontEl);
         setPosition(at);
         broadcastMediaSync({
           owner: "player",
@@ -639,7 +652,7 @@ export function PlayerBar() {
       trackId: track.id,
       // 视频恢复播放时必须从当前唱盘位置继续。省略 position 会被当成 0，
       // 暂停后再播放就会把视频错误拉回 Offset 起点。
-      position: frontEl.currentTime,
+      position: djEngine.currentTime(frontEl),
     });
   }, [playing, track?.id, frontEl]);
 
@@ -668,7 +681,9 @@ export function PlayerBar() {
       if (selected) playTrack(selected);
       return;
     }
-    frontEl.currentTime = 0;
+    void djEngine
+      .seamlessSeek(mediaUrlForTrack(track), 0, playingRef.current)
+      .then(setFrontEl);
     setPosition(0);
     broadcastMediaSync({ owner: "player", action: "seek", trackId: track.id, position: 0 });
     commitPlaying(true);
@@ -676,35 +691,32 @@ export function PlayerBar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fadeEpoch, coplay]);
 
-  // 波形跳转：播放中先淡出，定位后再淡入，避免解码器换 Range 时硬切出“咔”的断口。
+  // 播放中不能再让正在出声的 element 自己 seek：WebKit 换 Range/解码期间必然断流。
+  // 交给 shadow deck 在目标处静音备好，旧声持续到音频时钟完成无缝换手。
   useEffect(() => {
     const onSeek = (event: Event) => {
       const detail = (event as CustomEvent<SeekDetail>).detail;
-      if (!track || detail.trackId !== track.id) return;
+      if (!track || detail.trackId !== track.id || !Number.isFinite(detail.position)) return;
       const target = Math.max(0, detail.position);
       const generation = ++seekGenerationRef.current;
-      // 淡出期间媒体仍在旧位置继续走，不能先把 React 播放头放到目标点：迟到的
-      // timeupdate 会把它写回旧位置，真正 seek 时又跳过去，视觉上就是来回回弹。
-      const apply = async () => {
-        if (playingRef.current) {
-          await djEngine.softPause(false, SEEK_FADE_SEC);
+      // 视觉播放头仍在同一次点击内瞬移；准备期忽略旧 deck 迟到的 timeupdate。
+      setPosition(target);
+      broadcastMediaSync({
+        owner: "player",
+        action: "seek",
+        trackId: track.id,
+        position: target,
+      });
+      void djEngine
+        .seamlessSeek(mediaUrlForTrack(track), target, playingRef.current)
+        .then((element) => {
           if (generation !== seekGenerationRef.current) return;
-        }
-        frontEl.currentTime = target;
-        setPosition(target);
-        broadcastMediaSync({
-          owner: "player",
-          action: "seek",
-          trackId: track.id,
-          position: target,
+          setFrontEl(element);
         });
-        if (playingRef.current) await djEngine.softPlay(frontEl, false, SEEK_FADE_SEC);
-      };
-      void apply();
     };
     window.addEventListener(SEEK_EVENT, onSeek);
     return () => window.removeEventListener(SEEK_EVENT, onSeek);
-  }, [track, frontEl]);
+  }, [track]);
 
   // 和视频预览互斥出声（见 audioFocus.ts）：这边一开始放就喊一嗓子，
   // 预览听到会自己暂停；反过来预览开声时这边也自动停，只暂停不清进度。
@@ -817,9 +829,12 @@ export function PlayerBar() {
   useEffect(() => {
     const audio = frontEl;
     const onTime = () => {
-      // 暂停状态不接收迟到的 timeupdate，避免播放头在暂停后再跳一格。
-      if (!playingRef.current) return;
-      const seconds = audio.currentTime;
+      // 主按钮进入“暂停”状态后，媒体还会继续运行半秒来完成淡出。播放头必须
+      // 跟到真正的 pause 点；若在这段时间丢弃 timeupdate，UI 会停在旧位置，
+      // 下一次播放收到首个 timeupdate 时就会把这半秒一次性补跳出来。
+      // shadow deck 准备时旧声仍在走，但不能让旧时钟把刚点击的播放头拉回去。
+      if (djEngine.isSeeking()) return;
+      const seconds = djEngine.currentTime(audio);
       setPosition(seconds);
       broadcast(seconds);
       broadcastMediaSync({

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { RotateCcw, Trash2 } from "lucide-react";
+import { CheckSquare, Copy, ListMusic, RotateCcw, Scissors, Search, Trash2, X } from "lucide-react";
 import { useLibraryStore } from "../../stores/libraryStore";
 import {
   finishTrackDrop,
@@ -7,7 +7,8 @@ import {
   TRACK_TRASH_DROP_EVENT,
   type TrackDragDetail,
 } from "../../lib/trackDrag";
-import { InlineNotice } from "../common";
+import { Button, InlineNotice } from "../common";
+import { WorkRailSelection } from "../chrome/WorkRail";
 
 export function LibraryToolbar() {
   const scan = useLibraryStore((state) => state.scan);
@@ -15,6 +16,12 @@ export function LibraryToolbar() {
   const queueView = useLibraryStore((state) => state.queueView);
   const keyFilter = filter.key;
   const setFilter = useLibraryStore((state) => state.setFilter);
+  const selectedIds = useLibraryStore((state) => state.selectedIds);
+  const selectionMode = useLibraryStore((state) => state.selectionMode);
+  const setSelectionMode = useLibraryStore((state) => state.setSelectionMode);
+  const copyToClipboard = useLibraryStore((state) => state.copyToClipboard);
+  const total = useLibraryStore((state) => state.total);
+  const selecting = selectionMode || selectedIds.length > 1;
   const [dragIds, setDragIds] = useState<number[]>([]);
   const [trashOver, setTrashOver] = useState(false);
   /** 出错就地贴在工具条下面。原来是弹窗，可弹窗飘走之后用户就不知道刚才哪一步没成了。 */
@@ -58,6 +65,68 @@ export function LibraryToolbar() {
 
   return (
     <>
+      <div className="kd-library-commandbar" data-selecting={selecting ? "true" : undefined}>
+        {selecting ? (
+          <div className="kd-library-command-actions">
+            <CheckSquare size={13} strokeWidth={2.25} aria-hidden="true" />
+            <WorkRailSelection
+              count={selectedIds.length}
+              onSelectAll={() => useLibraryStore.getState().selectAll()}
+              onClear={() => useLibraryStore.getState().select(null)}
+              onDone={() => {
+                setSelectionMode(false);
+                useLibraryStore.getState().select(null);
+              }}
+              actions={
+                <>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={selectedIds.length === 0}
+                    onClick={() => copyToClipboard("link")}
+                  >
+                    <Copy size={12} /> 复制
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={selectedIds.length === 0}
+                    onClick={() => copyToClipboard("move")}
+                  >
+                    <Scissors size={12} /> 剪切
+                  </Button>
+                </>
+              }
+            />
+          </div>
+        ) : !queueView ? (
+          <label className="kd-library-inline-search">
+            <Search size={13} aria-hidden="true" />
+            <input
+              type="search"
+              value={filter.q}
+              placeholder={filter.folder ? "在当前文件夹中搜索" : "在全部歌曲中搜索"}
+              aria-label={filter.folder ? "搜索当前文件夹的曲目名称" : "搜索全部曲目的名称"}
+              onChange={(event) => setFilter({ q: event.target.value })}
+            />
+            {filter.q && (
+              <button
+                type="button"
+                aria-label="清除曲目搜索"
+                title="清除曲目搜索"
+                onClick={() => setFilter({ q: "" })}
+              >
+                <X size={12} />
+              </button>
+            )}
+          </label>
+        ) : (
+          <div className="kd-library-command-actions">
+            <ListMusic size={13} aria-hidden="true" />
+            <span>临时列表 {total} 首</span>
+          </div>
+        )}
+      </div>
       {hasFilter && (
         <div className="kd-library-filterbar">
           <span className="kd-library-filter-label">筛选</span>

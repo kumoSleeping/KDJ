@@ -43,7 +43,11 @@ export function DjPanel() {
       <div className="kd-scroll kd-djp" style={{ minHeight: 0 }}>
         <PanelStack storageKey="kd-dj-panels">
           <Panel key="transitions" heading="接歌方案" dense>
-            <div className="kd-djp-choices" aria-label="接歌方案">
+            <div
+              className="kd-djp-choices"
+              aria-label="接歌方案"
+              title={`${transitionHint || "至少选择一种接歌方案"}。每次接歌会从已选方案中随机组合。`}
+            >
               {DJ_TRANSITIONS.map((item) => {
                 const checked = transitions.includes(item.id);
                 return (
@@ -61,13 +65,13 @@ export function DjPanel() {
                 );
               })}
             </div>
-            <p className="kd-djp-note">
-              {transitionHint || "至少选择一种接歌方案"}。每次接歌会从已选方案中随机组合。
-            </p>
           </Panel>
 
           <Panel key="vocal" heading="人声处理" dense>
-            <label className="kd-djp-check">
+            <label
+              className="kd-djp-check"
+              title="保留立体声侧声道和补偿增益，让旧歌人声后退但不突然变小。"
+            >
               <span className="kd-djp-check-box" data-on={vocalCut ? "true" : undefined} aria-hidden="true">
                 {vocalCut ? <Check size={11} strokeWidth={2.5} /> : null}
               </span>
@@ -78,13 +82,14 @@ export function DjPanel() {
               />
               接歌时渐进削弱上一首的中置人声
             </label>
-            <p className="kd-djp-note">
-              保留立体声侧声道和补偿增益，让旧歌人声后退但不突然变小。
-            </p>
           </Panel>
 
           <Panel key="effects" heading="效果器" dense>
-            <div className="kd-djp-choices" aria-label="效果器">
+            <div
+              className="kd-djp-choices"
+              aria-label="效果器"
+              title={`${effectHint || "未启用效果器"}。强度会在接歌过程中自动推进。`}
+            >
               {DJ_EFFECTS.map((item) => {
                 const checked = effects.includes(item.id);
                 return (
@@ -102,13 +107,15 @@ export function DjPanel() {
                 );
               })}
             </div>
-            <p className="kd-djp-note">
-              {effectHint || "未启用效果器"}。强度会在接歌过程中自动推进。
-            </p>
           </Panel>
 
           <Panel key="bars" heading="接歌长度" dense>
-            <div className="kd-djp-segs" role="radiogroup" aria-label="接歌长度">
+            <div
+              className="kd-djp-segs"
+              role="radiogroup"
+              aria-label="接歌长度"
+              title={`${bpmLabel} · 约 ${formatSeconds(mixSeconds(bpm, bars))} · 起手点自动按尾段频谱估算`}
+            >
               {DJ_BARS_OPTIONS.map((value) => (
                 <button
                   key={value}
@@ -123,9 +130,6 @@ export function DjPanel() {
               ))}
               <span>小节</span>
             </div>
-            <p className="kd-djp-note">
-              {bpmLabel} · 约 {formatSeconds(mixSeconds(bpm, bars))} · 起手点自动按尾段频谱估算
-            </p>
           </Panel>
         </PanelStack>
       </div>

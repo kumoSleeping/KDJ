@@ -1,12 +1,11 @@
-import { BarChart3, CheckSquare, Copy, Download, Music2, Pause, Play, Scissors } from "lucide-react";
+import { BarChart3, Download, Music2, Pause, Play } from "lucide-react";
 import type { ReactNode } from "react";
 import { forgetQueuedAnalysis } from "../../lib/autoAnalyze";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
-import { Button } from "../common";
 import { AnalysisGlyph } from "./ActivityRail";
-import { WorkRail, WorkRailSelection } from "./WorkRail";
+import { WorkRail } from "./WorkRail";
 
 function ScanGlyph() {
   return (
@@ -19,8 +18,8 @@ function ScanGlyph() {
 }
 
 /**
- * 主内容区的曲库工作条：空闲看数量/分析进度，多选与导入/分析占用本条。
- * 它常驻在所有内容分栏上方，因此搜索结果和右侧面板出现时也不会把它截断。
+ * 主内容区的曲库工作条：空闲看数量，忙时显示导入/分析/下载进度。
+ * 曲目多选放在本地列表自己的搜索栏位置，不占用这根全局任务条。
  *
  * `showDownloads`：搜索半栏没开时，下载进度暂挂这里，避免任务悬空。
  */
@@ -37,10 +36,6 @@ export function LibraryWorkRail({
   const autoAnalyzeSuspended = useLibraryStore((state) => state.autoAnalyzeSuspended);
   const stats = useLibraryStore((state) => state.stats);
   const total = useLibraryStore((state) => state.total);
-  const selectedIds = useLibraryStore((state) => state.selectedIds);
-  const selectionMode = useLibraryStore((state) => state.selectionMode);
-  const setSelectionMode = useLibraryStore((state) => state.setSelectionMode);
-  const copyToClipboard = useLibraryStore((state) => state.copyToClipboard);
   const queueView = useLibraryStore((state) => state.queueView);
   const activeDownloads = useDownloadStore((state) => state.activeCount);
   const downloadList = useDownloadStore((state) => state.list);
@@ -50,7 +45,6 @@ export function LibraryWorkRail({
   const saveSettings = useAppStore((state) => state.saveSettings);
 
   const scanning = scan !== null && scan.phase !== "done";
-  const selecting = selectionMode || selectedIds.length > 1;
   const downloading = showDownloads && activeDownloads > 0;
   const autoPaused = autoAnalyzeSuspended || !autoAnalyze;
 
@@ -77,125 +71,85 @@ export function LibraryWorkRail({
   const glyphs: ReactNode[] = [];
   const texts: ReactNode[] = [];
 
-  if (selecting) {
+  if (scanning && scan) {
+    glyphs.push(<ScanGlyph key="scan" />);
+    texts.push(
+      <span key="scan" className="kd-activity-text" title={scan.current}>
+        正在导入 {scan.done}/{scan.total}
+        {scan.current ? ` · ${scan.current}` : ""}
+      </span>,
+    );
+  }
+  if (analyze !== null) {
+    glyphs.push(<AnalysisGlyph key="analyze" />);
+    texts.push(
+      <span key="analyze" className="kd-activity-text" title={analyze.current}>
+        正在分析 {analyze.done}/{analyze.total} 首
+        {analyze.current ? ` · ${analyze.current}` : ""}
+      </span>,
+    );
+  }
+  if (downloading) {
     glyphs.push(
-      <span key="sel" className="kd-activity-glyph kd-activity-glyph-sel" aria-hidden="true">
-        <CheckSquare size={13} strokeWidth={2.25} />
+      <span key="dl" className="kd-activity-glyph kd-activity-glyph-dl" aria-hidden="true">
+        <Download size={13} strokeWidth={2.25} />
       </span>,
     );
     texts.push(
-      <WorkRailSelection
-        key="sel"
-        count={selectedIds.length}
-        onSelectAll={() => useLibraryStore.getState().selectAll()}
-        onClear={() => useLibraryStore.getState().select(null)}
-        onDone={() => {
-          setSelectionMode(false);
-          useLibraryStore.getState().select(null);
-        }}
-        actions={
-          <>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={selectedIds.length === 0}
-              onClick={() => copyToClipboard("link")}
-            >
-              <Copy size={12} /> 复制
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={selectedIds.length === 0}
-              onClick={() => copyToClipboard("move")}
-            >
-              <Scissors size={12} /> 剪切
-            </Button>
-          </>
-        }
-      />,
-    );
-  } else {
-    if (scanning && scan) {
-      glyphs.push(<ScanGlyph key="scan" />);
-      texts.push(
-        <span key="scan" className="kd-activity-text" title={scan.current}>
-          正在导入 {scan.done}/{scan.total}
-          {scan.current ? ` · ${scan.current}` : ""}
-        </span>,
-      );
-    }
-    if (analyze !== null) {
-      glyphs.push(<AnalysisGlyph key="analyze" />);
-      texts.push(
-        <span key="analyze" className="kd-activity-text" title={analyze.current}>
-          正在分析 {analyze.done}/{analyze.total} 首
-          {analyze.current ? ` · ${analyze.current}` : ""}
-        </span>,
-      );
-    }
-    if (downloading) {
-      glyphs.push(
-        <span key="dl" className="kd-activity-glyph kd-activity-glyph-dl" aria-hidden="true">
-          <Download size={13} strokeWidth={2.25} />
-        </span>,
-      );
-      texts.push(
-        <span key="dl" className="kd-activity-text">
-          {running
-            ? `下载中 · ${running.title || running.id}`
-            : `队列进行中 ${activeDownloads} 项`}
-        </span>,
-      );
-    }
-
-    if (!scanning && analyze === null && !downloading) {
-      const trackTotal = stats?.total ?? total;
-      const analyzed = stats?.analyzed ?? 0;
-      const pending = Math.max(0, trackTotal - analyzed);
-      glyphs.push(
-        <span key="n" className="kd-activity-glyph" aria-hidden="true">
-          <Music2 size={13} strokeWidth={2.25} />
-        </span>,
-      );
-      texts.push(
-        <span key="n" className="kd-activity-text">
-          {queueView ? "临时列表" : "曲库"} {trackTotal} 首
-        </span>,
-      );
-      glyphs.push(
-        <span key="a" className="kd-activity-glyph" aria-hidden="true">
-          <BarChart3 size={13} strokeWidth={2.25} />
-        </span>,
-      );
-      texts.push(
-        <span key="a" className="kd-activity-text">
-          {pending === 0 ? "已全部分析" : `已分析 ${analyzed} · 未分析 ${pending}`}
-        </span>,
-      );
-    }
-
-    texts.push(
-      <button
-        key="auto-analyze"
-        type="button"
-        className="kd-activity-control"
-        aria-pressed={!autoPaused}
-        disabled={savingSettings}
-        title={
-          autoPaused
-            ? "恢复后会分析新导入、正在播放和空闲时尚未分析的曲目"
-            : "暂停自动分析；已开始分析的曲目会安全完成当前一首"
-        }
-        onClick={toggleAutoAnalyze}
-      >
-        {autoPaused ? <Play size={11} /> : <Pause size={11} />}
-        自动分析：{autoPaused ? "已暂停" : "运行中"}
-      </button>,
+      <span key="dl" className="kd-activity-text">
+        {running
+          ? `下载中 · ${running.title || running.id}`
+          : `队列进行中 ${activeDownloads} 项`}
+      </span>,
     );
   }
 
-  const idle = !selecting && !scanning && analyze === null && !downloading;
+  if (!scanning && analyze === null && !downloading) {
+    const trackTotal = stats?.total ?? total;
+    const analyzed = stats?.analyzed ?? 0;
+    const pending = Math.max(0, trackTotal - analyzed);
+    glyphs.push(
+      <span key="n" className="kd-activity-glyph" aria-hidden="true">
+        <Music2 size={13} strokeWidth={2.25} />
+      </span>,
+    );
+    texts.push(
+      <span key="n" className="kd-activity-text">
+        {queueView ? "临时列表" : "曲库"} {trackTotal} 首
+      </span>,
+    );
+    glyphs.push(
+      <span key="a" className="kd-activity-glyph" aria-hidden="true">
+        <BarChart3 size={13} strokeWidth={2.25} />
+      </span>,
+    );
+    texts.push(
+      <span key="a" className="kd-activity-text">
+        {pending === 0 ? "已全部分析" : `已分析 ${analyzed} · 未分析 ${pending}`}
+      </span>,
+    );
+  }
+
+  texts.push(
+    <button
+      key="auto-analyze"
+      type="button"
+      className="kd-activity-control"
+      aria-pressed={!autoPaused}
+      disabled={savingSettings}
+      title={
+        autoPaused
+          ? "恢复后会分析新导入、正在播放和空闲时尚未分析的曲目"
+          : "暂停自动分析；已开始分析的曲目会安全完成当前一首"
+      }
+      onClick={toggleAutoAnalyze}
+    >
+      {autoPaused ? <Play size={11} /> : <Pause size={11} />}
+      自动分析：{autoPaused ? "已暂停" : "运行中"}
+    </button>,
+  );
+
+  const idle = !scanning && analyze === null && !downloading;
 
   return (
     <WorkRail
@@ -203,7 +157,7 @@ export function LibraryWorkRail({
       glyphs={glyphs}
       texts={texts}
       actions={actions}
-      label={selecting ? "曲库多选" : idle ? "曲库概况" : "曲库任务"}
+      label={idle ? "曲库概况" : "曲库任务"}
     />
   );
 }

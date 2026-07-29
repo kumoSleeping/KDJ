@@ -483,6 +483,7 @@ export function TrackTable({
   const loadingMore = useLibraryStore((state) => state.loadingMore);
   const queueView = useLibraryStore((state) => state.queueView);
   const filterFolder = useLibraryStore((state) => state.filter.folder);
+  const filterQuery = useLibraryStore((state) => state.filter.q);
   const removeTracks = useLibraryStore((state) => state.removeTracks);
   const startAnalyze = useLibraryStore((state) => state.startAnalyze);
   const addToQueue = useQueueStore((state) => state.add);
@@ -837,11 +838,12 @@ export function TrackTable({
         />
       );
     }
+    const query = filterQuery.trim();
     return (
       <EmptyState
         icon={<FolderOpen size={22} />}
-        title={filterFolder ? "这个文件夹是空的" : "还没有曲目"}
-        hint="把音频或视频拖进来"
+        title={query ? "没有匹配的曲目" : filterFolder ? "这个文件夹是空的" : "还没有曲目"}
+        hint={query ? "换个曲目名称试试" : "把音频或视频拖进来"}
       />
     );
   }
@@ -878,6 +880,9 @@ export function TrackTable({
               setColMenu({ x: event.clientX, y: event.clientY });
             }}
           >
+            <th data-col="index" style={{ width: "3.2rem" }} title="当前列表中的序号">
+              序号
+            </th>
             {visibleColumns.map((column) => (
               <th
                 key={column.key}
@@ -966,6 +971,7 @@ export function TrackTable({
                 setPendingMenu({ x: event.clientX, y: event.clientY, task });
               }}
             >
+              <td data-col="index" aria-label="待下载曲目">…</td>
               {visibleColumns.map((column) => {
                 if (column.key === "title") {
                   return (
@@ -1004,7 +1010,7 @@ export function TrackTable({
               })}
             </tr>
           ))}
-          {tracks.map((track) => (
+          {tracks.map((track, index) => (
             <tr
               key={track.id}
               aria-selected={selected.has(track.id)}
@@ -1089,6 +1095,7 @@ export function TrackTable({
                   : undefined
               }
             >
+              <td data-col="index">{index + 1}</td>
               {visibleColumns.map((column) => {
                 const cell = trackCell(
                   track,
@@ -1252,7 +1259,7 @@ export function TrackTable({
             }}
           >
             <ListStart size={12} />
-            下一首播放（插队）{menuTracks.length > 1 ? `（${menuTracks.length} 首）` : ""}
+            下一首播放{menuTracks.length > 1 ? `（${menuTracks.length} 首）` : ""}
           </button>
           {menuIds.length === 1 && (
             <button

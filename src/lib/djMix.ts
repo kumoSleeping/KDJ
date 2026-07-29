@@ -236,6 +236,22 @@ const TRANSPORT_STOP_SEC = 0.5;
 const TRANSPORT_CURVE_N = 64;
 /** 曲线归零后留两个左右的音频渲染量子，再 pause，避免非零采样被硬截断。 */
 const TRANSPORT_SETTLE_MS = 24;
+/**
+ * seek 交接只覆盖一次波形不连续所需的几个渲染量子。它不是用户可感知的淡入淡出：
+ * 旧 deck 在目标位置解码完成前保持满幅，随后两台在 12ms 内等功率换手，既没有
+ * 静音洞，也不会把两个任意相位的采样硬拼成 click。
+ */
+const SEEK_HANDOFF_SEC = 0.012;
+const SEEK_HANDOFF_LEAD_SEC = 0.006;
+const SEEK_READY_TIMEOUT_MS = 1200;
+const SEEK_SETTLE_MS = 32;
+const SEEK_CURVE_N = 32;
+/** 当前曲目最多保留约 256MiB Float32 PCM；长 DJ set 超限就回退流式 shadow seek。 */
+const MAX_DECODED_PCM_BYTES = 256 * 1024 * 1024;
+/** PCM 已在内存，点击后只预留一个渲染量子并做 6ms 防 click 换源。 */
+const PCM_SEEK_LEAD_SEC = 0.004;
+const PCM_SEEK_HANDOFF_SEC = 0.006;
+const PCM_TICK_MS = 50;
 
 let transportGen = 0;
 let transportTimer: number | null = null;
@@ -295,24 +311,27 @@ function holdParam(param: AudioParam, now: number): number {
   return param.value;
 }
 
+function transportFadeOutLevel(progress: number): number {
+  // 前 32% 只轻微 duck；剩余 68% 用五次 S 曲线贴地。末端斜率为 0，
+  // 不会像 cos 曲线那样到零点时仍带着速度，听起来仿佛突然被截断。
+  if (progress <= 0.32) {
+    return 1 - 0.12 * smootherstep(progress / 0.32);
+  }
+  const fade = (progress - 0.32) / 0.68;
+  return 0.88 * (1 - smootherstep(fade));
+}
+
 function transportGainCurve(from: number, direction: "out" | "in"): Float32Array {
   const out = new Float32Array(TRANSPORT_CURVE_N);
   for (let index = 0; index < TRANSPORT_CURVE_N; index += 1) {
     const progress = index / (TRANSPORT_CURVE_N - 1);
     if (direction === "out") {
-      // 前 32% 只轻微 duck；剩余 68% 用五次 S 曲线贴地。末端斜率为 0，
-      // 不会像 cos 曲线那样到零点时仍带着速度，听起来仿佛突然被截断。
-      if (progress <= 0.32) {
-        out[index] = from * (1 - 0.12 * smootherstep(progress / 0.32));
-      } else {
-        const fade = (progress - 0.32) / 0.68;
-        out[index] = from * 0.88 * (1 - smootherstep(fade));
-      }
+      // 保留原有淡出听感，不改变已经稳定的刹停包络。
+      out[index] = from * transportFadeOutLevel(progress);
     } else {
-      // 直接控制的是振幅增益，不是 UI 百分比。等功率 sin 曲线起始斜率过大，
-      // 前几十毫秒会冲出过多音量，听起来像“崩”一下。线性振幅让 0.5 秒内
-      // 每一小段增加量一致，既不在开头猛冲，也不会像 S 曲线前静音后突升。
-      out[index] = from + (1 - from) * progress;
+      // 淡入必须是淡出的时间反向。旧实现使用线性增益，和淡出的 S 形节奏不匹配，
+      // 听起来会像另一套动作；反向复用同一包络也能保证两端平滑落速。
+      out[index] = from + (1 - from) * transportFadeOutLevel(1 - progress);
     }
   }
   return out;
@@ -497,6 +516,10 @@ function piecewise(stops: [number, number][]): Float32Array {
  */
 interface Deck {
   el: HTMLAudioElement;
+  /** HTMLMedia 与采样级 PCM 播放共用的同一条逻辑 Deck 入口。 */
+  input: GainNode;
+  /** 只控制流式媒体源；PCM seek 启动后把它关掉，不动整台 Deck 的 fader。 */
+  mediaGain: GainNode;
   dry: GainNode;
   wet: GainNode;
   vocalMakeup: GainNode;
@@ -504,6 +527,8 @@ interface Deck {
   lowpass: BiquadFilterNode;
   highpass: BiquadFilterNode;
   fader: GainNode;
+  /** 协同播放音量必须包住 HTMLMedia 和 PCM 两种源。 */
+  volume: GainNode;
   echoDelay: DelayNode;
   echoFeedback: GainNode;
   echoWet: GainNode;
@@ -545,6 +570,12 @@ function createElement(): HTMLAudioElement {
 
 function buildDeck(ctx: AudioContext, el: HTMLAudioElement): Deck {
   const source = ctx.createMediaElementSource(el);
+  const mediaGain = ctx.createGain();
+  mediaGain.gain.value = 1;
+  const input = ctx.createGain();
+  input.gain.value = 1;
+  source.connect(mediaGain);
+  mediaGain.connect(input);
 
   const dry = ctx.createGain();
   dry.gain.value = 1;
@@ -563,7 +594,7 @@ function buildDeck(ctx: AudioContext, el: HTMLAudioElement): Deck {
   const sideMerger = ctx.createChannelMerger(2);
   const wet = ctx.createGain();
   wet.gain.value = 0;
-  source.connect(splitter);
+  input.connect(splitter);
   splitter.connect(sideLeftL, 0);
   splitter.connect(sideLeftR, 1);
   splitter.connect(sideRightR, 1);
@@ -594,15 +625,18 @@ function buildDeck(ctx: AudioContext, el: HTMLAudioElement): Deck {
 
   const fader = ctx.createGain();
   fader.gain.value = 1;
+  const volume = ctx.createGain();
+  volume.gain.value = 1;
 
-  source.connect(dry);
+  input.connect(dry);
   dry.connect(vocalMakeup);
   wet.connect(vocalMakeup);
   vocalMakeup.connect(low);
   low.connect(lowpass);
   lowpass.connect(highpass);
   highpass.connect(fader);
-  fader.connect(ctx.destination);
+  fader.connect(volume);
+  volume.connect(ctx.destination);
 
   const fxLimiter = ctx.createDynamicsCompressor();
   fxLimiter.threshold.value = -12;
@@ -663,6 +697,8 @@ function buildDeck(ctx: AudioContext, el: HTMLAudioElement): Deck {
 
   return {
     el,
+    input,
+    mediaGain,
     dry,
     wet,
     vocalMakeup,
@@ -670,6 +706,7 @@ function buildDeck(ctx: AudioContext, el: HTMLAudioElement): Deck {
     lowpass,
     highpass,
     fader,
+    volume,
     echoDelay,
     echoFeedback,
     echoWet,
@@ -753,6 +790,164 @@ let decks: [Deck, Deck] | null = null;
 let broken = false;
 let frontIndex: 0 | 1 = 0;
 let pending: Pending | null = null;
+/** seek 准备/交接与 DJ 过渡共用两台 deck；外部控制可要求恢复旧声或落到目标。 */
+type SeekAbortMode = "restore" | "target";
+let seekAbort: ((mode: SeekAbortMode) => void) | null = null;
+let seekBusy = false;
+
+function abortSeamlessSeek(mode: SeekAbortMode): void {
+  const abort = seekAbort;
+  if (!abort) return;
+  seekAbort = null;
+  abort(mode);
+}
+
+function absoluteMediaUrl(source: string): string {
+  try {
+    return new URL(source, document.baseURI).href;
+  } catch {
+    return source;
+  }
+}
+
+function hasMediaSource(el: HTMLAudioElement, source: string): boolean {
+  const expected = absoluteMediaUrl(source);
+  return el.currentSrc === expected || el.src === expected;
+}
+
+function seekHandoffCurve(direction: "out" | "in"): Float32Array {
+  const curve = new Float32Array(SEEK_CURVE_N);
+  for (let index = 0; index < SEEK_CURVE_N; index += 1) {
+    const progress = index / (SEEK_CURVE_N - 1);
+    curve[index] =
+      direction === "out"
+        ? Math.cos((progress * Math.PI) / 2)
+        : Math.sin((progress * Math.PI) / 2);
+  }
+  return curve;
+}
+
+const seekOutCurve = seekHandoffCurve("out");
+const seekInCurve = seekHandoffCurve("in");
+
+interface DecodedTrack {
+  source: string;
+  buffer: AudioBuffer;
+}
+
+interface PcmRun {
+  deckIndex: 0 | 1;
+  sourceUrl: string;
+  source: AudioBufferSourceNode;
+  gain: GainNode;
+  offset: number;
+  startedAt: number;
+  stopped: boolean;
+}
+
+let decodeGeneration = 0;
+let decodeAbort: AbortController | null = null;
+let decodedTrack: DecodedTrack | null = null;
+let pcmRun: PcmRun | null = null;
+let pcmPaused: { deckIndex: 0 | 1; sourceUrl: string; position: number } | null = null;
+let pcmTickTimer: number | null = null;
+let pcmSeekGeneration = 0;
+
+function pcmPosition(run: PcmRun): number {
+  if (!ctx || !decodedTrack || decodedTrack.source !== run.sourceUrl) return run.offset;
+  const elapsed = Math.max(0, ctx.currentTime - run.startedAt);
+  return Math.min(decodedTrack.buffer.duration, run.offset + elapsed);
+}
+
+function stopPcmTicker(): void {
+  if (pcmTickTimer !== null) window.clearInterval(pcmTickTimer);
+  pcmTickTimer = null;
+}
+
+function ensurePcmTicker(): void {
+  if (pcmTickTimer !== null) return;
+  pcmTickTimer = window.setInterval(() => {
+    const run = pcmRun;
+    if (!run || !decks) {
+      stopPcmTicker();
+      return;
+    }
+    // PlayerBar 仍监听当前逻辑 Deck 的 element；事件只是让它来读取引擎 PCM 时钟。
+    decks[run.deckIndex].el.dispatchEvent(new Event("timeupdate"));
+  }, PCM_TICK_MS);
+}
+
+function stopPcm(run: PcmRun, syncElement: boolean): number {
+  const position = pcmPosition(run);
+  run.stopped = true;
+  try {
+    run.source.stop();
+  } catch {
+    /* 已自然结束 */
+  }
+  try {
+    run.source.disconnect();
+    run.gain.disconnect();
+  } catch {
+    /* ignore */
+  }
+  if (syncElement && decks) {
+    try {
+      decks[run.deckIndex].el.currentTime = position;
+    } catch {
+      /* metadata 尚未到时只保留 PCM 位置 */
+    }
+  }
+  if (pcmRun === run) pcmRun = null;
+  if (!pcmRun) stopPcmTicker();
+  return position;
+}
+
+function createPcmRun(deckIndex: 0 | 1, sourceUrl: string, offset: number, when: number): PcmRun | null {
+  if (!ctx || !decks || !decodedTrack || decodedTrack.source !== sourceUrl) return null;
+  const bounded = Math.min(Math.max(0, offset), Math.max(0, decodedTrack.buffer.duration - 0.001));
+  const source = ctx.createBufferSource();
+  source.buffer = decodedTrack.buffer;
+  const gain = ctx.createGain();
+  gain.gain.value = 0;
+  source.connect(gain);
+  gain.connect(decks[deckIndex].input);
+  const run: PcmRun = {
+    deckIndex,
+    sourceUrl,
+    source,
+    gain,
+    offset: bounded,
+    startedAt: when,
+    stopped: false,
+  };
+  source.onended = () => {
+    if (run.stopped || pcmRun !== run || !decks) return;
+    pcmRun = null;
+    pcmPaused = null;
+    stopPcmTicker();
+    decks[deckIndex].el.dispatchEvent(new Event("ended"));
+  };
+  source.start(when, bounded);
+  return run;
+}
+
+function releaseDecodedPlayback(): void {
+  decodeGeneration += 1;
+  pcmSeekGeneration += 1;
+  decodeAbort?.abort();
+  decodeAbort = null;
+  if (pcmRun) stopPcm(pcmRun, false);
+  if (ctx && decks) {
+    for (const deck of decks) {
+      deck.mediaGain.gain.cancelScheduledValues(ctx.currentTime);
+      deck.mediaGain.gain.setValueAtTime(1, ctx.currentTime);
+    }
+  }
+  decodedTrack = null;
+  pcmPaused = null;
+  seekBusy = false;
+}
 
 export type DjTransitionPhase = "idle" | "preparing" | "mixing";
 export interface DjTransitionState {
@@ -1052,8 +1247,16 @@ export const djEngine = {
    * 接歌进行到一半拨推子，暗处退场那台也得跟着小。
    */
   setVolume(volume: number): void {
-    elements[0].volume = volume;
-    elements[1].volume = volume;
+    const value = Math.min(1, Math.max(0, volume));
+    if (ctx && decks) {
+      for (const deck of decks) {
+        deck.el.volume = 1;
+        deck.volume.gain.setValueAtTime(value, ctx.currentTime);
+      }
+      return;
+    }
+    elements[0].volume = value;
+    elements[1].volume = value;
   },
 
   /**
@@ -1072,7 +1275,12 @@ export const djEngine = {
 
   /** 交接（含准备期）是否在进行。自动触发靠它防止一首歌里连开两场。 */
   isTransitioning(): boolean {
-    return pending !== null;
+    return pending !== null || seekBusy;
+  },
+
+  /** PlayerBar 在 shadow deck 换手前忽略旧元素迟到的 timeupdate。 */
+  isSeeking(): boolean {
+    return seekBusy;
   },
 
   /** 「顺其自然」档的起手提前量：交接本身的长度 + 一点挑歌/加载的余量。 */
@@ -1118,9 +1326,11 @@ export const djEngine = {
       try {
         decks = [buildDeck(ctx, elements[0]), buildDeck(ctx, elements[1])];
         void ctx.resume();
+        decks[0].volume.gain.setValueAtTime(volumes[0], ctx.currentTime);
+        decks[1].volume.gain.setValueAtTime(volumes[1], ctx.currentTime);
         requestAnimationFrame(() => {
-          elements[0].volume = volumes[0];
-          elements[1].volume = volumes[1];
+          elements[0].volume = 1;
+          elements[1].volume = 1;
         });
         return true;
       } catch (error) {
@@ -1136,12 +1346,375 @@ export const djEngine = {
     }
   },
 
+  /** 当前逻辑 Deck 的播放位置；PCM 模式读 AudioContext 时钟，流式模式读 element。 */
+  currentTime(el: HTMLAudioElement = elements[frontIndex]): number {
+    const index = elements.indexOf(el);
+    if (index >= 0 && pcmRun?.deckIndex === index) return pcmPosition(pcmRun);
+    if (index >= 0 && pcmPaused?.deckIndex === index) return pcmPaused.position;
+    return el.currentTime;
+  },
+
+  /**
+   * 当前曲目后台解成一份 Float32 PCM。仅保留一首且先按元数据估算内存；
+   * 5 分钟 44.1kHz 立体声约 101MiB，超过 256MiB 的长 set 不进入该路径。
+   */
+  prepareDecodedSeek(track: Track, source: string): void {
+    releaseDecodedPlayback();
+    if (!djEngine.warmup() || !ctx) return;
+    const duration = track.duration ?? 0;
+    const channels = Math.max(1, track.channels ?? 2);
+    const estimatedRate = Math.max(8000, ctx.sampleRate);
+    const estimatedBytes = duration * estimatedRate * channels * Float32Array.BYTES_PER_ELEMENT;
+    if (!Number.isFinite(estimatedBytes) || estimatedBytes <= 0 || estimatedBytes > MAX_DECODED_PCM_BYTES) {
+      return;
+    }
+
+    const expected = absoluteMediaUrl(source);
+    const generation = ++decodeGeneration;
+    const controller = new AbortController();
+    decodeAbort = controller;
+    void fetch(source, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`PCM fetch ${response.status}`);
+        return response.arrayBuffer();
+      })
+      .then((encoded) => {
+        if (generation !== decodeGeneration || !ctx) return null;
+        return ctx.decodeAudioData(encoded);
+      })
+      .then((buffer) => {
+        if (!buffer || generation !== decodeGeneration) return;
+        const bytes = buffer.length * buffer.numberOfChannels * Float32Array.BYTES_PER_ELEMENT;
+        if (bytes > MAX_DECODED_PCM_BYTES) return;
+        decodedTrack = { source: expected, buffer };
+      })
+      .catch(() => {
+        // Abort、坏文件或 WebKit 不支持该编码都保留流式 shadow 回退。
+      })
+      .finally(() => {
+        if (generation === decodeGeneration) decodeAbort = null;
+      });
+  },
+
+  decodedSeekReady(source: string): boolean {
+    return decodedTrack?.source === absoluteMediaUrl(source);
+  },
+
+  /** 换曲前释放当前 PCM 和未完成的 fetch/decode，避免旧曲继续占内存或漏声。 */
+  releaseDecodedPlayback(): void {
+    releaseDecodedPlayback();
+  },
+
+  /** PCM seek 后的硬播放：继续从内存采样位置走，不唤醒已静音的 HTMLMedia。 */
+  async hardPlay(el: HTMLAudioElement = elements[frontIndex]): Promise<void> {
+    const index = elements.indexOf(el);
+    if (index < 0 || !ctx || !decks) {
+      await el.play();
+      return;
+    }
+    if (pcmRun?.deckIndex === index) return;
+    const paused = pcmPaused;
+    if (paused?.deckIndex === index && decodedTrack?.source === paused.sourceUrl) {
+      const run = createPcmRun(index as 0 | 1, paused.sourceUrl, paused.position, ctx.currentTime);
+      if (run) {
+        run.gain.gain.setValueAtTime(1, ctx.currentTime);
+        decks[index].mediaGain.gain.setValueAtTime(0, ctx.currentTime);
+        pcmRun = run;
+        pcmPaused = null;
+        ensurePcmTicker();
+        return;
+      }
+    }
+    decks[index].mediaGain.gain.setValueAtTime(1, ctx.currentTime);
+    await el.play();
+  },
+
+  /** PCM seek 后的硬暂停：按 AudioContext 时钟记位置，下一次从同一采样恢复。 */
+  hardPause(el: HTMLAudioElement = elements[frontIndex]): void {
+    const index = elements.indexOf(el);
+    if (index >= 0 && pcmRun?.deckIndex === index && decks) {
+      const run = pcmRun;
+      const position = stopPcm(run, true);
+      pcmPaused = { deckIndex: index as 0 | 1, sourceUrl: run.sourceUrl, position };
+      decks[index].mediaGain.gain.setValueAtTime(0, ctx?.currentTime ?? 0);
+    }
+    el.pause();
+  },
+
+  /**
+   * 空闲 deck 只取同一资源的 metadata，作为 PCM 尚未解好时的回退 shadow。
+   * 不整首解码、不建 AudioBuffer；内存仍是两个流式媒体缓冲，自动接歌随时可覆盖。
+   */
+  prepareSeek(source: string): void {
+    if (!djEngine.warmup() || !ctx || !decks || pending || seekBusy) return;
+    const backIndex: 0 | 1 = frontIndex === 0 ? 1 : 0;
+    const back = decks[backIndex];
+    neutralize(ctx, back, 0);
+    back.el.pause();
+    back.el.preload = "metadata";
+    back.el.playbackRate = decks[frontIndex].el.playbackRate || 1;
+    if (!hasMediaSource(back.el, source)) {
+      back.el.src = source;
+      back.el.load();
+    }
+  },
+
+  /**
+   * 当前曲目 PCM 已就绪时，在同一逻辑 Deck 的 input 内按采样时钟换源，点击后
+   * 一个渲染量子就从目标位置出声。只有解码未完成/超内存上限时才走流式 shadow。
+   */
+  seamlessSeek(source: string, target: number, shouldPlay: boolean): Promise<HTMLAudioElement> {
+    const at = Math.max(0, target);
+    abortTransport();
+    // 新目标只撤掉上一轮尚未落地的准备，不能把旧轮目标先硬切出来。
+    abortSeamlessSeek("restore");
+
+    const direct = () => {
+      const el = elements[frontIndex];
+      if (pcmRun?.deckIndex === frontIndex) {
+        const run = pcmRun;
+        stopPcm(run, false);
+        pcmPaused = { deckIndex: frontIndex, sourceUrl: run.sourceUrl, position: at };
+        if (decks && ctx) decks[frontIndex].mediaGain.gain.setValueAtTime(0, ctx.currentTime);
+      } else if (pcmPaused?.deckIndex === frontIndex) {
+        pcmPaused.position = at;
+      }
+      try {
+        el.currentTime = at;
+      } catch {
+        /* metadata 尚未到时由媒体元素保留默认位置，error 监听负责最终报错 */
+      }
+      return el;
+    };
+    if (!shouldPlay || !djEngine.warmup() || !ctx || !decks) {
+      return Promise.resolve(direct());
+    }
+    void ctx.resume();
+
+    const expectedSource = absoluteMediaUrl(source);
+    const deckIndex = frontIndex;
+    const deck = decks[deckIndex];
+    if (
+      !pending &&
+      decodedTrack?.source === expectedSource &&
+      Math.abs((deck.el.playbackRate || 1) - 1) < 0.0001
+    ) {
+      const oldRun = pcmRun?.deckIndex === deckIndex ? pcmRun : null;
+      const when = ctx.currentTime + PCM_SEEK_LEAD_SEC;
+      const run = createPcmRun(deckIndex, expectedSource, at, when);
+      if (run) {
+        const generation = ++pcmSeekGeneration;
+        seekBusy = true;
+        pcmPaused = null;
+        run.gain.gain.setValueCurveAtTime(seekInCurve, when, PCM_SEEK_HANDOFF_SEC);
+        if (oldRun) {
+          const held = Math.min(1, Math.max(0, holdParam(oldRun.gain.gain, ctx.currentTime)));
+          const curve = Float32Array.from(seekOutCurve, (value) => value * held);
+          oldRun.gain.gain.setValueCurveAtTime(curve, when, PCM_SEEK_HANDOFF_SEC);
+        } else {
+          const held = Math.min(1, Math.max(0, holdParam(deck.mediaGain.gain, ctx.currentTime)));
+          const curve = Float32Array.from(seekOutCurve, (value) => value * held);
+          deck.mediaGain.gain.setValueCurveAtTime(curve, when, PCM_SEEK_HANDOFF_SEC);
+        }
+        pcmRun = run;
+        ensurePcmTicker();
+        window.setTimeout(() => {
+          if (oldRun) stopPcm(oldRun, false);
+          if (generation !== pcmSeekGeneration || !ctx || !decks || pcmRun !== run) return;
+          deck.mediaGain.gain.cancelScheduledValues(ctx.currentTime);
+          deck.mediaGain.gain.setValueAtTime(0, ctx.currentTime);
+          deck.el.pause();
+          try {
+            deck.el.currentTime = pcmPosition(run);
+          } catch {
+            /* PCM 时钟仍是权威位置 */
+          }
+          seekBusy = false;
+          deck.el.dispatchEvent(new Event("timeupdate"));
+        }, (PCM_SEEK_LEAD_SEC + PCM_SEEK_HANDOFF_SEC) * 1000 + SEEK_SETTLE_MS);
+        return Promise.resolve(deck.el);
+      }
+    }
+
+    const wasTransitioning = pending !== null;
+    let outIndex: 0 | 1 = frontIndex;
+    let inputIndex: 0 | 1 = frontIndex === 0 ? 1 : 0;
+    if (wasTransitioning) {
+      // begin 已把 front 指向新歌，但 preparing 时真正出声的还是另一台。手动 seek
+      // 以 UI 里的新歌为目标：旧歌继续托底，新歌 deck 直接改到点击位置。
+      inputIndex = frontIndex;
+      outIndex = frontIndex === 0 ? 1 : 0;
+      clearPending();
+      frontIndex = outIndex;
+    }
+
+    const out = decks[outIndex];
+    const input = decks[inputIndex];
+    neutralize(ctx, out, 1);
+    neutralize(ctx, input, 0);
+    input.el.pause();
+    input.el.preload = "auto";
+    if (!wasTransitioning) input.el.playbackRate = out.el.playbackRate || 1;
+    if (!hasMediaSource(input.el, source)) {
+      input.el.src = source;
+      input.el.load();
+    }
+
+    seekBusy = true;
+    return new Promise((resolve) => {
+      let seekApplied = false;
+      let starting = false;
+      let finished = false;
+      let timeout: number | null = null;
+      let settleTimer: number | null = null;
+
+      const removeListeners = () => {
+        input.el.removeEventListener("loadedmetadata", tryStart);
+        input.el.removeEventListener("durationchange", tryStart);
+        input.el.removeEventListener("seeked", tryStart);
+        input.el.removeEventListener("canplay", tryStart);
+        if (timeout !== null) window.clearTimeout(timeout);
+        timeout = null;
+      };
+
+      const settleOn = (index: 0 | 1, otherIndex: 0 | 1, play: boolean) => {
+        if (!ctx || !decks) return elements[index];
+        const chosen = decks[index];
+        const other = decks[otherIndex];
+        frontIndex = index;
+        neutralize(ctx, chosen, 1);
+        neutralize(ctx, other, 0);
+        other.el.pause();
+        if (play) void chosen.el.play().catch(() => undefined);
+        setTransitionPhase("idle");
+        return chosen.el;
+      };
+
+      const restore = (mode: SeekAbortMode) => {
+        if (finished) {
+          if (settleTimer !== null) window.clearTimeout(settleTimer);
+          settleTimer = null;
+          settleOn(inputIndex, outIndex, mode === "target");
+          seekBusy = false;
+          return;
+        }
+        finished = true;
+        removeListeners();
+        input.el.pause();
+        if (mode === "target") {
+          // 仍在静音链路时先落点，再把输出交给它；顺序反过来会漏出 cue 位置的一帧。
+          try {
+            input.el.currentTime = at;
+          } catch {
+            /* 同 direct 回退 */
+          }
+        }
+        const chosen =
+          mode === "target"
+            ? settleOn(inputIndex, outIndex, true)
+            : settleOn(outIndex, inputIndex, true);
+        seekBusy = false;
+        resolve(chosen);
+      };
+      seekAbort = restore;
+
+      const failToDirectSeek = () => {
+        if (finished) return;
+        finished = true;
+        removeListeners();
+        seekAbort = null;
+        if (wasTransitioning) {
+          try {
+            input.el.currentTime = at;
+          } catch {
+            /* 同 direct 回退 */
+          }
+          const chosen = settleOn(inputIndex, outIndex, true);
+          seekBusy = false;
+          resolve(chosen);
+          return;
+        }
+        input.el.pause();
+        neutralize(ctx!, input, 0);
+        neutralize(ctx!, out, 1);
+        frontIndex = outIndex;
+        try {
+          out.el.currentTime = at;
+        } catch {
+          /* 同 direct 回退 */
+        }
+        seekBusy = false;
+        resolve(out.el);
+      };
+
+      const handoff = () => {
+        if (finished || !ctx || !decks) return;
+        finished = true;
+        removeListeners();
+        const switchAt = ctx.currentTime + SEEK_HANDOFF_LEAD_SEC;
+        neutralize(ctx, out, 1);
+        neutralize(ctx, input, 0);
+        out.fader.gain.setValueCurveAtTime(seekOutCurve, switchAt, SEEK_HANDOFF_SEC);
+        input.fader.gain.setValueCurveAtTime(seekInCurve, switchAt, SEEK_HANDOFF_SEC);
+        frontIndex = inputIndex;
+        setTransitionPhase("idle");
+        resolve(input.el);
+
+        settleTimer = window.setTimeout(() => {
+          settleTimer = null;
+          if (!ctx || !decks) {
+            seekBusy = false;
+            seekAbort = null;
+            return;
+          }
+          neutralize(ctx, input, 1);
+          neutralize(ctx, out, 0);
+          out.el.pause();
+          // 下一次点击通常只需一次目标 Range；不把整首歌复制进内存。
+          out.el.preload = "metadata";
+          out.el.playbackRate = input.el.playbackRate || 1;
+          if (!hasMediaSource(out.el, source)) {
+            out.el.src = source;
+            out.el.load();
+          }
+          seekBusy = false;
+          seekAbort = null;
+        }, (SEEK_HANDOFF_LEAD_SEC + SEEK_HANDOFF_SEC) * 1000 + SEEK_SETTLE_MS);
+      };
+
+      function tryStart() {
+        if (finished || starting) return;
+        if (!seekApplied) {
+          if (input.el.readyState < HTMLMediaElement.HAVE_METADATA) return;
+          try {
+            input.el.currentTime = at;
+          } catch {
+            failToDirectSeek();
+            return;
+          }
+          seekApplied = true;
+        }
+        if (input.el.seeking || input.el.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) return;
+        starting = true;
+        void input.el.play().then(handoff).catch(failToDirectSeek);
+      }
+
+      input.el.addEventListener("loadedmetadata", tryStart);
+      input.el.addEventListener("durationchange", tryStart);
+      input.el.addEventListener("seeked", tryStart);
+      input.el.addEventListener("canplay", tryStart);
+      timeout = window.setTimeout(failToDirectSeek, SEEK_READY_TIMEOUT_MS);
+      tryStart();
+    });
+  },
+
   /**
    * 开始接歌。同步完成角色互换——返回 true 后 frontElement() 已经是新歌的
    * 元素（调用方立刻把 UI 切过去），旧歌在暗处按曲线退场。
    * 返回 false = 引擎不可用，调用方走普通换歌。
    */
   begin(next: Track, options: DjBeginOptions): boolean {
+    abortSeamlessSeek("target");
     if (!options.transitions.length || !djEngine.warmup() || !ctx || !decks) return false;
     void ctx.resume();
 
@@ -1156,6 +1729,10 @@ export const djEngine = {
     const out = decks[frontIndex];
     const backIndex: 0 | 1 = frontIndex === 0 ? 1 : 0;
     const input = decks[backIndex];
+    // 备用 Deck 重新给 HTMLMedia 使用；它可能在更早的一次 PCM seek 中被静音。
+    input.mediaGain.gain.cancelScheduledValues(ctx.currentTime);
+    input.mediaGain.gain.setValueAtTime(1, ctx.currentTime);
+    if (pcmPaused?.deckIndex === backIndex) pcmPaused = null;
     // 上一场若被提前打断，当前正主可能仍挂着进场用的高通/低频削减曲线。
     // clearPending 只负责摘 timer/listener，必须在把它当作新出让方前恢复全频；
     // 否则第二次接歌会把半截滤波继续带下去，直到用户 seek/重播才被 transport 清掉。
@@ -1238,6 +1815,7 @@ export const djEngine = {
               // 曲线已经在音频时钟上归零并稳定了一小段，再停媒体元素。不能在数学
               // 终点同一毫秒 pause：主线程 timer 略早于音频线程就会硬切出 click。
               out.el.pause();
+              if (pcmRun?.deckIndex === (frontIndex === 0 ? 1 : 0)) stopPcm(pcmRun, false);
               // 退场 deck 在被下一首复用前始终保持真正静音。若这里把 fader 重置
               // 到 1，WebKit pause 后偶尔吐出的残留解码帧仍可能漏成一声 click。
               // 进场 deck 也要显式归中性：正常情况下曲线终点已经是全频，但
@@ -1264,7 +1842,7 @@ export const djEngine = {
       const fromFirstBeat = options.from.first_beat;
       if (fromBpm && fromBpm > 0 && fromFirstBeat !== null) {
         const sourceBeatSeconds = 60 / fromBpm;
-        const sourcePosition = Math.max(0, out.el.currentTime - fromFirstBeat);
+        const sourcePosition = Math.max(0, djEngine.currentTime(out.el) - fromFirstBeat);
         const phase = ((sourcePosition % sourceBeatSeconds) + sourceBeatSeconds) % sourceBeatSeconds;
         let sourceUntilBeat = (sourceBeatSeconds - phase) % sourceBeatSeconds;
         const outgoingRate = Math.max(0.25, out.el.playbackRate || 1);
@@ -1314,12 +1892,15 @@ export const djEngine = {
    */
   cancel(): void {
     abortTransport();
+    abortSeamlessSeek("target");
     clearPending();
     if (!ctx || !decks) return;
     const backIndex = frontIndex === 0 ? 1 : 0;
     // 先静音再 pause，避免过渡中途硬切非正主 deck 时漏出一个非零采样。
     neutralize(ctx, decks[backIndex], 0);
     decks[backIndex].el.pause();
+    if (pcmRun?.deckIndex === backIndex) stopPcm(pcmRun, false);
+    if (pcmPaused?.deckIndex === backIndex) pcmPaused = null;
     neutralize(ctx, decks[frontIndex]);
     decks[frontIndex].el.playbackRate = 1;
   },
@@ -1327,6 +1908,7 @@ export const djEngine = {
   /** 普通起播前调用：避免上次软停把 fader 留在 0 导致「按了播放却没声」。 */
   ensureAudible(): void {
     abortTransport();
+    abortSeamlessSeek("target");
     restoreFrontOutput();
   },
 
@@ -1335,6 +1917,7 @@ export const djEngine = {
    */
   async softPause(motorSound = true, seconds = TRANSPORT_STOP_SEC): Promise<void> {
     abortTransport();
+    abortSeamlessSeek("target");
     const gen = transportGen;
     clearPending();
     const el = elements[frontIndex];
@@ -1343,7 +1926,7 @@ export const djEngine = {
       if (ctx) neutralize(ctx, back, 0);
       back.el.pause();
     }
-    if (el.paused) {
+    if (el.paused && pcmRun?.deckIndex !== frontIndex) {
       restoreFrontOutput();
       return;
     }
@@ -1357,6 +1940,11 @@ export const djEngine = {
     if (motorSound) playTransportSound(deck, "out", seconds);
     const ok = await waitTransport(seconds * 1000 + TRANSPORT_SETTLE_MS, gen);
     if (!ok) return;
+    if (pcmRun?.deckIndex === frontIndex) {
+      const run = pcmRun;
+      const position = stopPcm(run, true);
+      pcmPaused = { deckIndex: frontIndex, sourceUrl: run.sourceUrl, position };
+    }
     el.pause();
     // 停住后保持静音链路；下次 softPlay/ensureAudible 再打开。
     neutralize(ctx, deck, 0);
@@ -1372,13 +1960,14 @@ export const djEngine = {
     seconds = TRANSPORT_START_SEC,
   ): Promise<void> {
     abortTransport();
+    abortSeamlessSeek("target");
     const gen = transportGen;
     djEngine.resume();
     djEngine.warmup();
     const deck = frontDeckOrNull();
     if (!ctx || !deck || el !== deck.el) {
       restoreFrontOutput();
-      await el.play();
+      await djEngine.hardPlay(el);
       return;
     }
     // 真正停住时从静音起播；若是在淡出途中快速反悔，则保留此刻增益并直接
@@ -1388,7 +1977,7 @@ export const djEngine = {
       ? 0
       : Math.min(1, Math.max(0, holdParam(deck.fader.gain, arm)));
     neutralize(ctx, deck, startGain);
-    await el.play();
+    await djEngine.hardPlay(el);
     if (gen !== transportGen) return;
     scheduleTransport(deck, "in", seconds);
     if (motorSound) playTransportSound(deck, "in", seconds);
@@ -1404,7 +1993,9 @@ export const djEngine = {
    */
   silenceForExit(): void {
     abortTransport();
+    abortSeamlessSeek("target");
     clearPending();
+    releaseDecodedPlayback();
     for (const el of elements) {
       try {
         el.volume = 0;

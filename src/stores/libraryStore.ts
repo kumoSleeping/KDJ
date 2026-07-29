@@ -356,11 +356,24 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     set({ loadingMore: true });
     try {
       const page = await api.tracks(toQuery(get().filter, tracks.length));
-      if (seq !== requestSeq) return; // 翻页途中筛选变了，这页作废
+      if (seq !== requestSeq) {
+        // 页作废，但 loadingMore 必须跟着复位：后台分析每推一次
+        // library.updated 就会触发 refresh 把 requestSeq 往前推，
+        // 翻页请求撞上就被作废——不复位的话这道守卫会把之后所有
+        // loadMore 都挡掉，底部「加载更多」永远转圈。曲库越大、
+        // 后台分析越忙，这个竞态越容易中。
+        set({ loadingMore: false });
+        return;
+      }
       const seen = new Set(get().tracks.map((item) => item.id));
       const merged = [...get().tracks, ...page.items.filter((item) => !seen.has(item.id))];
       set({ tracks: merged, total: page.total, loadingMore: false });
     } catch (error) {
+      // 已被新筛选取代的请求失败，只复位状态，别把过期错误糊到现在的筛选上
+      if (seq !== requestSeq) {
+        set({ loadingMore: false });
+        return;
+      }
       set({ loadingMore: false, error: errorText(error) });
     }
   },
