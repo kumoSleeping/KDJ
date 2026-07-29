@@ -24,6 +24,8 @@ export interface WaveformProps {
   trackId: number;
   /** 播放位置（秒）。传 null 就不画播放头。 */
   position?: number | null;
+  /** 波形尚未返回时用于进度条跳转的媒体时长（秒）。 */
+  duration?: number;
   /** 开始点（毫秒）。有值时顶部画主题色小三角。 */
   cueMs?: number | null;
   /** 结束点（毫秒）。有值时顶部画主题色小三角。 */
@@ -131,6 +133,7 @@ export function pointPatch(
 export function Waveform({
   trackId,
   position = null,
+  duration = 0,
   cueMs = null,
   endMs = null,
   onSetPoint,
@@ -185,7 +188,9 @@ export function Waveform({
     return () => observer.disconnect();
   }, [wave, height]);
 
-  const total = wave?.duration ?? 0;
+  // 波形计算可能要几秒；期间直接使用曲库/媒体元数据里的时长，让用户可以立刻拖动跳转。
+  const waveDuration = wave?.duration ?? 0;
+  const total = waveDuration > 0 ? waveDuration : duration;
   const ratio = total > 0 && position !== null ? Math.min(1, Math.max(0, position / total)) : null;
   const cueRatio = markerRatio(cueMs, total);
   const endRatio = markerRatio(endMs, total);
@@ -250,12 +255,15 @@ export function Waveform({
       />
       {!ready && (
         <div
-          className="kd-wave-loading"
-          role="status"
-          aria-label={error ? `波形不可用：${error}` : "正在加载波形"}
+          className="kd-wave-fallback"
+          aria-hidden="true"
           title={error ? `波形不可用：${error}` : undefined}
         >
-          <span className="kd-wave-loading-bar" data-error={error ? "true" : undefined} />
+          <span
+            className="kd-wave-fallback-fill"
+            data-error={error ? "true" : undefined}
+            style={{ width: `${ratio !== null ? ratio * 100 : 0}%` }}
+          />
         </div>
       )}
 

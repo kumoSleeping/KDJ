@@ -2567,39 +2567,32 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
      把溢出区域的点击命中到底下的曲目表。 */
   overflow: hidden;
 }
-/* 波形未就绪：静默进度条占位，不写「正在加载」字。 */
-.kd-wave-loading {
+/* 波形未就绪：显示真实、可拖动的播放进度，不用加载动画阻塞跳转。 */
+.kd-wave-fallback {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
-  padding: 0 0.15rem;
+  margin: 0 0.15rem;
 }
-.kd-wave-loading-bar {
-  display: block;
-  width: 100%;
+.kd-wave-fallback::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
   height: 6px;
   border-radius: 999px;
-  background: linear-gradient(
-    90deg,
-    var(--kd-line) 0%,
-    color-mix(in srgb, var(--kd-theme) 45%, var(--kd-line)) 45%,
-    var(--kd-line) 90%
-  );
-  background-size: 220% 100%;
-  animation: kd-wave-loading 1.1s linear infinite;
+  background: var(--kd-line);
 }
-.kd-wave-loading-bar[data-error="true"] {
-  animation: none;
-  background: color-mix(in srgb, var(--kd-warn) 35%, var(--kd-line));
+.kd-wave-fallback-fill {
+  position: relative;
+  display: block;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--kd-theme);
 }
-@keyframes kd-wave-loading {
-  0% {
-    background-position: 100% 0;
-  }
-  100% {
-    background-position: -100% 0;
-  }
+.kd-wave-fallback-fill[data-error="true"] {
+  background: var(--kd-warn);
 }
 /* 在线试听没有分析波形：一条可点击进度条顶上。 */
 .kd-player-wave-stream {

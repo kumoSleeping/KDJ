@@ -71,6 +71,8 @@ import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackD
 
 /** 广播播放位置的节流间隔：节拍网格的播放头不需要每帧更新。 */
 const POSITION_BROADCAST_MS = 200;
+/** 拖动跳转只做极短防爆音包络；比播放按钮的唱机式软启停更强调即时响应。 */
+const SEEK_FADE_SEC = 0.08;
 
 /**
  * 播放模式按钮的脸。一颗按钮循环切换，图标就是当前模式——
@@ -685,7 +687,7 @@ export function PlayerBar() {
       // timeupdate 会把它写回旧位置，真正 seek 时又跳过去，视觉上就是来回回弹。
       const apply = async () => {
         if (playingRef.current) {
-          await djEngine.softPause(false, 0.2);
+          await djEngine.softPause(false, SEEK_FADE_SEC);
           if (generation !== seekGenerationRef.current) return;
         }
         frontEl.currentTime = target;
@@ -696,7 +698,7 @@ export function PlayerBar() {
           trackId: track.id,
           position: target,
         });
-        if (playingRef.current) await djEngine.softPlay(frontEl, false, 0.2);
+        if (playingRef.current) await djEngine.softPlay(frontEl, false, SEEK_FADE_SEC);
       };
       void apply();
     };
@@ -1377,6 +1379,7 @@ export function PlayerBar() {
             className="kd-player-wave"
             trackId={pipSession.trackId}
             position={pipPosition}
+            duration={pipDuration}
             cueMs={
               track?.id === pipSession.trackId
                 ? selected?.id === track.id
@@ -1433,6 +1436,7 @@ export function PlayerBar() {
             className="kd-player-wave"
             trackId={displayTrack.id}
             position={track?.id === displayTrack.id ? position : 0}
+            duration={track?.id === displayTrack.id ? playbackDuration : (displayTrack.duration ?? 0)}
             cueMs={selected?.id === displayTrack.id ? selected.cue_ms : displayTrack.cue_ms}
             endMs={selected?.id === displayTrack.id ? selected.end_ms : displayTrack.end_ms}
             height={38}

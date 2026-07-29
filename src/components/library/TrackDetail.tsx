@@ -504,6 +504,7 @@ export function TrackDetail({ track }: { track: Track }) {
         <Waveform
           trackId={track.id}
           position={position}
+          duration={track.duration ?? 0}
           cueMs={track.cue_ms}
           endMs={track.end_ms}
           height={64}
