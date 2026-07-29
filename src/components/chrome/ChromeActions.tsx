@@ -1,101 +1,77 @@
 import {
+  ArrowUpCircle,
   Download,
-  FolderTree,
-  Info,
+  LockKeyhole,
   PanelRightClose,
   PanelRightOpen,
-  SlidersHorizontal,
-  UserRound,
+  Settings,
 } from "lucide-react";
+import { useUpdateStore } from "../../stores/updateStore";
+
+export type AsideToggleState = "open" | "closed" | "locked";
 
 export interface ChromeActionsProps {
-  /** 单栏布局才显示：宽屏左栏已经是文件夹树。 */
-  showFolders?: boolean;
-  foldersOpen?: boolean;
-  onFolders?(): void;
-  detailOpen: boolean;
-  detailAvailable: boolean;
-  onDetail(): void;
-  djOpen: boolean;
-  onDj(): void;
-  loginOpen: boolean;
-  onLogin(): void;
+  settingsOpen: boolean;
+  onSettings(): void;
   queueOpen: boolean;
   queueCount: number;
   onQueue(): void;
-  /** 无论右栏开关，都固定在本组最右侧。 */
-  asideOpen: boolean;
+  /** 横屏保留右栏开关；竖屏内容走抽屉，不显示这颗按钮。 */
+  showAsideToggle?: boolean;
+  asideState: AsideToggleState;
   onAsideToggle(): void;
 }
 
-/**
- * 顶栏右侧入口：登录与下载队列各一颗，职责不再挂在平台图标上。
- */
+/** 主栏顶部右侧的设置、下载及横屏侧栏入口。 */
 export function ChromeActions({
-  showFolders = false,
-  foldersOpen = false,
-  onFolders,
-  detailOpen,
-  detailAvailable,
-  onDetail,
-  djOpen,
-  onDj,
-  loginOpen,
-  onLogin,
+  settingsOpen,
+  onSettings,
   queueOpen,
   queueCount,
   onQueue,
-  asideOpen,
+  showAsideToggle = true,
+  asideState,
   onAsideToggle,
 }: ChromeActionsProps) {
+  const updateReady = useUpdateStore((s) => Boolean(s.info?.newer));
+  const latest = useUpdateStore((s) => s.info?.latest ?? "");
+  const openUpdateSection = useUpdateStore((s) => s.openUpdateSection);
+
+  const asideLabel =
+    asideState === "open"
+      ? "关闭右侧栏"
+      : asideState === "closed"
+        ? "锁定右侧栏自动展开"
+        : "解除右侧栏锁定";
+
   return (
     <div className="kd-chrome-actions" role="group" aria-label="顶栏工具">
-      {showFolders && onFolders && (
+      {updateReady ? (
         <button
           type="button"
           className="kd-chrome-btn"
-          aria-label="文件夹"
-          aria-pressed={foldersOpen}
-          data-open={foldersOpen || undefined}
-          title="文件夹与曲库导航"
-          onClick={onFolders}
+          data-update="true"
+          aria-label={latest ? `有新版本 v${latest} 待下载` : "有更新待下载"}
+          title={latest ? `待下载：v${latest}` : "待下载更新"}
+          data-open={settingsOpen || undefined}
+          onClick={openUpdateSection}
         >
-          <FolderTree size={16} />
+          <ArrowUpCircle size={16} />
+          <span className="kd-chrome-badge" aria-hidden="true">
+            新
+          </span>
         </button>
-      )}
+      ) : null}
       <button
         type="button"
         className="kd-chrome-btn"
-        aria-label="曲目详情"
-        aria-pressed={detailOpen}
-        data-open={detailOpen || undefined}
-        disabled={!detailAvailable}
-        title={detailAvailable ? "打开当前选中曲目的详细信息" : "先在曲库中选一首歌"}
-        onClick={onDetail}
+        aria-label="设置"
+        aria-pressed={settingsOpen}
+        data-open={settingsOpen || undefined}
+        title="设置：接播与账号"
+        onClick={onSettings}
       >
-        <Info size={16} />
-      </button>
-      <button
-        type="button"
-        className="kd-chrome-btn"
-        aria-label="接播设置"
-        aria-pressed={djOpen}
-        data-open={djOpen || undefined}
-        title="接播设置"
-        onClick={onDj}
-      >
-        <SlidersHorizontal size={16} />
-      </button>
-      <button
-        type="button"
-        className="kd-chrome-btn"
-        aria-label="账号登录"
-        aria-pressed={loginOpen}
-        data-open={loginOpen || undefined}
-        title="账号登录"
-        onClick={onLogin}
-      >
-        <UserRound size={16} />
+        <Settings size={16} />
       </button>
       <button
         type="button"
@@ -113,17 +89,26 @@ export function ChromeActions({
           </span>
         )}
       </button>
-      <button
-        type="button"
-        className="kd-chrome-btn"
-        aria-label={asideOpen ? "关闭右侧栏" : "打开右侧栏"}
-        aria-pressed={asideOpen}
-        data-open={asideOpen || undefined}
-        title={asideOpen ? "关闭右侧栏" : "打开右侧栏"}
-        onClick={onAsideToggle}
-      >
-        {asideOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
-      </button>
+      {showAsideToggle && (
+        <button
+          type="button"
+          className="kd-chrome-btn"
+          aria-label={asideLabel}
+          aria-pressed={asideState !== "closed"}
+          data-open={asideState === "open" || undefined}
+          data-locked={asideState === "locked" || undefined}
+          title={asideLabel}
+          onClick={onAsideToggle}
+        >
+          {asideState === "open" ? (
+            <PanelRightClose size={16} />
+          ) : asideState === "closed" ? (
+            <PanelRightOpen size={16} />
+          ) : (
+            <LockKeyhole size={15} />
+          )}
+        </button>
+      )}
     </div>
   );
 }

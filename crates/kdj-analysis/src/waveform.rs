@@ -28,36 +28,12 @@ const COLOR_FLOOR: f64 = 0.12;
 
 pub fn band_waveform(samples: &[f32], sr: f64, buckets: usize) -> Waveform {
     let buckets = buckets.clamp(64, 2000);
-    // center=false：波形要的是"第 n 段音频长什么样"，不需要和拍点对齐
-    let spec = stft_no_center(samples, N_FFT, HOP);
-    let n_frames = spec.frames;
+    // center=false：波形要的是“第 n 段音频长什么样”，不需要和拍点对齐。
+    // FFT 每出来一帧就归并成低/中/高三个数，不再保留 bins × frames 的完整频谱。
+    let energies = band_energy_frames(samples, sr, N_FFT, HOP);
+    let n_frames = energies[0].len();
     if n_frames == 0 {
         return Waveform::default();
-    }
-
-    let freqs = dsp::rfft_freqs(N_FFT, sr);
-    let band_of = |bin: usize| -> usize {
-        let hz = freqs[bin];
-        if hz < XOVER_LOW {
-            0
-        } else if hz < XOVER_HIGH {
-            1
-        } else {
-            2
-        }
-    };
-
-    // 每帧三段的功率
-    let mut energies = [
-        vec![0.0f64; n_frames],
-        vec![0.0f64; n_frames],
-        vec![0.0f64; n_frames],
-    ];
-    for frame in 0..n_frames {
-        for bin in 0..spec.bins {
-            let magnitude = spec.at(bin, frame) as f64;
-            energies[band_of(bin)][frame] += magnitude * magnitude;
-        }
     }
 
     // 帧 → 显示格。尾巴不足一格的直接截掉，补零会画出一根假的静音柱。
@@ -175,27 +151,33 @@ pub fn band_waveform(samples: &[f32], sr: f64, buckets: usize) -> Waveform {
     }
 }
 
-/// `center = false` 的 STFT。波形不需要和拍点对齐，省掉两端的反射补零。
-fn stft_no_center(samples: &[f32], n_fft: usize, hop: usize) -> dsp::Spectrogram {
+/// `center = false` 的逐帧 STFT。只保留每帧三频段功率：5 分钟音频原先要分配
+/// 约 `513 × 9,000` 个频谱值，现在只保留 `3 × 9,000` 个 f64。
+fn band_energy_frames(
+    samples: &[f32],
+    sr: f64,
+    n_fft: usize,
+    hop: usize,
+) -> [Vec<f64>; 3] {
     use rustfft::num_complex::Complex32;
     use rustfft::FftPlanner;
 
-    let bins = n_fft / 2 + 1;
     if samples.len() < n_fft {
-        return dsp::Spectrogram {
-            bins,
-            frames: 0,
-            data: Vec::new(),
-        };
+        return Default::default();
     }
+    let bins = n_fft / 2 + 1;
     let frames = 1 + (samples.len() - n_fft) / hop;
     let window = dsp::hann_window(n_fft);
+    let mut energies = [
+        vec![0.0f64; frames],
+        vec![0.0f64; frames],
+        vec![0.0f64; frames],
+    ];
 
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(n_fft);
     let mut scratch = vec![Complex32::new(0.0, 0.0); fft.get_inplace_scratch_len()];
     let mut buffer = vec![Complex32::new(0.0, 0.0); n_fft];
-    let mut data = vec![0.0f32; bins * frames];
 
     for frame in 0..frames {
         let start = frame * hop;
@@ -203,11 +185,20 @@ fn stft_no_center(samples: &[f32], n_fft: usize, hop: usize) -> dsp::Spectrogram
             *slot = Complex32::new(samples[start + i] * window[i] as f32, 0.0);
         }
         fft.process_with_scratch(&mut buffer, &mut scratch);
-        for bin in 0..bins {
-            data[bin * frames + frame] = buffer[bin].norm();
+        for (bin, value) in buffer.iter().take(bins).enumerate() {
+            let hz = bin as f64 * sr / n_fft as f64;
+            let band = if hz < XOVER_LOW {
+                0
+            } else if hz < XOVER_HIGH {
+                1
+            } else {
+                2
+            };
+            let magnitude = value.norm() as f64;
+            energies[band][frame] += magnitude * magnitude;
         }
     }
-    dsp::Spectrogram { bins, frames, data }
+    energies
 }
 
 #[cfg(test)]

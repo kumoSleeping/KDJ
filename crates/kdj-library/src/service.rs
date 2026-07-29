@@ -125,6 +125,9 @@ pub struct TrackQuery {
     pub analyzed: Option<bool>,
     pub folder: String,
     pub folder_deep: bool,
+    /// 非空时只返回路径不在这些根目录之下的曲目（侧栏「其他」）。
+    /// 由路由在识别 `__kd_outside__` 哨兵后填入；与 `folder` 前缀过滤互斥。
+    pub exclude_under: Vec<String>,
     pub sort: String,
     pub order: String,
     /// 副排序键。空 = 只按主键排。
@@ -159,7 +162,18 @@ impl LibraryService {
         let mut params: Vec<SqlValue> = Vec::new();
 
         let folder = query.folder.trim().trim_end_matches('/');
-        if !folder.is_empty() {
+        if !query.exclude_under.is_empty() {
+            // 「其他」：路径不落在任一曲库根下。根本身与 root/… 都排除。
+            for root in &query.exclude_under {
+                let normalized = normalize_path(Path::new(root));
+                let prefix = format!("{normalized}{SEP}");
+                let escaped = escape_like(&prefix);
+                where_parts.push("path NOT LIKE ? ESCAPE '\\'".into());
+                params.push(SqlValue::Text(format!("{escaped}%")));
+                where_parts.push("path != ?".into());
+                params.push(SqlValue::Text(normalized));
+            }
+        } else if !folder.is_empty() {
             // 按路径前缀过滤。folder_deep=false 时再排掉"还有下一层分隔符"的，
             // 这样点开一个文件夹看到的就是它本层的东西，和访达一致。
             let prefix = format!("{}{SEP}", normalize_path(Path::new(folder)));
@@ -249,7 +263,7 @@ impl LibraryService {
         let sort_key = query.sort.trim().to_lowercase();
         let folder = query.folder.trim().trim_end_matches('/');
 
-        // 手排模式：顺序在这个文件夹自己的 .kdj.json 里（文件名列表）。
+        // 手排模式：顺序在这个文件夹自己的 .kdj/manifest.json 里（兼容旧 .kdj.json）。
         // 单个 set 文件夹最多几百首，全取出来按清单排再切页，
         // 比往 SQL 里拼几百个 WHEN 的 CASE 干净，也复用同一套 WHERE。
         if sort_key == "custom" && !folder.is_empty() && !query.folder_deep {
@@ -1208,6 +1222,56 @@ impl LibraryService {
         Ok(paths)
     }
 
+    /// 只返回没有当前 canonical 波形、生成失败或源文件已变动的已分析曲目。
+    /// 第一轮升级会为旧 JSON 缓存补状态；之后启动不再遍历整个缓存目录。
+    pub fn waveform_candidates(
+        &self,
+        profile: &str,
+        revision: i64,
+    ) -> Result<Vec<(i64, String)>> {
+        let conn = self.db.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT tracks.id, tracks.path FROM tracks \
+             LEFT JOIN waveform_assets ON waveform_assets.track_id = tracks.id \
+             WHERE tracks.analyzed_at IS NOT NULL AND (\
+               waveform_assets.track_id IS NULL OR waveform_assets.profile != ? OR \
+               waveform_assets.revision != ? OR waveform_assets.error IS NOT NULL OR \
+               (tracks.file_mtime IS NOT NULL AND \
+                waveform_assets.file_mtime != CAST(tracks.file_mtime AS INTEGER))\
+             ) ORDER BY tracks.id",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![profile, revision], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 波形正文仍在文件系统；这里仅记录“哪一版资产已经能直接播放使用”。
+    /// upsert 让分析预热、旧库补齐和播放器请求可以安全地重复确认同一状态。
+    pub fn record_waveform_asset(
+        &self,
+        track_id: i64,
+        profile: &str,
+        revision: i64,
+        file_mtime: u64,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.db.conn()?;
+        conn.execute(
+            "INSERT INTO waveform_assets \
+             (track_id, profile, revision, file_mtime, generated_at, error) \
+             VALUES (?, ?, ?, ?, datetime('now'), ?) \
+             ON CONFLICT(track_id) DO UPDATE SET \
+               profile = excluded.profile, revision = excluded.revision, \
+               file_mtime = excluded.file_mtime, generated_at = excluded.generated_at, \
+               error = excluded.error",
+            rusqlite::params![track_id, profile, revision, file_mtime as i64, error],
+        )?;
+        Ok(())
+    }
+
     /// 曲目文件被移动之后，把库里的 path/filename 跟着改掉。
     ///
     /// 不重新读标签：移动不改内容，重读一遍是纯浪费；
@@ -1692,7 +1756,8 @@ mod tests {
             );
         }
         // 清单只列了两首，没列的那首按文件名排在后面
-        crate::folders::write_manifest(Path::new(&folder), &["c.mp3".into(), "a.mp3".into()]);
+        crate::folders::write_manifest(Path::new(&folder), &["c.mp3".into(), "a.mp3".into()])
+            .unwrap();
 
         let page = service
             .list_tracks(&TrackQuery {
@@ -2189,6 +2254,56 @@ mod tests {
             .pending_analysis_ids(Some(&[]), false)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn waveform_readiness_tracks_profile_revision_mtime_and_errors() {
+        let service = service();
+        let id = insert(
+            &service,
+            Row {
+                path: "/lib/ready.mp3",
+                analyzed: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(service.waveform_candidates("v2-640", 2).unwrap().len(), 1);
+
+        service
+            .record_waveform_asset(id, "v2-640", 2, 123, None)
+            .unwrap();
+        assert!(service.waveform_candidates("v2-640", 2).unwrap().is_empty());
+        assert_eq!(service.waveform_candidates("v3-640", 3).unwrap().len(), 1);
+
+        service
+            .db()
+            .conn()
+            .unwrap()
+            .execute("UPDATE tracks SET file_mtime = 124 WHERE id = ?", [id])
+            .unwrap();
+        assert_eq!(service.waveform_candidates("v2-640", 2).unwrap().len(), 1);
+        service
+            .record_waveform_asset(id, "v2-640", 2, 124, Some("decode failed"))
+            .unwrap();
+        assert_eq!(service.waveform_candidates("v2-640", 2).unwrap().len(), 1);
+        service
+            .record_waveform_asset(id, "v2-640", 2, 124, None)
+            .unwrap();
+        assert!(service.waveform_candidates("v2-640", 2).unwrap().is_empty());
+
+        service
+            .db()
+            .conn()
+            .unwrap()
+            .execute("DELETE FROM tracks WHERE id = ?", [id])
+            .unwrap();
+        let assets: i64 = service
+            .db()
+            .conn()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM waveform_assets", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(assets, 0, "删曲目时不能留下假的 ready 状态");
     }
 
     #[test]

@@ -5,11 +5,13 @@ import { Workspace } from "./components/workspace/Workspace";
 import { PlayerBar } from "./components/player/PlayerBar";
 import { VideoPipHost } from "./components/player/VideoPipHost";
 import { startAutoAnalyze } from "./lib/autoAnalyze";
+import { startDataUpgrade } from "./lib/dataUpgrade";
 import { djEngine } from "./lib/djMix";
 import { bindSongPreviewToPlayer } from "./lib/songPreview";
 import { isEditable } from "./lib/useLibraryClipboard";
 import { useLayoutSignals } from "./lib/useLayoutMode";
 import { bootAll, connectEvents, selectConnected, useAppStore } from "./stores/appStore";
+import { useUpdateStore } from "./stores/updateStore";
 
 // 只有一个界面：工作台（曲库 + 搜索下载合一）。
 // 登录 / 队列从顶栏专用按钮进入；其余设置仍就地改。
@@ -33,7 +35,7 @@ export default function App() {
   const booting = useAppStore((state) => state.booting);
   const bootError = useAppStore((state) => state.bootError);
   const connected = useAppStore(selectConnected);
-  const { columns, chrome } = useLayoutSignals();
+  const { columns, chrome, portrait } = useLayoutSignals();
   const [retrying, setRetrying] = useState(false);
   const platform = window.kdj?.platform;
   const isMac = platform === "darwin";
@@ -75,7 +77,14 @@ export default function App() {
   // 挂在 connected 上而不是无条件挂——后端还没起来时轮询只会打出一串失败请求。
   useEffect(() => {
     if (!connected) return;
+    startDataUpgrade();
     return startAutoAnalyze();
+  }, [connected]);
+
+  // 软件更新：连通后启动静默检查（启动一次 + 每 5 分钟；受「自动检测」开关控制）。
+  useEffect(() => {
+    if (!connected) return;
+    return useUpdateStore.getState().startBackgroundChecks();
   }, [connected]);
 
   const retry = useCallback(() => {
@@ -90,6 +99,7 @@ export default function App() {
       data-mobile={isMobile ? "true" : undefined}
       data-columns={columns}
       data-chrome={chrome}
+      data-portrait={portrait ? "true" : undefined}
     >
       <div className="kd-body">
         {connected ? (

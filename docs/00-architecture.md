@@ -69,7 +69,7 @@ sidecar/kdj/
     db.py            # SQLite 建表 / 迁移 / 连接管理
     scan.py          # 目录遍历 + mutagen 读标签 + 入库
     service.py       # LibraryService：查询/过滤/和声推荐/歌单/统计
-    folders.py       # 文件夹模式：目录树 / 越界校验 / 移动与硬链接 / .kdj.json 清单
+    folders.py       # 文件夹模式：目录树 / 越界校验 / 移动与硬链接 / .kdj/manifest.json 清单
 ```
 
 ### 2.2 HTTP API（前缀 `/api`）
@@ -108,7 +108,7 @@ sidecar/kdj/
 | POST | `/library/folders/create` | `{parent, name}` | `FolderTree` |
 | POST | `/library/folders/rename` | `{path, name}` | `FolderTree`（同时 rebase 该枝下所有曲目的 path） |
 | POST | `/library/folders/delete` | `{path}` | `FolderTree`（只删空目录） |
-| POST | `/library/folders/init` | `{path?}` | `FolderTree`（每层写 `.kdj.json`） |
+| POST | `/library/folders/init` | `{path?}` | `FolderTree`（每层写 `.kdj/manifest.json`） |
 | POST | `/library/folders/order` | `{path, names[]}` | `FolderTree` |
 | POST | `/library/folders/move` | `{path, dest_parent}` | `FolderTree`（整枝搬走并 rebase path） |
 | POST | `/library/folders/apply` | `{track_ids[], dest, op: "move"\|"link"}` | `FolderOpResult` |
@@ -384,8 +384,9 @@ U 盘、要用 Rekordbox / Serato 再读一遍，虚拟分组到那一步就没�
 - **链接** = `os.link` → 失败退 `os.symlink` → 再退 `shutil.copy2`，
   然后 `upsert_file()` 建新行 + `clone_metadata()` 把分析结果抄过去。
   一首歌同时进两个 set 不多占空间。`Track.link` 字段告诉前端打不打链接标记。
-- **顺序** 存在每个目录里的 `.kdj.json`（`{version, order: [子目录名]}`）。
+- **顺序** 存在每个目录里的 `.kdj/manifest.json`（`{version, order: [子目录名]}`）。
   每目录一份而不是根目录一份大清单：清单跟着文件夹走，拷贝/搬移之后依然成立。
+  升级时优先读新位置，同时兼容旧 `.kdj.json`；新文件原子提交并校验成功后才删除旧文件。
   清单里有磁盘上没有的名字直接丢弃，磁盘上有清单里没有的按名字排在后面。
   读坏了只退回按名字排序，不让整棵树打不开。
 

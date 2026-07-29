@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { api } from "./api";
+import { isOutsideFolder } from "./outsideFolder";
 import { useLibraryStore } from "../stores/libraryStore";
 import { useQueueStore } from "../stores/queueStore";
 
@@ -20,7 +21,7 @@ export function isEditable(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   if (!el) return false;
   const tag = el.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || el.isContentEditable;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
 }
 
 export function useLibraryClipboard(): void {
@@ -58,7 +59,7 @@ export function useLibraryClipboard(): void {
         // 粘到"当前正在看的那个文件夹"。没选文件夹时无处可粘，
         // 静默忽略比弹一句"请先选文件夹"更省事——用户下一步自然会去点一个
         const dest = store.filter.folder;
-        if (!store.clipboard || !dest) return;
+        if (!store.clipboard || !dest || isOutsideFolder(dest)) return;
         event.preventDefault();
         void store.paste(dest);
       }

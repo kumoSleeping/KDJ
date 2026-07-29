@@ -1,4 +1,4 @@
-import { cloneElement, useEffect, useRef, useState } from "react";
+import { cloneElement, useCallback, useEffect, useRef, useState } from "react";
 import {
   Check,
   BarChart3,
@@ -36,6 +36,11 @@ import {
 } from "../../lib/trackDrag";
 import { folderDropElementAt, FOLDER_DROP_PATH_ATTR } from "../../lib/folderDrop";
 import { DASH, formatBpm, formatDuration, isVideoTrack, thumbUrl } from "../../lib/format";
+import {
+  clickAddsNext,
+  playClickForLayout,
+  useTrackClickPrefs,
+} from "../../lib/trackClickPrefs";
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
@@ -214,7 +219,12 @@ export interface TrackTableProps {
   /** 副排序键：主键相同的那一撮再按它排。null = 只按主键。 */
   sort2: TrackSort | null;
   order2: SortOrder;
-  onSelect(id: number, mode: SelectMode): void;
+  /**
+   * clickCount 透传 MouseEvent.detail：双击播放会先送来一下 detail=1 的单击，
+   * 再补一下 detail=2。Workspace 靠它区分「单击=查看详情」和「双击=播放」——
+   * 后者不该把详情面板弹出来挤压列表。
+   */
+  onSelect(id: number, mode: SelectMode, clickCount?: number): void;
   onSort(sort: TrackSort): void;
   onScrollEnd(): void;
   /** 在单个文件夹视图里才能行内拖动换位（顺序写进该文件夹的清单）。 */
@@ -345,7 +355,7 @@ function trackCell(
       );
     case "album":
       return (
-        <td key={key} data-col="album" className="kd-muted" title={track.album}>
+        <td key={key} data-col="album" title={track.album}>
           {track.album || DASH}
         </td>
       );
@@ -421,6 +431,12 @@ function sameFolderPath(a: string, b: string): boolean {
 
 const PENDING_STATES = new Set(["queued", "running", "processing", "failed"]);
 
+/**
+ * 虚拟滚动的兜底行高（= --kd-row-h）。真实行高以渲染出来的第一行为准
+ * （见 TrackTable 里的量测 effect），这里只是首帧还没量到时的占位。
+ */
+const FALLBACK_ROW_H = 36;
+
 function pendingLabel(task: DownloadTask): string {
   if (task.state === "running") {
     const pct = Math.round(Math.max(0, Math.min(1, task.progress)) * 100);
@@ -488,6 +504,11 @@ export function TrackTable({
   const startAnalyze = useLibraryStore((state) => state.startAnalyze);
   const addToQueue = useQueueStore((state) => state.add);
   const removeFromQueue = useQueueStore((state) => state.remove);
+  const widePlay = useTrackClickPrefs((state) => state.widePlay);
+  const narrowPlay = useTrackClickPrefs((state) => state.narrowPlay);
+  const clickAddNext = useTrackClickPrefs((state) => state.clickAddNext);
+  const playClick = playClickForLayout({ widePlay, narrowPlay }, layout);
+  const singleAddsNext = clickAddsNext({ widePlay, narrowPlay, clickAddNext }, layout);
   const copyToClipboard = useLibraryStore((state) => state.copyToClipboard);
   const updateTrack = useLibraryStore((state) => state.updateTrack);
   const selectionMode = useLibraryStore((state) => state.selectionMode);
@@ -543,6 +564,8 @@ export function TrackTable({
   useEffect(
     () => () => {
       pointerDragCleanupRef.current?.();
+      resizeObserverRef.current?.disconnect();
+      if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
     },
     [],
   );
@@ -774,11 +797,54 @@ export function TrackTable({
 
   /* ------------------------------------------------ 回到正在播的那首 */
   const scrollerRef = useRef<HTMLDivElement | null>(null);
+  /** 虚拟滚动需要的滚动位置/视口高度；一帧最多重算一次（见 onScroll）。 */
+  const [view, setView] = useState({ top: 0, height: 0 });
+  const [rowH, setRowH] = useState(FALLBACK_ROW_H);
+  const rowHRef = useRef(FALLBACK_ROW_H);
+  const scrollRafRef = useRef(0);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  /** 滚动容器 ref：身份必须稳定（见 JSX 处的注释）。值没变就不 setState，
+      否则 ResizeObserver 的初次回调会和自己触发的重渲染互相喂食。 */
+  const trackScrollerRef = useCallback((el: HTMLDivElement | null) => {
+    scrollerRef.current = el;
+    observeTrackScroller(el);
+    // 视口高度决定渲染窗口：面板拖宽拖窄、窗口缩放都要重算。
+    resizeObserverRef.current?.disconnect();
+    resizeObserverRef.current = null;
+    if (el) {
+      const updateView = () =>
+        setView((current) => {
+          const top = el.scrollTop;
+          const height = el.clientHeight;
+          return current.top === top && current.height === height ? current : { top, height };
+        });
+      updateView();
+      const observer = new ResizeObserver(updateView);
+      observer.observe(el);
+      resizeObserverRef.current = observer;
+    }
+  }, []);
+  // centerSelected 挂在 [] 上，靠 ref 拿最新值，不为它重挂全局事件
+  const tracksRef = useRef(tracks);
+  const selectedIdRef = useRef(selectedId);
+  const pendingCountRef = useRef(0);
   useEffect(() => {
-    const centerSelected = () =>
-      scrollerRef.current
-        ?.querySelector('tr[data-focus="true"]')
-        ?.scrollIntoView({ block: "center" });
+    const centerSelected = () => {
+      const box = scrollerRef.current;
+      if (!box) return;
+      const row = box.querySelector('tr[data-focus="true"]');
+      if (row) {
+        row.scrollIntoView({ block: "center" });
+        return;
+      }
+      // 虚拟滚动下选中行多半没渲染，scrollIntoView 找不到它：
+      // 按它在列表里的序号直接算滚动位置（行高恒定，见下方虚拟滚动注释）。
+      const index = tracksRef.current.findIndex((track) => track.id === selectedIdRef.current);
+      if (index < 0) return;
+      const height = rowHRef.current;
+      box.scrollTop =
+        pendingCountRef.current * height + index * height - (box.clientHeight - height) / 2;
+    };
     // 挂载时先滚一次：从搜索页点「正在播」跳回曲库时，这张表是重新挂的，
     // 滚动位置本来就丢了——与其停在列表顶端，不如直接停在要看的那首上。
     // 选中行不在已加载的分页里就什么都不做（1400 首只挂了前几页是常态）。
@@ -813,6 +879,40 @@ export function TrackTable({
   const orderedColumns = [...COLUMNS].sort((a, b) => colRank(a.key) - colRank(b.key));
   const colIds = orderedColumns.map((column) => column.key);
   const visibleColumns = orderedColumns.filter((column) => !colPrefs.hidden.includes(column.key));
+
+  /* ---------------------------------------------------- 虚拟滚动 */
+  /**
+   * 曲库上千首时把每一行都挂进 DOM 是滚动卡顿和空白的根源：
+   * 每次滚动都要重排上千个带封面的格子，懒加载的图片追不上滚动就留出白块。
+   * 行高恒定（td 全是 nowrap + 固定 --kd-row-h，内容撑不高），
+   * 所以只渲染视口附近的一小段，上下各垫一根占位行把总高度撑住——
+   * 滚动条位置、行序号、拖放落点都和全量渲染时一致。
+   */
+  tracksRef.current = tracks;
+  selectedIdRef.current = selectedId;
+  pendingCountRef.current = pendingDownloads.length;
+  // 行高以真实渲染出来的第一行为准（字号/主题变了它才变），不靠猜。
+  useEffect(() => {
+    const row = scrollerRef.current?.querySelector<HTMLTableRowElement>("tr[data-kd-track-id]");
+    const height = row?.getBoundingClientRect().height ?? 0;
+    if (height > 0 && Math.abs(height - rowHRef.current) > 0.5) {
+      rowHRef.current = height;
+      setRowH(height);
+    }
+  });
+  // 占位行上方还有若干「待下载」行，算窗口时先把它们的高度扣掉。
+  const pendingH = pendingDownloads.length * rowH;
+  // 上下各多渲染约一屏：快速滚动时新行已经在 DOM 里，不会闪空白。
+  const overscan = Math.max(10, Math.ceil(view.height / rowH));
+  const winStart =
+    view.height > 0 ? Math.max(0, Math.floor((view.top - pendingH) / rowH) - overscan) : 0;
+  const winEnd =
+    view.height > 0
+      ? Math.min(tracks.length, Math.ceil((view.top + view.height - pendingH) / rowH) + overscan)
+      : // 首帧还没量到视口：先渲染一小段，ref 回调量到高度后立刻换成真实窗口。
+        // 不能一次全渲染——1400 行一次性进 DOM 正是要避开的那个卡顿。
+        Math.min(tracks.length, 60);
+  const windowedTracks = tracks.slice(winStart, winEnd);
 
   const moveColumn = (from: string, to: string) => {
     if (from === to) return;
@@ -855,15 +955,24 @@ export function TrackTable({
       // 可视区域优先分析要知道"曲目表滚到哪了"。不挂这个 ref 它也能靠
       // DOM 自己找到表（认 td[data-col="title"]），但那条路在列结构变动时
       // 会静默失效——显式挂上就不再依赖任何选择器。
-      // scrollerRef 蹭同一个 ref：滚回选中行（见上面 DETAIL_EVENT）也要这个容器
-      ref={(el) => {
-        scrollerRef.current = el;
-        observeTrackScroller(el);
-      }}
+      // scrollerRef 蹭同一个 ref：滚回选中行（见上面 DETAIL_EVENT）也要这个容器。
+      // ref 必须是稳定函数（useCallback）：内联箭头每次渲染都是新身份，React 会
+      // 反复 detach/attach，attach 里的 setView 又触发渲染——死循环就是这么来的。
+      // setView 走相等守卫：值没变就返回旧对象， ResizeObserver 的初次回调
+      // 和滚动重算都不会再空转渲染。
+      ref={trackScrollerRef}
       onScroll={(event) => {
         const el = event.currentTarget;
         // 距底 200px 就预取下一页，滚到底再等请求会有明显空白
         if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) onScrollEnd();
+        // 滚动事件比帧率高得多，每个事件都 setState 重渲染就是卡顿本身；
+        // 压到一帧一次，滚动和重绘对齐。
+        if (scrollRafRef.current) return;
+        scrollRafRef.current = requestAnimationFrame(() => {
+          scrollRafRef.current = 0;
+          const node = scrollerRef.current;
+          if (node) setView({ top: node.scrollTop, height: node.clientHeight });
+        });
       }}
     >
       {/* 批选动作在曲库半栏 LibraryWorkRail，这里不再单独占一条。 */}
@@ -945,14 +1054,16 @@ export function TrackTable({
                 }
               >
                 {column.label}
-                {/* ①②：哪个是主、哪个是副，光靠箭头分不出来。
-                    数字标出层级，箭头标出方向，两件事各归各的符号。 */}
+                {/* 主、副排序仍由 store 中的 sort / sort2 区分；表头只显示方向，
+                    避免带圈数字与列名字号不协调。层级说明保留在表头 title 中。 */}
                 {column.id !== null && column.id === sort && (
-                  <span className="kd-sort-mark">①{order === "asc" ? "↑" : "↓"}</span>
+                  <span className="kd-sort-mark" aria-label="主排序">
+                    {order === "asc" ? "↑" : "↓"}
+                  </span>
                 )}
                 {column.id !== null && column.id !== sort && column.id === sort2 && (
-                  <span className="kd-sort-mark" data-second="true">
-                    ②{order2 === "asc" ? "↑" : "↓"}
+                  <span className="kd-sort-mark" aria-label="副排序">
+                    {order2 === "asc" ? "↑" : "↓"}
                   </span>
                 )}
               </th>
@@ -1010,7 +1121,14 @@ export function TrackTable({
               })}
             </tr>
           ))}
-          {tracks.map((track, index) => (
+          {/* 虚拟滚动：只渲染视口附近的行，上方的高度由这根占位行撑住。
+              行序号、拖放、选中都按 tracks 里的真实下标走，不被窗口影响。 */}
+          {winStart > 0 && (
+            <tr data-spacer="top" aria-hidden="true">
+              <td colSpan={visibleColumns.length + 1} style={{ height: winStart * rowH }} />
+            </tr>
+          )}
+          {windowedTracks.map((track, index) => (
             <tr
               key={track.id}
               aria-selected={selected.has(track.id)}
@@ -1031,11 +1149,16 @@ export function TrackTable({
                   return;
                 }
                 const mode = selectMode(event);
-                onSelect(track.id, mode);
-                // 竖屏点一下 = 播放：触屏上没有"双击"这个自然动作，而点一首歌
-                // 九成的意图就是放它。带修饰键的多选点击不算——那是在攒选区。
-                // 详情入口挪去了播放条的「正在播」块（见 PlayerBar.DETAIL_EVENT）
-                if (layout === "narrow" && mode === "replace") playFromTable(track);
+                onSelect(track.id, mode, event.detail);
+                // 带修饰键的多选不算——那是在攒选区。
+                if (mode !== "replace") return;
+                // 单击播放 / 单击加入下一首（仅播放手势为双击时）按设置走。
+                // 详情入口仍留给播放条唱盘（见 PlayerBar.DETAIL_EVENT）。
+                if (playClick === "single") {
+                  playFromTable(track);
+                } else if (singleAddsNext) {
+                  addToQueue([track], true);
+                }
               }}
               onPointerDown={(event) => {
                 if (event.pointerType === "mouse") {
@@ -1048,7 +1171,7 @@ export function TrackTable({
               onPointerCancel={cancelPress}
               onPointerLeave={cancelPress}
               onDoubleClick={() => {
-                if (!selectionMode) playFromTable(track);
+                if (!selectionMode && playClick === "double") playFromTable(track);
               }}
               onContextMenu={(event) => {
                 event.preventDefault();
@@ -1095,7 +1218,7 @@ export function TrackTable({
                   : undefined
               }
             >
-              <td data-col="index">{index + 1}</td>
+              <td data-col="index">{winStart + index + 1}</td>
               {visibleColumns.map((column) => {
                 const cell = trackCell(
                   track,
@@ -1134,6 +1257,14 @@ export function TrackTable({
               })}
             </tr>
           ))}
+          {winEnd < tracks.length && (
+            <tr data-spacer="bottom" aria-hidden="true">
+              <td
+                colSpan={visibleColumns.length + 1}
+                style={{ height: (tracks.length - winEnd) * rowH }}
+              />
+            </tr>
+          )}
         </tbody>
       </table>
       {/* 选列菜单。开着的时候点勾选不关闭——一次通常要调好几列，

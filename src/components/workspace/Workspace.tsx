@@ -20,17 +20,23 @@ import { claimActiveTrackDragIds } from "../../lib/trackDrag";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLayoutSignals } from "../../lib/useLayoutMode";
+import {
+  shouldPinDetailOnClick,
+  useTrackClickPrefs,
+} from "../../lib/trackClickPrefs";
+import { isOutsideFolder } from "../../lib/outsideFolder";
 import { useLibraryClipboard } from "../../lib/useLibraryClipboard";
 import {
   selectSelectedTrack,
   useLibraryStore,
   type SelectMode,
 } from "../../stores/libraryStore";
-import type { IntakeItem, Platform, SongSource, VideoInfo } from "../../types";
+import type { IntakeItem, MergedGroup, Platform, SongSource, VideoInfo } from "../../types";
 import { InlineNotice, Sheet } from "../common";
-import { AppChrome, ThemeToggle } from "../chrome/AppChrome";
+import { AppChrome } from "../chrome/AppChrome";
 import { AsideHead } from "../chrome/AsideHead";
 import { ChromeActions } from "../chrome/ChromeActions";
+import { ChromeHistory } from "../chrome/ChromeHistory";
 import { LibraryWorkRail } from "../chrome/LibraryWorkRail";
 import { SearchWorkRail } from "../chrome/SearchWorkRail";
 import { QueuePanel } from "../download/QueuePanel";
@@ -43,11 +49,10 @@ import {
   SearchBar,
 } from "../download/SearchBar";
 import { VideoPreview } from "../download/VideoPreview";
-import { FolderTree } from "../library/FolderTree";
+import { FolderTree, NarrowFolderRail } from "../library/FolderTree";
 import { VjExportPanel } from "../library/VjExportPanel";
 import { DETAIL_EVENT } from "../library/TrackTable";
-import { AccountsPanel } from "../settings/AccountsPanel";
-import { DjPanel } from "../player/DjPanel";
+import { SettingsPanel } from "../settings/SettingsPanel";
 import { LibraryToolbar } from "../library/LibraryToolbar";
 import { TrackDetail } from "../library/TrackDetail";
 import { TrackTable } from "../library/TrackTable";
@@ -80,7 +85,7 @@ export function requestVjSearch(query: string): void {
  *
  * 平时它就是曲库：左边文件夹、中间曲目；右栏只在打开旁路面板
  *（详情 / 队列 / 账号…）时出现，空闲时列表吃满整宽。
- * 顶上那条大搜索框是"去网上搜歌来下"——一旦搜出结果，
+ * 顶栏那条在线搜索是"去网上搜歌来下"——一旦搜出结果，
  * 中间栏一分为二：左半继续是本地曲库，右半挂搜索候选。
  * 真正把歌加入下载（按钮 / 拖进文件夹）时，才把右栏切成下载队列。
  *
@@ -97,22 +102,17 @@ export function Workspace() {
   const videoPipMode = useVideoPip((state) => state.mode);
   const videoPipSession = useVideoPip((state) => state.session);
   const showTrackDetail = useAppStore((state) => state.showTrackDetail);
-  const showAccounts = useAppStore((state) => state.showAccounts);
-  const accountPanelEpoch = useAppStore((state) => state.accountPanelEpoch);
-  const showDjPanel = useAppStore((state) => state.showDjPanel);
-  const djPanelEpoch = useAppStore((state) => state.djPanelEpoch);
+  const showSettings = useAppStore((state) => state.showSettings);
+  const settingsPanelEpoch = useAppStore((state) => state.settingsPanelEpoch);
   const showQueue = useAppStore((state) => state.showQueue);
   const queuePanelEpoch = useAppStore((state) => state.queuePanelEpoch);
   const showPreview = useAppStore((state) => state.showPreview);
-  const previewPanelEpoch = useAppStore((state) => state.previewPanelEpoch);
   const showFolders = useAppStore((state) => state.showFolders);
   const foldersPanelEpoch = useAppStore((state) => state.foldersPanelEpoch);
   const showVjExport = useAppStore((state) => state.showVjExport);
   const vjExportPanelEpoch = useAppStore((state) => state.vjExportPanelEpoch);
-  const toggleAccounts = useAppStore((state) => state.toggleAccounts);
-  const openDjPanel = useAppStore((state) => state.openDjPanel);
+  const toggleSettingsPanel = useAppStore((state) => state.toggleSettingsPanel);
   const toggleQueuePanel = useAppStore((state) => state.toggleQueuePanel);
-  const toggleFoldersPanel = useAppStore((state) => state.toggleFoldersPanel);
   const enqueue = useDownloadStore((state) => state.enqueue);
   const activeDownloads = useDownloadStore((state) => state.activeCount);
 
@@ -344,27 +344,97 @@ export function Workspace() {
   useLibraryClipboard();
 
   /* ------------------------------------------------------------ 布局档位 */
-  const { columns: layout, chrome } = useLayoutSignals();
-  // columns：wide 展开旁路栏，narrow 只收右侧旁路；左侧文件夹始终保留。
-  // chrome：inline 一行搜索，stacked 竖屏两段式——见 useLayoutMode
-  // 文件夹树是定位曲库的主导航，桌面窄窗 / 手机比例也不换成图标轨、更不消失。
+  const { columns: layout, chrome, portrait } = useLayoutSignals();
+  // columns：wide 展开旁路栏，narrow 只收右侧旁路。
+  // chrome：inline 一行搜索，stacked 竖屏两段式——见 useLayoutMode。
+  // 文件夹导航在所有尺寸都常驻；竖屏只收成窄轨，避免手机状态下失去入口。
   const showTree = true;
+  const [compactTreeExpanded, setCompactTreeExpanded] = useState(() => !portrait);
+  useEffect(() => {
+    // 进入竖屏默认收起；离开竖屏必须恢复完整侧栏，不能把手机轨道状态带到 1:1/横屏。
+    setCompactTreeExpanded(!portrait);
+  }, [portrait]);
+  const [searchSplitPercent, setSearchSplitPercent] = useState(50);
+  const searchSplitRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const key = portrait ? "kd-search-split-portrait" : "kd-search-split-regular";
+    const saved = Number(localStorage.getItem(key));
+    setSearchSplitPercent(Number.isFinite(saved) && saved > 0 ? saved : portrait ? 8 : 50);
+  }, [portrait]);
+  const startSearchSplitDrag = (event: React.PointerEvent) => {
+    const host = searchSplitRef.current;
+    if (!host) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const rect = host.getBoundingClientRect();
+    const min = portrait ? 5 : 15;
+    const max = portrait ? 55 : 85;
+    const update = (clientX: number) => {
+      const next = Math.min(max, Math.max(min, ((clientX - rect.left) / rect.width) * 100));
+      setSearchSplitPercent(next);
+    };
+    const onMove = (move: PointerEvent) => update(move.clientX);
+    const onUp = (up: PointerEvent) => {
+      update(up.clientX);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      const key = portrait ? "kd-search-split-portrait" : "kd-search-split-regular";
+      const final = Math.min(max, Math.max(min, ((up.clientX - rect.left) / rect.width) * 100));
+      localStorage.setItem(key, String(final));
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
   /** 当前拉开的是哪个抽屉。null = 都收着。 */
   const [sheet, setSheet] = useState<"aside" | null>(null);
+  /** 锁定只拦横屏里由歌曲/视频触发的自动展开；显式入口会解除锁定并强制打开。 */
+  const [asideLocked, setAsideLocked] = useState(false);
+  const asideLockedRef = useRef(false);
+  useEffect(() => {
+    asideLockedRef.current = asideLocked;
+  }, [asideLocked]);
   /** 用户点曲目或「正在播」入口后钉住详情；关闭后下一次单击曲目会重新打开。 */
   const [detailPinned, setDetailPinned] = useState(false);
 
+  /**
+   * 双击播放会先走一下单击（detail=1）再走 dblclick。单击「查看这首」的详情
+   * 若当场弹出，快双击时版面会先挤一下再被播放手势接住——所以单击路径延迟
+   * 一拍再钉住；第二下（detail>=2）取消延迟并立刻钉住，避免慢双击先开后关。
+   */
+  const detailTimerRef = useRef<number | null>(null);
+  const clearDetailTimer = useCallback(() => {
+    if (detailTimerRef.current !== null) {
+      window.clearTimeout(detailTimerRef.current);
+      detailTimerRef.current = null;
+    }
+  }, []);
+  useEffect(() => clearDetailTimer, [clearDetailTimer]);
+
   const selectTrack = useCallback(
-    (id: number, mode: SelectMode) => {
+    (id: number, mode: SelectMode, clickCount = 1) => {
       select(id, mode);
       // 普通单击既选择曲目，也明确表达“查看这首”的意图。修饰键/勾选多选
       // 只维护选区，不能让详情抽屉跟着每次批量选择反复弹出。
       if (mode !== "replace") return;
-      setDetailPinned(true);
-      showTrackDetail();
-      if (layout === "narrow") setSheet("aside");
+      // 单栏、锁定、或单击已有明确动作（播放 / 加入下一首）时不抢详情；
+      // 详情统一留给底部唱盘或用户再次单击（双击播放、无附加动作时）。
+      if (asideLockedRef.current) return;
+      if (!shouldPinDetailOnClick(useTrackClickPrefs.getState(), layout)) return;
+      clearDetailTimer();
+      if (clickCount >= 2) {
+        // 双击播放：取消「单击查看」那一拍延迟即可，但详情仍然钉住。
+        // 以前这里会 unset，慢双击（第二下晚于 300ms）就会先弹出再被撤掉。
+        setDetailPinned(true);
+        showTrackDetail();
+        return;
+      }
+      detailTimerRef.current = window.setTimeout(() => {
+        detailTimerRef.current = null;
+        setDetailPinned(true);
+        showTrackDetail();
+      }, 300);
     },
-    [layout, select, showTrackDetail],
+    [clearDetailTimer, layout, select, showTrackDetail],
   );
 
   /**
@@ -374,7 +444,13 @@ export function Workspace() {
   const detailJumpRef = useRef(false);
   const previewJumpRef = useRef(false);
   useEffect(() => {
-    const onDetail = () => {
+    const onDetail = (event: Event) => {
+      const source = (event as CustomEvent<{ source?: string }>).detail?.source;
+      // 竖屏只有点击底部唱盘可以拉开详情；列表、下载完成等被动事件都不弹抽屉。
+      if (portrait && source !== "player-deck") return;
+      // 横屏锁定只拦歌曲/视频的自动事件；底部唱盘是显式入口，必须强制打开。
+      if (source !== "player-deck" && asideLockedRef.current) return;
+      if (source === "player-deck") setAsideLocked(false);
       // 人在搜索页时先跳回曲库页：详情装在曲库页的右栏/抽屉里，
       // 停在搜索页把抽屉拉开，底下的列表和这首歌对不上号
       if (useAppStore.getState().listMode !== "library") {
@@ -386,11 +462,12 @@ export function Workspace() {
     };
     window.addEventListener(DETAIL_EVENT, onDetail);
     return () => window.removeEventListener(DETAIL_EVENT, onDetail);
-  }, [layout, showTrackDetail]);
+  }, [layout, portrait, showTrackDetail]);
 
   // 网络视频：右栏面板档才拉开预览板块；浮动档要关掉这块，别占右栏
   useEffect(() => {
     if (videoPipMode === "panel" && videoPipSession?.source === "network") {
+      if (asideLockedRef.current) return;
       if (!useAppStore.getState().showPreview) previewJumpRef.current = true;
       openPreviewPanel();
       if (layout === "narrow") setSheet("aside");
@@ -410,7 +487,7 @@ export function Workspace() {
   const previewAside =
     showPreview && videoPipMode === "panel" && videoPipSession?.source === "network";
   const overlayAside =
-    showFolders || showAccounts || showDjPanel || showVjExport || previewAside || queueAside;
+    showFolders || showSettings || showVjExport || previewAside || queueAside;
   const detailAside = detailPinned && Boolean(selected) && !overlayAside;
   const hasAsideContent = overlayAside || detailAside;
   const showAside = layout === "wide" && hasAsideContent;
@@ -421,33 +498,11 @@ export function Workspace() {
     useAppStore.getState().dismissOverlay();
   }, []);
 
-  // 右栏开关：有选中曲目就打开详情，否则打开始终有内容的下载队列。
-  const openAside = useCallback(() => {
-    if (selected) {
-      setDetailPinned(true);
-      showTrackDetail();
-    } else {
-      openQueuePanel();
-    }
-    if (layout === "narrow") setSheet("aside");
-  }, [layout, openQueuePanel, selected, showTrackDetail]);
-
-  /** 顶栏详情键：语义与播放条「正在播」相同，只是直接服务于当前选中曲目。 */
-  const openSelectedDetail = useCallback(() => {
-    if (!selected) return;
-    if (useAppStore.getState().listMode !== "library") detailJumpRef.current = true;
-    setDetailPinned(true);
-    showTrackDetail();
-    if (layout === "narrow") setSheet("aside");
-  }, [layout, selected, showTrackDetail]);
-
   const asideLabel = showFolders
     ? "文件夹"
-    : showAccounts
-      ? "账号管理"
-      : showDjPanel
-        ? "接播设置"
-        : showVjExport
+    : showSettings
+      ? "设置"
+      : showVjExport
           ? "导出 VJ"
           : previewAside
             ? "预览"
@@ -458,10 +513,8 @@ export function Workspace() {
                 : "";
   const asidePanel = showFolders ? (
     <FolderTree />
-  ) : showAccounts ? (
-    <AccountsPanel />
-  ) : showDjPanel ? (
-    <DjPanel />
+  ) : showSettings ? (
+    <SettingsPanel />
   ) : showVjExport ? (
     <VjExportPanel />
   ) : previewAside ? (
@@ -485,9 +538,20 @@ export function Workspace() {
     <TrackDetail key={selected.id} track={selected} />
   ) : null;
   const queueOpen =
-    showQueue && !showAccounts && !showDjPanel && !showFolders && !showPreview && !showVjExport;
+    showQueue && !showSettings && !showFolders && !showPreview && !showVjExport;
   // 宽屏是真正的右栏，窄屏则是承载同一份内容的抽屉；按钮位置和开关语义保持一致。
   const asideOpen = layout === "wide" ? showAside : sheet === "aside" && hasAsideContent;
+  const asideState = asideOpen ? "open" : asideLocked ? "locked" : "closed";
+  const cycleAsideState = useCallback(() => {
+    if (asideOpen) {
+      setAsideLocked(false);
+      closeAside();
+    } else if (asideLocked) {
+      setAsideLocked(false);
+    } else {
+      setAsideLocked(true);
+    }
+  }, [asideLocked, asideOpen, closeAside]);
 
   // 窄屏下换了标签（曲库 ↔ 搜索）就把抽屉收起来：抽屉里装的内容会跟着变，
   // 留在屏幕上等于突然换了一块东西，比自己收起来更让人迷惑
@@ -504,27 +568,35 @@ export function Workspace() {
     setSheet(null);
   }, [layout, listMode]);
 
-  // 旁路面板：窄屏没有右栏 → 拉开抽屉
+  // 显式旁路入口必须忽略锁定；窄屏没有右栏时拉开同一份内容的抽屉。
   useEffect(() => {
-    if (!(showAccounts || showDjPanel || showQueue || showPreview || showFolders || showVjExport)) {
-      return;
-    }
+    if (!(showSettings || showFolders || showVjExport)) return;
+    setAsideLocked(false);
     if (layout === "narrow") setSheet("aside");
   }, [
     layout,
-    showAccounts,
-    showDjPanel,
-    showQueue,
-    showPreview,
+    showSettings,
     showFolders,
     showVjExport,
-    accountPanelEpoch,
-    djPanelEpoch,
-    queuePanelEpoch,
-    previewPanelEpoch,
+    settingsPanelEpoch,
     foldersPanelEpoch,
     vjExportPanelEpoch,
   ]);
+
+  useEffect(() => {
+    if (!showQueue) return;
+    setAsideLocked(false);
+    if (layout === "narrow") setSheet("aside");
+  }, [layout, queuePanelEpoch, showQueue]);
+
+  const toggleQueueDrawer = useCallback(() => {
+    const opening = !useAppStore.getState().showQueue;
+    toggleQueuePanel();
+    if (opening) {
+      setAsideLocked(false);
+      if (layout === "narrow") setSheet("aside");
+    }
+  }, [layout, toggleQueuePanel]);
 
   /* ------------------------------------------------------------ 三栏换位 */
   /** 常驻的文件夹 / 主栏顺序，长期保存。 */
@@ -581,12 +653,14 @@ export function Workspace() {
   });
 
   /* ------------------------------------------------------------ 三栏拖宽 */
+  const shellRef = useRef<HTMLDivElement | null>(null);
   const splitRef = useRef<HTMLDivElement | null>(null);
   const localAsideRef = useRef<HTMLElement | null>(null);
 
   // 打开时恢复上次拖的宽度。存 px：百分比在窗口缩放时会把"我调好的那栏"再挤变形
+  // 写在 section-body：顶栏左区与侧栏共用 --kd-left。
   useEffect(() => {
-    const el = splitRef.current;
+    const el = shellRef.current;
     if (!el) return;
     for (const side of ["left", "right"] as const) {
       const saved = localStorage.getItem(`kd-split-${side}`);
@@ -595,26 +669,49 @@ export function Workspace() {
   }, []);
 
   const COLUMN_BOUNDS = { left: [140, 420], right: [240, 600] } as const;
+  const LEFT_RAIL_WIDTH = 58;
+  const LEFT_RAIL_SNAP = 112;
 
   const startColumnDrag = (side: "left" | "right") => (event: React.PointerEvent) => {
+    const shell = shellRef.current;
     const el = splitRef.current;
-    if (!el) return;
+    if (!shell || !el) return;
     event.preventDefault();
     const startX = event.clientX;
     const target = side === "left" ? (el.firstElementChild as HTMLElement) : localAsideRef.current;
     if (!target) return;
     const startWidth = target.getBoundingClientRect().width;
     const [min, max] = COLUMN_BOUNDS[side];
+    let treeExpanded = compactTreeExpanded;
     const onMove = (move: PointerEvent) => {
       // 左把手往右拖 = 左栏变宽；右把手往右拖 = 右栏变窄
       const delta = side === "left" ? move.clientX - startX : startX - move.clientX;
+      if (side === "left") {
+        const rawWidth = startWidth + delta;
+        if (rawWidth <= LEFT_RAIL_SNAP) {
+          if (treeExpanded) {
+            treeExpanded = false;
+            setCompactTreeExpanded(false);
+          }
+          return;
+        }
+        if (!treeExpanded) {
+          treeExpanded = true;
+          setCompactTreeExpanded(true);
+        }
+      }
       const width = Math.round(Math.min(max, Math.max(min, startWidth + delta)));
-      el.style.setProperty(`--kd-${side}`, `${width}px`);
+      shell.style.setProperty(`--kd-${side}`, `${width}px`);
     };
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      const value = el.style.getPropertyValue(`--kd-${side}`).replace("px", "");
+      if (side === "left" && !treeExpanded) {
+        // 最小轨道是一个布局状态，不把 58px 当作展开宽度存下来。
+        shell.style.setProperty("--kd-left", `${Math.max(min, LEFT_RAIL_WIDTH)}px`);
+        return;
+      }
+      const value = shell.style.getPropertyValue(`--kd-${side}`).replace("px", "");
       if (value) localStorage.setItem(`kd-split-${side}`, value);
     };
     window.addEventListener("pointermove", onMove);
@@ -622,7 +719,7 @@ export function Workspace() {
   };
 
   const resetColumn = (side: "left" | "right") => {
-    splitRef.current?.style.removeProperty(`--kd-${side}`);
+    shellRef.current?.style.removeProperty(`--kd-${side}`);
     localStorage.removeItem(`kd-split-${side}`);
   };
 
@@ -635,6 +732,8 @@ export function Workspace() {
    * 这是程序代搜，不是用户改了主意；搜完回来下歌，勾着的还是原来那几家。
    */
   const [vjPending, setVjPending] = useState("");
+  const [searchBurstNonce, setSearchBurstNonce] = useState(0);
+  const [searchBurstTone, setSearchBurstTone] = useState<"rainbow" | "pink">("rainbow");
   useEffect(() => {
     const onVj = (event: Event) => {
       const q = (event as CustomEvent<string>).detail?.trim();
@@ -649,6 +748,8 @@ export function Workspace() {
   useEffect(() => {
     if (vjPending && query === vjPending) {
       setVjPending("");
+      setSearchBurstTone("pink");
+      setSearchBurstNonce((n) => n + 1);
       void submit(["bilibili"]);
     }
   }, [vjPending, query, submit]);
@@ -781,8 +882,30 @@ export function Workspace() {
     [items, sourceIndex, settings?.default_quality, enqueue, openQueuePanel, refreshStats],
   );
 
+  /** 结果行首那颗小下载键：当前选中来源直接入队。 */
+  const downloadGroup = useCallback(
+    async (group: MergedGroup) => {
+      const pickedIndex = sourceIndex[group.group_id] ?? group.best_source_index;
+      const preferred = group.sources[pickedIndex] ?? group.sources[0];
+      const source =
+        preferred?.platform !== "local"
+          ? preferred
+          : group.sources.find((entry) => entry.platform !== "local");
+      if (!source) return;
+      setQueueError("");
+      try {
+        await enqueue([source], { quality: settings?.default_quality ?? null });
+        openQueuePanel();
+        void refreshStats();
+      } catch (error) {
+        setQueueError(`加入队列失败：${errorText(error)}`);
+      }
+    },
+    [sourceIndex, settings?.default_quality, enqueue, openQueuePanel, refreshStats],
+  );
+
   /**
-   * 本地列表里拖动换位：把整个文件夹的曲目顺序写回它的 .kdj.json。
+   * 本地列表里拖动换位：把整个文件夹的曲目顺序写回它的 .kdj/manifest.json。
    * 先按当前排序取全量（分页外的也要参与），再把拖动的块插到目标位置。
    */
   const reorderTracks = useCallback(
@@ -836,8 +959,7 @@ export function Workspace() {
     filter.folderDeep,
     queueView,
     selectedId,
-    showAccounts,
-    showDjPanel,
+    showSettings,
     showQueue,
     showPreview,
     showFolders,
@@ -846,12 +968,34 @@ export function Workspace() {
 
   return (
     <section className="kd-section">
-      <div className="kd-section-body">
+      <div
+        className="kd-section-body"
+        ref={shellRef}
+        data-compact-tree={compactTreeExpanded ? "open" : "closed"}
+      >
+        {/* 顶栏：横屏历史在侧栏宽内；竖屏/移动端历史改右侧与设置共处。 */}
+        <AppChrome
+          history={<ChromeHistory />}
+          historyEnd={portrait}
+          actions={
+            <ChromeActions
+              settingsOpen={showSettings}
+              onSettings={toggleSettingsPanel}
+              queueOpen={queueOpen}
+              queueCount={activeDownloads}
+              onQueue={toggleQueueDrawer}
+              showAsideToggle={!portrait}
+              asideState={asideState}
+              onAsideToggle={cycleAsideState}
+            />
+          }
+        />
         <div
           className="kd-split"
           data-folders="true"
           data-layout={layout}
           data-tree={showTree ? "open" : undefined}
+          data-compact-tree={compactTreeExpanded ? "open" : "closed"}
           data-aside={showAside ? "open" : "closed"}
           ref={splitRef}
         >
@@ -864,22 +1008,9 @@ export function Workspace() {
               {...dropProps("tree")}
             >
               <span {...gripProps("tree")} />
-              {/* 左栏固定常驻；主题键靠右，其余区域用于拖动窗口。 */}
-              <div
-                className="kd-tree-chrome"
-                data-tauri-drag-region
-                onPointerDown={(event) => {
-                  if (event.button !== 0) return;
-                  if ((event.target as HTMLElement).closest("button, a, input, textarea, select")) {
-                    return;
-                  }
-                  window.kdj?.windowControl("drag");
-                }}
-              >
-                <span className="kd-tree-chrome-drag" data-tauri-drag-region aria-hidden="true" />
-                <ThemeToggle />
-              </div>
-              <FolderTree />
+              <NarrowFolderRail
+                expanded={compactTreeExpanded}
+              />
             </div>
           )}
 
@@ -904,66 +1035,41 @@ export function Workspace() {
             {...dropProps("list")}
           >
             <span {...gripProps("list")} />
-            <AppChrome showThemeToggle={!showTree} />
             <div className="kd-table-wrap">
-            {/* 搜索在主栏眉头之下 */}
-            <div className="kd-list-head" data-mode={listMode} data-chrome={chrome}>
+            {/*
+              在线搜索只占主栏顶上，不盖左侧文件夹栏。曲库工作条在本地半栏里；
+              搜索结果弹出时把它顶到左半边，与右半边 SearchWorkRail 同行对齐。
+            */}
+            <div className="kd-search-band">
               <SearchBar
                 query={query}
                 onQueryChange={setQuery}
                 batch={batch}
                 busy={busy}
                 onSubmit={() => void submit()}
+                burstNonce={searchBurstNonce}
+                burstTone={searchBurstTone}
                 platforms={platforms}
                 onTogglePlatform={togglePlatform}
                 soundcloudEnabled={settings?.soundcloud_enabled ?? false}
                 stacked={chrome === "stacked"}
               />
             </div>
-
-            {/*
-              曲库状态和全局入口始终是一根完整横条。搜索结果、详情栏等内容只能在
-              它下面分栏，不能与它并排后把横条从中间截断。
-            */}
-            <LibraryWorkRail
-              showDownloads={!hasResults}
-              actions={
-                <ChromeActions
-                  showFolders={layout === "narrow"}
-                  foldersOpen={showFolders}
-                  onFolders={toggleFoldersPanel}
-                  detailOpen={detailAside}
-                  detailAvailable={Boolean(selected)}
-                  onDetail={openSelectedDetail}
-                  djOpen={showDjPanel}
-                  onDj={openDjPanel}
-                  loginOpen={showAccounts}
-                  onLogin={toggleAccounts}
-                  queueOpen={queueOpen}
-                  queueCount={activeDownloads}
-                  onQueue={toggleQueuePanel}
-                  asideOpen={asideOpen}
-                  onAsideToggle={asideOpen ? closeAside : openAside}
-                />
-              }
-            />
-
-            {/*
-              完整工作条以下分成「主内容 + 最右旁路栏」。主内容内部再按需拆成本地曲库
-              和搜索结果；搜索面板从这里向下插入，不会上顶挤断工作条。
-            */}
             <div className="kd-local-list-slot" data-aside={showAside ? "open" : "closed"}>
               <div
+                ref={searchSplitRef}
                 className="kd-middle-split"
                 data-search={hasResults ? "true" : "false"}
+                style={{ "--kd-local-share": `${searchSplitPercent}%` } as React.CSSProperties}
               >
                 <div
                   className="kd-middle-local kd-download-dropzone"
                   data-drop-active={localDropActive ? "true" : undefined}
                   {...{
-                    [SEARCH_DROP_PATH_ATTR]: !queueView && filter.folder.trim()
-                      ? filter.folder.trim()
-                      : undefined,
+                    [SEARCH_DROP_PATH_ATTR]:
+                      !queueView && filter.folder.trim() && !isOutsideFolder(filter.folder)
+                        ? filter.folder.trim()
+                        : undefined,
                   }}
                   onDragOver={(event) => {
                     if (!isSearchDownloadDrag(event)) return;
@@ -986,7 +1092,7 @@ export function Workspace() {
                       return;
                     }
                     const dest = filter.folder.trim();
-                    if (!dest) {
+                    if (!dest || isOutsideFolder(dest)) {
                       setFolderDropError("先打开一个文件夹，再拖进来");
                       return;
                     }
@@ -995,6 +1101,9 @@ export function Workspace() {
                     );
                   }}
                 >
+                  <LibraryWorkRail
+                    showDownloads={!hasResults}
+                  />
                   {searchDragActive && (
                     <div
                       className="kd-local-search-drop-overlay"
@@ -1027,7 +1136,7 @@ export function Workspace() {
                           return;
                         }
                         const dest = filter.folder.trim();
-                        if (!dest) {
+                        if (!dest || isOutsideFolder(dest)) {
                           finishSearchDrop();
                           setFolderDropError("先打开一个文件夹，再拖进来");
                           return;
@@ -1037,7 +1146,11 @@ export function Workspace() {
                         );
                       }}
                     >
-                      <span>{filter.folder ? "放入当前文件夹" : "先选择一个文件夹"}</span>
+                      <span>
+                        {filter.folder && !isOutsideFolder(filter.folder)
+                          ? "放入当前文件夹"
+                          : "先选择一个文件夹"}
+                      </span>
                     </div>
                   )}
                   <LibraryToolbar />
@@ -1071,14 +1184,24 @@ export function Workspace() {
                     sort2={filter.sort2}
                     order2={filter.order2}
                     onScrollEnd={() => void loadMore()}
-                    reorderable={Boolean(filter.folder) && !filter.folderDeep}
+                    reorderable={
+                      Boolean(filter.folder) &&
+                      !filter.folderDeep &&
+                      !isOutsideFolder(filter.folder)
+                    }
                     onReorder={(ids, targetId, before) => void reorderTracks(ids, targetId, before)}
                   />
                 </div>
 
                 {hasResults && (
                   <>
-                    <div className="kd-middle-divider" aria-hidden="true" />
+                    <div
+                      className="kd-middle-divider"
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-label="调整本地曲库与网络搜索结果宽度"
+                      onPointerDown={startSearchSplitDrag}
+                    />
                     <div className="kd-middle-search">
                       <SearchWorkRail
                         items={items ?? []}
@@ -1120,6 +1243,7 @@ export function Workspace() {
                           onToggleItemAll={toggleItemAll}
                           onToggleAll={toggleAll}
                           onDownloadItem={(index) => void downloadItem(index)}
+                          onDownloadGroup={(group) => void downloadGroup(group)}
                         />
                       </div>
                     </div>
@@ -1137,7 +1261,7 @@ export function Workspace() {
                     onPointerDown={startColumnDrag("right")}
                     onDoubleClick={() => resetColumn("right")}
                   />
-                  <aside className="kd-split-aside" ref={localAsideRef}>
+                  <aside className="kd-split-aside kd-pop-panel" ref={localAsideRef}>
                     <AsideHead title={asideLabel} />
                     <div className="kd-split-aside-body kd-scroll">{asidePanel}</div>
                   </aside>
@@ -1151,7 +1275,7 @@ export function Workspace() {
         </div>
       </div>
 
-      {/* 单栏：右栏与文件夹都进同一套底部抽屉。 */}
+      {/* 单栏：右栏与文件夹都进同一套侧方抽屉。 */}
       {layout === "narrow" && (
         <Sheet
           open={sheet === "aside" && hasAsideContent}

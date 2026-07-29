@@ -8,6 +8,7 @@
 
 import { isVideoTrack } from "./format";
 import { requestLocalVideo, useVideoPip } from "./videoPip";
+import { prefetchWaveform } from "./waveformCache";
 import type { Track } from "../types";
 
 export const PLAY_EVENT = "kd:play";
@@ -19,6 +20,8 @@ export interface PlayRequest {
 }
 
 export function playTrack(track: Track, autoPlay = true): void {
+  // 请求先于 React 换曲渲染发出；已有磁盘缓存时，波形通常能在组件挂载前进内存。
+  prefetchWaveform(track);
   if (isVideoTrack(track.format)) {
     requestLocalVideo(track);
   } else if (useVideoPip.getState().active) {

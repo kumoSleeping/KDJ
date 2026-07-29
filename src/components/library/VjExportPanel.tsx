@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, Check, Clapperboard, Film } from "lucide-react";
+import { ArrowDown, ArrowUp, Clapperboard, Film } from "lucide-react";
 import { useMemo, useState } from "react";
 import { api } from "../../lib/api";
 import { formatDuration } from "../../lib/format";
@@ -28,18 +28,18 @@ function CheckRow({
 }) {
   return (
     <div className="kd-col" style={{ gap: "0.15rem" }}>
-      <label className="kd-djp-check" data-disabled={disabled ? "true" : undefined}>
-        <span className="kd-djp-check-box" data-on={checked ? "true" : undefined} aria-hidden="true">
-          {checked ? <Check size={11} strokeWidth={2.5} /> : null}
-        </span>
-        <input
-          type="checkbox"
-          checked={checked}
+      <div className="kd-opts">
+        <button
+          type="button"
+          role="checkbox"
+          aria-checked={checked}
+          className="kd-opt"
           disabled={disabled}
-          onChange={(event) => onChange(event.currentTarget.checked)}
-        />
-        {label}
-      </label>
+          onClick={() => onChange(!checked)}
+        >
+          {label}
+        </button>
+      </div>
       {hint ? <p className="kd-djp-note">{hint}</p> : null}
     </div>
   );
@@ -194,12 +194,12 @@ export function VjExportPanel() {
 
           <Panel key="fade" heading="淡入淡出" dense>
             <div className="kd-col" style={{ gap: "0.5rem" }}>
-              <div className="kd-djp-segs" role="radiogroup" aria-label="淡入淡出单位">
+              <div className="kd-opts" role="radiogroup" aria-label="淡入淡出单位">
                 <button
                   type="button"
                   role="radio"
                   aria-checked={fadeMode === "bars"}
-                  data-on={fadeMode === "bars" ? "true" : undefined}
+                  className="kd-opt"
                   onClick={() => setFadeMode("bars")}
                 >
                   按小节
@@ -208,7 +208,7 @@ export function VjExportPanel() {
                   type="button"
                   role="radio"
                   aria-checked={fadeMode === "seconds"}
-                  data-on={fadeMode === "seconds" ? "true" : undefined}
+                  className="kd-opt"
                   onClick={() => setFadeMode("seconds")}
                 >
                   按秒
@@ -250,14 +250,14 @@ export function VjExportPanel() {
           </Panel>
 
           <Panel key="quality" heading="输出质量" dense>
-            <div className="kd-djp-segs" role="radiogroup" aria-label="输出质量">
+            <div className="kd-opts" role="radiogroup" aria-label="输出质量">
               {QUALITIES.map((item) => (
                 <button
                   key={item.id}
                   type="button"
                   role="radio"
                   aria-checked={item.id === quality}
-                  data-on={item.id === quality ? "true" : undefined}
+                  className="kd-opt"
                   onClick={() => setQuality(item.id)}
                 >
                   {item.label}

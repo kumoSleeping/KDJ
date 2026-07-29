@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "../../lib/api";
+import { cachedWaveform, loadWaveform } from "../../lib/waveformCache";
 import type { Waveform as WaveformData } from "../../types";
 import { ContextMenu } from "../common";
 
@@ -8,6 +8,8 @@ export const SEEK_EVENT = "kd:seek";
 export interface SeekDetail {
   trackId: number;
   position: number;
+  /** 拖动中的视觉预览不启动解码；松手或键盘操作时才真正跳转。 */
+  preview?: boolean;
 }
 
 /**
@@ -41,30 +43,6 @@ export interface WaveformProps {
   /** 点击是否跳转。 */
   seekable?: boolean;
   className?: string;
-}
-
-/** 同一首歌可能同时被详情栏和播放条要走，用内存缓存挡掉重复请求。 */
-const cache = new Map<number, WaveformData>();
-const inflight = new Map<number, Promise<WaveformData>>();
-
-function loadWaveform(trackId: number): Promise<WaveformData> {
-  const hit = cache.get(trackId);
-  if (hit) return Promise.resolve(hit);
-  const pending = inflight.get(trackId);
-  if (pending) return pending;
-  const request = api
-    .waveform(trackId)
-    .then((data) => {
-      cache.set(trackId, data);
-      inflight.delete(trackId);
-      return data;
-    })
-    .catch((error: unknown) => {
-      inflight.delete(trackId);
-      throw error;
-    });
-  inflight.set(trackId, request);
-  return request;
 }
 
 function draw(canvas: HTMLCanvasElement, wave: WaveformData, cssWidth: number, cssHeight: number) {
@@ -142,18 +120,47 @@ export function Waveform({
   seekable = true,
   className,
 }: WaveformProps) {
-  const [wave, setWave] = useState<WaveformData | null>(() => cache.get(trackId) ?? null);
+  const [wave, setWave] = useState<WaveformData | null>(() => cachedWaveform(trackId));
   const [error, setError] = useState("");
   // 右键设点永远取当时正在播放的位置，不能让鼠标点到波形哪里就误落到哪里。
   const [menu, setMenu] = useState<{ x: number; y: number; position: number } | null>(null);
   const [menuError, setMenuError] = useState("");
   const hostRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const draggingRef = useRef(false);
+  const previewFrameRef = useRef<number | null>(null);
+  const previewPositionRef = useRef(0);
+
+  useEffect(
+    () => () => {
+      if (previewFrameRef.current !== null) cancelAnimationFrame(previewFrameRef.current);
+    },
+    [],
+  );
+
+  const dispatchSeek = (nextPosition: number, preview = false) => {
+    window.dispatchEvent(
+      new CustomEvent<SeekDetail>(SEEK_EVENT, {
+        detail: { trackId, position: nextPosition, preview },
+      }),
+    );
+  };
+
+  // 原生 range 在指针下自己移动；播放头预览最多每帧同步一次。真正的媒体 seek
+  // 只在松手执行一次，避免拖动时反复 load/解码 shadow deck 把主线程堵住。
+  const previewSeek = (nextPosition: number) => {
+    previewPositionRef.current = nextPosition;
+    if (previewFrameRef.current !== null) return;
+    previewFrameRef.current = requestAnimationFrame(() => {
+      previewFrameRef.current = null;
+      dispatchSeek(previewPositionRef.current, true);
+    });
+  };
 
   useEffect(() => {
     let alive = true;
-    const cached = cache.get(trackId);
-    setWave(cached ?? null);
+    const cached = cachedWaveform(trackId);
+    setWave(cached);
     setError("");
     if (cached) return;
     loadWaveform(trackId)
@@ -322,16 +329,30 @@ export function Waveform({
           value={total > 0 && position !== null ? Math.min(total, Math.max(0, position)) : 0}
           disabled={total <= 0}
           aria-label="频谱波形，点击跳转"
-          onPointerDown={(event) => event.stopPropagation()}
+          onPointerDown={(event) => {
+            event.stopPropagation();
+            draggingRef.current = true;
+            event.currentTarget.setPointerCapture(event.pointerId);
+          }}
+          onPointerUp={(event) => {
+            event.stopPropagation();
+            draggingRef.current = false;
+            if (previewFrameRef.current !== null) {
+              cancelAnimationFrame(previewFrameRef.current);
+              previewFrameRef.current = null;
+            }
+            dispatchSeek(Number(event.currentTarget.value));
+          }}
+          onPointerCancel={() => {
+            draggingRef.current = false;
+          }}
           onClick={(event) => event.stopPropagation()}
           onInput={(event) => {
             event.stopPropagation();
             if (menu || total <= 0) return;
-            window.dispatchEvent(
-              new CustomEvent<SeekDetail>(SEEK_EVENT, {
-                detail: { trackId, position: Number(event.currentTarget.value) },
-              }),
-            );
+            const nextPosition = Number(event.currentTarget.value);
+            if (draggingRef.current) previewSeek(nextPosition);
+            else dispatchSeek(nextPosition);
           }}
           style={{
             position: "absolute",

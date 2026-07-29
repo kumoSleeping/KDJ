@@ -71,11 +71,13 @@ export interface ResultTableProps {
   onToggleItemAll(index: number): void;
   onToggleAll(): void;
   onDownloadItem(index: number): void;
+  /** 单首直接入队（行首下载键）。 */
+  onDownloadGroup(group: MergedGroup): void;
 }
 
 /** 表头列（首列的全选框由组件自己渲染，所以不在这里）。 */
 const HEAD_COLUMNS: ReadonlyArray<{ label: string; width?: string; num?: boolean }> = [
-  { label: "", width: "1.6rem" },
+  { label: "", width: "3.4rem" },
   { label: "标题" },
   { label: "艺人", width: "18%" },
   { label: "专辑", width: "16%" },
@@ -107,6 +109,7 @@ export function ResultTable({
   onToggleItemAll,
   onToggleAll,
   onDownloadItem,
+  onDownloadGroup,
 }: ResultTableProps) {
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
@@ -237,6 +240,7 @@ export function ResultTable({
                     onEnterSelection={() => onSelectionModeChange(true)}
                     onToggleExpand={() => onToggleExpand(group.group_id)}
                     onPickSource={(sourceIdx) => onPickSource(group.group_id, sourceIdx)}
+                    onDownload={() => onDownloadGroup(group)}
                     onDragStart={(event) => {
                       const currentKey = selectionKey(index, group.group_id);
                       const draggingSelection = selected.has(currentKey);
@@ -324,9 +328,15 @@ export function ResultTable({
                     />
                   )}
                 </td>
-                <td>
-                  {item.groups.length > 0 &&
-                    (collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />)}
+                <td className="kd-result-lead">
+                  {item.groups.length > 0 && (
+                    <span className="kd-result-lead-actions">
+                      <span className="kd-result-lead-spacer" aria-hidden="true" />
+                      <span className="kd-result-lead-btn" aria-hidden="true">
+                        {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                      </span>
+                    </span>
+                  )}
                 </td>
                 <td colSpan={4}>
                   <span className="kd-row" style={{ gap: "0.45rem", minWidth: 0 }}>

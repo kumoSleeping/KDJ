@@ -71,6 +71,8 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/library/folders/delete", post(folder_delete))
         .route("/api/library/folders/forget", post(folder_forget))
         .route("/api/library/folders/init", post(folder_init))
+        .route("/api/library/folders/upgrade", post(folder_upgrade))
+        .route("/api/library/waveforms/upgrade", post(waveform_upgrade))
         .route("/api/library/folders/move", post(folder_move))
         .route("/api/library/folders/order", post(folder_order))
         .route("/api/library/folders/apply", post(folder_apply))
@@ -856,6 +858,15 @@ async fn library_tracks(
     State(state): State<Arc<AppState>>,
     Query(params): Query<TrackQueryParams>,
 ) -> ApiResult<Json<TrackPage>> {
+    let outside = params.folder.trim() == kdj_library::folders::OUTSIDE_FOLDER;
+    let exclude_under = if outside {
+        library_roots(&state)
+            .into_iter()
+            .map(|root| root.to_string_lossy().into_owned())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let query = TrackQuery {
         q: params.q,
         key: params.key,
@@ -863,8 +874,13 @@ async fn library_tracks(
         bpm_max: params.bpm_max,
         energy_min: params.energy_min,
         analyzed: params.analyzed,
-        folder: params.folder,
+        folder: if outside {
+            String::new()
+        } else {
+            params.folder
+        },
         folder_deep: params.folder_deep,
+        exclude_under,
         sort: params.sort.unwrap_or_else(|| "added_at".into()),
         order: params.order.unwrap_or_else(|| "desc".into()),
         sort2: params.sort2.unwrap_or_default(),
@@ -1271,7 +1287,7 @@ async fn folder_init(
     let targets: Vec<PathBuf> = if payload.path.trim().is_empty() {
         roots.clone()
     } else {
-        // 越界检查不能省：这条接口会往目标目录里写 .kdj.json
+        // 越界检查不能省：这条接口会往目标目录里写 .kdj/manifest.json
         vec![kdj_library::folders::ensure_inside(
             Path::new(payload.path.trim()),
             &roots,
@@ -1281,6 +1297,18 @@ async fn folder_init(
         kdj_library::folders::init_manifests(&target, &roots)?;
     }
     Ok(Json(folder_tree(&state)?))
+}
+
+/// 启动旧文件夹清单升级。请求本身立即返回；进度统一走活动栏事件。
+async fn folder_upgrade(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let job_id = crate::jobs::spawn_folder_manifest_upgrade(state);
+    Json(json!({ "job_id": job_id }))
+}
+
+/// 给旧版本曲库补齐固定波形；和文件夹迁移一样只返回任务 id。
+async fn waveform_upgrade(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let job_id = crate::jobs::spawn_waveform_backfill(state);
+    Json(json!({ "job_id": job_id }))
 }
 
 async fn folder_move(
@@ -1300,7 +1328,7 @@ async fn folder_move(
     Ok(Json(folder_tree(&state)?))
 }
 
-/// 合并写清单：同一份 `.kdj.json` 里既有子目录名（文件夹树的顺序）
+/// 合并写清单：同一份 `.kdj/manifest.json` 里既有子目录名（文件夹树的顺序）
 /// 也有文件名（曲目手排）。拖文件夹时提交的是目录名、拖曲目时提交的是文件名，
 /// **整份覆盖会把另一类的顺序抹掉**——排好的 set 顺序会在拖一次文件夹之后消失。
 ///
@@ -1338,7 +1366,7 @@ async fn folder_order(
     kdj_library::folders::write_manifest(
         &target,
         &merge_manifest_order(&existing, &payload.names),
-    );
+    )?;
     Ok(Json(folder_tree(&state)?))
 }
 
@@ -2145,7 +2173,7 @@ mod tests {
 
     #[test]
     fn reordering_folders_keeps_the_track_order_in_the_same_manifest() {
-        // 同一份 .kdj.json 里既有目录名也有文件名：整份覆盖会把另一类抹掉，
+        // 同一份 .kdj/manifest.json 里既有目录名也有文件名：整份覆盖会把另一类抹掉，
         // 表现是"拖了一次文件夹，手排好的曲目顺序全没了"
         let existing = vec![
             "a.mp3".to_string(),

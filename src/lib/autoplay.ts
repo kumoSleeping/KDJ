@@ -11,6 +11,7 @@
 
 import { api } from "./api";
 import { useHarmonicScope } from "./harmonicScope";
+import { isOutsideFolder } from "./outsideFolder";
 import { usePlayMode } from "./playMode";
 import { useLibraryStore } from "../stores/libraryStore";
 import { useQueueStore } from "../stores/queueStore";
@@ -157,7 +158,10 @@ export async function pickNext(
 ): Promise<Track | null> {
   const { mode } = usePlayMode.getState();
   const { scope } = useHarmonicScope.getState();
-  const folder = scope === "folder" ? useLibraryStore.getState().filter.folder : "";
+  const rawFolder = scope === "folder" ? useLibraryStore.getState().filter.folder : "";
+  // 「其他」不是真实目录：顺序/随机走列表 API 哨兵；和声推荐暂扩到全库。
+  const folder = isOutsideFolder(rawFolder) ? "" : rawFolder;
+  const listFolder = rawFolder;
 
   // 点歌队列优先（KTV 语义）：排了歌就先放排的，什么模式都一样——
   // 队列是用户显式排的"接下来放这个"，意图比模式的通用规则强。
@@ -173,8 +177,8 @@ export async function pickNext(
   if (preferred && preferred.id !== current.id && !(mode === "one" && manual)) {
     return preferred;
   }
-  if (mode === "order") return nextInOrder(current, folder);
-  if (mode === "shuffle") return randomPick(current, folder);
+  if (mode === "order") return nextInOrder(current, listFolder);
+  if (mode === "shuffle") return randomPick(current, listFolder);
   return harmonicPick(current, folder);
 }
 
@@ -197,7 +201,9 @@ export async function previewNext(
 ): Promise<Track | null> {
   const { mode } = usePlayMode.getState();
   const { scope } = useHarmonicScope.getState();
-  const folder = scope === "folder" ? useLibraryStore.getState().filter.folder : "";
+  const rawFolder = scope === "folder" ? useLibraryStore.getState().filter.folder : "";
+  const folder = isOutsideFolder(rawFolder) ? "" : rawFolder;
+  const listFolder = rawFolder;
 
   const queued = useQueueStore
     .getState()
@@ -207,8 +213,8 @@ export async function previewNext(
   if (scope === "queue") return null;
 
   if (mode === "one" && !manual) return current;
-  if (mode === "order") return nextInOrder(current, folder);
-  if (mode === "shuffle") return randomPick(current, folder, excludeIds);
+  if (mode === "order") return nextInOrder(current, listFolder);
+  if (mode === "shuffle") return randomPick(current, listFolder, excludeIds);
   return harmonicPick(current, folder);
 }
 

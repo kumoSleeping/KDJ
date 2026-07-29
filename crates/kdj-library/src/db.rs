@@ -56,6 +56,18 @@ CREATE TABLE IF NOT EXISTS tags (
   track_id INTEGER NOT NULL, tag TEXT NOT NULL,
   PRIMARY KEY (track_id, tag)
 );
+CREATE TABLE IF NOT EXISTS waveform_assets (
+  track_id INTEGER PRIMARY KEY,
+  profile TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  file_mtime INTEGER NOT NULL,
+  generated_at TEXT NOT NULL,
+  error TEXT
+);
+CREATE TRIGGER IF NOT EXISTS cleanup_waveform_asset
+AFTER DELETE ON tracks BEGIN
+  DELETE FROM waveform_assets WHERE track_id = OLD.id;
+END;
 "#;
 
 /// 索引**必须在补列之后**再建。
@@ -69,6 +81,7 @@ CREATE INDEX IF NOT EXISTS idx_tracks_bpm ON tracks(bpm);
 CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(path);
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
+CREATE INDEX IF NOT EXISTS idx_waveform_assets_profile ON waveform_assets(profile, revision);
 "#;
 
 /// 老库升级用：只列可空列（NOT NULL 列没法 ALTER ADD，而它们从 v1 起就存在）。
@@ -245,6 +258,136 @@ fn prepare_journal_mode(path: &Path) -> Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")
         .context("切换 WAL 失败")?;
     Ok(())
+}
+
+/// 某一版桌面迁移曾把历史 `kumodeck.db` 复制成 `kdj.db`，但运行期仍打开
+/// `kumodeck.db`，于是同一 data_dir 会分叉成两份曲库。这里做**只增不改**合并：
+/// 当前库已有路径绝不覆盖；旧库独有曲目、标签和歌单按路径映射后补进来。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DatabaseMergeReport {
+    pub tracks: usize,
+    pub tags: usize,
+    pub playlists: usize,
+    pub playlist_items: usize,
+}
+
+pub fn merge_legacy_database(canonical: &Path, legacy: &Path) -> Result<DatabaseMergeReport> {
+    anyhow::ensure!(canonical != legacy, "不能把数据库合并进自己");
+    anyhow::ensure!(legacy.is_file(), "旧数据库不存在：{}", legacy.display());
+
+    // 先用正常入口把当前库 schema 补齐；旧库只读 attach，不对它做任何改动。
+    let database = Database::open(canonical)?;
+    let mut conn = database.conn()?;
+    conn.execute("ATTACH DATABASE ? AS legacy", [legacy.to_string_lossy().as_ref()])
+        .with_context(|| format!("挂载旧数据库失败：{}", legacy.display()))?;
+
+    let result = (|| -> Result<DatabaseMergeReport> {
+        let columns = |schema: &str| -> Result<Vec<String>> {
+            let mut stmt = conn.prepare(&format!("PRAGMA {schema}.table_info(tracks)"))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        };
+        let main_columns = columns("main")?;
+        let legacy_columns = columns("legacy")?;
+        anyhow::ensure!(!legacy_columns.is_empty(), "旧数据库没有 tracks 表");
+        let common: Vec<String> = main_columns
+            .into_iter()
+            .filter(|name| legacy_columns.contains(name))
+            .collect();
+        for required in ["id", "path", "filename", "added_at", "modified_at"] {
+            anyhow::ensure!(common.iter().any(|name| name == required), "旧库缺少 {required} 列");
+        }
+        let quoted = |names: &[String]| {
+            names
+                .iter()
+                .map(|name| format!("\"{}\"", name.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        let tx = conn.transaction().context("开始数据库合并事务失败")?;
+        // 先尽量保留旧 id，旧波形缓存便能继续命中；id 冲突但 path 不同的行
+        // 再走第二轮自动分配新 id，不能因为编号撞车漏掉整首歌。
+        let all = quoted(&common);
+        let mut report = DatabaseMergeReport::default();
+        report.tracks += tx.execute(
+            &format!("INSERT OR IGNORE INTO tracks ({all}) SELECT {all} FROM legacy.tracks"),
+            [],
+        )?;
+        let without_id: Vec<String> = common.into_iter().filter(|name| name != "id").collect();
+        let body = quoted(&without_id);
+        report.tracks += tx.execute(
+            &format!("INSERT OR IGNORE INTO tracks ({body}) SELECT {body} FROM legacy.tracks"),
+            [],
+        )?;
+
+        let legacy_has = |table: &str| -> Result<bool> {
+            let count: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM legacy.sqlite_master WHERE type = 'table' AND name = ?",
+                [table],
+                |row| row.get(0),
+            )?;
+            Ok(count > 0)
+        };
+        if legacy_has("tags")? {
+            report.tags = tx.execute(
+                "INSERT OR IGNORE INTO tags (track_id, tag) \
+                 SELECT current.id, source_tag.tag FROM legacy.tags source_tag \
+                 JOIN legacy.tracks source ON source.id = source_tag.track_id \
+                 JOIN tracks current ON current.path = source.path",
+                [],
+            )?;
+        }
+
+        if legacy_has("playlists")? && legacy_has("playlist_items")? {
+            let source_playlists: Vec<(i64, String, String, String)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT id, name, COALESCE(note, ''), created_at FROM legacy.playlists ORDER BY id",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                rows
+            };
+            for (source_id, name, note, created_at) in source_playlists {
+                let target_id: i64 = match tx.query_row(
+                    "SELECT id FROM playlists WHERE name = ? ORDER BY id LIMIT 1",
+                    [&name],
+                    |row| row.get(0),
+                ) {
+                    Ok(id) => id,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {
+                        tx.execute(
+                            "INSERT INTO playlists (name, note, created_at) VALUES (?, ?, ?)",
+                            rusqlite::params![name, note, created_at],
+                        )?;
+                        report.playlists += 1;
+                        tx.last_insert_rowid()
+                    }
+                    Err(err) => return Err(err.into()),
+                };
+                report.playlist_items += tx.execute(
+                    "INSERT OR IGNORE INTO playlist_items (playlist_id, track_id, position) \
+                     SELECT ?, current.id, source_item.position \
+                     FROM legacy.playlist_items source_item \
+                     JOIN legacy.tracks source ON source.id = source_item.track_id \
+                     JOIN tracks current ON current.path = source.path \
+                     WHERE source_item.playlist_id = ?",
+                    rusqlite::params![target_id, source_id],
+                )?;
+            }
+        }
+        tx.commit().context("提交数据库合并失败")?;
+        Ok(report)
+    })();
+
+    // DETACH 失败不应掩盖已经成功提交的结果；连接归还池时 SQLite 也会收掉 attach。
+    let _ = conn.execute_batch("DETACH DATABASE legacy");
+    result
 }
 
 #[cfg(test)]
@@ -472,6 +615,95 @@ mod tests {
         assert_eq!(mode, "wal");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_database_merge_adds_missing_paths_without_overwriting_current_rows() {
+        let dir = temp_dir("merge");
+        let current = dir.join("kumodeck.db");
+        let legacy = dir.join("kdj.db");
+        {
+            let db = Database::open(&current).unwrap();
+            let conn = db.conn().unwrap();
+            conn.execute(
+                "INSERT INTO tracks (id, path, filename, title, rating, added_at, modified_at) \
+                 VALUES (1, '/current.mp3', 'current.mp3', 'Current', 5, 'now', 'new'), \
+                        (2, '/shared.mp3', 'shared.mp3', 'New title', 4, 'now', 'new')",
+                [],
+            )
+            .unwrap();
+        }
+        {
+            let db = Database::open(&legacy).unwrap();
+            let conn = db.conn().unwrap();
+            conn.execute(
+                "INSERT INTO tracks (id, path, filename, title, rating, added_at, modified_at) \
+                 VALUES (1, '/legacy-only.mp3', 'legacy.mp3', 'Legacy', 3, 'old', 'old'), \
+                        (2, '/shared.mp3', 'shared.mp3', 'Stale title', 1, 'old', 'old')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tags (track_id, tag) VALUES (1, 'old-only'), (2, 'shared-tag')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO playlists (id, name, note, created_at) VALUES (7, 'Set', 'legacy', 'old')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO playlist_items (playlist_id, track_id, position) VALUES (7, 1, 0), (7, 2, 1)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let report = merge_legacy_database(&current, &legacy).unwrap();
+        assert_eq!(report.tracks, 1, "id 撞了也必须把旧库独有路径补进来");
+        assert_eq!(report.tags, 2);
+        assert_eq!(report.playlists, 1);
+        assert_eq!(report.playlist_items, 2);
+
+        let db = Database::open(&current).unwrap();
+        let conn = db.conn().unwrap();
+        let shared: (String, i64) = conn
+            .query_row(
+                "SELECT title, rating FROM tracks WHERE path = '/shared.mp3'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(shared, ("New title".into(), 4), "当前库已有编辑绝不能被旧库盖掉");
+        let legacy_id: i64 = conn
+            .query_row("SELECT id FROM tracks WHERE path = '/legacy-only.mp3'", [], |row| row.get(0))
+            .unwrap();
+        assert_ne!(legacy_id, 1, "编号撞车时应分配新 id");
+        let playlist_paths: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT tracks.path FROM playlist_items \
+                     JOIN tracks ON tracks.id = playlist_items.track_id \
+                     JOIN playlists ON playlists.id = playlist_items.playlist_id \
+                     WHERE playlists.name = 'Set' ORDER BY playlist_items.position",
+                )
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(playlist_paths, vec!["/legacy-only.mp3", "/shared.mp3"]);
+        drop(conn);
+        drop(db);
+
+        assert_eq!(
+            merge_legacy_database(&current, &legacy).unwrap(),
+            DatabaseMergeReport::default(),
+            "重复启动必须幂等"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

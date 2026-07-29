@@ -235,23 +235,25 @@ function viewportIds(): number[] {
   const body = box?.querySelector("tbody");
   if (!box || !body) return [];
   const { tracks } = useLibraryStore.getState();
-  const rows = body.rows;
-  // 行数对不上 = DOM 和 store 不是同一批（正在重渲染，或者认错了表）。
-  // 按下标映射会排到别人的 id 上，这一轮宁可什么都不做：
-  // 下一次滚动、或者下一次 tracks 变化都会重来。
-  if (rows.length === 0 || rows.length !== tracks.length) return [];
+  const byId = new Map<number, Track>();
+  for (const track of tracks) byId.set(track.id, track);
 
   const view = box.getBoundingClientRect();
   const margin = view.height * VIEWPORT_MARGIN_SCREENS;
   const inView: number[] = [];
   const nearby: number[] = [];
 
-  for (let index = 0; index < rows.length; index += 1) {
-    const rect = rows[index].getBoundingClientRect();
+  // 曲目表是虚拟滚动的：tbody 里只有视口附近的一小段加两根占位行，
+  // 行下标和 tracks 对不上，不能再按下标映射。直接读行上的
+  // data-kd-track-id；占位行和「待下载」行没有这个属性，自然被跳过。
+  const rows = body.querySelectorAll<HTMLTableRowElement>("tr[data-kd-track-id]");
+  for (const row of rows) {
+    const rect = row.getBoundingClientRect();
     if (rect.bottom < view.top - margin) continue;
-    // 行是自上而下排的，越过下边界之后不用再量了（量满 200 行 rect 会强制回流）
+    // 行是自上而下排的，越过下边界之后不用再量了
     if (rect.top > view.bottom + margin) break;
-    const track = tracks[index];
+    const id = Number(row.dataset.kdTrackId);
+    const track = byId.get(id);
     if (!track || track.analyzed_at || queued.has(track.id)) continue;
     const visible = rect.bottom > view.top && rect.top < view.bottom;
     (visible ? inView : nearby).push(track.id);

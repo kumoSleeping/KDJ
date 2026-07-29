@@ -10,19 +10,19 @@ import {
   FolderInput,
   FolderOpen,
   FolderPlus,
+  Files,
   HardDrive,
   Library,
   ListMusic,
   ListX,
   MoreHorizontal,
   Music2,
-  PanelLeftClose,
-  PanelLeftOpen,
   PencilLine,
   Trash2,
 } from "lucide-react";
 import { api } from "../../lib/api";
 import { FOLDER_DROP_PATH_ATTR } from "../../lib/folderDrop";
+import { isOutsideFolder, OUTSIDE_FOLDER } from "../../lib/outsideFolder";
 import {
   enqueueSearchDrop,
   isSearchDownloadDrag,
@@ -124,7 +124,11 @@ function flattenFolders(nodes: FolderNode[]): FolderNode[] {
  * 窄屏常驻文件夹栏。收起时也能直接切换添加/临时列表/全库/任意文件夹；
  * 展开时是占据布局宽度的真正侧栏，不覆盖列表，也不再退化成抽屉。
  */
-export function NarrowFolderRail({ expanded, onToggle }: { expanded: boolean; onToggle(): void }) {
+export function NarrowFolderRail({
+  expanded,
+}: {
+  expanded: boolean;
+}) {
   const folders = useLibraryStore((state) => state.folders);
   const filter = useLibraryStore((state) => state.filter);
   const queueView = useLibraryStore((state) => state.queueView);
@@ -144,10 +148,6 @@ export function NarrowFolderRail({ expanded, onToggle }: { expanded: boolean; on
   if (expanded) {
     return (
       <aside className="kd-narrow-folder-panel" aria-label="文件夹侧栏">
-        <button className="kd-narrow-rail-toggle" type="button" onClick={onToggle} title="收起文件夹栏">
-          <PanelLeftClose size={15} />
-          <span>文件夹</span>
-        </button>
         <FolderTree />
       </aside>
     );
@@ -159,9 +159,6 @@ export function NarrowFolderRail({ expanded, onToggle }: { expanded: boolean; on
   };
   return (
     <aside className="kd-narrow-folder-rail kd-scroll" aria-label="快捷文件夹栏">
-      <button type="button" onClick={onToggle} title="展开文件夹栏" aria-label="展开文件夹栏">
-        <PanelLeftOpen size={15} />
-      </button>
       <button
         type="button"
         title={error || "添加音乐文件夹"}
@@ -199,7 +196,7 @@ export function NarrowFolderRail({ expanded, onToggle }: { expanded: boolean; on
       </button>
       <button
         type="button"
-        data-active={!queueView && !filter.folder || undefined}
+        data-active={!queueView && filter.folder === "" || undefined}
         title="全部曲目"
         onClick={() => choose("")}
       >
@@ -257,6 +254,16 @@ export function NarrowFolderRail({ expanded, onToggle }: { expanded: boolean; on
           <small>{node.name}</small>
         </button>
       ))}
+      {(folders?.outside ?? 0) > 0 && (
+        <button
+          type="button"
+          data-active={!queueView && isOutsideFolder(filter.folder) || undefined}
+          title="不在曲库目录里的曲目"
+          onClick={() => choose(OUTSIDE_FOLDER)}
+        >
+          <Files size={15} /><small>其他</small>
+        </button>
+      )}
     </aside>
   );
 }
@@ -756,10 +763,21 @@ export function FolderTree() {
             还没有文件夹。点上方的「添加」选一个本地目录，剩下的交给后台。
           </p>
         )}
-        {folders && folders.outside > 0 && (
-          <p className="kd-faint" style={{ padding: "0.5rem", lineHeight: 1.5 }}>
-            另有 {folders.outside} 首在曲库目录之外，只能在「全部曲目」里看到。
-          </p>
+        {(folders?.outside ?? 0) > 0 && (
+          <div
+            className="kd-folder"
+            data-active={isOutsideFolder(filter.folder) && !queueView}
+            style={{ paddingLeft: "0.35rem" }}
+            title="不在曲库目录里的曲目"
+            onClick={() => {
+              setFilter({ folder: OUTSIDE_FOLDER, sort: "added_at", order: "desc" });
+            }}
+          >
+            <span className="kd-folder-caret" />
+            <Files size={13} />
+            <span className="kd-truncate">其他</span>
+            <span className="kd-folder-count">{folders!.outside}</span>
+          </div>
         )}
       </div>
 

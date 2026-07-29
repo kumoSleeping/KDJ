@@ -39,6 +39,8 @@ pub struct AppState {
     pub analysis: crate::jobs::AnalysisRegistry,
     /// 波形单飞：同一首歌的并发请求共享一次解码。
     pub waveforms: Arc<crate::waveform::WaveformCoordinator>,
+    /// 文件夹与波形升级各自只允许一个实例；前端重连/HMR 不会重复开整库任务。
+    pub maintenance: crate::jobs::MaintenanceRegistry,
 }
 
 impl AppState {
@@ -58,6 +60,7 @@ impl AppState {
         providers.insert(Platform::Soundcloud, soundcloud);
         providers.insert(Platform::Bilibili, bilibili.clone());
 
+        let waveforms = crate::waveform::WaveformCoordinator::new(library.clone());
         Ok(Arc::new(AppState {
             config,
             hub: EventHub::default(),
@@ -67,7 +70,8 @@ impl AppState {
             provider_ctx: ctx,
             song_previews: Mutex::new(HashMap::new()),
             analysis: Default::default(),
-            waveforms: Arc::new(crate::waveform::WaveformCoordinator::new()),
+            waveforms,
+            maintenance: Default::default(),
         }))
     }
 

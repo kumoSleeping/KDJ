@@ -10,7 +10,7 @@ import { create } from "zustand";
 import { useAppStore, type ListMode } from "./appStore";
 import { useLibraryStore } from "./libraryStore";
 
-export type OverlayKind = "accounts" | "dj" | "queue" | "preview" | "folders" | "vjExport";
+export type OverlayKind = "settings" | "queue" | "preview" | "folders" | "vjExport";
 
 export interface Place {
   listMode: ListMode;
@@ -26,8 +26,7 @@ const MAX = 80;
 function overlayOf(): OverlayKind | null {
   const app = useAppStore.getState();
   if (app.showFolders) return "folders";
-  if (app.showAccounts) return "accounts";
-  if (app.showDjPanel) return "dj";
+  if (app.showSettings) return "settings";
   if (app.showPreview) return "preview";
   if (app.showQueue) return "queue";
   if (app.showVjExport) return "vjExport";
@@ -67,8 +66,7 @@ export function isApplyingNav(): boolean {
 
 function applyOverlay(overlay: OverlayKind | null): void {
   const app = useAppStore.getState();
-  if (overlay === "accounts") app.openAccountsPanel();
-  else if (overlay === "dj") app.openDjPanel();
+  if (overlay === "settings") app.openSettingsPanel();
   else if (overlay === "preview") app.openPreviewPanel();
   else if (overlay === "queue") app.openQueuePanel();
   else if (overlay === "folders") app.openFoldersPanel();
@@ -83,8 +81,7 @@ export function applyPlace(place: Place): void {
     // 不走 setListMode：它会清 overlay 并打乱恢复顺序
     useAppStore.setState({
       listMode: place.listMode,
-      showAccounts: false,
-      showDjPanel: false,
+      showSettings: false,
       showQueue: false,
       showPreview: false,
       showFolders: false,

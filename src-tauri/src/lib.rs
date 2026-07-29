@@ -369,8 +369,8 @@ fn has_file_bytes(path: &Path) -> bool {
 /// 把旧应用数据逐项迁移到新的 KDJ 数据目录。
 ///
 /// 不能只迁移 settings.json：曲库数据库、封面和 providers 的 sessions 都是
-/// 用户数据。数据库文件名也随项目改名了，所以 kumodeck.db 需要映射成 kdj.db，
-/// WAL/SHM 同样要映射，否则 SQLite 会只看到一个空库。
+/// 用户数据。运行期的规范数据库名始终由 `DB_FILENAME` 决定；历史上出现过的
+/// `kdj.db` / `kumodeck.db` 都映射到它，WAL/SHM 必须同步。
 fn migrate_legacy_data(current: &Path, legacy: &Path, force: bool) -> anyhow::Result<bool> {
     if !legacy.exists() {
         return Ok(false);
@@ -384,10 +384,19 @@ fn migrate_legacy_data(current: &Path, legacy: &Path, force: bool) -> anyhow::Re
             let source_path = entry.path();
             let file_name = entry.file_name();
             let name = file_name.to_string_lossy();
+            // 同一个旧目录同时有两种名字时，规范名那份优先；否则 read_dir 顺序
+            // 会决定最后覆盖成哪一库。那正是升级后“少几首歌”的来源。
+            if name.starts_with("kdj.db") && source.join(kdj_core::config::DB_FILENAME).is_file() {
+                continue;
+            }
             let target_name = match name.as_ref() {
-                "kumodeck.db" => "kdj.db".to_string(),
-                "kumodeck.db-wal" => "kdj.db-wal".to_string(),
-                "kumodeck.db-shm" => "kdj.db-shm".to_string(),
+                "kdj.db" | "kumodeck.db" => kdj_core::config::DB_FILENAME.to_string(),
+                "kdj.db-wal" | "kumodeck.db-wal" => {
+                    format!("{}-wal", kdj_core::config::DB_FILENAME)
+                }
+                "kdj.db-shm" | "kumodeck.db-shm" => {
+                    format!("{}-shm", kdj_core::config::DB_FILENAME)
+                }
                 _ => name.to_string(),
             };
             let target_path = root.join(target_name);
@@ -420,6 +429,36 @@ fn migrate_legacy_data(current: &Path, legacy: &Path, force: bool) -> anyhow::Re
     Ok(copied)
 }
 
+const DB_ALIAS_MERGE_MARKER: &str = ".kdj-db-alias-merged-v1";
+
+/// 修复曾发布过的分叉布局：迁移器写了 `kdj.db`，运行期却继续打开
+/// `kumodeck.db`。合并只补当前库没有的 path，绝不覆盖评分、备注和 Cue 等现有编辑。
+fn reconcile_database_alias(data_dir: &Path) {
+    let canonical = data_dir.join(kdj_core::config::DB_FILENAME);
+    let alias = data_dir.join("kdj.db");
+    let marker = data_dir.join(DB_ALIAS_MERGE_MARKER);
+    if marker.is_file() || !has_file_bytes(&alias) || alias == canonical {
+        return;
+    }
+    match kdj_library::db::merge_legacy_database(&canonical, &alias) {
+        Ok(report) => {
+            let summary = format!(
+                "tracks={} tags={} playlists={} playlist_items={}\n",
+                report.tracks, report.tags, report.playlists, report.playlist_items
+            );
+            if let Err(err) = std::fs::write(&marker, &summary) {
+                eprintln!("KDJ: 数据库已合并，但写不下迁移标记：{err}");
+            }
+            eprintln!("KDJ: 已合并历史 kdj.db：{}", summary.trim());
+        }
+        Err(err) => {
+            // 当前规范库仍原样可用，旧 alias 也一字未改；不能因一份旁路旧库损坏
+            // 让整个应用起不来。下次启动还会重试，错误留在启动日志供排查。
+            eprintln!("KDJ: 合并历史 kdj.db 失败，将在下次启动重试：{err:#}");
+        }
+    }
+}
+
 fn default_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
     let current = app.path().app_config_dir()?.join("data");
     let base = app
@@ -449,6 +488,7 @@ fn default_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
             break;
         }
     }
+    reconcile_database_alias(&current);
     Ok(current)
 }
 
@@ -462,6 +502,8 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<Bridge> {
     let data_dir = env_path("KDJ_DATA_DIR")
         .map(Ok)
         .unwrap_or_else(|| default_data_dir(app))?;
+    // 调试覆盖目录同样可能来自出过问题的版本，不能绕过数据库别名修复。
+    reconcile_database_alias(&data_dir);
     // 默认落到系统的「下载」目录（本地化的那个）+ KDJ 子目录。
     // 这只是全新安装的默认值：settings.json 里存过的目录永远优先。
     // 安卓上 Tauri 的 download_dir() 会报错，退回 core 里同一套解析。

@@ -1,19 +1,22 @@
 import type { ReactNode } from "react";
 
 /**
- * 板块自有工作条：左侧小图标、右侧说明/动作。
+ * 板块自有工作条：左侧小图标与说明，右侧可挂搜索/动作。
  * 空闲时也占位（统计信息）；忙时（多选 / 任务）只换内容，不跳布局。
  */
 export function WorkRail({
   idle = false,
   glyphs,
   texts,
+  trailing,
   actions,
   label,
 }: {
   idle?: boolean;
   glyphs: ReactNode[];
   texts: ReactNode[];
+  /** 贴右的附属控件（如曲库内搜），在全局入口左侧。 */
+  trailing?: ReactNode;
   /** 本栏的全局入口，贴在右端，和搜索平台键上下对齐。 */
   actions?: ReactNode;
   label: string;
@@ -26,8 +29,9 @@ export function WorkRail({
       aria-live="polite"
       aria-label={label}
     >
-      <div className="kd-activity-glyphs">{glyphs}</div>
-      <div className="kd-activity-texts">{texts}</div>
+      {glyphs.length > 0 ? <div className="kd-activity-glyphs">{glyphs}</div> : null}
+      {texts.length > 0 ? <div className="kd-activity-texts">{texts}</div> : null}
+      {trailing}
       {actions && <div className="kd-activity-actions">{actions}</div>}
     </div>
   );

@@ -106,8 +106,20 @@ const AVATAR_IMG: CSSProperties = {
  * QQ 头像地址显示头像。这个兜底不携带任何登录 Cookie。 */
 function qqAvatarFallback(account: Account): string {
   if (account.platform !== "qqm") return "";
-  const musicid = account.detail.match(/(?:^|\D)musicid=(\d+)/)?.[1];
+  const musicid =
+    account.detail.match(/(?:^|\D)musicid=(\d+)/)?.[1] ||
+    account.avatar.match(/(?:uin|dst_uin)=(\d+)/i)?.[1];
   return musicid ? `https://q.qlogo.cn/headimg_dl?dst_uin=${musicid}&spec=100` : "";
+}
+
+/** 机器码不该出现在账号说明里：有昵称就显示昵称，会员等级这类可读文案才留。 */
+function isMachineIdDetail(detail: string): boolean {
+  const text = detail.trim();
+  if (!text) return true;
+  if (/^musicid\s*=/i.test(text)) return true;
+  if (/^UID\s*\d+/i.test(text)) return true;
+  if (/^\d+$/.test(text)) return true;
+  return false;
 }
 
 /**
@@ -145,7 +157,7 @@ export function AccountRow({ account }: { account: Account }) {
   return (
     <div style={settingRow.row}>
       <div style={settingRow.text}>
-        <span style={settingRow.avatar} aria-hidden="true">
+        <span className="kd-account-avatar" style={settingRow.avatar} aria-hidden="true">
           {avatarSrc && (
             <img
               src={avatarSrc}
@@ -172,8 +184,11 @@ export function AccountRow({ account }: { account: Account }) {
             {/* 状态本身就是这行的说明，不再另起一个彩色标签 */}
             <span style={{ color: STATE_COLOR[account.state] }}>{STATE_LABEL[account.state]}</span>
             {account.nickname && ` · ${account.nickname}`}
-            {/* detail 常常就是状态本身（"未登录"），重复一遍纯属噪音 */}
-            {account.detail && account.detail !== STATE_LABEL[account.state] && ` · ${account.detail}`}
+            {/* detail 常常就是状态本身（"未登录"），或 UID/musicid 这类机器码——都不展示 */}
+            {account.detail &&
+              account.detail !== STATE_LABEL[account.state] &&
+              !isMachineIdDetail(account.detail) &&
+              ` · ${account.detail}`}
           </div>
           {/* 贴在状态行下面，而不是塞进右边那一列：那一列只有按钮那么宽，
               一句"退出失败：连接被拒绝"进去就只剩省略号了 */}

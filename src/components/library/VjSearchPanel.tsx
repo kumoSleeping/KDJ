@@ -50,49 +50,49 @@ export function VjSearchPanel({ track }: { track: Track }) {
 
   return (
     <div className="kd-col" style={{ gap: "0.5rem" }}>
-      <div className="kd-vj-words">
+      <div className="kd-opts kd-vj-words" data-tone="bili">
           {artist && (
-            <span className="kd-vj-artist-tag" title={artist} aria-label={`艺人：${artist}`}>
-              {compactTag(artist)}
+            <span className="kd-vj-artist" title={`艺人：${artist}`}>
+              @{compactTag(artist)}
             </span>
           )}
           {keywords.map((word) => (
-          <span key={word} className="kd-vj-word">
-            <button
-              type="button"
-              aria-pressed={picked.includes(word)}
-              aria-label={armedWord === word ? `再次右键删除 ${word}` : word}
-              data-delete-armed={armedWord === word ? "true" : undefined}
-              title={
-                armedWord === word
-                  ? `再次右键删除「${word}」`
-                  : picked.includes(word)
-                    ? "取消这个词"
-                    : "加上这个词"
-              }
-              onClick={() => {
-                if (armedWord === word) {
-                  remove(word);
-                  setArmedWord("");
-                  return;
-                }
+          <button
+            key={word}
+            type="button"
+            className="kd-opt"
+            aria-pressed={picked.includes(word)}
+            aria-label={armedWord === word ? `再次右键删除 ${word}` : word}
+            data-delete-armed={armedWord === word ? "true" : undefined}
+            title={
+              armedWord === word
+                ? `再次右键删除「${word}」`
+                : picked.includes(word)
+                  ? "取消这个词"
+                  : "加上这个词"
+            }
+            onClick={() => {
+              if (armedWord === word) {
+                remove(word);
                 setArmedWord("");
-                toggle(word);
-              }}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                if (armedWord === word) {
-                  remove(word);
-                  setArmedWord("");
-                } else {
-                  setArmedWord(word);
-                }
-              }}
-            >
-              <span className="kd-vj-word-label">{word}</span>
-              {armedWord === word && <Trash2 className="kd-vj-word-trash" size={12} aria-hidden="true" />}
-            </button>
-          </span>
+                return;
+              }
+              setArmedWord("");
+              toggle(word);
+            }}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              if (armedWord === word) {
+                remove(word);
+                setArmedWord("");
+              } else {
+                setArmedWord(word);
+              }
+            }}
+          >
+            {word}
+            {armedWord === word && <Trash2 className="kd-vj-word-trash" size={11} aria-hidden="true" />}
+          </button>
         ))}
 
           {adding ? (
@@ -123,6 +123,7 @@ export function VjSearchPanel({ track }: { track: Track }) {
             onClick={() => setAdding(true)}
           >
             <Plus size={11} />
+            加词
           </button>
           )}
       </div>

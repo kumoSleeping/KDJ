@@ -118,14 +118,16 @@ export function SearchWorkRail({
       );
     } else {
       for (const id of rows) {
-        glyphs.push(
-          <span key={id} className="kd-activity-glyph" aria-hidden="true" title={id}>
-            <PlatformMark id={id} size={13} />
-          </span>,
-        );
         texts.push(
-          <span key={id} className="kd-activity-text">
-            {PLATFORM_LABEL[id]} {counts[id]}
+          <span
+            key={id}
+            className="kd-activity-plat"
+            data-platform={id}
+            title={`${PLATFORM_LABEL[id]} ${counts[id]}`}
+            aria-label={`${PLATFORM_LABEL[id]} ${counts[id]} 条`}
+          >
+            <PlatformMark id={id} size={13} />
+            <span className="kd-activity-plat-count">{counts[id]}</span>
           </span>,
         );
       }

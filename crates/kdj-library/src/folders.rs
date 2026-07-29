@@ -18,13 +18,18 @@ use anyhow::{bail, Context, Result};
 use kdj_core::models::{FolderNode, FolderTree};
 use kdj_providers::tags::is_media_extension;
 
-/// 每个受管目录里放一份清单文件，记这一层的**子目录显示顺序**。
+/// 每个受管目录都把 KDJ 自己的文件收进 `.kdj/`，不再把 sidecar 散在歌曲旁边。
 ///
-/// 为什么是"每个目录一份"而不是"根目录一份大清单"：清单跟着文件夹走。
-/// 出场前把 `温州/` 整个拷进 U 盘，顺序也一起过去了。
-/// 也不存进 SQLite：数据库在应用的 userData 里，换台电脑就没了，
-/// 而 DJ 的目录本来就是要跨机器搬的。
-pub const MANIFEST_NAME: &str = ".kdj.json";
+/// 为什么是“每个目录一份”而不是根目录一份大清单：清单要跟着文件夹走。
+/// 出场前把 `温州/` 整个拷进 U 盘，顺序也一起过去；它也不能只存 SQLite，
+/// 因为数据库在应用数据目录里，换台电脑就不会跟着音乐走。
+pub const METADATA_DIR_NAME: &str = ".kdj";
+pub const MANIFEST_NAME: &str = "manifest.json";
+/// 前端侧栏「其他」用的哨兵路径：不是真实目录，只表示「落在所有曲库根之外」。
+pub const OUTSIDE_FOLDER: &str = "__kd_outside__";
+/// v0.2.8 及以前把清单直接放在歌曲旁边。升级时双读并安全搬进 `.kdj/`。
+pub const LEGACY_MANIFEST_NAME: &str = ".kdj.json";
+const LEGACY_BACKUP_NAME: &str = "legacy-manifest-v1.json";
 const MANIFEST_VERSION: i64 = 1;
 
 /// 扫描目录树的深度上限。DJ 的歌单目录一般 1~2 层，给到 6 层足够，
@@ -157,18 +162,45 @@ pub fn infer_roots(track_paths: &[String]) -> Vec<PathBuf> {
 
 // ------------------------------------------------------------------ 目录清单
 
-/// 读目录里的 `.kdj.json`。读不出来一律当成空清单。
-///
-/// 清单只影响显示顺序，坏了不该让整棵树打不开——所以这里吞掉所有异常，
-/// 最坏情况是退回按名字排序，用户看到的是"顺序被重置了"，而不是白屏。
-fn read_manifest(directory: &Path) -> serde_json::Map<String, serde_json::Value> {
-    let Ok(text) = std::fs::read_to_string(directory.join(MANIFEST_NAME)) else {
-        return Default::default();
-    };
-    match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(serde_json::Value::Object(map)) => map,
-        _ => Default::default(),
+fn metadata_dir(directory: &Path) -> PathBuf {
+    directory.join(METADATA_DIR_NAME)
+}
+
+fn manifest_path(directory: &Path) -> PathBuf {
+    metadata_dir(directory).join(MANIFEST_NAME)
+}
+
+fn legacy_manifest_path(directory: &Path) -> PathBuf {
+    directory.join(LEGACY_MANIFEST_NAME)
+}
+
+fn legacy_backup_path(directory: &Path) -> PathBuf {
+    metadata_dir(directory).join(LEGACY_BACKUP_NAME)
+}
+
+fn read_manifest_file(path: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<serde_json::Value>(&text).ok()? {
+        serde_json::Value::Object(map) => Some(map),
+        _ => None,
     }
+}
+
+/// 先读新位置；升级还没完成或新文件损坏时，继续认旧清单和迁移备份。
+///
+/// 清单只影响显示顺序，三份都读不出来才退回空清单，不能让一份坏 JSON
+/// 把整棵文件夹树拖成白屏。
+fn read_manifest(directory: &Path) -> serde_json::Map<String, serde_json::Value> {
+    for path in [
+        manifest_path(directory),
+        legacy_manifest_path(directory),
+        legacy_backup_path(directory),
+    ] {
+        if let Some(map) = read_manifest_file(&path) {
+            return map;
+        }
+    }
+    Default::default()
 }
 
 pub fn read_manifest_order(directory: &Path) -> Vec<String> {
@@ -184,32 +216,115 @@ pub fn read_manifest_order(directory: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 清单文件在不在。`init_manifests` 用它决定要不要补一份，
-/// 判断的是**文件存在**——已经有的一律不动，哪怕内容坏了也不覆盖用户的顺序。
+/// 新旧任一清单存在都算“已有”。旧文件即使损坏也不能被初始化流程覆盖；
+/// 用户还有机会从备份修它，自动写一份空顺序反而会掩盖问题。
 pub fn has_manifest(directory: &Path) -> bool {
-    directory.join(MANIFEST_NAME).is_file()
+    manifest_path(directory).is_file() || legacy_manifest_path(directory).is_file()
 }
 
-/// 这个目录的顺序是不是"受管的"。树上的 `managed` 字段走这一条。
-///
-/// 判据是**清单能解析成非空对象**，不只是文件存在：清单坏掉时读出来的顺序
-/// 是空的，树实际按名字排，这时报 managed=true 会让用户以为自己排的顺序丢了。
+/// 这个目录的顺序是不是“受管的”。树上的 `managed` 字段走这一条。
 fn manifest_is_managed(directory: &Path) -> bool {
     !read_manifest(directory).is_empty()
 }
 
-pub fn write_manifest(directory: &Path, order: &[String]) {
-    let payload = serde_json::json!({ "version": MANIFEST_VERSION, "order": order });
-    let body = match serde_json::to_string_pretty(&payload) {
-        Ok(body) => body,
-        Err(err) => {
-            tracing::warn!("序列化清单失败：{err}");
-            return;
+/// 同目录写临时文件再 rename。进程被 kill 时最多留一份 `.partial`，
+/// 永远不会把上一份好清单截成半个 JSON。
+fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
+    let parent = path.parent().context("清单没有上级目录")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("创建 KDJ 元数据目录失败：{}", parent.display()))?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|delta| delta.as_nanos())
+        .unwrap_or(0);
+    let tmp = parent.join(format!(".{MANIFEST_NAME}.{nonce}.partial"));
+    std::fs::write(&tmp, body).with_context(|| format!("写临时清单失败：{}", tmp.display()))?;
+    if let Err(first) = std::fs::rename(&tmp, path) {
+        // Windows 不能 rename 覆盖已有目标。先把完整旧文件挪到同目录备份；
+        // 新文件提交失败就立刻还原，任何时刻至少有一份完整清单可恢复。
+        if path.is_file() {
+            let rollback = parent.join(format!(".{MANIFEST_NAME}.{nonce}.rollback"));
+            std::fs::rename(path, &rollback)
+                .with_context(|| format!("暂存旧清单失败：{}", path.display()))?;
+            if let Err(second) = std::fs::rename(&tmp, path) {
+                let _ = std::fs::rename(&rollback, path);
+                let _ = std::fs::remove_file(&tmp);
+                return Err(second).with_context(|| {
+                    format!("提交清单失败：{}（首次错误：{first}）", path.display())
+                });
+            }
+            let _ = std::fs::remove_file(rollback);
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(first).with_context(|| format!("提交清单失败：{}", path.display()));
         }
-    };
-    if let Err(err) = std::fs::write(directory.join(MANIFEST_NAME), body) {
-        tracing::warn!("写不了 {}：{err}", directory.join(MANIFEST_NAME).display());
     }
+    Ok(())
+}
+
+fn backup_legacy_manifest(directory: &Path) -> Result<()> {
+    let legacy = legacy_manifest_path(directory);
+    if !legacy.is_file() {
+        return Ok(());
+    }
+    let backup = legacy_backup_path(directory);
+    if !backup.is_file() {
+        let body = std::fs::read(&legacy)
+            .with_context(|| format!("读取旧清单失败：{}", legacy.display()))?;
+        atomic_write(&backup, &body)?;
+    }
+    Ok(())
+}
+
+/// 把根目录旧 `.kdj.json` 搬进 `.kdj/manifest.json`。
+/// 返回 true 表示本次真的完成了迁移；坏旧文件只备份、不删除。
+fn migrate_legacy_manifest(directory: &Path) -> Result<bool> {
+    let target = manifest_path(directory);
+    if target.is_file() {
+        return Ok(false);
+    }
+    let legacy = legacy_manifest_path(directory);
+    if !legacy.is_file() {
+        return Ok(false);
+    }
+    let body = std::fs::read(&legacy)
+        .with_context(|| format!("读取旧清单失败：{}", legacy.display()))?;
+    backup_legacy_manifest(directory)?;
+    if serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .is_none()
+    {
+        anyhow::bail!("旧清单损坏，已备份但不删除：{}", legacy.display());
+    }
+    atomic_write(&target, &body)?;
+    anyhow::ensure!(
+        read_manifest_file(&target).is_some(),
+        "迁移后的清单校验失败：{}",
+        target.display()
+    );
+    std::fs::remove_file(&legacy)
+        .with_context(|| format!("新清单已写好，但旧清单删不掉：{}", legacy.display()))?;
+    Ok(true)
+}
+
+/// 写新布局的清单。会保留将来版本添加的未知字段，并在成功提交后收掉旧 sidecar。
+pub fn write_manifest(directory: &Path, order: &[String]) -> Result<()> {
+    let mut payload = read_manifest(directory);
+    payload.insert("version".into(), serde_json::Value::from(MANIFEST_VERSION));
+    payload.insert("order".into(), serde_json::json!(order));
+    let body = serde_json::to_vec_pretty(&serde_json::Value::Object(payload))
+        .context("序列化清单失败")?;
+    let target = manifest_path(directory);
+    atomic_write(&target, &body)?;
+    anyhow::ensure!(read_manifest_file(&target).is_some(), "写出的清单校验失败");
+    backup_legacy_manifest(directory)?;
+    let legacy = legacy_manifest_path(directory);
+    if legacy.is_file() {
+        std::fs::remove_file(&legacy)
+            .with_context(|| format!("新清单已写好，但旧清单删不掉：{}", legacy.display()))?;
+    }
+    Ok(())
 }
 
 /// 这一层的子目录名，按大小写不敏感的字母序。
@@ -287,26 +402,93 @@ pub fn apply_order(directory: &Path, listed: &[String]) -> Vec<String> {
     known.into_iter().chain(fresh).collect()
 }
 
-/// 给目录树里每一层补上清单文件，返回新建了几个。
-///
-/// 已经有清单的目录不动，不覆盖用户排好的顺序。
+/// 给目录树里每一层补上 `.kdj/manifest.json`，并原地迁移旧 `.kdj.json`。
+/// 已有顺序绝不覆盖。返回新建或迁移成功的目录数。
 pub fn init_manifests(directory: &Path, roots: &[PathBuf]) -> Result<usize> {
-    ensure_inside(directory, roots)?;
-    Ok(init_manifests_at(directory, 0))
+    init_manifests_with_progress(directory, roots, |_, _, _| {})
 }
 
-fn init_manifests_at(directory: &Path, depth: usize) -> usize {
-    let mut created = 0;
-    if !has_manifest(directory) {
-        write_manifest(directory, &child_names(directory));
-        created += 1;
+/// 带进度的版本给升级任务使用。先收集目录再处理，total 从第一条事件起就是稳定的。
+pub fn init_manifests_with_progress<F>(
+    directory: &Path,
+    roots: &[PathBuf],
+    mut progress: F,
+) -> Result<usize>
+where
+    F: FnMut(usize, usize, &Path),
+{
+    ensure_inside(directory, roots)?;
+    let mut directories = Vec::new();
+    collect_directories(directory, 0, &mut directories);
+    let total = directories.len();
+    let mut changed = 0;
+    for (index, current) in directories.iter().enumerate() {
+        if ensure_manifest(current)? {
+            changed += 1;
+        }
+        progress(index + 1, total, current);
     }
+    Ok(changed)
+}
+
+fn collect_directories(directory: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    out.push(directory.to_path_buf());
     if depth < MAX_DEPTH {
         for name in child_names(directory) {
-            created += init_manifests_at(&directory.join(name), depth + 1);
+            collect_directories(&directory.join(name), depth + 1, out);
         }
     }
-    created
+}
+
+fn ensure_manifest(directory: &Path) -> Result<bool> {
+    if manifest_path(directory).is_file() {
+        return Ok(false);
+    }
+    if legacy_manifest_path(directory).is_file() {
+        return migrate_legacy_manifest(directory);
+    }
+    write_manifest(directory, &child_names(directory))?;
+    Ok(true)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManifestUpgradeReport {
+    pub changed: usize,
+    pub failed: usize,
+    /// 只留可展示的路径和原因；迁移是后台维护，单个只读目录不该拖停其他目录。
+    pub errors: Vec<(String, String)>,
+}
+
+/// 升级全部曲库根。和手动初始化不同，这条会吞住单目录错误继续往后跑，
+/// 最终把失败清单交给活动栏；旧文件在任何失败路径上都不会被删除。
+pub fn upgrade_manifests<F>(roots: &[PathBuf], mut progress: F) -> ManifestUpgradeReport
+where
+    F: FnMut(usize, usize, &Path),
+{
+    let mut directories = Vec::new();
+    for root in roots {
+        collect_directories(root, 0, &mut directories);
+    }
+    directories.sort();
+    directories.dedup();
+
+    let total = directories.len();
+    let mut report = ManifestUpgradeReport::default();
+    for (index, directory) in directories.iter().enumerate() {
+        match ensure_manifest(directory) {
+            Ok(true) => report.changed += 1,
+            Ok(false) => {}
+            Err(err) => {
+                report.failed += 1;
+                report.errors.push((
+                    directory.to_string_lossy().into_owned(),
+                    format!("{err:#}"),
+                ));
+            }
+        }
+        progress(index + 1, total, directory);
+    }
+    report
 }
 
 /// 按设置里的曲库目录构建文件夹树，并统计每个目录下的曲目数。
@@ -497,7 +679,8 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 只删空目录。递归删会连带删掉音频文件，这个按钮不该有那么大的杀伤力。
+/// 只删没有用户文件的目录。`.kdj/` 和旧 `.kdj.json` 是应用自己的元数据，
+/// 不该让一个肉眼看起来为空的文件夹永远删不掉；但 `.kdj/` 里出现未知文件时仍拒绝。
 pub fn delete_folder(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
     let target = ensure_inside(path, roots)?;
     anyhow::ensure!(
@@ -505,6 +688,34 @@ pub fn delete_folder(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
         "曲库根目录不能在这里删除，去设置里移除"
     );
     anyhow::ensure!(target.is_dir(), "文件夹不存在");
+
+    for entry in std::fs::read_dir(&target).context("读文件夹失败")? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        anyhow::ensure!(
+            name == METADATA_DIR_NAME || name == LEGACY_MANIFEST_NAME,
+            "文件夹非空或删不掉"
+        );
+    }
+    let meta = metadata_dir(&target);
+    if meta.is_dir() {
+        for entry in std::fs::read_dir(&meta).context("读 KDJ 元数据目录失败")? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            anyhow::ensure!(
+                entry.file_type()?.is_file()
+                    && (name == MANIFEST_NAME
+                        || name == LEGACY_BACKUP_NAME
+                        || name.ends_with(".partial")),
+                "KDJ 元数据目录里有未知内容，拒绝删除"
+            );
+        }
+        std::fs::remove_dir_all(&meta).context("删除 KDJ 元数据失败")?;
+    }
+    let legacy = legacy_manifest_path(&target);
+    if legacy.is_file() {
+        std::fs::remove_file(legacy).context("删除旧 KDJ 清单失败")?;
+    }
     std::fs::remove_dir(&target).context("文件夹非空或删不掉")?;
     Ok(target)
 }
@@ -692,14 +903,66 @@ mod tests {
     fn manifest_roundtrips_and_bad_json_degrades_to_empty() {
         let dir = scratch("manifest");
         assert!(!has_manifest(&dir));
-        write_manifest(&dir, &["b".into(), "a".into()]);
+        write_manifest(&dir, &["b".into(), "a".into()]).unwrap();
         assert!(has_manifest(&dir));
         assert_eq!(read_manifest_order(&dir), vec!["b", "a"]);
+        assert!(manifest_path(&dir).is_file());
+        assert!(!legacy_manifest_path(&dir).exists());
 
         // 坏清单不该让整棵树打不开
-        std::fs::write(dir.join(MANIFEST_NAME), "{ not json").unwrap();
+        std::fs::write(manifest_path(&dir), "{ not json").unwrap();
         assert_eq!(read_manifest_order(&dir), Vec::<String>::new());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_manifest_is_read_then_migrated_without_losing_order() {
+        let root = scratch("manifest-legacy");
+        let legacy = legacy_manifest_path(&root);
+        std::fs::write(
+            &legacy,
+            r#"{"version":1,"order":["二.mp3","一.mp3"],"future":"keep"}"#,
+        )
+        .unwrap();
+        assert_eq!(read_manifest_order(&root), vec!["二.mp3", "一.mp3"]);
+
+        let roots = vec![root.clone()];
+        assert_eq!(init_manifests(&root, &roots).unwrap(), 1);
+        assert!(!legacy.exists(), "校验成功后旧 sidecar 才能删除");
+        assert!(manifest_path(&root).is_file());
+        assert!(legacy_backup_path(&root).is_file());
+        let migrated = read_manifest_file(&manifest_path(&root)).unwrap();
+        assert_eq!(migrated["future"], "keep", "未知字段不能在升级时丢掉");
+        assert_eq!(read_manifest_order(&root), vec!["二.mp3", "一.mp3"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn corrupt_new_manifest_falls_back_to_the_legacy_copy() {
+        let root = scratch("manifest-fallback");
+        std::fs::create_dir_all(metadata_dir(&root)).unwrap();
+        std::fs::write(manifest_path(&root), "{ broken").unwrap();
+        std::fs::write(
+            legacy_manifest_path(&root),
+            r#"{"version":1,"order":["safe.mp3"]}"#,
+        )
+        .unwrap();
+        assert_eq!(read_manifest_order(&root), vec!["safe.mp3"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn corrupt_legacy_manifest_is_backed_up_but_never_deleted() {
+        let root = scratch("manifest-corrupt-legacy");
+        let legacy = legacy_manifest_path(&root);
+        std::fs::write(&legacy, "{ broken").unwrap();
+        let roots = vec![root.clone()];
+
+        assert!(init_manifests(&root, &roots).is_err());
+        assert!(legacy.is_file(), "坏旧文件必须原地保留");
+        assert_eq!(std::fs::read_to_string(legacy_backup_path(&root)).unwrap(), "{ broken");
+        assert!(!manifest_path(&root).exists(), "不能拿空顺序掩盖损坏");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -770,12 +1033,13 @@ mod tests {
         let base = scratch("managed");
         let root = base.join("lib");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join(MANIFEST_NAME), "{ not json").unwrap();
+        std::fs::create_dir_all(metadata_dir(&root)).unwrap();
+        std::fs::write(manifest_path(&root), "{ not json").unwrap();
 
         let tree = build_tree(&[root.to_string_lossy().into_owned()], &[]);
         assert!(!tree.roots[0].managed, "坏清单不算受管");
 
-        write_manifest(&root, &[]);
+        write_manifest(&root, &[]).unwrap();
         let tree = build_tree(&[root.to_string_lossy().into_owned()], &[]);
         assert!(tree.roots[0].managed, "写过清单就是受管");
         let _ = std::fs::remove_dir_all(&base);
@@ -919,7 +1183,8 @@ mod tests {
         std::fs::write(full.join("a.mp3"), b"x").unwrap();
         let roots = vec![root];
 
-        assert!(delete_folder(&empty, &roots).is_ok());
+        write_manifest(&empty, &[]).unwrap();
+        assert!(delete_folder(&empty, &roots).is_ok(), "只有 .kdj 元数据仍算空目录");
         assert!(!empty.exists());
         assert!(delete_folder(&full, &roots).is_err(), "非空目录不能删");
         assert!(full.join("a.mp3").exists());
@@ -962,7 +1227,7 @@ mod tests {
         let root = base.join("lib");
         std::fs::create_dir_all(root.join("a")).unwrap();
         std::fs::create_dir_all(root.join("b")).unwrap();
-        write_manifest(&root, &["b".into(), "a".into()]);
+        write_manifest(&root, &["b".into(), "a".into()]).unwrap();
         let roots = vec![root.clone()];
 
         let created = init_manifests(&root, &roots).unwrap();

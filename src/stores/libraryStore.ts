@@ -5,6 +5,8 @@
 
 import { create } from "zustand";
 import { api } from "../lib/api";
+import { continueDataUpgrade } from "../lib/dataUpgrade";
+import { isOutsideFolder } from "../lib/outsideFolder";
 import { useQueueStore } from "./queueStore";
 import type {
   AnalyzeProgress,
@@ -14,6 +16,7 @@ import type {
   FolderOpResult,
   FolderTree,
   LibraryStats,
+  MaintenanceProgress,
   ScanProgress,
   ScanResponseLike,
   Track,
@@ -22,7 +25,7 @@ import type {
   WsEvent,
 } from "../types";
 
-/** "custom" = 文件夹清单里的手排顺序（拖动排序写进 .kdj.json）。 */
+/** "custom" = 文件夹清单里的手排顺序（拖动排序写进 .kdj/manifest.json）。 */
 export type TrackSort =
   | "added_at" | "title" | "artist" | "album" | "bpm" | "camelot" | "energy" | "duration" | "rating" | "custom";
 export type SortOrder = "asc" | "desc";
@@ -154,7 +157,8 @@ function toQuery(filter: LibraryFilter, offset: number): Record<string, string |
     energy_min: filter.energyMin ?? undefined,
     analyzed: filter.analyzed === "all" ? undefined : String(filter.analyzed === "yes"),
     folder: filter.folder,
-    folder_deep: filter.folder && filter.folderDeep ? "true" : undefined,
+    folder_deep:
+      filter.folder && !isOutsideFolder(filter.folder) && filter.folderDeep ? "true" : undefined,
     sort: filter.sort,
     order: filter.order,
     sort2: filter.sort2 ?? undefined,
@@ -196,6 +200,8 @@ export interface LibraryStore {
   stats: LibraryStats | null;
   scan: ScanProgress | null;
   analyze: AnalyzeProgress | null;
+  /** 旧数据升级与缓存维护共用活动栏；不同任务可顺序接力，失败项会保留。 */
+  maintenance: MaintenanceProgress[];
   /**
    * 用户刚按过「停止」。自动化的那几条路径（选中即分析、后台补齐）看着它，
    * 否则几秒后空闲探测又排一批上来，那个按钮等于没按。
@@ -293,6 +299,7 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   stats: null,
   scan: null,
   analyze: null,
+  maintenance: [],
   autoAnalyzeSuspended: false,
   queueView: false,
 
@@ -451,7 +458,15 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   async refreshFolders() {
     try {
-      set({ folders: await api.folders() });
+      const folders = await api.folders();
+      const filter = get().filter;
+      // 「其他」里已经没有歌了：退回全部曲目，别留在空哨兵筛选上。
+      if (isOutsideFolder(filter.folder) && folders.outside <= 0) {
+        set({ folders, filter: { ...filter, folder: "" } });
+        void get().refresh();
+        return;
+      }
+      set({ folders });
     } catch {
       // 没配曲库目录时后端会给 400；文件夹面板自己会显示空态，不用弹错
     }
@@ -678,6 +693,19 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
         }
         set({ analyze: claimProgress(get().analyze, payload) });
         if (finished) void get().refreshStats();
+        return;
+      }
+      case "maintenance.progress": {
+        const payload = event.payload;
+        const others = get().maintenance.filter((item) => item.kind !== payload.kind);
+        set({
+          maintenance:
+            payload.phase === "done" && !payload.error ? others : [...others, payload],
+        });
+        if (payload.kind === "folder_metadata" && payload.phase === "done") {
+          void get().refreshFolders();
+          continueDataUpgrade();
+        }
         return;
       }
       case "library.updated": {

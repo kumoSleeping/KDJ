@@ -126,8 +126,8 @@ export function QrLoginDialog({ platform, label, onClose, onSuccess }: QrLoginDi
   const stale = status !== null && FINAL_STATES.has(status.state) && !done;
 
   return (
-    <div className="kd-overlay" role="dialog" aria-modal="true" aria-label={`${label}扫码登录`}>
-      <div className="kd-dialog">
+    <div className="kd-overlay kd-pop-scrim" role="dialog" aria-modal="true" aria-label={`${label}扫码登录`}>
+      <div className="kd-dialog kd-pop-panel">
         {/* 原来这里挂着一枚红色的「登录」角标。删掉的理由：弹窗标题已经写着
             平台名、内容是一张二维码，角标既不提供信息又占掉了这块唯一的红色额度。 */}
         <div className="kd-dialog-head">

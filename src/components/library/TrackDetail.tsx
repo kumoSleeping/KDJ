@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderOpen, Pencil, Play, RotateCcw, Star, Trash2, Waypoints } from "lucide-react";
+import { FolderOpen, Pencil, Play, RotateCcw, Star, Trash2 } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
 import { camelotToLabel } from "../../lib/camelot";
@@ -9,7 +9,6 @@ import type { Track, TrackPatch } from "../../types";
 import { Button, Field, InlineNotice, Panel, PanelStack } from "../common";
 import { VinylPlaceholder } from "../common/VinylPlaceholder";
 import { CamelotWheel } from "./CamelotWheel";
-import { HarmonicList } from "./HarmonicList";
 import { useVideoPip } from "../../lib/videoPip";
 import { LocalVideoPlayer } from "./LocalVideoPlayer";
 import { VjSearchPanel } from "./VjSearchPanel";
@@ -109,7 +108,6 @@ export function TrackDetail({ track }: { track: Track }) {
   const setCover = useLibraryStore((state) => state.setCover);
   const rereadTags = useLibraryStore((state) => state.rereadTags);
   const removeTrack = useLibraryStore((state) => state.removeTrack);
-  const selectTrack = useLibraryStore((state) => state.selectTrack);
   const setFilter = useLibraryStore((state) => state.setFilter);
   const keyFilter = useLibraryStore((state) => state.filter.key);
   // 小窗/系统 PiP 已接管这支本地视频时，详情里不再挂第二路解码
@@ -327,13 +325,13 @@ export function TrackDetail({ track }: { track: Track }) {
           排 set 时想先看接下一首，与其替他选一个，不如让他拖一次然后不用再想。 */}
       <PanelStack storageKey="kd-detail-panels">
       {isVideoTrack(track.format) && !pipOwnsVideo && (
-        <Panel key="video" heading="视频播放" padded={false} dense>
+        <Panel key="video" heading="Video" padded={false} dense>
           <LocalVideoPlayer track={track} />
         </Panel>
       )}
       <Panel
         key="metadata"
-        heading="元数据"
+        heading="Metadata"
         padded
         dense
         actions={
@@ -473,7 +471,7 @@ export function TrackDetail({ track }: { track: Track }) {
         )}
       </Panel>
 
-      <Panel key="analysis" heading="分析" padded dense>
+      <Panel key="analysis" heading="Analysis" padded dense>
         <div className="kd-stat-grid" data-dense="true" style={{ marginBottom: "0.5rem" }}>
           <div className="kd-stat">
             <div className="kd-stat-label">BPM</div>
@@ -531,29 +529,11 @@ export function TrackDetail({ track }: { track: Track }) {
         )}
       </Panel>
 
-      <Panel
-        key="harmonic"
-        heading={
-          <span className="kd-row kd-harmonic-heading" style={{ gap: "0.35rem" }}>
-            <Waypoints size={16} strokeWidth={1.75} className="kd-panel-heading-icon" />
-            接下一首
-          </span>
-        }
-        padded
-        dense
-      >
-        {/* 放宽筛选之后这里动辄三四十首，不封高度会把下面的面板挤到看不见 */}
-        <div className="kd-scroll" style={{ maxHeight: "13rem" }}>
-          <HarmonicList track={track} onSelect={selectTrack} />
-        </div>
-      </Panel>
-
-      {/* 排在「接下一首」后面：接歌想好了，接着就是给这首配画面 */}
-      <Panel key="vj" heading="搜 VJ（B 站）" padded dense>
+      <Panel key="vj" heading="VJ search Bili" padded dense>
         <VjSearchPanel track={track} />
       </Panel>
 
-      <Panel key="file" heading="文件" padded dense>
+      <Panel key="file" heading="File" padded dense>
         <div className="kd-col" style={{ gap: "0.2rem", fontSize: "var(--kd-size-sm)" }}>
           {/* 时长/格式/大小已经在顶部标题下那行显示过了，这里不重复 */}
           <Row label="采样率">
@@ -570,7 +550,7 @@ export function TrackDetail({ track }: { track: Track }) {
         </div>
       </Panel>
 
-      <Panel key="rating" heading="评分" padded dense>
+      <Panel key="rating" heading="Rating" padded dense>
         {/* 评分不进编辑表单：点一下就是一个完整的意思，没有"改一半反悔"这回事 */}
         <div className="kd-row" style={{ gap: "0.15rem" }}>
           {[1, 2, 3, 4, 5].map((value) => (
@@ -600,7 +580,7 @@ export function TrackDetail({ track }: { track: Track }) {
 
       <Panel
         key="wheel"
-        heading="调号轮"
+        heading="Camelot wheel"
         padded
         dense
         // 说明文字挪进 title：它只在第一次有用，占一整行不值

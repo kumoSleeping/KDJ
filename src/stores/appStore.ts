@@ -51,14 +51,10 @@ export interface AppStore {
   listMode: ListMode;
   /** 有没有搜过（哪怕结果为空）。决定要不要显示切换开关。 */
   hasResults: boolean;
-  /** 右侧详情栏是否正显示「平台登录」面板（顶栏登录按钮呼出）。 */
-  showAccounts: boolean;
-  /** 每次显式打开账号面板都递增，用于重新拉开窄屏抽屉。 */
-  accountPanelEpoch: number;
-  /** 右侧详情栏是否正显示「接播设置」面板（播放条 DJ 按钮呼出）。 */
-  showDjPanel: boolean;
-  /** 每次显式点“接播设置”都递增；即使面板已是打开态，也能重新拉开窄屏抽屉。 */
-  djPanelEpoch: number;
+  /** 右侧详情栏是否正显示「设置」面板（顶栏小齿轮呼出；接播 + 账号合在一起）。 */
+  showSettings: boolean;
+  /** 每次显式打开设置面板都递增；即使面板已是打开态，也能重新拉开窄屏抽屉。 */
+  settingsPanelEpoch: number;
   /** 强制把右栏/抽屉切到下载队列（曲库页也能看队列，不必先搜一次）。 */
   showQueue: boolean;
   queuePanelEpoch: number;
@@ -85,9 +81,8 @@ export interface AppStore {
   setHasResults(value: boolean): void;
   /** 让右栏回到曲目详情；任何显式选歌/换歌入口都走它。 */
   showTrackDetail(): void;
-  toggleAccounts(): void;
-  openAccountsPanel(): void;
-  openDjPanel(): void;
+  toggleSettingsPanel(): void;
+  openSettingsPanel(): void;
   toggleQueuePanel(): void;
   openQueuePanel(): void;
   /** 打开预览旁路（点搜索结果音频/视频时走这条，不跟下载队列挤一栏）。 */
@@ -99,7 +94,7 @@ export interface AppStore {
   /** 只收起旁路面板，不改 listMode（窄屏抽屉点关闭 / 下拖时用）。 */
   dismissOverlay(): void;
   /** 当前打开的旁路面板种类；没有则 null。供浏览历史 / 撤销使用。 */
-  currentOverlay(): "accounts" | "dj" | "queue" | "preview" | "folders" | "vjExport" | null;
+  currentOverlay(): "settings" | "queue" | "preview" | "folders" | "vjExport" | null;
   bootstrap(): Promise<void>;
   refreshAccounts(): Promise<void>;
   saveSettings(patch: Partial<Settings>): Promise<void>;
@@ -109,8 +104,7 @@ export interface AppStore {
 /** 打开某一块旁路面板时，把其余旁路关掉——互斥，避免关 A 露出 B。 */
 function clearOverlays() {
   return {
-    showAccounts: false,
-    showDjPanel: false,
+    showSettings: false,
     showQueue: false,
     showPreview: false,
     showFolders: false,
@@ -124,10 +118,8 @@ let bootInFlight: Promise<void> | null = null;
 export const useAppStore = create<AppStore>()((set, get) => ({
   listMode: "library",
   hasResults: false,
-  showAccounts: false,
-  accountPanelEpoch: 0,
-  showDjPanel: false,
-  djPanelEpoch: 0,
+  showSettings: false,
+  settingsPanelEpoch: 0,
   showQueue: false,
   queuePanelEpoch: 0,
   showPreview: false,
@@ -162,28 +154,20 @@ export const useAppStore = create<AppStore>()((set, get) => ({
 
   // 旁路面板共用右栏/抽屉那一个位置，互斥：开一个就把另一个顶掉，
   // 不然"关掉 A 露出的是 B"会让人以为关错了东西
-  toggleAccounts() {
-    const open = !get().showAccounts;
+  toggleSettingsPanel() {
+    const open = !get().showSettings;
     set({
       ...clearOverlays(),
-      showAccounts: open,
-      accountPanelEpoch: open ? get().accountPanelEpoch + 1 : get().accountPanelEpoch,
+      showSettings: open,
+      settingsPanelEpoch: open ? get().settingsPanelEpoch + 1 : get().settingsPanelEpoch,
     });
   },
 
-  openAccountsPanel() {
+  openSettingsPanel() {
     set({
       ...clearOverlays(),
-      showAccounts: true,
-      accountPanelEpoch: get().accountPanelEpoch + 1,
-    });
-  },
-
-  openDjPanel() {
-    set({
-      ...clearOverlays(),
-      showDjPanel: true,
-      djPanelEpoch: get().djPanelEpoch + 1,
+      showSettings: true,
+      settingsPanelEpoch: get().settingsPanelEpoch + 1,
     });
   },
 
@@ -240,8 +224,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   currentOverlay() {
     const state = get();
     if (state.showFolders) return "folders";
-    if (state.showAccounts) return "accounts";
-    if (state.showDjPanel) return "dj";
+    if (state.showSettings) return "settings";
     if (state.showPreview) return "preview";
     if (state.showQueue) return "queue";
     if (state.showVjExport) return "vjExport";
@@ -309,8 +292,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     } catch (error) {
       set({ settings: current, savingSettings: false });
       applyTheme(current.theme);
-      // 设置的入口散在各处（主题在播放器左侧、目录在队列、画质在视频面板），
-      // 没有一个统一的地方摆错误行；回滚本身已经是可见反馈——
+      // 保存失败时先回滚；主题会当场恢复，其他设置也会回到原值。
       // 拨过去的开关会自己弹回来。详情只留给控制台。
       console.error(`设置保存失败：${errorText(error)}`);
     }

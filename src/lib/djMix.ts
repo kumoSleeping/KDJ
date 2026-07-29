@@ -230,9 +230,10 @@ function setPreservesPitch(el: HTMLAudioElement, value: boolean): void {
  * 很轻的合成电机启转／刹停声。所有频率和增益都由 AudioParam 自动化，不在
  * 主线程逐帧改解码器，也不改变原曲频谱。
  */
-// 基础播放控制保留半秒启停包络：状态立即切换，声音用清晰可辨的淡入淡出落地。
-const TRANSPORT_START_SEC = 0.5;
-const TRANSPORT_STOP_SEC = 0.5;
+// 走带键必须接近即时响应；只留足以消除波形硬切 click 的短包络。
+// 60ms 低于明显可感知的操作等待，同时仍覆盖多个音频渲染量子。
+const TRANSPORT_START_SEC = 0.06;
+const TRANSPORT_STOP_SEC = 0.06;
 const TRANSPORT_CURVE_N = 64;
 /** 曲线归零后留两个左右的音频渲染量子，再 pause，避免非零采样被硬截断。 */
 const TRANSPORT_SETTLE_MS = 24;

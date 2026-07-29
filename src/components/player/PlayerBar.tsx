@@ -18,6 +18,8 @@ import {
   SlidersHorizontal,
   SkipBack,
   SkipForward,
+  Volume2,
+  VolumeX,
   Waypoints,
 } from "lucide-react";
 import { api } from "../../lib/api";
@@ -65,6 +67,8 @@ import { useQueueStore } from "../../stores/queueStore";
 import { InlineNotice } from "../common";
 import { POSITION_EVENT, type PositionDetail } from "../library/TrackDetail";
 import { PLAY_EVENT, parsePlayRequest, playTrack } from "../../lib/playTrack";
+import { usePlayerShortcuts } from "../../lib/usePlayerShortcuts";
+import { prefetchWaveform } from "../../lib/waveformCache";
 import { DETAIL_EVENT } from "../library/TrackTable";
 import { pointPatch, SEEK_EVENT, Waveform, type SeekDetail } from "../library/Waveform";
 import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
@@ -303,9 +307,9 @@ export function PlayerBar() {
   const djTransitions = useDjConfig((state) => state.transitions);
   const djBars = useDjConfig((state) => state.bars);
   const toggleDjEnabled = useDjConfig((state) => state.toggleEnabled);
-  const showDjPanel = useAppStore((state) => state.showDjPanel);
+  const showSettings = useAppStore((state) => state.showSettings);
   const showTrackDetail = useAppStore((state) => state.showTrackDetail);
-  const openDjPanel = useAppStore((state) => state.openDjPanel);
+  const openSettingsPanel = useAppStore((state) => state.openSettingsPanel);
   const listMode = useAppStore((state) => state.listMode);
   const pipMode = useVideoPip((state) => state.mode);
   const pipActive = useVideoPip((state) => state.active);
@@ -323,6 +327,7 @@ export function PlayerBar() {
    * 换正主就得换 src，中间必有一声可闻的断口。
    */
   const [frontEl, setFrontEl] = useState<HTMLAudioElement>(() => djEngine.frontElement());
+  const frontElRef = useRef(frontEl);
   const lastBroadcast = useRef(0);
   /** DJ 接歌换上来的曲目 id：换 src 的 effect 见到它就跳过（引擎已装好）。 */
   const djViaRef = useRef<number | null>(null);
@@ -340,6 +345,15 @@ export function PlayerBar() {
 
   const [track, setTrack] = useState<Track | null>(null);
   const [playing, setPlaying] = useState(false);
+  const [playerVolume, setPlayerVolume] = useState(() => {
+    const raw = localStorage.getItem("kd-player-volume");
+    if (raw === null) return 1;
+    const saved = Number(raw);
+    return Number.isFinite(saved) ? Math.min(1, Math.max(0, saved)) : 1;
+  });
+  const playerVolumeRef = useRef(playerVolume);
+  /** 点喇叭静音前记住的音量；取消静音时还原，而不是硬回到 100%。 */
+  const volumeBeforeMuteRef = useRef(playerVolume > 0 ? playerVolume : 1);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
   const [predicted, setPredicted] = useState<Track | null>(null);
@@ -348,6 +362,13 @@ export function PlayerBar() {
   const [retainedDecks, setRetainedDecks] = useState<[Track | null, Track | null]>([null, null]);
   const [retainedDecksLoaded, setRetainedDecksLoaded] = useState(false);
   const [visualActiveIndex, setVisualActiveIndex] = useState<0 | 1>(deckMemoryRef.current.activeIndex);
+
+  // 当前正主和预测出来的下一台 Deck 都提前读波形。真正接歌时只画 canvas，
+  // 不在切换临界点再发整轨波形请求。
+  useEffect(() => {
+    prefetchWaveform(track);
+    prefetchWaveform(predicted);
+  }, [track?.id, predicted?.id]);
   const visualActiveIndexRef = useRef<0 | 1>(deckMemoryRef.current.activeIndex);
   const [djTransition, setDjTransition] = useState(() => djEngine.transitionState());
   const [transitionVisual, setTransitionVisual] = useState<{
@@ -367,19 +388,34 @@ export function PlayerBar() {
   // 给 [] 依赖的 PLAY_EVENT 监听读的镜像：拦截接歌要知道"现在在放谁"
   const trackRef = useRef<Track | null>(null);
   const playingRef = useRef(false);
+  const positionRef = useRef(0);
+  const durationRef = useRef(0);
+  const selectedRef = useRef(selected);
   useEffect(() => {
     trackRef.current = track;
   }, [track]);
   useEffect(() => {
     playingRef.current = playing;
   }, [playing]);
+  useEffect(() => {
+    positionRef.current = position;
+  }, [position]);
+  useEffect(() => {
+    durationRef.current = duration;
+  }, [duration]);
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
+  useEffect(() => {
+    frontElRef.current = frontEl;
+  }, [frontEl]);
   /** 播放状态既给 React 渲染，也给同一用户手势里的下一次事件判断；必须同步写 ref。 */
   const commitPlaying = useCallback((next: boolean) => {
     playingRef.current = next;
     setPlaying(next);
   }, []);
-  /** 只有底栏主按钮使用短淡入淡出；换曲、同步等路径仍保持直接响应。 */
-  const fadeTransportRef = useRef(false);
+  /** 换曲/外部同步仍由 effect 执行；主按钮已在 click 调用栈内直接完成走带。 */
+  const transportHandledRef = useRef(false);
   /** shadow deck 异步换手时，连续点击只有最后一个目标能更新正主元素。 */
   const seekGenerationRef = useRef(0);
 
@@ -471,9 +507,8 @@ export function PlayerBar() {
       // PLAY_EVENT 通常由双击/右键等用户手势同步发出。趁手势仍有效唤醒
       // 刷新后 suspended 的 Web Audio 图，否则 audio 在走、扬声器却是静音。
       if (autoPlay) djEngine.resume();
-      // 协同已经关闭时，本地播放必须以满音量开始。不能只等下面监听 store 的
-      // effect：推子在最右时退出协同，紧接着点播放会撞上一个近似静音的窗口。
-      if (!useCrossfade.getState().coplay) djEngine.setVolume(1);
+      // 协同关闭时恢复用户设定的音量；不能写死为满音量覆盖底栏音量条。
+      if (!useCrossfade.getState().coplay) djEngine.setVolume(playerVolumeRef.current);
       const isLocalVideo = isVideoTrack(next.format);
       // 本地视频的 LOCAL_VIDEO 已在 playTrack 发出；这里只补面板档的详情栏。
       // 音频：playTrack 已 clear 预览会话；非流媒体仍进曲库详情。
@@ -578,12 +613,14 @@ export function PlayerBar() {
 
   useEffect(() => {
     if (!track) return;
-    const fade = fadeTransportRef.current;
-    fadeTransportRef.current = false;
+    if (transportHandledRef.current) {
+      transportHandledRef.current = false;
+      return;
+    }
     if (playing) {
       // 除了首播，也接住系统休眠、切换音频设备后 context 再次被挂起的情况。
       djEngine.resume();
-      if (!useCrossfade.getState().coplay) djEngine.setVolume(1);
+      if (!useCrossfade.getState().coplay) djEngine.setVolume(playerVolumeRef.current);
       setNotice("");
       // DJ begin 已经在按「seek cue → 缓冲 → 设 BPM → 起播」准备新 deck。
       // 这里若因为 frontEl/track 切换再 play 一次，新歌会先按默认位置暗中运行，
@@ -591,17 +628,12 @@ export function PlayerBar() {
       if (!djEngine.isTransitioning()) {
         // 基础 transport 只做原曲增益包络，不叠加合成电机声；后者起音太短，
         // 容易被听成媒体解码卡顿或爆音。DJ 接歌效果仍保留自己的音效。
-        const start = fade
-          ? djEngine.softPlay(frontEl, false)
-          : (djEngine.ensureAudible(), djEngine.hardPlay(frontEl));
-        void start.catch((error: unknown) => {
+        djEngine.ensureAudible();
+        void djEngine.hardPlay(frontEl).catch((error: unknown) => {
           commitPlaying(false);
           setNotice(`播放失败：${error instanceof Error ? error.message : String(error)}`);
         });
       }
-    } else if (fade) {
-      // UI 先切成暂停；声音只用极短包络落地，结束后才真正 pause 媒体。
-      void djEngine.softPause(false);
     } else {
       // 停下要连暗处那台一起按住：过渡进行到一半按停止，
       // 只停正主的话退场中的旧歌还会自己淡完那几秒
@@ -661,9 +693,12 @@ export function PlayerBar() {
   // ……推子除外：协同播放时预览面板那把交叉推子按等功率曲线分走一部分音量，
   // 协同一关立刻回满。这不是「音量设置」，是混音动作，值也从不落盘。
   useEffect(() => {
-    // 两台 deck 一起设：接歌中途拨推子，暗处退场那台也要跟着小
-    djEngine.setVolume(deckGain(coplay, fadeX));
-  }, [coplay, fadeX]);
+    playerVolumeRef.current = playerVolume;
+    localStorage.setItem("kd-player-volume", String(playerVolume));
+    if (playerVolume > 0) volumeBeforeMuteRef.current = playerVolume;
+    // 用户音量与协同交叉推子相乘；两台 deck 一起设，接歌中途也保持一致。
+    djEngine.setVolume(playerVolume * deckGain(coplay, fadeX));
+  }, [playerVolume, coplay, fadeX]);
 
   // 拨开协同播放（epoch +1）= 「两边同时从头来」：唱盘倒回 0 起播，
   // 预览那侧按 Offset 自己对位。不从头对齐的话，两条时间线的相对位置
@@ -698,9 +733,11 @@ export function PlayerBar() {
       const detail = (event as CustomEvent<SeekDetail>).detail;
       if (!track || detail.trackId !== track.id || !Number.isFinite(detail.position)) return;
       const target = Math.max(0, detail.position);
-      const generation = ++seekGenerationRef.current;
-      // 视觉播放头仍在同一次点击内瞬移；准备期忽略旧 deck 迟到的 timeupdate。
+      // 拖动时只更新视觉位置；松手再启动一次真正的媒体跳转。否则每个 pointermove
+      // 都会重建 shadow deck / 发 Range 请求，越拖积压越多，看起来像整条波形黏住。
       setPosition(target);
+      if (detail.preview) return;
+      const generation = ++seekGenerationRef.current;
       broadcastMediaSync({
         owner: "player",
         action: "seek",
@@ -820,6 +857,81 @@ export function PlayerBar() {
     // 候选池空了就安静停下，不报错——这是锦上添花的功能
     if (next) playTrack(next);
   };
+
+  /**
+   * 底栏主按钮和空格键共用这一条。网络视频预览时控预览；否则控唱盘。
+   * 必须在用户手势调用栈里直接 play/pause，WebKit 才认音频启动许可。
+   */
+  const toggleTransport = useCallback(() => {
+    const pip = useVideoPip.getState();
+    if (pip.active && pip.session?.source === "network") {
+      toggleVideoPip();
+      return;
+    }
+    if (!playingRef.current) djEngine.resume();
+    if (!trackRef.current) {
+      const pick = selectedRef.current;
+      if (pick) playTrack(pick);
+      return;
+    }
+    const nextPlaying = !playingRef.current;
+    transportHandledRef.current = true;
+    if (nextPlaying) {
+      djEngine.ensureAudible();
+      void djEngine.hardPlay(frontElRef.current).catch((error: unknown) => {
+        commitPlaying(false);
+        setNotice(`播放失败：${error instanceof Error ? error.message : String(error)}`);
+      });
+    } else {
+      djEngine.cancel();
+      djEngine.hardPause(frontElRef.current);
+    }
+    commitPlaying(nextPlaying);
+  }, [commitPlaying]);
+
+  /** 相对跳转：网络预览走 PiP 事件，曲库曲目走 SEEK_EVENT（和点波形同一条路）。 */
+  const seekBy = useCallback((delta: number) => {
+    const pip = useVideoPip.getState();
+    if (pip.active && pip.session?.source === "network") {
+      const total = pip.duration;
+      const next =
+        total > 0
+          ? Math.min(total, Math.max(0, pip.position + delta))
+          : Math.max(0, pip.position + delta);
+      // 立刻写回 store，连按才不会都基于同一个旧进度。
+      useVideoPip.getState().setPosition(next);
+      seekVideoPip(next);
+      return;
+    }
+    const current = trackRef.current;
+    if (!current) return;
+    const total = durationRef.current || current.duration || 0;
+    const next =
+      total > 0
+        ? Math.min(total, Math.max(0, positionRef.current + delta))
+        : Math.max(0, positionRef.current + delta);
+    positionRef.current = next;
+    setPosition(next);
+    window.dispatchEvent(
+      new CustomEvent<SeekDetail>(SEEK_EVENT, {
+        detail: { trackId: current.id, position: next },
+      }),
+    );
+  }, []);
+
+  usePlayerShortcuts({
+    togglePlay: toggleTransport,
+    seekBy,
+    nudgeVolume: (delta) => {
+      setPlayerVolume((value) => Math.min(1, Math.max(0, value + delta)));
+    },
+    goNext: () => {
+      void goNext();
+    },
+    goPrevious: () => {
+      void goPrevious();
+    },
+  });
 
   /**
    * <audio> 的事件监听挂在"当前正主"元素上。接歌互换正主后这个 effect
@@ -1115,7 +1227,9 @@ export function PlayerBar() {
     const deckTrack = view?.track;
     if (!deckTrack || isStreamTrack(deckTrack)) return;
     selectTrack(deckTrack);
-    window.dispatchEvent(new Event(DETAIL_EVENT));
+    window.dispatchEvent(
+      new CustomEvent(DETAIL_EVENT, { detail: { source: "player-deck" } }),
+    );
   };
 
   const dropOnDeck = async (
@@ -1185,6 +1299,43 @@ export function PlayerBar() {
           全是裸图标，没有按钮框——一条播放条上摆三个描边方块太吵，
           而且它们本来就在同一组里，靠间距分得开。 */}
       <div className="kd-player-transport">
+        <div className="kd-player-transport-side" data-side="left">
+        <label
+          className="kd-player-volume"
+          title={`音量 ${Math.round(playerVolume * 100)}%（↑↓）`}
+          data-muted={playerVolume === 0 ? "true" : undefined}
+        >
+          <button
+            type="button"
+            className="kd-player-mute"
+            aria-label={playerVolume === 0 ? "取消静音" : "静音"}
+            aria-pressed={playerVolume === 0}
+            title={playerVolume === 0 ? "取消静音" : "静音"}
+            onClick={(event) => {
+              // 喇叭在 label 里：不拦的话点一下还会顺带拨滑条。
+              event.preventDefault();
+              event.stopPropagation();
+              if (playerVolume > 0) {
+                volumeBeforeMuteRef.current = playerVolume;
+                setPlayerVolume(0);
+              } else {
+                setPlayerVolume(volumeBeforeMuteRef.current || 1);
+              }
+            }}
+          >
+            {playerVolume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
+          </button>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={playerVolume}
+            aria-label="播放器音量"
+            style={{ "--kd-volume-fill": `${playerVolume * 100}%` } as CSSProperties}
+            onChange={(event) => setPlayerVolume(Number(event.currentTarget.value))}
+          />
+        </label>
         {/* 接播拆成两个动作：Blend 只开关，旁边的调节图标只开设置。
             开关和设置绑在一颗键上时，“只是想看看参数”也会误改播放行为。 */}
         <div className="kd-player-dj">
@@ -1210,10 +1361,10 @@ export function PlayerBar() {
             type="button"
             className="kd-player-step kd-player-djsettings"
             aria-label="打开接播设置"
-            aria-expanded={showDjPanel}
-            data-open={showDjPanel ? "true" : undefined}
+            aria-expanded={showSettings}
+            data-open={showSettings ? "true" : undefined}
             title="接播设置"
-            onClick={openDjPanel}
+            onClick={openSettingsPanel}
           >
             <SlidersHorizontal size={13} />
           </button>
@@ -1247,6 +1398,8 @@ export function PlayerBar() {
           <SkipBack size={15} fill="currentColor" />
         </button>
 
+        </div>
+
         <button
           type="button"
           className="kd-player-go"
@@ -1263,28 +1416,12 @@ export function PlayerBar() {
             (pipDriving && pipSession?.source === "network" ? pipPlaying : playing) ? "true" : undefined
           }
           disabled={!track && !selected && !pipDriving}
-          onClick={() => {
-            // 网络视频预览：主按钮控预览；本地视频仍控音轨（小窗静音跟时钟）
-            if (pipDriving && pipSession?.source === "network") {
-              toggleVideoPip();
-              return;
-            }
-            // 直接点播放键也是一条播放入口；必须在 click 调用栈里 resume，
-            // WebKit 才会把它认作用户允许的音频启动。
-            if (!playing) djEngine.resume();
-            // 还没有在播的曲子时，播的就是曲库里当前选中的那首——
-            // 「选中 → 按播放」和双击是等价的两条路。
-            if (!track) {
-              if (selected) {
-                fadeTransportRef.current = true;
-                playTrack(selected);
-              }
-              return;
-            }
-            // 只在主按钮上加 0.5s 包络；状态立即切换，声音清晰淡入淡出。
-            fadeTransportRef.current = true;
-            commitPlaying(!playingRef.current);
-          }}
+          title={
+            pipDriving && pipSession?.source === "network"
+              ? "播放 / 暂停预览（空格）"
+              : "播放 / 暂停（空格）"
+          }
+          onClick={toggleTransport}
         >
           {(pipDriving && pipSession?.source === "network" ? pipPlaying : playing) ? (
             <Pause size={14} fill="currentColor" />
@@ -1293,6 +1430,7 @@ export function PlayerBar() {
           )}
         </button>
 
+        <div className="kd-player-transport-side" data-side="right">
         <button
           type="button"
           className="kd-player-step"
@@ -1354,6 +1492,7 @@ export function PlayerBar() {
             ? `−${formatDuration(remaining)} / ${formatDuration(playbackDuration)}`
             : "−−:−− / −−:−−"}
         </span>
+        </div>
       </div>
 
       <div className="kd-player-trailing">
@@ -1409,7 +1548,7 @@ export function PlayerBar() {
                   : track.end_ms
                 : null
             }
-            height={38}
+            height={42}
             dimPlayed
             onSetPoint={
               track?.id === pipSession.trackId
@@ -1454,7 +1593,7 @@ export function PlayerBar() {
             duration={track?.id === displayTrack.id ? playbackDuration : (displayTrack.duration ?? 0)}
             cueMs={selected?.id === displayTrack.id ? selected.cue_ms : displayTrack.cue_ms}
             endMs={selected?.id === displayTrack.id ? selected.end_ms : displayTrack.end_ms}
-            height={38}
+            height={42}
             dimPlayed
             onSetPoint={track?.id === displayTrack.id ? async (kind, at) => {
               const cueMs = selected?.id === track.id ? selected.cue_ms : track.cue_ms;

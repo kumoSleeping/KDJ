@@ -55,10 +55,12 @@ fn pick_cdn_base(data: &Value) -> Option<String> {
         .map(|base| format!("{}/", base.trim_end_matches('/')))
 }
 
-/// 主页接口的字段在 QQ 音乐不同版本之间变过几次：旧回包是 `Info.Pic`，
-/// 新版和 qqmusic-api-python 使用 `base_info.avatar`。头像字段本身也有时是
-/// URL 字符串、有时包在 `{ url: ... }` 里，所以这里集中做兼容，不让 account()
-/// 再绑定某一个客户端版本的回包形状。
+/// 主页接口的字段在 QQ 音乐不同版本之间变过几次：现行官方回包是
+/// `Info.BaseInfo.Name` / `Info.BaseInfo.Avatar`（qqmusic-api-python 的
+/// `get_homepage` 原样返回这一层）；旧回包还有 `Info.Pic`、以及某些中间
+/// 版本的 `base_info.*`。头像字段本身也有时是 URL 字符串、有时包在
+/// `{ url: ... }` 里，所以这里集中做兼容，不让 account() 再绑定某一个
+/// 客户端版本的回包形状。
 fn profile_text(value: Option<&Value>) -> Option<String> {
     let value = value?;
     if let Some(text) = value.as_str().filter(|text| !text.is_empty()) {
@@ -74,6 +76,64 @@ fn profile_text(value: Option<&Value>) -> Option<String> {
 
 fn profile_path<'a>(data: &'a Value, path: &[&str]) -> Option<&'a Value> {
     path.iter().try_fold(data, |value, key| value.get(*key))
+}
+
+fn homepage_nickname(data: &Value) -> String {
+    [
+        profile_path(data, &["Info", "BaseInfo", "Name"]),
+        profile_path(data, &["Info", "BaseInfo", "name"]),
+        profile_path(data, &["base_info", "name"]),
+        profile_path(data, &["base_info", "nick"]),
+        profile_path(data, &["Info", "Nick"]),
+        data.get("nickname"),
+    ]
+    .into_iter()
+    .find_map(|value| value.and_then(Value::as_str).filter(|text| !text.is_empty()))
+    .unwrap_or_default()
+    .to_string()
+}
+
+fn homepage_avatar(data: &Value) -> String {
+    [
+        profile_path(data, &["Info", "BaseInfo", "Avatar"]),
+        profile_path(data, &["Info", "BaseInfo", "avatar"]),
+        profile_path(data, &["base_info", "avatar"]),
+        profile_path(data, &["base_info", "avatarUrl"]),
+        profile_path(data, &["Info", "Pic"]),
+        data.get("avatar"),
+        data.get("avatarUrl"),
+        data.get("headPicUrl"),
+        data.get("frontPicUrl"),
+    ]
+    .into_iter()
+    .find_map(profile_text)
+    .map(https_avatar)
+    .unwrap_or_default()
+}
+
+fn profile_report_nickname(data: &Value) -> String {
+    [
+        profile_path(data, &["UserInfoCard", "NickName"]),
+        profile_path(data, &["UserInfoCard", "Nickname"]),
+        profile_path(data, &["UserInfoCard", "nick"]),
+        profile_path(data, &["UserInfoCard", "name"]),
+    ]
+    .into_iter()
+    .find_map(|value| value.and_then(Value::as_str).filter(|text| !text.is_empty()))
+    .unwrap_or_default()
+    .to_string()
+}
+
+fn profile_report_avatar(data: &Value) -> String {
+    [
+        profile_path(data, &["UserInfoCard", "HeadUrl"]),
+        profile_path(data, &["UserInfoCard", "Avatar"]),
+        profile_path(data, &["UserInfoCard", "avatar"]),
+    ]
+    .into_iter()
+    .find_map(profile_text)
+    .map(https_avatar)
+    .unwrap_or_default()
 }
 
 fn https_avatar(url: String) -> String {
@@ -351,46 +411,46 @@ impl QqMusicProvider {
         let musicid = credential.str_musicid();
         let mut profile = (String::new(), String::new());
         if !musicid.is_empty() || !euin.is_empty() {
+            // Desktop/Web 的 GetHomepageHeader 常回空 Name（官方 Python SDK
+            // 默认走 Android+QIMEI 才拿得到）。GetProfileReport 在 Desktop
+            // 下就能给出 UserInfoCard.NickName / HeadUrl——账号面板要的正是这个。
+            let visit = if !euin.is_empty() {
+                euin.clone()
+            } else {
+                musicid.clone()
+            };
             if let Ok(data) = self
                 .client
                 .call(
-                    "music.UnifiedHomepage.UnifiedHomepageSrv",
-                    "GetHomepageHeader",
-                    json!({
-                        "IsQueryTabDetail": 1,
-                        // 新版接口通常认明文 musicid；保留 encrypt_uin 兼容旧版。
-                        "uin": musicid,
-                        "hostuin": musicid,
-                        "encrypt_uin": euin,
-                    }),
+                    "music.recommend.UserProfileSettingSvr",
+                    "GetProfileReport",
+                    json!({ "VisitAccount": visit }),
                     QqPlatform::Desktop,
                 )
                 .await
             {
-                let nickname = [
-                    profile_path(&data, &["base_info", "name"]),
-                    profile_path(&data, &["base_info", "nick"]),
-                    profile_path(&data, &["Info", "Nick"]),
-                    data.get("nickname"),
-                ]
-                .into_iter()
-                .find_map(|value| value.and_then(Value::as_str).filter(|text| !text.is_empty()))
-                .unwrap_or_default()
-                .to_string();
-                let avatar = [
-                    profile_path(&data, &["base_info", "avatar"]),
-                    profile_path(&data, &["base_info", "avatarUrl"]),
-                    profile_path(&data, &["Info", "Pic"]),
-                    data.get("avatar"),
-                    data.get("avatarUrl"),
-                    data.get("headPicUrl"),
-                    data.get("frontPicUrl"),
-                ]
-                .into_iter()
-                .find_map(profile_text)
-                .map(https_avatar)
-                .unwrap_or_default();
-                profile = (nickname, avatar);
+                profile = (profile_report_nickname(&data), profile_report_avatar(&data));
+            }
+            // 主页接口作兜底：万一报告接口挂了，旧/新主页字段形状仍试一遍。
+            if profile.0.is_empty() && profile.1.is_empty() {
+                let uin = visit;
+                if let Ok(data) = self
+                    .client
+                    .call(
+                        "music.UnifiedHomepage.UnifiedHomepageSrv",
+                        "GetHomepageHeader",
+                        json!({
+                            "IsQueryTabDetail": 1,
+                            "uin": uin,
+                            "hostuin": musicid,
+                            "encrypt_uin": euin,
+                        }),
+                        QqPlatform::Desktop,
+                    )
+                    .await
+                {
+                    profile = (homepage_nickname(&data), homepage_avatar(&data));
+                }
             }
         }
         // 主页接口偶尔只返回昵称、不返回头像。musicid 是登录凭证里的普通 QQ
@@ -482,7 +542,7 @@ impl MusicProvider for QqMusicProvider {
             Platform::Qqm,
             LABEL,
             AccountState::Valid,
-            &format!("musicid={}", credential.musicid),
+            "",
         );
         account.nickname = nickname;
         account.avatar = avatar;
@@ -991,21 +1051,39 @@ mod tests {
 
     #[test]
     fn profile_avatar_accepts_new_and_legacy_homepage_shapes() {
-        let modern = json!({"base_info": {"name": "DJ", "avatar": "http://avatar/new.jpg"}});
+        // Desktop 可用的报告接口：UserInfoCard.{NickName,HeadUrl}
+        let report = json!({
+            "UserInfoCard": {
+                "NickName": "kumo",
+                "HeadUrl": "http://thirdqq.qlogo.cn/g?b=sdk&s=140"
+            }
+        });
+        // 现行官方 GetHomepageHeader（Android+QIMEI 下才常有值）
+        let official = json!({
+            "Info": {
+                "BaseInfo": {
+                    "Name": "kumo",
+                    "Avatar": "http://thirdqq.qlogo.cn/g?b=sdk&s=140"
+                }
+            }
+        });
+        // 旧 Python sidecar / 中间版本曾见过的映射后形状
+        let mapped = json!({"base_info": {"name": "DJ", "avatar": "http://avatar/new.jpg"}});
         let legacy = json!({"Info": {"Nick": "旧昵称", "Pic": {"url": "http://avatar/old.jpg"}}});
+        assert_eq!(profile_report_nickname(&report), "kumo");
         assert_eq!(
-            profile_path(&modern, &["base_info", "name"])
-                .and_then(Value::as_str),
-            Some("DJ")
+            profile_report_avatar(&report),
+            "https://thirdqq.qlogo.cn/g?b=sdk&s=140"
         );
+        assert_eq!(homepage_nickname(&official), "kumo");
         assert_eq!(
-            profile_text(profile_path(&modern, &["base_info", "avatar"])),
-            Some("http://avatar/new.jpg".into())
+            homepage_avatar(&official),
+            "https://thirdqq.qlogo.cn/g?b=sdk&s=140"
         );
-        assert_eq!(
-            profile_text(profile_path(&legacy, &["Info", "Pic"])),
-            Some("http://avatar/old.jpg".into())
-        );
+        assert_eq!(homepage_nickname(&mapped), "DJ");
+        assert_eq!(homepage_avatar(&mapped), "https://avatar/new.jpg");
+        assert_eq!(homepage_nickname(&legacy), "旧昵称");
+        assert_eq!(homepage_avatar(&legacy), "https://avatar/old.jpg");
         assert_eq!(https_avatar("http://avatar/new.jpg".into()), "https://avatar/new.jpg");
     }
 

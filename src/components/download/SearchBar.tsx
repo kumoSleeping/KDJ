@@ -1,8 +1,9 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Platform } from "../../types";
 import { clearTextSelection } from "../../lib/textSelection";
 import { useAppStore } from "../../stores/appStore";
 import { PlatformMark } from "./PlatformMark";
+import { SearchBurstFX, type SearchBurstTone } from "./SearchBurstFX";
 
 /** 平台一览（仅在线源）。本地曲库在左侧树里浏览，不再占搜索来源位。 */
 export const SEARCH_PLATFORMS: ReadonlyArray<{ id: Platform; label: string; video?: boolean }> = [
@@ -49,42 +50,19 @@ export interface SearchBarProps extends SearchPlatformProps {
   onSubmit(): void;
   /** 竖屏/极窄：输入与平台拆成两段。 */
   stacked?: boolean;
-}
-
-function RainbowSearchIcon() {
-  return (
-    <svg className="kd-search-rainbow" viewBox="0 0 24 24" aria-hidden="true">
-      <defs>
-        <linearGradient
-          id="kd-search-rainbow-stroke"
-          gradientUnits="userSpaceOnUse"
-          spreadMethod="repeat"
-          x1="-8"
-          y1="0"
-          x2="0"
-          y2="8"
-        >
-          <stop offset="0" stopColor="#38bdf8" />
-          <stop offset="0.33" stopColor="#8b5cf6" />
-          <stop offset="0.66" stopColor="#fb7299" />
-          <stop offset="1" stopColor="#38bdf8" />
-          <animate attributeName="x1" values="-8;0" dur="4.5s" repeatCount="indefinite" />
-          <animate attributeName="x2" values="0;8" dur="4.5s" repeatCount="indefinite" />
-          <animate attributeName="y1" values="0;8" dur="4.5s" repeatCount="indefinite" />
-          <animate attributeName="y2" values="8;16" dur="4.5s" repeatCount="indefinite" />
-        </linearGradient>
-      </defs>
-      <circle cx="11" cy="11" r="7.4" fill="none" stroke="url(#kd-search-rainbow-stroke)" strokeWidth="2.5" />
-      <path d="m16.4 16.4 4.3 4.3" fill="none" stroke="url(#kd-search-rainbow-stroke)" strokeWidth="2.5" strokeLinecap="square" />
-    </svg>
-  );
+  /**
+   * 外部触发扫光（如「搜 VJ」代填提交）。数值变化即重放；
+   * 搭配 burstTone 选彩虹或粉色。
+   */
+  burstNonce?: number;
+  burstTone?: SearchBurstTone;
 }
 
 /**
- * 搜索条：**一个**控件，不是一排控件。
+ * 在线搜索：顶栏正中的圆角小框。
  *
- * 搜索来源在最前，随后才是搜索输入；这样四个平台键和下方工作条的四个入口
- * 可以一一对齐。平台键只负责来源多选与顺序，登录仍有独立入口。
+ * 搜索来源在最前，细分割线后是输入；平台键只负责来源多选与顺序。
+ * 提交靠 Enter（Shift+Enter 换行），不再单独放放大镜。
  */
 export function SearchBar({
   query,
@@ -93,47 +71,78 @@ export function SearchBar({
   busy,
   onSubmit,
   stacked = false,
+  burstNonce = 0,
+  burstTone = "rainbow",
   ...platformProps
 }: SearchBarProps) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // Some third-party dictation IMEs report Enter before React's isComposing
   // flag settles. Keep our own composition state and also honor keyCode 229.
   const composingRef = useRef(false);
+  const [burst, setBurst] = useState<SearchBurstTone | null>(null);
+  const burstTimerRef = useRef<number | null>(null);
+  const lastNonceRef = useRef(burstNonce);
   const canSubmit = query.trim().length > 0 && !busy;
+
+  const playBurst = (tone: SearchBurstTone) => {
+    if (burstTimerRef.current != null) window.clearTimeout(burstTimerRef.current);
+    setBurst(null);
+    const duration = tone === "pink" ? 1000 : 900;
+    requestAnimationFrame(() => {
+      setBurst(tone);
+      burstTimerRef.current = window.setTimeout(() => {
+        setBurst(null);
+        burstTimerRef.current = null;
+      }, duration);
+    });
+  };
+
+  useEffect(() => {
+    return () => {
+      if (burstTimerRef.current != null) window.clearTimeout(burstTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (burstNonce === lastNonceRef.current) return;
+    lastNonceRef.current = burstNonce;
+    if (burstNonce > 0) playBurst(burstTone);
+  }, [burstNonce, burstTone]);
+
+  const fireSubmit = () => {
+    if (!canSubmit) return;
+    playBurst("rainbow");
+    onSubmit();
+  };
+
   return (
     <form
       className="kd-search-command"
       data-stacked={stacked || undefined}
       onSubmit={(event) => {
         event.preventDefault();
-        if (canSubmit) onSubmit();
+        fireSubmit();
       }}
     >
       <div
         className="kd-searchbar kd-grow"
         data-batch={batch || undefined}
         data-stacked={stacked || undefined}
+        data-burst={burst || undefined}
         onClick={(event) => {
           if ((event.target as HTMLElement).closest("button, select, input, textarea")) return;
           inputRef.current?.focus();
         }}
       >
+        {burst ? <SearchBurstFX tone={burst} /> : null}
         <div className="kd-searchbar-tools">
           <SearchPlatforms {...platformProps} />
         </div>
+        <span className="kd-searchbar-sep" aria-hidden="true" />
         <div className="kd-searchbar-copy">
-          <button
-            type="submit"
-            className="kd-searchbar-go"
-            disabled={!canSubmit}
-            aria-label={busy ? "正在搜索" : batch ? "开始批量解析" : "搜索"}
-            title="搜索（Enter；Shift + Enter 换行）"
-          >
-            <RainbowSearchIcon />
-          </button>
           {!query && (
             <span className="kd-search-placeholder" aria-hidden="true">
-              {stacked ? "歌名、链接都可以放这里" : "今天想听点什么？歌名、链接，都可以悄悄放在这里 ♫"}
+              {stacked ? "歌名、链接都可以放这里" : "今天想听点什么？歌名、链接都可以放这里"}
             </span>
           )}
           <textarea
@@ -143,6 +152,7 @@ export function SearchBar({
             value={query}
             placeholder=""
             aria-label="关键词、单曲链接或歌单链接，支持多行"
+            title="搜索（Enter；Shift + Enter 换行）"
             onCompositionStart={() => {
               composingRef.current = true;
             }}
@@ -154,7 +164,7 @@ export function SearchBar({
               const composing = composingRef.current || nativeEvent.isComposing || nativeEvent.keyCode === 229;
               if (event.key === "Enter" && !event.shiftKey && !composing && canSubmit) {
                 event.preventDefault();
-                onSubmit();
+                fireSubmit();
               }
             }}
             onChange={(event) => onQueryChange(event.target.value)}

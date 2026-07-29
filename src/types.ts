@@ -311,7 +311,7 @@ export interface FolderNode {
   pending_count: number;
   children: FolderNode[];
   is_root: boolean;
-  /** 目录里有 .kdj.json（顺序已受管）；false = 还没初始化，按名字排。 */
+  /** 目录里有可用的 .kdj/manifest.json（兼容旧 .kdj.json）；false = 按名字排。 */
   managed: boolean;
 }
 
@@ -448,6 +448,18 @@ export interface AnalyzeProgress {
   track_id: number | null;
 }
 
+export interface MaintenanceProgress {
+  job_id: string;
+  kind: "folder_metadata" | "waveform";
+  done: number;
+  total: number;
+  current: string;
+  phase: "migrate" | "prepare" | "done";
+  error: string | null;
+  changed?: number;
+  failed?: number;
+}
+
 /**
  * 后端仍然会推 `{"type":"toast"}`（EventHub::publish_toast 还在），
  * 但前端已经没有浮层通知了，这条分支故意不在联合类型里：
@@ -458,6 +470,7 @@ export type WsEvent =
   | { type: "download.list"; payload: DownloadTask[] }
   | { type: "scan.progress"; payload: ScanProgress }
   | { type: "analyze.progress"; payload: AnalyzeProgress }
+  | { type: "maintenance.progress"; payload: MaintenanceProgress }
   | { type: "library.updated"; payload: { track_ids: number[] } }
   | { type: "account.changed"; payload: Account };
 

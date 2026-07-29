@@ -644,12 +644,11 @@ impl MusicProvider for BilibiliProvider {
                 "登录已失效，请重新扫码",
             );
         }
-        let mid = data.get("mid").and_then(Value::as_i64).unwrap_or(0);
         let mut account = Account::new(
             Platform::Bilibili,
             LABEL,
             AccountState::Valid,
-            &if mid > 0 { format!("UID {mid}") } else { String::new() },
+            "",
         );
         account.nickname = data
             .get("uname")

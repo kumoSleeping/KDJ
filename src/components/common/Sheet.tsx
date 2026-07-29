@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { X } from "lucide-react";
 
 export interface SheetProps {
   open: boolean;
@@ -9,18 +8,15 @@ export interface SheetProps {
 }
 
 /**
- * 从底部升起的抽屉。窄屏（竖屏 / 手机）下用它装原本在左右两栏里的东西。
+ * 从右侧滑入的旁路面板。窄屏下用它装原本在右栏里的东西。
  *
- * 为什么是底部抽屉而不是全屏页：**列表不能丢**。DJ 找歌是"扫一眼列表 →
- * 看一眼这首的详情 → 回列表接着扫"，抽屉只盖住下半屏，上面那截列表还在，
- * 心里知道自己停在哪。换成全屏页就变成了"进去/出来"，每次都要重新找位置。
- *
- * 关法：抓着把手往下拖、点背景、按 Esc、右上角淡色小叉。
+ * 占约 70% 屏宽，左侧用轻透明遮罩；点遮罩、按 Esc、或把面板往右拖即可关闭。
+ * 入场动画刻意做得很短很轻，不拖泥带水。
  */
 export function Sheet({ open, title, onClose, children }: SheetProps) {
-  /** 拖动时的即时位移（px）。松手时要么归零、要么关掉。 */
+  /** 拖动时的即时位移（px，向右为正）。松手时要么归零、要么关掉。 */
   const [drag, setDrag] = useState(0);
-  const startY = useRef(0);
+  const startX = useRef(0);
 
   useEffect(() => {
     if (!open) return;
@@ -31,7 +27,6 @@ export function Sheet({ open, title, onClose, children }: SheetProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  // 关掉时把拖动位移清零，下次打开不会带着上次的残留位置弹出来
   useEffect(() => {
     if (!open) setDrag(0);
   }, [open]);
@@ -39,50 +34,34 @@ export function Sheet({ open, title, onClose, children }: SheetProps) {
   if (!open) return null;
 
   return (
-    <div className="kd-sheet-scrim" onClick={onClose}>
+    <div className="kd-sheet-scrim kd-pop-scrim" onClick={onClose}>
       <div
-        className="kd-sheet"
+        className="kd-sheet kd-pop-panel"
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        style={drag > 0 ? { transform: `translateY(${drag}px)`, transition: "none" } : undefined}
-        // 抽屉内部的点击不能冒到背景上，否则点任何东西都会把抽屉关掉
+        style={drag > 0 ? { transform: `translateX(${drag}px)`, transition: "none", animation: "none" } : undefined}
         onClick={(event) => event.stopPropagation()}
       >
         <div
-          className="kd-sheet-grab"
+          className="kd-sheet-head"
           onPointerDown={(event) => {
-            if ((event.target as HTMLElement).closest("button")) return;
-            startY.current = event.clientY;
+            startX.current = event.clientX;
             event.currentTarget.setPointerCapture(event.pointerId);
           }}
           onPointerMove={(event) => {
             if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-            // 只认往下拖：往上拖不该把抽屉拉得比屏幕还高
-            setDrag(Math.max(0, event.clientY - startY.current));
+            // 只认往右拖：往左拖不该把面板拉得比屏还宽
+            setDrag(Math.max(0, event.clientX - startX.current));
           }}
           onPointerUp={(event) => {
             if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
             event.currentTarget.releasePointerCapture(event.pointerId);
-            // 拖过 110px 才算"要关"。阈值太小的话，滚动列表时手指的
-            // 轻微下滑会把抽屉误关掉
             if (drag > 110) onClose();
             setDrag(0);
           }}
         >
-          <span className="kd-sheet-bar" aria-hidden="true" />
-          <div className="kd-sheet-grab-row">
-            <span className="kd-sheet-title">{title}</span>
-            <button
-              type="button"
-              className="kd-sheet-close"
-              aria-label="关闭"
-              title="关闭"
-              onClick={onClose}
-            >
-              <X size={14} strokeWidth={2} />
-            </button>
-          </div>
+          <span className="kd-sheet-title">{title}</span>
         </div>
         <div className="kd-sheet-body kd-scroll">{children}</div>
       </div>

@@ -7,6 +7,8 @@
  *   - 扁平卡片：纯色面板 + 1px 描边 + 极淡阴影，不用玻璃/模糊
  *   - 系统字体栈，数字一律等宽（tabular-nums）
  *   - 红色只用于角标 / 焦点 / 强调条，正文强调保持中性
+ *   - 以字为钮：选项没有框和底色，选中就是红字 + 一笔下划线；
+ *     主动作是红色粗体字 + 尾随箭头。状态用下划线，动作用箭头。
  * DJ 场景默认深色；亮色同样完整可用。
  * ---------------------------------------------------------------
  * 组件只允许使用这里定义的 .kd-* 类，不要写内联魔法数值。
@@ -60,16 +62,20 @@
   --kd-size-lg: 1rem;
 
   /* —— 度量 —— */
-  --kd-player-h: 60px;
+  --kd-player-h: 64px;
   --kd-badge-hang: 0.5rem;
   --kd-row-h: 36px;
   /* Overlay 顶栏：桌面拖拽垫 / 移动端安全区；具体值由 data-* 覆盖 */
-  --kd-chrome-top: 32px;
+  --kd-chrome-top: 36px;
   --kd-traffic-pad: 0px;
-  --kd-sheet-max-h: min(82vh, 720px);
-  --kd-sheet-grab-h: 2.75rem;
-  --kd-sheet-bar-w: 2.25rem;
-  --kd-sheet-bar-h: 3px;
+  --kd-sheet-w: 70%;
+  /* 曲库/搜索工作条与右栏眉目同高，并排时齐平 */
+  --kd-work-rail-h: 1.9rem;
+  --kd-sheet-head-h: var(--kd-work-rail-h);
+  /* 侧方弹出入场：移动端 Sheet / 桌面右栏 / 对话框共用，改这里全局生效 */
+  --kd-pop-dur: 110ms;
+  --kd-pop-scrim-dur: 90ms;
+  --kd-pop-ease: cubic-bezier(0.2, 0.9, 0.3, 1);
 }
 
 :root[data-theme="light"] {
@@ -203,8 +209,14 @@ body {
   color: var(--kd-text);
   font-family: var(--kd-font);
   font-size: var(--kd-size);
+  /* 深色用灰度抗锯齿更干净；浅色改回系统默认（subpixel），
+     否则细字重的 CJK 会一块深一块浅，和右侧搜索结果对不上。 */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+:root[data-theme="light"] body {
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
 }
 
 ::selection {
@@ -290,24 +302,75 @@ textarea {
   -webkit-user-select: text;
 }
 .kd-app[data-mac="true"] {
-  /* 全宽 AppChrome 高度：含红绿灯行，整条可拖 */
-  --kd-chrome-top: 36px;
+  /* 全宽 AppChrome：收瘦；搜索已下移到内容区。 */
+  --kd-chrome-top: 40px;
   --kd-traffic-pad: 72px;
 }
 .kd-app[data-mobile="true"] {
-  --kd-chrome-top: calc(36px + env(safe-area-inset-top, 0px));
+  /* 移动端顶栏必须留足：状态栏 / 刘海 / Dynamic Island 都不能压住操作。 */
+  --kd-chrome-top: calc(72px + max(env(safe-area-inset-top, 0px), 44px));
   --kd-traffic-pad: 0px;
+  --kd-player-h: 78px;
+}
+/* 竖屏再加一截帽檐，右侧工具避开系统区。 */
+.kd-app[data-mobile="true"][data-portrait="true"] {
+  --kd-chrome-top: calc(84px + max(env(safe-area-inset-top, 0px), 52px));
+}
+/* 桌面竖屏预览：加高顶栏；左侧空给红绿灯，工具全在右侧。 */
+.kd-app[data-mac="true"][data-portrait="true"] {
+  --kd-chrome-top: 56px;
 }
 .kd-app:not([data-mac="true"]):not([data-mobile="true"]) {
-  --kd-chrome-top: 32px;
+  --kd-chrome-top: 28px;
   --kd-traffic-pad: 0px;
 }
 .kd-app[data-mobile="true"] .kd-fabs {
-  bottom: calc(var(--kd-player-h) + 0.75rem + env(safe-area-inset-bottom, 0));
+  bottom: calc(var(--kd-player-h) + 1.1rem + max(env(safe-area-inset-bottom, 0px), 18px));
 }
 .kd-app[data-mobile="true"] .kd-player {
-  padding-bottom: env(safe-area-inset-bottom, 0);
-  height: calc(var(--kd-player-h) + env(safe-area-inset-bottom, 0));
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 22px);
+  height: calc(var(--kd-player-h) + max(env(safe-area-inset-bottom, 0px), 22px));
+}
+/* 顶栏内容贴底排：右侧历史/设置躲开刘海，左侧不放键。 */
+.kd-app[data-mobile="true"] .kd-app-chrome,
+.kd-app[data-portrait="true"] .kd-app-chrome {
+  align-items: flex-end;
+  box-sizing: border-box;
+  padding-bottom: 0.4rem;
+}
+.kd-app[data-mobile="true"] .kd-app-chrome {
+  padding-top: max(env(safe-area-inset-top, 0px), 44px);
+  padding-left: 0.55rem;
+  padding-right: 0.45rem;
+}
+.kd-app[data-mobile="true"][data-portrait="true"] .kd-app-chrome {
+  padding-top: max(env(safe-area-inset-top, 0px), 52px);
+  padding-bottom: 0.5rem;
+}
+.kd-app[data-mac="true"][data-portrait="true"] .kd-app-chrome {
+  padding-bottom: 0.35rem;
+}
+/* 竖屏：历史键并入右侧，尺寸对齐原来的设置/下载，后者不放大。 */
+.kd-app[data-portrait="true"] .kd-app-chrome[data-history-end="true"] .kd-app-chrome-actions {
+  gap: 0.15rem;
+  margin-bottom: 0.05rem;
+}
+.kd-app[data-portrait="true"] .kd-app-chrome[data-history-end="true"] .kd-chrome-history {
+  gap: 0.05rem;
+  margin-right: 0.1rem;
+  padding-right: 0.15rem;
+  border-right: 1px solid var(--kd-line);
+}
+.kd-app[data-portrait="true"] .kd-app-chrome[data-history-end="true"] .kd-chrome-nav-btn {
+  width: 2rem;
+  height: 2rem;
+}
+.kd-app[data-portrait="true"] .kd-app-chrome[data-history-end="true"] .kd-chrome-nav-btn svg {
+  width: 1rem;
+  height: 1rem;
+}
+.kd-app[data-mobile="true"][data-portrait="true"] .kd-player {
+  padding-bottom: calc(0.85rem + max(env(safe-area-inset-bottom, 0px), 28px));
 }
 
 .kd-body {
@@ -342,6 +405,9 @@ textarea {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* 顶栏左区与侧栏同宽；拖宽时 JS 写在这一层，chrome / split 一起吃。 */
+  --kd-left: 15rem;
+  --kd-right: 25rem;
 }
 .kd-pad {
   padding: 1.25rem;
@@ -355,7 +421,7 @@ textarea {
 
 .kd-narrow-folder-rail {
   flex: none;
-  width: 4.8rem;
+  width: 3.65rem;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -366,14 +432,12 @@ textarea {
   overflow-x: hidden;
   overflow-y: auto;
 }
-.kd-app[data-mac="true"] .kd-narrow-folder-rail,
-.kd-app[data-mac="true"] .kd-narrow-folder-panel {
-  padding-top: 1.75rem;
-}
+/* Mac 红绿灯安全区改由 .kd-tree-chrome（--kd-chrome-top）统一占位，
+   这里不再额外垫高，否则「添加」会比中/右栏正文矮一截。 */
 .kd-narrow-folder-rail > button {
   appearance: none;
   flex: none;
-  width: 4.25rem;
+  width: 3.2rem;
   min-height: 2.55rem;
   display: flex;
   flex-direction: column;
@@ -389,7 +453,7 @@ textarea {
 }
 .kd-narrow-folder-rail > button small {
   display: block;
-  max-width: 3.9rem;
+  max-width: 2.9rem;
   overflow: hidden;
   color: inherit;
   font-size: 0.65rem;
@@ -418,32 +482,12 @@ textarea {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--kd-line);
+  border-right: none;
   background: var(--kd-panel);
 }
 .kd-narrow-folder-panel > .kd-folder-pane {
   flex: 1;
   min-height: 0;
-}
-.kd-narrow-rail-toggle {
-  appearance: none;
-  flex: none;
-  height: 2rem;
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0 0.65rem;
-  border: none;
-  border-bottom: 1px solid var(--kd-line);
-  background: transparent;
-  color: var(--kd-muted);
-  font: inherit;
-  font-size: var(--kd-size-xs);
-  cursor: pointer;
-}
-.kd-narrow-rail-toggle:hover {
-  color: var(--kd-text);
-  background: var(--kd-hover);
 }
 .kd-split[data-layout="narrow"] > .kd-main-slot {
   flex: 1 1 auto;
@@ -454,37 +498,53 @@ textarea {
   width: var(--kd-left, 11rem);
   min-width: var(--kd-left, 11rem) !important;
 }
-.kd-split[data-layout="narrow"] > .kd-split-handle {
-  flex: 0 0 6px;
+.kd-split[data-compact-tree="closed"] > .kd-tree-slot {
+  flex-basis: 3.65rem;
+  width: 3.65rem;
+  min-width: 3.65rem !important;
 }
-
+/* 左右拖宽把手：1px 细线，与表内列线同级；热区靠 ::before 外扩。 */
 .kd-split {
   display: grid;
   /* 常驻的只有文件夹和主栏。详情/队列等旁路面板在主栏的搜索框下方展开，
      不占工作台整列，因此不会挤压顶部搜索。 */
-  grid-template-columns: var(--kd-left, 13rem) 6px minmax(0, 1fr);
+  grid-template-columns: var(--kd-left) 1px minmax(0, 1fr);
   min-height: 0;
   flex: 1;
 }
-@media (min-width: 1600px) {
-  /* 大屏默认更宽。用户拖过的话，拖动写在元素 style 上的变量优先级更高，自然盖掉 */
-  .kd-split {
-    --kd-left: 15rem;
-    --kd-right: 25rem;
-  }
+.kd-split[data-layout="wide"][data-compact-tree="closed"] {
+  grid-template-columns: 3.65rem 1px minmax(0, 1fr);
 }
-/* 拖宽把手：平时隐形，悬停/拖动时亮一条细线。6px 已经算宽了——
-   它是两栏之间唯一的空隙，太宽会看起来像布局裂开了。 */
+.kd-split[data-layout="wide"][data-compact-tree="closed"] > .kd-main-slot {
+  grid-column: 3;
+}
+.kd-app[data-portrait="true"] .kd-tree-slot > .kd-narrow-folder-panel,
+.kd-app[data-portrait="true"] .kd-tree-slot > .kd-narrow-folder-rail {
+  width: 100%;
+  height: 100%;
+}
+.kd-split[data-layout="narrow"] > .kd-split-handle {
+  flex: 0 0 1px;
+}
 .kd-split-handle {
   cursor: col-resize;
   position: relative;
   touch-action: none;
+  z-index: 2;
+}
+.kd-split-handle::before {
+  content: "";
+  position: absolute;
+  inset: 0 -5px;
 }
 .kd-split-handle::after {
   content: "";
   position: absolute;
-  inset: 0 2px;
-  background: transparent;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  background: var(--kd-line-soft);
   transition: background 0.12s;
 }
 .kd-split-handle:hover::after,
@@ -494,7 +554,7 @@ textarea {
 .kd-split-aside {
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--kd-line);
+  border-left: none;
   background: var(--kd-panel);
   min-height: 0;
   overflow: hidden;
@@ -509,10 +569,11 @@ textarea {
   min-height: 0;
   display: flex;
   overflow: hidden;
+  background: var(--kd-panel);
 }
 .kd-local-list-slot[data-aside="open"] {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 6px var(--kd-right, 22rem);
+  grid-template-columns: minmax(0, 1fr) 1px var(--kd-right, 22rem);
 }
 .kd-local-list-slot > .kd-middle-split {
   min-width: 0;
@@ -603,7 +664,7 @@ textarea {
 }
 
 /* ============================================================
- * 按钮：实心块 或 纯文字，不用描边方框。
+ * 按钮：纯文字。主动作 = 红字 + 尾随箭头，其余 = 灰字 hover 变亮。
  * ========================================================== */
 .kd-btn {
   -webkit-app-region: no-drag;
@@ -629,14 +690,15 @@ textarea {
   opacity: 0.4;
   cursor: not-allowed;
 }
-/* 主按钮：实心块 */
+/* 主动作：不用实心块，只用主题色粗体字。 */
 .kd-btn[data-variant="primary"] {
-  background: var(--kd-theme);
-  color: var(--kd-theme-ink);
+  background: transparent;
+  color: var(--kd-theme);
+  font-weight: 700;
 }
 .kd-btn[data-variant="primary"]:hover:not(:disabled) {
-  background: var(--kd-theme-strong);
-  color: var(--kd-theme-ink);
+  background: transparent;
+  color: var(--kd-theme-strong);
 }
 .kd-btn[data-variant="primary"] > svg {
   color: inherit;
@@ -676,8 +738,68 @@ textarea {
   width: 1.85rem;
   padding: 0;
 }
-.kd-btn[data-variant="primary"].kd-btn-icon {
-  background: var(--kd-theme);
+
+/* ============================================================
+ * 选项：以字为钮
+ *
+ * 选项（选没选中是一种状态）不用框、不用底色块——
+ * 选中使用主题色和字重，不再添加彩色下划线；
+ * 没选是灰字，hover 变亮。一排描边盒子的噪音没有了，剩下的全是字。
+ * ========================================================== */
+.kd-opts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 0.85rem;
+  row-gap: 0.3rem;
+}
+.kd-opt {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 0.1rem 0.05rem 0.22rem;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  line-height: 1.3;
+  cursor: pointer;
+  transition: color 0.12s ease, box-shadow 0.12s ease;
+}
+.kd-opt:hover:not(:disabled) {
+  color: var(--kd-text);
+}
+.kd-opt[aria-pressed="true"],
+.kd-opt[aria-checked="true"] {
+  color: var(--kd-theme);
+  font-weight: 600;
+  box-shadow: none;
+}
+.kd-opt:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+/* B 站系的选项染平台粉（同 kd-plat：品牌色唯一被允许上色的时刻） */
+.kd-opts[data-tone="bili"] .kd-opt[aria-pressed="true"],
+.kd-opt-bili[aria-pressed="true"] {
+  color: #fb7299;
+  box-shadow: none;
+}
+/* 右键第一次上膛：不变成红块，字本身划掉 + 挂一把小改钝 */
+.kd-opt[data-delete-armed="true"],
+.kd-opt[data-delete-armed="true"]:hover {
+  color: var(--kd-danger);
+  box-shadow: none;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.kd-opt .kd-vj-word-trash {
+  margin-left: 0.22rem;
+  vertical-align: -1px;
+}
+/* 选项行里的静态字（“小节”这种单位、提示）：和未选项同灰，不响应点击 */
+.kd-opts > .kd-opts-note {
+  color: var(--kd-faint);
+  font-size: var(--kd-size-xs);
 }
 
 /* 分段控件 */
@@ -702,9 +824,35 @@ textarea {
 }
 /* 激活态用中性底色而不是主题红：分段开关是"状态"，不是"动作"。
    满屏的开关每个都亮一块红，真正要按的那颗红按钮反而没了分量。 */
-.kd-segment > button[aria-pressed="true"] {
+.kd-segment > button[aria-pressed="true"],
+.kd-segment > button[aria-checked="true"] {
   background: var(--kd-selected);
   color: var(--kd-text);
+}
+.kd-segment[data-wrap="true"] {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100%;
+}
+.kd-segment[data-wrap="true"] > button {
+  height: auto;
+  min-height: 1.85rem;
+  flex: 1 1 auto;
+  padding: 0.4rem 0.7rem;
+  white-space: normal;
+  text-align: left;
+  line-height: 1.35;
+  font-weight: 600;
+}
+.kd-djp-seg-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+.kd-djp-seg-row > .kd-opts-note {
+  color: var(--kd-faint);
+  font-size: var(--kd-size-xs);
 }
 /* 例外：搜索平台按钮激活时上各家品牌色（和来源小方块同一组色值），认色比认字快。
    网易云红底配白字；QQ 绿和 SC 橙偏亮，配深字才够对比。 */
@@ -738,7 +886,7 @@ textarea {
   color: var(--kd-faint);
   border-style: dashed;
 }
-.kd-segment > button:hover:not([aria-pressed="true"]) {
+.kd-segment > button:hover:not([aria-pressed="true"]):not([aria-checked="true"]) {
   background: var(--kd-hover);
   color: var(--kd-text);
 }
@@ -890,7 +1038,7 @@ textarea {
   grid-template-columns: minmax(0, 1fr);
 }
 .kd-middle-split[data-search="true"] {
-  grid-template-columns: minmax(0, 1fr) 1px minmax(0, 1fr);
+  grid-template-columns: minmax(3rem, var(--kd-local-share, 50%)) 1px minmax(8rem, 1fr);
 }
 .kd-middle-local,
 .kd-middle-search {
@@ -900,6 +1048,11 @@ textarea {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background: var(--kd-panel);
+}
+.kd-middle-local > .kd-scroll,
+.kd-middle-search > .kd-scroll {
+  background: var(--kd-panel);
 }
 .kd-local-search-drop-overlay {
   position: absolute;
@@ -924,12 +1077,40 @@ textarea {
   outline-offset: -3px;
   background: color-mix(in srgb, var(--kd-accent) 6%, transparent);
 }
-/* 搜索结果仍有自己的选择/任务条；曲库工作条已经提升到所有分栏上方。 */
+/* 左右半栏各自一条工作条，顶边对齐；分割线与侧栏把手同一套细线。 */
+.kd-middle-local > .kd-activity,
 .kd-middle-search > .kd-activity {
   border-top: none;
+  border-bottom: 1px solid var(--kd-line);
 }
 .kd-middle-divider {
+  position: relative;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 2;
+}
+.kd-middle-divider::before {
+  content: "";
+  position: absolute;
+  inset: 0 -4px;
+}
+.kd-middle-divider::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  background: var(--kd-line-soft);
+  transition: background 0.12s;
+}
+.kd-middle-divider:hover::after,
+.kd-middle-divider:active::after {
   background: var(--kd-line);
+}
+.kd-middle-divider:active::after {
+  background: var(--kd-muted);
 }
 
 /* 拖进文件夹后、尚未落盘的占位行 */
@@ -976,50 +1157,67 @@ textarea {
   color: var(--kd-ok);
 }
 
-/* 三栏顶条使用同一块面色，避免顶部被切成黑、灰两截。 */
+/* 顶栏整窗一条：收瘦后服务拖窗、侧栏宽内导航与右侧动作。 */
 .kd-app-chrome {
+  position: relative;
   flex: none;
   height: var(--kd-chrome-top);
   min-height: var(--kd-chrome-top);
   display: flex;
   align-items: center;
-  gap: 0.15rem;
+  gap: 0.25rem;
   padding: 0 0.45rem 0 0.35rem;
   border-bottom: 1px solid var(--kd-line);
   background: var(--kd-panel);
   -webkit-app-region: drag;
 }
-.kd-split[data-tree="closed"] .kd-app-chrome,
-.kd-split:not([data-tree]) .kd-app-chrome {
-  padding-left: var(--kd-traffic-pad, 0.35rem);
+.kd-app[data-mac="true"] .kd-app-chrome {
+  padding-left: var(--kd-traffic-pad);
 }
-.kd-app-chrome-nav {
-  flex: none;
-  display: inline-flex;
+/* 与左栏同宽：从窗左缘起算，导航靠右贴侧栏右缘；Mac 红绿灯用 padding 躲开。 */
+.kd-app-chrome-tree {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  box-sizing: border-box;
+  width: var(--kd-left, 15rem);
+  display: flex;
   align-items: center;
-  gap: 0.05rem;
+  justify-content: flex-end;
+  padding-left: min(var(--kd-traffic-pad, 0px), max(0px, calc(var(--kd-left, 15rem) - 5rem)));
+  padding-right: 0.15rem;
+  pointer-events: none;
   -webkit-app-region: no-drag;
 }
-.kd-app-chrome-history {
+.kd-app-chrome-tree > * {
+  pointer-events: auto;
+}
+.kd-section-body[data-compact-tree="closed"] .kd-app-chrome-tree {
+  width: 3.65rem;
+  padding-left: min(var(--kd-traffic-pad, 0px), max(0px, calc(3.65rem - 5rem)));
+}
+/* 窄侧栏时 3.65rem 装不下红绿灯垫，历史键会被压到圆钮下面——改成先让出红绿灯再排键。 */
+.kd-app[data-mac="true"] .kd-section-body[data-compact-tree="closed"] .kd-app-chrome-tree {
+  width: calc(var(--kd-traffic-pad, 0px) + 5.4rem);
+  padding-left: var(--kd-traffic-pad, 0px);
+  justify-content: flex-start;
+}
+.kd-chrome-history {
   display: inline-flex;
   align-items: center;
-  gap: 0.05rem;
-}
-.kd-app-chrome-separator {
-  width: 1px;
-  height: 1rem;
-  margin: 0 0.2rem;
-  background: var(--kd-line);
+  gap: 0.02rem;
 }
 .kd-chrome-nav-btn {
   appearance: none;
-  width: 1.7rem;
-  height: 1.7rem;
+  width: 1.55rem;
+  height: 1.55rem;
   display: grid;
   place-items: center;
   padding: 0;
   border: none;
-  border-radius: 0.3rem;
+  border-radius: 0;
   background: transparent;
   color: var(--kd-muted);
   cursor: pointer;
@@ -1033,6 +1231,119 @@ textarea {
   opacity: 0.55;
   cursor: default;
 }
+.kd-app-chrome-actions {
+  flex: none;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  -webkit-app-region: no-drag;
+}
+/* 主栏顶上的在线搜索：默认跟主题面板色；提交时彩带从左往右推，再淡回底色。 */
+.kd-search-band {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: stretch;
+  padding: 0.45rem 0.65rem 0.4rem;
+  background: var(--kd-panel);
+  border-bottom: 1px solid var(--kd-line);
+}
+.kd-search-band > .kd-search-command {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}
+.kd-search-band .kd-searchbar {
+  position: relative;
+  isolation: isolate;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 0 0.55rem;
+  min-height: 2.75rem;
+  height: 2.75rem;
+  padding: 0 0.75rem 0 0.55rem;
+  border: none;
+  border-radius: 0 !important;
+  box-shadow: none;
+  background: var(--kd-panel);
+  color: var(--kd-text);
+  overflow: hidden;
+  transition: background-color 0.2s ease;
+}
+.kd-search-band .kd-search-burst-fx {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.kd-search-band .kd-searchbar-tools,
+.kd-search-band .kd-searchbar-sep,
+.kd-search-band .kd-searchbar-copy {
+  position: relative;
+  z-index: 1;
+}
+.kd-search-band .kd-searchbar-input {
+  color: inherit;
+}
+.kd-search-band .kd-search-placeholder {
+  color: var(--kd-muted);
+  opacity: 1;
+}
+.kd-search-band .kd-searchbar[data-batch] {
+  height: auto;
+  min-height: 2.75rem;
+  align-items: flex-start;
+  padding-top: 0.4rem;
+  padding-bottom: 0.4rem;
+}
+.kd-search-band .kd-searchbar-tools {
+  grid-column: 1;
+}
+.kd-search-band .kd-searchbar-sep {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: center;
+  width: 1px;
+  height: 1.15rem;
+  background: color-mix(in srgb, var(--kd-text) 12%, transparent);
+}
+.kd-search-band .kd-searchbar-copy {
+  grid-column: 3;
+  padding-left: 0;
+}
+.kd-search-band .kd-searchbar-input {
+  min-height: 2rem;
+  padding: 0.25rem 0.15rem;
+  font-size: var(--kd-size);
+}
+.kd-search-band textarea.kd-searchbar-input {
+  height: 2rem;
+  line-height: 1.45;
+}
+.kd-search-band .kd-searchbar[data-batch] textarea.kd-searchbar-input {
+  height: 4rem;
+}
+.kd-search-band .kd-search-placeholder {
+  left: 0.15rem;
+  right: 0.4rem;
+  font-size: var(--kd-size);
+}
+.kd-search-band .kd-plat {
+  width: 1.6rem;
+  height: 1.6rem;
+}
+.kd-app-chrome-actions {
+  flex: none;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  -webkit-app-region: no-drag;
+}
+.kd-app-chrome-actions > .kd-chrome-actions {
+  margin: 0;
+}
 .kd-app-chrome-drag {
   flex: 1 1 auto;
   align-self: stretch;
@@ -1045,34 +1356,20 @@ textarea {
   -webkit-app-region: no-drag;
 }
 
-/* 左侧栏顶到窗口上沿：最左侧主题键 + 窗口拖动区。 */
+/* 左栏只负责文件夹内容；竖分割线由中间把手画，这里不再加边框以免变粗。 */
 .kd-tree-slot {
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--kd-panel);
-  border-right: 1px solid var(--kd-line);
+  border-right: none;
 }
-.kd-tree-chrome {
-  flex: none;
-  height: var(--kd-chrome-top);
-  min-height: var(--kd-chrome-top);
-  display: flex;
-  align-items: center;
-  gap: 0.15rem;
-  padding: 0 0.35rem 0 var(--kd-traffic-pad, 0.35rem);
-  border-bottom: 1px solid var(--kd-line);
-  background: var(--kd-panel);
-  -webkit-app-region: drag;
-}
-.kd-tree-chrome > .kd-chrome-nav-btn {
-  -webkit-app-region: no-drag;
-}
-.kd-tree-chrome-drag {
+.kd-tree-slot > .kd-narrow-folder-panel,
+.kd-tree-slot > .kd-narrow-folder-rail {
   flex: 1 1 auto;
-  align-self: stretch;
-  min-width: 0.5rem;
-  -webkit-app-region: drag;
+  min-height: 0;
+  width: 100%;
+  flex-basis: auto;
 }
 .kd-tree-slot .kd-folder-pane {
   flex: 1 1 auto;
@@ -1117,15 +1414,15 @@ textarea {
   -webkit-app-region: no-drag;
 }
 
-/* 右栏眉目：可拖 + 标题；开关固定在分析工作条右端。 */
+/* 右栏眉目：与左侧分析/搜索工作条同高同线；开关仍在工作条右端。 */
 .kd-aside-head {
   flex: none;
-  height: var(--kd-chrome-top);
-  min-height: var(--kd-chrome-top);
+  height: var(--kd-work-rail-h);
+  min-height: var(--kd-work-rail-h);
   display: flex;
   align-items: center;
   gap: 0.35rem;
-  padding: 0 0.55rem 0 0.75rem;
+  padding: 0 0.75rem;
   border-bottom: 1px solid var(--kd-line);
   background: var(--kd-panel);
   -webkit-app-region: drag;
@@ -1282,11 +1579,11 @@ textarea {
   color: var(--kd-theme);
   background: transparent;
 }
-/* 激活态只用亮字和细下划线，不再铺一整块红色。 */
+/* 激活态只用亮字和字重，不铺底色或彩色短横杠。 */
 .kd-list-tabs > button[aria-pressed="true"] {
   color: var(--kd-text);
   background: transparent;
-  box-shadow: inset 0 -2px var(--kd-theme);
+  box-shadow: none;
   font-weight: 700;
 }
 .kd-list-tabs > button:hover:not([aria-pressed="true"]) {
@@ -1490,6 +1787,14 @@ textarea {
 }
 .kd-table tbody tr:hover td {
   background: var(--kd-hover);
+}
+/* 虚拟滚动的占位行：只负责撑出未渲染区域的高度，
+   不吃 hover 底色（不然一大块空白会被整条点亮）、不带内边距。 */
+.kd-table tbody tr[data-spacer] > td {
+  padding: 0;
+}
+.kd-table tbody tr[data-spacer]:hover > td {
+  background: transparent;
 }
 /* 选中只靠底色，不描红边：红色留给动作，选中是状态 */
 .kd-table tbody tr[aria-selected="true"] td {
@@ -1911,6 +2216,43 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   justify-content: flex-end;
   gap: 0.65rem;
 }
+/* 结果行首：下载 + 展开。通用 td 的 0.6rem 左右 padding 会把 1.6rem 宽的格子
+   吃到只剩 0.4rem，展开键就被 overflow:hidden 裁掉——这里单独开一列。 */
+.kd-table tbody td.kd-result-lead {
+  width: 3.4rem;
+  max-width: 3.4rem;
+  padding: 0 0.15rem;
+  overflow: visible;
+  vertical-align: middle;
+}
+.kd-result-lead-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.05rem;
+  min-width: 0;
+}
+.kd-result-lead-btn {
+  appearance: none;
+  flex: none;
+  width: 1.55rem;
+  height: 1.55rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+button.kd-result-lead-btn:hover {
+  color: var(--kd-theme);
+}
+.kd-result-lead-spacer {
+  flex: none;
+  width: 1.55rem;
+  height: 1.55rem;
+}
 .kd-result-download-all {
   appearance: none;
   height: 1.75rem;
@@ -1965,10 +2307,8 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   color: var(--kd-text);
   font-weight: 600;
 }
-.kd-table[data-kind="library"] td[data-col="title"] {
-  /* 封面和位置已经建立主次；标题再加粗只会让同样宽度少显示几个字。 */
-  font-weight: 400;
-}
+/* 曲库标题和搜索结果标题共用 .kd-td-strong：同一字重、同一字色。
+   以前曲库单独压成 400，再叠灰度抗锯齿，CJK 笔画就会一块深一块浅。 */
 .kd-td-num {
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -2073,10 +2413,15 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
 .kd-table[data-kind="library"] th[data-col="artist"],
 .kd-table[data-kind="library"] th[data-col="album"],
 .kd-table[data-kind="library"] td[data-col="artist"],
-.kd-table[data-kind="library"] td[data-col="album"] {
-  /* 两列主动让位给标题；收内边距后表头仍能读出“艺人 / 专辑”。 */
+.kd-table[data-kind="library"] td[data-col="album"],
+.kd-table:not([data-kind="library"]) th[data-col="artist"],
+.kd-table:not([data-kind="library"]) th[data-col="album"],
+.kd-table:not([data-kind="library"]) td[data-col="artist"],
+.kd-table:not([data-kind="library"]) td[data-col="album"] {
+  /* 两列主动让位给标题；左右表共用同一套内边距与字色。 */
   padding-right: 0.25rem;
   padding-left: 0.25rem;
+  color: var(--kd-text-body);
 }
 .kd-table-rating > button {
   appearance: none;
@@ -2205,6 +2550,32 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
 }
 
 /* ============================================================
+ * 侧方弹出动画（Sheet / 桌面右栏 / 对话框共用）
+ * 只改 :root 的 --kd-pop-* 或下面两段 keyframes，全部弹出一起变。
+ * ========================================================== */
+@keyframes kd-pop-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+@keyframes kd-pop-scrim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.kd-pop-panel {
+  will-change: transform;
+  animation: kd-pop-in var(--kd-pop-dur) var(--kd-pop-ease) both;
+}
+.kd-pop-scrim {
+  animation: kd-pop-scrim-in var(--kd-pop-scrim-dur) ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kd-pop-panel,
+  .kd-pop-scrim {
+    animation: none;
+  }
+}
+
+/* ============================================================
  * 对话框
  * ========================================================== */
 .kd-overlay {
@@ -2258,10 +2629,10 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
     "wave wave wave";
   align-items: center;
   column-gap: 0.75rem;
-  row-gap: 0.2rem;
+  row-gap: 0.4rem;
   min-width: 0;
-  min-height: calc(var(--kd-player-h) + 2.2rem);
-  padding: 0.35rem 0.85rem 0.3rem;
+  min-height: calc(var(--kd-player-h) + 2.55rem);
+  padding: 0.4rem 0.85rem calc(0.35rem + 4px);
   border-top: 1px solid var(--kd-line);
   background: var(--kd-panel);
 }
@@ -2309,8 +2680,8 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
 /* 桌面播放条的两台 deck 占用网格两侧真正剩下的宽度。中间工具组会因视频键、
    时间等内容变宽，不能再用「视口一半减固定值」估算安全边界；那会让左侧长标题
    钻到工具下面。跨两行仍保留大唱盘，同时网格列会自动扩展空闲空间并在工具前收住。 */
-.kd-app:not([data-columns="narrow"]) .kd-player-leading,
-.kd-app:not([data-columns="narrow"]) .kd-player-trailing {
+.kd-app:not([data-portrait="true"]) .kd-player-leading,
+.kd-app:not([data-portrait="true"]) .kd-player-trailing {
   position: relative;
   top: auto;
   right: auto;
@@ -2320,10 +2691,10 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   align-self: stretch;
   grid-row: 1 / -1;
 }
-.kd-app:not([data-columns="narrow"]) .kd-player-leading {
+.kd-app:not([data-portrait="true"]) .kd-player-leading {
   grid-column: 1;
 }
-.kd-app:not([data-columns="narrow"]) .kd-player-trailing {
+.kd-app:not([data-portrait="true"]) .kd-player-trailing {
   grid-column: 3;
 }
 .kd-player-deck {
@@ -2387,6 +2758,10 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   overflow: hidden;
   opacity: 0.68;
   transition: opacity 0.15s;
+}
+/* 桌面：唱盘跨过波形行，文案和波形之间留一点气口，避免高柱子蹭到艺人名。 */
+.kd-app:not([data-portrait="true"]) .kd-player-deck-copy {
+  padding-bottom: 0.25rem;
 }
 .kd-player-deck[data-active="true"] .kd-player-deck-copy,
 .kd-player-deck[data-transitioning="true"] .kd-player-deck-copy {
@@ -2502,6 +2877,11 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   border-color: var(--kd-line);
   color: var(--kd-text);
 }
+/* Pause 保持原生水平几何居中，仅补偿半像素的垂直视觉重心。
+   不做横向整数像素位移，避免在这颗小尺寸图标上从偏左直接跳成偏右。 */
+.kd-player-go[data-playing="true"] > svg {
+  transform: translateY(0.5px);
+}
 .kd-player-go:active:not(:disabled) {
   transform: scale(0.94);
 }
@@ -2552,14 +2932,14 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   display: grid;
   /* 左唱盘是绝对定位，原先 wave 横跨整行只是被黑胶盖住；实际轨道仍从
      唱盘里面穿过去。这里把起点与左侧文字（唱盘之后）对齐。 */
-  margin-left: calc(0.85rem + 4.75rem + 0.35rem);
-  /* 右 deck 同样绝对定位；给它留出完整唱盘宽度，别让波形藏在唱盘下面。 */
-  margin-right: calc(0.85rem + 4.75rem + 0.35rem);
+  margin-left: calc(0.85rem + 4.25rem + 0.35rem);
+  /* 稍微伸进唱盘外圈下方，让波形横向更饱满但仍不挡唱盘点击。 */
+  margin-right: calc(0.85rem + 4.25rem + 0.35rem);
   grid-template-columns: minmax(10rem, 1fr);
   grid-template-areas: "waveform";
   align-items: center;
   column-gap: 0.45rem;
-  padding-right: clamp(0.55rem, 1.25vw, 1.1rem);
+  padding-right: clamp(0.2rem, 0.6vw, 0.5rem);
   font-variant-numeric: tabular-nums;
   color: var(--kd-muted);
   font-size: var(--kd-size-xs);
@@ -2573,6 +2953,8 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   display: flex;
   align-items: center;
   pointer-events: auto;
+  /* 相对唱盘文案再往下让半拍，柱顶不容易顶到艺人行。 */
+  margin-top: 0.1rem;
 }
 .kd-player-time {
   min-width: 0;
@@ -2600,7 +2982,7 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   flex: 1 1 auto;
   min-width: 10rem;
   width: 100%;
-  height: 32px;
+  height: 42px;
   align-self: center;
   border: none;
   /* 播放头本身由 Waveform 的绝对定位层绘制；轨道不再越出命中框，避免 WKWebView
@@ -2975,10 +3357,6 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   opacity: 0.35;
   cursor: default;
 }
-.kd-djp-check[data-disabled="true"] {
-  opacity: 0.55;
-  cursor: default;
-}
 
 /* ============================================================
  * 视频预览（右栏，下载队列头上）
@@ -3224,27 +3602,20 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   opacity: 1;
   visibility: visible;
 }
-/* 「接下一首」带图标，沿用面板标题的 700 会让中文和图标都显得比其它标题重一档。 */
-.kd-harmonic-heading {
-  font-weight: 500;
-  letter-spacing: 0.02em;
-}
-.kd-harmonic-heading .kd-panel-heading-icon {
-  color: currentColor;
-}
-/* —— 活动区：常驻一条、占满中间栏宽；空闲也占位，忙时只换内容 —— */
+/* —— 活动区：常驻一条、占满中间栏宽；空闲也占位，忙时只换内容 ——
+   与顶栏同面色连成一片；只在贴表头处留一条软线，避免和搜索小框叠线。 */
 .kd-activity {
   flex: none;
   align-self: stretch;
   width: 100%;
   box-sizing: border-box;
-  height: 1.9rem;
-  min-height: 1.9rem;
+  height: var(--kd-work-rail-h);
+  min-height: var(--kd-work-rail-h);
   display: flex;
   align-items: center;
   gap: 0.55rem;
   padding: 0 0.75rem;
-  border-bottom: 1px solid var(--kd-line);
+  border-bottom: 1px solid var(--kd-line-soft);
   /* 分析 / 多选 / 下载时也不染主题粉红，保持面板本色 */
   background: var(--kd-panel);
   overflow: hidden;
@@ -3270,15 +3641,109 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   gap: 0.65rem;
   min-width: 0;
   flex: 1 1 auto;
-  width: 100%;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.kd-activity-texts::-webkit-scrollbar {
+  display: none;
+}
+/* 曲库内搜：平常只是右端小按键；点开后整条工作条换成搜索输入。 */
+.kd-activity-search-toggle {
+  appearance: none;
+  flex: none;
+  width: 1.55rem;
+  height: 1.55rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 0.3rem !important;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+  margin-left: auto;
+  margin-right: -0.35rem;
+}
+.kd-activity-search-toggle:hover {
+  color: var(--kd-text);
+  background: var(--kd-hover);
+}
+/* 展开态：整条就是搜索，不再另套加深色块或描边。 */
+.kd-activity-search {
+  flex: 1 1 auto;
+  max-width: none;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.15rem 0 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--kd-muted);
+}
+.kd-activity-search-expanded {
+  margin-left: 0;
+  margin-right: -0.35rem;
+}
+.kd-activity-search:hover,
+.kd-activity-search:focus-within {
+  background: transparent;
+  color: var(--kd-text);
+}
+.kd-activity-search > svg {
+  flex: none;
+}
+.kd-activity-search > input {
+  appearance: none;
+  min-width: 0;
+  flex: 1;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--kd-text);
+  font: inherit;
+  font-size: var(--kd-size-sm);
+}
+.kd-activity-search > input::placeholder {
+  color: var(--kd-faint);
+  transition: color 0.1s, opacity 0.1s;
+}
+.kd-activity-search:hover > input::placeholder,
+.kd-activity-search:focus-within > input::placeholder {
+  color: transparent;
+  opacity: 0;
+}
+.kd-activity-search > input::-webkit-search-cancel-button {
+  display: none;
+}
+.kd-activity-search > button {
+  appearance: none;
+  flex: none;
+  width: 1.2rem;
+  height: 1.2rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+.kd-activity-search > button:hover {
+  color: var(--kd-text);
 }
 .kd-activity-actions {
   display: inline-flex;
   align-items: center;
   flex: none;
-  /* 搜索条右边距是 .65rem；抵销工作条多出的 .1rem，四个入口正好和上方四个平台键齐边。 */
-  margin-right: -0.1rem;
+  margin-right: -0.35rem;
+}
+.kd-activity:not(:has(.kd-activity-search)):not(:has(.kd-activity-search-toggle)) .kd-activity-actions {
+  margin-left: auto;
 }
 .kd-activity-actions .kd-chrome-actions {
   gap: 0.25rem;
@@ -3296,6 +3761,41 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   white-space: nowrap;
   color: var(--kd-text-body);
   font-size: var(--kd-size-xs);
+}
+/* 搜索概况：彩色图标 + 标准灰数字，平台名只进 title。 */
+.kd-activity-plat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: none;
+  font-size: var(--kd-size-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* 圆标路径贴满 viewBox，外层再让 1px，避免被 overflow 啃边。 */
+.kd-activity-plat > svg {
+  flex: none;
+  display: block;
+  width: 13px;
+  height: 13px;
+  margin: 1px;
+  overflow: visible;
+}
+.kd-activity-plat[data-platform="wyy"] {
+  color: #e02020;
+}
+.kd-activity-plat[data-platform="qqm"] {
+  color: #31c27c;
+}
+.kd-activity-plat[data-platform="soundcloud"] {
+  color: #ff5500;
+}
+.kd-activity-plat[data-platform="bilibili"] {
+  color: #fb7299;
+}
+.kd-activity-plat-count {
+  color: var(--kd-muted);
+  font-weight: 650;
 }
 .kd-activity-control {
   display: inline-flex;
@@ -3766,6 +4266,11 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   display: block;
   transition: opacity 0.15s;
 }
+/* 登录平台头像是人物/品牌身份，不沿用面板的直角规则。 */
+.kd-account-avatar,
+.kd-account-avatar > img {
+  border-radius: 50% !important;
+}
 /* 同一个位子放图标而不是头像（更新那一行）：不描边，免得看着像个空头像框 */
 .kd-set-avatar-icon {
   display: grid;
@@ -3782,7 +4287,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-right: 1px solid var(--kd-line);
+  border-right: none;
   background: var(--kd-panel);
 }
 .kd-split[data-layout="wide"] .kd-folder-pane {
@@ -3793,7 +4298,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   grid-template-columns: minmax(0, 1fr);
 }
 .kd-split[data-layout="wide"][data-tree="closed"][data-aside="open"] {
-  grid-template-columns: minmax(0, 1fr) 6px var(--kd-right, 22rem);
+  grid-template-columns: minmax(0, 1fr) 1px var(--kd-right, 22rem);
 }
 .kd-folder-search {
   display: flex;
@@ -4174,20 +4679,18 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   cursor: pointer;
 }
 .kd-scope > button:not(.kd-scope-done)[aria-pressed="true"] {
-  background: var(--kd-panel-inset);
-  color: var(--kd-text);
+  background: transparent;
+  color: var(--kd-theme);
+  box-shadow: none;
 }
 .kd-scope > button:not(.kd-scope-done):hover:not([aria-pressed="true"]) {
   color: var(--kd-text);
   background: var(--kd-hover);
 }
 
-/* 搜 VJ 的关键词按钮群 */
+/* 搜 VJ 的关键词：全部走 .kd-opts/.kd-opt 的“以字为钮”，粉色只染字和下划线。
+   这里只剩这个板块特有的几件小东西。 */
 .kd-vj-words {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.3rem;
   min-height: 1.55rem;
 }
 .kd-vj-actions {
@@ -4198,79 +4701,43 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   min-width: 0;
   font-size: var(--kd-size-xs);
 }
-.kd-vj-artist-tag {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.18rem 0.58rem;
-  border: 1px solid #fb7299;
-  border-radius: 999px;
-  background: #fb7299;
-  color: #fff;
+/* 艺人不是选项（有值就永远参与搜索）：一个静态的粉色“@名字”，
+   读起来就是“曲名 + @艺人 + 关键词…”这条查询本身 */
+.kd-vj-artist {
+  color: #fb7299;
   font-size: var(--kd-size-xs);
   font-weight: 700;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 9rem;
 }
-.kd-vj-word {
-  position: relative;
-  display: inline-flex;
-}
-.kd-vj-word > button:first-child {
-  position: relative;
-  appearance: none;
-  border: 1px solid var(--kd-line);
-  background: transparent;
-  color: var(--kd-muted);
-  font: inherit;
-  font-size: var(--kd-size-xs);
-  padding: 0.18rem 0.58rem;
-  border-radius: 999px;
-  cursor: pointer;
-}
-.kd-vj-word > button:first-child:hover {
-  color: var(--kd-text);
-}
-.kd-vj-word > button:first-child[aria-pressed="true"] {
-  border-color: #fb7299;
-  background: #fb7299;
-  color: #fff;
-  font-weight: 700;
-}
-/* 必须放在粉色选中态之后：第一次右键永远切成删除红，第二次才真正删。 */
-.kd-vj-word > button:first-child[data-delete-armed="true"] {
-  border-color: var(--kd-danger);
-  background: var(--kd-danger);
-  color: #fff;
-}
-.kd-vj-word > button:first-child[data-delete-armed="true"] .kd-vj-word-label {
-  visibility: hidden;
-}
-.kd-vj-word-trash {
-  position: absolute;
-  inset: 50% auto auto 50%;
-  transform: translate(-50%, -50%);
-  color: #fff;
-  pointer-events: none;
-}
+/* 加词：一个低调的“+ 加词”字钮，hover 才亮出粉色 */
 .kd-vj-word-add {
   appearance: none;
-  border: 1px dashed var(--kd-line);
+  border: none;
   background: transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.1rem 0.05rem;
   color: var(--kd-faint);
-  border-radius: 999px;
-  padding: 0.12rem 0.45rem;
+  font: inherit;
+  font-size: var(--kd-size-xs);
   cursor: pointer;
-  line-height: 0;
 }
 .kd-vj-word-add:hover {
   color: #fb7299;
 }
 .kd-vj-actions .kd-btn[data-variant="primary"] {
-  background: #fb7299;
-  color: #fff;
+  background: transparent;
+  color: #fb7299;
+  /* 关键词几乎无水平内边距；按钮默认 sm padding 会让放大镜比标签缩进去一截。 */
+  padding-inline: 0;
 }
 .kd-vj-actions .kd-btn[data-variant="primary"]:hover:not(:disabled) {
-  background: #e85f88;
-  color: #fff;
+  background: transparent;
+  color: #e85f88;
 }
 .kd-vj-actions .kd-btn[data-variant="primary"] > svg {
   color: inherit;
@@ -4306,36 +4773,33 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
  *
  * 设计取向：**列表是脊柱**。找歌、搜歌、看结果全在它上面，
  * 左边的文件夹和右边的详情都是"针对当前这一首/这一次搜索"的补充。
- * 所以窄屏下把三栏压成一栏，两侧的内容收进底部抽屉，右下角两颗悬浮键
+ * 所以窄屏下把三栏压成一栏，两侧的内容收进侧方抽屉，右下角两颗悬浮键
  * 按需拉出来——而不是自动弹：自动弹会在滚列表时不停打断。
  *
  * 阈值 940px 是量出来的：13rem + 22rem 两栏 = 560px，中间的表再留 380px
  * 才够放下标题+BPM+KEY+时长。这一档同时覆盖竖着的平板和横着的手机。
  * ========================================================== */
-.kd-app[data-columns="narrow"] .kd-list-head > .kd-search-command {
+.kd-app[data-portrait="true"] .kd-list-head > .kd-search-command {
   min-width: 0;
 }
-.kd-app[data-columns="narrow"] .kd-list-head > .kd-list-note {
+.kd-app[data-portrait="true"] .kd-list-head > .kd-list-note {
   display: none;
 }
-.kd-app[data-columns="narrow"] .kd-folder-count {
-  display: none;
-}
-.kd-app[data-columns="narrow"] .kd-toolbar {
+.kd-app[data-portrait="true"] .kd-toolbar {
   row-gap: 0.4rem;
 }
-.kd-app[data-columns="narrow"] .kd-player {
+.kd-app[data-portrait="true"] .kd-player {
   padding: 0 0.6rem;
   gap: 0.5rem;
 }
-.kd-app[data-columns="narrow"] .kd-player-scrub > .kd-nowrap {
+.kd-app[data-portrait="true"] .kd-player-scrub > .kd-nowrap {
   display: none;
 }
-.kd-app[data-columns="narrow"] .kd-player-now {
+.kd-app[data-portrait="true"] .kd-player-now {
   flex: 1 1 auto;
   min-width: 0;
 }
-.kd-app[data-columns="narrow"] .kd-player-leading {
+.kd-app[data-portrait="true"] .kd-player-leading {
   min-width: 0;
 }
 
@@ -4378,53 +4842,42 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   background: var(--kd-theme);
 }
 
-/* —— 底部抽屉（账号 / 队列 / 接播 / 详情 / 文件夹共用尺度） —— */
+/* —— 侧方抽屉（账号 / 队列 / 接播 / 详情 / 文件夹共用尺度） —— */
 .kd-sheet-scrim {
   position: fixed;
   inset: 0;
   z-index: 50;
-  background: rgba(0, 0, 0, 0.45);
+  /* 轻透明遮罩：能看见底下列表，不是死灰蒙层。 */
+  background: color-mix(in srgb, var(--kd-bg) 32%, transparent);
   display: flex;
-  align-items: flex-end;
+  justify-content: flex-end;
+  align-items: stretch;
 }
 .kd-sheet {
-  width: 100%;
-  /* 只盖住下半屏：上面那截列表还看得见，心里知道自己停在哪。 */
-  max-height: var(--kd-sheet-max-h);
+  /* 占七成屏宽，左侧三成留给透明遮罩，点遮罩即可关掉。 */
+  width: var(--kd-sheet-w);
+  max-width: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
   background: var(--kd-panel);
-  border-top: 1px solid var(--kd-line);
+  border-left: 1px solid var(--kd-line);
   box-shadow: var(--kd-shadow-float);
-  transition: transform 0.18s ease-out;
 }
-.kd-sheet-grab {
+.kd-sheet-head {
   flex: none;
-  min-height: var(--kd-sheet-grab-h);
-  padding: 0.55rem 0.9rem 0.65rem;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  justify-content: center;
-  gap: 0.35rem;
-  cursor: grab;
-  touch-action: none;
-  border-bottom: 1px solid var(--kd-line-soft);
-}
-.kd-sheet-grab:active {
-  cursor: grabbing;
-}
-.kd-sheet-bar {
-  width: var(--kd-sheet-bar-w);
-  height: var(--kd-sheet-bar-h);
-  margin: 0 auto;
-  background: var(--kd-faint);
-}
-.kd-sheet-grab-row {
+  height: var(--kd-sheet-head-h);
+  min-height: var(--kd-sheet-head-h);
+  padding: 0 0.75rem;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  min-width: 0;
+  justify-content: center;
+  cursor: grab;
+  touch-action: none;
+  border-bottom: 1px solid var(--kd-line);
+}
+.kd-sheet-head:active {
+  cursor: grabbing;
 }
 .kd-sheet-title {
   flex: 1 1 auto;
@@ -4436,24 +4889,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   white-space: nowrap;
   text-align: center;
 }
-.kd-sheet-close {
-  appearance: none;
-  flex: none;
-  width: 1.55rem;
-  height: 1.55rem;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: none;
-  border-radius: 0.3rem;
-  background: transparent;
-  color: var(--kd-faint);
-  cursor: pointer;
-}
-.kd-sheet-close:hover {
-  color: var(--kd-muted);
-  background: var(--kd-hover);
-}
 .kd-sheet-body {
   flex: 1;
   min-height: 0;
@@ -4464,7 +4899,8 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
    父容器高度是内容撑的，两边互相等对方 → 树被压成 0 高。
    右边框也去掉：抽屉里它左右都到边，那条线看着像画歪了。 */
 .kd-sheet .kd-folder-pane {
-  height: 62vh;
+  height: 100%;
+  min-height: 0;
   border-right: none;
 }
 /* 手机抽屉里的文件夹行比桌面树稍大一点，给手指留下更可靠的点击面积；
@@ -4487,8 +4923,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
  * 搜索框（图标内嵌）与平台标志键
  * ========================================================== */
 
-/* 在线搜索 Composer：输入、前置放大镜和所有平台保持一行组合，但直接融入
-   中间栏；不给输入套框，也不另垫白色卡片或使用红色描边。 */
+/* 在线搜索 Composer：平台来源 | 细分割线 | 输入，顶栏正中圆角小框。 */
 .kd-search-command {
   position: relative;
   flex: 1 1 auto;
@@ -4504,10 +4939,10 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 }
 .kd-searchbar {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr);
   grid-template-rows: auto;
   align-items: center;
-  gap: 0 0.55rem;
+  gap: 0 0.4rem;
   min-width: 0;
   min-height: 0;
   padding: 0;
@@ -4516,11 +4951,11 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   box-shadow: none;
   cursor: text;
 }
-/* 竖屏/极窄：第一行输入+入口，第二行平台来源 */
+/* 竖屏/极窄仍保持同一行：平台 | 分割线 | 输入 */
 .kd-searchbar[data-stacked] {
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr);
   grid-template-rows: auto;
-  gap: 0 0.4rem;
+  gap: 0 0.35rem;
 }
 .kd-searchbar:focus-within {
   background: transparent;
@@ -4551,24 +4986,13 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   height: 16px;
   stroke-width: 2.25;
 }
-.kd-search-rainbow {
-  width: 18px;
-  height: 18px;
-  overflow: visible;
-  filter: saturate(1.18);
-}
-@media (prefers-reduced-motion: reduce) {
-  .kd-search-rainbow animate {
-    display: none;
-  }
-}
 .kd-searchbar[data-batch] .kd-searchbar-lead {
   height: 1.35rem;
   padding-top: 0;
 }
 /* 标题 / 使用提示 / 三行编辑面形成清楚的信息层级。 */
 .kd-searchbar-copy {
-  grid-column: 2;
+  grid-column: 3;
   grid-row: 1;
   min-width: 0;
   overflow: hidden;
@@ -4577,10 +5001,8 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   flex-direction: row;
   align-items: center;
   gap: 0.1rem;
-  /* 平台来源和炫彩搜索入口是两个动作；这一笔只分开它们，不给输入框套壳。 */
   border: none;
-  border-left: 1px solid var(--kd-line);
-  padding-left: 0.4rem;
+  padding-left: 0;
   background: transparent;
 }
 .kd-search-placeholder {
@@ -4588,7 +5010,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   z-index: 0;
   top: 50%;
   right: 0.45rem;
-  left: 2.15rem;
+  left: 0.1rem;
   transform: translateY(-50%);
   overflow: hidden;
   color: var(--kd-faint);
@@ -4598,10 +5020,6 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   text-overflow: ellipsis;
   white-space: nowrap;
   pointer-events: none;
-}
-/* 空搜索框取得焦点时不能让提示文案压在光标和系统听写候选层上。 */
-.kd-searchbar-copy:focus-within .kd-search-placeholder {
-  display: none;
 }
 .kd-searchbar-heading {
   min-width: 0;
@@ -4673,14 +5091,27 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   gap: 0.35rem;
   min-width: 0;
 }
-.kd-searchbar[data-stacked] .kd-searchbar-copy {
+.kd-searchbar-sep {
   grid-column: 2;
+  grid-row: 1;
+  align-self: center;
+  width: 1px;
+  height: 0.95rem;
+  background: color-mix(in srgb, var(--kd-line) 85%, var(--kd-text));
+  opacity: 0.9;
+}
+.kd-searchbar[data-stacked] .kd-searchbar-copy {
+  grid-column: 3;
   grid-row: 1;
 }
 .kd-searchbar[data-stacked] .kd-searchbar-tools {
   grid-column: 1;
   grid-row: 1;
   min-width: 0;
+}
+.kd-searchbar[data-stacked] .kd-searchbar-sep {
+  grid-column: 2;
+  grid-row: 1;
 }
 .kd-chrome-actions {
   display: inline-flex;
@@ -4704,12 +5135,23 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   cursor: pointer;
 }
 .kd-chrome-btn:hover {
-  color: var(--kd-text);
+  color: var(--kd-text-body);
   background: transparent;
 }
 .kd-chrome-btn[data-open="true"] {
-  color: var(--kd-text);
+  /* 开着也不骤变纯黑：图标形状已能区分开合，颜色保持柔和 */
+  color: var(--kd-muted);
   background: transparent;
+  box-shadow: none;
+}
+.kd-chrome-btn[data-open="true"]:hover {
+  color: var(--kd-text-body);
+}
+.kd-chrome-actions > .kd-chrome-btn[data-update="true"] {
+  color: var(--kd-theme);
+}
+.kd-chrome-btn[data-locked="true"] {
+  color: var(--kd-text-body);
 }
 .kd-chrome-btn:disabled {
   color: var(--kd-faint);
@@ -4730,11 +5172,11 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }
-/* 分隔线只画在"换了个话题"的地方：输入 │ 音质 │ 平台+提交 */
+/* 分隔线：平台来源与输入提示之间的细竖线 */
 .kd-searchbar-sep {
   width: 1px;
-  height: 1.15rem;
-  background: var(--kd-line);
+  height: 0.95rem;
+  background: color-mix(in srgb, var(--kd-line) 85%, var(--kd-text));
 }
 /* 音质是循环控件，不是下拉框。小标签说明它控制什么，大数字显示当前档位。 */
 .kd-searchbar-quality {
@@ -4874,7 +5316,7 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   min-width: 2rem;
 }
 
-.kd-app[data-columns="narrow"] .kd-section > form.kd-toolbar {
+.kd-app[data-portrait="true"] .kd-section > form.kd-toolbar {
   flex-wrap: nowrap;
   gap: 0.35rem;
   padding: 0.5rem 0.6rem;
@@ -4893,46 +5335,110 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   height: 1.85rem;
 }
 
-/* —— 单栏播放条拆成两行 —— */
-.kd-app[data-columns="narrow"] .kd-player {
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+/* —— 竖屏播放条固定三行：控制 / 双唱盘信息 / 波形 —— */
+.kd-app[data-portrait="true"] .kd-player {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   grid-template-areas:
-    "now go next"
-    "wave wave wave";
+    "controls controls"
+    "now next"
+    "wave wave";
   align-items: center;
-  gap: 0.4rem 0.6rem;
+  gap: 0.35rem 0.7rem;
+  min-height: 0;
   height: auto;
-  padding: 0.45rem 0.7rem calc(0.45rem + env(safe-area-inset-bottom, 0));
+  padding: 0.45rem 0.7rem calc(0.45rem + 4px + env(safe-area-inset-bottom, 0));
 }
-.kd-app[data-columns="narrow"] .kd-player-scrub {
+.kd-app[data-mobile="true"][data-portrait="true"] .kd-player {
+  padding: 0.5rem 0.7rem calc(1rem + max(env(safe-area-inset-bottom, 0px), 28px));
+}
+.kd-app[data-portrait="true"] .kd-player-transport {
+  grid-area: controls;
+  justify-self: center;
+}
+.kd-app[data-portrait="true"] .kd-player-leading,
+.kd-app[data-portrait="true"] .kd-player-trailing {
+  position: relative;
+  inset: auto;
+  width: auto;
+  height: auto;
+  min-height: 2.85rem;
+  min-width: 0;
+}
+.kd-app[data-portrait="true"] .kd-player-deck {
+  grid-template-columns: 3.15rem minmax(0, 1fr);
+  grid-template-rows: 1fr;
+  column-gap: 0.45rem;
+  align-items: center;
+}
+.kd-app[data-portrait="true"] .kd-player-deck[data-side="right"] {
+  grid-template-columns: minmax(0, 1fr) 3.15rem;
+}
+/* 桌面唱盘 disc 跨两行给波形留空；竖屏只有一行，再写 1 / 3 会撑出隐式行，
+   三行字（状态 / 标题 / 艺人）就被裁成一团。 */
+.kd-app[data-portrait="true"] .kd-player-deck[data-side="left"] .kd-player-disc,
+.kd-app[data-portrait="true"] .kd-player-deck[data-side="right"] .kd-player-disc,
+.kd-app[data-portrait="true"] .kd-player-deck[data-side="left"] .kd-player-deck-copy,
+.kd-app[data-portrait="true"] .kd-player-deck[data-side="right"] .kd-player-deck-copy {
+  grid-row: 1;
+}
+.kd-app[data-portrait="true"] .kd-player-deck-copy {
+  align-self: center;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 0.4rem;
+  row-gap: 0.08rem;
+}
+/* 竖屏：状态单独一行；曲名 + 艺人同一行，不再上下拆开。 */
+.kd-app[data-portrait="true"] .kd-player-deck-state {
+  flex: 1 0 100%;
+  margin-bottom: 0;
+}
+.kd-app[data-portrait="true"] .kd-player-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: block;
+}
+.kd-app[data-portrait="true"] .kd-player-artist {
+  flex: 0 1 auto;
+  max-width: 42%;
+  display: block;
+  min-height: 0;
+}
+.kd-app[data-portrait="true"] .kd-player-disc {
+  width: 3.05rem;
+  height: 3.05rem;
+}
+.kd-app[data-portrait="true"] .kd-player-disc-record {
+  width: 2.75rem;
+  height: 2.75rem;
+}
+.kd-app[data-portrait="true"] .kd-player-leading { grid-area: now; }
+.kd-app[data-portrait="true"] .kd-player-trailing { grid-area: next; }
+.kd-app[data-portrait="true"] .kd-player-scrub { grid-area: wave; }
+.kd-app[data-portrait="true"] .kd-player-scrub {
   grid-area: wave;
-  /* 窄屏不保留双唱盘的绝对区，波形应重新吃满可用宽度。 */
+  /* 竖屏不保留双唱盘的绝对区，波形应重新吃满可用宽度。 */
   margin-left: 0;
   margin-right: 0;
 }
-.kd-app[data-columns="narrow"] .kd-player-leading {
+.kd-app[data-portrait="true"] .kd-player-go {
   grid-area: auto;
 }
-.kd-app[data-columns="narrow"] .kd-player-go {
-  grid-area: auto;
-}
-.kd-app[data-columns="narrow"] .kd-player-transport {
-  grid-area: go;
+.kd-app[data-portrait="true"] .kd-player-transport {
   min-width: 0;
   max-width: 100%;
-  justify-content: flex-end;
   overflow-x: auto;
   scrollbar-width: none;
 }
-.kd-app[data-columns="narrow"] .kd-player-transport::-webkit-scrollbar {
+.kd-app[data-portrait="true"] .kd-player-transport::-webkit-scrollbar {
   display: none;
 }
-.kd-app[data-columns="narrow"] .kd-player-scrub > .kd-player-time {
+.kd-app[data-portrait="true"] .kd-player-scrub > .kd-player-time {
   display: block;
 }
-.kd-app[data-columns="narrow"] .kd-player > .kd-notice {
+.kd-app[data-portrait="true"] .kd-player > .kd-notice {
   grid-column: 1 / -1;
-  grid-row: 1;
 }
 
 /* 「正在播」那一块的三层都必须是块级。
@@ -5014,16 +5520,13 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   min-width: 44rem;
 }
 
-/* 排序层级标记。①是主键、②是副键，箭头才是方向——
-   两件事用两个符号，光靠一个箭头分不出"这列是主还是副"。 */
+/* 排序只显示方向箭头；主、副层级由交互状态保留，不再用 ①② 占据表头。
+   显式继承字号，避免符号使用不同字形时看起来忽大忽小。 */
 .kd-sort-mark {
   margin-left: 0.25rem;
-  color: var(--kd-theme);
-  font-weight: 700;
-}
-.kd-sort-mark[data-second="true"] {
   color: var(--kd-muted);
-  font-weight: 600;
+  font: inherit;
+  font-size: 1em;
 }
 
 /* 标题给左上角那个把手让出位置。只在可拖的槽位里让——
@@ -5045,15 +5548,86 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
    红色仍然只给中间那颗：播放是主动作，前后跳是它的附属。 */
 .kd-player-transport {
   grid-area: controls;
-  /* 两侧唱盘是绝对定位且 z-index:1；时间跟在控制键后，必须在它们上层，
-     否则宽一点时会看似被右唱盘吞掉。 */
   position: relative;
   z-index: 2;
-  flex: none;
+  width: min(30rem, 100%);
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 2.3rem minmax(0, 1fr);
+  align-items: center;
+  column-gap: 0.45rem;
+}
+/* 左右严格等宽，中间列因此永远落在整条控制区中心，不受时间文字或音量条宽度影响。 */
+.kd-player-transport-side {
+  min-width: 0;
   display: flex;
   align-items: center;
-  /* 只多放开一点；中间列仍按内容宽度参与网格，左右歌名会优先省略而不会相撞。 */
   gap: 0.25rem;
+}
+.kd-player-transport-side[data-side="left"] {
+  justify-content: flex-end;
+}
+.kd-player-transport-side[data-side="right"] {
+  justify-content: flex-start;
+}
+.kd-player-volume {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--kd-muted);
+}
+.kd-player-mute {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.kd-player-volume[data-muted="true"] .kd-player-mute {
+  color: var(--kd-theme);
+}
+.kd-player-volume > input[type="range"] {
+  appearance: none;
+  width: 4.5rem;
+  min-width: 3rem;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  touch-action: none;
+}
+/* 只有一根红/灰实线；透明命中区仍有 14px 高，拖起来不需要瞄准 2px 细线。 */
+.kd-player-volume > input[type="range"]::-webkit-slider-runnable-track {
+  height: 2px;
+  border: 0;
+  background: linear-gradient(
+    to right,
+    var(--kd-theme) 0 var(--kd-volume-fill),
+    var(--kd-line) var(--kd-volume-fill) 100%
+  );
+}
+.kd-player-volume > input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -6px;
+  border: 0;
+  border-radius: 0 !important;
+  background: transparent;
+  box-shadow: none;
+}
+.kd-player-go {
+  touch-action: manipulation;
+}
+.kd-player-wave input[type="range"] {
+  touch-action: none;
 }
 .kd-player-step {
   appearance: none;
@@ -5121,8 +5695,8 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   background: transparent;
 }
 
-/* ------------------------------------------------------------ DJ 配置面板
-   与曲目详情同一套 Panel / PanelStack：每组一块，可拖拽排序。
+/* ------------------------------------------------------------ 设置面板（接播 + 账号）
+   接播的四组配置收在同一个 Panel 里，组间只用小标签分节。
    选中态走主题红，避免整板灰阶「水墨」糊成一团。 */
 .kd-djp {
   display: flex;
@@ -5130,38 +5704,18 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   gap: 0.55rem;
   padding: 0.55rem 0.65rem 0.85rem;
 }
-.kd-djp .kd-panel-slot + .kd-panel-slot {
-  margin-top: 0.55rem;
-}
-.kd-djp-choices {
+.kd-djp-groups {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.3rem;
+  flex-direction: column;
+  gap: 0.55rem;
 }
-.kd-djp-choice {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  height: 1.7rem;
-  padding: 0 0.65rem;
-  border: 1px solid var(--kd-line);
-  background: var(--kd-panel-inset);
-  color: var(--kd-text-body);
-  font: inherit;
+.kd-djp-label {
+  display: block;
+  margin: 0 0 0.3rem;
   font-size: var(--kd-size-xs);
-  cursor: pointer;
+  color: var(--kd-muted);
 }
-.kd-djp-choice:hover {
-  color: var(--kd-text);
-  border-color: color-mix(in srgb, var(--kd-theme) 35%, var(--kd-line));
-  background: var(--kd-hover);
-}
-.kd-djp-choice[data-active="true"] {
-  border-color: var(--kd-theme);
-  background: var(--kd-theme);
-  color: var(--kd-theme-ink);
-  font-weight: 600;
-}
+/* 设置面板里：外观用互斥分段；接播用「文字 + 开关」；长度用拖动条。 */
 .kd-djp-intro,
 .kd-djp-note {
   margin: 0.45rem 0 0;
@@ -5169,47 +5723,187 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   line-height: 1.55;
   color: var(--kd-text-body);
 }
-.kd-djp-segs {
-  display: inline-flex;
-  align-items: center;
-  align-self: flex-start;
-  gap: 0;
-  margin: 0;
-  padding: 0;
-  border: 1px solid var(--kd-line);
-  background: var(--kd-panel-inset);
+.kd-djp-switch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
 }
-.kd-djp-segs > button {
+/* 整行可点：左侧名称，右侧「开/关」字态，不走滑钮形态。 */
+.kd-djp-toggle {
   appearance: none;
-  min-width: 2.2rem;
-  height: 1.55rem;
-  padding: 0 0.35rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  min-height: 1.85rem;
+  margin: 0;
+  padding: 0.2rem 0;
   border: none;
-  border-right: 1px solid var(--kd-line-soft);
   background: transparent;
-  color: var(--kd-text-body);
+  color: inherit;
   font: inherit;
-  font-size: var(--kd-size-xs);
+  text-align: left;
   cursor: pointer;
-  white-space: nowrap;
+  -webkit-app-region: no-drag;
 }
-.kd-djp-segs > button:last-of-type {
-  border-right: none;
-}
-.kd-djp-segs > span {
-  padding: 0 0.45rem;
-  border-left: 1px solid var(--kd-line);
+.kd-djp-toggle-label {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--kd-muted);
   font-size: var(--kd-size-xs);
+  line-height: 1.35;
 }
-.kd-djp-segs > button:hover {
+.kd-djp-toggle-state {
+  flex: none;
+  min-width: 1.5rem;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-align: right;
+  transition: color 0.12s ease;
+}
+.kd-djp-toggle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.kd-djp-toggle:disabled:hover .kd-djp-toggle-label,
+.kd-djp-toggle:disabled:hover .kd-djp-toggle-state {
+  color: var(--kd-muted);
+}
+/* 外观主题：太阳 / 月亮 / 系统，选中用各自语义色，不用品牌红。 */
+.kd-djp-theme {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  -webkit-app-region: no-drag;
+}
+.kd-djp-theme-btn {
+  appearance: none;
+  width: 1.85rem;
+  height: 1.85rem;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--kd-faint);
+  cursor: pointer;
+}
+.kd-djp-theme-btn:hover {
+  color: var(--kd-text);
   background: var(--kd-hover);
+}
+.kd-djp-theme-btn[aria-checked="true"][data-theme="light"] {
+  color: #d97706;
+}
+.kd-djp-theme-btn[aria-checked="true"][data-theme="dark"] {
+  color: #64748b;
+}
+.kd-djp-theme-btn[aria-checked="true"][data-theme="system"] {
   color: var(--kd-text);
 }
-.kd-djp-segs > button[data-on="true"] {
-  color: var(--kd-theme-ink);
-  background: var(--kd-theme);
+/* 黑白模式旧文字互斥（其它地方若还用）。 */
+.kd-djp-choice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.85rem;
+  -webkit-app-region: no-drag;
+}
+.kd-djp-choice-btn {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  line-height: 1.3;
+  cursor: pointer;
+}
+.kd-djp-choice-btn:hover {
+  color: var(--kd-text);
+}
+.kd-djp-choice-btn[aria-checked="true"] {
+  color: var(--kd-text);
   font-weight: 700;
+}
+.kd-djp-slider-block {
+  -webkit-app-region: no-drag;
+}
+.kd-djp-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+.kd-djp-slider-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+/* 与播放条音量一致：一根 2px 红/灰线，无可见滑块。 */
+.kd-djp-slider {
+  --kd-djp-fill: 0%;
+  position: relative;
+  width: 100%;
+  height: 14px;
+  outline: none;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  -webkit-app-region: no-drag;
+}
+.kd-djp-slider-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 2px;
+  margin-top: -1px;
+  border-radius: 0 !important;
+  background: linear-gradient(
+    to right,
+    var(--kd-theme) 0 var(--kd-djp-fill),
+    var(--kd-line) var(--kd-djp-fill) 100%
+  );
+  pointer-events: none;
+}
+.kd-djp-slider:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--kd-theme-soft);
+}
+.kd-djp-slider-value {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.05rem;
+  min-width: 5.2rem;
+  max-width: 8.5rem;
+  color: var(--kd-text);
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: right;
+}
+.kd-djp-slider-value > small {
+  color: var(--kd-faint);
+  font-size: 0.65rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.kd-djp-slider-ticks {
+  display: flex;
+  justify-content: space-between;
+  color: var(--kd-faint);
+  font-size: 0.65rem;
 }
 .kd-djp-number {
   display: flex;
@@ -5221,41 +5915,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   width: 5.5rem;
   margin-left: auto;
   text-align: right;
-}
-.kd-djp-check {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: 0.78rem;
-  color: var(--kd-text);
-  cursor: pointer;
-  padding: 0.15rem 0;
-}
-.kd-djp-check > input {
-  position: absolute;
-  opacity: 0;
-  width: 1px;
-  height: 1px;
-  pointer-events: none;
-}
-.kd-djp-check-box {
-  width: 0.95rem;
-  height: 0.95rem;
-  flex: none;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--kd-line);
-  background: var(--kd-panel-inset);
-  color: transparent;
-}
-.kd-djp-check-box[data-on="true"] {
-  border-color: var(--kd-theme);
-  background: var(--kd-theme);
-  color: var(--kd-theme-ink);
-}
-.kd-djp-check:hover .kd-djp-check-box {
-  border-color: var(--kd-theme);
 }
 
 /* ============================================================

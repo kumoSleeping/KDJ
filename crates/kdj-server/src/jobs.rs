@@ -89,6 +89,205 @@ pub fn spawn_scan(state: Arc<AppState>, paths: Vec<String>, recursive: bool, ana
     job_id
 }
 
+#[derive(Default)]
+pub struct MaintenanceRegistry {
+    folder_metadata: std::sync::Mutex<Option<String>>,
+    waveform: std::sync::Mutex<Option<String>>,
+}
+
+impl MaintenanceRegistry {
+    fn claim(slot: &std::sync::Mutex<Option<String>>, proposed: String) -> (String, bool) {
+        let mut active = slot.lock().expect("maintenance registry");
+        if let Some(existing) = active.as_ref() {
+            return (existing.clone(), false);
+        }
+        *active = Some(proposed.clone());
+        (proposed, true)
+    }
+
+    fn finish(slot: &std::sync::Mutex<Option<String>>, job_id: &str) {
+        let mut active = slot.lock().expect("maintenance registry");
+        if active.as_deref() == Some(job_id) {
+            *active = None;
+        }
+    }
+
+    fn claim_folder(&self, proposed: String) -> (String, bool) {
+        Self::claim(&self.folder_metadata, proposed)
+    }
+
+    fn finish_folder(&self, job_id: &str) {
+        Self::finish(&self.folder_metadata, job_id);
+    }
+
+    fn claim_waveform(&self, proposed: String) -> (String, bool) {
+        Self::claim(&self.waveform, proposed)
+    }
+
+    fn finish_waveform(&self, job_id: &str) {
+        Self::finish(&self.waveform, job_id);
+    }
+}
+
+/// 把旧 `.kdj.json` 升级到每层目录自己的 `.kdj/manifest.json`。
+///
+/// 由前端在 WebSocket 连好之后显式启动，所以进度不会丢在“还没人订阅”的窗口里。
+/// 单个只读目录失败只记在最终 error，其他目录继续迁；任何失败路径都保留旧文件。
+pub fn spawn_folder_manifest_upgrade(state: Arc<AppState>) -> String {
+    let (job_id, claimed) = state.maintenance.claim_folder(new_job_id());
+    if !claimed {
+        return job_id;
+    }
+    let job = job_id.clone();
+    let roots = kdj_library::folders::resolve_roots(&state.config.to_settings().library_dirs);
+    tokio::task::spawn_blocking(move || {
+        let hub = state.hub.clone();
+        if roots.is_empty() {
+            hub.publish(
+                "maintenance.progress",
+                &json!({
+                    "job_id": job, "kind": "folder_metadata", "done": 0, "total": 0,
+                    "current": "", "phase": "done", "error": null
+                }),
+            );
+            state.maintenance.finish_folder(&job);
+            return;
+        }
+
+        let mut completed = 0;
+        let mut directory_total = 0;
+        let report = kdj_library::folders::upgrade_manifests(&roots, |done, total, current| {
+            completed = done;
+            directory_total = total;
+            hub.publish(
+                "maintenance.progress",
+                &json!({
+                    "job_id": job, "kind": "folder_metadata", "done": done, "total": total,
+                    "current": current.to_string_lossy(), "phase": "migrate", "error": null
+                }),
+            );
+        });
+        let error = if report.failed == 0 {
+            None
+        } else {
+            let preview = report
+                .errors
+                .iter()
+                .take(3)
+                .map(|(path, reason)| format!("{}：{}", path, reason))
+                .collect::<Vec<_>>()
+                .join("；");
+            Some(format!("{} 个文件夹升级失败。{}", report.failed, preview))
+        };
+        hub.publish(
+            "maintenance.progress",
+            &json!({
+                "job_id": job, "kind": "folder_metadata",
+                "done": completed, "total": directory_total, "current": "",
+                "phase": "done", "error": error,
+                "changed": report.changed, "failed": report.failed
+            }),
+        );
+        tracing::info!(
+            "文件夹元数据升级结束：更新 {}，失败 {}",
+            report.changed,
+            report.failed
+        );
+        state.maintenance.finish_folder(&job);
+    });
+    job_id
+}
+
+/// 给旧曲库补齐固定 640 列波形。缓存命中只读一份小 `.kdwave`；缺失时单线程逐首算，
+/// 不抢播放器的交互优先权。错误集中留在活动栏，坏文件不会让整批中断。
+pub fn spawn_waveform_backfill(state: Arc<AppState>) -> String {
+    let (job_id, claimed) = state.maintenance.claim_waveform(new_job_id());
+    if !claimed {
+        return job_id;
+    }
+    let job = job_id.clone();
+    tokio::spawn(async move {
+        let hub = state.hub.clone();
+        let candidates = match state.library.waveform_candidates(
+            crate::waveform::CANONICAL_WAVEFORM_PROFILE,
+            crate::waveform::CANONICAL_WAVEFORM_REVISION,
+        ) {
+            Ok(items) => items,
+            Err(err) => {
+                hub.publish(
+                    "maintenance.progress",
+                    &json!({
+                        "job_id": job, "kind": "waveform", "done": 0, "total": 0,
+                        "current": "", "phase": "done", "error": format!("读取波形待办失败：{err:#}")
+                    }),
+                );
+                state.maintenance.finish_waveform(&job);
+                return;
+            }
+        };
+        let total = candidates.len();
+        let cache_dir = state.config.data_dir.join("waveform");
+        let mut errors: Vec<String> = Vec::new();
+        hub.publish(
+            "maintenance.progress",
+            &json!({
+                "job_id": job, "kind": "waveform", "done": 0, "total": total,
+                "current": "", "phase": "prepare", "error": null
+            }),
+        );
+        for (index, (track_id, raw_path)) in candidates.into_iter().enumerate() {
+            let path = std::path::PathBuf::from(&raw_path);
+            let current = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or(raw_path);
+            if !path.is_file() {
+                let message = "文件不存在";
+                let _ = state.library.record_waveform_asset(
+                    track_id,
+                    crate::waveform::CANONICAL_WAVEFORM_PROFILE,
+                    crate::waveform::CANONICAL_WAVEFORM_REVISION,
+                    0,
+                    Some(message),
+                );
+                errors.push(format!("{current}：{message}"));
+            } else if let Err(err) = state
+                .waveforms
+                .prepare_default(track_id, path, cache_dir.clone())
+                .await
+            {
+                errors.push(format!("{current}：{err:#}"));
+            }
+            hub.publish(
+                "maintenance.progress",
+                &json!({
+                    "job_id": job, "kind": "waveform", "done": index + 1, "total": total,
+                    "current": current, "phase": "prepare", "error": null
+                }),
+            );
+        }
+        let error = if errors.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "{} 首波形准备失败。{}",
+                errors.len(),
+                errors.iter().take(3).cloned().collect::<Vec<_>>().join("；")
+            ))
+        };
+        hub.publish(
+            "maintenance.progress",
+            &json!({
+                "job_id": job, "kind": "waveform", "done": total, "total": total,
+                "current": "", "phase": "done", "error": error, "failed": errors.len()
+            }),
+        );
+        tracing::info!("波形补齐结束：共 {total} 首，失败 {}", errors.len());
+        state.maintenance.finish_waveform(&job);
+    });
+    job_id
+}
+
 /// 分析是 CPU 密集的（解码 + FFT），worker 开多了会把机器压满，
 /// 表现是 UI 掉帧、下载速度也跟着掉。固定 2 个。
 const ANALYSIS_WORKERS: usize = 2;
@@ -138,6 +337,12 @@ impl Drop for AnalysisPermit<'_> {
 }
 
 static ANALYSIS_GATE: AnalysisGate = AnalysisGate::new(ANALYSIS_WORKERS);
+
+/// 波形预热也属于后台 FFT 工作，必须和 BPM 分析共用这两个额度；否则“分析 2 条”
+/// 之外再偷偷跑一条波形，原本的全局上限就失效了。交互波形不走这里。
+pub(crate) fn acquire_background_analysis_permit() -> impl Drop {
+    ANALYSIS_GATE.acquire()
+}
 
 /// 交互路径（波形）占用时 > 0。分析线程在**歌与歌之间**看到它就让路，
 /// 不会去抢分析闸门（抢闸门会把自己堵在当前那两首的长解码后面）。
@@ -336,19 +541,14 @@ pub fn spawn_analysis(state: Arc<AppState>, track_ids: Vec<i64>, priority: bool)
                             tracing::warn!("保存分析结果失败 {track_id}：{err:#}");
                             continue;
                         }
-                        // 异步预热默认档波形：不占分析闸门，避免拖慢 BPM；
-                        // 播到这首时缓存多半已经写好。
-                        {
-                            let warm_path = path.clone();
-                            let warm_dir = state.config.data_dir.join("waveform");
-                            let _ = std::thread::Builder::new()
-                                .name("wave-warm".into())
-                                .spawn(move || {
-                                    crate::waveform::warm_default_cache(
-                                        track_id, &warm_path, &warm_dir,
-                                    );
-                                });
-                        }
+                        // 固定单 worker 预热默认波形。忙时排队而不是像旧 BUSY 实现那样
+                        // 直接丢掉，批量分析完成后每首歌最终都会有持久缓存。
+                        state.waveforms.enqueue_default(
+                            track_id,
+                            path.clone(),
+                            state.config.data_dir.join("waveform"),
+                            false,
+                        );
                         if write_tags {
                             let _ = kdj_providers::tags::write_analysis_tags(
                                 &path,
@@ -402,6 +602,18 @@ pub fn spawn_analysis(state: Arc<AppState>, track_ids: Vec<i64>, priority: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_jobs_are_singleflight_per_kind() {
+        let registry = MaintenanceRegistry::default();
+        assert_eq!(registry.claim_folder("folder-a".into()), ("folder-a".into(), true));
+        assert_eq!(registry.claim_folder("folder-b".into()), ("folder-a".into(), false));
+        assert_eq!(registry.claim_waveform("wave-a".into()), ("wave-a".into(), true));
+        registry.finish_folder("wrong-id");
+        assert_eq!(registry.claim_folder("folder-c".into()), ("folder-a".into(), false));
+        registry.finish_folder("folder-a");
+        assert_eq!(registry.claim_folder("folder-c".into()), ("folder-c".into(), true));
+    }
 
     /// 登记一个批次，并把它的 done 计数器一并返回，方便测试里推进进度。
     fn register(

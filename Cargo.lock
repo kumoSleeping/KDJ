@@ -2318,7 +2318,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-analysis"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "kdj-core",
@@ -2333,10 +2333,11 @@ dependencies = [
 
 [[package]]
 name = "kdj-app"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "kdj-core",
+ "kdj-library",
  "kdj-server",
  "rand 0.10.2",
  "serde",
@@ -2354,7 +2355,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-core"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "directories",
@@ -2367,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-library"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2388,7 +2389,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-providers"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "aes",
  "anyhow",
@@ -2422,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-server"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "axum",

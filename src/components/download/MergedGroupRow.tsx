@@ -1,5 +1,5 @@
 import { Fragment, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Check, Copy, Play } from "lucide-react";
+import { ChevronDown, ChevronRight, Check, Copy, Download, Play } from "lucide-react";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { api } from "../../lib/api";
 import { requestSongPreview } from "../../lib/songPreview";
@@ -38,6 +38,8 @@ export interface MergedGroupRowProps {
   onEnterSelection(): void;
   onToggleExpand(): void;
   onPickSource(index: number): void;
+  /** 把当前选中来源直接丢进下载队列，省掉先勾选再找顶栏。 */
+  onDownload(): void;
   onDragStart?(event: React.DragEvent<HTMLElement>): void;
   onDragEnd?(): void;
 }
@@ -60,6 +62,7 @@ export function MergedGroupRow({
   onEnterSelection,
   onToggleExpand,
   onPickSource,
+  onDownload,
   onDragStart,
   onDragEnd,
 }: MergedGroupRowProps) {
@@ -208,24 +211,45 @@ export function MergedGroupRow({
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
           onDragEnd={selectable ? onDragEnd : undefined}
-          style={{ width: "1.6rem" }}
+          className="kd-result-lead"
         >
-          {multi && (
-            <button
-              type="button"
-              className="kd-btn kd-btn-icon"
-              data-variant="ghost"
-              data-size="sm"
-              aria-label={expanded ? "收起来源" : "展开来源"}
-              aria-expanded={expanded}
-              onClick={(event) => {
-                event.stopPropagation();
-                onToggleExpand();
-              }}
-            >
-              {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-            </button>
-          )}
+          {/* 下载在前、展开在后：窄屏上这两颗键常被表头 1.6rem + 左右 padding 裁掉，
+              单独给一列够宽的动作格，别再吃通用 td 的 0.6rem 内边距。 */}
+          <span className="kd-result-lead-actions">
+            {selectable ? (
+              <button
+                type="button"
+                className="kd-result-lead-btn"
+                aria-label={`下载 ${group.title}`}
+                title="加入下载队列"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onDownload();
+                }}
+              >
+                <Download size={13} />
+              </button>
+            ) : (
+              <span className="kd-result-lead-spacer" aria-hidden="true" />
+            )}
+            {multi ? (
+              <button
+                type="button"
+                className="kd-result-lead-btn"
+                aria-label={expanded ? "收起来源" : "展开来源"}
+                aria-expanded={expanded}
+                title={expanded ? "收起来源" : "展开来源"}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onToggleExpand();
+                }}
+              >
+                {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+              </button>
+            ) : (
+              <span className="kd-result-lead-spacer" aria-hidden="true" />
+            )}
+          </span>
         </td>
         <td
           draggable={selectable}
@@ -246,6 +270,7 @@ export function MergedGroupRow({
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
           onDragEnd={selectable ? onDragEnd : undefined}
+          data-col="artist"
           title={group.artists.join(", ")}
         >
           {group.artists.join(", ") || DASH}
@@ -254,7 +279,7 @@ export function MergedGroupRow({
           draggable={selectable}
           onDragStart={selectable ? onDragStart : undefined}
           onDragEnd={selectable ? onDragEnd : undefined}
-          className="kd-muted"
+          data-col="album"
           title={group.album}
         >
           {group.album || DASH}
@@ -376,6 +401,18 @@ export function MergedGroupRow({
             <Copy size={12} />
             复制标题
           </button>
+          {selectable && (
+            <button
+              type="button"
+              onClick={() => {
+                onDownload();
+                setRowMenu(null);
+              }}
+            >
+              <Download size={12} />
+              加入下载队列
+            </button>
+          )}
           {selectable && (
             <button
               type="button"

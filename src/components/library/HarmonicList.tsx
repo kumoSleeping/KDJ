@@ -3,6 +3,7 @@ import { Check, FolderOpen, Library, ListMusic, ListStart, LoaderCircle, Play } 
 import { api } from "../../lib/api";
 import { formatBpm } from "../../lib/format";
 import { useHarmonicScope } from "../../lib/harmonicScope";
+import { isOutsideFolder } from "../../lib/outsideFolder";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import { endTrackDrag, writeTrackDragData } from "../../lib/trackDrag";
 import { useLibraryStore } from "../../stores/libraryStore";
@@ -42,8 +43,8 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
   const folder = useLibraryStore((state) => state.filter.folder);
   const queueCount = useQueueStore((state) => state.ids.length);
   // 没选文件夹时「当前文件夹」等价于全库——与其给一个点了没反应的开关，
-  // 不如让它退回全库并在按钮上说清楚
-  const activeFolder = scope === "folder" ? folder : "";
+  // 不如让它退回全库并在按钮上说清楚。「其他」也不是真实目录，同样退回全库。
+  const activeFolder = scope === "folder" && !isOutsideFolder(folder) ? folder : "";
   const selected = new Set(selectedIds);
 
   useEffect(() => {

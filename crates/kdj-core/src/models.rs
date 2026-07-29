@@ -738,7 +738,7 @@ pub struct FolderNode {
     pub pending_count: i64,
     pub children: Vec<FolderNode>,
     pub is_root: bool,
-    /// 目录里有 .kdj.json（顺序已受管），false = 还没初始化，按名字排
+    /// 目录里有可用的 .kdj/manifest.json（兼容旧 .kdj.json），false = 按名字排
     pub managed: bool,
 }
 
@@ -812,7 +812,7 @@ pub struct FolderMoveRequest {
     pub dest_parent: String,
 }
 
-/// 把 path 下的子目录顺序改成 names 给的顺序，落进 path/.kdj.json。
+/// 把 path 下的子目录顺序改成 names 给的顺序，落进 path/.kdj/manifest.json。
 #[derive(Debug, Clone, Deserialize)]
 pub struct FolderOrderRequest {
     pub path: String,
@@ -820,7 +820,7 @@ pub struct FolderOrderRequest {
     pub names: Vec<String>,
 }
 
-/// 给 path 及其子目录补上 .kdj.json。省略 path = 所有曲库根。
+/// 给 path 及其子目录补上 .kdj/manifest.json。省略 path = 所有曲库根。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct FolderInitRequest {
     #[serde(default)]

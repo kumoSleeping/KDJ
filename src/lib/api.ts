@@ -215,6 +215,8 @@ export const api = {
   /** 从软件移出文件夹：摘掉库记录 / 曲库根登记，磁盘文件不动。 */
   forgetFolder: (path: string) => post<FolderForgetResult>("/library/folders/forget", { path }),
   initFolders: (path = "") => post<FolderTree>("/library/folders/init", { path }),
+  upgradeFolders: () => post<{ job_id: string }>("/library/folders/upgrade", {}),
+  upgradeWaveforms: () => post<{ job_id: string }>("/library/waveforms/upgrade", {}),
   moveFolder: (path: string, destParent: string) =>
     post<FolderTree>("/library/folders/move", { path, dest_parent: destParent }),
   orderFolder: (path: string, names: string[]) =>
