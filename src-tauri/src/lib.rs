@@ -134,6 +134,86 @@ fn reveal_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
+/// 登录二维码落盘结果。电脑进「下载」，手机进「图片/相册」目录。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedLoginQr {
+    path: String,
+    /// `downloads` | `pictures`
+    location: &'static str,
+}
+
+/// 把登录二维码 PNG（data URL）写到本机，方便用另一台设备扫。
+///
+/// - 桌面：系统「下载」目录
+/// - 手机：系统「图片」目录（相册里能直接挑到）
+#[tauri::command]
+fn save_login_qr(platform: String, label: String, image: String) -> Result<SavedLoginQr, String> {
+    let png = decode_png_data_url(&image)?;
+    let (dir, location) = login_qr_save_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|err| format!("创建目录失败：{err}"))?;
+
+    let safe_label = sanitize_filename(if label.trim().is_empty() {
+        platform.as_str()
+    } else {
+        label.trim()
+    });
+    // 固定文件名：换一张就覆盖，下载/相册里不会堆一堆过期码。
+    let path = dir.join(format!("KDJ-登录二维码-{safe_label}.png"));
+    std::fs::write(&path, png).map_err(|err| format!("写入二维码失败：{err}"))?;
+
+    Ok(SavedLoginQr {
+        path: path.to_string_lossy().into_owned(),
+        location,
+    })
+}
+
+fn decode_png_data_url(image: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    let payload = image
+        .strip_prefix("data:image/png;base64,")
+        .or_else(|| image.strip_prefix("data:image/PNG;base64,"))
+        .ok_or_else(|| "二维码不是 PNG 图片".to_string())?;
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|err| format!("解码二维码失败：{err}"))
+}
+
+/// 文件名里去掉路径分隔符和明显的非法字符，避免写到奇怪位置。
+fn sanitize_filename(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.');
+    if trimmed.is_empty() {
+        "login".into()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn login_qr_save_dir() -> Result<(PathBuf, &'static str), String> {
+    // 手机：进图片目录，相册/图库一般能直接扫到；桌面：进下载，最容易找到。
+    #[cfg(target_os = "android")]
+    {
+        Ok((PathBuf::from("/storage/emulated/0/Pictures/KDJ"), "pictures"))
+    }
+    #[cfg(target_os = "ios")]
+    {
+        // iOS 沙盒写不进系统相册；先落到下载目录，仍可用「打开」定位文件。
+        Ok((kdj_core::config::system_download_dir(), "downloads"))
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        Ok((kdj_core::config::system_download_dir(), "downloads"))
+    }
+}
+
 /// 用系统浏览器开外链（Release 下载页）。只放行 http(s)——
 /// opener 什么 scheme 都肯开，file:// 之类的从网页侧透进来就是提权。
 #[tauri::command]
@@ -397,8 +477,8 @@ fn position_desktop_lyrics(
 
 fn desktop_lyrics_inner_size(font_scale: f64) -> (f64, f64) {
     let scale = font_scale.clamp(1.0, 3.0);
-    // 基准 680×92；高度随字号涨，避免 300% 时被窗口裁切。
-    let width = (680.0 * (0.92 + 0.08 * scale)).clamp(420.0, 960.0);
+    // 基准 900×92；宽度比旧 680 更充裕，避免长歌词（尤其是 CJK）被省略号截断。
+    let width = (900.0 * (0.92 + 0.08 * scale)).clamp(520.0, 1200.0);
     let height = (48.0 + 44.0 * scale).clamp(76.0, 220.0);
     (width, height)
 }
@@ -726,6 +806,7 @@ pub fn run() {
         get_bridge_info,
         open_path,
         reveal_path,
+        save_login_qr,
         open_external,
         check_desktop_update,
         get_update_progress,
@@ -743,6 +824,7 @@ pub fn run() {
         get_bridge_info,
         open_path,
         reveal_path,
+        save_login_qr,
         open_external,
         check_desktop_update,
         get_update_progress,

@@ -38,6 +38,7 @@ import {
   RESULT_LEAD_WIDTH,
   type ResultColumn,
 } from "./resultColumns";
+import type { LayoutMode } from "../../lib/useLayoutMode";
 
 const KIND_LABEL: Record<IntakeKind, string> = {
   search: "搜索",
@@ -75,6 +76,8 @@ export interface ResultTableProps {
   loading: boolean;
   /** 已处理过一次（用来区分"还没搜"和"搜了没结果"）。 */
   searched: boolean;
+  /** 当前布局档位，决定搜索结果行的单击/双击播放行为。 */
+  layout: LayoutMode;
   selected: Set<string>;
   selectionMode: boolean;
   onSelectionModeChange(value: boolean): void;
@@ -103,6 +106,7 @@ export function ResultTable({
   video,
   loading,
   searched,
+  layout,
   selected,
   selectionMode,
   onSelectionModeChange,
@@ -339,6 +343,7 @@ export function ResultTable({
               info={video}
               columns={visibleColumns}
               totalColumns={totalColumns}
+              layout={layout}
             />
           )}
           {items.map((item, index) => {
@@ -359,6 +364,7 @@ export function ResultTable({
                       {...videoSeedFromGroup(group)}
                       columns={visibleColumns}
                       totalColumns={totalColumns}
+                      layout={layout}
                     />
                   ) : (
                     <MergedGroupRow
@@ -377,6 +383,7 @@ export function ResultTable({
                       onToggleExpand={() => onToggleExpand(group.group_id)}
                       onPickSource={(sourceIdx) => onPickSource(group.group_id, sourceIdx)}
                       onDownload={() => onDownloadGroup(group)}
+                      layout={layout}
                       onDragStart={(event) => {
                         const currentKey = selectionKey(index, group.group_id);
                         const draggingSelection = selected.has(currentKey);

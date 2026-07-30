@@ -1,10 +1,7 @@
 import {
-  ArrowUpCircle,
   Download,
-  LockKeyhole,
-  PanelRightClose,
-  PanelRightOpen,
   Settings,
+  Upload,
 } from "lucide-react";
 import { useUpdateStore } from "../../stores/updateStore";
 
@@ -16,33 +13,19 @@ export interface ChromeActionsProps {
   queueOpen: boolean;
   queueCount: number;
   onQueue(): void;
-  /** 横屏保留右栏开关；竖屏内容走抽屉，不显示这颗按钮。 */
-  showAsideToggle?: boolean;
-  asideState: AsideToggleState;
-  onAsideToggle(): void;
 }
 
-/** 主栏顶部右侧的设置、下载及横屏侧栏入口。 */
+/** 主栏顶部右侧的设置、下载入口。右栏收起按钮已移到右栏头部。 */
 export function ChromeActions({
   settingsOpen,
   onSettings,
   queueOpen,
   queueCount,
   onQueue,
-  showAsideToggle = true,
-  asideState,
-  onAsideToggle,
 }: ChromeActionsProps) {
   const updateReady = useUpdateStore((s) => Boolean(s.info?.newer));
   const latest = useUpdateStore((s) => s.info?.latest ?? "");
   const openUpdateSection = useUpdateStore((s) => s.openUpdateSection);
-
-  const asideLabel =
-    asideState === "open"
-      ? "关闭右侧栏"
-      : asideState === "closed"
-        ? "锁定右侧栏自动展开"
-        : "解除右侧栏锁定";
 
   return (
     <div className="kd-chrome-actions" role="group" aria-label="顶栏工具">
@@ -56,10 +39,9 @@ export function ChromeActions({
           data-open={settingsOpen || undefined}
           onClick={openUpdateSection}
         >
-          <ArrowUpCircle size={16} />
-          <span className="kd-chrome-badge" aria-hidden="true">
-            新
-          </span>
+          {/* 经典「上箭头 + 底框」升级形；灰色，有更新只靠角点提示。 */}
+          <Upload size={16} />
+          <span className="kd-chrome-dot" aria-hidden="true" />
         </button>
       ) : null}
       <button
@@ -89,26 +71,6 @@ export function ChromeActions({
           </span>
         )}
       </button>
-      {showAsideToggle && (
-        <button
-          type="button"
-          className="kd-chrome-btn"
-          aria-label={asideLabel}
-          aria-pressed={asideState !== "closed"}
-          data-open={asideState === "open" || undefined}
-          data-locked={asideState === "locked" || undefined}
-          title={asideLabel}
-          onClick={onAsideToggle}
-        >
-          {asideState === "open" ? (
-            <PanelRightClose size={16} />
-          ) : asideState === "closed" ? (
-            <PanelRightOpen size={16} />
-          ) : (
-            <LockKeyhole size={15} />
-          )}
-        </button>
-      )}
     </div>
   );
 }

@@ -145,7 +145,7 @@ export function AccountRow({ account }: { account: Account }) {
     setNotice("");
     try {
       await api.logout(account.platform);
-      // 成功不用报：这一行的状态当场从"已登录"变成"未登录"，按钮也换成扫码登录
+      // 成功不用报：这一行的状态当场从"已登录"变成"未登录"，按钮也换成保存登录二维码
       await refreshAccounts();
     } catch (error) {
       setNotice(`退出失败：${(error as Error).message}`);
@@ -207,7 +207,7 @@ export function AccountRow({ account }: { account: Account }) {
           </Button>
         ) : (
           <Button size="sm" variant="ghost" onClick={() => setShowQr(true)}>
-            扫码登录
+            保存登录二维码
           </Button>
         )}
       </div>

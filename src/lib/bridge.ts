@@ -3,7 +3,7 @@
  * Electron 已停用，不再探测或兼容它的 preload 全局对象。
  */
 
-import type { KdjBridge, UpdateInfo, UpdateProgress } from "../types";
+import type { KdjBridge, SavedLoginQr, UpdateInfo, UpdateProgress } from "../types";
 import { djEngine } from "./djMix";
 
 declare global {
@@ -74,6 +74,12 @@ async function createTauriBridge(): Promise<KdjBridge> {
     ...info,
     openPath: (path: string) => tauriInvoke<void>("open_path", { path }),
     revealPath: (path: string) => tauriInvoke<void>("reveal_path", { path }),
+    saveLoginQr: (options) =>
+      tauriInvoke<SavedLoginQr>("save_login_qr", {
+        platform: options.platform,
+        label: options.label,
+        image: options.image,
+      }),
     openExternal: (url: string) => tauriInvoke<void>("open_external", { url }),
     // 检查也必须走 updater 本身，不能先问 GitHub releases/latest：Release 先建、
     // 三平台包后到的窗口里，后者会谎报"可更新"，真正安装时才发现 latest.json
@@ -154,6 +160,15 @@ function createBrowserBridge(): KdjBridge {
     },
     revealPath: async (path: string) => {
       console.info("[browser] revealPath", path);
+    },
+    saveLoginQr: async ({ platform, label, image }) => {
+      const safe = (label.trim() || platform).replace(/[\\/:*?"<>|]/g, "-");
+      const filename = `KDJ-登录二维码-${safe}.png`;
+      const anchor = document.createElement("a");
+      anchor.href = image;
+      anchor.download = filename;
+      anchor.click();
+      return { path: filename, location: "downloads" };
     },
     pickFolder: async () => window.prompt("输入要添加的目录绝对路径") || null,
     pickFolders: async () => {

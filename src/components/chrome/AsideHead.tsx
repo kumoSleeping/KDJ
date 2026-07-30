@@ -1,3 +1,5 @@
+import { PanelRightClose } from "lucide-react";
+
 export type TrackAsideFace = "detail" | "lyrics";
 
 export interface AsideFaceSwitchProps {
@@ -41,13 +43,15 @@ export interface AsideHeadProps {
   /** 歌词模式下详情 / 歌词双极切换；有值时替代纯标题。 */
   face?: TrackAsideFace;
   onFaceChange?: (face: TrackAsideFace) => void;
+  /** 点击关闭按钮收起右栏；提供时渲染右上角关闭按钮。 */
+  onClose?(): void;
 }
 
 /**
  * 右栏眉目：可拖窗口 + 当前面板标题（或详情/歌词分段）。
  * 开关固定在分析工作条右端，不随右栏出现/消失而换位置。
  */
-export function AsideHead({ title, face, onFaceChange }: AsideHeadProps) {
+export function AsideHead({ title, face, onFaceChange, onClose }: AsideHeadProps) {
   const bipolar = Boolean(face && onFaceChange);
 
   return (
@@ -66,6 +70,17 @@ export function AsideHead({ title, face, onFaceChange }: AsideHeadProps) {
         <span className="kd-aside-head-title">{title}</span>
       ) : null}
       <span className="kd-aside-head-drag" data-tauri-drag-region aria-hidden="true" />
+      {onClose && (
+        <button
+          type="button"
+          className="kd-aside-head-close"
+          aria-label="收起右侧栏"
+          title="收起右侧栏"
+          onClick={onClose}
+        >
+          <PanelRightClose size={14} />
+        </button>
+      )}
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import { PanelRightClose } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 export interface SheetProps {
@@ -65,6 +66,16 @@ export function Sheet({ open, title, heading, onClose, children }: SheetProps) {
           }}
         >
           {heading ?? <span className="kd-sheet-title">{title}</span>}
+          <button
+            type="button"
+            className="kd-sheet-close"
+            aria-label="收起右侧栏"
+            title="收起右侧栏"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={onClose}
+          >
+            <PanelRightClose size={14} />
+          </button>
         </div>
         <div className="kd-sheet-body kd-scroll">{children}</div>
       </div>

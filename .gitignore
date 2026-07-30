@@ -24,3 +24,13 @@ data/
 # 和 target/ 一样属于可重建产物
 src-tauri/gen/
 src-tauri/target/
+
+# Agent / tool / dev scratch
+.pi-subagents/
+.playwright-cli/
+.tmp/
+artifacts/
+dev/
+output/
+div.kd-player-wave
+sidecar/kumodeck.egg-info/

@@ -12,6 +12,8 @@ import type { MergedGroup, VideoDownloadRequest, VideoInfo } from "../../types";
 import { ContextMenu, InlineNotice } from "../common";
 import { PlatformMark } from "./PlatformMark";
 import { requestVideoPreview } from "./VideoPreview";
+import { useTrackClickPrefs, playClickForLayout } from "../../lib/trackClickPrefs";
+import type { LayoutMode } from "../../lib/useLayoutMode";
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -77,6 +79,8 @@ export interface VideoResultRowProps extends VideoSeed {
   columns: ReadonlyArray<{ key: string; align?: "num" }>;
   /** 整行单元格总数（勾选 + 动作 + 数据列），错误提示行用。 */
   totalColumns: number;
+  /** 当前布局档位，决定单击/双击预览行为。 */
+  layout: LayoutMode;
   /** @deprecated 保留兼容；请用 totalColumns。 */
   colSpan?: number;
 }
@@ -95,10 +99,13 @@ export function VideoResultRow({
   info: given,
   columns,
   totalColumns,
+  layout,
 }: VideoResultRowProps) {
   const settings = useAppStore((state) => state.settings);
   const openQueuePanel = useAppStore((state) => state.openQueuePanel);
   const mergeTasks = useDownloadStore((state) => state.mergeTasks);
+  const { widePlay, narrowPlay } = useTrackClickPrefs();
+  const playClick = playClickForLayout({ widePlay, narrowPlay }, layout);
 
   const [info, setInfo] = useState<VideoInfo | null>(given ?? resolvedCache.get(bvid) ?? null);
   const [sending, setSending] = useState(false);
@@ -230,16 +237,22 @@ export function VideoResultRow({
           }
           if (!bvid) return;
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
-          requestVideoPreview({ bvid, title, author, page: 0, cover });
+          if (playClick === "double") requestVideoPreview({ bvid, title, author, page: 0, cover });
         }}
         onPointerDown={(event) => {
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
           bindPointerDrag(event);
         }}
-        onClick={() => {
-          if (suppressClickRef.current) suppressClickRef.current = false;
+        onClick={(event) => {
+          if (suppressClickRef.current) {
+            suppressClickRef.current = false;
+            return;
+          }
+          if (!bvid) return;
+          if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+          if (playClick === "single") requestVideoPreview({ bvid, title, author, page: 0, cover });
         }}
-        title="双击预览视频；点下载加入队列后可在队列里调分 P / 画质 / Offset"
+        title="单击/双击预览视频（跟随播放手势设置）；点下载加入队列后可在队列里调分 P / 画质 / Offset"
       >
         <td className="kd-selection-cell" {...cellDrag} />
         <td className="kd-result-lead" {...cellDrag}>

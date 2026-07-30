@@ -2408,6 +2408,7 @@ name = "kdj-app"
 version = "0.2.12"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "kdj-core",
  "kdj-library",
  "kdj-playback",

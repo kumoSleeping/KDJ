@@ -468,15 +468,39 @@ impl Actor {
     }
 
     fn seek(&mut self, position: f64) -> Result<(), String> {
-        // 换曲/接歌的激活还没落地时，front 上仍是旧曲目：这时跳转旧曲目会顶掉
-        // 新曲目的待激活流——状态已指向新曲目、声音却退回旧曲目。拒绝这次跳转，
-        // 装载通常在几百毫秒内完成，调用方看到新状态后再跳。连续 scrub
-        // （Activation::Seek 的 pending）不在此列，仍允许后到的跳转覆盖先到的。
+        // 换曲（Hard 激活）还没落地时，front 上仍是旧曲目：跳转旧曲目会顶掉
+        // 新曲目的待激活流。但用户点的是新曲目的进度条——把这次跳转折进换曲，
+        // 让新曲目改从目标位置起播；连续 scrub 时后到的跳转覆盖先到的装载位置。
+        let pending_load = self.pending.iter().position(|pending| {
+            pending.as_ref().is_some_and(|pending| {
+                matches!(pending.activation, Some(Activation::Hard))
+                    && Some(pending.request.track_id) == self.state.track_id
+            })
+        });
+        if let Some(index) = pending_load {
+            let checkpoint = self.state.clone();
+            let Some(mut request) = self.pending[index]
+                .as_ref()
+                .map(|pending| pending.request.clone())
+            else {
+                return Err("换曲进行中，等新歌起播后再跳转".into());
+            };
+            request.position = clamp_position(position, request.duration);
+            request.autoplay = self.state.desired_playing;
+            self.state.current_time = request.position;
+            self.state.phase = PlaybackPhase::Loading;
+            self.state.buffering = true;
+            let deck = if index == 0 { DeckId::A } else { DeckId::B };
+            let result = self.start_stream(deck, request, Some(Activation::Hard));
+            if result.is_err() {
+                self.state = checkpoint;
+            }
+            return result;
+        }
+        // 接歌（Transition 激活）的承诺涉及双 Deck 混合，仍不允许被跳转顶掉；
+        // 过渡通常在几秒内完成，调用方看到新状态后再跳。
         if self.pending.iter().flatten().any(|pending| {
-            matches!(
-                pending.activation,
-                Some(Activation::Hard) | Some(Activation::Transition(_))
-            )
+            matches!(pending.activation, Some(Activation::Transition(_)))
         }) {
             return Err("换曲进行中，等新歌起播后再跳转".into());
         }
@@ -1016,6 +1040,10 @@ fn same_source(left: &PlaybackSource, right: &PlaybackSource) -> bool {
         && (left.position - right.position).abs() < 0.02
 }
 
+/// 进度条最右端换算出的目标常常正好等于时长；精确 seek 到流的末尾会读出
+/// 流外（end of stream），给末尾留一点余量，让“跳到结尾”播完最后一点自然结束。
+const SEEK_END_MARGIN_SECONDS: f64 = 0.25;
+
 fn clamp_position(position: f64, duration: Option<f64>) -> f64 {
     let position = if position.is_finite() {
         position.max(0.0)
@@ -1024,7 +1052,7 @@ fn clamp_position(position: f64, duration: Option<f64>) -> f64 {
     };
     duration
         .filter(|duration| duration.is_finite() && *duration > 0.0)
-        .map(|duration| position.min(duration))
+        .map(|duration| position.min((duration - SEEK_END_MARGIN_SECONDS).max(0.0)))
         .unwrap_or(position)
 }
 
@@ -1280,8 +1308,10 @@ mod tests {
         assert_eq!(actor.front, DeckId::A);
     }
 
+    /// 换曲激活未落地时点进度条：跳转折进待激活流，新曲目改从目标位置起播，
+    /// 而不是被拒绝后让进度条先跳过去再弹回来。
     #[test]
-    fn seek_is_rejected_while_a_track_change_is_pending() {
+    fn seek_during_a_pending_track_change_retargets_the_load() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
         actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.0));
@@ -1289,16 +1319,27 @@ mod tests {
         actor.state.phase = PlaybackPhase::Playing;
         actor.load(source(2, 0.0)).expect("load 登记");
 
-        let error = actor.seek(30.0).unwrap_err();
+        actor.seek(30.0).expect("跳转折进待激活的换曲");
 
-        assert!(error.contains("换曲进行中"));
-        assert_eq!(
-            actor.pending[DeckId::B as usize]
-                .as_ref()
-                .map(|pending| pending.request.track_id),
-            Some(2),
-            "待激活的新曲目不能被这次跳转顶掉"
-        );
+        let pending = actor.pending[DeckId::B as usize]
+            .as_ref()
+            .expect("待激活流不能被这次跳转顶掉");
+        assert_eq!(pending.request.track_id, 2);
+        assert!(matches!(pending.activation, Some(Activation::Hard)));
+        assert!((pending.request.position - 30.0).abs() < 0.001);
+        assert!((actor.state.current_time - 30.0).abs() < 0.001);
+        assert_eq!(actor.state.phase, PlaybackPhase::Loading);
+        assert!(actor.state.buffering);
+    }
+
+    /// 点到进度条最右端：目标被收进末尾余量内，seek 不会读出流外。
+    #[test]
+    fn clamp_position_keeps_a_margin_from_the_stream_end() {
+        assert!((clamp_position(184.464, Some(184.5)) - 184.25).abs() < 0.001);
+        assert!((clamp_position(30.0, Some(184.5)) - 30.0).abs() < 0.001);
+        assert!((clamp_position(184.464, None) - 184.464).abs() < 0.001);
+        assert_eq!(clamp_position(5.0, Some(0.1)), 0.0);
+        assert_eq!(clamp_position(f64::NAN, Some(10.0)), 0.0);
     }
 
     /// 没有激活承诺时跳转照常登记（保护不影响正常 seek）。

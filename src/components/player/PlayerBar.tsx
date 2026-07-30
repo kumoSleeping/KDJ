@@ -475,6 +475,8 @@ export function PlayerBar() {
     lastCommittedSeekRef.current = { trackId, position, at: now };
     return true;
   }, []);
+  /** 已提交、等待后端落地的跳转；期间迟到的旧位置事件不能把进度条弹回去。 */
+  const pendingSeekRef = useRef<{ trackId: number; position: number; at: number } | null>(null);
   /** 原生播放器换 source 会短暂回 idle；这不是用户/系统按了暂停。 */
   const nativeLoadInFlightRef = useRef(false);
   /** 快速连点换歌时，迟到的旧 decode 结果不能覆盖新曲目的 UI/transport。 */
@@ -1061,8 +1063,9 @@ export function PlayerBar() {
         position: target,
       });
       if (nativePlayer) {
-        // 换曲/接歌激活未落地时后端会拒绝这次跳转（保护待激活流）；静默即可，
-        // 下一拍状态事件会把进度显示纠正回来。
+        // 后端会把换曲装载期的跳转折进待激活流；先按住用户点下的位置，
+        // 等状态事件落到目标附近再交回跟随，避免进度条跳过去又被弹回。
+        pendingSeekRef.current = { trackId: track.id, position: target, at: performance.now() };
         void nativePlayer.seek(target).catch(() => undefined);
       } else {
         void djEngine
@@ -1156,9 +1159,26 @@ export function PlayerBar() {
       setNotice(`原生播放器初始化失败：${error instanceof Error ? error.message : String(error)}`);
     });
     const unsubscribe = nativePlayer.subscribe((state, previous) => {
-      positionRef.current = state.currentTime;
+      // 跳转回声抑制：seek 已提交但状态还没落到目标附近时，在飞的旧位置
+      // 事件会把进度条弹回去再跳回来；落地、超时或换曲后恢复正常跟随。
+      let pendingSeek = pendingSeekRef.current;
+      if (pendingSeek) {
+        const landed =
+          state.trackId === pendingSeek.trackId &&
+          Math.abs(state.currentTime - pendingSeek.position) < 1.5;
+        if (
+          landed ||
+          state.trackId !== pendingSeek.trackId ||
+          performance.now() - pendingSeek.at > 1500
+        ) {
+          pendingSeekRef.current = null;
+          pendingSeek = null;
+        }
+      }
+      const shownTime = pendingSeek ? pendingSeek.position : state.currentTime;
+      positionRef.current = shownTime;
       durationRef.current = state.duration || durationRef.current;
-      setPosition(state.currentTime);
+      setPosition(shownTime);
       if (state.duration > 0) setDuration(state.duration);
 
       if (desktopNative) {
@@ -1192,12 +1212,12 @@ export function PlayerBar() {
         }
       }
       if (current) {
-        broadcast(state.currentTime);
+        broadcast(shownTime);
         broadcastMediaSync({
           owner: "player",
           action: "position",
           trackId: current.id,
-          position: state.currentTime,
+          position: shownTime,
         });
         if (
           desktopNative &&
@@ -2229,8 +2249,10 @@ export function PlayerBar() {
               if (duration <= 0) return;
               const rect = event.currentTarget.getBoundingClientRect();
               const at = ((event.clientX - rect.left) / rect.width) * duration;
-              if (nativePlayer) void nativePlayer.seek(at);
-              else frontEl.currentTime = at;
+              if (nativePlayer) {
+                pendingSeekRef.current = { trackId: track.id, position: at, at: performance.now() };
+                void nativePlayer.seek(at).catch(() => undefined);
+              } else frontEl.currentTime = at;
               setPosition(at);
             }}
           >

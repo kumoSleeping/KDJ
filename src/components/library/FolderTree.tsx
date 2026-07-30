@@ -17,6 +17,8 @@ import {
   ListX,
   MoreHorizontal,
   Music2,
+  PanelLeftClose,
+  PanelLeftOpen,
   PencilLine,
   Trash2,
 } from "lucide-react";
@@ -126,8 +128,10 @@ function flattenFolders(nodes: FolderNode[]): FolderNode[] {
  */
 export function NarrowFolderRail({
   expanded,
+  onToggle,
 }: {
   expanded: boolean;
+  onToggle(): void;
 }) {
   const folders = useLibraryStore((state) => state.folders);
   const filter = useLibraryStore((state) => state.filter);
@@ -148,6 +152,16 @@ export function NarrowFolderRail({
   if (expanded) {
     return (
       <aside className="kd-narrow-folder-panel" aria-label="文件夹侧栏">
+        <button
+          className="kd-narrow-rail-toggle"
+          type="button"
+          onClick={onToggle}
+          title="收起文件夹栏"
+          aria-label="收起文件夹栏"
+        >
+          <PanelLeftClose size={15} />
+          <span>文件夹</span>
+        </button>
         <FolderTree />
       </aside>
     );
@@ -159,6 +173,9 @@ export function NarrowFolderRail({
   };
   return (
     <aside className="kd-narrow-folder-rail kd-scroll" aria-label="快捷文件夹栏">
+      <button type="button" onClick={onToggle} title="展开文件夹栏" aria-label="展开文件夹栏">
+        <PanelLeftOpen size={15} />
+      </button>
       <button
         type="button"
         title={error || "添加音乐文件夹"}

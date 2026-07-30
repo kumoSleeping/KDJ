@@ -577,6 +577,26 @@ textarea {
   flex: 1;
   min-height: 0;
 }
+.kd-narrow-rail-toggle {
+  appearance: none;
+  flex: none;
+  height: 2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.65rem;
+  border: none;
+  border-bottom: 1px solid var(--kd-line);
+  background: transparent;
+  color: var(--kd-muted);
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  cursor: pointer;
+}
+.kd-narrow-rail-toggle:hover {
+  color: var(--kd-text);
+  background: var(--kd-hover);
+}
 .kd-split[data-layout="narrow"] > .kd-main-slot {
   flex: 1 1 auto;
   min-width: 0;
@@ -684,11 +704,10 @@ textarea {
   box-shadow: -10px 0 28px rgba(15, 18, 28, 0.08);
 }
 /*
- * 搜索结果半栏与右旁路同时打开时，中间分割整体右缩给右栏让位；
- * 否则绝对定位的详情/队列面板会盖住搜索工作条右侧的收折按钮。
- * 仅在搜索态让位，平时曲库列表宽度不受右栏开合影响。
+ * 右旁路面板打开时，中间分割整体右缩给右栏让位；
+ * 否则绝对定位的详情/队列面板会盖住本地曲库和搜索结果右侧的工具按钮。
  */
-.kd-local-list-slot[data-aside="open"] > .kd-middle-split[data-search="true"] {
+.kd-local-list-slot[data-aside="open"] > .kd-middle-split {
   margin-right: calc(var(--kd-right, 25rem) + 1px);
 }
 
@@ -1573,6 +1592,26 @@ textarea {
   align-self: stretch;
   min-width: 1rem;
   -webkit-app-region: drag;
+}
+.kd-aside-head-close,
+.kd-sheet-close {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.kd-aside-head-close:hover,
+.kd-sheet-close:hover {
+  color: var(--kd-text);
+  background: var(--kd-hover);
 }
 .kd-split-aside-body {
   flex: 1 1 auto;
@@ -5157,7 +5196,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   flex: none;
   height: var(--kd-sheet-head-h);
   min-height: var(--kd-sheet-head-h);
-  padding: 0 0.75rem;
+  padding: 0 0.45rem 0 0.75rem;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -5176,11 +5215,25 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   font-size: var(--kd-size-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: center;
+  text-align: left;
 }
 .kd-sheet-body {
   flex: 1;
   min-height: 0;
+}
+
+/* 窄屏下 Sheet 占满左侧文件夹栏以外的全部中间区，
+   左侧文件夹栏保持可点、不被半透明遮罩盖住。 */
+.kd-section-body[data-compact-tree="open"] .kd-sheet-scrim {
+  left: var(--kd-left, 11rem);
+  right: 0;
+}
+.kd-section-body[data-compact-tree="closed"] .kd-sheet-scrim {
+  left: 3.65rem;
+  right: 0;
+}
+.kd-section-body .kd-sheet {
+  width: 100%;
 }
 
 /* 抽屉里装文件夹树时给它一个确定的高度。
@@ -5465,7 +5518,22 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   color: var(--kd-text-body);
 }
 .kd-chrome-actions > .kd-chrome-btn[data-update="true"] {
-  color: var(--kd-theme);
+  /* 图标色跟旁边一致；有更新只靠角点提示。 */
+  color: var(--kd-muted);
+  min-width: 2rem;
+  padding: 0 0.15rem;
+  gap: 0;
+}
+.kd-chrome-btn[data-update="true"] .kd-chrome-dot {
+  position: absolute;
+  top: 0.38rem;
+  right: 0.38rem;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--kd-theme);
+  box-shadow: 0 0 0 1.5px var(--kd-panel);
+  pointer-events: none;
 }
 .kd-chrome-btn[data-locked="true"] {
   color: var(--kd-text-body);

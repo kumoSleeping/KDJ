@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { CheckCircle2, LoaderCircle, RefreshCw, X } from "lucide-react";
+import { CheckCircle2, FolderOpen, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { api } from "../../lib/api";
+import { getBridge } from "../../lib/bridge";
 import type { Platform, QrState, QrStateValue } from "../../types";
 import { Button } from "../common";
 
@@ -41,7 +42,8 @@ export interface QrLoginDialogProps {
 }
 
 export function QrLoginDialog({ platform, label, onClose, onSuccess }: QrLoginDialogProps) {
-  const [image, setImage] = useState("");
+  const [savedPath, setSavedPath] = useState("");
+  const [locationHint, setLocationHint] = useState("");
   const [status, setStatus] = useState<QrState | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -74,7 +76,8 @@ export function QrLoginDialog({ platform, label, onClose, onSuccess }: QrLoginDi
     let timer: ReturnType<typeof setTimeout> | null = null;
     let sessionId = "";
     setLoading(true);
-    setImage("");
+    setSavedPath("");
+    setLocationHint("");
     setStatus(null);
     setError("");
 
@@ -102,11 +105,27 @@ export function QrLoginDialog({ platform, label, onClose, onSuccess }: QrLoginDi
 
     api
       .loginQr(platform)
-      .then((session) => {
+      .then(async (session) => {
         if (!aliveRef.current) return;
         sessionId = session.session_id;
-        setImage(session.image);
+        const bridge = getBridge();
+        const saved = await bridge.saveLoginQr({
+          platform,
+          label,
+          image: session.image,
+        });
+        if (!aliveRef.current) return;
+        setSavedPath(saved.path);
+        setLocationHint(
+          saved.location === "pictures"
+            ? "已保存到相册/图片"
+            : "已保存到下载文件夹",
+        );
         setLoading(false);
+        // 桌面立刻在文件管理器里选中；手机上 reveal 常不可用，路径文案本身就够定位。
+        if (!["android", "ios", "browser"].includes(String(bridge.platform))) {
+          void bridge.revealPath(saved.path).catch(() => {});
+        }
         timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
       })
       .catch((reason: unknown) => {
@@ -120,16 +139,26 @@ export function QrLoginDialog({ platform, label, onClose, onSuccess }: QrLoginDi
     };
     // onSuccess/onClose 有意不进依赖，走 ref——理由见上面 successRef 的注释
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [platform, round]);
+  }, [platform, label, round]);
 
   const done = status?.state === "done";
   const stale = status !== null && FINAL_STATES.has(status.state) && !done;
 
+  const openSaved = () => {
+    if (!savedPath) return;
+    const bridge = getBridge();
+    // 优先「在文件夹中显示」；失败再退到直接打开文件。
+    void bridge
+      .revealPath(savedPath)
+      .catch(() => bridge.openPath(savedPath))
+      .catch((reason: unknown) => {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      });
+  };
+
   return (
-    <div className="kd-overlay kd-pop-scrim" role="dialog" aria-modal="true" aria-label={`${label}扫码登录`}>
+    <div className="kd-overlay kd-pop-scrim" role="dialog" aria-modal="true" aria-label={`${label}登录二维码`}>
       <div className="kd-dialog kd-pop-panel">
-        {/* 原来这里挂着一枚红色的「登录」角标。删掉的理由：弹窗标题已经写着
-            平台名、内容是一张二维码，角标既不提供信息又占掉了这块唯一的红色额度。 */}
         <div className="kd-dialog-head">
           {label}
           <span className="kd-toolbar-gap" />
@@ -138,30 +167,55 @@ export function QrLoginDialog({ platform, label, onClose, onSuccess }: QrLoginDi
           </Button>
         </div>
 
-        <div className="kd-dialog-body kd-col" style={{ alignItems: "center", gap: "0.8rem" }}>
+        <div className="kd-dialog-body kd-col" style={{ alignItems: "stretch", gap: "0.8rem" }}>
           {loading ? (
-            <div className="kd-row kd-muted" style={{ height: 220 }}>
-              <LoaderCircle className="kd-spin" size={20} /> 正在获取二维码
+            <div className="kd-row kd-muted" style={{ height: 120, justifyContent: "center" }}>
+              <LoaderCircle className="kd-spin" size={20} /> 正在保存登录二维码
             </div>
-          ) : error ? (
+          ) : error && !savedPath ? (
             <p style={{ color: "var(--kd-danger)", textAlign: "center" }}>{error}</p>
           ) : done ? (
-            <div className="kd-col" style={{ alignItems: "center", gap: "0.5rem", height: 220, justifyContent: "center" }}>
+            <div className="kd-col" style={{ alignItems: "center", gap: "0.5rem", height: 120, justifyContent: "center" }}>
               <CheckCircle2 size={40} color="var(--kd-ok)" />
               <strong>{status?.account?.nickname || "登录成功"}</strong>
             </div>
           ) : (
             <>
-              <img
-                src={image}
-                alt="登录二维码"
-                width={220}
-                height={220}
-                // 过期/取消后二维码已失效，压暗提示要点重试
-                style={{ opacity: stale ? 0.25 : 1, imageRendering: "pixelated", background: "#fff" }}
-              />
-              {/* 「用哪个 App 扫」比「等待扫码」有用得多——尤其 QQ 音乐是用 QQ 扫的 */}
-              <div className="kd-row kd-muted" style={{ gap: "0.4rem" }}>
+              <div className="kd-col" style={{ gap: "0.35rem", opacity: stale ? 0.45 : 1 }}>
+                <div className="kd-muted" style={{ fontSize: "var(--kd-size-xs)" }}>
+                  {locationHint || "已保存登录二维码"}
+                </div>
+                <div className="kd-row" style={{ gap: "0.6rem", alignItems: "flex-start" }}>
+                  <div
+                    className="kd-mono"
+                    title={savedPath}
+                    style={{
+                      flex: "1 1 auto",
+                      minWidth: 0,
+                      fontSize: "var(--kd-size-xs)",
+                      lineHeight: 1.45,
+                      wordBreak: "break-all",
+                      color: "var(--kd-text)",
+                    }}
+                  >
+                    {savedPath}
+                  </div>
+                  <button
+                    type="button"
+                    className="kd-text-action"
+                    aria-label="在文件夹中显示登录二维码"
+                    onClick={openSaved}
+                    style={{ flex: "0 0 auto", marginTop: 1 }}
+                  >
+                    <span className="kd-row" style={{ gap: "0.25rem", alignItems: "center" }}>
+                      <FolderOpen size={12} />
+                      打开
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="kd-row kd-muted" style={{ gap: "0.4rem", justifyContent: "center" }}>
                 {status?.state === "scanned" && <LoaderCircle className="kd-spin" size={13} />}
                 <span>
                   {status && status.state !== "waiting"
@@ -169,17 +223,18 @@ export function QrLoginDialog({ platform, label, onClose, onSuccess }: QrLoginDi
                     : (SCAN_WITH[platform] ?? "等待扫码")}
                 </span>
               </div>
-              {/* 后端的 message 常常就是状态本身（"等待扫码"），原样再印一遍
-                  就成了屏幕上同一句话出现两次。只在它真的多说了点什么时才显示。 */}
               {status?.message && status.message !== STATE_TEXT[status.state] && (
-                <p className="kd-faint">{status.message}</p>
+                <p className="kd-faint" style={{ textAlign: "center" }}>
+                  {status.message}
+                </p>
               )}
+              {error && <p style={{ color: "var(--kd-danger)", textAlign: "center" }}>{error}</p>}
             </>
           )}
         </div>
 
         <div className="kd-dialog-foot">
-          {(stale || error !== "") && (
+          {(stale || (error !== "" && !done)) && (
             <Button onClick={() => setRound((value) => value + 1)}>
               <RefreshCw size={13} />
               换一张

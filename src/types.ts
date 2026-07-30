@@ -499,11 +499,24 @@ export type WsEvent =
 
 /* ---------------------------------------------------------------- preload */
 
+/** `saveLoginQr` 的返回：本机落盘路径 + 落在下载还是相册。 */
+export interface SavedLoginQr {
+  path: string;
+  /** downloads = 系统下载目录；pictures = 图片/相册目录 */
+  location: "downloads" | "pictures" | string;
+}
+
 export interface KdjBridge {
   baseUrl: string;
   platform: NodeJS.Platform | string;
   openPath: (path: string) => Promise<void>;
   revealPath: (path: string) => Promise<void>;
+  /** 把登录二维码 PNG 写到下载（桌面）或相册（手机），返回本机路径。 */
+  saveLoginQr: (options: {
+    platform: string;
+    label: string;
+    image: string;
+  }) => Promise<SavedLoginQr>;
   pickFolder: () => Promise<string | null>;
   pickFolders: () => Promise<string[]>;
   /** 用系统浏览器开外链（Release 页等）。 */

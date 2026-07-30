@@ -4,6 +4,11 @@ import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { api } from "../../lib/api";
 import { requestSongPreview } from "../../lib/songPreview";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
+import {
+  playClickForLayout,
+  useTrackClickPrefs,
+} from "../../lib/trackClickPrefs";
+import type { LayoutMode } from "../../lib/useLayoutMode";
 import type { MergedGroup, Platform, SongSource } from "../../types";
 import { copyText } from "../../lib/copyText";
 import { ContextMenu } from "../common";
@@ -33,6 +38,8 @@ export interface MergedGroupRowProps {
   expanded: boolean;
   /** 可见数据列（顺序已按用户偏好排好；不含勾选/动作列）。 */
   columns: ReadonlyArray<{ key: string; align?: "num" }>;
+  /** 当前布局档位，决定单击/双击播放行为。 */
+  layout: LayoutMode;
   /** 挂在某个"包"（歌单/一次搜索）底下时缩进并画导引线。 */
   indent?: boolean;
   /** 包里的最后一行，竖导引线到此为止。 */
@@ -60,6 +67,7 @@ export function MergedGroupRow({
   selectionMode,
   expanded,
   columns,
+  layout,
   indent = false,
   last = false,
   onToggleSelect,
@@ -75,6 +83,8 @@ export function MergedGroupRow({
   const pressTimerRef = useRef<number | null>(null);
   const suppressClickRef = useRef(false);
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
+  const { widePlay, narrowPlay } = useTrackClickPrefs();
+  const playClick = playClickForLayout({ widePlay, narrowPlay }, layout);
 
   /**
    * 试听放哪个来源：优先当前选中的；选中的是 B 站就退而求其次找一家音乐
@@ -90,7 +100,7 @@ export function MergedGroupRow({
     onToggleSelect();
   };
 
-  /** 双击 / 右键「播放」才会顶替主播放条；单击绝不碰正在播的。 */
+  /** 把当前组/来源送进主播放条试听。双击或设置成单击时触发。 */
   const playGroup = () => {
     if (previewSource) {
       requestSongPreview({
@@ -312,12 +322,13 @@ export function MergedGroupRow({
             toggleSelection();
             return;
           }
-          // 单击不装播放条、不开播——正在播的别被随手点一下顶掉。
-          // 多来源组仍可展开看各平台；要听用双击或右键「播放」。
-          if (multi && !expanded) onToggleExpand();
+          // 与曲库表一致：设置成单击播放时直接进播放条；双击播放时单击不顶掉正在播。
+          if (playClick === "single") {
+            playGroup();
+          }
         }}
         onDoubleClick={() => {
-          if (!selectionMode) playGroup();
+          if (!selectionMode && playClick === "double") playGroup();
         }}
         onContextMenu={(event) => {
           event.preventDefault();

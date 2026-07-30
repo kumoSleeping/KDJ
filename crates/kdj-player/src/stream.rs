@@ -101,6 +101,12 @@ impl StreamSource {
     }
 }
 
+/// seek 目标与流末尾保持的最小距离：精确 seek 到“正好结尾”（或元数据时长
+/// 比真实可解码长度略长）会读出流外，symphonia 以 end of stream 失败告终。
+const SEEK_END_MARGIN_SECONDS: f64 = 0.25;
+/// seek 失败后的回退步长：逐级提前重试，直到落进流内。
+const SEEK_RETRY_STEP_SECONDS: f64 = 1.0;
+
 /// Decode-thread half. It blocks only on its worker thread when read-ahead is full.
 pub struct StreamWriter {
     producer: Producer<[f32; 2]>,
@@ -189,16 +195,35 @@ where
         .make(&params, &DecoderOptions::default())
         .context("audio decoder unavailable")?;
 
+    // 点到进度条最右端时目标常等于甚至略超真实时长；先按本次探测到的时长
+    // 收敛，再对仍失败的边界（VBR 时长虚高等）逐级提前 1s 重试，让“跳到末尾”
+    // 退化为从接近末尾处起播，而不是整次跳转以 end of stream 报错。
+    let mut position = position;
+    if let Some(limit) = duration.filter(|value| value.is_finite() && *value > SEEK_END_MARGIN_SECONDS)
+    {
+        position = position.min(limit - SEEK_END_MARGIN_SECONDS);
+    }
     if position > 0.0 {
-        format
-            .seek(
+        let mut attempt = position;
+        loop {
+            match format.seek(
                 SeekMode::Accurate,
                 SeekTo::Time {
-                    time: Time::from(position),
+                    time: Time::from(attempt),
                     track_id: Some(track_id),
                 },
-            )
-            .with_context(|| format!("seek audio to {position:.3}s"))?;
+            ) {
+                Ok(_) => break,
+                Err(error) => {
+                    let next = (attempt - SEEK_RETRY_STEP_SECONDS).max(0.0);
+                    if next >= attempt {
+                        return Err(error)
+                            .with_context(|| format!("seek audio to {position:.3}s"));
+                    }
+                    attempt = next;
+                }
+            }
+        }
         decoder.reset();
     }
 

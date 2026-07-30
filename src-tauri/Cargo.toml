@@ -17,6 +17,7 @@ tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
 anyhow = "1.0.104"
+base64 = "0.22"
 kdj-core = { version = "0.2.12", path = "../crates/kdj-core" }
 kdj-library = { version = "0.2.12", path = "../crates/kdj-library" }
 kdj-server = { version = "0.2.12", path = "../crates/kdj-server" }

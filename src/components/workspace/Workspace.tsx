@@ -487,7 +487,8 @@ export function Workspace() {
   useEffect(() => {
     const onDetail = (event: Event) => {
       const source = (event as CustomEvent<{ source?: string }>).detail?.source;
-      const explicitLocate = source === "player-deck" || source === "locate-playing";
+      const isLocatePlaying = source === "locate-playing";
+      const explicitLocate = source === "player-deck" || isLocatePlaying;
       // 竖屏只有显式定位（唱盘 / 「定位正在播」）可以拉开详情；被动事件不弹抽屉。
       if (portrait && !explicitLocate) return;
       // 横屏锁定只拦歌曲/视频的自动事件；显式定位必须强制打开。
@@ -497,14 +498,17 @@ export function Workspace() {
       // 停在搜索页把抽屉拉开，底下的列表和这首歌对不上号
       if (useAppStore.getState().listMode !== "library") {
         detailJumpRef.current = true;
+        showTrackDetail();
       }
-      // 唱盘 / 定位：显式查看这首；歌词模式下按上次记住的面打开。
+      // 「定位正在播」只滚动列表到当前歌曲，不展开右栏/抽屉
+      if (isLocatePlaying) return;
+      // 唱盘 / 其他显式查看：钉住内容面
       pinTrackAside(faceForTrackPin());
       if (layout === "narrow") setSheet("aside");
     };
     window.addEventListener(DETAIL_EVENT, onDetail);
     return () => window.removeEventListener(DETAIL_EVENT, onDetail);
-  }, [faceForTrackPin, layout, pinTrackAside, portrait]);
+  }, [faceForTrackPin, layout, pinTrackAside, portrait, showTrackDetail]);
 
   // 播放条 / 自动显示：store 打开歌词 → 钉住内容面并切到歌词极。
   // 从歌词极关掉 store（播放条再点一次）→ 收起整块内容面。
@@ -626,19 +630,6 @@ export function Workspace() {
     !showPreview &&
     !showVjExport &&
     !showLyrics;
-  // 宽屏是真正的右栏，窄屏则是承载同一份内容的抽屉；按钮位置和开关语义保持一致。
-  const asideOpen = layout === "wide" ? showAside : sheet === "aside" && hasAsideContent;
-  const asideState = asideOpen ? "open" : asideLocked ? "locked" : "closed";
-  const cycleAsideState = useCallback(() => {
-    if (asideOpen) {
-      setAsideLocked(false);
-      closeAside();
-    } else if (asideLocked) {
-      setAsideLocked(false);
-    } else {
-      setAsideLocked(true);
-    }
-  }, [asideLocked, asideOpen, closeAside]);
 
   // 窄屏下换了标签（曲库 ↔ 搜索）就把抽屉收起来：抽屉里装的内容会跟着变，
   // 留在屏幕上等于突然换了一块东西，比自己收起来更让人迷惑
@@ -1073,9 +1064,6 @@ export function Workspace() {
               queueOpen={queueOpen}
               queueCount={activeDownloads}
               onQueue={toggleQueueDrawer}
-              showAsideToggle={!portrait}
-              asideState={asideState}
-              onAsideToggle={cycleAsideState}
             />
           }
         />
@@ -1100,6 +1088,7 @@ export function Workspace() {
               <span {...gripProps("tree")} />
               <NarrowFolderRail
                 expanded={compactTreeExpanded}
+                onToggle={() => setCompactTreeExpanded((value) => !value)}
               />
             </div>
           )}
@@ -1320,6 +1309,7 @@ export function Workspace() {
                           video={video}
                           loading={busy}
                           searched={hasResults}
+                          layout={layout}
                           selected={chosen}
                           selectionMode={searchSelectionMode}
                           onSelectionModeChange={setSearchSelectionMode}
@@ -1356,6 +1346,7 @@ export function Workspace() {
                       title={asideLabel}
                       face={showTrackFaceSwitch ? trackAsideFace : undefined}
                       onFaceChange={showTrackFaceSwitch ? onTrackAsideFace : undefined}
+                      onClose={closeAside}
                     />
                     <div className="kd-split-aside-body kd-scroll">{asidePanel}</div>
                   </aside>
