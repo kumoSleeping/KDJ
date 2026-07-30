@@ -414,7 +414,12 @@ mod tests {
         server.join().expect("封面服务线程");
 
         assert!(url.starts_with("file://"));
-        let path = PathBuf::from(url.trim_start_matches("file://"));
+        // Windows: file:///C:/Users/...  — 三个斜杠；Unix: file:///tmp/... 或 file:///var/...
+        let path = if cfg!(windows) {
+            PathBuf::from(url.trim_start_matches("file:///"))
+        } else {
+            PathBuf::from(url.trim_start_matches("file://"))
+        };
         assert_eq!(fs::read(&path).expect("读取封面缓存"), b"jpeg");
         let _ = fs::remove_file(path);
     }
