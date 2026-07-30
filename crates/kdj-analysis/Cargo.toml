@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-kdj-core = { version = "0.2.17", path = "../kdj-core" }
+kdj-core = { version = "0.2.18", path = "../kdj-core" }
 rubato = "4.0.0"
 rustfft = "6.4.1"
 serde = { version = "1.0.229", features = ["derive"] }
