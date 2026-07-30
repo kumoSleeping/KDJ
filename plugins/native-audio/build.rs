@@ -12,6 +12,10 @@ const COMMANDS: &[&str] = &[
     "get_state",
     "get_progress_checkpoint",
     "clear_progress_checkpoint",
+    "set_lyrics_timeline",
+    "set_lyrics_overlay",
+    "check_overlay_permission",
+    "request_overlay_permission",
     "dispose",
 ];
 

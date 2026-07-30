@@ -32,17 +32,27 @@ export interface LyricsPrefs {
    * 之后点列表 / 定位正在播，都按这个面弹出。
    */
   asideFace: LyricsAsideFace;
-  /** 桌面歌词使用独立透明置顶窗口；移动端忽略。 */
+  /**
+   * 悬浮歌词开关。桌面是独立透明置顶窗口；Android 是原生
+   * `TYPE_APPLICATION_OVERLAY` 浮层（需要「显示在其他应用上层」权限）。
+   */
   desktopEnabled: boolean;
-  /** 桌面歌词贴近当前主屏的上沿或下沿。 */
+  /** 悬浮歌词贴近屏幕的上沿或下沿。 */
   desktopPosition: DesktopLyricsPosition;
-  /** 锁定后整个歌词窗口鼠标穿透。 */
+  /** 锁定后整个歌词窗口触摸/鼠标穿透。 */
   desktopLocked: boolean;
-  /** 桌面歌词字号倍率；1=默认最小，最大 3（300%）。 */
+  /** 悬浮歌词字号倍率；1=默认最小，最大 3（300%）。 */
   desktopFontScale: number;
-  /** 自由拖动后的物理屏幕坐标；两者齐全时下次启动优先恢复。 */
+  /**
+   * 自由拖动后的坐标；两者齐全时下次打开优先恢复。
+   * 桌面是物理屏幕坐标；Android 只用 Y（浮层满宽，仅允许垂直拖动）。
+   */
   desktopPositionX: number | null;
   desktopPositionY: number | null;
+  /** 主行文字颜色，`#RRGGBB`。Android 上同时是逐字填充的高亮色。 */
+  desktopAccent: string;
+  /** 整体不透明度 0.2–1。 */
+  desktopOpacity: number;
 }
 
 const DEFAULTS: LyricsPrefs = {
@@ -57,6 +67,8 @@ const DEFAULTS: LyricsPrefs = {
   desktopFontScale: 1,
   desktopPositionX: null,
   desktopPositionY: null,
+  desktopAccent: "#ffffff",
+  desktopOpacity: 1,
 };
 
 function normalizeEngines(value: unknown): LyricsEngine[] {
@@ -112,6 +124,22 @@ function normalizeCoordinate(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? Math.round(value) : null;
 }
 
+/** 原生侧用 Color.parseColor 解析，非法值会被回落成白色，这里先挡一道。 */
+function normalizeAccent(value: unknown): string {
+  if (typeof value !== "string") return DEFAULTS.desktopAccent;
+  const trimmed = value.trim().toLowerCase();
+  return /^#[0-9a-f]{6}$/.test(trimmed) ? trimmed : DEFAULTS.desktopAccent;
+}
+
+/** 全透明的悬浮歌词等于消失且无法找回，所以下限留 0.2。 */
+export const DESKTOP_OPACITY_MIN = 0.2;
+
+function normalizeOpacity(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(1, Math.max(DESKTOP_OPACITY_MIN, value))
+    : DEFAULTS.desktopOpacity;
+}
+
 /** 按本首歌实际有的层，排出可点循环：原 → 意 → 音（缺的跳过）。 */
 export function lyricExtraCycle(hasMeaning: boolean, hasRomaji: boolean): LyricsExtra[] {
   const cycle: LyricsExtra[] = ["off"];
@@ -149,6 +177,8 @@ function pickPrefs(state: LyricsPrefs): LyricsPrefs {
     desktopFontScale: state.desktopFontScale,
     desktopPositionX: state.desktopPositionX,
     desktopPositionY: state.desktopPositionY,
+    desktopAccent: state.desktopAccent,
+    desktopOpacity: state.desktopOpacity,
   };
 }
 
@@ -193,6 +223,8 @@ function load(): LyricsPrefs {
       desktopFontScale: normalizeDesktopFontScale(data.desktopFontScale),
       desktopPositionX: normalizeCoordinate(data.desktopPositionX),
       desktopPositionY: normalizeCoordinate(data.desktopPositionY),
+      desktopAccent: normalizeAccent(data.desktopAccent),
+      desktopOpacity: normalizeOpacity(data.desktopOpacity),
     };
   } catch {
     return { ...DEFAULTS, engines: [...DEFAULTS.engines] };
@@ -234,7 +266,11 @@ interface LyricsPrefsState extends LyricsPrefs {
   setDesktopPosition(value: DesktopLyricsPosition): void;
   setDesktopLocked(value: boolean): void;
   setDesktopFontScale(value: number): void;
+  setDesktopAccent(value: string): void;
+  setDesktopOpacity(value: number): void;
   setDesktopCoordinates(x: number, y: number): void;
+  /** Android 浮层满宽，只有垂直偏移会变。 */
+  setDesktopVerticalOffset(y: number): void;
   /** 从另一个 WebView 写入的 localStorage 重新同步偏好。 */
   syncFromStorage(): void;
   /** 每次启动：收起桌面歌词，不自动弹出。 */
@@ -335,12 +371,28 @@ export const useLyricsPrefs = create<LyricsPrefsState>((set, get) => ({
     set({ desktopFontScale: scale });
     save({ ...get(), desktopFontScale: scale });
   },
+  setDesktopAccent(value) {
+    const desktopAccent = normalizeAccent(value);
+    set({ desktopAccent });
+    save({ ...get(), desktopAccent });
+  },
+  setDesktopOpacity(value) {
+    const desktopOpacity = normalizeOpacity(value);
+    set({ desktopOpacity });
+    save({ ...get(), desktopOpacity });
+  },
   setDesktopCoordinates(x, y) {
     const desktopPositionX = normalizeCoordinate(x);
     const desktopPositionY = normalizeCoordinate(y);
     if (desktopPositionX == null || desktopPositionY == null) return;
     set({ desktopPositionX, desktopPositionY });
     save({ ...get(), desktopPositionX, desktopPositionY });
+  },
+  setDesktopVerticalOffset(y) {
+    const desktopPositionY = normalizeCoordinate(y);
+    if (desktopPositionY == null) return;
+    set({ desktopPositionY });
+    save({ ...get(), desktopPositionY });
   },
   syncFromStorage() {
     const next = load();
@@ -362,6 +414,8 @@ export const useLyricsPrefs = create<LyricsPrefsState>((set, get) => ({
       reposition: false,
       x: state.desktopPositionX,
       y: state.desktopPositionY,
+      accent: state.desktopAccent,
+      opacity: state.desktopOpacity,
     }).catch(() => undefined);
   },
   cycleLyricExtra(hasMeaning, hasRomaji) {

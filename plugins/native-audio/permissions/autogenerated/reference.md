@@ -17,6 +17,10 @@ Default permissions for the plugin
 - `allow-get-state`
 - `allow-get-progress-checkpoint`
 - `allow-clear-progress-checkpoint`
+- `allow-set-lyrics-timeline`
+- `allow-set-lyrics-overlay`
+- `allow-check-overlay-permission`
+- `allow-request-overlay-permission`
 - `allow-dispose`
 
 ## Permission Table
@@ -27,6 +31,32 @@ Default permissions for the plugin
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`native-audio:allow-check-overlay-permission`
+
+</td>
+<td>
+
+Enables the check_overlay_permission command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-check-overlay-permission`
+
+</td>
+<td>
+
+Denies the check_overlay_permission command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>
@@ -265,6 +295,32 @@ Denies the remove_listener command without any pre-configured scope.
 <tr>
 <td>
 
+`native-audio:allow-request-overlay-permission`
+
+</td>
+<td>
+
+Enables the request_overlay_permission command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-request-overlay-permission`
+
+</td>
+<td>
+
+Denies the request_overlay_permission command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `native-audio:allow-seek-to`
 
 </td>
@@ -284,6 +340,58 @@ Enables the seek_to command without any pre-configured scope.
 <td>
 
 Denies the seek_to command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:allow-set-lyrics-overlay`
+
+</td>
+<td>
+
+Enables the set_lyrics_overlay command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-set-lyrics-overlay`
+
+</td>
+<td>
+
+Denies the set_lyrics_overlay command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:allow-set-lyrics-timeline`
+
+</td>
+<td>
+
+Enables the set_lyrics_timeline command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-set-lyrics-timeline`
+
+</td>
+<td>
+
+Denies the set_lyrics_timeline command without any pre-configured scope.
 
 </td>
 </tr>

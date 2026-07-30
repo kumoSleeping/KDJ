@@ -44,6 +44,7 @@ import { useAppStore } from "../../stores/appStore";
 import { useCrossfade, deckGain } from "../../lib/crossfade";
 import { useHarmonicScope } from "../../lib/harmonicScope";
 import { useLyricsPrefs } from "../../lib/lyricsPrefs";
+import { ensureOverlayPermission } from "../../lib/lyricsOverlay";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { usePlayMode, type PlayMode } from "../../lib/playMode";
 import {
@@ -457,13 +458,26 @@ export function PlayerBar() {
   useEffect(() => {
     frontElRef.current = frontEl;
   }, [frontEl]);
+  /**
+   * UI 刚提交暂停的时刻。移动端 state.playing 是硬件真值（isPlaying），pause 命令
+   * 在原生侧排队生效前仍会滴答出几帧 playing=true；订阅里的"拉回播放"对账必须在
+   * 这个短窗口内闭嘴，否则会把用户的暂停撤销掉（拉回还会触发 effect 重发 play）。
+   */
+  const pauseCommitAtRef = useRef(0);
   /** 播放状态既给 React 渲染，也给同一用户手势里的下一次事件判断；必须同步写 ref。 */
   const commitPlaying = useCallback((next: boolean) => {
+    if (!next) pauseCommitAtRef.current = performance.now();
     playingRef.current = next;
     setPlaying(next);
   }, []);
   /** 换曲/外部同步仍由 effect 执行；主按钮已在 click 调用栈内直接完成走带。 */
   const transportHandledRef = useRef(false);
+  /**
+   * 主按钮最近一次指针接触的时刻。Android WebView 无视 pointerdown 的 preventDefault
+   * 照样合成 click（detail 值还不可靠），只能按"这个 click 是否紧跟一次指针手势"
+   * 来吞重复；键盘激活没有指针手势，不受影响。
+   */
+  const transportPointerAtRef = useRef(0);
   /** shadow deck 异步换手时，连续点击只有最后一个目标能更新正主元素。 */
   const seekGenerationRef = useRef(0);
   /**
@@ -1300,7 +1314,15 @@ export function PlayerBar() {
         }
       }
 
-      if (state.playing && !playingRef.current) commitPlaying(true);
+      // 拉回播放前先让暂停落地：pause 命令生效前的迟到 playing=true 帧不算数。
+      // 窗口过后硬件若真还在放（暂停失败/外部起播），下一帧照常对账回来。
+      if (
+        state.playing &&
+        !playingRef.current &&
+        performance.now() - pauseCommitAtRef.current > 1500
+      ) {
+        commitPlaying(true);
+      }
       // 桌面端声音/画面对账：load 在飞、DJ 承诺未落地、过渡/缓冲都允许短暂分
       // 歧；其余稳定状态下 state.trackId 连续多拍 ≠ UI 曲目，说明硬件还停在旧
       // 歌上（例如接歌承诺被后台预热顶掉的竞态），以 UI 为准补一条原子 load
@@ -1708,9 +1730,26 @@ export function PlayerBar() {
     (pipDriving && pipSession) || (displayTrack && isVideoTrack(displayTrack.format)),
   );
   const networkPreview = Boolean(pipDriving && pipSession?.source === "network");
-  // 同一颗按钮按当前媒体解释：音频控制桌面歌词，本地视频控制详情/小窗。
+  // 同一颗按钮按当前媒体解释：音频控制悬浮歌词，本地视频控制详情/小窗。
   // B 站搜索结果固定浮动预览，不读取也不改这项本地视频偏好。
   const sharedFloatOn = networkPreview ? true : video ? pipMode === "float" : desktopLyricsOn;
+  /**
+   * Android 的悬浮歌词要「显示在其他应用上层」权限，必须先拿到再翻开关，
+   * 否则开关亮着而屏幕上什么都没有。桌面不需要该权限，直接翻。
+   */
+  const toggleLyricsOverlay = async () => {
+    if (desktopLyricsOn) {
+      setDesktopLyricsOn(false);
+      return;
+    }
+    if (await ensureOverlayPermission()) {
+      setDesktopLyricsOn(true);
+      return;
+    }
+    setNotice(
+      "悬浮歌词需要「显示在其他应用上层」权限。部分定制系统还要额外允许「后台弹出界面」，否则授权了也不显示。",
+    );
+  };
   const artistText = pipDriving && pipSession
     ? pipSession.author || "\u00a0"
     : displayTrack?.artist || "\u00a0";
@@ -2093,8 +2132,8 @@ export function PlayerBar() {
                       ? "本地视频改用详情播放"
                       : "本地视频改用悬浮小窗播放"
                     : sharedFloatOn
-                      ? "关闭桌面歌词"
-                      : "打开桌面歌词"
+                      ? "关闭悬浮歌词"
+                      : "打开悬浮歌词"
               }
               aria-pressed={sharedFloatOn}
               data-on={sharedFloatOn ? "true" : undefined}
@@ -2107,13 +2146,13 @@ export function PlayerBar() {
                       ? "本地视频：浮动小窗。点一下改为详情播放"
                       : "本地视频：详情播放。点一下改为浮动小窗"
                     : sharedFloatOn
-                      ? "桌面悬浮歌词：开。点一下关闭"
-                      : "打开桌面悬浮歌词"
+                      ? "悬浮歌词：开。点一下关闭"
+                      : "打开悬浮歌词"
               }
               onClick={() => {
                 if (networkPreview) return;
                 if (video) cyclePipMode();
-                else setDesktopLyricsOn(!desktopLyricsOn);
+                else void toggleLyricsOverlay();
               }}
             >
               <PictureInPicture2 size={13} />
@@ -2159,13 +2198,20 @@ export function PlayerBar() {
           onPointerDown={(event) => {
             if (event.button !== 0) return;
             // 走带键按下就生效，不等 pointerup 后的 click；触摸、鼠标长按时都不会
-            // 多拖几十到几百毫秒才停声。preventDefault 同时避免随后再合成一次 click。
+            // 多拖几十到几百毫秒才停声。
             event.preventDefault();
+            transportPointerAtRef.current = performance.now();
             toggleTransport();
           }}
-          onClick={(event) => {
-            // 键盘激活没有 pointerdown，detail=0；鼠标/触摸已在上面处理，不能执行两次。
-            if (event.detail === 0) toggleTransport();
+          onPointerUp={() => {
+            // 长按后松手，合成 click 才到；把手势时刻刷到松手点，窗口判断不受按住时长影响。
+            if (transportPointerAtRef.current) transportPointerAtRef.current = performance.now();
+          }}
+          onClick={() => {
+            // 指针手势已在 pointerdown 切换过一次；紧跟其后的 click（含 Android WebView
+            // 无视 preventDefault 合成的那次）一律吞掉。键盘激活没有指针手势，正常放行。
+            if (performance.now() - transportPointerAtRef.current < 800) return;
+            toggleTransport();
           }}
         >
           {(pipDriving && pipSession?.source === "network" ? pipPlaying : playing) ? (

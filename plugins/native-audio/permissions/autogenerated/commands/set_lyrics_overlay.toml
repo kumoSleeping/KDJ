@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-set-lyrics-overlay"
+description = "Enables the set_lyrics_overlay command without any pre-configured scope."
+commands.allow = ["set_lyrics_overlay"]
+
+[[permission]]
+identifier = "deny-set-lyrics-overlay"
+description = "Denies the set_lyrics_overlay command without any pre-configured scope."
+commands.deny = ["set_lyrics_overlay"]

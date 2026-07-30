@@ -295,6 +295,18 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Enables the check_overlay_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-check-overlay-permission",
+          "markdownDescription": "Enables the check_overlay_permission command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the check_overlay_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-check-overlay-permission",
+          "markdownDescription": "Denies the check_overlay_permission command without any pre-configured scope."
+        },
+        {
           "description": "Enables the clear_progress_checkpoint command without any pre-configured scope.",
           "type": "string",
           "const": "allow-clear-progress-checkpoint",
@@ -403,6 +415,18 @@
           "markdownDescription": "Denies the remove_listener command without any pre-configured scope."
         },
         {
+          "description": "Enables the request_overlay_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-request-overlay-permission",
+          "markdownDescription": "Enables the request_overlay_permission command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the request_overlay_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-request-overlay-permission",
+          "markdownDescription": "Denies the request_overlay_permission command without any pre-configured scope."
+        },
+        {
           "description": "Enables the seek_to command without any pre-configured scope.",
           "type": "string",
           "const": "allow-seek-to",
@@ -413,6 +437,30 @@
           "type": "string",
           "const": "deny-seek-to",
           "markdownDescription": "Denies the seek_to command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_lyrics_overlay command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-lyrics-overlay",
+          "markdownDescription": "Enables the set_lyrics_overlay command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_lyrics_overlay command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-lyrics-overlay",
+          "markdownDescription": "Denies the set_lyrics_overlay command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_lyrics_timeline command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-lyrics-timeline",
+          "markdownDescription": "Enables the set_lyrics_timeline command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_lyrics_timeline command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-lyrics-timeline",
+          "markdownDescription": "Denies the set_lyrics_timeline command without any pre-configured scope."
         },
         {
           "description": "Enables the set_queue command without any pre-configured scope.",
@@ -463,10 +511,10 @@
           "markdownDescription": "Denies the set_volume command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-initialize`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-set-source`\n- `allow-set-queue`\n- `allow-play`\n- `allow-pause`\n- `allow-seek-to`\n- `allow-set-rate`\n- `allow-set-volume`\n- `allow-get-state`\n- `allow-get-progress-checkpoint`\n- `allow-clear-progress-checkpoint`\n- `allow-dispose`",
+          "description": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-initialize`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-set-source`\n- `allow-set-queue`\n- `allow-play`\n- `allow-pause`\n- `allow-seek-to`\n- `allow-set-rate`\n- `allow-set-volume`\n- `allow-get-state`\n- `allow-get-progress-checkpoint`\n- `allow-clear-progress-checkpoint`\n- `allow-set-lyrics-timeline`\n- `allow-set-lyrics-overlay`\n- `allow-check-overlay-permission`\n- `allow-request-overlay-permission`\n- `allow-dispose`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-initialize`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-set-source`\n- `allow-set-queue`\n- `allow-play`\n- `allow-pause`\n- `allow-seek-to`\n- `allow-set-rate`\n- `allow-set-volume`\n- `allow-get-state`\n- `allow-get-progress-checkpoint`\n- `allow-clear-progress-checkpoint`\n- `allow-dispose`"
+          "markdownDescription": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-initialize`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-set-source`\n- `allow-set-queue`\n- `allow-play`\n- `allow-pause`\n- `allow-seek-to`\n- `allow-set-rate`\n- `allow-set-volume`\n- `allow-get-state`\n- `allow-get-progress-checkpoint`\n- `allow-clear-progress-checkpoint`\n- `allow-set-lyrics-timeline`\n- `allow-set-lyrics-overlay`\n- `allow-check-overlay-permission`\n- `allow-request-overlay-permission`\n- `allow-dispose`"
         }
       ]
     }

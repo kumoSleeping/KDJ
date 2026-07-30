@@ -2,7 +2,8 @@ import { useEffect, useState, useSyncExternalStore, type CSSProperties } from "r
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { api } from "../../lib/api";
 import { activeLrcIndex } from "../../lib/lrc";
-import { useLyricsPrefs, type LyricsExtra } from "../../lib/lyricsPrefs";
+import { effectiveLyricExtra } from "../../lib/lyricsOverlay";
+import { useLyricsPrefs } from "../../lib/lyricsPrefs";
 import { runtimePlayer, type UnifiedPlayerState } from "../../lib/unifiedPlayer";
 import { ensureLyrics, useLyricsStore } from "../../stores/lyricsStore";
 import type { Track } from "../../types";
@@ -14,16 +15,6 @@ function alignedText(
   return lines.find((line) => Math.abs(line.time - time) < 0.05)?.text;
 }
 
-function effectiveExtra(
-  preferred: LyricsExtra,
-  hasMeaning: boolean,
-  hasRomaji: boolean,
-): LyricsExtra {
-  if (preferred === "meaning" && hasMeaning) return "meaning";
-  if (preferred === "romaji" && hasRomaji) return "romaji";
-  return "off";
-}
-
 export function DesktopLyricsOverlay() {
   const player = runtimePlayer();
   const [playback, setPlayback] = useState<UnifiedPlayerState>(() => player.state());
@@ -33,6 +24,8 @@ export function DesktopLyricsOverlay() {
   const prefsEpoch = useLyricsPrefs((state) => state.prefsEpoch);
   const locked = useLyricsPrefs((state) => state.desktopLocked);
   const fontScale = useLyricsPrefs((state) => state.desktopFontScale);
+  const accent = useLyricsPrefs((state) => state.desktopAccent);
+  const opacity = useLyricsPrefs((state) => state.desktopOpacity);
   const setDesktopCoordinates = useLyricsPrefs((state) => state.setDesktopCoordinates);
   const entry = useSyncExternalStore(
     useLyricsStore.subscribe,
@@ -122,7 +115,7 @@ export function DesktopLyricsOverlay() {
   const next = entry.lines[currentIndex + 1];
   const hasMeaning = entry.translated.some((line) => line.text.trim());
   const hasRomaji = entry.romaji.some((line) => line.text.trim());
-  const layer = effectiveExtra(lyricExtra, hasMeaning, hasRomaji);
+  const layer = effectiveLyricExtra(lyricExtra, hasMeaning, hasRomaji);
   const extra = current
     ? layer === "meaning"
       ? alignedText(entry.translated, current.time)
@@ -147,7 +140,13 @@ export function DesktopLyricsOverlay() {
     <main
       className="kd-desktop-lyrics"
       data-locked={locked ? "true" : undefined}
-      style={{ "--kd-desktop-lyrics-scale": fontScale } as CSSProperties}
+      style={
+        {
+          "--kd-desktop-lyrics-scale": fontScale,
+          "--kd-desktop-lyrics-accent": accent,
+          "--kd-desktop-lyrics-opacity": opacity,
+        } as CSSProperties
+      }
     >
       <div className="kd-desktop-lyrics-stage">
         <div

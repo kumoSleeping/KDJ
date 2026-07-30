@@ -40,3 +40,53 @@ export declare const getProgressCheckpoint: () => Promise<NativeAudioProgressChe
 export declare const clearProgressCheckpoint: () => Promise<void>;
 export declare const dispose: () => Promise<void>;
 export declare const addStateListener: (handler: (state: NativeAudioState) => void) => Promise<() => void>;
+
+/** 一行歌词；`secondary` 是翻译或罗马音，由调用方按当前附加层选好。 */
+export type NativeLyricsLine = {
+  time: number;
+  text: string;
+  secondary?: string;
+};
+
+export type NativeLyricsTimelinePayload = {
+  /** 与播放器当前曲目比对，防止切歌瞬间把上一首的词继续滚下去。 */
+  trackId?: number | null;
+  duration?: number;
+  /** 搜词中 / 没有歌词时的兜底文案。 */
+  placeholder?: string;
+  lines: NativeLyricsLine[];
+};
+
+export type NativeLyricsOverlayPayload = {
+  visible: boolean;
+  position: 'top' | 'bottom';
+  locked: boolean;
+  fontScale?: number;
+  /** 逐字高亮色，`#RRGGBB`；缺省为白。 */
+  accent?: string;
+  opacity?: number;
+  /** 只有换边或重新打开时才吸附，否则会抹掉用户拖出来的位置。 */
+  reposition?: boolean;
+  y?: number | null;
+};
+
+/** `granted=false` 表示「显示在其他应用上层」权限没到位，开关不能算已打开。 */
+export type NativeLyricsOverlayResult = {
+  visible: boolean;
+  granted: boolean;
+};
+
+export type NativeLyricsOverlayMoved = {
+  position: 'top' | 'bottom';
+  y: number;
+};
+
+export declare const setLyricsTimeline: (payload: NativeLyricsTimelinePayload) => Promise<void>;
+export declare const setLyricsOverlay: (
+  payload: NativeLyricsOverlayPayload,
+) => Promise<NativeLyricsOverlayResult>;
+export declare const checkOverlayPermission: () => Promise<{ granted: boolean }>;
+export declare const requestOverlayPermission: () => Promise<{ granted: boolean }>;
+export declare const addOverlayMovedListener: (
+  handler: (moved: NativeLyricsOverlayMoved) => void,
+) => Promise<() => void>;

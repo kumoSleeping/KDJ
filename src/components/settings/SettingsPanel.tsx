@@ -15,6 +15,7 @@ import {
 import {
   DESKTOP_FONT_SCALE_MAX,
   DESKTOP_FONT_SCALE_MIN,
+  DESKTOP_OPACITY_MIN,
   enginesFromMode,
   enginesMode,
   useLyricsPrefs,
@@ -227,37 +228,41 @@ function BarsSlider({
   );
 }
 
-/** 连续字号滑条：视觉与接歌小节同一套 2px 红/灰线。 */
-function FontScaleSlider({
+/** 连续百分比滑条：视觉与接歌小节同一套 2px 红/灰线。 */
+function RatioSlider({
+  label,
+  ariaLabel,
+  min,
+  max,
   value,
   onChange,
   disabled,
 }: {
+  label: string;
+  ariaLabel: string;
+  min: number;
+  max: number;
   value: number;
   onChange(next: number): void;
   disabled?: boolean;
 }) {
   const trackRef = useRef<HTMLDivElement>(null);
-  const span = DESKTOP_FONT_SCALE_MAX - DESKTOP_FONT_SCALE_MIN;
-  const fill = span <= 0 ? 0 : (value - DESKTOP_FONT_SCALE_MIN) / span;
+  const span = max - min;
+  const fill = span <= 0 ? 0 : (value - min) / span;
   const pct = Math.round(value * 100);
-  const handlers = usePointerSlider(
-    trackRef,
-    (t) => onChange(DESKTOP_FONT_SCALE_MIN + t * span),
-    disabled,
-  );
+  const handlers = usePointerSlider(trackRef, (t) => onChange(min + t * span), disabled);
 
   return (
     <div className="kd-lyrics-size-row" data-disabled={disabled || undefined}>
-      <span className="kd-djp-toggle-label">悬浮字号</span>
+      <span className="kd-djp-toggle-label">{label}</span>
       <div
         ref={trackRef}
         className="kd-djp-slider"
         role="slider"
         tabIndex={disabled ? -1 : 0}
-        aria-label="桌面歌词字号"
-        aria-valuemin={Math.round(DESKTOP_FONT_SCALE_MIN * 100)}
-        aria-valuemax={Math.round(DESKTOP_FONT_SCALE_MAX * 100)}
+        aria-label={ariaLabel}
+        aria-valuemin={Math.round(min * 100)}
+        aria-valuemax={Math.round(max * 100)}
         aria-valuenow={pct}
         aria-valuetext={`${pct}%`}
         aria-disabled={disabled || undefined}
@@ -274,10 +279,10 @@ function FontScaleSlider({
             onChange(value + step);
           } else if (event.key === "Home") {
             event.preventDefault();
-            onChange(DESKTOP_FONT_SCALE_MIN);
+            onChange(min);
           } else if (event.key === "End") {
             event.preventDefault();
-            onChange(DESKTOP_FONT_SCALE_MAX);
+            onChange(max);
           }
         }}
       >
@@ -315,10 +320,17 @@ export function SettingsPanel() {
   const desktopLyricsPosition = useLyricsPrefs((state) => state.desktopPosition);
   const desktopLyricsLocked = useLyricsPrefs((state) => state.desktopLocked);
   const desktopLyricsFontScale = useLyricsPrefs((state) => state.desktopFontScale);
+  const desktopLyricsAccent = useLyricsPrefs((state) => state.desktopAccent);
+  const desktopLyricsOpacity = useLyricsPrefs((state) => state.desktopOpacity);
   const setDesktopLyricsPosition = useLyricsPrefs((state) => state.setDesktopPosition);
   const setDesktopLyricsLocked = useLyricsPrefs((state) => state.setDesktopLocked);
   const setDesktopLyricsFontScale = useLyricsPrefs((state) => state.setDesktopFontScale);
-  const isDesktop = ["darwin", "win32", "linux"].includes(window.kdj?.platform ?? "");
+  const setDesktopLyricsAccent = useLyricsPrefs((state) => state.setDesktopAccent);
+  const setDesktopLyricsOpacity = useLyricsPrefs((state) => state.setDesktopOpacity);
+  // 桌面是独立置顶窗口，Android 是原生浮层；两边都由这组设置驱动。
+  // 浏览器预览和 iOS 没有悬浮歌词，桥接层那边就是 null。
+  const canOverlayLyrics = Boolean(window.kdj?.desktopLyrics);
+  const overlayIsNative = Boolean(window.kdj?.overlayPermission);
 
   const accounts = useAppStore((state) => state.accounts);
   const accountsError = useAppStore((state) => state.accountsError);
@@ -437,12 +449,16 @@ export function SettingsPanel() {
 
         <Panel heading="歌词" dense>
           <div className="kd-djp-switch-list" aria-label="歌词选项">
-            {isDesktop ? (
+            {canOverlayLyrics ? (
               <>
                 <Switch
                   checked={desktopLyricsLocked}
-                  label="鼠标穿透（开启后不能拖动）"
-                  title="关闭时按住歌词即可自由拖动；开启后点击会穿过歌词窗口，需要回这里关闭才能再次拖动。"
+                  label={overlayIsNative ? "触摸穿透（开启后不能拖动）" : "鼠标穿透（开启后不能拖动）"}
+                  title={
+                    overlayIsNative
+                      ? "关闭时按住歌词即可上下拖动；开启后触摸会穿过歌词浮层落到下面的应用，需要回这里关闭才能再次拖动。"
+                      : "关闭时按住歌词即可自由拖动；开启后点击会穿过歌词窗口，需要回这里关闭才能再次拖动。"
+                  }
                   onChange={() => setDesktopLyricsLocked(!desktopLyricsLocked)}
                 />
                 <Switch
@@ -450,17 +466,46 @@ export function SettingsPanel() {
                   label="悬浮位置"
                   onState="底部"
                   offState="顶部"
-                  title="桌面歌词贴近当前主屏的上沿或下沿；自由拖动后下次仍会优先恢复拖动位置。"
+                  title="悬浮歌词贴近屏幕的上沿或下沿；自由拖动后下次仍会优先恢复拖动位置。"
                   onChange={() =>
                     setDesktopLyricsPosition(
                       desktopLyricsPosition === "bottom" ? "top" : "bottom",
                     )
                   }
                 />
-                <FontScaleSlider
+                <RatioSlider
+                  label="悬浮字号"
+                  ariaLabel="悬浮歌词字号"
+                  min={DESKTOP_FONT_SCALE_MIN}
+                  max={DESKTOP_FONT_SCALE_MAX}
                   value={desktopLyricsFontScale}
                   onChange={setDesktopLyricsFontScale}
                 />
+                <RatioSlider
+                  label="不透明度"
+                  ariaLabel="悬浮歌词不透明度"
+                  min={DESKTOP_OPACITY_MIN}
+                  max={1}
+                  value={desktopLyricsOpacity}
+                  onChange={setDesktopLyricsOpacity}
+                />
+                <div className="kd-lyrics-size-row">
+                  <span className="kd-djp-toggle-label">
+                    {overlayIsNative ? "逐字高亮色" : "歌词颜色"}
+                  </span>
+                  <input
+                    type="color"
+                    className="kd-lyrics-color"
+                    value={desktopLyricsAccent}
+                    aria-label={overlayIsNative ? "悬浮歌词逐字高亮色" : "悬浮歌词颜色"}
+                    title={
+                      overlayIsNative
+                        ? "已唱部分用这个颜色点亮，未唱部分保持半透明白。"
+                        : "悬浮歌词主行的文字颜色。"
+                    }
+                    onChange={(event) => setDesktopLyricsAccent(event.target.value)}
+                  />
+                </div>
               </>
             ) : null}
             <CycleToggle

@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -35,6 +36,7 @@ import kotlin.math.max
 
 private const val TAG = "plugin/native-audio"
 private const val EVENT_STATE = "native_audio_state"
+private const val EVENT_OVERLAY_MOVED = "native_lyrics_overlay_moved"
 private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 9512
 private const val FOREGROUND_PROGRESS_TICK_MS = 25L
 private const val BACKGROUND_PROGRESS_TICK_MS = 250L
@@ -67,6 +69,17 @@ data class NativeAudioProgressCheckpoint(
     val status: String? = null,
 )
 
+/**
+ * 悬浮歌词的时间轴只需要这三个值。单独开一个读取口是为了不走 [NativeAudioRuntime.getState]：
+ * 那个会 `ensure` 出播放器，而歌词侧被 60Hz 调用，不该有副作用。
+ */
+data class NativeAudioClock(
+    val trackId: Long?,
+    val positionSec: Double,
+    val durationSec: Double,
+    val isPlaying: Boolean,
+)
+
 @InvokeArg
 class SetSourceArgs {
     var src: String? = null
@@ -95,6 +108,36 @@ class SetRateArgs {
 @InvokeArg
 class SetVolumeArgs {
     var volume: Double? = null
+}
+
+@InvokeArg
+class LyricsLineArgs {
+    var time: Double? = null
+    var text: String? = null
+    /** 翻译或罗马音，由前端按当前附加层选好，原生侧不必懂这层语义。 */
+    var secondary: String? = null
+}
+
+@InvokeArg
+class SetLyricsTimelineArgs {
+    var trackId: Long? = null
+    var duration: Double? = null
+    /** 搜词中 / 没有歌词时显示的兜底文案。 */
+    var placeholder: String? = null
+    var lines: Array<LyricsLineArgs>? = null
+}
+
+@InvokeArg
+class SetLyricsOverlayArgs {
+    var visible: Boolean? = null
+    var position: String? = null
+    var locked: Boolean? = null
+    var fontScale: Double? = null
+    var accent: String? = null
+    var opacity: Double? = null
+    /** 只有换边或重新打开时才吸附，避免抹掉用户拖出来的位置。 */
+    var reposition: Boolean? = null
+    var y: Int? = null
 }
 
 private data class PendingSeekState(
@@ -412,6 +455,20 @@ object NativeAudioRuntime {
         }
     }
 
+    /** 只读播放位置，播放器还没建起来时返回 null。见 [NativeAudioClock]。 */
+    fun clock(): NativeAudioClock? {
+        synchronized(lock) {
+            val exoPlayer = player ?: return null
+            val rawDurationMs = exoPlayer.duration
+            return NativeAudioClock(
+                trackId = currentStoryId,
+                positionSec = max(0L, exoPlayer.currentPosition) / 1000.0,
+                durationSec = if (rawDurationMs > 0) rawDurationMs / 1000.0 else 0.0,
+                isPlaying = exoPlayer.isPlaying,
+            )
+        }
+    }
+
     fun getProgressCheckpoint(context: Context): NativeAudioProgressCheckpoint? {
         val prefs = progressPrefs(context.applicationContext)
         val storyId = prefs.getLong(PROGRESS_KEY_STORY_ID, 0L)
@@ -635,6 +692,14 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
 
     init {
         activeInstance = this
+        // 悬浮窗被拖动后把新位置回传前端，写进 lyricsPrefs（与桌面共用一套字段）。
+        LyricsOverlayRuntime.onMoved = { edge, y ->
+            val payload = JSObject().apply {
+                put("position", edge.wire)
+                put("y", y)
+            }
+            activity.runOnUiThread { trigger(EVENT_OVERLAY_MOVED, payload) }
+        }
     }
 
     @Command
@@ -812,9 +877,120 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    /**
+     * 推入整首歌的歌词时间轴。**前端只在换歌或切附加层时调一次**，
+     * 之后由 [LyricsOverlayRuntime] 读 ExoPlayer 位置自己滚——WebView 被冻结时
+     * 悬浮歌词照样走，见该类注释。
+     */
+    @Command
+    fun setLyricsTimeline(invoke: Invoke) {
+        val args = invoke.parseArgs(SetLyricsTimelineArgs::class.java)
+        val lines = args.lines.orEmpty().mapNotNull { line ->
+            val time = line.time ?: return@mapNotNull null
+            val text = line.text?.trim().orEmpty()
+            if (!time.isFinite() || text.isEmpty()) return@mapNotNull null
+            LyricsOverlayLine(
+                timeSec = max(0.0, time),
+                text = text,
+                secondary = line.secondary?.trim().orEmpty(),
+            )
+        }.sortedBy { it.timeSec }
+
+        runCatching {
+            LyricsOverlayRuntime.setTimeline(
+                activity.applicationContext,
+                LyricsOverlayTimeline(
+                    trackId = args.trackId?.takeIf { it > 0 },
+                    durationSec = args.duration?.takeIf { it.isFinite() && it > 0 } ?: 0.0,
+                    placeholder = args.placeholder?.trim().orEmpty(),
+                    lines = lines,
+                ),
+            )
+        }.onSuccess {
+            invoke.resolve()
+        }.onFailure {
+            invoke.reject(it.message ?: "setLyricsTimeline failed")
+        }
+    }
+
+    /**
+     * 开关与样式。返回 `{ visible, granted }`：`granted=false` 表示「显示在其他
+     * 应用上层」权限没到位，前端要据此去引导，而不能把开关当成已经打开。
+     */
+    @Command
+    fun setLyricsOverlay(invoke: Invoke) {
+        val args = invoke.parseArgs(SetLyricsOverlayArgs::class.java)
+        val config = LyricsOverlayConfig(
+            visible = args.visible == true,
+            edge = LyricsOverlayEdge.parse(args.position),
+            locked = args.locked != false,
+            fontScale = args.fontScale?.takeIf { it.isFinite() }?.toFloat() ?: 1f,
+            accentColor = LyricsOverlayConfig.parseAccent(args.accent),
+            opacity = args.opacity?.takeIf { it.isFinite() }?.toFloat() ?: 1f,
+        )
+        val repositionY = if (args.reposition == true) args.y else null
+
+        runCatching {
+            LyricsOverlayRuntime.setConfig(activity.applicationContext, config, repositionY)
+        }.onSuccess { attached ->
+            invoke.resolve(
+                JSObject().apply {
+                    put("visible", config.visible && attached)
+                    put("granted", LyricsOverlayRuntime.canDraw(activity.applicationContext))
+                },
+            )
+        }.onFailure {
+            invoke.reject(it.message ?: "setLyricsOverlay failed")
+        }
+    }
+
+    @Command
+    fun checkOverlayPermission(invoke: Invoke) {
+        invoke.resolve(
+            JSObject().apply {
+                put("granted", LyricsOverlayRuntime.canDraw(activity.applicationContext))
+            },
+        )
+    }
+
+    /**
+     * 拉起系统的「在其他应用上层显示」设置页。
+     *
+     * 这里不用 `startActivityForResult`：那个页面回来时不带结果码，拿到回调
+     * 也还得重新查一次 `canDrawOverlays`。所以只管打开，由前端回到前台后
+     * 轮询 [checkOverlayPermission]，少一条容易出错的回调链路。
+     */
+    @Command
+    fun requestOverlayPermission(invoke: Invoke) {
+        if (LyricsOverlayRuntime.canDraw(activity.applicationContext)) {
+            invoke.resolve(JSObject().apply { put("granted", true) })
+            return
+        }
+        runCatching {
+            activity.startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:${activity.packageName}"),
+                ),
+            )
+        }.onSuccess {
+            invoke.resolve(JSObject().apply { put("granted", false) })
+        }.onFailure {
+            // 少数 ROM 不认带包名的 Intent，退回不带包名的总开关页。
+            runCatching {
+                activity.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION))
+            }.onSuccess {
+                invoke.resolve(JSObject().apply { put("granted", false) })
+            }.onFailure { error ->
+                invoke.reject(error.message ?: "requestOverlayPermission failed")
+            }
+        }
+    }
+
     @Command
     fun dispose(invoke: Invoke) {
         runCatching {
+            LyricsOverlayRuntime.dispose(activity.applicationContext)
             NativeAudioRuntime.dispose(activity.applicationContext)
         }.onSuccess {
             invoke.resolve()
@@ -824,7 +1000,12 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     override fun onDestroy() {
-        if (activeInstance === this) activeInstance = null
+        if (activeInstance === this) {
+            activeInstance = null
+            LyricsOverlayRuntime.onMoved = null
+        }
+        // 悬浮窗不在这里摘掉：Activity 销毁后前台播放服务仍可能在放歌，
+        // 那种情况下歌词本就该继续挂着。真正的收尾在 dispose 命令里。
         super.onDestroy()
     }
 

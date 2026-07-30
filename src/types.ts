@@ -535,7 +535,10 @@ export interface KdjBridge {
   windowControl: (action: "minimize" | "maximize" | "close" | "drag") => void;
   /** 同步原生窗口底色，避免 macOS 拖窗时露出与页面主题不符的底层。 */
   setWindowBackground: (theme: "dark" | "light") => void;
-  /** 桌面独立歌词窗口；浏览器与移动端没有该能力。 */
+  /**
+   * 悬浮歌词开关与样式。桌面是独立透明置顶窗口；Android 是原生
+   * `TYPE_APPLICATION_OVERLAY` 浮层。浏览器与 iOS 没有该能力（iOS 沙盒不允许）。
+   */
   desktopLyrics?: null | ((options: {
     visible: boolean;
     position: "top" | "bottom";
@@ -546,7 +549,36 @@ export interface KdjBridge {
     reposition: boolean;
     x?: number | null;
     y?: number | null;
+    /** 主行颜色 `#RRGGBB`；Android 上同时是逐字填充的高亮色。 */
+    accent?: string;
+    opacity?: number;
   }) => Promise<void>);
+  /**
+   * 把整首歌的歌词时间轴交给原生侧，只在换歌或切附加层时调用。
+   *
+   * 只有 Android 有：那边浮层是原生 View，时间轴必须由持有 ExoPlayer 的
+   * 原生侧驱动——WebView 一进后台就会被冻结，靠 JS 定时器推歌词会卡住，
+   * 而息屏/切走恰好是悬浮歌词唯一的使用场景。桌面的歌词窗口是另一个
+   * WebView，自己订阅 store，不需要这条通道。
+   */
+  lyricsTimeline?: null | ((payload: {
+    trackId: number | null;
+    duration: number;
+    /** 搜词中 / 没有歌词时的兜底文案。 */
+    placeholder: string;
+    lines: { time: number; text: string; secondary?: string }[];
+  }) => Promise<void>);
+  /**
+   * 「显示在其他应用上层」权限。只有 Android 有：这是用户必须去系统设置里
+   * 手动授予的敏感权限，拿不到就挂不上浮层。
+   */
+  overlayPermission?: null | {
+    check: () => Promise<boolean>;
+    /** 拉起系统设置页；返回时的授权结果由调用方轮询 check 确认。 */
+    request: () => Promise<void>;
+    /** 浮层被拖动后的新垂直偏移。 */
+    onMoved: (handler: (y: number) => void) => Promise<() => void>;
+  };
   onSidecarLog: (cb: (line: string) => void) => () => void;
 }
 

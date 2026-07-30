@@ -2,6 +2,7 @@ import { addPluginListener, invoke } from '@tauri-apps/api/core';
 
 const PLUGIN_NAME = 'native-audio';
 const STATE_EVENT = 'native_audio_state';
+const OVERLAY_MOVED_EVENT = 'native_lyrics_overlay_moved';
 
 const call = async (command, payload) => {
   return await invoke(`plugin:${PLUGIN_NAME}|${command}`, payload);
@@ -20,3 +21,11 @@ export const getProgressCheckpoint = async () => await call('get_progress_checkp
 export const clearProgressCheckpoint = async () => await call('clear_progress_checkpoint');
 export const dispose = async () => await call('dispose');
 export const addStateListener = async (handler) => await addPluginListener(PLUGIN_NAME, STATE_EVENT, handler);
+
+// 歌词悬浮窗：时间轴只在换歌或切附加层时推一次，之后由原生侧读 ExoPlayer 位置自己滚。
+export const setLyricsTimeline = async (payload) => await call('set_lyrics_timeline', payload);
+export const setLyricsOverlay = async (payload) => await call('set_lyrics_overlay', payload);
+export const checkOverlayPermission = async () => await call('check_overlay_permission');
+export const requestOverlayPermission = async () => await call('request_overlay_permission');
+export const addOverlayMovedListener = async (handler) =>
+  await addPluginListener(PLUGIN_NAME, OVERLAY_MOVED_EVENT, handler);

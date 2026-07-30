@@ -14,5 +14,9 @@ permissions = [
   "allow-get-state",
   "allow-get-progress-checkpoint",
   "allow-clear-progress-checkpoint",
+  "allow-set-lyrics-timeline",
+  "allow-set-lyrics-overlay",
+  "allow-check-overlay-permission",
+  "allow-request-overlay-permission",
   "allow-dispose",
 ]

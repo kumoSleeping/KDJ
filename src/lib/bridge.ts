@@ -3,6 +3,13 @@
  * Electron 已停用，不再探测或兼容它的 preload 全局对象。
  */
 
+import {
+  addOverlayMovedListener,
+  checkOverlayPermission,
+  requestOverlayPermission,
+  setLyricsOverlay,
+  setLyricsTimeline,
+} from "tauri-plugin-native-audio-api";
 import type { KdjBridge, SavedLoginQr, UpdateInfo, UpdateProgress } from "../types";
 import { djEngine } from "./djMix";
 
@@ -70,6 +77,9 @@ function normalizeInfo(raw: unknown): BridgeInfo {
 async function createTauriBridge(): Promise<KdjBridge> {
   const info = normalizeInfo(await tauriInvoke<unknown>("get_bridge_info"));
   const desktop = ["darwin", "win32", "linux"].includes(info.platform);
+  // 只认 Rust 报的平台名。iOS 沙盒里不存在系统级浮层，那边这些命令没有实现，
+  // 靠 UA 猜会在 iPhone 上调到不存在的插件命令。
+  const android = info.platform === "android";
   return {
     ...info,
     openPath: (path: string) => tauriInvoke<void>("open_path", { path }),
@@ -135,8 +145,51 @@ async function createTauriBridge(): Promise<KdjBridge> {
       void tauriInvoke("set_window_background", { theme }).catch(() => {});
     },
     desktopLyrics: desktop
-      ? (options) => tauriInvoke<void>("set_desktop_lyrics", options)
-      : null,
+      ? // 颜色和不透明度不进 Rust：它们不影响窗口尺寸或层级，歌词窗口那个
+        // WebView 自己读 lyricsPrefs（localStorage + lyrics-prefs-changed 广播）。
+        (options) =>
+          tauriInvoke<void>("set_desktop_lyrics", {
+            visible: options.visible,
+            position: options.position,
+            locked: options.locked,
+            fontScale: options.fontScale,
+            reposition: options.reposition,
+            x: options.x,
+            y: options.y,
+          })
+      : android
+        ? async (options) => {
+            const result = await setLyricsOverlay({
+              visible: options.visible,
+              position: options.position,
+              locked: options.locked,
+              fontScale: options.fontScale,
+              accent: options.accent,
+              opacity: options.opacity,
+              reposition: options.reposition,
+              // 浮层满宽，水平坐标没有意义；只有垂直偏移会用到。
+              y: options.y,
+            });
+            // 想开却挂不上：多数是权限或国产 ROM 第二道门，不能让开关假亮着。
+            if (options.visible && !result.visible) {
+              throw new Error(
+                result.granted
+                  ? "悬浮歌词未能显示。部分系统还需允许「后台弹出界面」。"
+                  : "悬浮歌词需要「显示在其他应用上层」权限。",
+              );
+            }
+          }
+        : null,
+    lyricsTimeline: android ? (payload) => setLyricsTimeline(payload) : null,
+    overlayPermission: android
+      ? {
+          check: async () => (await checkOverlayPermission()).granted,
+          request: async () => {
+            await requestOverlayPermission();
+          },
+          onMoved: (handler) => addOverlayMovedListener((moved) => handler(moved.y)),
+        }
+      : undefined,
     // 纯 Rust 版没有 sidecar 子进程，日志直接落在 Rust 侧，这里给个空退订函数
     onSidecarLog: () => () => {},
   };
