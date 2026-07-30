@@ -29,17 +29,16 @@
 
 Choose your platform below to open the latest [Releases](https://github.com/kumoSleeping/KDJ/releases/latest). Available for macOS, Windows, Linux, and Android.
 
-<p align="center">
+<p>
   <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/macOS-black?style=for-the-badge&logo=apple&logoColor=white" alt="macOS"></a>
-  &nbsp;
   <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows"></a>
-  &nbsp;
   <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux"></a>
-  &nbsp;
   <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/badge/Android-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android"></a>
 </p>
 
-Some sources support QR login so you can access content your account is already allowed to play or download.
+You may need to allow apps from unidentified developers. On macOS, allow the app under System Settings → Privacy & Security → General.
+
+When GitHub is reachable, KDJ checks for updates on launch. You can also check manually in Settings.
 
 > [!NOTE]
 > Everyday library management and music analysis do not require FFmpeg. Video remuxing, extracting audio from video, and VJ export need [FFmpeg](https://ffmpeg.org/download.html) installed on the system.
@@ -48,11 +47,33 @@ KDJ packs cross-platform search, download, local library management, and music a
 
 ## Features
 
-- **Search across sources** — aggregate results from multiple providers and automatically merge duplicates.
-- **Organize your library** — manage common audio and video files on your computer by folder, without changing how you already store music.
-- **Understand every track** — automatic BPM, key, Camelot, loudness, and energy analysis to find a good next track faster.
-- **Get audio and video** — keywords, share links, and playlists; download video, or keep audio only.
-- **Preview and arrange in-app** — waveform preview, harmonic suggestions, auto-continue, and crossfade to move from picking tracks to building a set.
+- Download
+  - Cross-platform aggregate search
+  - QR login and source priority ordering
+  - Deduplicated merged results; track / playlist links and batch intake
+  - In-app preview with quality fallback (FLAC / 320 / 128)
+  - One-click playlist download and a configurable download queue
+  - Automatic VJ matching search
+- Library
+  - Drag-first organization
+  - Local library / folder scanning and tag editing
+  - Camelot wheel with BPM / energy filters
+  - Automatic BPM, key, Camelot / Open Key, loudness, and energy analysis
+  - Harmonic similarity recommendations (library / folder / temporary queue)
+  - Waveform in/out points, star ratings, and cover art
+  - Automatic VJ export (requires [FFmpeg](https://ffmpeg.org/download.html))
+- Playback
+  - System-level audio output and volume control
+  - rkb-style waveform preview
+  - Multiple transition effects (crossfade / bass swap / filter / FX)
+  - Video floating window and system picture-in-picture; remux and audio extract
+  - VJ export (video mix + audio mix)
+  - Lyrics indexing and system-level desktop lyrics overlay
+- Other
+  - Light / dark / system theme; carefully designed interaction
+  - Lightweight Tauri desktop app; Android supported
+  - Automatic update checks on launch
+
 
 ## Build for development
 
