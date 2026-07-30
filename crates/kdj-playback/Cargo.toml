@@ -1,0 +1,10 @@
+[package]
+name = "kdj-playback"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+kdj-player = { version = "0.2.11", path = "../kdj-player" }
+serde = { version = "1.0.229", features = ["derive"] }

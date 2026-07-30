@@ -1,0 +1,93 @@
+# Playback v2 ownership and execution map
+
+## Non-negotiable ownership
+
+Local playback state no longer belongs to React, an `HTMLAudioElement`, or a Tauri command
+handler. `kdj-playback::PlaybackCoordinator` is the sole writer of transport state. The frontend
+submits intent and renders snapshots; platform adapters serialize commands, emit snapshots and
+provide device/media-session integration.
+
+```text
+PlayerBar view
+  -> DesktopNativePlayer command client
+  -> Tauri playback_command (immediate CommandAck)
+  -> kdj-playback PlaybackCoordinator actor
+       -> bounded decode workers (generation fenced)
+       -> kdj-player realtime command/source queues
+       -> CPAL callback
+  <- playback-state { sequence, phase, desiredPlaying, clock, ... }
+```
+
+Every accepted command and emitted state has a monotonic sequence. Invoke replies and Tauri events
+may cross in transit; clients accept only the newest sequence. Decode/seek workers carry a per-Deck
+revision and cannot install after replacement.
+
+## State model
+
+`PlaybackPhase` names the lifecycle instead of inferring it from unrelated booleans:
+
+- `idle`: no source
+- `loading`: target accepted; bounded read-ahead is filling
+- `ready`: source installed but not running
+- `playing` / `paused`: stable transport
+- `seeking`: a shadow Deck is filling at the requested position
+- `transitioning`: both Decks are driven by the callback clock
+- `ended`: active stream reached EOF and drained
+- `error`: actionable device/decode failure
+
+`desiredPlaying` is the user's latest intent and drives the button. `isPlaying` is callback truth.
+They are deliberately separate; collapsing them is what allowed a stale hardware snapshot to undo
+a pause click.
+
+## Source pipeline
+
+Ordinary playback uses `StreamSource`, a fixed-size SPSC ring of stereo frames resampled on a
+worker to the active output rate. Memory is bounded by read-ahead seconds, not track duration.
+The callback is the only consumer and never allocates, locks, decodes or performs IO.
+
+- Load prepares the inactive Deck while the old Deck remains valid.
+- Predicted/queued tracks pre-read into the inactive Deck without consuming frames.
+- Seek creates a new generation at the target position and switches only after startup buffering.
+- A later request invalidates the worker fence; its late result is ignored.
+- Full decoded PCM remains available to specialist/offline paths, but is no longer a prerequisite
+  for play, pause, ordinary skip or seek.
+
+Streaming pitch-preserving tempo conversion is the remaining DSP boundary. Playback v2 does not
+silently restore whole-track WSOLA to the interaction path. Until the block processor lands, DJ
+handoff keeps callback-timed transition effects and uses the prepared stream at rate 1.
+
+## Platform boundary
+
+Shared Rust owns commands, queue/prewarm, Deck lifecycle, decode, resampling, clocks and DSP.
+
+- macOS/Windows/Linux: CPAL selects CoreAudio, WASAPI or the available Linux host.
+- Android: the adapter owns MediaSession, audio focus, interruption and background-service policy.
+- iOS: the adapter owns AVAudioSession, Now Playing and remote-command policy.
+
+Mobile adapters may require AudioUnit/AAudio/Oboe bridges for final PCM. They must not duplicate the
+coordinator state machine in Kotlin or Swift.
+
+## Implementation order
+
+1. Replace the decode-blocking desktop actor with the coordinator and sequenced contract.
+2. Put ordinary load, prewarm and seek on bounded streaming Decks.
+3. Route the Tauri desktop adapter and `DesktopNativePlayer` through one command endpoint.
+4. Stop eager Web Audio initialization in a native shell; keep it only for explicit previews.
+5. Move recommendation/ended policy into the Rust application service when the library service is
+   exposed in-process, then delete the remaining PlayerBar policy continuations.
+6. Add block-based pitch-preserving tempo processing before restoring BPM-rate changes in DJ mode.
+7. Implement Android/iOS output and media-session adapters against `PlaybackOutputFactory` without
+   copying the coordinator.
+
+Steps 1–4 are the first vertical slice. Steps 5–7 are explicit remaining boundaries, not silent
+fallbacks to the old WebView owner.
+
+## Frontend boundary
+
+Local desktop playback must go through `UnifiedPlayer`'s `DesktopNativePlayer`. Browser/Web Audio
+is an explicit online-preview/development adapter only. A local-file failure is visible; it must not
+silently create a second WebView audio owner.
+
+The remaining PlayerBar cleanup is policy migration: automatic recommendation selection and ended
+handling still originate in shared UI code. They should move behind coordinator queue commands once
+the Rust library-selection service is exposed directly to the application layer.

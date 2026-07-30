@@ -80,16 +80,24 @@ pub enum RtCommand {
     },
 }
 
-/// Internal source-lifetime messages share the transport queue so installing PCM and applying
-/// the first seek/gain are totally ordered at one callback boundary. The address is never exposed
-/// outside this crate: `DynamicPlayer` retains the matching `Arc<DecodedTrack>` until the audio
-/// callback acknowledges retirement.
+/// Identifies the concrete stable address installed in the callback source table.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum SourceKind {
+    #[default]
+    Decoded,
+    Stream,
+}
+
+/// Internal source-lifetime messages share the transport queue so installing a source and its
+/// first transport command are totally ordered at one callback boundary. DynamicPlayer retains
+/// the matching Arc until the audio callback acknowledges retirement.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum EngineCommand {
     Transport(RtCommand),
     InstallPrepared {
         deck: DeckId,
         source_id: u64,
+        source_kind: SourceKind,
         address: usize,
         start_frame: u64,
     },

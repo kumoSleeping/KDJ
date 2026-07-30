@@ -133,8 +133,8 @@ export const useDjConfig = create<DjConfigState>((set, get) => ({
     const enabled = !get().enabled;
     set({ enabled });
     saveDjConfig(get());
-    if (enabled) djEngine.prime();
-    else djEngine.cancel();
+    if (enabled && !window.__TAURI_INTERNALS__) djEngine.prime();
+    else if (!enabled) djEngine.cancel();
   },
   toggleTransition(transition) {
     const current = get().transitions;
@@ -2170,7 +2170,9 @@ export const djEngine = {
 // 不会绕过浏览器的用户手势限制；真正播放仍由播放器的用户操作触发。
 // 这消除了第一次自动接歌时的重接爆音和偶发停顿。
 try {
-  if (!nativeMobilePlaybackOwnsOutput()) djEngine.warmup();
+  // 正式 Tauri 壳的主输出由 Rust/系统播放器持有。Web Audio 只在浏览器开发时
+  // 预热；桌面在线预览需要它时由 BrowserPreview 路径显式 warmup。
+  if (!window.__TAURI_INTERNALS__ && !nativeMobilePlaybackOwnsOutput()) djEngine.warmup();
 } catch {
   // warmup 自己会把 broken 记住，后续自动回退到普通硬切。
 }

@@ -5,6 +5,7 @@ members = [
     "crates/kdj-providers",
     "crates/kdj-analysis",
     "crates/kdj-player",
+    "crates/kdj-playback",
     "crates/kdj-library",
     "crates/kdj-server",
     "src-tauri",

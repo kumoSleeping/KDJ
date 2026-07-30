@@ -6,10 +6,11 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, SampleFormat, Stream, StreamConfig, SupportedBufferSize};
 use rtrb::Consumer;
 
+use crate::command::SourceKind;
 use crate::engine::{dynamic_command_channel, AudioRenderer};
 use crate::{
     command_channel, CommandError, DeckId, DecodedTrack, PlayerController, RtCommand,
-    TransportSnapshot,
+    StreamSource, TransportSnapshot,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,17 +59,22 @@ pub struct DeviceOutput {
     spec: OutputSpec,
 }
 
-/// Complete native two-Deck output with control-thread ownership of prepared PCM.
+/// Complete native two-Deck output with control-thread ownership of decoded or streaming sources.
 ///
 /// The callback receives only stable addresses. Replaced source IDs travel back through an SPSC
 /// acknowledgement queue; only this owner drops their `Arc`s. `output` is explicitly dropped
-/// first so no callback can observe freed PCM during shutdown.
+/// first so no callback can observe freed source memory during shutdown.
 pub struct DynamicPlayer {
     output: Option<DeviceOutput>,
     controller: PlayerController,
-    sources: HashMap<u64, Arc<DecodedTrack>>,
+    sources: HashMap<u64, OwnedSource>,
     retired: Consumer<u64>,
     next_source_id: u64,
+}
+
+enum OwnedSource {
+    Decoded(Arc<DecodedTrack>),
+    Stream(Arc<StreamSource>),
 }
 
 /// Opens a complete two-deck native output path for already decoded tracks.
@@ -126,11 +132,39 @@ impl DynamicPlayer {
         let source_id = self.next_source_id;
         self.next_source_id = self.next_source_id.wrapping_add(1).max(1);
         let address = Arc::as_ptr(&track) as usize;
-        self.sources.insert(source_id, track);
-        if let Err(error) = self
-            .controller
-            .install_prepared(deck, source_id, address, start_frame)
+        self.sources.insert(source_id, OwnedSource::Decoded(track));
+        if let Err(error) = self.controller.install_prepared(
+            deck,
+            source_id,
+            SourceKind::Decoded,
+            address,
+            start_frame,
+        )
         {
+            self.sources.remove(&source_id);
+            return Err(error);
+        }
+        Ok(source_id)
+    }
+
+    pub fn install_stream(
+        &mut self,
+        deck: DeckId,
+        source: Arc<StreamSource>,
+        start_frame: u64,
+    ) -> Result<u64, CommandError> {
+        self.collect_retired();
+        let source_id = self.next_source_id;
+        self.next_source_id = self.next_source_id.wrapping_add(1).max(1);
+        let address = Arc::as_ptr(&source) as usize;
+        self.sources.insert(source_id, OwnedSource::Stream(source));
+        if let Err(error) = self.controller.install_prepared(
+            deck,
+            source_id,
+            SourceKind::Stream,
+            address,
+            start_frame,
+        ) {
             self.sources.remove(&source_id);
             return Err(error);
         }

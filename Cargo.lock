@@ -2410,7 +2410,7 @@ dependencies = [
  "anyhow",
  "kdj-core",
  "kdj-library",
- "kdj-player",
+ "kdj-playback",
  "kdj-server",
  "rand 0.10.2",
  "serde",
@@ -2459,6 +2459,14 @@ dependencies = [
  "tracing",
  "trash",
  "walkdir",
+]
+
+[[package]]
+name = "kdj-playback"
+version = "0.2.11"
+dependencies = [
+ "kdj-player",
+ "serde",
 ]
 
 [[package]]

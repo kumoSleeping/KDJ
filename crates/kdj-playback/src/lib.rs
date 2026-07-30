@@ -1,0 +1,18 @@
+//! Cross-platform playback coordination above the realtime renderer.
+//!
+//! This crate owns command ordering, authoritative snapshots, Deck lifecycle, bounded streaming
+//! decode and stale-worker cancellation. Tauri and platform media sessions are adapters: they do
+//! not own playback state.
+
+mod contract;
+mod coordinator;
+mod platform;
+
+pub use contract::{
+    CommandAck, PlaybackCommand, PlaybackPhase, PlaybackSnapshot, PlaybackSource,
+    PlaybackTransitionPlan,
+};
+pub use coordinator::PlaybackCoordinator;
+pub use platform::{
+    CpalOutputFactory, PlaybackOutput, PlaybackOutputFactory, PlaybackOutputSpec,
+};

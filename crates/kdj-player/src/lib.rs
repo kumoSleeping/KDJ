@@ -9,6 +9,7 @@ mod dsp;
 mod engine;
 mod output;
 mod state;
+mod stream;
 mod stretch;
 
 pub use command::{DeckId, PlayerMode, RtCommand, TransitionPlan};
@@ -21,4 +22,8 @@ pub use output::{
     OutputSpec,
 };
 pub use state::TransportSnapshot;
+pub use stream::{
+    decode_file_streaming, StreamMetadata, StreamSource, StreamWriter,
+    DEFAULT_STREAM_BUFFER_SECONDS,
+};
 pub use stretch::{stretch_preserving_pitch, stretch_preserving_pitch_with_cancel};

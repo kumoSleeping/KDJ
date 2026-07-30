@@ -653,9 +653,12 @@ export function PlayerBar() {
       const autoPlay = parsed.autoPlay !== false;
       // PLAY_EVENT 通常由双击/右键等用户手势同步发出。趁手势仍有效唤醒
       // 刷新后 suspended 的 Web Audio 图，否则 audio 在走、扬声器却是静音。
-      if (autoPlay) djEngine.resume();
-      // 协同关闭时恢复用户设定的音量；不能写死为满音量覆盖底栏音量条。
-      if (!useCrossfade.getState().coplay) djEngine.setVolume(playerVolumeRef.current);
+      const webPreview = !desktopNative || isStreamTrack(next);
+      if (autoPlay && webPreview) djEngine.resume();
+      // 正式本地音频只走 Rust；Web Audio 音量仅属于在线/浏览器预览边界。
+      if (webPreview && !useCrossfade.getState().coplay) {
+        djEngine.setVolume(playerVolumeRef.current);
+      }
       const isLocalVideo = isVideoTrack(next.format);
       // 本地视频的 LOCAL_VIDEO 已在 playTrack 发出；这里只补面板档的详情栏。
       // 音频：playTrack 已 clear 预览会话；非流媒体仍进曲库详情。
@@ -770,12 +773,17 @@ export function PlayerBar() {
         return;
       }
       const source = mediaUrlForTrack(track);
+      const applyAutomaticCue = autoInOutCueRef.current === track.id;
+      const initialPosition =
+        applyAutomaticCue && track.cue_ms != null ? Math.max(0, track.cue_ms / 1000) : 0;
+      autoInOutCueRef.current = null;
       const loadGeneration = ++nativeLoadGenerationRef.current;
       nativeLoadInFlightRef.current = true;
       void nativePlayer
         .load({
           src: source,
           track,
+          position: initialPosition,
           autoplay: playingRef.current,
           artworkUrl: isStreamTrack(track)
             ? streamCoverUrl(track)
@@ -1073,8 +1081,47 @@ export function PlayerBar() {
     [track],
   );
 
+  const continueAfterEnded = useCallback(
+    (finished: Track | null) => {
+      if (djBusyRef.current) return;
+      setPosition(0);
+      if (!finished || isStreamTrack(finished)) {
+        commitPlaying(false);
+        return;
+      }
+      markPlayed(finished.id);
+      void pickNext(finished, false, predictedRef.current).then((next) => {
+        if (!next) {
+          commitPlaying(false);
+          return;
+        }
+        if (next.id === finished.id) {
+          const cueSec =
+            useDjConfig.getState().applyInOutPoints && finished.cue_ms != null
+              ? finished.cue_ms / 1000
+              : 0;
+          commitPlaying(true);
+          if (nativePlayer) {
+            void nativePlayer.seek(cueSec).then(() => nativePlayer.play());
+          } else {
+            const audio = djEngine.frontElement();
+            audio.currentTime = cueSec;
+            void audio.play();
+          }
+          setPosition(cueSec);
+          return;
+        }
+        autoInOutCueRef.current = useDjConfig.getState().applyInOutPoints
+          ? next.id
+          : null;
+        playTrack(next);
+      });
+    },
+    [nativePlayer, commitPlaying],
+  );
+
   // 原生播放器即使 WebView 暂停也持续走时钟；回到前台后事件会带回权威状态。
-  // ended 仍复用下面那条自动续播规则，避免原生/桌面各维护一套播放模式逻辑。
+  // 本地 ended 直接进入共享续播策略，不再伪造 HTMLAudioElement 事件。
   useEffect(() => {
     if (!nativePlayer) return;
     void nativePlayer.initialize().catch((error: unknown) => {
@@ -1127,6 +1174,7 @@ export function PlayerBar() {
         if (
           desktopNative &&
           state.playing &&
+          !state.buffering &&
           djEnabled &&
           !state.transitioning &&
           !nativeDjBusyRef.current &&
@@ -1155,7 +1203,7 @@ export function PlayerBar() {
       }
       if (state.status === "ended" && previous.status !== "ended") {
         commitPlaying(false);
-        frontElRef.current.dispatchEvent(new Event("ended"));
+        continueAfterEnded(current);
       }
       if (state.status === "error") {
         commitPlaying(false);
@@ -1179,6 +1227,7 @@ export function PlayerBar() {
     broadcast,
     commitPlaying,
     selectTrack,
+    continueAfterEnded,
   ]);
 
   /**
@@ -1433,53 +1482,7 @@ export function PlayerBar() {
       // 无损/VBR 文件偶尔给 Infinity，这时退回曲库里存的时长
       if (Number.isFinite(value) && value > 0) setDuration(value);
     };
-    const onEnded = () => {
-      // DJ 正在准备下一首（挑歌请求还没回来）：别和它抢着挑，
-      // 过渡开始后正主就换了，这条 ended 也就到不了这里
-      if (djBusyRef.current) return;
-      setPosition(0);
-      // 自动续播：按播放模式挑下一首接上（见 lib/playMode.ts）。
-      // 先把"当前这首放完了"记下来再挑，否则它自己会出现在候选里。
-      const finished = track;
-      if (!finished) {
-        commitPlaying(false);
-        return;
-      }
-      // 在线试听没有曲库邻居可接，放完就停
-      if (isStreamTrack(finished)) {
-        commitPlaying(false);
-        return;
-      }
-      markPlayed(finished.id);
-      void pickNext(finished, false, predictedRef.current).then((next) => {
-        if (!next) {
-          // 候选池空了（曲库太小 / 都放过了）就安静停下，不报错
-          commitPlaying(false);
-          return;
-        }
-        // 单曲循环挑回了自己：走 playTrack 的话 track.id 没变，
-        // 换 src 的 effect 不会重跑，音频会停在 ended 上不动——直接倒带重放
-        if (next.id === finished.id) {
-          const cueSec =
-            useDjConfig.getState().applyInOutPoints && finished.cue_ms != null
-              ? finished.cue_ms / 1000
-              : 0;
-          if (nativePlayer) {
-            void nativePlayer.seek(cueSec).then(() => nativePlayer.play());
-          } else {
-            audio.currentTime = cueSec;
-            void audio.play();
-          }
-          setPosition(cueSec);
-          return;
-        }
-        // 走和双击列表同一条路：播放器不必知道谁触发了播放
-        autoInOutCueRef.current = useDjConfig.getState().applyInOutPoints
-          ? next.id
-          : null;
-        playTrack(next);
-      });
-    };
+    const onEnded = () => continueAfterEnded(track);
     const onError = () => {
       if (track) {
         commitPlaying(false);
@@ -1496,7 +1499,7 @@ export function PlayerBar() {
       audio.removeEventListener("ended", onEnded);
       audio.removeEventListener("error", onError);
     };
-  }, [frontEl, track, playing, djEnabled, djBars, applyInOutPoints, broadcast, djNext, nativePlayer, commitPlaying]);
+  }, [frontEl, track, playing, djEnabled, djBars, applyInOutPoints, broadcast, djNext, nativePlayer, commitPlaying, continueAfterEnded]);
 
   // 跳转统一由 Waveform 发 kd:seek 事件，上面那个监听负责落到 <audio> 上
 
@@ -1619,21 +1622,24 @@ export function PlayerBar() {
     pipDriving,
   ]);
 
-  // Rust 的下一台 Deck 在预测结果出来后就离线解码并完成不变调 WSOLA。真正按
-  // “下一首”时只需向 callback 发一个固定大小 handoff 命令，不把解码延迟放进交互。
+  // 正式桌面播放器在预测结果出来后就让 Rust 流式预读第二台 Deck。普通切歌和
+  // DJ 都复用这份有界缓冲；按钮只提交切换命令，不在交互路径整轨解码。
   useEffect(() => {
-    if (!desktopNative || !nativePlayer?.supportsRealtimeDj || !djEnabled || !track || !predicted) {
+    if (!desktopNative || !nativePlayer?.supportsRealtimeDj || !track || !predicted) {
       nativePreparedRef.current = null;
       return;
     }
     if (isStreamTrack(track) || isStreamTrack(predicted) || predicted.id === track.id) return;
     const currentRate = nativePlayer.state().rate || 1;
     const effectiveFromBpm = track.bpm ? track.bpm * currentRate : null;
-    const rate = bpmSyncRate(effectiveFromBpm, predicted.bpm);
-    const cue =
-      applyInOutPoints && predicted.cue_ms !== null
+    const rate = djEnabled ? bpmSyncRate(effectiveFromBpm, predicted.bpm) : 1;
+    const cue = djEnabled
+      ? applyInOutPoints && predicted.cue_ms !== null
         ? predicted.cue_ms / 1000
-        : (predicted.first_beat ?? 0);
+        : (predicted.first_beat ?? 0)
+      : applyInOutPoints && predicted.cue_ms !== null
+        ? predicted.cue_ms / 1000
+        : 0;
     const generation = ++nativePrepareGenerationRef.current;
     nativePreparedRef.current = null;
     void nativePlayer

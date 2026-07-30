@@ -97,6 +97,20 @@ abstract class PlayerStateOwner {
 
   protected publish(next: UnifiedPlayerState): UnifiedPlayerState {
     const previous = this.snapshot;
+    if (
+      next.trackId === previous.trackId &&
+      next.preparedTrackId === previous.preparedTrackId &&
+      next.status === previous.status &&
+      next.currentTime === previous.currentTime &&
+      next.duration === previous.duration &&
+      next.playing === previous.playing &&
+      next.buffering === previous.buffering &&
+      next.transitioning === previous.transitioning &&
+      next.rate === previous.rate &&
+      next.error === previous.error
+    ) {
+      return previous;
+    }
     this.snapshot = next;
     for (const listener of this.listeners) listener(next, previous);
     return next;
@@ -235,31 +249,66 @@ class MobileNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 }
 
-interface DesktopPlayerStateRaw {
-  status: UnifiedPlayerStatus;
+type DesktopPlaybackPhase =
+  | "idle"
+  | "loading"
+  | "ready"
+  | "playing"
+  | "paused"
+  | "seeking"
+  | "transitioning"
+  | "ended"
+  | "error";
+
+interface DesktopPlaybackSnapshotRaw {
+  sequence: number;
+  lastCommandId: number;
+  phase: DesktopPlaybackPhase;
   trackId: number | null;
   preparedTrackId: number | null;
   currentTime: number;
   duration: number;
+  desiredPlaying: boolean;
   isPlaying: boolean;
   buffering: boolean;
   transitioning: boolean;
   rate: number;
+  volume: number;
   error: string;
+}
+
+interface DesktopCommandAckRaw {
+  commandId: number;
+  acceptedSequence: number;
+  snapshot: DesktopPlaybackSnapshotRaw;
 }
 
 interface TauriEvent<T> {
   payload: T;
 }
 
-function normalizedDesktop(raw: DesktopPlayerStateRaw): UnifiedPlayerState {
+function normalizedDesktop(raw: DesktopPlaybackSnapshotRaw): UnifiedPlayerState {
+  const status: UnifiedPlayerStatus =
+    raw.phase === "error"
+      ? "error"
+      : raw.phase === "ended"
+        ? "ended"
+        : raw.phase === "loading" || raw.phase === "seeking"
+          ? "loading"
+          : raw.phase === "playing" || raw.phase === "transitioning"
+            ? "playing"
+            : raw.trackId === null
+              ? "idle"
+              : "paused";
   return {
     trackId: raw.trackId,
     preparedTrackId: raw.preparedTrackId,
-    status: raw.status,
+    status,
     currentTime: Number.isFinite(raw.currentTime) ? Math.max(0, raw.currentTime) : 0,
     duration: Number.isFinite(raw.duration) ? Math.max(0, raw.duration) : 0,
-    playing: raw.isPlaying,
+    // The button renders coordinator intent. `isPlaying` is hardware truth and remains available
+    // in the raw contract, but using it here would reintroduce one-buffer play/pause flicker.
+    playing: raw.desiredPlaying,
     buffering: raw.buffering,
     transitioning: raw.transitioning,
     rate: Number.isFinite(raw.rate) && raw.rate > 0 ? raw.rate : 1,
@@ -272,17 +321,18 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   readonly supportsRealtimeDj = true;
   private initPromise: Promise<UnifiedPlayerState> | null = null;
   private unlisten: UnlistenFn | null = null;
+  private sequence = 0;
+  private nextCommandId = 1;
 
   initialize(): Promise<UnifiedPlayerState> {
     if (this.initPromise) return this.initPromise;
     this.initPromise = (async () => {
-      this.unlisten = await listen<DesktopPlayerStateRaw>(
-        "desktop-player-state",
-        (event: TauriEvent<DesktopPlayerStateRaw>) => {
-          this.publish(normalizedDesktop(event.payload));
-        },
+      this.unlisten = await listen<DesktopPlaybackSnapshotRaw>(
+        "playback-state",
+        (event: TauriEvent<DesktopPlaybackSnapshotRaw>) => this.accept(event.payload),
       );
-      return this.call("desktop_player_initialize");
+      const snapshot = await invoke<DesktopPlaybackSnapshotRaw>("playback_initialize");
+      return this.accept(snapshot);
     })().catch((error) => {
       this.unlisten?.();
       this.unlisten = null;
@@ -292,46 +342,46 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     return this.initPromise;
   }
 
-  private async call(
-    command: string,
-    args?: Record<string, unknown>,
-  ): Promise<UnifiedPlayerState> {
-    const raw = await invoke<DesktopPlayerStateRaw>(command, args);
+  private accept(raw: DesktopPlaybackSnapshotRaw): UnifiedPlayerState {
+    if (raw.sequence < this.sequence) return this.snapshot;
+    this.sequence = raw.sequence;
+    this.nextCommandId = Math.max(this.nextCommandId, raw.lastCommandId + 1);
     return this.publish(normalizedDesktop(raw));
   }
 
-  async load(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
+  private async command(command: Record<string, unknown>): Promise<UnifiedPlayerState> {
     await this.initialize();
-    return this.call("desktop_player_load", {
-      request: {
-        trackId: source.track.id,
-        path: source.track.path,
-        position: source.position ?? 0,
-        rate: source.rate ?? 1,
-        autoplay: source.autoplay ?? false,
-      },
-    });
+    const commandId = this.nextCommandId++;
+    const ack = await invoke<DesktopCommandAckRaw>("playback_command", { commandId, command });
+    return this.accept(ack.snapshot);
   }
 
-  async prepare(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
-    await this.initialize();
-    return this.call("desktop_player_prepare", {
-      request: {
-        trackId: source.track.id,
-        path: source.track.path,
-        position: source.position ?? 0,
-        rate: source.rate ?? 1,
-      },
-    });
+  private source(source: UnifiedPlayerSource): Record<string, unknown> {
+    return {
+      trackId: source.track.id,
+      path: source.track.path,
+      position: source.position ?? 0,
+      duration: source.track.duration,
+      rate: source.rate ?? 1,
+      autoplay: source.autoplay ?? false,
+    };
   }
 
-  async handoff(
+  load(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
+    return this.command({ type: "load", source: this.source(source) });
+  }
+
+  prepare(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
+    return this.command({ type: "prepare", source: this.source(source) });
+  }
+
+  handoff(
     position: number,
     seconds: number,
     plan?: UnifiedTransitionPlan,
   ): Promise<UnifiedPlayerState> {
-    await this.initialize();
-    return this.call("desktop_player_handoff", {
+    return this.command({
+      type: "handoff",
       position: Math.max(0, position),
       seconds: Math.max(0, seconds),
       plan: plan ?? {
@@ -346,55 +396,47 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     });
   }
 
-  setQueue(): Promise<UnifiedPlayerState> {
-    // Desktop autoplay selection remains in the shared JS policy; Rust owns prepared PCM only.
-    return Promise.resolve(this.snapshot);
+  setQueue(sources: UnifiedPlayerSource[]): Promise<UnifiedPlayerState> {
+    return this.command({ type: "setQueue", sources: sources.map((source) => this.source(source)) });
   }
 
-  async play(): Promise<UnifiedPlayerState> {
-    await this.initialize();
-    return this.call("desktop_player_play");
+  play(): Promise<UnifiedPlayerState> {
+    return this.command({ type: "play" });
   }
 
-  async pause(): Promise<UnifiedPlayerState> {
-    await this.initialize();
-    return this.call("desktop_player_pause");
+  pause(): Promise<UnifiedPlayerState> {
+    return this.command({ type: "pause" });
   }
 
-  async seek(seconds: number): Promise<UnifiedPlayerState> {
-    await this.initialize();
-    return this.call("desktop_player_seek", { position: Math.max(0, seconds) });
+  seek(seconds: number): Promise<UnifiedPlayerState> {
+    return this.command({ type: "seek", position: Math.max(0, seconds) });
   }
 
   setRate(rate: number): Promise<UnifiedPlayerState> {
     if (Math.abs(rate - this.snapshot.rate) < 0.0001) return Promise.resolve(this.snapshot);
-    return Promise.reject(
-      new Error("桌面变速需在 prepare 阶段离线生成不变调 PCM，不能在回调中直接重采样"),
-    );
+    return Promise.reject(new Error("流式不变调处理器尚未接入，速度只能由准备阶段决定"));
   }
 
-  async setVolume(volume: number): Promise<UnifiedPlayerState> {
-    await this.initialize();
-    return this.call("desktop_player_set_volume", {
-      volume: Math.min(1, Math.max(0, volume)),
-    });
+  setVolume(volume: number): Promise<UnifiedPlayerState> {
+    return this.command({ type: "setVolume", volume: Math.min(1, Math.max(0, volume)) });
   }
 
-  async setEq(lowDb: number, highDb: number): Promise<UnifiedPlayerState> {
-    await this.initialize();
-    return this.call("desktop_player_set_eq", { lowDb, highDb });
+  setEq(lowDb: number, highDb: number): Promise<UnifiedPlayerState> {
+    return this.command({ type: "setEq", lowDb, highDb });
   }
 
   async refresh(): Promise<UnifiedPlayerState> {
     await this.initialize();
-    return this.call("desktop_player_state");
+    const snapshot = await invoke<DesktopPlaybackSnapshotRaw>("playback_state");
+    return this.accept(snapshot);
   }
 
   async dispose(): Promise<void> {
-    if (this.initPromise) await this.call("desktop_player_dispose").catch(() => undefined);
+    if (this.initPromise) await this.command({ type: "dispose" }).catch(() => undefined);
     this.unlisten?.();
     this.unlisten = null;
     this.initPromise = null;
+    this.sequence = 0;
     this.publish(INITIAL_STATE);
   }
 }

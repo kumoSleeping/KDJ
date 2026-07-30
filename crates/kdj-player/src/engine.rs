@@ -3,10 +3,12 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::command::EngineCommand;
+use crate::command::{EngineCommand, SourceKind};
 use crate::dsp::{DeckEq, TransitionFx};
 use crate::state::{SharedState, SharedTransportState};
-use crate::{DeckId, DecodedTrack, PlayerMode, RtCommand, TransitionPlan, TransportSnapshot};
+use crate::{
+    DeckId, DecodedTrack, PlayerMode, RtCommand, StreamSource, TransitionPlan, TransportSnapshot,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandError {
@@ -39,6 +41,7 @@ impl PlayerController {
         &mut self,
         deck: DeckId,
         source_id: u64,
+        source_kind: SourceKind,
         address: usize,
         start_frame: u64,
     ) -> Result<(), CommandError> {
@@ -46,6 +49,7 @@ impl PlayerController {
             .push(EngineCommand::InstallPrepared {
                 deck,
                 source_id,
+                source_kind,
                 address,
                 start_frame,
             })
@@ -75,6 +79,7 @@ struct Transition {
 #[derive(Clone, Copy, Debug, Default)]
 struct InstalledSource {
     id: u64,
+    kind: SourceKind,
     address: usize,
 }
 
@@ -198,7 +203,7 @@ impl AudioRenderer {
                     0.0
                 };
             }
-            self.advance_frame();
+            self.advance_frame([true, true], true);
         }
         self.publish();
     }
@@ -253,7 +258,7 @@ impl AudioRenderer {
                     0.0
                 };
             }
-            self.advance_frame();
+            self.advance_frame([true, true], true);
         }
         self.publish();
     }
@@ -310,33 +315,40 @@ impl AudioRenderer {
         self.output_sample_rate = output_sample_rate;
         self.drain_commands();
 
-        let sources = self.deck_sources;
-        // SAFETY: DynamicPlayer stores each matching Arc before publishing InstallPrepared and
-        // removes it only after this renderer acknowledges the old source ID. DeviceOutput is
-        // dropped before the source registry during shutdown.
-        let tracks = unsafe { [installed_track(sources[0]), installed_track(sources[1])] };
+        let installed = self.deck_sources;
+        // SAFETY: DynamicPlayer retains the matching Arc until this renderer acknowledges the old
+        // source ID. Stream consumers are touched only by this callback.
+        let sources = unsafe {
+            [
+                installed_callback_source(installed[0]),
+                installed_callback_source(installed[1]),
+            ]
+        };
         self.source_rate_ratios = [
-            tracks[0]
-                .map(|track| f64::from(track.sample_rate()) / f64::from(output_sample_rate))
-                .unwrap_or(1.0),
-            tracks[1]
-                .map(|track| f64::from(track.sample_rate()) / f64::from(output_sample_rate))
-                .unwrap_or(1.0),
+            callback_source_ratio(sources[0], output_sample_rate),
+            callback_source_ratio(sources[1], output_sample_rate),
         ];
         self.ensure_eq_sample_rate();
 
         for frame in output.chunks_mut(output_channels) {
+            let required = self.required_decks();
+            let (raw_a, advance_a) = if self.playing && required[0] {
+                callback_source_frame(sources[0], self.deck_positions[0])
+            } else {
+                ([0.0; 2], false)
+            };
+            let (raw_b, advance_b) = if self.playing && required[1] {
+                callback_source_frame(sources[1], self.deck_positions[1])
+            } else {
+                ([0.0; 2], false)
+            };
+            let transition_can_advance = self.transition.is_none()
+                || (!required[0] || advance_a) && (!required[1] || advance_b);
             let (transition_a, transition_b) = self.transition_gains();
             let (a, b) = if self.playing {
                 (
-                    self.deck_eq[0].process_stereo([
-                        optional_track_sample(tracks[0], self.deck_positions[0], 0),
-                        optional_track_sample(tracks[0], self.deck_positions[0], 1),
-                    ]),
-                    self.deck_eq[1].process_stereo([
-                        optional_track_sample(tracks[1], self.deck_positions[1], 0),
-                        optional_track_sample(tracks[1], self.deck_positions[1], 1),
-                    ]),
+                    self.deck_eq[0].process_stereo(raw_a),
+                    self.deck_eq[1].process_stereo(raw_b),
                 )
             } else {
                 ([0.0; 2], [0.0; 2])
@@ -366,13 +378,14 @@ impl AudioRenderer {
                 };
                 *sample = convert(value.clamp(-1.0, 1.0));
             }
-            self.advance_frame();
+            self.advance_frame([advance_a, advance_b], transition_can_advance);
         }
         if self.transition.is_none() {
-            if let Some(active) = tracks[self.active_deck as usize] {
-                if self.deck_positions[self.active_deck as usize] >= active.frames() as f64 {
-                    self.playing = false;
-                }
+            if callback_source_ended(
+                sources[self.active_deck as usize],
+                self.deck_positions[self.active_deck as usize],
+            ) {
+                self.playing = false;
             }
         }
         self.publish();
@@ -385,9 +398,10 @@ impl AudioRenderer {
                 EngineCommand::InstallPrepared {
                     deck,
                     source_id,
+                    source_kind,
                     address,
                     start_frame,
-                } => self.install_prepared(deck, source_id, address, start_frame),
+                } => self.install_prepared(deck, source_id, source_kind, address, start_frame),
                 EngineCommand::ClearPrepared { deck } => self.clear_prepared(deck),
             }
         }
@@ -404,12 +418,20 @@ impl AudioRenderer {
         }
     }
 
-    fn install_prepared(&mut self, deck: DeckId, source_id: u64, address: usize, start_frame: u64) {
+    fn install_prepared(
+        &mut self,
+        deck: DeckId,
+        source_id: u64,
+        source_kind: SourceKind,
+        address: usize,
+        start_frame: u64,
+    ) {
         let index = deck as usize;
         let previous = std::mem::replace(
             &mut self.deck_sources[index],
             InstalledSource {
                 id: source_id,
+                kind: source_kind,
                 address,
             },
         );
@@ -486,6 +508,23 @@ impl AudioRenderer {
         }
     }
 
+    fn required_decks(&self) -> [bool; 2] {
+        if !self.playing {
+            return [false, false];
+        }
+        if let Some(transition) = self.transition {
+            let mut required = [false, false];
+            required[transition.from as usize] = true;
+            required[transition.to as usize] = true;
+            required
+        } else {
+            match self.active_deck {
+                DeckId::A => [true, false],
+                DeckId::B => [false, true],
+            }
+        }
+    }
+
     fn transition_gains(&self) -> (f32, f32) {
         let Some(transition) = self.transition else {
             return match self.active_deck {
@@ -505,24 +544,19 @@ impl AudioRenderer {
         }
     }
 
-    fn advance_frame(&mut self) {
+    fn advance_frame(&mut self, advanced: [bool; 2], transition_can_advance: bool) {
         self.output_frames = self.output_frames.saturating_add(1);
         if self.playing {
-            if let Some(transition) = self.transition {
-                self.deck_positions[transition.from as usize] += self.deck_rates
-                    [transition.from as usize]
-                    * self.source_rate_ratios[transition.from as usize];
-                self.deck_positions[transition.to as usize] += self.deck_rates
-                    [transition.to as usize]
-                    * self.source_rate_ratios[transition.to as usize];
-            } else {
-                self.deck_positions[self.active_deck as usize] += self.deck_rates
-                    [self.active_deck as usize]
-                    * self.source_rate_ratios[self.active_deck as usize];
+            let required = self.required_decks();
+            for index in 0..2 {
+                if required[index] && advanced[index] {
+                    self.deck_positions[index] +=
+                        self.deck_rates[index] * self.source_rate_ratios[index];
+                }
             }
         }
 
-        if self.playing {
+        if self.playing && transition_can_advance {
             if let Some(mut transition) = self.transition {
                 transition.elapsed_frames += 1;
                 if transition.elapsed_frames >= transition.total_frames {
@@ -548,27 +582,69 @@ impl AudioRenderer {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CallbackSource {
+    Decoded(&'static DecodedTrack),
+    Stream(&'static StreamSource),
+}
+
 /// # Safety
 ///
-/// `source.address` must point to a live `DecodedTrack` retained by DynamicPlayer. The renderer
-/// never stores the resulting reference beyond one callback invocation.
-unsafe fn installed_track(source: InstalledSource) -> Option<&'static DecodedTrack> {
+/// `source.address` must match `source.kind` and point to an owner retained by DynamicPlayer.
+/// The renderer never stores the resulting reference beyond one callback invocation.
+unsafe fn installed_callback_source(source: InstalledSource) -> Option<CallbackSource> {
     if source.id == 0 || source.address == 0 {
-        None
-    } else {
-        // SAFETY: upheld by DynamicPlayer's source registry and retirement protocol.
-        Some(unsafe { &*(source.address as *const DecodedTrack) })
+        return None;
+    }
+    match source.kind {
+        SourceKind::Decoded => {
+            // SAFETY: upheld by DynamicPlayer's source registry and retirement protocol.
+            Some(CallbackSource::Decoded(unsafe {
+                &*(source.address as *const DecodedTrack)
+            }))
+        }
+        SourceKind::Stream => {
+            // SAFETY: upheld by DynamicPlayer's source registry and retirement protocol.
+            Some(CallbackSource::Stream(unsafe {
+                &*(source.address as *const StreamSource)
+            }))
+        }
+    }
+}
+
+fn callback_source_ratio(source: Option<CallbackSource>, output_sample_rate: u32) -> f64 {
+    match source {
+        Some(CallbackSource::Decoded(track)) => {
+            f64::from(track.sample_rate()) / f64::from(output_sample_rate)
+        }
+        Some(CallbackSource::Stream(_)) | None => 1.0,
+    }
+}
+
+fn callback_source_frame(source: Option<CallbackSource>, position: f64) -> ([f32; 2], bool) {
+    match source {
+        Some(CallbackSource::Decoded(track)) if position < track.frames() as f64 => (
+            [track_sample(track, position, 0), track_sample(track, position, 1)],
+            true,
+        ),
+        Some(CallbackSource::Stream(stream)) => stream
+            .pop_callback()
+            .map(|frame| (frame, true))
+            .unwrap_or(([0.0; 2], false)),
+        _ => ([0.0; 2], false),
+    }
+}
+
+fn callback_source_ended(source: Option<CallbackSource>, position: f64) -> bool {
+    match source {
+        Some(CallbackSource::Decoded(track)) => position >= track.frames() as f64,
+        Some(CallbackSource::Stream(stream)) => stream.drained(),
+        None => true,
     }
 }
 
 fn transition_progress(transition: Transition) -> f32 {
     (transition.elapsed_frames + 1) as f32 / transition.total_frames.max(1) as f32
-}
-
-fn optional_track_sample(track: Option<&DecodedTrack>, position: f64, channel: usize) -> f32 {
-    track
-        .map(|track| track_sample(track, position, channel))
-        .unwrap_or(0.0)
 }
 
 fn track_sample(track: &DecodedTrack, position: f64, channel: usize) -> f32 {
@@ -698,7 +774,13 @@ mod tests {
         );
         let (mut controller, mut renderer, mut retired) = dynamic_command_channel(8, 8);
         controller
-            .install_prepared(DeckId::A, 10, Arc::as_ptr(&first) as usize, 0)
+            .install_prepared(
+                DeckId::A,
+                10,
+                SourceKind::Decoded,
+                Arc::as_ptr(&first) as usize,
+                0,
+            )
             .unwrap();
         controller.send(RtCommand::SetPlaying(true)).unwrap();
         let mut output = [0.0; 2];
@@ -706,7 +788,13 @@ mod tests {
         assert_eq!(output, [0.25, -0.25]);
 
         controller
-            .install_prepared(DeckId::A, 11, Arc::as_ptr(&second) as usize, 1)
+            .install_prepared(
+                DeckId::A,
+                11,
+                SourceKind::Decoded,
+                Arc::as_ptr(&second) as usize,
+                1,
+            )
             .unwrap();
         renderer.render_prepared(&mut output, 48_000, 2);
         assert_eq!(output, [0.75, -0.75]);

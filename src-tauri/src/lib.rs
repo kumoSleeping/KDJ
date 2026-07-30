@@ -583,17 +583,9 @@ pub fn run() {
         pick_folder,
         pick_folders,
         window_control,
-        desktop_player::desktop_player_initialize,
-        desktop_player::desktop_player_load,
-        desktop_player::desktop_player_prepare,
-        desktop_player::desktop_player_play,
-        desktop_player::desktop_player_pause,
-        desktop_player::desktop_player_seek,
-        desktop_player::desktop_player_handoff,
-        desktop_player::desktop_player_set_volume,
-        desktop_player::desktop_player_set_eq,
-        desktop_player::desktop_player_state,
-        desktop_player::desktop_player_dispose
+        desktop_player::playback_initialize,
+        desktop_player::playback_command,
+        desktop_player::playback_state
     ]);
     #[cfg(mobile)]
     let builder = builder.invoke_handler(tauri::generate_handler![

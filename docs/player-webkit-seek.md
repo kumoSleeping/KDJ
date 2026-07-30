@@ -56,22 +56,22 @@ Rust 服务只提供文件、Range、音频提取和元数据。它没有拥有�
 ```text
 PlayerBar
   -> UnifiedPlayer / DesktopNativePlayer
-  -> Tauri typed command
-  -> src-tauri/src/desktop_player.rs（单一控制 actor）
-  -> decode / WSOLA workers
-  -> crates/kdj-player prepared Deck bank
-  -> realtime Rust DSP
+  -> Tauri command ack + 单调 sequence 状态流
+  -> kdj-playback::PlaybackCoordinator（唯一状态 owner）
+  -> 有界流式 decode / shadow seek workers
+  -> kdj-player 双 Deck + realtime Rust DSP
+  -> PlaybackOutputFactory
   -> CPAL / CoreAudio、WASAPI、Linux host
 ```
 
 关键性质：
 
-- seek 是 O(1) prepared frame cursor 更新，不触发压缩媒体重新缓冲；
-- 连续 seek 在下一音频 callback 前按顺序消费，最后一个目标生效；
+- load/prepare/seek 收到后立即确认，不等整轨解码；
+- seek 在目标位置起一台有 revision 的 shadow stream，缓冲就绪后再换手；
+- 连续命令带客户端 command id，迟到命令和旧状态 sequence 都会被丢弃；
 - handoff、包络、EQ/filter、人声削弱和效果按 callback frame 推进；
-- BPM 同步先在 worker 上做 WSOLA，不靠简单重采样改变音高；
-- PCM 的创建、替换和释放都在控制侧；callback 不锁、不分配、不做 IO；
-- 每台 Deck 有 revision fence，旧 decode/seek 结果不能覆盖新操作；
+- 每台 Deck 只保留固定秒数的 SPSC PCM 缓冲，内存不随歌曲时长增长；
+- callback 不锁、不分配、不解码、不做 IO；
 - 本地视频仍由 WebView 显示，但正式声音来自 Rust；视频按 Rust 状态校时。
 
 浏览器开发和临时在线流仍有 Web Audio preview adapter。它不是本地桌面播放的权威实现，也不能再用“Chrome 正常”证明 App 音频正常。
@@ -79,12 +79,12 @@ PlayerBar
 ## 代码位置
 
 - `crates/kdj-player/src/command.rs`：固定大小 realtime 命令和 transition plan。
-- `crates/kdj-player/src/decode.rs`：有内存上限、可取消的 Symphonia 解码。
-- `crates/kdj-player/src/stretch.rs`：离线 WSOLA 变速不变调。
-- `crates/kdj-player/src/engine.rs`：Deck cursor、seek、handoff 和 callback 状态机。
+- `crates/kdj-playback`：命令、状态序号、stream/Deck/worker 生命周期和平台输出边界。
+- `crates/kdj-player/src/stream.rs`：有界 Symphonia 流式解码与 worker 侧重采样。
+- `crates/kdj-player/src/engine.rs`：Deck cursor、stream 消费、handoff 和 callback 状态机。
 - `crates/kdj-player/src/dsp.rs`：EQ、filter、vocal cut、echo/alarm/hydrant。
-- `crates/kdj-player/src/output.rs`：动态 PCM 生命周期和 CPAL 输出。
-- `src-tauri/src/desktop_player.rs`：actor、revision、Tauri commands/events、状态映射。
+- `crates/kdj-player/src/output.rs`：动态 source 生命周期和 CPAL 输出。
+- `src-tauri/src/desktop_player.rs`：薄 Tauri commands/events 适配器。
 - `src/lib/unifiedPlayer.ts`：desktop-native、mobile-native、browser-preview adapters。
 - `src/components/player/PlayerBar.tsx`：UI 编排和自动选歌策略；本地桌面 transport 走 UnifiedPlayer。
 
@@ -98,7 +98,7 @@ PlayerBar
 - 播放/暂停在按下后一个设备 buffer 内生效；
 - 过渡中暂停不会漏出另一台 Deck；
 - 快速连续点击波形只采用最后目标；
-- BPM 同步不改变人声/乐器音高；
+- 流式不变调处理器接入后，BPM 同步不改变人声/乐器音高；当前版本不得偷偷回退整轨 WSOLA；
 - cross、EQ、filter、vocal cut 和三个效果均正常收尾；
 - 本地视频画面继续跟随 Rust 音频时钟，PiP 不产生第二条声音；
 - 音频设备中断会显示错误，重新初始化可打开新的默认设备。
