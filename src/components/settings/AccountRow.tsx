@@ -1,9 +1,30 @@
-import { useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { FolderOpen, LoaderCircle } from "lucide-react";
 import { api } from "../../lib/api";
+import { getBridge } from "../../lib/bridge";
 import { useAppStore } from "../../stores/appStore";
-import type { Account, AccountState } from "../../types";
+import type { Account, AccountState, Platform, QrStateValue } from "../../types";
 import { Button, InlineNotice } from "../common";
-import { QrLoginDialog } from "./QrLoginDialog";
+import { PLATFORM_BRAND, PlatformMark } from "../download/PlatformMark";
+
+const POLL_INTERVAL_MS = 1500;
+
+const SCAN_WITH: Partial<Record<Platform, string>> = {
+  wyy: "用网易云音乐 App 扫码",
+  qqm: "用 QQ 扫码",
+  bilibili: "用哔哩哔哩 App 扫码",
+};
+
+const QR_STATE_TEXT: Partial<Record<QrStateValue, string>> = {
+  waiting: "等待扫码",
+  scanned: "已扫码，请在手机上确认",
+  done: "登录成功",
+  expired: "二维码已过期",
+  refused: "已在手机上取消",
+  error: "登录状态异常",
+};
+
+const QR_FINAL_STATES = new Set<QrStateValue>(["done", "expired", "refused", "error"]);
 
 const STATE_LABEL: Record<AccountState, string> = {
   valid: "已登录",
@@ -131,14 +152,95 @@ function isMachineIdDetail(detail: string): boolean {
  */
 export function AccountRow({ account }: { account: Account }) {
   const refreshAccounts = useAppStore((state) => state.refreshAccounts);
-  const [showQr, setShowQr] = useState(false);
+  const openSettingsPanel = useAppStore((state) => state.openSettingsPanel);
   const [busy, setBusy] = useState(false);
+  const [qrBusy, setQrBusy] = useState(false);
+  const [savedPath, setSavedPath] = useState("");
+  const [savedHint, setSavedHint] = useState("");
+  const [qrState, setQrState] = useState<QrStateValue | null>(null);
+  const qrGenerationRef = useRef(0);
   /** 退出失败就贴在这一行自己底下：状态还写着"已登录"，得说清楚为什么。 */
   const [notice, setNotice] = useState("");
 
   const loggedIn = account.state === "valid";
   const avatarFallback = qqAvatarFallback(account);
   const avatarSrc = account.avatar || avatarFallback;
+
+  useEffect(
+    () => () => {
+      // 关闭设置会卸载账号行：让仍在等待的轮询自然失效。重新打开后按钮恢复原状。
+      qrGenerationRef.current += 1;
+    },
+    [],
+  );
+
+  const saveLoginQr = async () => {
+    const generation = ++qrGenerationRef.current;
+    setQrBusy(true);
+    setSavedPath("");
+    setSavedHint("");
+    setQrState(null);
+    setNotice("");
+    try {
+      const session = await api.loginQr(account.platform);
+      if (generation !== qrGenerationRef.current) return;
+      const bridge = getBridge();
+      const saved = await bridge.saveLoginQr({
+        platform: account.platform,
+        label: account.label,
+        image: session.image,
+      });
+      if (generation !== qrGenerationRef.current) return;
+      setSavedPath(saved.path);
+      setSavedHint(saved.location === "pictures" ? "已保存到相册/图片" : "已保存到下载文件夹");
+      setQrState("waiting");
+      setQrBusy(false);
+      // 保存完成就直接在文件管理器中定位；账号行本身继续留在设置里等待扫码。
+      if (!["android", "ios", "browser"].includes(String(bridge.platform))) {
+        void bridge
+          .revealPath(saved.path)
+          .catch(() => bridge.openPath(saved.path))
+          .finally(() => openSettingsPanel());
+      }
+
+      const poll = async () => {
+        if (generation !== qrGenerationRef.current) return;
+        try {
+          const state = await api.loginQrState(account.platform, session.session_id);
+          if (generation !== qrGenerationRef.current) return;
+          setQrState(state.state);
+          if (state.state === "done") {
+            await refreshAccounts();
+            return;
+          }
+          if (QR_FINAL_STATES.has(state.state)) return;
+          window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
+        } catch (error) {
+          if (generation === qrGenerationRef.current) {
+            setNotice(`登录状态检查失败：${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      };
+      window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
+    } catch (error) {
+      if (generation !== qrGenerationRef.current) return;
+      setQrBusy(false);
+      setNotice(`保存登录二维码失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const openSavedQr = () => {
+    if (!savedPath) return;
+    const bridge = getBridge();
+    void bridge
+      .revealPath(savedPath)
+      .catch(() => bridge.openPath(savedPath))
+      .catch((error: unknown) => {
+        setNotice(`打开保存位置失败：${error instanceof Error ? error.message : String(error)}`);
+      })
+      // Finder 抢到前台后仍保持设置旁栏为打开态；回来时文件夹按钮也不会复原。
+      .finally(() => openSettingsPanel());
+  };
 
   const logout = async () => {
     setBusy(true);
@@ -157,7 +259,16 @@ export function AccountRow({ account }: { account: Account }) {
   return (
     <div style={settingRow.row}>
       <div style={settingRow.text}>
-        <span className="kd-account-avatar" style={settingRow.avatar} aria-hidden="true">
+        <span
+          className="kd-account-avatar"
+          style={{
+            ...settingRow.avatar,
+            display: "grid",
+            placeItems: "center",
+            color: PLATFORM_BRAND[account.platform] ?? "var(--kd-muted)",
+          }}
+          aria-hidden="true"
+        >
           {avatarSrc && (
             <img
               src={avatarSrc}
@@ -174,6 +285,7 @@ export function AccountRow({ account }: { account: Account }) {
               }}
             />
           )}
+          {!avatarSrc && !loggedIn && <PlatformMark id={account.platform} size={17} />}
         </span>
         <div style={settingRow.body}>
           {/* title 兜住省略号：名字被截了还能悬停看全 */}
@@ -190,6 +302,15 @@ export function AccountRow({ account }: { account: Account }) {
               !isMachineIdDetail(account.detail) &&
               ` · ${account.detail}`}
           </div>
+          {savedPath && !loggedIn && (
+            <div style={settingRow.hint} title={savedPath}>
+              {savedHint}
+              {" · "}
+              {qrState === "waiting"
+                ? (SCAN_WITH[account.platform] ?? "等待扫码")
+                : (qrState && QR_STATE_TEXT[qrState]) || "等待扫码"}
+            </div>
+          )}
           {/* 贴在状态行下面，而不是塞进右边那一列：那一列只有按钮那么宽，
               一句"退出失败：连接被拒绝"进去就只剩省略号了 */}
           <InlineNotice text={notice} onDismiss={() => setNotice("")} />
@@ -205,21 +326,28 @@ export function AccountRow({ account }: { account: Account }) {
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => void logout()}>
             退出
           </Button>
+        ) : savedPath ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            iconOnly
+            aria-label="在文件夹中显示登录二维码"
+            title={savedPath}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              openSavedQr();
+            }}
+          >
+            <FolderOpen size={14} />
+          </Button>
         ) : (
-          <Button size="sm" variant="ghost" onClick={() => setShowQr(true)}>
-            保存登录二维码
+          <Button size="sm" variant="ghost" disabled={qrBusy} onClick={() => void saveLoginQr()}>
+            {qrBusy && <LoaderCircle size={13} className="kd-spin" />}
+            {qrBusy ? "正在保存" : "保存登录二维码"}
           </Button>
         )}
       </div>
-
-      {showQr && (
-        <QrLoginDialog
-          platform={account.platform}
-          label={account.label}
-          onClose={() => setShowQr(false)}
-          onSuccess={() => void refreshAccounts()}
-        />
-      )}
     </div>
   );
 }

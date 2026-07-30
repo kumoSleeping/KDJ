@@ -14,6 +14,8 @@ interface StreamMeta {
   cover: string;
   kind: StreamKind;
   sourceKey: string;
+  source: SongSource | null;
+  nextTrack: Track | null;
 }
 
 const metaById = new Map<number, StreamMeta>();
@@ -29,7 +31,7 @@ export function streamMeta(track: Track | null | undefined): StreamMeta | null {
 }
 
 export function streamMediaUrl(track: Track): string | null {
-  return streamMeta(track)?.url ?? null;
+  return streamMeta(track)?.url || null;
 }
 
 export function streamCoverUrl(track: Track): string {
@@ -51,6 +53,8 @@ export function makeSongStreamTrack(source: SongSource, url: string): Track {
     cover: source.cover || "",
     kind: "song",
     sourceKey: `${source.platform}:${source.key}`,
+    source,
+    nextTrack: null,
   });
   const now = new Date().toISOString();
   return {
@@ -93,4 +97,29 @@ export function makeSongStreamTrack(source: SongSource, url: string): Track {
     folder: "",
     link: "",
   };
+}
+
+/** 搜索结果的后继项先只建展示元数据；真正轮到它播放时才解析直链。 */
+export function makePendingSongStreamTrack(source: SongSource): Track {
+  return makeSongStreamTrack(source, "");
+}
+
+export function setStreamNextTrack(track: Track, next: Track | null): void {
+  const meta = streamMeta(track);
+  if (meta) meta.nextTrack = next;
+}
+
+export function streamNextTrack(track: Track | null | undefined): Track | null {
+  return streamMeta(track)?.nextTrack ?? null;
+}
+
+/** 将搜索结果占位曲目解析成可播放流，保留 id 和已经串好的后继链。 */
+export async function resolvePendingStreamTrack(track: Track): Promise<Track> {
+  const meta = streamMeta(track);
+  if (!meta) throw new Error("在线试听上下文已经失效");
+  if (meta.url) return track;
+  if (!meta.source) throw new Error("在线试听来源缺失");
+  const { url } = await api.songPreview(meta.source);
+  meta.url = url;
+  return track;
 }

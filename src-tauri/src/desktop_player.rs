@@ -3,24 +3,48 @@
 //! Tauri owns serialization and event delivery only. Command ordering, decode workers, Deck
 //! lifecycle and authoritative state live in `kdj-playback`; CPAL selection lives in `kdj-player`.
 
+use std::sync::{Arc, OnceLock};
+
 use kdj_playback::{CommandAck, PlaybackCommand, PlaybackCoordinator, PlaybackSnapshot};
 use tauri::{AppHandle, Emitter};
+
+use crate::desktop_media::DesktopMediaSession;
 
 pub const STATE_EVENT: &str = "playback-state";
 
 pub struct DesktopPlayerHandle {
-    coordinator: PlaybackCoordinator,
+    coordinator: Arc<PlaybackCoordinator>,
+    _media_session: Option<DesktopMediaSession>,
 }
 
 impl DesktopPlayerHandle {
     pub fn spawn(app: AppHandle) -> Result<Self, String> {
+        let coordinator_slot = Arc::new(OnceLock::new());
+        let media_session =
+            match DesktopMediaSession::spawn(app.clone(), Arc::clone(&coordinator_slot)) {
+                Ok(session) => Some(session),
+                Err(error) => {
+                    tracing::warn!("{error}；播放器仍可使用，但系统媒体键不可用");
+                    None
+                }
+            };
         let event_app = app.clone();
-        let coordinator = PlaybackCoordinator::spawn(move |snapshot| {
+        let event_media = media_session.clone();
+        let coordinator = Arc::new(PlaybackCoordinator::spawn(move |snapshot| {
+            if let Some(media) = &event_media {
+                media.update(&snapshot);
+            }
             if let Err(error) = event_app.emit(STATE_EVENT, snapshot) {
                 tracing::warn!("发送播放器状态失败：{error}");
             }
-        })?;
-        Ok(Self { coordinator })
+        })?);
+        coordinator_slot
+            .set(Arc::clone(&coordinator))
+            .map_err(|_| "系统媒体控制重复绑定播放器".to_string())?;
+        Ok(Self {
+            coordinator,
+            _media_session: media_session,
+        })
     }
 
     fn submit(&self, command_id: u64, command: PlaybackCommand) -> Result<CommandAck, String> {

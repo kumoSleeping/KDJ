@@ -101,7 +101,7 @@ function QueueRow({
         event.preventDefault();
         setMenu({ x: event.clientX, y: event.clientY });
       }}
-      title={configurable ? (expanded ? "收起配置" : "点开配置本条下载参数") : undefined}
+      title={configurable ? "下载配置" : undefined}
     >
       <span className="kd-queue-title" title={`${task.title} — ${task.artist}`}>
         {task.title}
@@ -255,16 +255,16 @@ function QueueRow({
  */
 function QueuePrefsBar({
   canStart,
+  canClear,
   queuedCount,
-  finishedCount,
   activeCount,
   totalCount,
   onStart,
   onClear,
 }: {
   canStart: boolean;
+  canClear: boolean;
   queuedCount: number;
-  finishedCount: number;
   activeCount: number;
   totalCount: number;
   onStart(): void;
@@ -304,8 +304,12 @@ function QueuePrefsBar({
         <button
           type="button"
           className="kd-text-action"
-          disabled={finishedCount <= 0}
-          title="清掉已完成 / 失败 / 已取消的记录，进行中的留着"
+          disabled={!canClear}
+          title={
+            canClear
+              ? "清掉排队中 / 已完成 / 失败 / 已取消的记录，下载中的留着"
+              : "没有可清掉的记录（下载中的需先取消）"
+          }
           onClick={onClear}
         >
           <Trash2 size={12} />
@@ -371,6 +375,7 @@ export function QueuePanel() {
   const list = useDownloadStore((store) => store.list);
   const activeCount = useDownloadStore((store) => store.activeCount);
   const clear = useDownloadStore((store) => store.clear);
+  const cancel = useDownloadStore((store) => store.cancel);
   const [dropActive, setDropActive] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const folders = useLibraryStore((store) => store.folders);
@@ -379,6 +384,7 @@ export function QueuePanel() {
   const setListMode = useAppStore((store) => store.setListMode);
   const finishedCount = list.length - activeCount;
   const queuedCount = list.reduce((sum, task) => sum + (task.state === "queued" ? 1 : 0), 0);
+  const canClear = finishedCount > 0 || queuedCount > 0;
   /**
    * 「开始下载」按得动的唯一情形：闸门关着，且真有人被它拦在外面。
    *
@@ -448,8 +454,8 @@ export function QueuePanel() {
     >
       <QueuePrefsBar
         canStart={canStart}
+        canClear={canClear}
         queuedCount={queuedCount}
-        finishedCount={finishedCount}
         activeCount={activeCount}
         totalCount={list.length}
         onStart={() => {
@@ -464,9 +470,21 @@ export function QueuePanel() {
         }}
         onClear={() => {
           setActionError("");
-          void clear().catch((error: unknown) =>
-            setActionError(`清空失败：${(error as Error).message}`),
-          );
+          void (async () => {
+            try {
+              const queued = list.filter((task) => task.state === "queued");
+              await clear();
+              await Promise.all(
+                queued.map((task) =>
+                  cancel(task.id)
+                    .then(() => forgetQueueDraft(task.id))
+                    .catch(() => undefined),
+                ),
+              );
+            } catch (error: unknown) {
+              setActionError(`清空失败：${(error as Error).message}`);
+            }
+          })();
         }}
       />
 

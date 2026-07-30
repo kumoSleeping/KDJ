@@ -11,6 +11,7 @@ import { bindSongPreviewToPlayer } from "./lib/songPreview";
 import { isEditable } from "./lib/useLibraryClipboard";
 import { useLayoutSignals } from "./lib/useLayoutMode";
 import { bootAll, connectEvents, selectConnected, useAppStore } from "./stores/appStore";
+import { useLyricsPrefs } from "./lib/lyricsPrefs";
 import { useUpdateStore } from "./stores/updateStore";
 
 // 只有一个界面：工作台（曲库 + 搜索下载合一）。
@@ -44,6 +45,7 @@ export default function App() {
   useEffect(() => {
     // 全应用只有这一处订阅 WS；卸载时断开（StrictMode 的二次挂载会自动重订）
     const stop = connectEvents();
+    useLyricsPrefs.getState().prepareForStartup();
     void bootAll();
     return stop;
   }, []);

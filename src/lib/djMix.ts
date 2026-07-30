@@ -70,12 +70,11 @@ interface DjConfig {
 }
 
 const DEFAULT_CONFIG: DjConfig = {
-  enabled: false,
-  transitions: ["cross"],
-  effects: [],
-  bars: 8,
-  vocalCut: false,
-  // 默认开：接播本来就会用 cue；顺带让结束点也参与自动切歌。
+  enabled: true,
+  transitions: ["filter"],
+  effects: ["echo"],
+  bars: 1,
+  vocalCut: true,
   applyInOutPoints: true,
 };
 
@@ -1252,52 +1251,66 @@ export interface DjBeginOptions {
 }
 
 /**
- * 在曲子的尾段找「人声退场、只剩背景音」的时间点（秒）。找不到返回 null。
+ * 从波形估算接歌起手时刻（秒）。
  *
- * 不是真正的人声识别——那需要模型。用的是现成的波形三频段数据
- * （见 Waveform 类型：红=低频/鼓，绿=中频/人声，蓝=高频/镲）：
- * 人声的能量主要落在中频，「结尾一段的中频占比明显低于全曲中段的基线」
- * 就当人声已经退了。副歌收尾长音、纯器乐的中频主旋律会骗过它，
- * 所以调用方必须把它当**建议**用，找不到/不可信就回退到按长度倒推。
+ * 1. 在全曲「有声」段算平均响度 amp；
+ * 2. 仍 ≥ 平均值一半的最后一段视为真实尾音结束；
+ * 3. 起手 = 尾音结束 − mixSecs（设置里选 N 小节，就提前 N 小节接入）。
+ *
+ * 比旧版中频占比 heuristic 更贴近「最后一音放完再接」——不会在
+ * 人声暂歇、鼓还在时误判成 outro。
  */
+export function findMixStartTime(
+  wave: { duration: number; amp: number[] },
+  mixSecs: number,
+): number | null {
+  const n = wave.amp.length;
+  if (n < 8 || wave.duration <= 0 || mixSecs <= 0) return null;
+  const secPerBucket = wave.duration / n;
+
+  const NOISE_FLOOR = 0.02;
+  const active: number[] = [];
+  for (let i = 0; i < n; i += 1) {
+    if (wave.amp[i] > NOISE_FLOOR) active.push(wave.amp[i]);
+  }
+  if (active.length < 8) return null;
+
+  const average = active.reduce((sum, value) => sum + value, 0) / active.length;
+  const threshold = average * 0.5;
+  if (threshold <= NOISE_FLOOR) return null;
+
+  let lastAudible = -1;
+  for (let i = n - 1; i >= 0; i -= 1) {
+    if (wave.amp[i] >= threshold) {
+      lastAudible = i;
+      break;
+    }
+  }
+  if (lastAudible < 0) return null;
+
+  const lastSoundEnd = Math.min(wave.duration, (lastAudible + 1) * secPerBucket);
+  const mixStart = lastSoundEnd - mixSecs;
+  return Math.max(0, Math.min(mixStart, wave.duration - 0.05));
+}
+
+/** @deprecated 使用 findMixStartTime */
 export function findOutroStart(
   wave: { duration: number; amp: number[]; r: number[]; g: number[]; b: number[] },
   mixSecs: number,
 ): number | null {
-  const n = wave.amp.length;
-  if (n < 32 || wave.duration <= 0) return null;
-  const secPerBucket = wave.duration / n;
+  return findMixStartTime(wave, mixSecs);
+}
 
-  // 基线：中段 25%..75% 里「有声」桶的中频占比中位数——人声通常住在这儿
-  const shares: number[] = [];
-  for (let i = Math.floor(n * 0.25); i < Math.floor(n * 0.75); i++) {
-    const total = wave.r[i] + wave.g[i] + wave.b[i];
-    if (wave.amp[i] > 0.05 && total > 0) shares.push(wave.g[i] / total);
-  }
-  if (shares.length < 16) return null; // 大半是静音/数据太少，基线不可信
-  shares.sort((a, b) => a - b);
-  const baseline = shares[Math.floor(shares.length / 2)];
-  if (baseline <= 0.05) return null; // 整曲几乎没有中频（纯打击乐？），没得判
-
-  // 从 70% 处往后找：连续「接歌那么长」的一段，中频占比都跌破基线的七成。
-  // 窗口必须盖住整个过渡——只看一两个桶，副歌换气的空拍都能骗过它。
-  const windowBuckets = Math.max(4, Math.round(mixSecs / secPerBucket));
-  const searchFrom = Math.floor(n * 0.7);
-  for (let start = searchFrom; start <= n - Math.ceil(windowBuckets / 2); start++) {
-    let ok = true;
-    const end = Math.min(n, start + windowBuckets);
-    for (let i = start; i < end; i++) {
-      const total = wave.r[i] + wave.g[i] + wave.b[i];
-      // 已经淡出到近静音的桶算"没人声"，不打断窗口
-      if (wave.amp[i] <= 0.05 || total <= 0) continue;
-      if (wave.g[i] / total > baseline * 0.7) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) return start * secPerBucket;
-  }
-  return null;
+/** 波形不可用时：按媒体时长从尾部倒推 N 小节。 */
+export function mixStartFromDuration(
+  durationSec: number,
+  bpm: number | null | undefined,
+  bars: number,
+): number | null {
+  if (!Number.isFinite(durationSec) || durationSec <= 0) return null;
+  const mixSecs = mixSeconds(bpm, bars);
+  if (mixSecs <= 0) return null;
+  return Math.max(0, durationSec - mixSecs);
 }
 
 export const djEngine = {
@@ -1363,9 +1376,9 @@ export const djEngine = {
     return seekBusy;
   },
 
-  /** 「顺其自然」档的起手提前量：交接本身的长度 + 一点挑歌/加载的余量。 */
+  /** 「按小节提前量」：与 mixSeconds 相同，不再额外 +1.5s 抢跑。 */
   leadSeconds(bpm: number | null | undefined, bars: number): number {
-    return mixSeconds(bpm, bars) + 1.5;
+    return mixSeconds(bpm, bars);
   },
 
   /**

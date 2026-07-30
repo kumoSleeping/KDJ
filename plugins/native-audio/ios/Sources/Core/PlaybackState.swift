@@ -19,7 +19,7 @@ struct PlaybackStateMachine: Sendable {
   private(set) var lastError: String?
   private(set) var didReachEnd = false
   private(set) var currentStoryId: Int64?
-  private(set) var metadata = PlaybackMetadata(title: nil, artist: nil, artworkURL: nil)
+  private(set) var metadata = PlaybackMetadata(title: nil, artist: nil, album: nil, artworkURL: nil)
   private(set) var pendingSeek: PendingSeekContext?
   private var stickySeekTarget: Double?
   private var lastStableCurrentTime: Double = 0.0
@@ -125,7 +125,7 @@ struct PlaybackStateMachine: Sendable {
     pendingSeek = nil
     stickySeekTarget = nil
     lastStableCurrentTime = 0.0
-    metadata = PlaybackMetadata(title: nil, artist: nil, artworkURL: nil)
+    metadata = PlaybackMetadata(title: nil, artist: nil, album: nil, artworkURL: nil)
   }
 
   mutating func makeSnapshot(

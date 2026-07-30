@@ -12,6 +12,7 @@ import {
   SearchX,
 } from "lucide-react";
 import type { IntakeItem, IntakeKind, MergedGroup, VideoInfo } from "../../types";
+import type { SongPreviewItem } from "../../lib/songPreview";
 import {
   beginColumnPointerReorder,
   loadTableColumnPrefs,
@@ -67,6 +68,23 @@ export function selectableGroups(item: IntakeItem): MergedGroup[] {
     (group) =>
       !isVideoGroup(group) && group.sources.some((source) => source.platform !== "local"),
   );
+}
+
+function previewItem(group: MergedGroup, preferredIndex: number): SongPreviewItem | null {
+  if (isVideoGroup(group)) return null;
+  const preferred = group.sources[preferredIndex] ?? group.sources[0];
+  const source =
+    preferred && preferred.platform !== "bilibili" && preferred.platform !== "local"
+      ? preferred
+      : group.sources.find(
+          (candidate) => candidate.platform !== "bilibili" && candidate.platform !== "local",
+        );
+  if (!source) return null;
+  return {
+    source,
+    title: group.title || source.title,
+    artist: group.artists.join(", ") || source.artists.join(", "),
+  };
 }
 
 export interface ResultTableProps {
@@ -148,9 +166,12 @@ export function ResultTable({
   const colIds = orderedColumns.map((column) => column.key);
   const visibleColumns = orderedColumns.filter((column) => !colPrefs.hidden.includes(column.key));
   const leadWidth = widthFor("lead", RESULT_LEAD_WIDTH);
+  // 批选列只在 selectionMode 时占满勾选宽；平时留一点左边距，别贴死边缘。
+  // 不能继续写死 2.2rem：fixed 布局下 <col> 会盖过 .kd-selection-cell { width: 0 }。
+  const selectionColWidth = selectionMode ? "2.2rem" : "0.35rem";
   const totalColumns = 3 + visibleColumns.length;
   const tableMinWidthPx =
-    remStringToPx("2.2rem") +
+    remStringToPx(selectionColWidth) +
     remStringToPx(leadWidth) +
     visibleColumns.reduce(
       (sum, column) => sum + remStringToPx(widthFor(column.key, column.width)),
@@ -293,7 +314,7 @@ export function ResultTable({
     <>
       <table className="kd-table" style={{ minWidth: tableMinWidthPx }}>
         <colgroup>
-          <col style={{ width: "2.2rem" }} />
+          <col style={{ width: selectionColWidth }} />
           <col style={{ width: leadWidth }} />
           {visibleColumns.map((column) => (
             <col key={column.key} style={{ width: widthFor(column.key, column.width) }} />
@@ -378,6 +399,15 @@ export function ResultTable({
                       selectable={group.sources.some((source) => source.platform !== "local")}
                       selectionMode={selectionMode}
                       expanded={expandedGroups.has(group.group_id)}
+                      followingSongs={item.groups
+                        .slice(position + 1)
+                        .flatMap((candidate) => {
+                          const next = previewItem(
+                            candidate,
+                            sourceIndex[candidate.group_id] ?? candidate.best_source_index,
+                          );
+                          return next ? [next] : [];
+                        })}
                       onToggleSelect={() => onToggleSelect(selectionKey(index, group.group_id))}
                       onEnterSelection={() => onSelectionModeChange(true)}
                       onToggleExpand={() => onToggleExpand(group.group_id)}

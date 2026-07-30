@@ -2,6 +2,10 @@
 export const FOLDER_DROP_PATH_ATTR = "data-kd-folder-drop-path";
 /** 当前曲目表也能接搜索结果；值就是这张表正在看的目标文件夹。 */
 export const SEARCH_DROP_PATH_ATTR = "data-kd-search-drop-path";
+/** 「全部曲目」落点：只接搜索下载，落到默认下载文件夹。 */
+export const SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR = "data-kd-search-default-download-drop";
+/** searchDropPathAt 在命中「全部曲目」时返回的哨兵；入队前再解析成 settings.download_dir。 */
+export const SEARCH_DEFAULT_DOWNLOAD_SENTINEL = "__kd_default_download__";
 /** 下载队列的稳定落点标记，供 WKWebView 丢失原生 drop 时由 dragend 坐标兜底。 */
 export const SEARCH_QUEUE_DROP_ATTR = "data-kd-search-queue-drop";
 
@@ -40,12 +44,22 @@ export function searchQueueDropAt(clientX: number, clientY: number): boolean {
 export function searchDropElementAt(clientX: number, clientY: number): HTMLElement | null {
   if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
   const hit = document.elementFromPoint(clientX, clientY);
-  return hit?.closest<HTMLElement>(`[${SEARCH_DROP_PATH_ATTR}]`) ?? folderDropElementAt(clientX, clientY);
+  return (
+    hit?.closest<HTMLElement>(
+      `[${SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR}], [${SEARCH_DROP_PATH_ATTR}]`,
+    ) ?? folderDropElementAt(clientX, clientY)
+  );
 }
 
 export function searchDropPathAt(clientX: number, clientY: number): string {
   const target = searchDropElementAt(clientX, clientY);
-  return target?.getAttribute(SEARCH_DROP_PATH_ATTR)?.trim()
-    || target?.getAttribute(FOLDER_DROP_PATH_ATTR)?.trim()
-    || "";
+  if (!target) return "";
+  if (target.hasAttribute(SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR)) {
+    return SEARCH_DEFAULT_DOWNLOAD_SENTINEL;
+  }
+  return (
+    target.getAttribute(SEARCH_DROP_PATH_ATTR)?.trim()
+    || target.getAttribute(FOLDER_DROP_PATH_ATTR)?.trim()
+    || ""
+  );
 }

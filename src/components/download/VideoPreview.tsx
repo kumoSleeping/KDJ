@@ -315,8 +315,13 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
   const toggle = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
-    if (video.paused) void video.play().catch(() => undefined);
-    else video.pause();
+    if (video.paused) {
+      // 必须在 play() 前交出音频焦点。等 onPlay 才通知时，Rust/CPAL 唱盘仍在
+      // 发声，WebKit 的网络视频可能停在起播阶段；用户手动暂停唱盘后才会恢复。
+      // 协同模式由 PlayerBar 的焦点例外保留双路声音。
+      announceAudioFocus("preview");
+      void video.play().catch(() => undefined);
+    } else video.pause();
   }, []);
 
   /**

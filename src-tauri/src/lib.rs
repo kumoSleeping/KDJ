@@ -14,6 +14,8 @@
 //! 名字和参数由 `src/lib/bridge.ts` 固定，改名等于把前端按钮变哑巴。
 
 #[cfg(desktop)]
+mod desktop_media;
+#[cfg(desktop)]
 mod desktop_player;
 
 use std::path::{Path, PathBuf};
@@ -436,6 +438,32 @@ fn window_control(
     }
 }
 
+/// 让原生窗口底色跟随 Web 主题。macOS 快速拖窗时系统会短暂直接合成窗口底层；
+/// 若浅色页面仍垫着配置中的深色底色，右缘就会露出一块黑影。
+#[tauri::command]
+fn set_window_background(window: tauri::WebviewWindow, theme: String) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        // 歌词悬浮窗依赖透明背景，不能被主界面的主题同步改成不透明。
+        if window.label() != "main" {
+            return Ok(());
+        }
+        let color = match theme.as_str() {
+            "dark" => tauri::window::Color(0x11, 0x11, 0x13, 0xff),
+            "light" => tauri::window::Color(0xf2, 0xf2, 0xf2, 0xff),
+            other => return Err(format!("未知的窗口主题：{other}")),
+        };
+        return window
+            .set_background_color(Some(color))
+            .map_err(|err| err.to_string());
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (window, theme);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum DesktopLyricsPosition {
@@ -814,6 +842,7 @@ pub fn run() {
         pick_folder,
         pick_folders,
         window_control,
+        set_window_background,
         set_desktop_lyrics,
         desktop_player::playback_initialize,
         desktop_player::playback_command,
@@ -832,6 +861,7 @@ pub fn run() {
         pick_folder,
         pick_folders,
         window_control,
+        set_window_background,
         set_desktop_lyrics
     ]);
 

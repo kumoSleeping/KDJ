@@ -25,6 +25,7 @@ actor PlaybackRuntimeActor {
   private var isConfigured = false
   private var wasPlayingBeforeInterruption = false
   private var isAppInForeground = true
+  private var queue: [SetSourceArgs] = []
 
   private var lastEmittedState: NativeAudioState?
   private var lastProgressTickEmitAt = Date.distantPast
@@ -52,15 +53,22 @@ actor PlaybackRuntimeActor {
     id: Int64?,
     title: String?,
     artist: String?,
-    artworkURL: String?
+    album: String?,
+    artworkURL: String?,
+    preserveQueue: Bool = false
   ) async throws -> NativeAudioState {
     await ensureConfigured()
     try audioSessionController.configurePlaybackCategory()
 
     let playbackURL = try await sourceResolver.resolvePlayableURL(src: src)
+    if !preserveQueue {
+      queue.removeAll()
+    }
     let sourceRevision = machine.advanceSourceRevision()
     machine.setStoryId(id)
-    machine.setMetadata(PlaybackMetadata(title: title, artist: artist, artworkURL: artworkURL))
+    machine.setMetadata(
+      PlaybackMetadata(title: title, artist: artist, album: album, artworkURL: artworkURL)
+    )
 
     wasPlayingBeforeInterruption = false
     playerAdapter.pause()
@@ -68,6 +76,49 @@ actor PlaybackRuntimeActor {
 
     emitState(trigger: .transition, forcePersistCheckpoint: false, forceEmit: true, refreshArtwork: true)
     return snapshot()
+  }
+
+  func setQueue(items: [SetSourceArgs]) async throws -> NativeAudioState {
+    guard !items.isEmpty else {
+      throw NativeAudioRuntimeError.invalidSource
+    }
+    queue = items
+    if let currentID = machine.currentStoryId, items.contains(where: { $0.id == currentID }) {
+      return snapshot()
+    }
+    return try await loadQueueItem(items[0], resume: machine.desiredPlaying)
+  }
+
+  private func skipQueue(by offset: Int) async throws -> NativeAudioState {
+    guard !queue.isEmpty else { return snapshot() }
+    let currentIndex = machine.currentStoryId
+      .flatMap { currentID in queue.firstIndex(where: { $0.id == currentID }) } ?? 0
+    let targetIndex = currentIndex + offset
+    guard queue.indices.contains(targetIndex) else {
+      if offset < 0 {
+        return await seekTo(position: 0)
+      }
+      return snapshot()
+    }
+    let item = queue[targetIndex]
+    let resume = machine.desiredPlaying
+    return try await loadQueueItem(item, resume: resume)
+  }
+
+  private func loadQueueItem(_ item: SetSourceArgs, resume: Bool) async throws -> NativeAudioState {
+    let state = try await setSource(
+      src: item.src,
+      id: item.id,
+      title: item.title,
+      artist: item.artist,
+      album: item.album,
+      artworkURL: item.artworkUrl,
+      preserveQueue: true
+    )
+    if resume {
+      return try await play()
+    }
+    return state
   }
 
   func play() async throws -> NativeAudioState {
@@ -96,6 +147,11 @@ actor PlaybackRuntimeActor {
 
     emitState(trigger: .transition, forcePersistCheckpoint: true, forceEmit: true, refreshArtwork: false)
     return snapshot()
+  }
+
+  func stop() async -> NativeAudioState {
+    _ = await pause()
+    return await seekTo(position: 0)
   }
 
   func seekTo(position: Double) async -> NativeAudioState {
@@ -159,6 +215,7 @@ actor PlaybackRuntimeActor {
     await sourceResolver.cleanupAll()
 
     machine.resetAll()
+    queue.removeAll()
     wasPlayingBeforeInterruption = false
     lastEmittedState = nil
     lastProgressTickEmitAt = .distantPast
@@ -396,6 +453,12 @@ actor PlaybackRuntimeActor {
       } else {
         _ = try? await play()
       }
+    case .next:
+      _ = try? await skipQueue(by: 1)
+    case .previous:
+      _ = try? await skipQueue(by: -1)
+    case .stop:
+      _ = await stop()
     case let .seek(position):
       _ = await seekTo(position: position)
     case let .seekDelta(delta):

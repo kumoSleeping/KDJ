@@ -533,6 +533,8 @@ export interface KdjBridge {
    */
   applyUpdate?: null | ((onProgress?: (progress: UpdateProgress) => void) => Promise<void>);
   windowControl: (action: "minimize" | "maximize" | "close" | "drag") => void;
+  /** 同步原生窗口底色，避免 macOS 拖窗时露出与页面主题不符的底层。 */
+  setWindowBackground: (theme: "dark" | "light") => void;
   /** 桌面独立歌词窗口；浏览器与移动端没有该能力。 */
   desktopLyrics?: null | ((options: {
     visible: boolean;

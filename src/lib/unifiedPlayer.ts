@@ -186,6 +186,7 @@ class MobileNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
         id: track.id,
         title: track.title || track.filename,
         artist: track.artist || undefined,
+        album: track.album || undefined,
         artworkUrl,
       }),
     );
@@ -207,6 +208,7 @@ class MobileNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
           id: track.id,
           title: track.title || track.filename,
           artist: track.artist || undefined,
+          album: track.album || undefined,
           artworkUrl,
         })),
       ),
@@ -272,6 +274,10 @@ interface DesktopPlaybackSnapshotRaw {
   phase: DesktopPlaybackPhase;
   trackId: number | null;
   preparedTrackId: number | null;
+  title: string;
+  artist: string;
+  album: string;
+  artworkUrl: string | null;
   currentTime: number;
   duration: number;
   desiredPlaying: boolean;
@@ -329,6 +335,8 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private unlisten: UnlistenFn | null = null;
   private sequence = 0;
   private nextCommandId = 1;
+  /** Tauri invoke 可以并发越序到达；播放命令必须和 commandId 保持同一顺序。 */
+  private commandTail: Promise<void> = Promise.resolve();
 
   initialize(): Promise<UnifiedPlayerState> {
     if (this.initPromise) return this.initPromise;
@@ -355,17 +363,29 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     return this.publish(normalizedDesktop(raw));
   }
 
-  private async command(command: Record<string, unknown>): Promise<UnifiedPlayerState> {
-    await this.initialize();
-    const commandId = this.nextCommandId++;
-    const ack = await invoke<DesktopCommandAckRaw>("playback_command", { commandId, command });
-    return this.accept(ack.snapshot);
+  private command(command: Record<string, unknown>): Promise<UnifiedPlayerState> {
+    const operation = this.commandTail.then(async () => {
+      await this.initialize();
+      const commandId = this.nextCommandId++;
+      const ack = await invoke<DesktopCommandAckRaw>("playback_command", { commandId, command });
+      return this.accept(ack.snapshot);
+    });
+    // 失败不能堵死后续播放命令，但调用方仍会收到本次 operation 的原始错误。
+    this.commandTail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
   }
 
   private source(source: UnifiedPlayerSource): Record<string, unknown> {
     return {
       trackId: source.track.id,
       path: source.track.path,
+      title: source.track.title || source.track.filename,
+      artist: source.track.artist || "",
+      album: source.track.album || "",
+      artworkUrl: source.artworkUrl,
       position: source.position ?? 0,
       duration: source.track.duration,
       rate: source.rate ?? 1,
@@ -449,6 +469,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     this.unlisten = null;
     this.initPromise = null;
     this.sequence = 0;
+    this.commandTail = Promise.resolve();
     this.publish(INITIAL_STATE);
   }
 }

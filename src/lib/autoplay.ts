@@ -141,6 +141,44 @@ function sameSong(a: Track, b: Track): boolean {
   return left.length > 0 && left === right;
 }
 
+/** 曲目是否落在接歌范围指定的文件夹（含子目录）内。 */
+function trackInFolderScope(track: Track, folder: string): boolean {
+  const normalized = folder.trim().replace(/\/+$/, "");
+  if (!normalized) return true;
+  const trackFolder = track.folder?.trim() ?? "";
+  if (!trackFolder) return false;
+  return trackFolder === normalized || trackFolder.startsWith(`${normalized}/`);
+}
+
+/**
+ * 右侧唱盘预告的候选还能不能兑现。
+ *
+ * 范围 / 模式一切，旧预告必须作废——否则 pickNext 会硬切到
+ * 新文件夹之外的曲目，原生 handoff 也会因 Deck 没预热而失败。
+ */
+export function preferredStillValid(preferred: Track, current: Track): boolean {
+  const { scope } = useHarmonicScope.getState();
+  const { mode } = usePlayMode.getState();
+  const rawFolder = scope === "folder" ? useLibraryStore.getState().filter.folder : "";
+  const folder = isOutsideFolder(rawFolder) ? "" : rawFolder;
+
+  if (preferred.id === current.id) return mode === "one";
+
+  if (scope === "queue") {
+    const queued = useQueueStore
+      .getState()
+      .list()
+      .find((candidate) => candidate.id !== current.id);
+    return queued?.id === preferred.id;
+  }
+
+  if (scope === "folder" && folder && !trackInFolderScope(preferred, folder)) {
+    return false;
+  }
+
+  return true;
+}
+
 /**
  * 挑下一首，按播放条上选的模式来（见 playMode.ts）。
  *
@@ -174,7 +212,12 @@ export async function pickNext(
   if (mode === "one" && !manual) return current;
   // previewNext 已经替右侧唱盘挑好一首时直接兑现预告。队列仍在它前面消费，
   // 所以用户临时插队后，显式点歌永远比旧预告优先。
-  if (preferred && preferred.id !== current.id && !(mode === "one" && manual)) {
+  if (
+    preferred &&
+    preferred.id !== current.id &&
+    !(mode === "one" && manual) &&
+    preferredStillValid(preferred, current)
+  ) {
     return preferred;
   }
   if (mode === "order") return nextInOrder(current, listFolder);

@@ -577,26 +577,6 @@ textarea {
   flex: 1;
   min-height: 0;
 }
-.kd-narrow-rail-toggle {
-  appearance: none;
-  flex: none;
-  height: 2rem;
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0 0.65rem;
-  border: none;
-  border-bottom: 1px solid var(--kd-line);
-  background: transparent;
-  color: var(--kd-muted);
-  font: inherit;
-  font-size: var(--kd-size-xs);
-  cursor: pointer;
-}
-.kd-narrow-rail-toggle:hover {
-  color: var(--kd-text);
-  background: var(--kd-hover);
-}
 .kd-split[data-layout="narrow"] > .kd-main-slot {
   flex: 1 1 auto;
   min-width: 0;
@@ -1263,6 +1243,10 @@ textarea {
   flex: none;
   margin-right: 0;
 }
+.kd-pending-side {
+  flex: none;
+  max-width: 8rem;
+}
 .kd-pending-mark {
   display: inline-flex;
   align-items: center;
@@ -1535,7 +1519,7 @@ textarea {
   -webkit-app-region: no-drag;
 }
 
-/* 右栏眉目：与左侧分析/搜索工作条同高同线；开关仍在工作条右端。 */
+/* 右栏眉目：与左侧分析/搜索工作条同高同线；开合键弹出时在本条右端。 */
 .kd-aside-head {
   flex: none;
   height: var(--kd-work-rail-h);
@@ -1593,6 +1577,14 @@ textarea {
   min-width: 1rem;
   -webkit-app-region: drag;
 }
+.kd-aside-head-tools {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  margin-right: -0.35rem;
+  -webkit-app-region: no-drag;
+}
 .kd-aside-head-close,
 .kd-sheet-close {
   flex: none;
@@ -1618,6 +1610,13 @@ textarea {
   min-height: 0;
   /* 详情滚到边界后也留在当前面板，不把触控板/滚轮手势串给底下的列表。 */
   overscroll-behavior: contain;
+  -webkit-app-region: no-drag;
+}
+.kd-split-aside-body .kd-toolbar,
+.kd-split-aside-body .kd-text-action,
+.kd-split-aside-body .kd-download-quality,
+.kd-split-aside-body .kd-save-dest {
+  -webkit-app-region: no-drag;
 }
 .kd-aside-foot {
   flex: none;
@@ -2414,11 +2413,8 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   justify-content: flex-end;
   gap: 0.65rem;
 }
-/* 结果行首：下载 + 展开。通用 td 的 0.6rem 左右 padding 会把 1.6rem 宽的格子
-   吃到只剩 0.4rem，展开键就被 overflow:hidden 裁掉——这里单独开一列。 */
+/* 结果行首：下载 + 展开。宽度跟 col/表头拖动走，不在 tbody 上写死。 */
 .kd-table tbody td.kd-result-lead {
-  width: 3.4rem;
-  max-width: 3.4rem;
   padding: 0 0.15rem;
   overflow: visible;
   vertical-align: middle;
@@ -5524,13 +5520,15 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   padding: 0 0.15rem;
   gap: 0;
 }
-.kd-chrome-btn[data-update="true"] .kd-chrome-dot {
+/* 顶栏角点要破全局零圆角（* { border-radius: 0 !important }），否则会变成小方块。 */
+.kd-chrome-btn[data-update="true"] .kd-chrome-dot,
+.kd-chrome-btn[data-queue-hint="true"] .kd-chrome-dot {
   position: absolute;
   top: 0.38rem;
   right: 0.38rem;
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: 50% !important;
   background: var(--kd-theme);
   box-shadow: 0 0 0 1.5px var(--kd-panel);
   pointer-events: none;
@@ -5922,6 +5920,23 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 .kd-table[data-kind="library"] [data-col="index"] {
   color: var(--kd-faint);
   text-align: right;
+  padding-left: 0.35rem;
+  padding-right: 0.35rem;
+}
+.kd-table[data-kind="library"] tr[data-pending="true"] td.kd-pending-lead {
+  max-width: none;
+}
+/* 待下载图标落在序号格里：与曲目序号同列同宽、同 padding。 */
+.kd-table[data-kind="library"] tr[data-pending="true"] td.kd-pending-index {
+  vertical-align: middle;
+}
+.kd-table[data-kind="library"] tr[data-pending="true"] td.kd-pending-index .kd-pending-mark {
+  display: inline-flex;
+  justify-content: flex-end;
+  width: 100%;
+}
+.kd-table[data-kind="library"] tr[data-pending="true"] .kd-pending-mark {
+  flex: none;
 }
 /* 搜索结果表：标题对齐曲库 14rem，横向不够就自己滚 */
 .kd-table:not([data-kind="library"]) {

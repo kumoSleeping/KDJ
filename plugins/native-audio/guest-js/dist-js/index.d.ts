@@ -16,6 +16,7 @@ export type NativeAudioSetSourcePayload = {
   id?: number;
   title?: string;
   artist?: string;
+  album?: string;
   artworkUrl?: string;
 };
 

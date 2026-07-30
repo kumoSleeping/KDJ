@@ -12,6 +12,7 @@ import {
   SEARCH_DRAG_STATE_EVENT,
 } from "../../lib/searchDrag";
 import {
+  SEARCH_DEFAULT_DOWNLOAD_SENTINEL,
   SEARCH_DROP_PATH_ATTR,
   searchDropPathAt,
   searchQueueDropAt,
@@ -20,6 +21,7 @@ import { claimActiveTrackDragIds } from "../../lib/trackDrag";
 import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
+import { useUpdateStore } from "../../stores/updateStore";
 import { useLayoutSignals } from "../../lib/useLayoutMode";
 import {
   shouldPinDetailOnClick,
@@ -35,7 +37,7 @@ import {
 import type { IntakeItem, MergedGroup, Platform, SongSource, VideoInfo } from "../../types";
 import { InlineNotice, Sheet } from "../common";
 import { AppChrome } from "../chrome/AppChrome";
-import { AsideFaceSwitch, AsideHead, type TrackAsideFace } from "../chrome/AsideHead";
+import { AsideFaceSwitch, AsideHead, AsideToggleButton, type TrackAsideFace } from "../chrome/AsideHead";
 import { useLyricsPrefs, type LyricsAsideFace } from "../../lib/lyricsPrefs";
 import { VJ_SEARCH_EVENT } from "../../lib/vjSearch";
 import { ensureLyrics } from "../../stores/lyricsStore";
@@ -232,6 +234,8 @@ export function Workspace() {
 
       const ids = claimActiveTrackDragIds();
       if (ids.length > 0) {
+        // 「全部曲目」只接搜索下载，不接曲目搬家。
+        if (dest === SEARCH_DEFAULT_DOWNLOAD_SENTINEL) return;
         const op = event.altKey ? "move" : "link";
         void useLibraryStore
           .getState()
@@ -561,6 +565,31 @@ export function Workspace() {
     useAppStore.getState().dismissOverlay();
   }, []);
 
+  /** 竖屏 / 窄屏：点左侧文件夹后收起弹出面板，把列表让出来。 */
+  const onFolderNavigate = useCallback(() => {
+    if (portrait) setCompactTreeExpanded(false);
+    if (layout === "narrow") closeAside();
+  }, [portrait, layout, closeAside]);
+
+  const toggleAside = useCallback(() => {
+    if (showAside) {
+      closeAside();
+      return;
+    }
+    const track = selected ?? playingTrack;
+    if (!track) return;
+    pinTrackAside(showLyrics ? "lyrics" : faceForTrackPin(), track.id);
+  }, [closeAside, faceForTrackPin, pinTrackAside, playingTrack, selected, showAside, showLyrics]);
+
+  const asideToggle =
+    layout === "wide" ? (
+      <AsideToggleButton
+        open={showAside}
+        canOpen={Boolean(selected ?? playingTrack)}
+        onToggle={toggleAside}
+      />
+    ) : null;
+
   const onTrackAsideFace = useCallback(
     (face: TrackAsideFace) => {
       trackAsideFaceRef.current = face;
@@ -596,7 +625,7 @@ export function Workspace() {
                   ? "曲目详情"
                   : "";
   const asidePanel = showFolders ? (
-    <FolderTree />
+    <FolderTree onNavigate={onFolderNavigate} />
   ) : showSettings ? (
     <SettingsPanel />
   ) : showVjExport ? (
@@ -646,14 +675,16 @@ export function Workspace() {
     setSheet(null);
   }, [layout, listMode]);
 
-  // 显式旁路入口必须忽略锁定；窄屏没有右栏时拉开同一份内容的抽屉。
+  // 显式旁路（设置 / 下载队列 / 文件夹…）打开时收起曲目详情，避免右栏叠两层内容。
   useEffect(() => {
-    if (!(showSettings || showFolders || showVjExport || showLyrics)) return;
+    if (!(showSettings || showFolders || showVjExport || showLyrics || showQueue)) return;
+    setDetailPinned(false);
     setAsideLocked(false);
     if (layout === "narrow") setSheet("aside");
   }, [
     layout,
     showSettings,
+    showQueue,
     showFolders,
     showVjExport,
     showLyrics,
@@ -661,22 +692,28 @@ export function Workspace() {
     foldersPanelEpoch,
     vjExportPanelEpoch,
     lyricsPanelEpoch,
+    queuePanelEpoch,
   ]);
-
-  useEffect(() => {
-    if (!showQueue) return;
-    setAsideLocked(false);
-    if (layout === "narrow") setSheet("aside");
-  }, [layout, queuePanelEpoch, showQueue]);
 
   const toggleQueueDrawer = useCallback(() => {
     const opening = !useAppStore.getState().showQueue;
+    if (opening) setDetailPinned(false);
     toggleQueuePanel();
     if (opening) {
       setAsideLocked(false);
       if (layout === "narrow") setSheet("aside");
     }
   }, [layout, toggleQueuePanel]);
+
+  const openSettingsFromChrome = useCallback(() => {
+    setDetailPinned(false);
+    toggleSettingsPanel();
+  }, [toggleSettingsPanel]);
+
+  const openUpdateFromChrome = useCallback(() => {
+    setDetailPinned(false);
+    useUpdateStore.getState().openUpdateSection();
+  }, []);
 
   /* ------------------------------------------------------------ 三栏换位 */
   /** 常驻的文件夹 / 主栏顺序，长期保存。 */
@@ -1060,10 +1097,11 @@ export function Workspace() {
           actions={
             <ChromeActions
               settingsOpen={showSettings}
-              onSettings={toggleSettingsPanel}
+              onSettings={openSettingsFromChrome}
               queueOpen={queueOpen}
               queueCount={activeDownloads}
               onQueue={toggleQueueDrawer}
+              onOpenUpdate={openUpdateFromChrome}
             />
           }
         />
@@ -1088,7 +1126,7 @@ export function Workspace() {
               <span {...gripProps("tree")} />
               <NarrowFolderRail
                 expanded={compactTreeExpanded}
-                onToggle={() => setCompactTreeExpanded((value) => !value)}
+                onNavigate={onFolderNavigate}
               />
             </div>
           )}
@@ -1146,13 +1184,13 @@ export function Workspace() {
                   data-drop-active={localDropActive ? "true" : undefined}
                   {...{
                     [SEARCH_DROP_PATH_ATTR]:
-                      !queueView && filter.folder.trim() && !isOutsideFolder(filter.folder)
-                        ? filter.folder.trim()
+                      !queueView && !isOutsideFolder(filter.folder)
+                        ? filter.folder.trim() || SEARCH_DEFAULT_DOWNLOAD_SENTINEL
                         : undefined,
                   }}
                   onDragOver={(event) => {
                     if (!isSearchDownloadDrag(event)) return;
-                    // 临时列表 / 全部曲目没有落点文件夹，仍放行指针反馈，松手时再报错。
+                    // 临时列表没有落点；全部曲目落到默认下载文件夹。
                     event.preventDefault();
                     event.dataTransfer.dropEffect = "copy";
                     setLocalDropActive(true);
@@ -1171,17 +1209,21 @@ export function Workspace() {
                       return;
                     }
                     const dest = filter.folder.trim();
-                    if (!dest || isOutsideFolder(dest)) {
+                    if (isOutsideFolder(dest)) {
                       setFolderDropError("先打开一个文件夹，再拖进来");
                       return;
                     }
-                    void enqueueSearchDrop(event, dest).catch((error: unknown) =>
+                    void enqueueSearchDrop(
+                      event,
+                      dest || SEARCH_DEFAULT_DOWNLOAD_SENTINEL,
+                    ).catch((error: unknown) =>
                       setFolderDropError(error instanceof Error ? error.message : String(error)),
                     );
                   }}
                 >
                   <LibraryWorkRail
                     showDownloads={!hasResults}
+                    asideToggle={showAside ? undefined : asideToggle}
                   />
                   {searchDragActive && (
                     <div
@@ -1215,12 +1257,15 @@ export function Workspace() {
                           return;
                         }
                         const dest = filter.folder.trim();
-                        if (!dest || isOutsideFolder(dest)) {
+                        if (isOutsideFolder(dest)) {
                           finishSearchDrop();
                           setFolderDropError("先打开一个文件夹，再拖进来");
                           return;
                         }
-                        void enqueueSearchDrop(event, dest).catch((error: unknown) =>
+                        void enqueueSearchDrop(
+                          event,
+                          dest || SEARCH_DEFAULT_DOWNLOAD_SENTINEL,
+                        ).catch((error: unknown) =>
                           setFolderDropError(error instanceof Error ? error.message : String(error)),
                         );
                       }}
@@ -1346,7 +1391,7 @@ export function Workspace() {
                       title={asideLabel}
                       face={showTrackFaceSwitch ? trackAsideFace : undefined}
                       onFaceChange={showTrackFaceSwitch ? onTrackAsideFace : undefined}
-                      onClose={closeAside}
+                      asideToggle={asideToggle}
                     />
                     <div className="kd-split-aside-body kd-scroll">{asidePanel}</div>
                   </aside>

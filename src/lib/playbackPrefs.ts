@@ -8,8 +8,7 @@ export interface PlaybackPrefs {
 }
 
 const DEFAULTS: PlaybackPrefs = {
-  // 保持升级前的即时走带；需要柔和启停的用户再主动打开。
-  transportFade: false,
+  transportFade: true,
 };
 
 function load(): PlaybackPrefs {

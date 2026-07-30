@@ -5,6 +5,9 @@ enum RemoteCommandEvent: Sendable {
   case play
   case pause
   case toggle
+  case next
+  case previous
+  case stop
   case seek(position: Double)
   case seekDelta(delta: Double)
 }
@@ -28,6 +31,9 @@ final class RemoteCommandController {
       center.playCommand.isEnabled = true
       center.pauseCommand.isEnabled = true
       center.togglePlayPauseCommand.isEnabled = true
+      center.nextTrackCommand.isEnabled = true
+      center.previousTrackCommand.isEnabled = true
+      center.stopCommand.isEnabled = true
       center.changePlaybackPositionCommand.isEnabled = true
       center.skipForwardCommand.isEnabled = true
       center.skipBackwardCommand.isEnabled = true
@@ -51,6 +57,24 @@ final class RemoteCommandController {
         return .success
       }
       remoteCommandTargets.append((center.togglePlayPauseCommand, toggleTarget))
+
+      let nextTarget = center.nextTrackCommand.addTarget { [weak self] _ in
+        self?.eventHandler?(.next)
+        return .success
+      }
+      remoteCommandTargets.append((center.nextTrackCommand, nextTarget))
+
+      let previousTarget = center.previousTrackCommand.addTarget { [weak self] _ in
+        self?.eventHandler?(.previous)
+        return .success
+      }
+      remoteCommandTargets.append((center.previousTrackCommand, previousTarget))
+
+      let stopTarget = center.stopCommand.addTarget { [weak self] _ in
+        self?.eventHandler?(.stop)
+        return .success
+      }
+      remoteCommandTargets.append((center.stopCommand, stopTarget))
 
       let changePositionTarget = center.changePlaybackPositionCommand.addTarget { [weak self] event in
         guard let seekEvent = event as? MPChangePlaybackPositionCommandEvent else {
@@ -88,6 +112,9 @@ final class RemoteCommandController {
       center.playCommand.isEnabled = false
       center.pauseCommand.isEnabled = false
       center.togglePlayPauseCommand.isEnabled = false
+      center.nextTrackCommand.isEnabled = false
+      center.previousTrackCommand.isEnabled = false
+      center.stopCommand.isEnabled = false
       center.changePlaybackPositionCommand.isEnabled = false
       center.skipForwardCommand.isEnabled = false
       center.skipBackwardCommand.isEnabled = false

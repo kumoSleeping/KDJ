@@ -6,7 +6,7 @@ import type { LayoutMode } from "./useLayoutMode";
  *
  * - 横屏默认双击播放（单击留给选中 / 详情 / 插入下一首待播）
  * - 竖屏默认单击播放（触屏上双击不自然）
- * - 「单击插入下一首待播」默认开，只在播放手势为双击时生效：单击插队到临时列表队头
+ * - 「单击插入下一首待播」默认关，只在播放手势为双击时生效
  */
 export type TrackPlayClick = "single" | "double";
 
@@ -18,7 +18,7 @@ export interface TrackClickPrefs {
   /** 竖屏 / 窄栏列表：默认单击播放 */
   narrowPlay: TrackPlayClick;
   /**
-   * 单击插入下一首待播（临时列表队头）。默认开。
+   * 单击插入下一首待播（临时列表队头）。默认关。
    * 只对「播放手势 = 双击」的布局生效；两边都是单击时强制关掉。
    */
   clickAddNext: boolean;
@@ -27,7 +27,7 @@ export interface TrackClickPrefs {
 const DEFAULTS: TrackClickPrefs = {
   widePlay: "double",
   narrowPlay: "single",
-  clickAddNext: true,
+  clickAddNext: false,
 };
 
 function isPlayClick(value: unknown): value is TrackPlayClick {

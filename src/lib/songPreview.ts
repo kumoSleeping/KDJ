@@ -6,17 +6,26 @@
 
 import { api } from "./api";
 import { playTrack } from "./playTrack";
-import { makeSongStreamTrack } from "./streamTrack";
+import {
+  makePendingSongStreamTrack,
+  makeSongStreamTrack,
+  setStreamNextTrack,
+} from "./streamTrack";
 import type { SongSource } from "../types";
 
 export const SONG_PREVIEW_EVENT = "kd:song-preview";
 
-export interface SongPreviewRequest {
+export interface SongPreviewItem {
   source: SongSource;
   title: string;
   artist: string;
+}
+
+export interface SongPreviewRequest extends SongPreviewItem {
   /** 为 true 时主播放条自动开播。搜索入口现在一律 true。 */
   autoPlay?: boolean;
+  /** 当前搜索结果中排在本项之后的歌曲；用于填充主播放条“下一首”。 */
+  queue?: SongPreviewItem[];
 }
 
 export function requestSongPreview(request: SongPreviewRequest): void {
@@ -37,16 +46,21 @@ export async function playSongPreview(request: SongPreviewRequest): Promise<void
   const mySeq = ++seq;
   const { url } = await api.songPreview(request.source);
   if (seq !== mySeq) return;
-  const track = makeSongStreamTrack(
-    {
-      ...request.source,
-      title: request.title || request.source.title,
-      artists: request.artist
-        ? request.artist.split(",").map((part) => part.trim()).filter(Boolean)
-        : request.source.artists,
-    },
-    url,
+  const normalize = (item: SongPreviewItem): SongSource => ({
+    ...item.source,
+    title: item.title || item.source.title,
+    artists: item.artist
+      ? item.artist.split(",").map((part) => part.trim()).filter(Boolean)
+      : item.source.artists,
+  });
+  const track = makeSongStreamTrack(normalize(request), url);
+  const following = (request.queue ?? []).map((item) =>
+    makePendingSongStreamTrack(normalize(item)),
   );
+  for (let index = 0; index < following.length - 1; index += 1) {
+    setStreamNextTrack(following[index], following[index + 1]);
+  }
+  setStreamNextTrack(track, following[0] ?? null);
   playTrack(track, request.autoPlay !== false);
 }
 

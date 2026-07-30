@@ -73,6 +73,7 @@ class SetSourceArgs {
     var id: Long? = null
     var title: String? = null
     var artist: String? = null
+    var album: String? = null
     var artworkUrl: String? = null
 }
 
@@ -284,12 +285,20 @@ object NativeAudioRuntime {
         context.applicationContext.stopService(serviceIntent)
     }
 
-    fun setSource(context: Context, src: String, storyId: Long?, title: String?, artist: String?, artworkUrl: String?) {
+    fun setSource(
+        context: Context,
+        src: String,
+        storyId: Long?,
+        title: String?,
+        artist: String?,
+        album: String?,
+        artworkUrl: String?,
+    ) {
         synchronized(lock) {
             ensure(context)
             val exoPlayer = player ?: return
 
-            val mediaItem = buildMediaItem(src, storyId, title, artist, artworkUrl)
+            val mediaItem = buildMediaItem(src, storyId, title, artist, album, artworkUrl)
 
             pendingSeekState = null
             currentStoryId = storyId?.takeIf { it > 0 }
@@ -308,7 +317,7 @@ object NativeAudioRuntime {
             val mediaItems = items.mapNotNull { item ->
                 val src = item.src?.trim().orEmpty()
                 if (src.isEmpty()) null
-                else buildMediaItem(src, item.id, item.title, item.artist, item.artworkUrl)
+                else buildMediaItem(src, item.id, item.title, item.artist, item.album, item.artworkUrl)
             }
             if (mediaItems.isEmpty()) return
 
@@ -546,11 +555,13 @@ object NativeAudioRuntime {
         storyId: Long?,
         title: String?,
         artist: String?,
+        album: String?,
         artworkUrl: String?,
     ): MediaItem {
         val metadataBuilder = MediaMetadata.Builder()
         if (!title.isNullOrBlank()) metadataBuilder.setTitle(title)
         if (!artist.isNullOrBlank()) metadataBuilder.setArtist(artist)
+        if (!album.isNullOrBlank()) metadataBuilder.setAlbumTitle(album)
         if (!artworkUrl.isNullOrBlank()) {
             runCatching { Uri.parse(artworkUrl) }
                 .onSuccess { metadataBuilder.setArtworkUri(it) }
@@ -658,7 +669,15 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
         }
 
         runCatching {
-            NativeAudioRuntime.setSource(activity.applicationContext, src, args.id, args.title, args.artist, args.artworkUrl)
+            NativeAudioRuntime.setSource(
+                activity.applicationContext,
+                src,
+                args.id,
+                args.title,
+                args.artist,
+                args.album,
+                args.artworkUrl,
+            )
         }.onSuccess {
             invoke.resolve(toJsObject(NativeAudioRuntime.getState(activity.applicationContext)))
         }.onFailure {
@@ -828,6 +847,7 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun toJsObject(state: NativeAudioState): JSObject {
         val payload = JSObject()
+        state.id?.let { payload.put("id", it) }
         payload.put("status", state.status)
         payload.put("currentTime", state.currentTime)
         payload.put("duration", state.duration)

@@ -219,9 +219,6 @@ export function QueueRowConfig({
           >
             {qualityLabel}
           </button>
-          <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>
-            未单独改则跟随顶部默认
-          </span>
         </div>
         {error ? <p className="kd-queue-config-error">{error}</p> : null}
       </div>

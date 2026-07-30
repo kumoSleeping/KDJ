@@ -35,6 +35,7 @@ import {
   type TrackDragDetail,
 } from "../../lib/trackDrag";
 import { folderDropElementAt, FOLDER_DROP_PATH_ATTR } from "../../lib/folderDrop";
+import { isOutsideFolder } from "../../lib/outsideFolder";
 import { DASH, formatBpm, formatDuration, isVideoTrack, thumbUrl } from "../../lib/format";
 import {
   clickAddsNext,
@@ -76,6 +77,12 @@ export { PLAY_EVENT, playTrack, parsePlayRequest, type PlayRequest } from "../..
  * 反向再 import 一个常量就成环了。
  */
 export const DETAIL_EVENT = "kd:show-detail";
+
+export interface DetailEventDetail {
+  source?: string;
+  /** 定位正在播等场景：显式指定要滚进视野的曲目 id。 */
+  trackId?: number;
+}
 
 /** 1..10 的能量条。未分析时全灰。 */
 export function EnergyMeter({
@@ -188,12 +195,12 @@ const COLUMNS: Column[] = [
  */
 const COLUMN_PREFS_KEY = "kd-library-columns";
 const INDEX_COL_KEY = "index";
-const INDEX_DEFAULT_WIDTH = "3.2rem";
+const INDEX_DEFAULT_WIDTH = "1.75rem";
 
 type ColumnPrefs = TableColumnPrefs;
 
 const COLUMN_MIN_WIDTH: Record<string, string> = {
-  index: "2.4rem",
+  index: "1.4rem",
   title: "4rem",
   artist: "3rem",
   album: "3rem",
@@ -207,7 +214,15 @@ const COLUMN_MIN_WIDTH: Record<string, string> = {
 
 function loadColumnPrefs(): ColumnPrefs {
   // 标题列永远不准藏：它是唯一说明「这行是哪首歌」的列。
-  return loadTableColumnPrefs(COLUMN_PREFS_KEY, ["title"]);
+  const prefs = loadTableColumnPrefs(COLUMN_PREFS_KEY, ["title"]);
+  const indexW = prefs.widths.index;
+  if (!indexW) return prefs;
+  const px = remStringToPx(indexW);
+  const cap = remStringToPx("2rem");
+  if (px > cap) {
+    return { ...prefs, widths: { ...prefs.widths, index: INDEX_DEFAULT_WIDTH } };
+  }
+  return prefs;
 }
 
 export interface TrackTableProps {
@@ -483,7 +498,15 @@ function PendingStateMark({ task }: { task: DownloadTask }) {
 
 /** 当前文件夹下载任务的即时反馈；文件实际入库后由正式曲目行替代。 */
 function isPendingForFolder(task: DownloadTask, filterFolder: string, tracks: Track[]): boolean {
-  if (!task.dest_dir || !sameFolderPath(task.dest_dir, filterFolder)) return false;
+  const dest = task.dest_dir?.trim() || "";
+  if (!dest) return false;
+  const folder = filterFolder.trim();
+  // 全部曲目：任意落进曲库文件夹的下载都应顶上可见（子文件夹也属于全库）。
+  if (!folder) {
+    if (isOutsideFolder(dest)) return false;
+  } else if (!sameFolderPath(dest, folder)) {
+    return false;
+  }
   if (PENDING_STATES.has(task.state)) return true;
   if (task.state !== "done") return false;
   if (task.track_id == null) return true;
@@ -841,30 +864,58 @@ export function TrackTable({
   const onReorderRef = useRef(onReorder);
   onReorderRef.current = onReorder;
   useEffect(() => {
-    const centerSelected = () => {
+    const scrollTrackIntoCenter = (trackId: number | null | undefined, attemptsLeft = 40) => {
+      const id = trackId ?? selectedIdRef.current;
+      if (id == null) return;
+
       const box = scrollerRef.current;
-      if (!box) return;
-      const row = box.querySelector('tr[data-focus="true"]');
+      if (!box) {
+        if (attemptsLeft > 0) {
+          requestAnimationFrame(() => scrollTrackIntoCenter(id, attemptsLeft - 1));
+        }
+        return;
+      }
+
+      const tracks = useLibraryStore.getState().tracks;
+      const index = tracks.findIndex((track) => track.id === id);
+      if (index < 0) {
+        if (attemptsLeft > 0) {
+          requestAnimationFrame(() => scrollTrackIntoCenter(id, attemptsLeft - 1));
+        }
+        return;
+      }
+
+      const row = box.querySelector(`tr[data-kd-track-id="${id}"]`);
       if (row) {
         row.scrollIntoView({ block: "center" });
         return;
       }
-      // 虚拟滚动下选中行多半没渲染，scrollIntoView 找不到它：
-      // 按它在列表里的序号直接算滚动位置（行高恒定，见下方虚拟滚动注释）。
-      const index = tracksRef.current.findIndex((track) => track.id === selectedIdRef.current);
-      if (index < 0) return;
+
       const height = rowHRef.current;
-      box.scrollTop =
-        pendingCountRef.current * height + index * height - (box.clientHeight - height) / 2;
+      if (height <= 0) {
+        if (attemptsLeft > 0) {
+          requestAnimationFrame(() => scrollTrackIntoCenter(id, attemptsLeft - 1));
+        }
+        return;
+      }
+
+      // 虚拟滚动：先把滚动条推到目标附近，等下一帧行挂进 DOM 再精确居中。
+      const pending = pendingCountRef.current;
+      box.scrollTop = Math.max(
+        0,
+        pending * height + index * height - (box.clientHeight - height) / 2,
+      );
+      if (attemptsLeft > 0) {
+        requestAnimationFrame(() => scrollTrackIntoCenter(id, attemptsLeft - 1));
+      }
     };
-    // 挂载时先滚一次：从搜索页点「正在播」跳回曲库时，这张表是重新挂的，
-    // 滚动位置本来就丢了——与其停在列表顶端，不如直接停在要看的那首上。
-    // 选中行不在已加载的分页里就什么都不做（1400 首只挂了前几页是常态）。
-    centerSelected();
-    // 本来就停在曲库页时点「正在播」不会重挂表，靠事件补同一件事。
-    // 等两帧：事件比"选中态渲染进 DOM"先到，立刻滚会找不到 data-focus 行
-    const onDetail = () => {
-      requestAnimationFrame(() => requestAnimationFrame(centerSelected));
+
+    scrollTrackIntoCenter(selectedIdRef.current);
+    const onDetail = (event: Event) => {
+      const detail = (event as CustomEvent<DetailEventDetail>).detail;
+      requestAnimationFrame(() => {
+        scrollTrackIntoCenter(detail?.trackId ?? selectedIdRef.current);
+      });
     };
     window.addEventListener(DETAIL_EVENT, onDetail);
     return () => window.removeEventListener(DETAIL_EVENT, onDetail);
@@ -937,9 +988,12 @@ export function TrackTable({
   const orderedColumns = orderByPrefs(COLUMNS, colPrefs.order);
   const colIds = orderedColumns.map((column) => column.key);
   const visibleColumns = orderedColumns.filter((column) => !colPrefs.hidden.includes(column.key));
+  /** 只有曲库行需要序号列；纯待下载占位时不占左侧空白。 */
+  const showIndexCol = tracks.length > 0;
   const indexWidth = widthFor(INDEX_COL_KEY, INDEX_DEFAULT_WIDTH);
+  const tableColSpan = visibleColumns.length + (showIndexCol ? 1 : 0) + 1;
   const tableMinWidthPx =
-    remStringToPx(indexWidth) +
+    (showIndexCol ? remStringToPx(indexWidth) : 0) +
     visibleColumns.reduce(
       (sum, column) => sum + remStringToPx(widthFor(column.key, column.width ?? "4rem")),
       0,
@@ -1098,7 +1152,7 @@ export function TrackTable({
         {/* 每个真实列由 col 锁住自己的宽度，最后一列只吃剩余空白。
             这样拖标题不会再按比例挤动艺人/BPM；总宽超过视口时由外层横向滚动。 */}
         <colgroup>
-          <col style={{ width: indexWidth }} />
+          {showIndexCol ? <col style={{ width: indexWidth }} /> : null}
           {visibleColumns.map((column) => (
             <col
               key={column.key}
@@ -1116,16 +1170,18 @@ export function TrackTable({
               setColMenu({ x: event.clientX, y: event.clientY });
             }}
           >
-            <th data-col="index" style={{ width: indexWidth }} title="当前列表中的序号">
-              序号
-              <span
-                className="kd-col-resize"
-                data-active={resizingCol === INDEX_COL_KEY ? "true" : undefined}
-                onPointerDown={(event) => beginColumnResize(INDEX_COL_KEY, event)}
-                onClick={(event) => event.stopPropagation()}
-                aria-hidden="true"
-              />
-            </th>
+            {showIndexCol ? (
+              <th data-col="index" style={{ width: indexWidth }} title="当前列表中的序号">
+                序号
+                <span
+                  className="kd-col-resize"
+                  data-active={resizingCol === INDEX_COL_KEY ? "true" : undefined}
+                  onPointerDown={(event) => beginColumnResize(INDEX_COL_KEY, event)}
+                  onClick={(event) => event.stopPropagation()}
+                  aria-hidden="true"
+                />
+              </th>
+            ) : null}
             {visibleColumns.map((column) => {
               const colWidth = widthFor(column.key, column.width ?? "4rem");
               return (
@@ -1214,7 +1270,11 @@ export function TrackTable({
           </tr>
         </thead>
         <tbody>
-          {pendingDownloads.map((task) => (
+          {pendingDownloads.map((task) => {
+            /** 有曲目时下载态占独立序号列，和下面 1/2/3 同宽；无曲目时不单独占一列。 */
+            const showArtist = visibleColumns.some((column) => column.key === "artist");
+            const showFormat = visibleColumns.some((column) => column.key === "format");
+            return (
             <tr
               key={`pending:${task.id}`}
               data-pending="true"
@@ -1225,51 +1285,58 @@ export function TrackTable({
                 setPendingMenu({ x: event.clientX, y: event.clientY, task });
               }}
             >
-              <td data-col="index" aria-label="待下载曲目">…</td>
-              {visibleColumns.map((column) => {
-                if (column.key === "title") {
-                  return (
-                    <td key={column.key} data-col="title" className="kd-td-strong" title={task.title || "未命名"}>
-                      <span className="kd-pending-title">
-                        <span className="kd-thumb" aria-hidden="true">
-                          {task.cover ? (
-                            <img
-                              src={thumbUrl(task.cover)}
-                              alt=""
-                              loading="lazy"
-                              draggable={false}
-                              referrerPolicy="no-referrer"
-                              onError={(event) => { event.currentTarget.style.visibility = "hidden"; }}
-                            />
-                          ) : null}
-                        </span>
-                        {(task.kind === "video" || task.kind === "vj_export") && (
-                          <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
-                            <Video size={11} aria-hidden="true" />
-                          </span>
-                        )}
-                        <PendingStateMark task={task} />
-                        <span className="kd-truncate">{task.title || "未命名"}</span>
-                      </span>
-                    </td>
-                  );
-                }
-                if (column.key === "artist") {
-                  return <td key={column.key} data-col="artist" title={task.artist || undefined}><span className="kd-truncate">{task.artist || DASH}</span></td>;
-                }
-                if (column.key === "format") {
-                  return <td key={column.key} data-col="format">{task.kind === "video" || task.kind === "vj_export" ? "视频" : task.quality || DASH}</td>;
-                }
-                return <td key={column.key} data-col={column.key} />;
-              })}
+              {showIndexCol ? (
+                <td data-col="index" className="kd-pending-index">
+                  <PendingStateMark task={task} />
+                </td>
+              ) : null}
+              <td
+                colSpan={Math.max(1, visibleColumns.length)}
+                data-col="title"
+                className="kd-td-strong kd-pending-lead"
+                title={task.title || "未命名"}
+              >
+                <span className="kd-pending-title">
+                  {!showIndexCol ? <PendingStateMark task={task} /> : null}
+                  <span className="kd-thumb" aria-hidden="true">
+                    {task.cover ? (
+                      <img
+                        src={thumbUrl(task.cover)}
+                        alt=""
+                        loading="lazy"
+                        draggable={false}
+                        referrerPolicy="no-referrer"
+                        onError={(event) => { event.currentTarget.style.visibility = "hidden"; }}
+                      />
+                    ) : null}
+                  </span>
+                  {(task.kind === "video" || task.kind === "vj_export") && (
+                    <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
+                      <Video size={11} aria-hidden="true" />
+                    </span>
+                  )}
+                  <span className="kd-truncate">{task.title || "未命名"}</span>
+                  {showArtist && task.artist ? (
+                    <span className="kd-pending-side kd-muted kd-truncate" title={task.artist}>
+                      {task.artist}
+                    </span>
+                  ) : null}
+                  {showFormat ? (
+                    <span className="kd-pending-side kd-mono kd-muted">
+                      {task.kind === "video" || task.kind === "vj_export" ? "视频" : task.quality || DASH}
+                    </span>
+                  ) : null}
+                </span>
+              </td>
               <td className="kd-table-fill" aria-hidden="true" />
             </tr>
-          ))}
+            );
+          })}
           {/* 虚拟滚动：只渲染视口附近的行，上方的高度由这根占位行撑住。
               行序号、拖放、选中都按 tracks 里的真实下标走，不被窗口影响。 */}
           {winStart > 0 && (
             <tr data-spacer="top" aria-hidden="true">
-              <td colSpan={visibleColumns.length + 2} style={{ height: winStart * rowH }} />
+              <td colSpan={tableColSpan} style={{ height: winStart * rowH }} />
             </tr>
           )}
           {windowedTracks.map((track, index) => (
@@ -1362,7 +1429,7 @@ export function TrackTable({
                   : undefined
               }
             >
-              <td data-col="index">{winStart + index + 1}</td>
+              {showIndexCol ? <td data-col="index">{winStart + index + 1}</td> : null}
               {visibleColumns.map((column) => {
                 const cell = trackCell(
                   track,
@@ -1405,7 +1472,7 @@ export function TrackTable({
           {winEnd < tracks.length && (
             <tr data-spacer="bottom" aria-hidden="true">
               <td
-                colSpan={visibleColumns.length + 2}
+                colSpan={tableColSpan}
                 style={{ height: (tracks.length - winEnd) * rowH }}
               />
             </tr>

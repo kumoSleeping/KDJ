@@ -1,8 +1,11 @@
 import Foundation
+import ImageIO
 import MediaPlayer
 import UIKit
 
-private let fallbackNowPlayingTitle = "Stority"
+private let fallbackNowPlayingTitle = "KDJ"
+private let maxArtworkBytes = 16 * 1024 * 1024
+private let maxArtworkEdge: CGFloat = 1024
 
 final class NowPlayingController {
   private var nowPlayingArtwork: MPMediaItemArtwork?
@@ -27,6 +30,12 @@ final class NowPlayingController {
         info[MPMediaItemPropertyArtist] = artist
       } else {
         info.removeValue(forKey: MPMediaItemPropertyArtist)
+      }
+
+      if let album = metadata.album, !album.isEmpty {
+        info[MPMediaItemPropertyAlbumTitle] = album
+      } else {
+        info.removeValue(forKey: MPMediaItemPropertyAlbumTitle)
       }
 
       if state.duration > 0 {
@@ -108,10 +117,21 @@ final class NowPlayingController {
     } else {
       data = try? Data(contentsOf: url, options: [.mappedIfSafe])
     }
-    guard let data else {
+    guard let data, data.count <= maxArtworkBytes else {
       return nil
     }
-    return UIImage(data: data)
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+      return nil
+    }
+    let options: [CFString: Any] = [
+      kCGImageSourceCreateThumbnailFromImageAlways: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceThumbnailMaxPixelSize: maxArtworkEdge,
+    ]
+    guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+      return nil
+    }
+    return UIImage(cgImage: image)
   }
 
   private func playbackState(for state: NativeAudioState) -> MPNowPlayingPlaybackState {

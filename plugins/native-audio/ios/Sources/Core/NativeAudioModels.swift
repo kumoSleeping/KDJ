@@ -27,6 +27,7 @@ struct SetSourceArgs: Decodable, Sendable {
   let id: Int64?
   let title: String?
   let artist: String?
+  let album: String?
   let artworkUrl: String?
 }
 
@@ -63,6 +64,7 @@ enum NativeAudioRuntimeError: LocalizedError {
 struct PlaybackMetadata: Sendable {
   let title: String?
   let artist: String?
+  let album: String?
   let artworkURL: String?
 }
 

@@ -8,18 +8,27 @@ import android.app.Service
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.ui.PlayerNotificationManager
+import java.net.URL
+import java.util.concurrent.Executors
 
 private const val NOTIFICATION_ID = 9501
 private const val CHANNEL_ID_SUFFIX = ".native_audio"
 private const val NOTIFICATION_ICON_NAME = "ic_notification"
+private const val MAX_ARTWORK_BYTES = 16 * 1024 * 1024
+private const val MAX_ARTWORK_EDGE_PX = 512
 
 class NativeAudioService : MediaSessionService() {
     private var notificationManager: PlayerNotificationManager? = null
     private var appLargeIcon: Bitmap? = null
+    private var trackLargeIcon: Bitmap? = null
+    private var loadedArtworkUrl: String? = null
+    private var loadingArtworkUrl: String? = null
+    private val artworkExecutor = Executors.newSingleThreadExecutor()
 
     override fun onCreate() {
         super.onCreate()
@@ -40,6 +49,9 @@ class NativeAudioService : MediaSessionService() {
         notificationManager = null
         appLargeIcon?.recycle()
         appLargeIcon = null
+        trackLargeIcon?.recycle()
+        trackLargeIcon = null
+        artworkExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -69,11 +81,32 @@ class NativeAudioService : MediaSessionService() {
                         player: androidx.media3.common.Player,
                         callback: PlayerNotificationManager.BitmapCallback,
                     ): Bitmap? {
-                        if (appLargeIcon == null) {
-                            val iconResId = resolveAppIconResId()
-                            if (iconResId != 0) appLargeIcon = BitmapFactory.decodeResource(resources, iconResId)
+                        val artworkUrl = player.mediaMetadata.artworkUri?.toString()?.takeIf { it.isNotBlank() }
+                            ?: return fallbackLargeIcon()
+                        synchronized(this@NativeAudioService) {
+                            if (loadedArtworkUrl == artworkUrl && trackLargeIcon != null) {
+                                return trackLargeIcon
+                            }
+                            if (loadingArtworkUrl != artworkUrl) {
+                                loadingArtworkUrl = artworkUrl
+                                artworkExecutor.execute {
+                                    val bitmap = loadArtwork(Uri.parse(artworkUrl))
+                                    synchronized(this@NativeAudioService) {
+                                        if (loadingArtworkUrl != artworkUrl) {
+                                            bitmap?.recycle()
+                                            return@execute
+                                        }
+                                        loadingArtworkUrl = null
+                                        if (bitmap != null) {
+                                            trackLargeIcon = bitmap
+                                            loadedArtworkUrl = artworkUrl
+                                            callback.onBitmap(bitmap)
+                                        }
+                                    }
+                                }
+                            }
+                            return fallbackLargeIcon()
                         }
-                        return appLargeIcon
                     }
                 },
             )
@@ -105,7 +138,7 @@ class NativeAudioService : MediaSessionService() {
                 setUseNextActionInCompactView(true)
                 setUseRewindActionInCompactView(false)
                 setUseFastForwardActionInCompactView(false)
-                setUseStopAction(false)
+                setUseStopAction(true)
                 setSmallIcon(resolveNotificationSmallIconResId())
                 setPlayer(player)
             }
@@ -116,7 +149,7 @@ class NativeAudioService : MediaSessionService() {
     }
 
     private fun appDisplayName(): String {
-        return applicationInfo.loadLabel(packageManager)?.toString().orEmpty().ifBlank { "Audio app" }
+        return applicationInfo.loadLabel(packageManager).toString().ifBlank { "Audio app" }
     }
 
     private fun resolveNotificationSmallIconResId(): Int {
@@ -128,6 +161,37 @@ class NativeAudioService : MediaSessionService() {
     private fun resolveAppIconResId(): Int {
         val appIcon = applicationInfo.icon
         return if (appIcon != 0) appIcon else android.R.drawable.sym_def_app_icon
+    }
+
+    private fun fallbackLargeIcon(): Bitmap? {
+        if (appLargeIcon == null) {
+            val iconResId = resolveAppIconResId()
+            if (iconResId != 0) appLargeIcon = BitmapFactory.decodeResource(resources, iconResId)
+        }
+        return appLargeIcon
+    }
+
+    private fun loadArtwork(uri: Uri): Bitmap? {
+        return runCatching {
+            val stream = when (uri.scheme?.lowercase()) {
+                "content", "android.resource" -> contentResolver.openInputStream(uri)
+                else -> URL(uri.toString()).openStream()
+            }
+            val bytes = stream?.use { it.readBytes() } ?: return@runCatching null
+            if (bytes.size > MAX_ARTWORK_BYTES) return@runCatching null
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            var sampleSize = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > MAX_ARTWORK_EDGE_PX) {
+                sampleSize *= 2
+            }
+            BitmapFactory.decodeByteArray(
+                bytes,
+                0,
+                bytes.size,
+                BitmapFactory.Options().apply { inSampleSize = sampleSize },
+            )
+        }.getOrNull()
     }
 
     private fun stopForegroundCompat(remove: Boolean) {

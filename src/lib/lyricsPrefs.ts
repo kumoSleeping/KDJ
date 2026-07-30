@@ -50,10 +50,10 @@ const DEFAULTS: LyricsPrefs = {
   engines: ["wyy", "qqm"],
   displaySource: "follow",
   lyricExtra: "meaning",
-  asideFace: "lyrics",
+  asideFace: "detail",
   desktopEnabled: false,
   desktopPosition: "bottom",
-  desktopLocked: false,
+  desktopLocked: true,
   desktopFontScale: 1,
   desktopPositionX: null,
   desktopPositionY: null,
@@ -237,6 +237,8 @@ interface LyricsPrefsState extends LyricsPrefs {
   setDesktopCoordinates(x: number, y: number): void;
   /** 从另一个 WebView 写入的 localStorage 重新同步偏好。 */
   syncFromStorage(): void;
+  /** 每次启动：收起桌面歌词，不自动弹出。 */
+  prepareForStartup(): void;
   /** 按本首歌可用层循环切换。 */
   cycleLyricExtra(hasMeaning: boolean, hasRomaji: boolean): void;
 }
@@ -343,6 +345,24 @@ export const useLyricsPrefs = create<LyricsPrefsState>((set, get) => ({
   syncFromStorage() {
     const next = load();
     set((state) => ({ ...next, prefsEpoch: state.prefsEpoch + 1 }));
+  },
+  prepareForStartup() {
+    const state = get();
+    if (state.desktopEnabled) {
+      set({ desktopEnabled: false });
+      save({ ...pickPrefs(state), desktopEnabled: false });
+    }
+    const control = window.kdj?.desktopLyrics;
+    if (!control) return;
+    void control({
+      visible: false,
+      position: state.desktopPosition,
+      locked: state.desktopLocked,
+      fontScale: state.desktopFontScale,
+      reposition: false,
+      x: state.desktopPositionX,
+      y: state.desktopPositionY,
+    }).catch(() => undefined);
   },
   cycleLyricExtra(hasMeaning, hasRomaji) {
     const cycle = lyricExtraCycle(hasMeaning, hasRomaji);

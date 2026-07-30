@@ -38,6 +38,9 @@ export function applyTheme(theme: Settings["theme"]): void {
   if (document.documentElement.dataset.theme !== resolved) {
     document.documentElement.dataset.theme = resolved;
   }
+  // macOS 快速拖窗时会直接合成原生窗口底层；它也要和页面同色，
+  // 否则浅色主题的窗口右缘会短暂露出配置中的深色背景。
+  window.kdj?.setWindowBackground(resolved);
   // 存的是算好的 dark/light 而不是 system：读它的是 public/theme-init.js，
   // 跑在首帧前，越简单越好，不该在那边再算一遍系统偏好
   try {

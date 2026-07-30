@@ -131,6 +131,9 @@ async function createTauriBridge(): Promise<KdjBridge> {
       if (action === "close") silenceMediaForExit();
       void tauriInvoke("window_control", { action }).catch(() => {});
     },
+    setWindowBackground: (theme) => {
+      void tauriInvoke("set_window_background", { theme }).catch(() => {});
+    },
     desktopLyrics: desktop
       ? (options) => tauriInvoke<void>("set_desktop_lyrics", options)
       : null,
@@ -185,6 +188,7 @@ function createBrowserBridge(): KdjBridge {
     checkUpdate: null,
     applyUpdate: null,
     windowControl: () => {},
+    setWindowBackground: () => {},
     onSidecarLog: () => () => {},
   };
 }

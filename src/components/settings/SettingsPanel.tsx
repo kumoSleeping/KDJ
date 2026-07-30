@@ -341,7 +341,22 @@ export function SettingsPanel() {
 
   useEffect(() => {
     if (!focusEpoch) return;
-    updateSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    let frame = 0;
+    const scrollToUpdate = () => {
+      const section = updateSectionRef.current;
+      if (!section) {
+        if (frame++ < 8) requestAnimationFrame(scrollToUpdate);
+        return;
+      }
+      const scrollHost = section.closest(".kd-scroll") as HTMLElement | null;
+      if (!scrollHost) return;
+      const top =
+        section.getBoundingClientRect().top -
+        scrollHost.getBoundingClientRect().top +
+        scrollHost.scrollTop;
+      scrollHost.scrollTo({ top: Math.max(0, top), behavior: frame > 0 ? "auto" : "smooth" });
+    };
+    scrollToUpdate();
   }, [focusEpoch]);
 
   return (

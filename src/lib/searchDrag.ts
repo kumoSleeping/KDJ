@@ -7,6 +7,7 @@
 
 import { api } from "./api";
 import {
+  SEARCH_DEFAULT_DOWNLOAD_SENTINEL,
   searchDropElementAt,
   searchDropPathAt,
   searchQueueDropElementAt,
@@ -292,18 +293,28 @@ export function readSearchDrop(dataTransfer: DataTransfer): ActiveSearchDrag | n
   return active;
 }
 
+/** 「全部曲目」哨兵 → settings.download_dir；其它路径原样返回。 */
+function resolveSearchDestDir(destDir: string): string {
+  const dest = destDir.trim();
+  if (!dest) throw new Error("先打开一个文件夹，再拖进来");
+  if (dest === SEARCH_DEFAULT_DOWNLOAD_SENTINEL) {
+    const dir = useAppStore.getState().settings?.download_dir?.trim() || "";
+    if (!dir) throw new Error("还没有设置默认下载文件夹");
+    return dir;
+  }
+  return dest;
+}
+
 /**
  * 搜到的音/视频拖进某个曲库文件夹：入队、右栏切队列、左表出现待下载行。
  * 侧边栏文件夹和中间左半「当前打开的文件夹」共用。
+ * destDir 也可以是「全部曲目」哨兵，会落到默认下载文件夹。
  */
 export async function enqueueSearchDrop(
   event: { dataTransfer: DataTransfer },
   destDir: string,
 ): Promise<void> {
-  const dest = destDir.trim();
-  if (!dest) {
-    throw new Error("先打开一个文件夹，再拖进来");
-  }
+  const dest = resolveSearchDestDir(destDir);
 
   const payload = readSearchDrop(event.dataTransfer);
   const alreadyClaimed = dropClaimed;
@@ -352,8 +363,7 @@ export async function enqueueSearchPayload(
   payload: ActiveSearchDrag,
   destDir: string,
 ): Promise<void> {
-  const dest = destDir.trim();
-  if (!dest) throw new Error("先打开一个文件夹，再拖进来");
+  const dest = resolveSearchDestDir(destDir);
   if (payload.kind === "audio" && payload.sources.length === 0) {
     throw new Error("没有可下载的在线来源");
   }

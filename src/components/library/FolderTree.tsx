@@ -17,13 +17,15 @@ import {
   ListX,
   MoreHorizontal,
   Music2,
-  PanelLeftClose,
-  PanelLeftOpen,
   PencilLine,
   Trash2,
 } from "lucide-react";
 import { api } from "../../lib/api";
-import { FOLDER_DROP_PATH_ATTR } from "../../lib/folderDrop";
+import {
+  FOLDER_DROP_PATH_ATTR,
+  SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR,
+  SEARCH_DEFAULT_DOWNLOAD_SENTINEL,
+} from "../../lib/folderDrop";
 import { isOutsideFolder, OUTSIDE_FOLDER } from "../../lib/outsideFolder";
 import {
   enqueueSearchDrop,
@@ -48,6 +50,7 @@ export { TRACK_DND_TYPE };
 /** 拖文件夹换顺序用的 MIME，和上面分开，dragover 时才好区别对待。 */
 const FOLDER_DND_TYPE = "application/x-kdj-folder";
 const QUEUE_DROP_TARGET = "__kd_queue__";
+const ALL_TRACKS_DROP_TARGET = "__kd_all_tracks__";
 
 function trackIdsFromDrop(event: React.DragEvent): number[] {
   const ids = readTrackDragIds(event.dataTransfer);
@@ -128,10 +131,11 @@ function flattenFolders(nodes: FolderNode[]): FolderNode[] {
  */
 export function NarrowFolderRail({
   expanded,
-  onToggle,
+  onNavigate,
 }: {
   expanded: boolean;
-  onToggle(): void;
+  /** 点选文件夹 / 临时列表 / 全部曲目等导航项后回调（竖屏收起弹出面板用）。 */
+  onNavigate?: () => void;
 }) {
   const folders = useLibraryStore((state) => state.folders);
   const filter = useLibraryStore((state) => state.filter);
@@ -152,17 +156,7 @@ export function NarrowFolderRail({
   if (expanded) {
     return (
       <aside className="kd-narrow-folder-panel" aria-label="文件夹侧栏">
-        <button
-          className="kd-narrow-rail-toggle"
-          type="button"
-          onClick={onToggle}
-          title="收起文件夹栏"
-          aria-label="收起文件夹栏"
-        >
-          <PanelLeftClose size={15} />
-          <span>文件夹</span>
-        </button>
-        <FolderTree />
+        <FolderTree onNavigate={onNavigate} />
       </aside>
     );
   }
@@ -170,12 +164,10 @@ export function NarrowFolderRail({
   const choose = (folder: string) => {
     setQueueView(false);
     setFilter({ folder, folderDeep: false });
+    onNavigate?.();
   };
   return (
     <aside className="kd-narrow-folder-rail kd-scroll" aria-label="快捷文件夹栏">
-      <button type="button" onClick={onToggle} title="展开文件夹栏" aria-label="展开文件夹栏">
-        <PanelLeftOpen size={15} />
-      </button>
       <button
         type="button"
         title={error || "添加音乐文件夹"}
@@ -192,7 +184,10 @@ export function NarrowFolderRail({
         data-active={queueView || undefined}
         data-drop={narrowDrop === QUEUE_DROP_TARGET ? "true" : undefined}
         title="临时列表"
-        onClick={() => { setQueueView(true); }}
+        onClick={() => {
+          setQueueView(true);
+          onNavigate?.();
+        }}
         onDragOverCapture={(event) => {
           if (!isTrackDrag(event)) return;
           event.preventDefault();
@@ -213,9 +208,28 @@ export function NarrowFolderRail({
       </button>
       <button
         type="button"
+        {...{ [SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR]: "" }}
         data-active={!queueView && filter.folder === "" || undefined}
-        title="全部曲目"
+        data-drop={narrowDrop === ALL_TRACKS_DROP_TARGET ? "true" : undefined}
+        title="全部曲目（拖入下载会落到默认下载文件夹）"
         onClick={() => choose("")}
+        onDragOverCapture={(event) => {
+          if (!isSearchDownloadDrag(event)) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+          setNarrowDrop(ALL_TRACKS_DROP_TARGET);
+        }}
+        onDragLeave={() =>
+          setNarrowDrop((current) => (current === ALL_TRACKS_DROP_TARGET ? "" : current))
+        }
+        onDropCapture={(event) => {
+          event.preventDefault();
+          setNarrowDrop("");
+          if (!isSearchDownloadDrag(event)) return;
+          void enqueueSearchDrop(event, SEARCH_DEFAULT_DOWNLOAD_SENTINEL).catch(
+            (reason: unknown) => setError((reason as Error).message),
+          );
+        }}
       >
         <Library size={15} /><small>全部曲目</small>
       </button>
@@ -329,7 +343,12 @@ function useExpanded(roots: FolderNode[]) {
   return [expanded, setExpanded] as const;
 }
 
-export function FolderTree() {
+export function FolderTree({
+  onNavigate,
+}: {
+  /** 点选文件夹 / 临时列表 / 全部曲目等导航项后回调（竖屏收起弹出面板用）。 */
+  onNavigate?: () => void;
+} = {}) {
   const folders = useLibraryStore((state) => state.folders);
   const filter = useLibraryStore((state) => state.filter);
   const clipboard = useLibraryStore((state) => state.clipboard);
@@ -522,6 +541,7 @@ export function FolderTree() {
                 : { folder: node.path, sort: "custom" },
             );
             if (!active) importPending(node);
+            onNavigate?.();
           }}
           onContextMenu={(event) => {
             event.preventDefault();
@@ -740,6 +760,7 @@ export function FolderTree() {
           style={{ paddingLeft: "0.35rem" }}
           onClick={() => {
             setQueueView(true);
+            onNavigate?.();
           }}
           onDragOverCapture={(event) => {
             if (!isTrackDrag(event)) return;
@@ -767,10 +788,37 @@ export function FolderTree() {
         </div>
         <div
           className="kd-folder"
+          {...{ [SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR]: "" }}
           data-active={filter.folder === "" && !queueView}
+          data-drop={dropTarget === ALL_TRACKS_DROP_TARGET ? "true" : undefined}
           style={{ paddingLeft: "0.35rem" }}
+          title="拖入下载会落到默认下载文件夹"
           onClick={() => {
             setFilter({ folder: "", sort: "added_at", order: "desc" });
+            onNavigate?.();
+          }}
+          onDragOverCapture={(event) => {
+            if (!isSearchDownloadDrag(event)) return;
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "copy";
+            setDropTarget(ALL_TRACKS_DROP_TARGET);
+            setDropEdge("");
+          }}
+          onDragLeave={() =>
+            setDropTarget((current) => {
+              if (current !== ALL_TRACKS_DROP_TARGET) return current;
+              setDropEdge("");
+              return "";
+            })
+          }
+          onDropCapture={(event) => {
+            event.preventDefault();
+            setDropTarget("");
+            setDropEdge("");
+            if (!isSearchDownloadDrag(event)) return;
+            void enqueueSearchDrop(event, SEARCH_DEFAULT_DOWNLOAD_SENTINEL).catch(
+              (error: unknown) => setNotice((error as Error).message),
+            );
           }}
         >
           <span className="kd-folder-caret" />
@@ -792,6 +840,7 @@ export function FolderTree() {
             title="不在曲库目录里的曲目"
             onClick={() => {
               setFilter({ folder: OUTSIDE_FOLDER, sort: "added_at", order: "desc" });
+              onNavigate?.();
             }}
           >
             <span className="kd-folder-caret" />

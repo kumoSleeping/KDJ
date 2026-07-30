@@ -60,7 +60,10 @@ handoff keeps callback-timed transition effects and uses the prepared stream at 
 
 Shared Rust owns commands, queue/prewarm, Deck lifecycle, decode, resampling, clocks and DSP.
 
-- macOS/Windows/Linux: CPAL selects CoreAudio, WASAPI or the available Linux host.
+- macOS/Windows/Linux: CPAL selects CoreAudio, WASAPI or the available Linux host. The Tauri
+  adapter mirrors coordinator snapshots into MPNowPlaying/SMTC/MPRIS and sends remote commands
+  back through the coordinator's platform-command lane. Artwork is downloaded off the playback
+  thread and exposed to all three system APIs as a local `file://` cache URL.
 - Android: the adapter owns MediaSession, audio focus, interruption and background-service policy.
 - iOS: the adapter owns AVAudioSession, Now Playing and remote-command policy.
 

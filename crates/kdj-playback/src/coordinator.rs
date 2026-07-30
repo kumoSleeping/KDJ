@@ -81,6 +81,18 @@ impl PlaybackCoordinator {
             .map_err(|_| "播放协调器没有及时确认命令".to_string())?
     }
 
+    /// Platform media keys are an independent command source. They must not consume or collide
+    /// with frontend command IDs, whose monotonic sequence is used to de-duplicate Tauri invokes.
+    pub fn submit_platform(&self, command: PlaybackCommand) -> Result<CommandAck, String> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.sender
+            .send(Request::PlatformCommand { command, reply })
+            .map_err(|_| "播放协调器已经退出".to_string())?;
+        response
+            .recv_timeout(ACK_TIMEOUT)
+            .map_err(|_| "播放协调器没有及时确认系统媒体命令".to_string())?
+    }
+
     pub fn snapshot(&self) -> Result<PlaybackSnapshot, String> {
         let (reply, response) = mpsc::sync_channel(1);
         self.sender
@@ -101,6 +113,10 @@ impl Drop for PlaybackCoordinator {
 enum Request {
     Command {
         command_id: u64,
+        command: PlaybackCommand,
+        reply: CommandReply,
+    },
+    PlatformCommand {
         command: PlaybackCommand,
         reply: CommandReply,
     },
@@ -266,6 +282,19 @@ impl Actor {
                 });
                 let _ = reply.send(result);
             }
+            Request::PlatformCommand { command, reply } => {
+                let command_id = self.state.last_command_id;
+                let result = self.apply_command(command_id, command).map(|()| {
+                    self.bump_sequence();
+                    self.publish(true);
+                    CommandAck {
+                        command_id,
+                        accepted_sequence: self.state.sequence,
+                        snapshot: self.state.clone(),
+                    }
+                });
+                let _ = reply.send(result);
+            }
             Request::State { reply } => {
                 let before = self.state.clone();
                 self.refresh_from_audio();
@@ -377,6 +406,7 @@ impl Actor {
         self.state.desired_playing = source.autoplay;
         self.state.phase = PlaybackPhase::Loading;
         self.state.track_id = Some(source.track_id);
+        self.adopt_metadata(&source);
         self.state.prepared_track_id = None;
         self.state.current_time = source.position;
         self.state.duration = source.duration.unwrap_or(0.0).max(0.0);
@@ -418,6 +448,17 @@ impl Actor {
             return Ok(());
         }
         if self.retire_after_transition.is_some() {
+            // 第一场过渡尚未回收旧 Deck 时，第二场 handoff 可能已经把 deferred
+            // 承诺给明确曲目。UI 换曲后会立刻刷新队列/预测并再次 prepare；这里若
+            // 无条件覆盖 deferred，第二场激活就永久丢失，表现为底栏到了下一首而
+            // 声音仍停在上一首。已带激活的延迟流和 pending 一样，后台预热必须让路。
+            if self
+                .deferred_stream
+                .as_ref()
+                .is_some_and(|deferred| deferred.activation.is_some())
+            {
+                return Ok(());
+            }
             self.state.prepared_track_id = Some(source.track_id);
             self.deferred_stream = Some(DeferredStream {
                 request: source,
@@ -574,6 +615,7 @@ impl Actor {
     ) {
         self.state.phase = PlaybackPhase::Loading;
         self.state.track_id = Some(request.track_id);
+        self.adopt_metadata(request);
         self.state.current_time = transition.position.max(0.0);
         self.state.duration = request.duration.unwrap_or(0.0).max(0.0);
         self.state.desired_playing = true;
@@ -615,6 +657,13 @@ impl Actor {
             self.send_playing(self.state.desired_playing)?;
         }
         Ok(())
+    }
+
+    fn adopt_metadata(&mut self, source: &PlaybackSource) {
+        self.state.title = source.title.clone();
+        self.state.artist = source.artist.clone();
+        self.state.album = source.album.clone();
+        self.state.artwork_url = source.artwork_url.clone();
     }
 
     fn set_volume(&mut self, volume: f32) -> Result<(), String> {
@@ -797,6 +846,7 @@ impl Actor {
         self.send_playing(self.state.desired_playing)?;
         self.front = deck;
         self.state.track_id = Some(runtime.request.track_id);
+        self.adopt_metadata(&runtime.request);
         self.state.prepared_track_id = None;
         self.state.current_time = position;
         self.state.duration = runtime.duration();
@@ -1199,6 +1249,10 @@ mod tests {
         PlaybackSource {
             track_id,
             path: format!("/nonexistent/{track_id}.flac"),
+            title: format!("曲目 {track_id}"),
+            artist: String::new(),
+            album: String::new(),
+            artwork_url: None,
             position,
             duration: Some(180.0),
             rate: 1.0,
@@ -1260,6 +1314,69 @@ mod tests {
             .expect("预热流还在");
         assert_eq!(pending.request.track_id, 3);
         assert!(pending.activation.is_none());
+    }
+
+    /// 前端最终接歌前会再次 prepare：即使旧的预热标记已经被队列预热弄陈旧，
+    /// 这次确认也必须把 Deck 重新指回最终候选，随后 handoff 才不会退化成硬切。
+    #[test]
+    fn final_prepare_recovers_a_candidate_replaced_by_queue_prewarm() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.0));
+        actor.state.track_id = Some(1);
+        actor.prepare(source(2, 0.0)).expect("预测预热 2");
+        actor.prepare(source(3, 0.0)).expect("队列预热改成 3");
+
+        actor.prepare(source(2, 0.0)).expect("最终候选重新确认");
+        actor
+            .handoff(
+                2,
+                PendingTransition {
+                    position: 0.0,
+                    seconds: 8.0,
+                    plan: PlaybackTransitionPlan::default(),
+                },
+            )
+            .expect("handoff 应绑定最终候选");
+
+        let pending = actor.pending[DeckId::B as usize]
+            .as_ref()
+            .expect("最终候选仍在准备");
+        assert_eq!(pending.request.track_id, 2);
+        assert!(matches!(
+            pending.activation,
+            Some(Activation::Transition(transition)) if transition.seconds == 8.0
+        ));
+    }
+
+    /// 连续接歌时第二场会暂存在 deferred，直到第一场释放旧 Deck。此时 UI 更新会
+    /// 触发下一轮队列预热，但不能把已经承诺的第二场激活覆盖掉。
+    #[test]
+    fn queue_prewarm_yields_to_a_committed_deferred_transition() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::B as usize] = Some(live_runtime(2, 0.0));
+        actor.front = DeckId::B;
+        actor.state.track_id = Some(2);
+        actor.retire_after_transition = Some(DeckId::A);
+        actor.deferred_stream = Some(DeferredStream {
+            request: source(3, 0.0),
+            activation: Some(Activation::Transition(PendingTransition {
+                position: 0.0,
+                seconds: 8.0,
+                plan: PlaybackTransitionPlan::default(),
+            })),
+        });
+
+        actor.prepare(source(4, 0.0)).expect("后台预热应让路");
+
+        let deferred = actor.deferred_stream.as_ref().expect("第二场接歌承诺仍在");
+        assert_eq!(deferred.request.track_id, 3);
+        assert!(matches!(
+            deferred.activation,
+            Some(Activation::Transition(transition)) if transition.seconds == 8.0
+        ));
+        assert_ne!(actor.state.prepared_track_id, Some(4));
     }
 
     #[test]
@@ -1383,5 +1500,31 @@ mod tests {
                     ..
                 }
             )));
+    }
+
+    #[test]
+    fn platform_commands_do_not_consume_frontend_command_ids() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let factory = Arc::new(FakeFactory {
+            knobs,
+            taken: Mutex::new(false),
+        });
+        let coordinator =
+            PlaybackCoordinator::spawn_with_factory(|_| {}, factory).expect("启动测试协调器");
+
+        coordinator
+            .submit_with_id(7, PlaybackCommand::SetVolume { volume: 0.4 })
+            .expect("前端命令");
+        let platform = coordinator
+            .submit_platform(PlaybackCommand::SetVolume { volume: 0.7 })
+            .expect("系统媒体命令");
+        assert_eq!(platform.snapshot.last_command_id, 7);
+        assert!((platform.snapshot.volume - 0.7).abs() < 0.001);
+
+        let frontend = coordinator
+            .submit_with_id(8, PlaybackCommand::SetVolume { volume: 0.9 })
+            .expect("后续前端命令");
+        assert_eq!(frontend.snapshot.last_command_id, 8);
+        assert!((frontend.snapshot.volume - 0.9).abs() < 0.001);
     }
 }

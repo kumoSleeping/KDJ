@@ -23,7 +23,7 @@ import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
 import { Button } from "../common";
-import { DETAIL_EVENT } from "../library/TrackTable";
+import { DETAIL_EVENT, type DetailEventDetail } from "../library/TrackTable";
 import { AnalysisGlyph } from "./ActivityRail";
 import { WorkRail, WorkRailSelection } from "./WorkRail";
 
@@ -103,11 +103,11 @@ function LibrarySearchField({
  */
 export function LibraryWorkRail({
   showDownloads = false,
-  actions,
+  asideToggle,
 }: {
   showDownloads?: boolean;
-  /** 详情、接播、账号和下载队列：放在分析工作条右端。 */
-  actions?: ReactNode;
+  /** 宽屏右栏开合键，在文件夹内搜索键右侧。 */
+  asideToggle?: ReactNode;
 }) {
   const scan = useLibraryStore((state) => state.scan);
   const analyze = useLibraryStore((state) => state.analyze);
@@ -143,15 +143,53 @@ export function LibraryWorkRail({
     if (!playingTrack || locating) return;
     setLocating(true);
     try {
-      const store = useLibraryStore.getState();
-      // 临时列表里找不到正在播的那首时，先回到曲库再定位。
-      if (store.queueView && !store.tracks.some((track) => track.id === playingTrack.id)) {
-        store.setQueueView(false);
+      const waitLoading = async () => {
+        for (let i = 0; i < 80 && useLibraryStore.getState().loading; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      };
+
+      let store = useLibraryStore.getState();
+      const inPage = store.tracks.some((track) => track.id === playingTrack.id);
+      if (!inPage) {
+        const folder = store.filter.folder.trim().replaceAll("\\", "/").replace(/\/+$/, "");
+        const q = store.filter.q.trim();
+        const path = (playingTrack.path || "").replaceAll("\\", "/");
+        const onAllTracks = !folder && !q && !store.queueView;
+        // 仍在「这首歌所属的文件夹」里：继续往下翻页找。
+        const staysInFolder =
+          Boolean(folder) &&
+          !isOutsideFolder(folder) &&
+          !q &&
+          !store.queueView &&
+          path.startsWith(`${folder}/`);
+        // 临时列表 / 搜索 / 其它文件夹盖不住正在播的歌：退回全部曲目再定位。
+        if (!onAllTracks && !staysInFolder) {
+          if (store.queueView) store.setQueueView(false);
+          useLibraryStore.getState().setFilter({
+            folder: "",
+            q: "",
+            sort: "added_at",
+            order: "desc",
+          });
+          await waitLoading();
+        }
       }
+
+      store = useLibraryStore.getState();
       store.selectTrack(playingTrack);
       await store.ensureTrackLoaded(playingTrack.id);
+      if (!useLibraryStore.getState().tracks.some((track) => track.id === playingTrack.id)) {
+        return;
+      }
+      // 等虚拟列表吃进新页再滚，否则 rAF 时行还没挂上会看起来像「点了没反应」。
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      });
       window.dispatchEvent(
-        new CustomEvent(DETAIL_EVENT, { detail: { source: "locate-playing" } }),
+        new CustomEvent(DETAIL_EVENT, {
+          detail: { source: "locate-playing", trackId: playingTrack.id } satisfies DetailEventDetail,
+        }),
       );
     } finally {
       setLocating(false);
@@ -201,6 +239,45 @@ export function LibraryWorkRail({
     setSearchOpen(false);
   };
 
+  const folderSearchToggle = !queueView ? (
+    <button
+      type="button"
+      className="kd-activity-search-toggle"
+      aria-label="搜索曲目"
+      title={
+        filter.folder && !isOutsideFolder(filter.folder)
+          ? "在当前文件夹中搜索"
+          : "在全部歌曲中搜索"
+      }
+      onClick={() => setSearchOpen(true)}
+    >
+      <Search size={14} strokeWidth={2.25} />
+    </button>
+  ) : null;
+
+  const trailingTools = (
+    <span className="kd-activity-trailing-tools">
+      <button
+        type="button"
+        className="kd-activity-search-toggle"
+        aria-label="定位正在播放"
+        title={
+          playingTrack
+            ? `定位正在播放：${playingTrack.title || playingTrack.filename}`
+            : "当前没有正在播放的曲目"
+        }
+        disabled={!playingTrack || locating}
+        onClick={() => {
+          void locatePlaying();
+        }}
+      >
+        <LocateFixed size={14} strokeWidth={2.25} />
+      </button>
+      {folderSearchToggle}
+      {asideToggle}
+    </span>
+  );
+
   if (selecting) {
     return (
       <WorkRail
@@ -242,7 +319,7 @@ export function LibraryWorkRail({
             }
           />,
         ]}
-        actions={actions}
+        trailing={trailingTools}
         label="曲库多选"
       />
     );
@@ -255,16 +332,34 @@ export function LibraryWorkRail({
         glyphs={[]}
         texts={[]}
         trailing={
-          <LibrarySearchField
-            inputRef={searchInputRef}
-            value={filter.q}
-            folder={filter.folder}
-            onChange={(value) => setFilter({ q: value })}
-            onClear={clearSearch}
-            onBlurEmpty={() => setSearchOpen(false)}
-          />
+          <span className="kd-activity-trailing-tools">
+            <button
+              type="button"
+              className="kd-activity-search-toggle"
+              aria-label="定位正在播放"
+              title={
+                playingTrack
+                  ? `定位正在播放：${playingTrack.title || playingTrack.filename}`
+                  : "当前没有正在播放的曲目"
+              }
+              disabled={!playingTrack || locating}
+              onClick={() => {
+                void locatePlaying();
+              }}
+            >
+              <LocateFixed size={14} strokeWidth={2.25} />
+            </button>
+            <LibrarySearchField
+              inputRef={searchInputRef}
+              value={filter.q}
+              folder={filter.folder}
+              onChange={(value) => setFilter({ q: value })}
+              onClear={clearSearch}
+              onBlurEmpty={() => setSearchOpen(false)}
+            />
+            {asideToggle}
+          </span>
         }
-        actions={actions}
         label="曲库搜索"
       />
     );
@@ -368,52 +463,13 @@ export function LibraryWorkRail({
   );
 
   const idle = activeMaintenance.length === 0 && !scanning && analyze === null && !downloading;
-  const locateButton = (
-    <button
-      type="button"
-      className="kd-activity-search-toggle"
-      aria-label="定位正在播放"
-      title={
-        playingTrack
-          ? `定位正在播放：${playingTrack.title || playingTrack.filename}`
-          : "当前没有正在播放的曲目"
-      }
-      disabled={!playingTrack || locating}
-      onClick={() => {
-        void locatePlaying();
-      }}
-    >
-      <LocateFixed size={14} strokeWidth={2.25} />
-    </button>
-  );
-  const trailing = (
-    <span className="kd-activity-trailing-tools">
-      {locateButton}
-      {!queueView ? (
-        <button
-          type="button"
-          className="kd-activity-search-toggle"
-          aria-label="搜索曲目"
-          title={
-            filter.folder && !isOutsideFolder(filter.folder)
-              ? "在当前文件夹中搜索"
-              : "在全部歌曲中搜索"
-          }
-          onClick={() => setSearchOpen(true)}
-        >
-          <Search size={14} strokeWidth={2.25} />
-        </button>
-      ) : null}
-    </span>
-  );
 
   return (
     <WorkRail
       idle={idle}
       glyphs={glyphs}
       texts={texts}
-      trailing={trailing}
-      actions={actions}
+      trailing={trailingTools}
       label={idle ? "曲库概况" : "曲库任务"}
     />
   );

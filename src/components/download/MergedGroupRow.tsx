@@ -2,7 +2,7 @@ import { Fragment, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Check, Copy, Download, Play } from "lucide-react";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { api } from "../../lib/api";
-import { requestSongPreview } from "../../lib/songPreview";
+import { requestSongPreview, type SongPreviewItem } from "../../lib/songPreview";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import {
   playClickForLayout,
@@ -50,6 +50,8 @@ export interface MergedGroupRowProps {
   onPickSource(index: number): void;
   /** 把当前选中来源直接丢进下载队列，省掉先勾选再找顶栏。 */
   onDownload(): void;
+  /** 当前搜索结果里排在本行之后的可播放歌曲。 */
+  followingSongs?: SongPreviewItem[];
   onDragStart?(event: React.DragEvent<HTMLElement>): void;
   onDragEnd?(): void;
 }
@@ -75,6 +77,7 @@ export function MergedGroupRow({
   onToggleExpand,
   onPickSource,
   onDownload,
+  followingSongs = [],
   onDragStart,
   onDragEnd,
 }: MergedGroupRowProps) {
@@ -108,6 +111,7 @@ export function MergedGroupRow({
         title: group.title,
         artist: group.artists.join(", "),
         autoPlay: true,
+        queue: followingSongs,
       });
       if (multi && !expanded) onToggleExpand();
       return;
@@ -436,6 +440,7 @@ export function MergedGroupRow({
                 title: source.title || group.title,
                 artist: source.artists.join(", ") || group.artists.join(", "),
                 autoPlay: true,
+                queue: followingSongs,
               });
             }}
           >

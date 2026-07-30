@@ -48,6 +48,7 @@ class NativeAudioPlugin: Plugin, NativeAudioEventEmitter {
             id: args.id,
             title: args.title,
             artist: args.artist,
+            album: args.album,
             artworkURL: args.artworkUrl
           )
         )
@@ -61,24 +62,11 @@ class NativeAudioPlugin: Plugin, NativeAudioEventEmitter {
     Task { @MainActor in
       do {
         let args = try invoke.parseArgs(SetQueueArgs.self)
-        guard let first = args.items.first else {
+        guard !args.items.isEmpty else {
           invoke.reject("items are required")
           return
         }
-        let current = await runtime.getState()
-        if let currentID = current.id, args.items.contains(where: { $0.id == currentID }) {
-          invoke.resolve(current)
-          return
-        }
-        invoke.resolve(
-          try await runtime.setSource(
-            src: first.src,
-            id: first.id,
-            title: first.title,
-            artist: first.artist,
-            artworkURL: first.artworkUrl
-          )
-        )
+        invoke.resolve(try await runtime.setQueue(items: args.items))
       } catch {
         invoke.reject(error.localizedDescription)
       }

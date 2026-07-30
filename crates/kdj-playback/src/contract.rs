@@ -6,6 +6,14 @@ pub struct PlaybackSource {
     pub track_id: i64,
     pub path: String,
     #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub album: String,
+    #[serde(default)]
+    pub artwork_url: Option<String>,
+    #[serde(default)]
     pub position: f64,
     #[serde(default)]
     pub duration: Option<f64>,
@@ -89,6 +97,10 @@ pub struct PlaybackSnapshot {
     pub phase: PlaybackPhase,
     pub track_id: Option<i64>,
     pub prepared_track_id: Option<i64>,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub artwork_url: Option<String>,
     pub current_time: f64,
     pub duration: f64,
     pub desired_playing: bool,
@@ -109,6 +121,10 @@ impl Default for PlaybackSnapshot {
             phase: PlaybackPhase::Idle,
             track_id: None,
             prepared_track_id: None,
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            artwork_url: None,
             current_time: 0.0,
             duration: 0.0,
             desired_playing: false,
