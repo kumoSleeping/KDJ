@@ -71,6 +71,7 @@ export interface UnifiedPlayer {
   setRate(rate: number): Promise<UnifiedPlayerState>;
   setVolume(volume: number): Promise<UnifiedPlayerState>;
   setEq(lowDb: number, highDb: number): Promise<UnifiedPlayerState>;
+  setTransportFade(enabled: boolean): Promise<UnifiedPlayerState>;
   state(): UnifiedPlayerState;
   refresh(): Promise<UnifiedPlayerState>;
   subscribe(listener: (state: UnifiedPlayerState, previous: UnifiedPlayerState) => void): () => void;
@@ -233,6 +234,10 @@ class MobileNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 
   setEq(): Promise<UnifiedPlayerState> {
+    return Promise.resolve(this.snapshot);
+  }
+
+  setTransportFade(): Promise<UnifiedPlayerState> {
     return Promise.resolve(this.snapshot);
   }
 
@@ -428,6 +433,10 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     return this.command({ type: "setEq", lowDb, highDb });
   }
 
+  setTransportFade(enabled: boolean): Promise<UnifiedPlayerState> {
+    return this.command({ type: "setTransportFade", enabled });
+  }
+
   async refresh(): Promise<UnifiedPlayerState> {
     await this.initialize();
     const snapshot = await invoke<DesktopPlaybackSnapshotRaw>("playback_state");
@@ -525,6 +534,10 @@ class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 
   setEq(): Promise<UnifiedPlayerState> {
+    return Promise.resolve(this.snapshot);
+  }
+
+  setTransportFade(): Promise<UnifiedPlayerState> {
     return Promise.resolve(this.snapshot);
   }
 

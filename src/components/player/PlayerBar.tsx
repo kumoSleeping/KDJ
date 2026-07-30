@@ -43,6 +43,7 @@ import {
 import { useAppStore } from "../../stores/appStore";
 import { useCrossfade, deckGain } from "../../lib/crossfade";
 import { useHarmonicScope } from "../../lib/harmonicScope";
+import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { usePlayMode, type PlayMode } from "../../lib/playMode";
 import {
   AUDIO_FOCUS_EVENT,
@@ -317,6 +318,7 @@ export function PlayerBar() {
   const djBars = useDjConfig((state) => state.bars);
   const applyInOutPoints = useDjConfig((state) => state.applyInOutPoints);
   const toggleDjEnabled = useDjConfig((state) => state.toggleEnabled);
+  const transportFade = usePlaybackPrefs((state) => state.transportFade);
   const showSettings = useAppStore((state) => state.showSettings);
   const showTrackDetail = useAppStore((state) => state.showTrackDetail);
   const openSettingsPanel = useAppStore((state) => state.openSettingsPanel);
@@ -416,6 +418,13 @@ export function PlayerBar() {
    */
   const [notice, setNotice] = useState("");
   const [deckDropSide, setDeckDropSide] = useState<"left" | "right" | null>(null);
+
+  useEffect(() => {
+    if (!nativePlayer || nativePlayer.kind !== "desktop-native") return;
+    void nativePlayer.setTransportFade(transportFade).catch((error: unknown) => {
+      setNotice(`同步播放渐变设置失败：${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, [nativePlayer, transportFade]);
 
   // 给 [] 依赖的 PLAY_EVENT 监听读的镜像：拦截接歌要知道"现在在放谁"
   const trackRef = useRef<Track | null>(null);

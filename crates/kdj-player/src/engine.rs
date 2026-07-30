@@ -83,6 +83,14 @@ struct InstalledSource {
     address: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TransportRamp {
+    target: f32,
+    step: f32,
+    remaining_frames: u32,
+    stop_after_ramp: bool,
+}
+
 /// State owned exclusively by the platform audio callback.
 pub struct AudioRenderer {
     consumer: Consumer<EngineCommand>,
@@ -91,6 +99,8 @@ pub struct AudioRenderer {
     shared: SharedTransportState,
     mode: PlayerMode,
     playing: bool,
+    transport_gain: f32,
+    transport_ramp: Option<TransportRamp>,
     active_deck: DeckId,
     output_frames: u64,
     deck_positions: [f64; 2],
@@ -141,6 +151,8 @@ fn make_channels(
             shared,
             mode: PlayerMode::Continuous,
             playing: false,
+            transport_gain: 0.0,
+            transport_ramp: None,
             active_deck: DeckId::A,
             output_frames: 0,
             deck_positions: [0.0; 2],
@@ -199,11 +211,13 @@ impl AudioRenderer {
                     (a[side] * self.deck_gains[0] * transition_a
                         + b[side] * self.deck_gains[1] * transition_b)
                         * self.master_gain
+                        * self.transport_gain
                 } else {
                     0.0
                 };
             }
             self.advance_frame([true, true], true);
+            self.advance_transport_ramp();
         }
         self.publish();
     }
@@ -254,11 +268,13 @@ impl AudioRenderer {
                     (a[side] * self.deck_gains[0] * transition_a
                         + b[side] * self.deck_gains[1] * transition_b)
                         * self.master_gain
+                        * self.transport_gain
                 } else {
                     0.0
                 };
             }
             self.advance_frame([true, true], true);
+            self.advance_transport_ramp();
         }
         self.publish();
     }
@@ -373,19 +389,21 @@ impl AudioRenderer {
                         + b[side] * self.deck_gains[1] * transition_b)
                         + wet[side])
                         * self.master_gain
+                        * self.transport_gain
                 } else {
                     0.0
                 };
                 *sample = convert(value.clamp(-1.0, 1.0));
             }
             self.advance_frame([advance_a, advance_b], transition_can_advance);
+            self.advance_transport_ramp();
         }
         if self.transition.is_none() {
             if callback_source_ended(
                 sources[self.active_deck as usize],
                 self.deck_positions[self.active_deck as usize],
             ) {
-                self.playing = false;
+                self.stop_transport();
             }
         }
         self.publish();
@@ -446,7 +464,7 @@ impl AudioRenderer {
         let previous = std::mem::take(&mut self.deck_sources[index]);
         self.deck_positions[index] = 0.0;
         if deck == self.active_deck {
-            self.playing = false;
+            self.stop_transport();
             self.transition = None;
         }
         self.retire(previous);
@@ -455,7 +473,10 @@ impl AudioRenderer {
     fn apply(&mut self, command: RtCommand) {
         match command {
             RtCommand::SetMode(mode) => self.mode = mode,
-            RtCommand::SetPlaying(playing) => self.playing = playing,
+            RtCommand::SetPlaying {
+                playing,
+                fade_frames,
+            } => self.set_transport_playing(playing, fade_frames),
             RtCommand::SetMasterGain(gain) => self.master_gain = normalized_gain(gain),
             RtCommand::SetDeckGain { deck, gain } => {
                 self.deck_gains[deck as usize] = normalized_gain(gain);
@@ -500,6 +521,66 @@ impl AudioRenderer {
                 }
             }
         }
+    }
+
+    fn set_transport_playing(&mut self, playing: bool, fade_frames: u32) {
+        if fade_frames == 0 {
+            self.transport_ramp = None;
+            self.playing = playing;
+            self.transport_gain = if playing { 1.0 } else { 0.0 };
+            return;
+        }
+
+        if playing {
+            self.playing = true;
+        } else if !self.playing {
+            self.stop_transport();
+            return;
+        }
+
+        let target = if playing { 1.0 } else { 0.0 };
+        let distance = (target - self.transport_gain).abs();
+        if distance <= f32::EPSILON {
+            self.transport_gain = target;
+            self.transport_ramp = None;
+            if !playing {
+                self.playing = false;
+            }
+            return;
+        }
+
+        // A reversal starts at the current gain. Scaling by the remaining distance preserves the
+        // configured slope, so rapid play/pause clicks cannot create a jump or a sluggish restart.
+        let remaining_frames = ((fade_frames as f32 * distance).ceil() as u32).max(1);
+        self.transport_ramp = Some(TransportRamp {
+            target,
+            step: (target - self.transport_gain) / remaining_frames as f32,
+            remaining_frames,
+            stop_after_ramp: !playing,
+        });
+    }
+
+    fn advance_transport_ramp(&mut self) {
+        let Some(mut ramp) = self.transport_ramp else {
+            return;
+        };
+        if ramp.remaining_frames <= 1 {
+            self.transport_gain = ramp.target;
+            self.transport_ramp = None;
+            if ramp.stop_after_ramp {
+                self.playing = false;
+            }
+            return;
+        }
+        self.transport_gain = (self.transport_gain + ramp.step).clamp(0.0, 1.0);
+        ramp.remaining_frames -= 1;
+        self.transport_ramp = Some(ramp);
+    }
+
+    fn stop_transport(&mut self) {
+        self.playing = false;
+        self.transport_gain = 0.0;
+        self.transport_ramp = None;
     }
 
     fn ensure_eq_sample_rate(&mut self) {
@@ -683,9 +764,45 @@ mod tests {
     }
 
     #[test]
+    fn transport_fade_reverses_from_the_current_gain_without_a_jump() {
+        let (mut controller, mut renderer) = command_channel(8);
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: false,
+                fade_frames: 4,
+            })
+            .unwrap();
+        let mut fade_out = [0.0; 2];
+        renderer.render(&[1.0; 2], &[], &mut fade_out, 1);
+        assert_eq!(fade_out, [1.0, 0.75]);
+
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 4,
+            })
+            .unwrap();
+        let mut reversed = [0.0; 3];
+        renderer.render(&[1.0; 3], &[], &mut reversed, 1);
+        assert_eq!(reversed, [0.5, 0.75, 1.0]);
+        assert!(controller.snapshot().playing);
+    }
+
+    #[test]
     fn prepared_handoff_is_sample_clocked_without_a_silent_frame() {
         let (mut controller, mut renderer) = command_channel(4);
-        controller.send(RtCommand::SetPlaying(true)).unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
         controller
             .send(RtCommand::HandoffPrepared {
                 to: DeckId::B,
@@ -709,7 +826,12 @@ mod tests {
     #[test]
     fn repeated_scrub_updates_coalesce_before_the_next_audio_frame() {
         let (mut controller, mut renderer) = command_channel(8);
-        controller.send(RtCommand::SetPlaying(true)).unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
         for frame in [1_000, 5_000, 9_000] {
             controller
                 .send(RtCommand::SeekPrepared {
@@ -726,7 +848,12 @@ mod tests {
     #[test]
     fn seek_and_gain_apply_before_first_output_frame() {
         let (mut controller, mut renderer) = command_channel(8);
-        controller.send(RtCommand::SetPlaying(true)).unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
         controller
             .send(RtCommand::SeekPrepared {
                 deck: DeckId::A,
@@ -749,9 +876,17 @@ mod tests {
     #[test]
     fn bounded_queue_reports_backpressure() {
         let (mut controller, _renderer) = command_channel(1);
-        controller.send(RtCommand::SetPlaying(true)).unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
         assert_eq!(
-            controller.send(RtCommand::SetPlaying(false)),
+            controller.send(RtCommand::SetPlaying {
+                playing: false,
+                fade_frames: 0,
+            }),
             Err(CommandError::Full)
         );
     }
@@ -782,7 +917,12 @@ mod tests {
                 0,
             )
             .unwrap();
-        controller.send(RtCommand::SetPlaying(true)).unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
         let mut output = [0.0; 2];
         renderer.render_prepared(&mut output, 48_000, 2);
         assert_eq!(output, [0.25, -0.25]);

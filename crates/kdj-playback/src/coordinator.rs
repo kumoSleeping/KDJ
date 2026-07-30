@@ -21,6 +21,7 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const STARTUP_BUFFER_MS: u64 = 120;
 const SEEK_BUFFER_MS: u64 = 40;
 const SEEK_CROSSFADE_MS: u64 = 5;
+const TRANSPORT_FADE_MS: u64 = 120;
 
 type CommandReply = SyncSender<Result<CommandAck, String>>;
 type StateReply = SyncSender<PlaybackSnapshot>;
@@ -338,6 +339,7 @@ impl Actor {
                 },
             ),
             PlaybackCommand::SetVolume { volume } => self.set_volume(volume),
+            PlaybackCommand::SetTransportFade { enabled } => self.set_transport_fade(enabled),
             PlaybackCommand::SetEq { low_db, high_db } => self.set_eq(low_db, high_db),
             PlaybackCommand::Dispose => {
                 self.dispose();
@@ -432,7 +434,7 @@ impl Actor {
 
     fn set_playing(&mut self, playing: bool) -> Result<(), String> {
         self.state.desired_playing = playing;
-        self.send(RtCommand::SetPlaying(playing))?;
+        self.send_playing(playing)?;
         if !matches!(self.state.phase, PlaybackPhase::Loading | PlaybackPhase::Seeking) {
             self.state.phase = if self.state.track_id.is_none() {
                 PlaybackPhase::Idle
@@ -442,7 +444,6 @@ impl Actor {
                 PlaybackPhase::Paused
             };
         }
-        self.state.is_playing = playing && self.state.track_id.is_some();
         Ok(())
     }
 
@@ -541,6 +542,14 @@ impl Actor {
         self.retire_deck(old);
         self.state.transitioning = false;
         self.deferred_stream = None;
+        Ok(())
+    }
+
+    fn set_transport_fade(&mut self, enabled: bool) -> Result<(), String> {
+        self.state.transport_fade_enabled = enabled;
+        if !enabled && self.player.is_some() {
+            self.send_playing(self.state.desired_playing)?;
+        }
         Ok(())
     }
 
@@ -721,7 +730,7 @@ impl Actor {
             transition_frames,
             plan,
         })?;
-        self.send(RtCommand::SetPlaying(self.state.desired_playing))?;
+        self.send_playing(self.state.desired_playing)?;
         self.front = deck;
         self.state.track_id = Some(runtime.request.track_id);
         self.state.prepared_track_id = None;
@@ -797,7 +806,7 @@ impl Actor {
                 self.state.is_playing = audio.playing;
                 return;
             }
-            self.state.phase = if audio.playing {
+            self.state.phase = if self.state.desired_playing {
                 PlaybackPhase::Playing
             } else {
                 PlaybackPhase::Paused
@@ -814,7 +823,7 @@ impl Actor {
                 self.state.phase = PlaybackPhase::Ended;
                 self.state.desired_playing = false;
             } else if !self.state.transitioning {
-                self.state.phase = if audio.playing {
+                self.state.phase = if self.state.desired_playing {
                     PlaybackPhase::Playing
                 } else {
                     PlaybackPhase::Paused
@@ -837,6 +846,24 @@ impl Actor {
         } else {
             self.front.other()
         }
+    }
+
+    fn send_playing(&mut self, playing: bool) -> Result<(), String> {
+        let fade_frames = if self.state.transport_fade_enabled {
+            self.player
+                .as_ref()
+                .map(|player| {
+                    (u64::from(player.spec().sample_rate) * TRANSPORT_FADE_MS / 1_000)
+                        .min(u64::from(u32::MAX)) as u32
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        self.send(RtCommand::SetPlaying {
+            playing,
+            fade_frames,
+        })
     }
 
     fn send(&mut self, command: RtCommand) -> Result<(), String> {
@@ -877,10 +904,12 @@ impl Actor {
         self.player.take();
         let sequence = self.state.sequence;
         let command = self.state.last_command_id;
+        let transport_fade_enabled = self.state.transport_fade_enabled;
         self.state = PlaybackSnapshot {
             sequence,
             last_command_id: command,
             volume: self.volume,
+            transport_fade_enabled,
             ..PlaybackSnapshot::default()
         };
     }

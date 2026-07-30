@@ -51,7 +51,10 @@ impl TransitionPlan {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RtCommand {
     SetMode(PlayerMode),
-    SetPlaying(bool),
+    SetPlaying {
+        playing: bool,
+        fade_frames: u32,
+    },
     SetMasterGain(f32),
     SetDeckGain {
         deck: DeckId,

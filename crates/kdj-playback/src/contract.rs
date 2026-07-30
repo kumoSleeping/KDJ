@@ -56,6 +56,7 @@ pub enum PlaybackCommand {
         plan: PlaybackTransitionPlan,
     },
     SetVolume { volume: f32 },
+    SetTransportFade { enabled: bool },
     SetEq {
         #[serde(rename = "lowDb")]
         low_db: f32,
@@ -96,6 +97,7 @@ pub struct PlaybackSnapshot {
     pub transitioning: bool,
     pub rate: f32,
     pub volume: f32,
+    pub transport_fade_enabled: bool,
     pub error: String,
 }
 
@@ -115,6 +117,7 @@ impl Default for PlaybackSnapshot {
             transitioning: false,
             rate: 1.0,
             volume: 1.0,
+            transport_fade_enabled: false,
             error: String::new(),
         }
     }

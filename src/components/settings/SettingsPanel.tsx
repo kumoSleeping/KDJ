@@ -8,9 +8,8 @@ import {
   mixSeconds,
   useDjConfig,
 } from "../../lib/djMix";
-import {
-  useTrackClickPrefs,
-} from "../../lib/trackClickPrefs";
+import { usePlaybackPrefs } from "../../lib/playbackPrefs";
+import { useTrackClickPrefs } from "../../lib/trackClickPrefs";
 import { useAppStore } from "../../stores/appStore";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useUpdateStore } from "../../stores/updateStore";
@@ -182,6 +181,8 @@ export function SettingsPanel() {
   const setNarrowPlay = useTrackClickPrefs((state) => state.setNarrowPlay);
   const setClickAddNext = useTrackClickPrefs((state) => state.setClickAddNext);
   const addNextAvailable = widePlay === "double" || narrowPlay === "double";
+  const transportFade = usePlaybackPrefs((state) => state.transportFade);
+  const setTransportFade = usePlaybackPrefs((state) => state.setTransportFade);
 
   const accounts = useAppStore((state) => state.accounts);
   const accountsError = useAppStore((state) => state.accountsError);
@@ -268,6 +269,17 @@ export function SettingsPanel() {
                   : "需要先把横屏或竖屏的播放手势设为双击，单击才有空档留给「插入下一首待播」。"
               }
               onChange={() => setClickAddNext(!clickAddNext)}
+            />
+          </div>
+        </Panel>
+
+        <Panel heading="播放" dense>
+          <div className="kd-djp-switch-list" aria-label="播放选项">
+            <Switch
+              checked={transportFade}
+              label="播放 / 暂停渐入渐出"
+              title="播放时用约 120 毫秒渐入，暂停时用约 120 毫秒渐出；关掉后立即播放或暂停。"
+              onChange={() => setTransportFade(!transportFade)}
             />
           </div>
         </Panel>

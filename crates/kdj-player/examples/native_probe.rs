@@ -8,7 +8,12 @@ fn main() {
     let mut player = open_dynamic_default(64, |error| eprintln!("device: {error}")).unwrap();
     player.send(RtCommand::SetMasterGain(0.0)).unwrap();
     player.install(DeckId::A, decoded, 48_000).unwrap();
-    player.send(RtCommand::SetPlaying(true)).unwrap();
+    player
+        .send(RtCommand::SetPlaying {
+            playing: true,
+            fade_frames: 0,
+        })
+        .unwrap();
     thread::sleep(Duration::from_millis(80));
     let first = player.snapshot();
     player
