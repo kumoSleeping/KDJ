@@ -154,7 +154,7 @@ for i in $(seq 1 10); do
   sleep 20
 done
 if [[ "$build_ok" != "1" ]]; then
-  green "✅ KDJ v$VERSION 更新通道已就绪（latest.json = $served），但 rust-build 有失败步骤，请去 Actions 核对缺了哪些平台。"
+  green "✅ KDJ v$VERSION 更新通道已就绪（latest.json = ${served}），但 rust-build 有失败步骤，请去 Actions 核对缺了哪些平台。"
 else
-  green "✅ KDJ v$VERSION 发版完成，latest.json = $served，客户端可以检测到更新了。"
+  green "✅ KDJ v$VERSION 发版完成，latest.json = ${served}，客户端可以检测到更新了。"
 fi
