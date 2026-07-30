@@ -417,6 +417,12 @@ fn window_control(
                 Err(err) => Err(err),
             },
             "close" => {
+                // macOS：红灯/自绘关闭 = 藏到程序坞，播放继续；真退出走 Cmd+Q / 程序坞「退出」。
+                // 其它平台仍是关窗退出。
+                #[cfg(target_os = "macos")]
+                if _window.label() == "main" {
+                    return _window.hide().map_err(|err| err.to_string());
+                }
                 // 主窗口关闭时不能把透明歌词窗留成一个看不见入口的孤儿进程。
                 if _window.label() == "main" {
                     if let Some(lyrics) = _app.get_webview_window("lyrics-overlay") {
@@ -865,6 +871,39 @@ pub fn run() {
         set_desktop_lyrics
     ]);
 
+    // macOS：点红灯只藏主窗，别拆 WebView——否则桌面播放/歌词还在跑、进程却半死不活。
+    #[cfg(all(desktop, target_os = "macos"))]
+    let builder = builder.on_window_event(|window, event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            if window.label() == "main" {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        }
+    });
+
+    #[cfg(desktop)]
+    {
+        let app = builder
+            .build(tauri::generate_context!())
+            .expect("KDJ 启动失败");
+        app.run(|app_handle, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = &event {
+                // 程序坞图标再点一下：唤回被红灯藏起的主窗。
+                // 桌面歌词可能仍可见，所以不能只看 has_visible_windows。
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            let _ = (app_handle, event);
+        });
+        return;
+    }
+
+    #[cfg(not(desktop))]
     builder
         .run(tauri::generate_context!())
         .expect("KDJ 启动失败");
