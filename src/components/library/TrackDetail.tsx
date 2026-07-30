@@ -39,6 +39,25 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
+/** 采样率 / 来源 / 入库 / 路径——只读事实，挂在 Metadata 面板底部。 */
+function FileRows({ track }: { track: Track }) {
+  return (
+    <>
+      <Row label="采样率">
+        {track.samplerate ? `${(track.samplerate / 1000).toFixed(1)} kHz` : DASH}
+        {track.channels ? ` · ${track.channels}ch` : ""}
+      </Row>
+      <Row label="来源">{track.source_platform || "local"}</Row>
+      <Row label="入库">{formatDate(track.added_at)}</Row>
+      <Row label="路径">
+        <span className="kd-mono kd-faint" title={track.path}>
+          {track.path}
+        </span>
+      </Row>
+    </>
+  );
+}
+
 /** 表单草稿。标签在编辑期是一行文本，存的时候才切成数组。 */
 interface Draft {
   title: string;
@@ -467,6 +486,14 @@ export function TrackDetail({ track }: { track: Track }) {
                 {track.comment}
               </p>
             )}
+            {/* 文件信息并进同一块：单独占一块标题 + 拖动手柄太碎。
+                时长/格式/大小上面已显示过，不重复。 */}
+            <FileRows track={track} />
+          </div>
+        )}
+        {editing && (
+          <div className="kd-col" style={{ gap: "0.2rem", fontSize: "var(--kd-size-sm)" }}>
+            <FileRows track={track} />
           </div>
         )}
       </Panel>
@@ -531,23 +558,6 @@ export function TrackDetail({ track }: { track: Track }) {
 
       <Panel key="vj" heading="VJ search Bili" padded dense>
         <VjSearchPanel track={track} />
-      </Panel>
-
-      <Panel key="file" heading="File" padded dense>
-        <div className="kd-col" style={{ gap: "0.2rem", fontSize: "var(--kd-size-sm)" }}>
-          {/* 时长/格式/大小已经在顶部标题下那行显示过了，这里不重复 */}
-          <Row label="采样率">
-            {track.samplerate ? `${(track.samplerate / 1000).toFixed(1)} kHz` : DASH}
-            {track.channels ? ` · ${track.channels}ch` : ""}
-          </Row>
-          <Row label="来源">{track.source_platform || "local"}</Row>
-          <Row label="入库">{formatDate(track.added_at)}</Row>
-          <Row label="路径">
-            <span className="kd-mono kd-faint" title={track.path}>
-              {track.path}
-            </span>
-          </Row>
-        </div>
       </Panel>
 
       <Panel key="rating" heading="Rating" padded dense>

@@ -8,8 +8,11 @@ pub struct TransportSnapshot {
     pub mode: PlayerMode,
     pub playing: bool,
     pub active_deck: DeckId,
+    pub transitioning: bool,
+    pub transition_to: DeckId,
     pub output_frames: u64,
     pub deck_frames: [u64; 2],
+    pub deck_source_ids: [u64; 2],
 }
 
 pub(crate) struct SharedState {
@@ -17,9 +20,13 @@ pub(crate) struct SharedState {
     mode: AtomicU8,
     playing: AtomicBool,
     active_deck: AtomicU8,
+    transitioning: AtomicBool,
+    transition_to: AtomicU8,
     output_frames: AtomicU64,
     deck_a_frame: AtomicU64,
     deck_b_frame: AtomicU64,
+    deck_a_source: AtomicU64,
+    deck_b_source: AtomicU64,
 }
 
 impl Default for SharedState {
@@ -29,9 +36,13 @@ impl Default for SharedState {
             mode: AtomicU8::new(PlayerMode::Continuous as u8),
             playing: AtomicBool::new(false),
             active_deck: AtomicU8::new(DeckId::A as u8),
+            transitioning: AtomicBool::new(false),
+            transition_to: AtomicU8::new(DeckId::A as u8),
             output_frames: AtomicU64::new(0),
             deck_a_frame: AtomicU64::new(0),
             deck_b_frame: AtomicU64::new(0),
+            deck_a_source: AtomicU64::new(0),
+            deck_b_source: AtomicU64::new(0),
         }
     }
 }
@@ -42,8 +53,10 @@ impl SharedState {
         mode: PlayerMode,
         playing: bool,
         active_deck: DeckId,
+        transition_to: Option<DeckId>,
         output_frames: u64,
         deck_frames: [u64; 2],
+        deck_source_ids: [u64; 2],
     ) {
         // A seqlock prevents control readers from combining fields from two callbacks.
         // The audio thread still never takes a lock or waits for another thread.
@@ -51,9 +64,19 @@ impl SharedState {
         self.mode.store(mode as u8, Ordering::Relaxed);
         self.playing.store(playing, Ordering::Relaxed);
         self.active_deck.store(active_deck as u8, Ordering::Relaxed);
+        self.transitioning
+            .store(transition_to.is_some(), Ordering::Relaxed);
+        self.transition_to.store(
+            transition_to.unwrap_or(active_deck) as u8,
+            Ordering::Relaxed,
+        );
         self.output_frames.store(output_frames, Ordering::Relaxed);
         self.deck_a_frame.store(deck_frames[0], Ordering::Relaxed);
         self.deck_b_frame.store(deck_frames[1], Ordering::Relaxed);
+        self.deck_a_source
+            .store(deck_source_ids[0], Ordering::Relaxed);
+        self.deck_b_source
+            .store(deck_source_ids[1], Ordering::Relaxed);
         self.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -74,10 +97,19 @@ impl SharedState {
                     1 => DeckId::B,
                     _ => DeckId::A,
                 },
+                transitioning: self.transitioning.load(Ordering::Relaxed),
+                transition_to: match self.transition_to.load(Ordering::Relaxed) {
+                    1 => DeckId::B,
+                    _ => DeckId::A,
+                },
                 output_frames: self.output_frames.load(Ordering::Relaxed),
                 deck_frames: [
                     self.deck_a_frame.load(Ordering::Relaxed),
                     self.deck_b_frame.load(Ordering::Relaxed),
+                ],
+                deck_source_ids: [
+                    self.deck_a_source.load(Ordering::Relaxed),
+                    self.deck_b_source.load(Ordering::Relaxed),
                 ],
             };
             if before == self.generation.load(Ordering::Acquire) {

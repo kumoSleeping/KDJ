@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   BarChart3,
   CheckSquare,
   Copy,
   Download,
+  LocateFixed,
   Music2,
   Pause,
   Play,
@@ -14,10 +15,15 @@ import {
 import type { ReactNode } from "react";
 import { forgetQueuedAnalysis } from "../../lib/autoAnalyze";
 import { isOutsideFolder } from "../../lib/outsideFolder";
+import {
+  getPlayingTrack,
+  subscribePlayingTrack,
+} from "../../lib/playingTrack";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
 import { Button } from "../common";
+import { DETAIL_EVENT } from "../library/TrackTable";
 import { AnalysisGlyph } from "./ActivityRail";
 import { WorkRail, WorkRailSelection } from "./WorkRail";
 
@@ -126,6 +132,31 @@ export function LibraryWorkRail({
   const selecting = selectionMode || selectedIds.length > 1;
   const [searchOpen, setSearchOpen] = useState(() => Boolean(filter.q.trim()));
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const playingTrack = useSyncExternalStore(
+    subscribePlayingTrack,
+    getPlayingTrack,
+    () => null,
+  );
+  const [locating, setLocating] = useState(false);
+
+  const locatePlaying = async () => {
+    if (!playingTrack || locating) return;
+    setLocating(true);
+    try {
+      const store = useLibraryStore.getState();
+      // 临时列表里找不到正在播的那首时，先回到曲库再定位。
+      if (store.queueView && !store.tracks.some((track) => track.id === playingTrack.id)) {
+        store.setQueueView(false);
+      }
+      store.selectTrack(playingTrack);
+      await store.ensureTrackLoaded(playingTrack.id);
+      window.dispatchEvent(
+        new CustomEvent(DETAIL_EVENT, { detail: { source: "locate-playing" } }),
+      );
+    } finally {
+      setLocating(false);
+    }
+  };
 
   // 多选顶掉搜索；有残留 query 时退出多选再把搜索展开回来。
   useEffect(() => {
@@ -337,21 +368,44 @@ export function LibraryWorkRail({
   );
 
   const idle = activeMaintenance.length === 0 && !scanning && analyze === null && !downloading;
-  const trailing = !queueView ? (
+  const locateButton = (
     <button
       type="button"
       className="kd-activity-search-toggle"
-      aria-label="搜索曲目"
+      aria-label="定位正在播放"
       title={
-        filter.folder && !isOutsideFolder(filter.folder)
-          ? "在当前文件夹中搜索"
-          : "在全部歌曲中搜索"
+        playingTrack
+          ? `定位正在播放：${playingTrack.title || playingTrack.filename}`
+          : "当前没有正在播放的曲目"
       }
-      onClick={() => setSearchOpen(true)}
+      disabled={!playingTrack || locating}
+      onClick={() => {
+        void locatePlaying();
+      }}
     >
-      <Search size={14} strokeWidth={2.25} />
+      <LocateFixed size={14} strokeWidth={2.25} />
     </button>
-  ) : null;
+  );
+  const trailing = (
+    <span className="kd-activity-trailing-tools">
+      {locateButton}
+      {!queueView ? (
+        <button
+          type="button"
+          className="kd-activity-search-toggle"
+          aria-label="搜索曲目"
+          title={
+            filter.folder && !isOutsideFolder(filter.folder)
+              ? "在当前文件夹中搜索"
+              : "在全部歌曲中搜索"
+          }
+          onClick={() => setSearchOpen(true)}
+        >
+          <Search size={14} strokeWidth={2.25} />
+        </button>
+      ) : null}
+    </span>
+  );
 
   return (
     <WorkRail

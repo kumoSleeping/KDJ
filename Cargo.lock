@@ -846,7 +846,7 @@ dependencies = [
  "objc2-foundation",
  "web-sys",
  "windows 0.61.3",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -2410,6 +2410,7 @@ dependencies = [
  "anyhow",
  "kdj-core",
  "kdj-library",
+ "kdj-player",
  "kdj-server",
  "rand 0.10.2",
  "serde",
@@ -2468,6 +2469,8 @@ dependencies = [
  "cpal",
  "rtrb",
  "symphonia",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
 ]
 
 [[package]]

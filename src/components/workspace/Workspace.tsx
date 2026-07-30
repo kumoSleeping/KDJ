@@ -445,11 +445,12 @@ export function Workspace() {
   useEffect(() => {
     const onDetail = (event: Event) => {
       const source = (event as CustomEvent<{ source?: string }>).detail?.source;
-      // 竖屏只有点击底部唱盘可以拉开详情；列表、下载完成等被动事件都不弹抽屉。
-      if (portrait && source !== "player-deck") return;
-      // 横屏锁定只拦歌曲/视频的自动事件；底部唱盘是显式入口，必须强制打开。
-      if (source !== "player-deck" && asideLockedRef.current) return;
-      if (source === "player-deck") setAsideLocked(false);
+      const explicitLocate = source === "player-deck" || source === "locate-playing";
+      // 竖屏只有显式定位（唱盘 / 「定位正在播」）可以拉开详情；被动事件不弹抽屉。
+      if (portrait && !explicitLocate) return;
+      // 横屏锁定只拦歌曲/视频的自动事件；显式定位必须强制打开。
+      if (!explicitLocate && asideLockedRef.current) return;
+      if (explicitLocate) setAsideLocked(false);
       // 人在搜索页时先跳回曲库页：详情装在曲库页的右栏/抽屉里，
       // 停在搜索页把抽屉拉开，底下的列表和这首歌对不上号
       if (useAppStore.getState().listMode !== "library") {

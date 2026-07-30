@@ -13,6 +13,9 @@
 //! 这里实现的 6 条命令是 `electron/preload.ts` 的一比一替代品，
 //! 名字和参数由 `src/lib/bridge.ts` 固定，改名等于把前端按钮变哑巴。
 
+#[cfg(desktop)]
+mod desktop_player;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -538,8 +541,8 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init());
-    // 移动端播放必须脱离 WebView 生命周期：Android 由 MediaSessionService 承载，
-    // iOS 由 AVPlayer + AVAudioSession 承载。桌面暂时保留现有 DJ 适配器，插件不入包。
+    // 移动端由 MediaSessionService / AVPlayer 承载；桌面由进程内 kdj-player +
+    // CPAL 承载。两边最终声音都不再依赖 WebView 生命周期，移动插件仍只在手机入包。
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let builder = builder.plugin(tauri_plugin_native_audio::init());
     // updater/process 只在桌面注册：安卓的更新走 Release 页下 APK
@@ -548,33 +551,65 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init());
 
+    let builder = builder.setup(|app| {
+        app.manage(UpdateProgressState::default());
+        #[cfg(desktop)]
+        app.manage(
+            desktop_player::DesktopPlayerHandle::spawn(app.handle().clone())
+                .map_err(anyhow::Error::msg)?,
+        );
+        let bridge = start_server(app.handle())?;
+        tracing::info!("KDJ 后端就绪：{}", bridge.base_url);
+        app.manage(bridge);
+        // 服务起好再显示窗口。窗口在配置里是 visible:false，这里补一次 show()——
+        // Electron 版靠 `ready-to-show` 做同样的事，为的是不让用户看见
+        // 「空窗口 → 内容」的跳变。start_server 失败时直接返回 Err，
+        // 窗口不会露面，也就不会出现一个连不上后端的空壳。
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+        }
+        Ok(())
+    });
+
+    #[cfg(desktop)]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        get_bridge_info,
+        open_path,
+        reveal_path,
+        open_external,
+        check_desktop_update,
+        get_update_progress,
+        apply_update,
+        pick_folder,
+        pick_folders,
+        window_control,
+        desktop_player::desktop_player_initialize,
+        desktop_player::desktop_player_load,
+        desktop_player::desktop_player_prepare,
+        desktop_player::desktop_player_play,
+        desktop_player::desktop_player_pause,
+        desktop_player::desktop_player_seek,
+        desktop_player::desktop_player_handoff,
+        desktop_player::desktop_player_set_volume,
+        desktop_player::desktop_player_set_eq,
+        desktop_player::desktop_player_state,
+        desktop_player::desktop_player_dispose
+    ]);
+    #[cfg(mobile)]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        get_bridge_info,
+        open_path,
+        reveal_path,
+        open_external,
+        check_desktop_update,
+        get_update_progress,
+        apply_update,
+        pick_folder,
+        pick_folders,
+        window_control
+    ]);
+
     builder
-        .setup(|app| {
-            app.manage(UpdateProgressState::default());
-            let bridge = start_server(app.handle())?;
-            tracing::info!("KDJ 后端就绪：{}", bridge.base_url);
-            app.manage(bridge);
-            // 服务起好再显示窗口。窗口在配置里是 visible:false，这里补一次 show()——
-            // Electron 版靠 `ready-to-show` 做同样的事，为的是不让用户看见
-            // 「空窗口 → 内容」的跳变。start_server 失败时直接返回 Err，
-            // 窗口不会露面，也就不会出现一个连不上后端的空壳。
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-            }
-            Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
-            get_bridge_info,
-            open_path,
-            reveal_path,
-            open_external,
-            check_desktop_update,
-            get_update_progress,
-            apply_update,
-            pick_folder,
-            pick_folders,
-            window_control
-        ])
         .run(tauri::generate_context!())
         .expect("KDJ 启动失败");
 }

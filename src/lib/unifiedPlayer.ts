@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   addStateListener,
   dispose,
@@ -13,36 +15,61 @@ import {
   type NativeAudioState,
 } from "tauri-plugin-native-audio-api";
 import type { Track } from "../types";
+import { djEngine } from "./djMix";
 
-export type UnifiedPlayerStatus = "idle" | "loading" | "playing" | "ended" | "error";
+export type UnifiedPlayerStatus = "idle" | "loading" | "paused" | "playing" | "ended" | "error";
+export type UnifiedPlayerKind = "desktop-native" | "mobile-native" | "browser-preview";
 
 export interface UnifiedPlayerState {
   trackId: number | null;
+  preparedTrackId: number | null;
   status: UnifiedPlayerStatus;
   currentTime: number;
   duration: number;
   playing: boolean;
   buffering: boolean;
+  transitioning: boolean;
   rate: number;
   error: string;
+}
+
+export interface UnifiedTransitionPlan {
+  eq: boolean;
+  filter: boolean;
+  vocalCut: boolean;
+  echo: boolean;
+  alarm: boolean;
+  hydrant: boolean;
+  beatSeconds: number;
 }
 
 export interface UnifiedPlayerSource {
   src: string;
   track: Track;
   artworkUrl?: string;
+  position?: number;
+  rate?: number;
+  autoplay?: boolean;
 }
 
 export interface UnifiedPlayer {
-  readonly kind: "mobile-native";
+  readonly kind: UnifiedPlayerKind;
+  readonly supportsRealtimeDj: boolean;
   initialize(): Promise<UnifiedPlayerState>;
   load(source: UnifiedPlayerSource): Promise<UnifiedPlayerState>;
+  prepare(source: UnifiedPlayerSource): Promise<UnifiedPlayerState>;
+  handoff(
+    position: number,
+    seconds: number,
+    plan?: UnifiedTransitionPlan,
+  ): Promise<UnifiedPlayerState>;
   setQueue(sources: UnifiedPlayerSource[]): Promise<UnifiedPlayerState>;
   play(): Promise<UnifiedPlayerState>;
   pause(): Promise<UnifiedPlayerState>;
   seek(seconds: number): Promise<UnifiedPlayerState>;
   setRate(rate: number): Promise<UnifiedPlayerState>;
   setVolume(volume: number): Promise<UnifiedPlayerState>;
+  setEq(lowDb: number, highDb: number): Promise<UnifiedPlayerState>;
   state(): UnifiedPlayerState;
   refresh(): Promise<UnifiedPlayerState>;
   subscribe(listener: (state: UnifiedPlayerState, previous: UnifiedPlayerState) => void): () => void;
@@ -51,51 +78,73 @@ export interface UnifiedPlayer {
 
 const INITIAL_STATE: UnifiedPlayerState = {
   trackId: null,
+  preparedTrackId: null,
   status: "idle",
   currentTime: 0,
   duration: 0,
   playing: false,
   buffering: false,
+  transitioning: false,
   rate: 1,
   error: "",
 };
 
-function normalized(raw: NativeAudioState): UnifiedPlayerState {
-  return {
-    trackId: typeof raw.id === "number" ? raw.id : null,
-    status: raw.status,
-    currentTime: Number.isFinite(raw.currentTime) ? Math.max(0, raw.currentTime) : 0,
-    duration: Number.isFinite(raw.duration) ? Math.max(0, raw.duration) : 0,
-    playing: raw.isPlaying,
-    buffering: raw.buffering,
-    rate: Number.isFinite(raw.rate) && raw.rate > 0 ? raw.rate : 1,
-    error: raw.error ?? "",
-  };
-}
+abstract class PlayerStateOwner {
+  protected snapshot: UnifiedPlayerState = INITIAL_STATE;
+  protected listeners = new Set<
+    (state: UnifiedPlayerState, previous: UnifiedPlayerState) => void
+  >();
 
-class MobileNativePlayer implements UnifiedPlayer {
-  readonly kind = "mobile-native" as const;
-  private snapshot: UnifiedPlayerState = INITIAL_STATE;
-  private listeners = new Set<(state: UnifiedPlayerState, previous: UnifiedPlayerState) => void>();
-  private initPromise: Promise<UnifiedPlayerState> | null = null;
-  private removeNativeListener: (() => void) | null = null;
-  /** React effects can request load and play in the same commit; serialize native mutations. */
-  private operations: Promise<void> = Promise.resolve();
-
-  private publish(raw: NativeAudioState): UnifiedPlayerState {
+  protected publish(next: UnifiedPlayerState): UnifiedPlayerState {
     const previous = this.snapshot;
-    const next = normalized(raw);
     this.snapshot = next;
     for (const listener of this.listeners) listener(next, previous);
     return next;
   }
 
+  state(): UnifiedPlayerState {
+    return this.snapshot;
+  }
+
+  subscribe(
+    listener: (state: UnifiedPlayerState, previous: UnifiedPlayerState) => void,
+  ): () => void {
+    this.listeners.add(listener);
+    listener(this.snapshot, this.snapshot);
+    return () => this.listeners.delete(listener);
+  }
+}
+
+function normalizedMobile(raw: NativeAudioState): UnifiedPlayerState {
+  return {
+    trackId: typeof raw.id === "number" ? raw.id : null,
+    preparedTrackId: null,
+    status: raw.status === "playing" ? "playing" : raw.status === "ended" ? "ended" : raw.status === "error" ? "error" : raw.status === "loading" ? "loading" : raw.id == null ? "idle" : "paused",
+    currentTime: Number.isFinite(raw.currentTime) ? Math.max(0, raw.currentTime) : 0,
+    duration: Number.isFinite(raw.duration) ? Math.max(0, raw.duration) : 0,
+    playing: raw.isPlaying,
+    buffering: raw.buffering,
+    transitioning: false,
+    rate: Number.isFinite(raw.rate) && raw.rate > 0 ? raw.rate : 1,
+    error: raw.error ?? "",
+  };
+}
+
+class MobileNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
+  readonly kind = "mobile-native" as const;
+  readonly supportsRealtimeDj = false;
+  private initPromise: Promise<UnifiedPlayerState> | null = null;
+  private removeNativeListener: (() => void) | null = null;
+  /** React effects can request load and play in the same commit; serialize native mutations. */
+  private operations: Promise<void> = Promise.resolve();
+
   initialize(): Promise<UnifiedPlayerState> {
     if (this.initPromise) return this.initPromise;
     this.initPromise = (async () => {
-      // 先注册再初始化，避免 initialize 的第一帧状态落在监听建立之前。
-      this.removeNativeListener = await addStateListener((state) => this.publish(state));
-      return this.publish(await initialize());
+      this.removeNativeListener = await addStateListener((state) =>
+        this.publish(normalizedMobile(state)),
+      );
+      return this.publish(normalizedMobile(await initialize()));
     })().catch((error) => {
       this.removeNativeListener?.();
       this.removeNativeListener = null;
@@ -108,9 +157,8 @@ class MobileNativePlayer implements UnifiedPlayer {
   private enqueue(operation: () => Promise<NativeAudioState>): Promise<UnifiedPlayerState> {
     const result = this.operations.then(async () => {
       await this.initialize();
-      return this.publish(await operation());
+      return this.publish(normalizedMobile(await operation()));
     });
-    // A failed command must not poison every later transport command.
     this.operations = result.then(() => undefined, () => undefined);
     return result;
   }
@@ -127,15 +175,25 @@ class MobileNativePlayer implements UnifiedPlayer {
     );
   }
 
+  prepare(): Promise<UnifiedPlayerState> {
+    return Promise.reject(new Error("移动连续播放模式不支持实时双 Deck prepare"));
+  }
+
+  handoff(): Promise<UnifiedPlayerState> {
+    return Promise.reject(new Error("移动连续播放模式不支持实时双 Deck handoff"));
+  }
+
   setQueue(sources: UnifiedPlayerSource[]): Promise<UnifiedPlayerState> {
     return this.enqueue(() =>
-      setNativeQueue(sources.map(({ src, track, artworkUrl }) => ({
-        src,
-        id: track.id,
-        title: track.title || track.filename,
-        artist: track.artist || undefined,
-        artworkUrl,
-      }))),
+      setNativeQueue(
+        sources.map(({ src, track, artworkUrl }) => ({
+          src,
+          id: track.id,
+          title: track.title || track.filename,
+          artist: track.artist || undefined,
+          artworkUrl,
+        })),
+      ),
     );
   }
 
@@ -156,23 +214,16 @@ class MobileNativePlayer implements UnifiedPlayer {
   }
 
   setVolume(volume: number): Promise<UnifiedPlayerState> {
-    const normalizedVolume = Math.min(1, Math.max(0, volume));
-    return this.enqueue(() => setVolume(normalizedVolume));
+    return this.enqueue(() => setVolume(Math.min(1, Math.max(0, volume))));
   }
 
-  state(): UnifiedPlayerState {
-    return this.snapshot;
+  setEq(): Promise<UnifiedPlayerState> {
+    return Promise.resolve(this.snapshot);
   }
 
   async refresh(): Promise<UnifiedPlayerState> {
     await this.initialize();
-    return this.publish(await getState());
-  }
-
-  subscribe(listener: (state: UnifiedPlayerState, previous: UnifiedPlayerState) => void): () => void {
-    this.listeners.add(listener);
-    listener(this.snapshot, this.snapshot);
-    return () => this.listeners.delete(listener);
+    return this.publish(normalizedMobile(await getState()));
   }
 
   async dispose(): Promise<void> {
@@ -180,15 +231,294 @@ class MobileNativePlayer implements UnifiedPlayer {
     this.removeNativeListener = null;
     this.initPromise = null;
     await dispose();
-    this.snapshot = INITIAL_STATE;
+    this.publish(INITIAL_STATE);
+  }
+}
+
+interface DesktopPlayerStateRaw {
+  status: UnifiedPlayerStatus;
+  trackId: number | null;
+  preparedTrackId: number | null;
+  currentTime: number;
+  duration: number;
+  isPlaying: boolean;
+  buffering: boolean;
+  transitioning: boolean;
+  rate: number;
+  error: string;
+}
+
+interface TauriEvent<T> {
+  payload: T;
+}
+
+function normalizedDesktop(raw: DesktopPlayerStateRaw): UnifiedPlayerState {
+  return {
+    trackId: raw.trackId,
+    preparedTrackId: raw.preparedTrackId,
+    status: raw.status,
+    currentTime: Number.isFinite(raw.currentTime) ? Math.max(0, raw.currentTime) : 0,
+    duration: Number.isFinite(raw.duration) ? Math.max(0, raw.duration) : 0,
+    playing: raw.isPlaying,
+    buffering: raw.buffering,
+    transitioning: raw.transitioning,
+    rate: Number.isFinite(raw.rate) && raw.rate > 0 ? raw.rate : 1,
+    error: raw.error ?? "",
+  };
+}
+
+class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
+  readonly kind = "desktop-native" as const;
+  readonly supportsRealtimeDj = true;
+  private initPromise: Promise<UnifiedPlayerState> | null = null;
+  private unlisten: UnlistenFn | null = null;
+
+  initialize(): Promise<UnifiedPlayerState> {
+    if (this.initPromise) return this.initPromise;
+    this.initPromise = (async () => {
+      this.unlisten = await listen<DesktopPlayerStateRaw>(
+        "desktop-player-state",
+        (event: TauriEvent<DesktopPlayerStateRaw>) => {
+          this.publish(normalizedDesktop(event.payload));
+        },
+      );
+      return this.call("desktop_player_initialize");
+    })().catch((error) => {
+      this.unlisten?.();
+      this.unlisten = null;
+      this.initPromise = null;
+      throw error;
+    });
+    return this.initPromise;
+  }
+
+  private async call(
+    command: string,
+    args?: Record<string, unknown>,
+  ): Promise<UnifiedPlayerState> {
+    const raw = await invoke<DesktopPlayerStateRaw>(command, args);
+    return this.publish(normalizedDesktop(raw));
+  }
+
+  async load(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
+    await this.initialize();
+    return this.call("desktop_player_load", {
+      request: {
+        trackId: source.track.id,
+        path: source.track.path,
+        position: source.position ?? 0,
+        rate: source.rate ?? 1,
+        autoplay: source.autoplay ?? false,
+      },
+    });
+  }
+
+  async prepare(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
+    await this.initialize();
+    return this.call("desktop_player_prepare", {
+      request: {
+        trackId: source.track.id,
+        path: source.track.path,
+        position: source.position ?? 0,
+        rate: source.rate ?? 1,
+      },
+    });
+  }
+
+  async handoff(
+    position: number,
+    seconds: number,
+    plan?: UnifiedTransitionPlan,
+  ): Promise<UnifiedPlayerState> {
+    await this.initialize();
+    return this.call("desktop_player_handoff", {
+      position: Math.max(0, position),
+      seconds: Math.max(0, seconds),
+      plan: plan ?? {
+        eq: false,
+        filter: false,
+        vocalCut: false,
+        echo: false,
+        alarm: false,
+        hydrant: false,
+        beatSeconds: 0.5,
+      },
+    });
+  }
+
+  setQueue(): Promise<UnifiedPlayerState> {
+    // Desktop autoplay selection remains in the shared JS policy; Rust owns prepared PCM only.
+    return Promise.resolve(this.snapshot);
+  }
+
+  async play(): Promise<UnifiedPlayerState> {
+    await this.initialize();
+    return this.call("desktop_player_play");
+  }
+
+  async pause(): Promise<UnifiedPlayerState> {
+    await this.initialize();
+    return this.call("desktop_player_pause");
+  }
+
+  async seek(seconds: number): Promise<UnifiedPlayerState> {
+    await this.initialize();
+    return this.call("desktop_player_seek", { position: Math.max(0, seconds) });
+  }
+
+  setRate(rate: number): Promise<UnifiedPlayerState> {
+    if (Math.abs(rate - this.snapshot.rate) < 0.0001) return Promise.resolve(this.snapshot);
+    return Promise.reject(
+      new Error("桌面变速需在 prepare 阶段离线生成不变调 PCM，不能在回调中直接重采样"),
+    );
+  }
+
+  async setVolume(volume: number): Promise<UnifiedPlayerState> {
+    await this.initialize();
+    return this.call("desktop_player_set_volume", {
+      volume: Math.min(1, Math.max(0, volume)),
+    });
+  }
+
+  async setEq(lowDb: number, highDb: number): Promise<UnifiedPlayerState> {
+    await this.initialize();
+    return this.call("desktop_player_set_eq", { lowDb, highDb });
+  }
+
+  async refresh(): Promise<UnifiedPlayerState> {
+    await this.initialize();
+    return this.call("desktop_player_state");
+  }
+
+  async dispose(): Promise<void> {
+    if (this.initPromise) await this.call("desktop_player_dispose").catch(() => undefined);
+    this.unlisten?.();
+    this.unlisten = null;
+    this.initPromise = null;
+    this.publish(INITIAL_STATE);
+  }
+}
+
+class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
+  readonly kind = "browser-preview" as const;
+  readonly supportsRealtimeDj = true;
+
+  initialize(): Promise<UnifiedPlayerState> {
+    return Promise.resolve(this.snapshot);
+  }
+
+  async load(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
+    djEngine.releaseDecodedPlayback();
+    djEngine.cancel();
+    const audio = djEngine.frontElement();
+    audio.src = source.src;
+    audio.load();
+    if ((source.position ?? 0) > 0) {
+      const seek = () => {
+        audio.currentTime = Math.max(0, source.position ?? 0);
+      };
+      if (audio.readyState >= HTMLMediaElement.HAVE_METADATA) seek();
+      else audio.addEventListener("loadedmetadata", seek, { once: true });
+    }
+    djEngine.prepareSeek(source.src);
+    djEngine.prepareDecodedSeek(source.track, source.src);
+    this.publish({
+      ...this.snapshot,
+      trackId: source.track.id,
+      status: source.autoplay ? "playing" : "paused",
+      currentTime: source.position ?? 0,
+      duration: source.track.duration ?? 0,
+      playing: source.autoplay ?? false,
+      rate: source.rate ?? 1,
+      error: "",
+    });
+    if (source.autoplay) await djEngine.hardPlay(audio);
+    return this.refresh();
+  }
+
+  prepare(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
+    djEngine.prepareSeek(source.src);
+    djEngine.prepareDecodedSeek(source.track, source.src);
+    return Promise.resolve(this.snapshot);
+  }
+
+  handoff(): Promise<UnifiedPlayerState> {
+    return Promise.reject(new Error("浏览器 DJ handoff 由 Web Audio transition adapter 管理"));
+  }
+
+  setQueue(): Promise<UnifiedPlayerState> {
+    return Promise.resolve(this.snapshot);
+  }
+
+  async play(): Promise<UnifiedPlayerState> {
+    await djEngine.hardPlay(djEngine.frontElement());
+    return this.publish({ ...this.snapshot, status: "playing", playing: true });
+  }
+
+  pause(): Promise<UnifiedPlayerState> {
+    djEngine.cancel();
+    djEngine.hardPause(djEngine.frontElement());
+    return Promise.resolve(this.publish({ ...this.snapshot, status: "paused", playing: false }));
+  }
+
+  async seek(seconds: number): Promise<UnifiedPlayerState> {
+    const source = djEngine.frontElement().currentSrc || djEngine.frontElement().src;
+    await djEngine.seamlessSeek(source, Math.max(0, seconds), this.snapshot.playing);
+    return this.publish({ ...this.snapshot, currentTime: Math.max(0, seconds) });
+  }
+
+  setRate(rate: number): Promise<UnifiedPlayerState> {
+    const value = Number.isFinite(rate) && rate > 0 ? rate : 1;
+    const audio = djEngine.frontElement();
+    audio.playbackRate = value;
+    return Promise.resolve(this.publish({ ...this.snapshot, rate: value }));
+  }
+
+  setVolume(volume: number): Promise<UnifiedPlayerState> {
+    djEngine.setVolume(Math.min(1, Math.max(0, volume)));
+    return Promise.resolve(this.snapshot);
+  }
+
+  setEq(): Promise<UnifiedPlayerState> {
+    return Promise.resolve(this.snapshot);
+  }
+
+  refresh(): Promise<UnifiedPlayerState> {
+    const audio = djEngine.frontElement();
+    return Promise.resolve(
+      this.publish({
+        ...this.snapshot,
+        currentTime: djEngine.currentTime(audio),
+        duration:
+          Number.isFinite(audio.duration) && audio.duration > 0
+            ? audio.duration
+            : this.snapshot.duration,
+        playing: !audio.paused,
+        status: audio.ended ? "ended" : audio.paused ? "paused" : "playing",
+      }),
+    );
+  }
+
+  dispose(): Promise<void> {
+    djEngine.cancel();
+    djEngine.hardPause(djEngine.frontElement());
+    this.publish(INITIAL_STATE);
+    return Promise.resolve();
   }
 }
 
 let mobilePlayer: MobileNativePlayer | null = null;
+let desktopPlayer: DesktopNativePlayer | null = null;
+let browserPlayer: BrowserPreviewPlayer | null = null;
 
 export function usesNativeMobilePlayer(): boolean {
   const platform = window.kdj?.platform;
   return platform === "android" || platform === "ios";
+}
+
+export function usesNativeDesktopPlayer(): boolean {
+  const platform = window.kdj?.platform;
+  return Boolean(window.__TAURI_INTERNALS__) && ["darwin", "win32", "linux"].includes(platform ?? "");
 }
 
 export function nativeMobilePlayer(): UnifiedPlayer {
@@ -197,4 +527,25 @@ export function nativeMobilePlayer(): UnifiedPlayer {
   }
   mobilePlayer ??= new MobileNativePlayer();
   return mobilePlayer;
+}
+
+export function nativeDesktopPlayer(): UnifiedPlayer {
+  if (!usesNativeDesktopPlayer()) {
+    throw new Error("桌面原生播放器只能在 Tauri 桌面壳中使用");
+  }
+  desktopPlayer ??= new DesktopNativePlayer();
+  return desktopPlayer;
+}
+
+export function runtimePlayer(): UnifiedPlayer {
+  if (usesNativeMobilePlayer()) return nativeMobilePlayer();
+  if (usesNativeDesktopPlayer()) return nativeDesktopPlayer();
+  browserPlayer ??= new BrowserPreviewPlayer();
+  return browserPlayer;
+}
+
+/** Kept for callers outside PlayerBar during the staged migration. */
+export function runtimeNativePlayer(): UnifiedPlayer | null {
+  const player = runtimePlayer();
+  return player.kind === "browser-preview" ? null : player;
 }

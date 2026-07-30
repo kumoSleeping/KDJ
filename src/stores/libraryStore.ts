@@ -216,6 +216,8 @@ export interface LibraryStore {
   queueView: boolean;
 
   refresh(): Promise<void>;
+  /** 连续翻页直到列表里出现该 id（或已到库底）。 */
+  ensureTrackLoaded(id: number): Promise<void>;
   loadMore(): Promise<void>;
   refreshStats(): Promise<void>;
   refreshFolders(): Promise<void>;
@@ -327,17 +329,55 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
       });
       return;
     }
+    // 删曲 / 分析回填都会触发 library.updated → refresh。
+    // 若永远只拉第一页，用户滚到第 500 首时列表高度突然塌回 200 行，
+    // 视口就会「弹回顶部」——保留当前已加载深度，滚动位置才站得住。
+    const keepCount = Math.max(PAGE_SIZE, get().tracks.length);
     set({ loading: true });
     try {
-      const page = await api.tracks(toQuery(get().filter, 0));
+      const items: Track[] = [];
+      let total = 0;
+      while (items.length < keepCount) {
+        const page = await api.tracks(toQuery(get().filter, items.length));
+        if (seq !== requestSeq) return;
+        total = page.total;
+        if (page.items.length === 0) break;
+        const seen = new Set(items.map((item) => item.id));
+        items.push(...page.items.filter((item) => !seen.has(item.id)));
+        if (items.length >= total || page.items.length < PAGE_SIZE) break;
+      }
       if (seq !== requestSeq) return;
       // 故意不动 selectedId：分析进度会不停触发 refresh，
       // 一旦顺手清选中，用户看详情时会被反复踢出去。选中项落在页外时
       // selectSelectedTrack 自然返回 null，交给视图处理。
-      set({ tracks: page.items, total: page.total, loading: false, error: "" });
+      set({ tracks: items, total, loading: false, error: "" });
     } catch (error) {
       if (seq !== requestSeq) return;
       set({ loading: false, error: errorText(error) });
+    }
+  },
+
+  /**
+   * 把指定曲目滚进已加载窗口：定位「正在播」时，refresh 塌页或尚未翻到那一页
+   * 都会让表里找不到行。连续 loadMore，直到看见它或到库底。
+   */
+  async ensureTrackLoaded(id: number) {
+    if (get().queueView) return;
+    // refresh 进行中先等它结束，否则 loadMore 会被 loading 守卫挡住。
+    for (let i = 0; i < 80 && get().loading; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    for (;;) {
+      const { tracks, total, loadingMore } = get();
+      if (tracks.some((track) => track.id === id)) return;
+      if (tracks.length >= total) return;
+      if (loadingMore) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        continue;
+      }
+      const before = tracks.length;
+      await get().loadMore();
+      if (get().tracks.length <= before) return;
     }
   },
 

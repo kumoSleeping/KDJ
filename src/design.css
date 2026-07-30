@@ -1743,6 +1743,25 @@ textarea {
   white-space: nowrap;
   user-select: none;
 }
+/* 列头右缘把手：拖它调列宽，不影响点排序 / 拖换列序。 */
+.kd-table thead th .kd-col-resize {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 3;
+}
+.kd-table thead th .kd-col-resize:hover,
+.kd-table thead th .kd-col-resize[data-active="true"] {
+  background: color-mix(in srgb, var(--kd-theme) 42%, transparent);
+}
+body[data-kd-col-resizing="true"],
+body[data-kd-col-resizing="true"] * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
 .kd-table thead th[data-sortable="true"] {
   cursor: pointer;
 }
@@ -3739,6 +3758,13 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   display: none;
 }
 /* 曲库内搜：平常只是右端小按键；点开后整条工作条换成搜索输入。 */
+.kd-activity-trailing-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  margin-left: auto;
+  margin-right: -0.35rem;
+}
 .kd-activity-search-toggle {
   appearance: none;
   flex: none;
@@ -3752,12 +3778,18 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   background: transparent;
   color: var(--kd-muted);
   cursor: pointer;
-  margin-left: auto;
-  margin-right: -0.35rem;
 }
-.kd-activity-search-toggle:hover {
+.kd-activity-trailing-tools .kd-activity-search-toggle {
+  margin-left: 0;
+  margin-right: 0;
+}
+.kd-activity-search-toggle:hover:not(:disabled) {
   color: var(--kd-text);
   background: var(--kd-hover);
+}
+.kd-activity-search-toggle:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 /* 展开态：整条就是搜索，不再另套加深色块或描边。 */
 .kd-activity-search {
@@ -5636,7 +5668,7 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 .kd-middle-search > .kd-scroll {
   overflow-x: auto;
 }
-/* 标题 14rem；艺人和专辑恢复到能正常读出内容的宽度。 */
+/* 默认列宽合计的兜底；用户拖过列宽后由 TrackTable 内联 minWidth 覆盖。 */
 .kd-table[data-kind="library"] {
   min-width: 53.7rem;
 }

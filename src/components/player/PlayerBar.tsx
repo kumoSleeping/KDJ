@@ -34,6 +34,7 @@ import {
 } from "../../lib/autoplay";
 import {
   DJ_TRANSITIONS,
+  bpmSyncRate,
   djEngine,
   findOutroStart,
   mixSeconds,
@@ -67,12 +68,13 @@ import { useQueueStore } from "../../stores/queueStore";
 import { InlineNotice } from "../common";
 import { POSITION_EVENT, type PositionDetail } from "../library/TrackDetail";
 import { PLAY_EVENT, parsePlayRequest, playTrack } from "../../lib/playTrack";
+import { setPlayingTrack } from "../../lib/playingTrack";
 import { usePlayerShortcuts } from "../../lib/usePlayerShortcuts";
 import { prefetchWaveform } from "../../lib/waveformCache";
 import { DETAIL_EVENT } from "../library/TrackTable";
 import { pointPatch, SEEK_EVENT, Waveform, type SeekDetail } from "../library/Waveform";
 import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
-import { nativeMobilePlayer, usesNativeMobilePlayer } from "../../lib/unifiedPlayer";
+import { runtimePlayer, usesNativeMobilePlayer } from "../../lib/unifiedPlayer";
 
 /** 广播播放位置的节流间隔：节拍网格的播放头不需要每帧更新。 */
 const POSITION_BROADCAST_MS = 200;
@@ -291,7 +293,8 @@ function PlayerDeck({
 
 export function PlayerBar() {
   const mobileNative = usesNativeMobilePlayer();
-  const nativePlayer = mobileNative ? nativeMobilePlayer() : null;
+  const playerRuntime = runtimePlayer();
+  const desktopNative = playerRuntime.kind === "desktop-native";
   const selected = useLibraryStore(selectSelectedTrack);
   const selectTrack = useLibraryStore((state) => state.selectTrack);
   const updateTrack = useLibraryStore((state) => state.updateTrack);
@@ -307,8 +310,8 @@ export function PlayerBar() {
   const coplay = useCrossfade((state) => state.coplay);
   const fadeX = useCrossfade((state) => state.x);
   const djConfigured = useDjConfig((state) => state.enabled);
-  // 阶段 1 的移动 owner 是系统连续播放服务；实时双 Deck 尚未达到等价前，
-  // 明确标成不可用，不能亮着 DJ 灯却偷偷退化成硬切。
+  // 手机仍由系统连续播放服务持有输出；实时双 Deck 只在共享 Rust 桌面引擎和
+  // 浏览器预览 adapter 中开放，不能亮着 DJ 灯却在移动端偷偷退化成硬切。
   const djEnabled = djConfigured && !mobileNative;
   const djTransitions = useDjConfig((state) => state.transitions);
   const djBars = useDjConfig((state) => state.bars);
@@ -340,6 +343,17 @@ export function PlayerBar() {
   const djViaRef = useRef<number | null>(null);
   /** 正在挑歌/起手。曲末的自动触发一秒能来四次，不挡会叠出一摞过渡。 */
   const djBusyRef = useRef(false);
+  /** Rust Deck 的解码/不变调准备是异步的；准备完成前不能再开第二场。 */
+  const nativeDjBusyRef = useRef(false);
+  const nativeDjGenerationRef = useRef(0);
+  const nativeDjNextRef = useRef<(manual: boolean) => Promise<boolean>>(async () => false);
+  const nativePreparedRef = useRef<{
+    fromId: number;
+    trackId: number;
+    rate: number;
+    cue: number;
+  } | null>(null);
+  const nativePrepareGenerationRef = useRef(0);
   /** 这首歌自动接歌挑不到候选：记下来别每次 timeupdate 都去问一遍后端。 */
   const djGaveUpRef = useRef<number | null>(null);
   /** 右侧空闲唱盘已经预告的候选；真正续播时交回 pickNext，随机模式也不会变卦。 */
@@ -356,6 +370,12 @@ export function PlayerBar() {
   const autoInOutCueRef = useRef<number | null>(null);
 
   const [track, setTrack] = useState<Track | null>(null);
+  // 在线试听仍是 browser-preview：它是远程压缩流，不进入要求随机 O(1) seek 的
+  // 本地 PCM Deck。正式曲库曲目在桌面全部交给同一个 Rust owner。
+  const nativePlayer =
+    playerRuntime.kind === "browser-preview" || (desktopNative && isStreamTrack(track))
+      ? null
+      : playerRuntime;
   const [playing, setPlaying] = useState(false);
   const [playerVolume, setPlayerVolume] = useState(() => {
     const raw = localStorage.getItem("kd-player-volume");
@@ -405,6 +425,8 @@ export function PlayerBar() {
   const selectedRef = useRef(selected);
   useEffect(() => {
     trackRef.current = track;
+    // 在线试听流不能定位进曲库表；只登记本地曲目。
+    setPlayingTrack(track && !isStreamTrack(track) ? track : null);
   }, [track]);
   useEffect(() => {
     playingRef.current = playing;
@@ -453,6 +475,8 @@ export function PlayerBar() {
   }, []);
   /** 原生播放器换 source 会短暂回 idle；这不是用户/系统按了暂停。 */
   const nativeLoadInFlightRef = useRef(false);
+  /** 快速连点换歌时，迟到的旧 decode 结果不能覆盖新曲目的 UI/transport。 */
+  const nativeLoadGenerationRef = useRef(0);
   /** 后台队列已自行切歌时，React 只接管显示，不能再次 load 把进度打回开头。 */
   const nativeAdoptedTrackIdRef = useRef<number | null>(null);
 
@@ -512,15 +536,83 @@ export function PlayerBar() {
    */
   const djSwitchTo = useCallback(
     (next: Track, from: Track): boolean => {
-      // 移动端的播放 owner 是系统媒体服务，不让 Web Audio 再开第二条输出链。
-      // DJ 保留在桌面适配器，等 Rust 双 Deck 达到功能等价后再切移动端。
+      // 移动端的播放 owner 是系统媒体服务，不让实时 DJ 再开第二条输出链。
       if (mobileNative) return false;
-      // 在线试听没有 BPM/波形，接歌过渡意义不大，硬切更稳
+      // 在线试听没有稳定本地路径/BPM/波形，接歌过渡意义不大，硬切更稳。
       if (isStreamTrack(next) || isStreamTrack(from)) return false;
       const { enabled, transitions, effects, bars, vocalCut, applyInOutPoints } =
         useDjConfig.getState();
       if (!enabled) return false;
       const outgoingIndex = visualActiveIndexRef.current;
+
+      if (desktopNative && nativePlayer?.supportsRealtimeDj) {
+        if (nativeDjBusyRef.current) return true;
+        nativeDjBusyRef.current = true;
+        const generation = ++nativeDjGenerationRef.current;
+        const currentRate = nativePlayer.state().rate || 1;
+        const effectiveFromBpm = from.bpm ? from.bpm * currentRate : null;
+        const rate = bpmSyncRate(effectiveFromBpm, next.bpm);
+        const tempo = effectiveFromBpm ?? next.bpm ?? 120;
+        const seconds = mixSeconds(tempo, bars);
+        const chosenTransitions = transitions.filter(() => Math.random() >= 0.5);
+        if (!chosenTransitions.length && transitions.length) {
+          chosenTransitions.push(transitions[Math.floor(Math.random() * transitions.length)]);
+        }
+        const cue =
+          applyInOutPoints && next.cue_ms !== null
+            ? next.cue_ms / 1000
+            : (next.first_beat ?? 0);
+        const cached = nativePreparedRef.current;
+        const preparation =
+          cached &&
+          cached.fromId === from.id &&
+          cached.trackId === next.id &&
+          Math.abs(cached.rate - rate) < 0.0001 &&
+          Math.abs(cached.cue - cue) < 0.02
+            ? Promise.resolve(nativePlayer.state())
+            : nativePlayer.prepare({
+                src: mediaUrlForTrack(next),
+                track: next,
+                position: cue,
+                rate,
+              });
+        void preparation
+          .then(() => {
+            if (generation !== nativeDjGenerationRef.current) return;
+            const incomingIndex: 0 | 1 = outgoingIndex === 0 ? 1 : 0;
+            const visual = { outgoingIndex, incomingIndex, from, next };
+            transitionVisualRef.current = visual;
+            setTransitionVisual(visual);
+            showTrackDetail();
+            djViaRef.current = next.id;
+            setTrack(next);
+            selectTrack(next);
+            setPosition(cue);
+            setDuration(next.duration ?? 0);
+            commitPlaying(true);
+            setNotice("");
+            markPlayed(next.id);
+            return nativePlayer.handoff(cue, seconds, {
+              eq: chosenTransitions.includes("eq"),
+              filter: chosenTransitions.includes("filter"),
+              vocalCut,
+              echo: effects.includes("echo"),
+              alarm: effects.includes("alarm"),
+              hydrant: effects.includes("hydrant"),
+              beatSeconds: 60 / Math.max(1, tempo),
+            });
+          })
+          .catch((error: unknown) => {
+            if (generation !== nativeDjGenerationRef.current) return;
+            setNotice(`原生接歌失败：${error instanceof Error ? error.message : String(error)}`);
+            // 准备失败时保持旧歌继续播放，不把 UI/声音硬切到半成品。
+          })
+          .finally(() => {
+            if (generation === nativeDjGenerationRef.current) nativeDjBusyRef.current = false;
+          });
+        return true;
+      }
+
       if (
         !djEngine.begin(next, {
           transitions,
@@ -548,7 +640,7 @@ export function PlayerBar() {
       markPlayed(next.id);
       return true;
     },
-    [mobileNative, selectTrack, showTrackDetail, commitPlaying],
+    [mobileNative, desktopNative, nativePlayer, selectTrack, showTrackDetail, commitPlaying],
   );
 
   // 曲库表格双击 / 在线试听 → 这里换曲并播放。用全局事件而不是共享 store，
@@ -656,47 +748,60 @@ export function PlayerBar() {
     if (track) analyzePlaying(track);
   }, [track?.id, track?.analyzed_at]);
 
-  // 换曲：移动端把 source 和锁屏元数据交给系统播放器；桌面仍由 DJ adapter
-  // 持有双 deck。两条实现只在这一处选择，其他播放入口不感知平台。
+  // 换曲：移动端交给系统媒体服务，正式桌面交给 Rust/CPAL，纯浏览器调试才走
+  // Web Audio preview adapter。选择集中在这里，其他播放入口不感知声卡后端。
   useEffect(() => {
     if (!track) return;
+    // DJ prepare/handoff 已把曲目装进第二台 Rust/Web Audio Deck；不能让换曲 effect
+    // 再执行一次普通 load，把正在进行的 sample-clock 过渡重置掉。
+    if (djViaRef.current === track.id) {
+      djViaRef.current = null;
+      setNotice("");
+      return;
+    }
     if (nativePlayer) {
+      if (desktopNative) {
+        djEngine.cancel();
+        djEngine.hardPause(djEngine.frontElement());
+      }
       if (nativeAdoptedTrackIdRef.current === track.id) {
         nativeAdoptedTrackIdRef.current = null;
         setNotice("");
         return;
       }
       const source = mediaUrlForTrack(track);
+      const loadGeneration = ++nativeLoadGenerationRef.current;
       nativeLoadInFlightRef.current = true;
       void nativePlayer
         .load({
           src: source,
           track,
+          autoplay: playingRef.current,
           artworkUrl: isStreamTrack(track)
             ? streamCoverUrl(track)
             : api.coverUrl(track.id, track.modified_at),
         })
         .then((state) => {
+          if (loadGeneration !== nativeLoadGenerationRef.current) return;
           setPosition(state.currentTime);
           setDuration(state.duration || track.duration || 0);
           setNotice("");
         })
         .catch((error: unknown) => {
+          if (loadGeneration !== nativeLoadGenerationRef.current) return;
           commitPlaying(false);
           setNotice(`播放失败：${error instanceof Error ? error.message : String(error)}`);
         })
         .finally(() => {
-          nativeLoadInFlightRef.current = false;
+          if (loadGeneration === nativeLoadGenerationRef.current) {
+            nativeLoadInFlightRef.current = false;
+          }
         });
       return;
     }
-    // DJ 接歌换上来的曲：引擎已经装好 src、正按曲线进场，这里再动手
-    // 就是把进行到一半的过渡掐断重来
-    if (djViaRef.current === track.id) {
-      djViaRef.current = null;
-      setNotice("");
-      return;
-    }
+    nativeLoadGenerationRef.current += 1;
+    nativeLoadInFlightRef.current = false;
+    if (desktopNative) void playerRuntime.pause();
     // 硬切歌（双击列表、回上一首）顺手掐掉可能还在进行的过渡：
     // 不掐的话暗处退场那台 deck 还会再响好几秒
     djEngine.releaseDecodedPlayback();
@@ -735,7 +840,7 @@ export function PlayerBar() {
     // playing 不进依赖：它变化时由下面的 effect 处理，这里只管换曲。
     // frontEl 也不进：它只在 DJ 接歌互换时变，而那条路在上面已经 return 了
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [track?.id, nativePlayer, commitPlaying]);
+  }, [track?.id, nativePlayer, desktopNative, playerRuntime, commitPlaying]);
 
   // 把用户明确排好的下一首预装进系统播放器。更新队尾只修改 Media3 timeline
   // 的非当前项，不重建正在发声的 MediaSource，因此不会因排队操作产生卡顿。
@@ -981,8 +1086,24 @@ export function PlayerBar() {
       setPosition(state.currentTime);
       if (state.duration > 0) setDuration(state.duration);
 
+      if (desktopNative) {
+        if (state.transitioning) {
+          const incoming = transitionVisualRef.current?.incomingIndex ?? visualActiveIndexRef.current;
+          setDjTransition({ phase: "mixing", frontIndex: incoming });
+        } else if (previous.transitioning) {
+          const visual = transitionVisualRef.current;
+          if (visual) {
+            visualActiveIndexRef.current = visual.incomingIndex;
+            setVisualActiveIndex(visual.incomingIndex);
+          }
+          transitionVisualRef.current = null;
+          setTransitionVisual(null);
+          setDjTransition({ phase: "idle", frontIndex: visual?.incomingIndex ?? visualActiveIndexRef.current });
+        }
+      }
+
       let current = trackRef.current;
-      if (state.trackId !== null && state.trackId !== current?.id) {
+      if (mobileNative && state.trackId !== null && state.trackId !== current?.id) {
         const adopted = useQueueStore.getState().byId[state.trackId];
         if (adopted) {
           nativeAdoptedTrackIdRef.current = adopted.id;
@@ -1003,6 +1124,24 @@ export function PlayerBar() {
           trackId: current.id,
           position: state.currentTime,
         });
+        if (
+          desktopNative &&
+          state.playing &&
+          djEnabled &&
+          !state.transitioning &&
+          !nativeDjBusyRef.current &&
+          !djBusyRef.current &&
+          djGaveUpRef.current !== current.id
+        ) {
+          const total = state.duration || current.duration || 0;
+          const remain = total - state.currentTime;
+          const outro = djOutroRef.current;
+          const due =
+            outro.trackId === current.id && outro.at !== null
+              ? state.currentTime >= outro.at
+              : remain > 0 && remain <= mixSeconds(current.bpm, djBars) + 1.5;
+          if (total >= 30 && due) void nativeDjNextRef.current(false);
+        }
       }
 
       if (state.playing && !playingRef.current) commitPlaying(true);
@@ -1031,7 +1170,16 @@ export function PlayerBar() {
       unsubscribe();
       document.removeEventListener("visibilitychange", syncAfterResume);
     };
-  }, [nativePlayer, broadcast, commitPlaying, selectTrack]);
+  }, [
+    nativePlayer,
+    mobileNative,
+    desktopNative,
+    djEnabled,
+    djBars,
+    broadcast,
+    commitPlaying,
+    selectTrack,
+  ]);
 
   /**
    * 「上一首」= 沿播放历史回退，不是"曲库里的前一行"。
@@ -1093,6 +1241,7 @@ export function PlayerBar() {
     },
     [track, playing, djEnabled, djSwitchTo],
   );
+  nativeDjNextRef.current = djNext;
 
   /** 「下一首」和放完自动续播走同一条路，只是标成 manual：单曲循环下手动按=想换歌。 */
   const goNext = async () => {
@@ -1468,6 +1617,55 @@ export function PlayerBar() {
     queueIds,
     queueById,
     pipDriving,
+  ]);
+
+  // Rust 的下一台 Deck 在预测结果出来后就离线解码并完成不变调 WSOLA。真正按
+  // “下一首”时只需向 callback 发一个固定大小 handoff 命令，不把解码延迟放进交互。
+  useEffect(() => {
+    if (!desktopNative || !nativePlayer?.supportsRealtimeDj || !djEnabled || !track || !predicted) {
+      nativePreparedRef.current = null;
+      return;
+    }
+    if (isStreamTrack(track) || isStreamTrack(predicted) || predicted.id === track.id) return;
+    const currentRate = nativePlayer.state().rate || 1;
+    const effectiveFromBpm = track.bpm ? track.bpm * currentRate : null;
+    const rate = bpmSyncRate(effectiveFromBpm, predicted.bpm);
+    const cue =
+      applyInOutPoints && predicted.cue_ms !== null
+        ? predicted.cue_ms / 1000
+        : (predicted.first_beat ?? 0);
+    const generation = ++nativePrepareGenerationRef.current;
+    nativePreparedRef.current = null;
+    void nativePlayer
+      .prepare({
+        src: mediaUrlForTrack(predicted),
+        track: predicted,
+        position: cue,
+        rate,
+      })
+      .then(() => {
+        if (generation !== nativePrepareGenerationRef.current) return;
+        nativePreparedRef.current = { fromId: track.id, trackId: predicted.id, rate, cue };
+      })
+      .catch(() => {
+        if (generation === nativePrepareGenerationRef.current) nativePreparedRef.current = null;
+      });
+    return () => {
+      if (generation === nativePrepareGenerationRef.current) {
+        nativePrepareGenerationRef.current += 1;
+      }
+    };
+  }, [
+    desktopNative,
+    nativePlayer,
+    djEnabled,
+    track?.id,
+    track?.bpm,
+    predicted?.id,
+    predicted?.bpm,
+    predicted?.cue_ms,
+    predicted?.first_beat,
+    applyInOutPoints,
   ]);
 
   const transitionShowing = djTransition.phase !== "idle" && transitionVisual !== null;

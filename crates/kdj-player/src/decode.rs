@@ -18,6 +18,19 @@ pub struct DecodedTrack {
 }
 
 impl DecodedTrack {
+    pub fn from_interleaved_stereo(samples: Vec<f32>, sample_rate: u32) -> Result<Self> {
+        if sample_rate == 0 {
+            bail!("decoded audio has no sample rate");
+        }
+        if samples.is_empty() || samples.len() % 2 != 0 {
+            bail!("stereo PCM must contain complete non-empty frames");
+        }
+        Ok(Self {
+            samples: samples.into_iter().map(finite).collect(),
+            sample_rate,
+        })
+    }
+
     pub const fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
@@ -28,6 +41,12 @@ impl DecodedTrack {
 
     pub fn frames(&self) -> usize {
         self.samples.len() / self.channels()
+    }
+
+    pub fn byte_len(&self) -> usize {
+        self.samples
+            .len()
+            .saturating_mul(std::mem::size_of::<f32>())
     }
 
     pub fn duration_seconds(&self) -> f64 {
@@ -50,6 +69,26 @@ impl DecodedTrack {
 
 /// Decodes a local file to finite interleaved stereo PCM on a worker thread.
 pub fn decode_file(path: &Path) -> Result<DecodedTrack> {
+    decode_file_with_limit(path, usize::MAX)
+}
+
+/// Bounded variant for long-running application runtimes. The limit is checked while packets are
+/// appended so an unexpectedly long recording cannot exhaust memory before the caller sees it.
+pub fn decode_file_with_limit(path: &Path, max_pcm_bytes: usize) -> Result<DecodedTrack> {
+    decode_file_with_limit_and_cancel(path, max_pcm_bytes, || false)
+}
+
+pub fn decode_file_with_limit_and_cancel<F>(
+    path: &Path,
+    max_pcm_bytes: usize,
+    cancelled: F,
+) -> Result<DecodedTrack>
+where
+    F: Fn() -> bool,
+{
+    if cancelled() {
+        bail!("audio preparation cancelled");
+    }
     let file = File::open(path).with_context(|| format!("open audio: {}", path.display()))?;
     let source = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -71,7 +110,11 @@ pub fn decode_file(path: &Path) -> Result<DecodedTrack> {
     let track = format
         .tracks()
         .iter()
-        .find(|candidate| candidate.codec_params.codec != CODEC_TYPE_NULL)
+        .find(|candidate| {
+            let params = &candidate.codec_params;
+            params.codec != CODEC_TYPE_NULL
+                && (params.channels.is_some() || params.sample_rate.is_some())
+        })
         .context("audio stream not found")?;
     let track_id = track.id;
     let params = track.codec_params.clone();
@@ -84,6 +127,9 @@ pub fn decode_file(path: &Path) -> Result<DecodedTrack> {
     let mut conversion: Option<(SampleBuffer<f32>, u64, usize, u32)> = None;
 
     loop {
+        if cancelled() {
+            bail!("audio preparation cancelled");
+        }
         let packet = match format.next_packet() {
             Ok(packet) => packet,
             Err(Error::IoError(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
@@ -132,7 +178,15 @@ pub fn decode_file(path: &Path) -> Result<DecodedTrack> {
         let buffer = &mut conversion.as_mut().expect("conversion buffer").0;
         buffer.copy_interleaved_ref(decoded);
         let samples = buffer.samples();
-        stereo.reserve(samples.len() / channels * 2);
+        let appended_samples = samples.len() / channels * 2;
+        let next_samples = stereo.len().saturating_add(appended_samples);
+        if next_samples.saturating_mul(std::mem::size_of::<f32>()) > max_pcm_bytes {
+            bail!(
+                "decoded PCM exceeds {} MiB limit",
+                max_pcm_bytes / (1024 * 1024)
+            );
+        }
+        stereo.reserve(appended_samples);
         for frame in samples.chunks_exact(channels) {
             let (left, right) = if channels == 1 {
                 (frame[0], frame[0])
@@ -150,10 +204,7 @@ pub fn decode_file(path: &Path) -> Result<DecodedTrack> {
     if sample_rate == 0 {
         bail!("decoded audio has no sample rate");
     }
-    Ok(DecodedTrack {
-        samples: stereo.into_boxed_slice(),
-        sample_rate,
-    })
+    DecodedTrack::from_interleaved_stereo(stereo, sample_rate)
 }
 
 fn finite(sample: f32) -> f32 {
@@ -197,5 +248,16 @@ mod tests {
         assert_eq!(decoded.frames(), 2);
         assert_eq!(decoded.frame_slice(1).len(), 2);
         assert!(decoded.frame_slice(99).is_empty());
+    }
+
+    #[test]
+    fn cancellation_stops_before_decoder_work() {
+        let path =
+            std::env::temp_dir().join(format!("kdj-player-cancel-{}.wav", std::process::id()));
+        std::fs::write(&path, b"not read after cancellation").unwrap();
+        let result = decode_file_with_limit_and_cancel(&path, 1024, || true);
+        let _ = std::fs::remove_file(path);
+        assert!(result.is_err());
+        assert!(format!("{:#}", result.unwrap_err()).contains("cancelled"));
     }
 }

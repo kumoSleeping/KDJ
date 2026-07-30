@@ -210,7 +210,7 @@ export function mixSeconds(bpm: number | null | undefined, bars: number): number
  * 不试倍率的话会被硬拉一倍速。取对数距离最近的那档，仍超出容差就放弃（返回 1）：
  * 强行同步一首差太远的歌，比不同步更破坏气氛。
  */
-function syncRate(fromBpm: number | null, toBpm: number | null): number {
+export function bpmSyncRate(fromBpm: number | null, toBpm: number | null): number {
   if (!fromBpm || !toBpm || fromBpm <= 0 || toBpm <= 0) return 1;
   let best = 1;
   let bestDistance = Infinity;
@@ -1870,7 +1870,7 @@ export const djEngine = {
     const effectiveFromBpm = options.from.bpm
       ? options.from.bpm * Math.max(0.25, out.el.playbackRate || 1)
       : null;
-    const rate = syncRate(effectiveFromBpm, next.bpm);
+    const rate = bpmSyncRate(effectiveFromBpm, next.bpm);
     const seconds = mixSeconds(effectiveFromBpm ?? next.bpm, options.bars);
     const tempo = effectiveFromBpm ?? next.bpm ?? FALLBACK_BPM;
     const beatSeconds = 60 / Math.max(1, tempo);

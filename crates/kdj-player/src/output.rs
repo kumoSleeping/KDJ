@@ -1,10 +1,16 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, SampleFormat, Stream, StreamConfig, SupportedBufferSize};
+use rtrb::Consumer;
 
-use crate::{command_channel, DecodedTrack, PlayerController};
+use crate::engine::{dynamic_command_channel, AudioRenderer};
+use crate::{
+    command_channel, CommandError, DeckId, DecodedTrack, PlayerController, RtCommand,
+    TransportSnapshot,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OutputSpec {
@@ -52,6 +58,19 @@ pub struct DeviceOutput {
     spec: OutputSpec,
 }
 
+/// Complete native two-Deck output with control-thread ownership of prepared PCM.
+///
+/// The callback receives only stable addresses. Replaced source IDs travel back through an SPSC
+/// acknowledgement queue; only this owner drops their `Arc`s. `output` is explicitly dropped
+/// first so no callback can observe freed PCM during shutdown.
+pub struct DynamicPlayer {
+    output: Option<DeviceOutput>,
+    controller: PlayerController,
+    sources: HashMap<u64, Arc<DecodedTrack>>,
+    retired: Consumer<u64>,
+    next_source_id: u64,
+}
+
 /// Opens a complete two-deck native output path for already decoded tracks.
 ///
 /// Track ownership moves into the callback once, outside realtime execution. The callback only
@@ -75,7 +94,141 @@ where
     Ok((controller, output))
 }
 
+/// Opens the shared desktop engine without routing final audio through a WebView.
+pub fn open_dynamic_default<E>(
+    command_capacity: usize,
+    on_error: E,
+) -> Result<DynamicPlayer, OutputError>
+where
+    E: FnMut(cpal::Error) + Send + 'static,
+{
+    let retire_capacity = command_capacity.max(8);
+    let (controller, renderer, retired) =
+        dynamic_command_channel(command_capacity, retire_capacity);
+    let output = DeviceOutput::open_dynamic(renderer, on_error)?;
+    Ok(DynamicPlayer {
+        output: Some(output),
+        controller,
+        sources: HashMap::new(),
+        retired,
+        next_source_id: 1,
+    })
+}
+
+impl DynamicPlayer {
+    pub fn install(
+        &mut self,
+        deck: DeckId,
+        track: Arc<DecodedTrack>,
+        start_frame: u64,
+    ) -> Result<u64, CommandError> {
+        self.collect_retired();
+        let source_id = self.next_source_id;
+        self.next_source_id = self.next_source_id.wrapping_add(1).max(1);
+        let address = Arc::as_ptr(&track) as usize;
+        self.sources.insert(source_id, track);
+        if let Err(error) = self
+            .controller
+            .install_prepared(deck, source_id, address, start_frame)
+        {
+            self.sources.remove(&source_id);
+            return Err(error);
+        }
+        Ok(source_id)
+    }
+
+    pub fn clear(&mut self, deck: DeckId) -> Result<(), CommandError> {
+        self.collect_retired();
+        self.controller.clear_prepared(deck)
+    }
+
+    pub fn send(&mut self, command: RtCommand) -> Result<(), CommandError> {
+        self.collect_retired();
+        self.controller.send(command)
+    }
+
+    pub fn snapshot(&mut self) -> TransportSnapshot {
+        self.collect_retired();
+        self.controller.snapshot()
+    }
+
+    pub fn spec(&self) -> OutputSpec {
+        self.output
+            .as_ref()
+            .expect("dynamic output exists until drop")
+            .spec()
+    }
+
+    pub fn collect_retired(&mut self) {
+        while let Ok(source_id) = self.retired.pop() {
+            self.sources.remove(&source_id);
+        }
+    }
+}
+
+impl Drop for DynamicPlayer {
+    fn drop(&mut self) {
+        // Stop and join the platform callback's ownership before releasing stable source addresses.
+        self.output.take();
+        self.sources.clear();
+    }
+}
+
 impl DeviceOutput {
+    fn open_dynamic<E>(mut renderer: AudioRenderer, on_error: E) -> Result<Self, OutputError>
+    where
+        E: FnMut(cpal::Error) + Send + 'static,
+    {
+        let host = cpal::default_host();
+        let device = host.default_output_device().ok_or(OutputError::NoDevice)?;
+        let supported = device.default_output_config()?;
+        let sample_format = supported.sample_format();
+        let supported_buffer = supported.buffer_size();
+        let mut config: StreamConfig = supported.into();
+        let target_frames = (config.sample_rate / 100).max(1);
+        let requested_buffer_frames = match supported_buffer {
+            SupportedBufferSize::Range { min, max } => Some(target_frames.clamp(*min, *max)),
+            SupportedBufferSize::Unknown => None,
+        };
+        config.buffer_size = requested_buffer_frames
+            .map(BufferSize::Fixed)
+            .unwrap_or(BufferSize::Default);
+        let spec = OutputSpec {
+            sample_rate: config.sample_rate,
+            channels: usize::from(config.channels),
+            requested_buffer_frames,
+        };
+        let stream = match sample_format {
+            SampleFormat::F32 => device.build_output_stream(
+                config,
+                move |samples: &mut [f32], _| {
+                    renderer.render_prepared(samples, spec.sample_rate, spec.channels);
+                },
+                on_error,
+                None,
+            )?,
+            SampleFormat::I16 => device.build_output_stream(
+                config,
+                move |samples: &mut [i16], _| {
+                    renderer.render_prepared_i16(samples, spec.sample_rate, spec.channels);
+                },
+                on_error,
+                None,
+            )?,
+            SampleFormat::U16 => device.build_output_stream(
+                config,
+                move |samples: &mut [u16], _| {
+                    renderer.render_prepared_u16(samples, spec.sample_rate, spec.channels);
+                },
+                on_error,
+                None,
+            )?,
+            other => return Err(OutputError::UnsupportedFormat(other)),
+        };
+        stream.play()?;
+        Ok(Self { stream, spec })
+    }
+
     /// Opens the system default device without routing audio through a WebView.
     ///
     /// The callback runs on CoreAudio/AAudio/WASAPI/ALSA's realtime thread. It must not allocate,

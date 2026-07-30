@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::dsp::DeckEq;
+use crate::command::EngineCommand;
+use crate::dsp::{DeckEq, TransitionFx};
 use crate::state::{SharedState, SharedTransportState};
-use crate::{DeckId, DecodedTrack, PlayerMode, RtCommand, TransportSnapshot};
+use crate::{DeckId, DecodedTrack, PlayerMode, RtCommand, TransitionPlan, TransportSnapshot};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandError {
@@ -23,13 +24,38 @@ impl std::error::Error for CommandError {}
 /// Single-producer control handle. It is intentionally not `Clone`: a second producer would
 /// violate the realtime queue's ownership contract.
 pub struct PlayerController {
-    producer: Producer<RtCommand>,
+    producer: Producer<EngineCommand>,
     shared: SharedTransportState,
 }
 
 impl PlayerController {
     pub fn send(&mut self, command: RtCommand) -> Result<(), CommandError> {
-        self.producer.push(command).map_err(|_| CommandError::Full)
+        self.producer
+            .push(EngineCommand::Transport(command))
+            .map_err(|_| CommandError::Full)
+    }
+
+    pub(crate) fn install_prepared(
+        &mut self,
+        deck: DeckId,
+        source_id: u64,
+        address: usize,
+        start_frame: u64,
+    ) -> Result<(), CommandError> {
+        self.producer
+            .push(EngineCommand::InstallPrepared {
+                deck,
+                source_id,
+                address,
+                start_frame,
+            })
+            .map_err(|_| CommandError::Full)
+    }
+
+    pub(crate) fn clear_prepared(&mut self, deck: DeckId) -> Result<(), CommandError> {
+        self.producer
+            .push(EngineCommand::ClearPrepared { deck })
+            .map_err(|_| CommandError::Full)
     }
 
     pub fn snapshot(&self) -> TransportSnapshot {
@@ -43,11 +69,20 @@ struct Transition {
     to: DeckId,
     total_frames: u32,
     elapsed_frames: u32,
+    plan: TransitionPlan,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct InstalledSource {
+    id: u64,
+    address: usize,
 }
 
 /// State owned exclusively by the platform audio callback.
 pub struct AudioRenderer {
-    consumer: Consumer<RtCommand>,
+    consumer: Consumer<EngineCommand>,
+    retired: Option<Producer<u64>>,
+    deck_sources: [InstalledSource; 2],
     shared: SharedTransportState,
     mode: PlayerMode,
     playing: bool,
@@ -59,12 +94,33 @@ pub struct AudioRenderer {
     source_rate_ratios: [f64; 2],
     output_sample_rate: u32,
     deck_eq: [DeckEq; 2],
+    transition_fx: TransitionFx,
     master_gain: f32,
     transition: Option<Transition>,
 }
 
 /// Creates the bounded control/audio halves. Capacity is fixed for the lifetime of the player.
 pub fn command_channel(capacity: usize) -> (PlayerController, AudioRenderer) {
+    make_channels(capacity, None)
+}
+
+pub(crate) fn dynamic_command_channel(
+    capacity: usize,
+    retire_capacity: usize,
+) -> (PlayerController, AudioRenderer, Consumer<u64>) {
+    assert!(
+        retire_capacity > 0,
+        "retire queue capacity must be non-zero"
+    );
+    let (retired_producer, retired_consumer) = RingBuffer::new(retire_capacity);
+    let (controller, renderer) = make_channels(capacity, Some(retired_producer));
+    (controller, renderer, retired_consumer)
+}
+
+fn make_channels(
+    capacity: usize,
+    retired: Option<Producer<u64>>,
+) -> (PlayerController, AudioRenderer) {
     assert!(capacity > 0, "command queue capacity must be non-zero");
     let (producer, consumer) = RingBuffer::new(capacity);
     let shared = Arc::new(SharedState::default());
@@ -75,6 +131,8 @@ pub fn command_channel(capacity: usize) -> (PlayerController, AudioRenderer) {
         },
         AudioRenderer {
             consumer,
+            retired,
+            deck_sources: [InstalledSource::default(); 2],
             shared,
             mode: PlayerMode::Continuous,
             playing: false,
@@ -86,6 +144,7 @@ pub fn command_channel(capacity: usize) -> (PlayerController, AudioRenderer) {
             source_rate_ratios: [1.0; 2],
             output_sample_rate: 48_000,
             deck_eq: [DeckEq::default(); 2],
+            transition_fx: TransitionFx::new(),
             master_gain: 1.0,
             transition: None,
         },
@@ -199,10 +258,176 @@ impl AudioRenderer {
         self.publish();
     }
 
+    /// Renders from sources installed by the control thread. The callback only follows stable
+    /// addresses and never clones or drops their owning `Arc`; retirement is acknowledged through
+    /// the reverse SPSC queue after a Deck switches away from an address.
+    pub(crate) fn render_prepared(
+        &mut self,
+        output: &mut [f32],
+        output_sample_rate: u32,
+        output_channels: usize,
+    ) {
+        self.render_prepared_as(output, output_sample_rate, output_channels, |sample| sample);
+    }
+
+    pub(crate) fn render_prepared_i16(
+        &mut self,
+        output: &mut [i16],
+        output_sample_rate: u32,
+        output_channels: usize,
+    ) {
+        self.render_prepared_as(output, output_sample_rate, output_channels, |sample| {
+            (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16
+        });
+    }
+
+    pub(crate) fn render_prepared_u16(
+        &mut self,
+        output: &mut [u16],
+        output_sample_rate: u32,
+        output_channels: usize,
+    ) {
+        self.render_prepared_as(output, output_sample_rate, output_channels, |sample| {
+            ((sample.clamp(-1.0, 1.0) * 0.5 + 0.5) * f32::from(u16::MAX)).round() as u16
+        });
+    }
+
+    fn render_prepared_as<T, F>(
+        &mut self,
+        output: &mut [T],
+        output_sample_rate: u32,
+        output_channels: usize,
+        convert: F,
+    ) where
+        F: Fn(f32) -> T,
+    {
+        assert!(
+            output_sample_rate > 0,
+            "output sample rate must be non-zero"
+        );
+        assert!(output_channels > 0, "channel count must be non-zero");
+        assert_eq!(output.len() % output_channels, 0, "partial output frame");
+        self.output_sample_rate = output_sample_rate;
+        self.drain_commands();
+
+        let sources = self.deck_sources;
+        // SAFETY: DynamicPlayer stores each matching Arc before publishing InstallPrepared and
+        // removes it only after this renderer acknowledges the old source ID. DeviceOutput is
+        // dropped before the source registry during shutdown.
+        let tracks = unsafe { [installed_track(sources[0]), installed_track(sources[1])] };
+        self.source_rate_ratios = [
+            tracks[0]
+                .map(|track| f64::from(track.sample_rate()) / f64::from(output_sample_rate))
+                .unwrap_or(1.0),
+            tracks[1]
+                .map(|track| f64::from(track.sample_rate()) / f64::from(output_sample_rate))
+                .unwrap_or(1.0),
+        ];
+        self.ensure_eq_sample_rate();
+
+        for frame in output.chunks_mut(output_channels) {
+            let (transition_a, transition_b) = self.transition_gains();
+            let (a, b) = if self.playing {
+                (
+                    self.deck_eq[0].process_stereo([
+                        optional_track_sample(tracks[0], self.deck_positions[0], 0),
+                        optional_track_sample(tracks[0], self.deck_positions[0], 1),
+                    ]),
+                    self.deck_eq[1].process_stereo([
+                        optional_track_sample(tracks[1], self.deck_positions[1], 0),
+                        optional_track_sample(tracks[1], self.deck_positions[1], 1),
+                    ]),
+                )
+            } else {
+                ([0.0; 2], [0.0; 2])
+            };
+            let (processed, wet) = if let Some(transition) = self.transition {
+                self.transition_fx.process(
+                    [a, b],
+                    transition.from as usize,
+                    transition.to as usize,
+                    transition_progress(transition),
+                    self.output_sample_rate,
+                    transition.plan,
+                )
+            } else {
+                ([a, b], [0.0; 2])
+            };
+            let [a, b] = processed;
+            for (channel, sample) in frame.iter_mut().enumerate() {
+                let value = if self.playing {
+                    let side = channel.min(1);
+                    ((a[side] * self.deck_gains[0] * transition_a
+                        + b[side] * self.deck_gains[1] * transition_b)
+                        + wet[side])
+                        * self.master_gain
+                } else {
+                    0.0
+                };
+                *sample = convert(value.clamp(-1.0, 1.0));
+            }
+            self.advance_frame();
+        }
+        if self.transition.is_none() {
+            if let Some(active) = tracks[self.active_deck as usize] {
+                if self.deck_positions[self.active_deck as usize] >= active.frames() as f64 {
+                    self.playing = false;
+                }
+            }
+        }
+        self.publish();
+    }
+
     fn drain_commands(&mut self) {
         while let Ok(command) = self.consumer.pop() {
-            self.apply(command);
+            match command {
+                EngineCommand::Transport(command) => self.apply(command),
+                EngineCommand::InstallPrepared {
+                    deck,
+                    source_id,
+                    address,
+                    start_frame,
+                } => self.install_prepared(deck, source_id, address, start_frame),
+                EngineCommand::ClearPrepared { deck } => self.clear_prepared(deck),
+            }
         }
+    }
+
+    fn retire(&mut self, source: InstalledSource) {
+        if source.id == 0 {
+            return;
+        }
+        if let Some(retired) = &mut self.retired {
+            // A full acknowledgement queue delays reclamation until shutdown but never permits
+            // the callback to drop PCM or block. Runtime capacities make this exceptional.
+            let _ = retired.push(source.id);
+        }
+    }
+
+    fn install_prepared(&mut self, deck: DeckId, source_id: u64, address: usize, start_frame: u64) {
+        let index = deck as usize;
+        let previous = std::mem::replace(
+            &mut self.deck_sources[index],
+            InstalledSource {
+                id: source_id,
+                address,
+            },
+        );
+        self.deck_positions[index] = start_frame as f64;
+        self.deck_rates[index] = 1.0;
+        self.deck_eq[index].reset();
+        self.retire(previous);
+    }
+
+    fn clear_prepared(&mut self, deck: DeckId) {
+        let index = deck as usize;
+        let previous = std::mem::take(&mut self.deck_sources[index]);
+        self.deck_positions[index] = 0.0;
+        if deck == self.active_deck {
+            self.playing = false;
+            self.transition = None;
+        }
+        self.retire(previous);
     }
 
     fn apply(&mut self, command: RtCommand) {
@@ -234,6 +459,7 @@ impl AudioRenderer {
                 to,
                 target_frame,
                 transition_frames,
+                plan,
             } => {
                 self.deck_positions[to as usize] = target_frame as f64;
                 self.deck_eq[to as usize].reset();
@@ -241,11 +467,13 @@ impl AudioRenderer {
                     self.active_deck = to;
                     self.transition = None;
                 } else {
+                    self.transition_fx.reset();
                     self.transition = Some(Transition {
                         from: self.active_deck,
                         to,
                         total_frames: transition_frames,
                         elapsed_frames: 0,
+                        plan,
                     });
                 }
             }
@@ -312,10 +540,35 @@ impl AudioRenderer {
             self.mode,
             self.playing,
             self.active_deck,
+            self.transition.map(|transition| transition.to),
             self.output_frames,
             [self.deck_positions[0] as u64, self.deck_positions[1] as u64],
+            [self.deck_sources[0].id, self.deck_sources[1].id],
         );
     }
+}
+
+/// # Safety
+///
+/// `source.address` must point to a live `DecodedTrack` retained by DynamicPlayer. The renderer
+/// never stores the resulting reference beyond one callback invocation.
+unsafe fn installed_track(source: InstalledSource) -> Option<&'static DecodedTrack> {
+    if source.id == 0 || source.address == 0 {
+        None
+    } else {
+        // SAFETY: upheld by DynamicPlayer's source registry and retirement protocol.
+        Some(unsafe { &*(source.address as *const DecodedTrack) })
+    }
+}
+
+fn transition_progress(transition: Transition) -> f32 {
+    (transition.elapsed_frames + 1) as f32 / transition.total_frames.max(1) as f32
+}
+
+fn optional_track_sample(track: Option<&DecodedTrack>, position: f64, channel: usize) -> f32 {
+    track
+        .map(|track| track_sample(track, position, channel))
+        .unwrap_or(0.0)
 }
 
 fn track_sample(track: &DecodedTrack, position: f64, channel: usize) -> f32 {
@@ -362,6 +615,7 @@ mod tests {
                 to: DeckId::B,
                 target_frame: 8_000,
                 transition_frames: 4,
+                plan: TransitionPlan::default(),
             })
             .unwrap();
 
@@ -424,5 +678,38 @@ mod tests {
             controller.send(RtCommand::SetPlaying(false)),
             Err(CommandError::Full)
         );
+    }
+
+    #[test]
+    fn dynamic_deck_install_is_ordered_and_retires_old_source() {
+        let first = Arc::new(
+            DecodedTrack::from_interleaved_stereo(
+                vec![0.25, -0.25, 0.25, -0.25, 0.25, -0.25, 0.25, -0.25],
+                48_000,
+            )
+            .unwrap(),
+        );
+        let second = Arc::new(
+            DecodedTrack::from_interleaved_stereo(
+                vec![0.75, -0.75, 0.75, -0.75, 0.75, -0.75, 0.75, -0.75],
+                48_000,
+            )
+            .unwrap(),
+        );
+        let (mut controller, mut renderer, mut retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared(DeckId::A, 10, Arc::as_ptr(&first) as usize, 0)
+            .unwrap();
+        controller.send(RtCommand::SetPlaying(true)).unwrap();
+        let mut output = [0.0; 2];
+        renderer.render_prepared(&mut output, 48_000, 2);
+        assert_eq!(output, [0.25, -0.25]);
+
+        controller
+            .install_prepared(DeckId::A, 11, Arc::as_ptr(&second) as usize, 1)
+            .unwrap();
+        renderer.render_prepared(&mut output, 48_000, 2);
+        assert_eq!(output, [0.75, -0.75]);
+        assert_eq!(retired.pop(), Ok(10));
     }
 }

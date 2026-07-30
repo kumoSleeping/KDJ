@@ -10,3 +10,10 @@ anyhow = "=1.0.104"
 cpal = "=0.18.1"
 rtrb = "=0.3.4"
 symphonia = { version = "=0.5.5", features = ["aac", "alac", "mp3", "isomp4", "ogg", "vorbis", "flac", "wav", "pcm"] }
+
+# cpal 0.18 accepts both windows 0.61 and 0.62 independently. Without a direct pair pin,
+# Cargo can resolve `windows` 0.61 with `windows-core` 0.62 and cpal's COM implementations fail
+# to type-check. Tauri 2.11 already requires the 0.61 line, so keep both cpal halves there.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = "=0.61.3"
+windows-core = "=0.61.2"

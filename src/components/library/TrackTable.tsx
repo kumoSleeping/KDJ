@@ -172,32 +172,74 @@ const COLUMNS: Column[] = [
 /* ------------------------------------------------------------ 列的自由组合 */
 
 /**
- * 列顺序 + 隐藏集合，长期保存。和三栏换位、详情面板拖排同一套心智：
- * 拖一次、勾一次，永远不用再想。存的是 id 列表而不是完整快照，
+ * 列顺序 + 隐藏集合 + 自定义列宽，长期保存。和三栏换位、详情面板拖排同一套心智：
+ * 拖一次、勾一次、拉一次，永远不用再想。存的是 id 列表而不是完整快照，
  * 理由同 PanelStack：以后加新列时旧存档不作废，新列自动排在默认位置。
  */
 const COLUMN_PREFS_KEY = "kd-library-columns";
+const INDEX_COL_KEY = "index";
+const INDEX_DEFAULT_WIDTH = "3.2rem";
 
 interface ColumnPrefs {
   order: string[];
   hidden: string[];
+  /** 用户拖过的列宽（rem 字符串）。没出现的键走 COLUMNS / 序号默认值。 */
+  widths: Record<string, string>;
+}
+
+const COLUMN_MIN_WIDTH: Record<string, string> = {
+  index: "2.4rem",
+  title: "8rem",
+  artist: "3rem",
+  album: "3rem",
+  bpm: "2.8rem",
+  camelot: "2.8rem",
+  energy: "2.8rem",
+  duration: "2.8rem",
+  format: "2.6rem",
+  rating: "3rem",
+};
+
+function rootFontPx(): number {
+  if (typeof document === "undefined") return 16;
+  return parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+}
+
+function remStringToPx(value: string): number {
+  const n = parseFloat(value);
+  if (!Number.isFinite(n)) return 0;
+  return value.trim().endsWith("px") ? n : n * rootFontPx();
+}
+
+function pxToRemString(px: number): string {
+  return `${Math.round((px / rootFontPx()) * 100) / 100}rem`;
 }
 
 function loadColumnPrefs(): ColumnPrefs {
   try {
     const raw: unknown = JSON.parse(localStorage.getItem(COLUMN_PREFS_KEY) ?? "null");
     if (raw && typeof raw === "object") {
-      const { order, hidden } = raw as Record<string, unknown>;
+      const { order, hidden, widths } = raw as Record<string, unknown>;
       const strings = (value: unknown) =>
         Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : [];
+      const widthMap: Record<string, string> = {};
+      if (widths && typeof widths === "object") {
+        for (const [key, value] of Object.entries(widths as Record<string, unknown>)) {
+          if (typeof value === "string" && remStringToPx(value) > 0) widthMap[key] = value;
+        }
+      }
       // 标题列永远不准藏：它是唯一说明「这行是哪首歌」的列，藏掉整张表就没有主语了。
       // 在读档这一层拦，而不是只在菜单里禁用——存档被手改坏也不会出现无标题的表
-      return { order: strings(order), hidden: strings(hidden).filter((key) => key !== "title") };
+      return {
+        order: strings(order),
+        hidden: strings(hidden).filter((key) => key !== "title"),
+        widths: widthMap,
+      };
     }
   } catch {
     // 存档坏了就用默认，不值得为它报错
   }
-  return { order: [], hidden: [] };
+  return { order: [], hidden: [], widths: {} };
 }
 
 export interface TrackTableProps {
@@ -858,20 +900,63 @@ export function TrackTable({
     return () => window.removeEventListener(DETAIL_EVENT, onDetail);
   }, []);
 
-  /* ---------------------------------------------------- 列拖排 / 显隐 */
+  /* ---------------------------------------------------- 列拖排 / 显隐 / 列宽 */
   const [colPrefs, setColPrefs] = useState(loadColumnPrefs);
   /** 正在拖的列头 id / 悬停到哪个列头上（画落点竖线用）。 */
   const [dragCol, setDragCol] = useState<string | null>(null);
   const [overCol, setOverCol] = useState<string | null>(null);
   /** 右键列头弹出的「选列」菜单的位置。null = 没开。 */
   const [colMenu, setColMenu] = useState<{ x: number; y: number } | null>(null);
+  /** 正在拖列宽的列 key；拖的时候禁掉列头换序，松手后压掉那一次排序 click。 */
+  const [resizingCol, setResizingCol] = useState<string | null>(null);
+  const suppressSortClickRef = useRef(false);
+  const colPrefsRef = useRef(colPrefs);
+  colPrefsRef.current = colPrefs;
 
   const saveColPrefs = (next: ColumnPrefs) => {
     localStorage.setItem(COLUMN_PREFS_KEY, JSON.stringify(next));
     setColPrefs(next);
   };
 
-  // 没记录过的列排 MAX：stable sort 让它们之间保持 COLUMNS 里的默认相对顺序
+  const widthFor = (key: string, fallback: string) => colPrefs.widths[key] ?? fallback;
+
+  const beginColumnResize = (key: string, event: React.PointerEvent<HTMLSpanElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const th = event.currentTarget.parentElement;
+    if (!th) return;
+    const startX = event.clientX;
+    const startWidth = th.getBoundingClientRect().width;
+    const minPx = remStringToPx(COLUMN_MIN_WIDTH[key] ?? "2.8rem");
+    setResizingCol(key);
+    document.body.dataset.kdColResizing = "true";
+
+    const onMove = (moveEvent: PointerEvent) => {
+      const next = pxToRemString(Math.max(minPx, startWidth + (moveEvent.clientX - startX)));
+      setColPrefs((current) => {
+        const updated = {
+          ...current,
+          widths: { ...current.widths, [key]: next },
+        };
+        // 同步写 ref：松手落盘时不能等下一次渲染才拿到最新宽度。
+        colPrefsRef.current = updated;
+        return updated;
+      });
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.removeAttribute("data-kd-col-resizing");
+      setResizingCol(null);
+      suppressSortClickRef.current = true;
+      // 松手时把最新宽度落盘；拖动过程只 setState，避免每个像素写 localStorage
+      localStorage.setItem(COLUMN_PREFS_KEY, JSON.stringify(colPrefsRef.current));
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  // 没记忆过的列排 MAX：stable sort 让它们之间保持 COLUMNS 里的默认相对顺序
   const colRank = (key: string) => {
     const index = colPrefs.order.indexOf(key);
     return index === -1 ? Number.MAX_SAFE_INTEGER : index;
@@ -879,6 +964,13 @@ export function TrackTable({
   const orderedColumns = [...COLUMNS].sort((a, b) => colRank(a.key) - colRank(b.key));
   const colIds = orderedColumns.map((column) => column.key);
   const visibleColumns = orderedColumns.filter((column) => !colPrefs.hidden.includes(column.key));
+  const indexWidth = widthFor(INDEX_COL_KEY, INDEX_DEFAULT_WIDTH);
+  const tableMinWidthPx =
+    remStringToPx(indexWidth) +
+    visibleColumns.reduce(
+      (sum, column) => sum + remStringToPx(widthFor(column.key, column.width ?? "4rem")),
+      0,
+    );
 
   /* ---------------------------------------------------- 虚拟滚动 */
   /**
@@ -979,9 +1071,14 @@ export function TrackTable({
       {/* data-kind 区分曲库表和搜索结果表（两者共用 .kd-table，但结果表里有
           视频大行那套自排版，套不得两行式）；data-layout 是两行式的开关，
           见 TrackTableProps.layout 里为什么不能交给容器宽度判。 */}
-      <table className="kd-table" data-kind="library" data-layout={layout}>
+      <table
+        className="kd-table"
+        data-kind="library"
+        data-layout={layout}
+        style={{ minWidth: tableMinWidthPx }}
+      >
         <thead>
-          {/* 右键任意列头 = 选列菜单；拖列头 = 换列序。
+          {/* 右键任意列头 = 选列菜单；拖列头 = 换列序；列头右缘把手 = 调列宽。
               拖和点不冲突：一旦触发 dragstart，浏览器就不再发那次 click */}
           <tr
             onContextMenu={(event) => {
@@ -989,17 +1086,36 @@ export function TrackTable({
               setColMenu({ x: event.clientX, y: event.clientY });
             }}
           >
-            <th data-col="index" style={{ width: "3.2rem" }} title="当前列表中的序号">
+            <th data-col="index" style={{ width: indexWidth }} title="当前列表中的序号">
               序号
+              <span
+                className="kd-col-resize"
+                data-active={resizingCol === INDEX_COL_KEY ? "true" : undefined}
+                onPointerDown={(event) => beginColumnResize(INDEX_COL_KEY, event)}
+                onClick={(event) => event.stopPropagation()}
+                aria-hidden="true"
+              />
             </th>
-            {visibleColumns.map((column) => (
+            {visibleColumns.map((column) => {
+              const colWidth = widthFor(column.key, column.width ?? "4rem");
+              return (
               <th
                 key={column.key}
                 data-col={column.key}
-                style={column.width ? { width: column.width } : undefined}
+                style={{ width: colWidth }}
                 className={column.align === "num" ? "kd-td-num" : undefined}
                 data-sortable={column.id ? "true" : undefined}
-                onClick={column.id ? () => onSort(column.id as TrackSort) : undefined}
+                onClick={
+                  column.id
+                    ? () => {
+                        if (suppressSortClickRef.current) {
+                          suppressSortClickRef.current = false;
+                          return;
+                        }
+                        onSort(column.id as TrackSort);
+                      }
+                    : undefined
+                }
                 data-sort={
                   column.id !== null
                     ? column.id === sort
@@ -1009,8 +1125,12 @@ export function TrackTable({
                         : undefined
                     : undefined
                 }
-                draggable
+                draggable={!resizingCol}
                 onDragStart={(event) => {
+                  if (resizingCol) {
+                    event.preventDefault();
+                    return;
+                  }
                   setDragCol(column.key);
                   event.dataTransfer.effectAllowed = "move";
                   // Firefox 不设 data 就不触发 drag 事件
@@ -1022,7 +1142,7 @@ export function TrackTable({
                 }}
                 onDragOver={(event) => {
                   // 只认自家的列拖拽：行拖拽和外来文件都不该在列头上放行
-                  if (!dragCol || dragCol === column.key) return;
+                  if (!dragCol || dragCol === column.key || resizingCol) return;
                   event.preventDefault();
                   setOverCol(column.key);
                 }}
@@ -1050,7 +1170,7 @@ export function TrackTable({
                       : column.id === sort2
                         ? "副排序键。再点一下把它升为主排序（原主排序降为副）"
                         : "点一下按它排。已经有主排序时，这一下加的是副排序"
-                    : "拖动列头换列序；右键选择显示哪些列"
+                    : "拖动列头换列序；右缘拖动调列宽；右键选择显示哪些列"
                 }
               >
                 {column.label}
@@ -1066,8 +1186,16 @@ export function TrackTable({
                     {order2 === "asc" ? "↑" : "↓"}
                   </span>
                 )}
+                <span
+                  className="kd-col-resize"
+                  data-active={resizingCol === column.key ? "true" : undefined}
+                  onPointerDown={(event) => beginColumnResize(column.key, event)}
+                  onClick={(event) => event.stopPropagation()}
+                  aria-hidden="true"
+                />
               </th>
-            ))}
+              );
+            })}
           </tr>
         </thead>
         <tbody>
@@ -1299,7 +1427,7 @@ export function TrackTable({
             type="button"
             onClick={() => {
               localStorage.removeItem(COLUMN_PREFS_KEY);
-              setColPrefs({ order: [], hidden: [] });
+              setColPrefs({ order: [], hidden: [], widths: {} });
               setColMenu(null);
             }}
           >
