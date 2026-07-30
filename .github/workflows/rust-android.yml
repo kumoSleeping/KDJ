@@ -229,6 +229,8 @@ jobs:
         if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          # 不在这里抢 Latest；桌面 latest-json 写好清单后再提升。
+          make_latest: false
           files: |
             src-tauri/gen/android/app/build/outputs/apk/**/release/*-release.apk
         env:

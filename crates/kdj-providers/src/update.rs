@@ -22,19 +22,81 @@ pub struct UpdateInfo {
     pub notes: String,
 }
 
-/// Android 的 GitHub 渠道只认正式签名 APK。Release 可能先创建、APK 十几分钟后
-/// 才传完；这段窗口里宁可提示「发布中」也不能把 unsigned 包或 Release 首页
-/// 当成可安装更新交给用户。
-fn signed_android_apk_url(body: &serde_json::Value) -> Option<&str> {
-    body["assets"].as_array()?.iter().find_map(|asset| {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AndroidAbi {
+    Arm64,
+    Arm32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AndroidApkKind {
+    Arm64,
+    Arm32,
+    Universal,
+}
+
+fn host_android_abi() -> AndroidAbi {
+    // 与 rustc target 一致：aarch64-linux-android → "aarch64"；
+    // armv7-linux-androideabi → "arm"。
+    match std::env::consts::ARCH {
+        "aarch64" => AndroidAbi::Arm64,
+        "arm" => AndroidAbi::Arm32,
+        other if other.contains("64") => AndroidAbi::Arm64,
+        _ => AndroidAbi::Arm32,
+    }
+}
+
+/// 按文件名识别 APK ABI。必须先判 arm64，否则 `arm64` 会被 `arm` 误吃。
+fn classify_android_apk(name: &str) -> Option<AndroidApkKind> {
+    let lower = name.to_ascii_lowercase();
+    if !lower.ends_with(".apk") || lower.contains("unsigned") {
+        return None;
+    }
+    if lower.contains("arm64") || lower.contains("aarch64") {
+        return Some(AndroidApkKind::Arm64);
+    }
+    if lower.contains("armeabi")
+        || lower.contains("armv7")
+        || lower.contains("-arm-")
+        || lower.contains("_arm_")
+        || lower.contains("-arm.")
+        || lower.contains("_arm.")
+    {
+        return Some(AndroidApkKind::Arm32);
+    }
+    if lower.contains("universal") {
+        return Some(AndroidApkKind::Universal);
+    }
+    None
+}
+
+/// Android 的 GitHub 渠道只认正式签名 APK，并按本机 ABI 选包。
+/// Release 可能先创建、APK 十几分钟后才传完；这段窗口里宁可提示「发布中」
+/// 也不能把 unsigned 包、错 ABI 包或 Release 首页当成可安装更新交给用户。
+fn signed_android_apk_url(body: &serde_json::Value, prefer: AndroidAbi) -> Option<&str> {
+    let assets = body["assets"].as_array()?;
+    let mut preferred = None;
+    let mut universal = None;
+    for asset in assets {
         let name = asset["name"].as_str()?;
-        let lower = name.to_ascii_lowercase();
-        if lower.ends_with(".apk") && !lower.contains("unsigned") {
-            asset["browser_download_url"].as_str()
-        } else {
-            None
+        let Some(kind) = classify_android_apk(name) else {
+            continue;
+        };
+        let url = asset["browser_download_url"].as_str()?;
+        match kind {
+            AndroidApkKind::Arm64 if prefer == AndroidAbi::Arm64 && preferred.is_none() => {
+                preferred = Some(url);
+            }
+            AndroidApkKind::Arm32 if prefer == AndroidAbi::Arm32 && preferred.is_none() => {
+                preferred = Some(url);
+            }
+            AndroidApkKind::Universal if universal.is_none() => {
+                universal = Some(url);
+            }
+            _ => {}
         }
-    })
+    }
+    preferred.or(universal)
 }
 
 /// "v0.2.1" / "0.2.1" → (0, 2, 1)。解析不了当 (0,0,0)——
@@ -73,7 +135,7 @@ pub async fn check(current: &str) -> Result<UpdateInfo> {
     let is_newer = triple(&tag) > triple(current);
     let release_url = body["html_url"].as_str().unwrap_or_default();
     let url = if cfg!(target_os = "android") {
-        match signed_android_apk_url(&body) {
+        match signed_android_apk_url(&body, host_android_abi()) {
             Some(url) => url,
             None if is_newer => anyhow::bail!("新版本正在生成签名 APK，请稍后再检查"),
             None => release_url,
@@ -108,15 +170,66 @@ mod tests {
     }
 
     #[test]
-    fn android_selects_only_a_signed_apk_asset() {
+    fn classify_distinguishes_arm_from_arm64() {
+        assert_eq!(
+            classify_android_apk("app-arm64-release.apk"),
+            Some(AndroidApkKind::Arm64)
+        );
+        assert_eq!(
+            classify_android_apk("app-arm-release.apk"),
+            Some(AndroidApkKind::Arm32)
+        );
+        assert_eq!(
+            classify_android_apk("app-universal-release.apk"),
+            Some(AndroidApkKind::Universal)
+        );
+        assert_eq!(classify_android_apk("app-arm-release-unsigned.apk"), None);
+        assert_eq!(classify_android_apk("KDJ.dmg"), None);
+    }
+
+    #[test]
+    fn android_prefers_matching_abi_over_asset_order() {
+        // 真实 Release 里 arm 常排在 arm64 前面；旧逻辑 find_map 会误下 32 位包。
         let release = serde_json::json!({
             "assets": [
-                {"name": "app-universal-release-unsigned.apk", "browser_download_url": "bad"},
-                {"name": "KDJ_0.3.0_universal-release.apk", "browser_download_url": "good"},
-                {"name": "KDJ.dmg", "browser_download_url": "other"}
+                {"name": "app-arm-release.apk", "browser_download_url": "arm32"},
+                {"name": "app-arm64-release.apk", "browser_download_url": "arm64"},
+                {"name": "app-universal-release-unsigned.apk", "browser_download_url": "bad"}
             ]
         });
-        assert_eq!(signed_android_apk_url(&release), Some("good"));
-        assert_eq!(signed_android_apk_url(&serde_json::json!({"assets": []})), None);
+        assert_eq!(
+            signed_android_apk_url(&release, AndroidAbi::Arm64),
+            Some("arm64")
+        );
+        assert_eq!(
+            signed_android_apk_url(&release, AndroidAbi::Arm32),
+            Some("arm32")
+        );
+    }
+
+    #[test]
+    fn android_falls_back_to_universal_not_wrong_abi() {
+        let only_arm32 = serde_json::json!({
+            "assets": [
+                {"name": "app-arm-release.apk", "browser_download_url": "arm32"}
+            ]
+        });
+        assert_eq!(
+            signed_android_apk_url(&only_arm32, AndroidAbi::Arm64),
+            None,
+            "64 位机不能回落到 32 位包"
+        );
+
+        let with_universal = serde_json::json!({
+            "assets": [
+                {"name": "app-arm-release.apk", "browser_download_url": "arm32"},
+                {"name": "app-universal-release.apk", "browser_download_url": "uni"}
+            ]
+        });
+        assert_eq!(
+            signed_android_apk_url(&with_universal, AndroidAbi::Arm64),
+            Some("uni")
+        );
+        assert_eq!(signed_android_apk_url(&serde_json::json!({"assets": []}), AndroidAbi::Arm64), None);
     }
 }

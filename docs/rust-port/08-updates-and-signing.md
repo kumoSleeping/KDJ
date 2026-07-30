@@ -67,7 +67,8 @@ node scripts/set-version.mjs 0.2.2 → 提交 → 推 main → 完事
 
 1. 读出 `.version`，形状不对（不是 `x.y.z`）就直接 fail——宁可不发也别打出 `vnull`
 2. 问**远端**有没有 `v{version}` 这个 tag（不是问本地：checkout 默认浅克隆不带 tags）
-3. 没有 → 打 tag、`gh release create --generate-notes`
+3. 没有 → 打 tag、`gh release create --generate-notes --latest=false`
+   （先不抢 `releases/latest`，避免空壳/旧清单把更新通道静默冻住）
 4. `gh workflow run` 把 `rust-build.yml` 和 `rust-android.yml` **dispatch 到 tag ref**
 
 ### 第 4 步为什么不能省
@@ -101,9 +102,14 @@ Android keystore 任意一个都不能再换，否则 Android 会把新版当成
 ### `latest.json` 是怎么来的
 
 updater 启动时拉 `releases/latest/download/latest.json`，按 `os-arch` 取键。
-这个文件由 `rust-build.yml` 的 `latest-json` job 在**三平台都传完之后**拼：
-下载全部 artifact → 找 `*.app.tar.gz` / `*-setup.exe` / `*.AppImage` 和它们的
-`.sig` → 拼 JSON → `gh release upload --clobber`。
+这个文件由 `rust-build.yml` 的 `latest-json` job 在 desktop matrix **结束之后**拼
+（`if: always()`，不要求三平台全绿）：
+
+1. 下载已有 artifact → 找各平台更新包和 `.sig`
+2. **有哪个平台就写哪个**；缺的平台只 warning，不堵死其它平台
+3. 至少有一个平台成功 → `gh release upload --clobber`，再
+   `gh release edit --latest` 提升本版
+4. 若零平台成功 → 不写清单、不提升 Latest，上一版继续当更新通道
 
 清单使用 updater 2.10+ 的安装格式精确键，并保留无后缀兼容键：
 
@@ -114,7 +120,8 @@ updater 启动时拉 `releases/latest/download/latest.json`，按 `os-arch` 取�
 macOS universal 包一份喂 arm64/x64 两个架构；Windows 和 Linux 则保证用户从
 什么格式安装，就继续用同格式更新，避免 MSI→NSIS 或 DEB→AppImage 串包。
 
-任一正式包或 `.sig` 缺失都会让 `latest-json` job 失败，不再静默发布残缺清单。
+正式 tag 上 `cargo test` 失败不再阻断打包（main 分支仍硬失败），避免 CI
+时序类单测把更新通道卡死。某个平台的 `.sig` 缺失会跳过该平台并告警。
 
 ---
 

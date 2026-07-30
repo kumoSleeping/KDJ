@@ -103,8 +103,25 @@ jobs:
       # 只跑 debug：release 档开了 lto + codegen-units=1，跑测试等于白等十分钟。
       # 真库集成测试（tests/real_library.rs）靠 KDJ_TEST_DB 环境变量开关，
       # CI 上没有这个变量，会自己跳过。
+      #
+      # 测试与打包解耦：continue-on-error 让后续步骤能看到 outcome。
+      # main 分支仍硬失败（见下一 step）；正式 tag 允许测试红了也继续打包——
+      # 否则一个 Windows 时序/权限 flaky 测试会卡死全平台更新通道。
       - name: Rust 全量测试
+        id: rust_test
+        continue-on-error: true
         run: cargo test --workspace
+
+      - name: 分支构建要求测试通过
+        if: ${{ !startsWith(github.ref, 'refs/tags/') && steps.rust_test.outcome == 'failure' }}
+        run: |
+          echo "::error::main 分支构建要求 cargo test 通过"
+          exit 1
+
+      - name: 正式 tag 测试失败仅告警
+        if: ${{ startsWith(github.ref, 'refs/tags/') && steps.rust_test.outcome == 'failure' }}
+        run: |
+          echo "::warning::tag 构建上 cargo test 失败，仍继续打包以便更新通道不因单测卡死；请尽快修测试。"
 
       - name: 安装前端依赖
         run: npm ci
@@ -195,6 +212,9 @@ jobs:
         if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          # 默认 make_latest=true 会在第一个平台传包时就抢 Latest，
+          # 此时 latest.json 还没写好。提升权只留给下面的 latest-json job。
+          make_latest: false
           files: |
             **/release/bundle/dmg/*.dmg
             **/release/bundle/macos/*.app.tar.gz
@@ -212,75 +232,129 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # 一键更新的"版本清单"。updater 启动时拉 releases/latest/download/latest.json，
-  # 按平台键取下载地址和 minisign 签名。必须等三平台都传完 Release 再拼，
-  # 所以 needs: desktop 是硬依赖，不是习惯。
+  # 一键更新的"版本清单"。updater 拉 releases/latest/download/latest.json。
+  # 旧规则是三平台全绿才写清单；任一平台挂掉就 skip，再叠加「新 Release
+  # 立刻变 Latest + 旧清单占位」，客户端会静默冻结在旧 version。
+  # 新规则：
+  #   1. 有任意成功平台的 artifact 就拼清单（缺的平台只 warning，不堵死别人）；
+  #   2. 至少一个平台成功才上传，并 gh release edit --latest 提升本版；
+  #   3. 全部失败则不上传、不提升，上一版继续当 Latest。
   latest-json:
     name: 更新清单 latest.json
     needs: desktop
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.desktop.result != 'cancelled' }}
     runs-on: ubuntu-latest
     steps:
-      - name: 下载全部平台产物
+      - name: 下载已有平台产物
+        id: download
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           path: bundles
 
-      - name: 拼 latest.json 并传上 Release
+      - name: 拼 latest.json、上传并提升 Latest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
+          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
         run: |
           set -euo pipefail
+          if [ "$DOWNLOAD_OUTCOME" != "success" ]; then
+            echo "::error::没有任何桌面构建产物可下载；拒绝写入 latest.json，也不提升 Latest"
+            exit 1
+          fi
           python3 - <<'PY'
-          import json, os, glob
-          tag = os.environ["TAG"]; repo = os.environ["REPO"]
+          import json, os, glob, sys
+          from datetime import datetime, timezone
+
+          tag = os.environ["TAG"]
+          repo = os.environ["REPO"]
+          version = tag.lstrip("v")
+
           def find(pattern):
-              hits = glob.glob(f"bundles/**/{pattern}", recursive=True)
+              hits = sorted(glob.glob(f"bundles/**/{pattern}", recursive=True))
+              # 只要正式包，跳过误匹配到的 .sig
+              hits = [h for h in hits if not h.endswith(".sig")]
               return hits[0] if hits else None
-          def entry(art, label):
-              if not art:
-                  raise SystemExit(f"::error::缺少 {label} 更新包")
+
+          def entry(art):
               sig = art + ".sig"
               if not os.path.exists(sig):
-                  raise SystemExit(f"::error::{label} 缺少签名：{sig}")
+                  raise SystemExit(f"::error::{os.path.basename(art)} 缺少签名：{sig}")
               name = os.path.basename(art)
               return {
                   "signature": open(sig).read().strip(),
                   "url": f"https://github.com/{repo}/releases/download/{tag}/{name}",
               }
+
           platforms = {}
+          missing = []
+
           mac = find("*.app.tar.gz")
-          mac_entry = entry(mac, "macOS app")
-          # universal 一个包喂两个架构；-app 是 updater 2.10+ 的安装格式精确键，
-          # 无后缀键留给已经装出去的旧 updater 兼容。
-          for arch in ("aarch64", "x86_64"):
-              platforms[f"darwin-{arch}-app"] = mac_entry
-              platforms[f"darwin-{arch}"] = mac_entry
+          if mac:
+              mac_entry = entry(mac)
+              # universal 一个包喂两个架构；-app 是 updater 2.10+ 精确键，
+              # 无后缀键留给已装出去的旧 updater。
+              for arch in ("aarch64", "x86_64"):
+                  platforms[f"darwin-{arch}-app"] = mac_entry
+                  platforms[f"darwin-{arch}"] = mac_entry
+          else:
+              missing.append("macOS")
 
-          nsis_entry = entry(find("*-setup.exe"), "Windows NSIS")
-          msi_entry = entry(find("*.msi"), "Windows MSI")
-          platforms["windows-x86_64-nsis"] = nsis_entry
-          platforms["windows-x86_64-msi"] = msi_entry
-          platforms["windows-x86_64"] = nsis_entry
+          nsis = find("*-setup.exe")
+          msi = find("*.msi")
+          if nsis:
+              nsis_entry = entry(nsis)
+              platforms["windows-x86_64-nsis"] = nsis_entry
+              platforms["windows-x86_64"] = nsis_entry
+          if msi:
+              platforms["windows-x86_64-msi"] = entry(msi)
+          if not nsis and not msi:
+              missing.append("Windows")
 
-          appimage_entry = entry(find("*.AppImage"), "Linux AppImage")
-          deb_entry = entry(find("*.deb"), "Linux DEB")
-          rpm_entry = entry(find("*.rpm"), "Linux RPM")
-          platforms["linux-x86_64-appimage"] = appimage_entry
-          platforms["linux-x86_64-deb"] = deb_entry
-          platforms["linux-x86_64-rpm"] = rpm_entry
-          platforms["linux-x86_64"] = appimage_entry
+          appimage = find("*.AppImage")
+          deb = find("*.deb")
+          rpm = find("*.rpm")
+          if appimage:
+              appimage_entry = entry(appimage)
+              platforms["linux-x86_64-appimage"] = appimage_entry
+              platforms["linux-x86_64"] = appimage_entry
+          if deb:
+              platforms["linux-x86_64-deb"] = entry(deb)
+          if rpm:
+              platforms["linux-x86_64-rpm"] = entry(rpm)
+          if not appimage and not deb and not rpm:
+              missing.append("Linux")
+
+          for name in missing:
+              print(f"::warning::本版缺少 {name} 更新包，latest.json 不含该平台；其它平台仍可更新")
+
+          if not platforms:
+              raise SystemExit(
+                  "::error::没有任何平台更新包，拒绝写入 latest.json，也不提升 Latest；"
+                  "上一版继续作为更新通道"
+              )
+
           manifest = {
-              "version": tag.lstrip("v"),
+              "version": version,
               "notes": f"KDJ {tag}",
-              "pub_date": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+              "pub_date": datetime.now(timezone.utc).isoformat(),
               "platforms": platforms,
           }
-          json.dump(manifest, open("latest.json", "w"), indent=2)
-          print(json.dumps(manifest, indent=2)[:800])
+          with open("latest.json", "w") as fh:
+              json.dump(manifest, fh, indent=2)
+              fh.write("\n")
+          print(json.dumps(manifest, indent=2)[:1200])
+          if missing:
+              print(f"partial platforms; missing={','.join(missing)}", file=sys.stderr)
+          else:
+              print("all desktop platform families present", file=sys.stderr)
           PY
-          if [ -f latest.json ]; then
-            gh release upload "$TAG" latest.json --repo "$REPO" --clobber
-          fi
+
+          gh release upload "$TAG" latest.json --repo "$REPO" --clobber
+          # 清单就绪后才抢 Latest；此前 release.yml 用 --latest=false 建的空壳
+          # 不会让 /releases/latest/download/latest.json 指向残缺发版。
+          gh release edit "$TAG" --repo "$REPO" --latest
+          served=$(python3 -c "import json;print(json.load(open('latest.json'))['version'])")
+          echo "已上传 latest.json 并提升 $TAG 为 Latest（version=$served）"

@@ -11,8 +11,9 @@
 #     五处版本必须一致，release.yml 的 gate 会拒发不一致的推送；
 #   - 新版本必须大于远端最新 v* tag（本地 tag 不算数）；
 #   - 推送前要求工作区干净，避免把半成品改动混进 release 提交；
-#   - 推送后盯 rust-build 的 tag 构建：任何平台挂掉 latest.json 就不会更新，
-#     客户端会停在占位旧清单报「已是最新」——所以脚本最后必须验证
+#   - 新 Release 以 --latest=false 创建，不会抢占更新通道；latest-json 在至少
+#     一个平台产物就绪后写入本版清单并提升 Latest。单平台失败不再用旧清单
+#     占位伪装「已是最新」。脚本最后仍必须验证
 #     releases/latest/download/latest.json 的 version 真的变成了新版本。
 set -euo pipefail
 
@@ -129,9 +130,10 @@ watch_run() { # $1=workflow 名
 }
 
 info "盯桌面三平台构建（rust-build）"
+build_ok=1
 watch_run rust-build || {
-  red "rust-build 失败或超时。latest.json 不会更新，客户端会继续报「已是最新」！"
-  exit 1
+  build_ok=0
+  red "rust-build 失败或超时。若 latest-json 也没跑成，Latest 不会被提升，更新通道仍指向上一版。"
 }
 
 info "盯安卓构建（rust-android）"
@@ -139,11 +141,20 @@ watch_run rust-android || red "安卓构建失败，桌面更新不受影响但 
 
 # ---- 终检：更新端点必须已经是新版本 ------------------------------------------
 info "验证更新端点"
+served=""
 for i in $(seq 1 10); do
   served=$(curl -sL "https://github.com/$repo/releases/latest/download/latest.json" \
     | python3 -c "import json,sys;print(json.load(sys.stdin)['version'])" 2>/dev/null || true)
   [[ "$served" == "$VERSION" ]] && break
-  [[ "$i" == "10" ]] && { red "latest.json 仍是 ${served:-未知}，需要人工排查"; exit 1; }
+  [[ "$i" == "10" ]] && {
+    red "latest.json 仍是 ${served:-未知}，需要人工排查"
+    [[ "$build_ok" == "1" ]] || red "（rust-build 本身也没有成功）"
+    exit 1
+  }
   sleep 20
 done
-green "✅ KDJ v$VERSION 发版完成，latest.json = $served，客户端可以检测到更新了。"
+if [[ "$build_ok" != "1" ]]; then
+  green "✅ KDJ v$VERSION 更新通道已就绪（latest.json = $served），但 rust-build 有失败步骤，请去 Actions 核对缺了哪些平台。"
+else
+  green "✅ KDJ v$VERSION 发版完成，latest.json = $served，客户端可以检测到更新了。"
+fi

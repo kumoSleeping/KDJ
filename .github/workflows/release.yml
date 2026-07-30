@@ -7,9 +7,11 @@
 #
 # 发版流程（人只做第一步）：
 #   1. 同步修改 tauri.conf.json / package.json / Cargo.toml 的版本，提交、推 main；
-#   2. 本工作流发现 v{version} 这个 tag 还不存在 → 打 tag、建 Release（自动生成 notes）；
+#   2. 本工作流发现 v{version} 这个 tag 还不存在 → 打 tag、建 Release
+#      （--latest=false，不抢更新通道；自动生成 notes）；
 #   3. dispatch 两条打包线到 refs/tags/v{version} 上——它们各自的
-#      「发布 Release（仅 tag）」步骤会把产物传进同一个 Release。
+#      「发布 Release（仅 tag）」步骤会把产物传进同一个 Release；
+#      rust-build 的 latest-json 写入本版清单后再提升为 Latest。
 #
 # 为什么不是"打了 tag 自动触发打包"而要显式 dispatch：
 # 用 GITHUB_TOKEN push 的 tag **不会**触发任何 on:tags 工作流
@@ -111,16 +113,12 @@ jobs:
           git tag -a "v$VERSION" -m "KDJ v$VERSION" "$GITHUB_SHA"
           git push origin "v$VERSION"
 
-          # 新 Release 一公开，releases/latest 就会立刻从上一版切到这个尚无产物的
-          # 空壳；桌面 updater 随即请求 /latest/download/latest.json 并收到 404。
-          # 先把上一版完整清单留作占位：构建期间旧客户端只会得到「已是最新」，
-          # 等 rust-build 的 latest-json job 汇齐三平台后再用新清单原子覆盖。
-          previous_tag=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
-          mkdir -p previous-release
-          if [ -n "$previous_tag" ]; then
-            gh release download "$previous_tag" --pattern latest.json --dir previous-release 2>/dev/null || true
-          fi
-
+          # 关键 Release 先以 --latest=false 建好，绝不抢占 releases/latest。
+          # 旧做法是立刻成为 Latest，再把上一版 latest.json 拷进来占位——
+          # 一旦后续构建挂掉，客户端会永远读到「version = 旧版」并静默报
+          # 「已是最新」。正确顺序：上一版继续当 Latest → 打包线传产物 →
+          # latest-json 写入本版清单后，再 gh release edit --latest 提升。
+          #
           # Release 先建好（产物晚点由打包线传进来）。下载说明放在自动生成的
           # 变更记录前面，文件名必须与 rust-build / rust-android 的产物保持一致。
           base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION"
@@ -146,15 +144,16 @@ jobs:
             echo "- **较旧的 32 位 ARM 设备**：[下载 APK]($base_url/app-arm-release.apk)"
             echo
             echo "> .sig、.app.tar.gz 和 latest.json 是自动更新所需文件，普通用户无需下载。"
+            echo ">"
+            echo "> 本 Release 在桌面更新清单就绪前不会被标为 Latest；"
+            echo "> 自动更新通道在构建完成前仍指向上一可用版本。"
           } > release-notes.md
 
           gh release create "v$VERSION" \
             --title "KDJ v$VERSION" \
             --generate-notes \
-            --notes-file release-notes.md
-          if [ -f previous-release/latest.json ]; then
-            gh release upload "v$VERSION" previous-release/latest.json --clobber
-          fi
+            --notes-file release-notes.md \
+            --latest=false
 
       - name: 调度打包线到 tag 上
         run: |
