@@ -8,10 +8,10 @@ license.workspace = true
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws", "macros"] }
 futures-util = "0.3.33"
-kdj-analysis = { version = "0.2.14", path = "../kdj-analysis" }
-kdj-core = { version = "0.2.14", path = "../kdj-core" }
-kdj-library = { version = "0.2.14", path = "../kdj-library" }
-kdj-providers = { version = "0.2.14", path = "../kdj-providers" }
+kdj-analysis = { version = "0.2.15", path = "../kdj-analysis" }
+kdj-core = { version = "0.2.15", path = "../kdj-core" }
+kdj-library = { version = "0.2.15", path = "../kdj-library" }
+kdj-providers = { version = "0.2.15", path = "../kdj-providers" }
 rand = "0.10.2"
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "stream"] }
 serde = { version = "1.0.229", features = ["derive"] }
