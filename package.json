@@ -16,7 +16,8 @@
     "tauri:web": "vite --config vite.tauri.config.ts",
     "tauri:web:build": "tsc --noEmit && vite build --config vite.tauri.config.ts",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "release": "bash scripts/release.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.0",

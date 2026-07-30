@@ -12,7 +12,9 @@ failed=0
 
 while IFS= read -r -d '' apk; do
   found=1
-  bytes=$(stat -f %z "$apk" 2>/dev/null || stat -c %s "$apk")
+  # wc -c 是唯一跨 GNU/BSD 一致的取大小方式；stat 的 -f %z 在 GNU 上是另一套
+  # 语义（文件系统信息而不是文件大小），曾把 APK 读成 0 字节误报门禁。
+  bytes=$(wc -c < "$apk")
   mib=$(awk -v n="$bytes" 'BEGIN { printf "%.2f", n / 1024 / 1024 }')
   delta=$(awk -v n="$bytes" -v b="$BASELINE_BYTES" 'BEGIN { printf "%+.2f", (n - b) / 1024 / 1024 }')
   echo "APK $(basename "$apk"): ${mib} MiB（相对约 16 MiB 基线 ${delta} MiB）"
