@@ -2007,6 +2007,14 @@ mod tests {
     #[test]
     fn writing_tags_back_keeps_the_stored_mtime_in_step_with_the_file() {
         let (service, id, path) = scratch_track("mtime");
+        // Windows CI 偶发：创建与写标签落在同一 mtime tick，after == before。
+        // 先把磁盘时间拨回过去，再 sync 进库，后面的写入就一定能推高 mtime。
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        service.sync_file_stat(id).unwrap();
         let before = stored_mtime(&service, &path);
 
         let patch = TrackPatch {
