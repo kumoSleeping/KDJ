@@ -2,11 +2,16 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./design.css";
 import App from "./App";
+import { DesktopLyricsOverlay } from "./components/player/DesktopLyricsOverlay";
+import { RootErrorBoundary } from "./components/RootErrorBoundary";
 import { initBridge } from "./lib/bridge";
 import { applyTheme, useAppStore } from "./stores/appStore";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("找不到 #root，index.html 被改坏了");
+
+const isLyricsWindow = new URLSearchParams(window.location.search).get("window") === "lyrics";
+if (isLyricsWindow) document.documentElement.dataset.window = "lyrics";
 
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -43,7 +48,9 @@ async function bootstrap(): Promise<void> {
   }
   createRoot(mount).render(
     <StrictMode>
-      <App />
+      <RootErrorBoundary>
+        {isLyricsWindow ? <DesktopLyricsOverlay /> : <App />}
+      </RootErrorBoundary>
     </StrictMode>,
   );
 }

@@ -676,12 +676,46 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     const failed = new Set(Object.keys(result.errors).map(Number));
     const gone = new Set(ids.filter((id) => !failed.has(id)));
     if (gone.size > 0) {
+      const {
+        tracks: prevTracks,
+        selectedId,
+        selectedIds,
+        selectedTrack,
+        total,
+      } = get();
+      const nextTracks = prevTracks.filter((item) => !gone.has(item.id));
+      let nextSelectedIds = selectedIds.filter((id) => !gone.has(id));
+      let nextSelectedId =
+        selectedId !== null && !gone.has(selectedId) ? selectedId : null;
+      let nextSelectedTrack =
+        selectedTrack !== null && !gone.has(selectedTrack.id) ? selectedTrack : null;
+
+      // 锚点被删：落到原位置邻近的一首（同下标=下一首，删到末尾则上一首），
+      // 选中不会飞走，详情栏也能继续钉在邻曲上。
+      if (selectedId !== null && gone.has(selectedId)) {
+        const focusIndex = prevTracks.findIndex((track) => track.id === selectedId);
+        const neighbor =
+          nextTracks.length === 0 || focusIndex < 0
+            ? null
+            : (nextTracks[Math.min(focusIndex, nextTracks.length - 1)] ?? null);
+        nextSelectedId = neighbor?.id ?? null;
+        nextSelectedIds = neighbor ? [neighbor.id] : [];
+        nextSelectedTrack = neighbor;
+      } else if (nextSelectedId === null && nextSelectedIds.length > 0) {
+        nextSelectedId = nextSelectedIds[nextSelectedIds.length - 1] ?? null;
+      }
+
       set({
-        tracks: get().tracks.filter((item) => !gone.has(item.id)),
-        total: Math.max(0, get().total - gone.size),
-        selectedId: gone.has(get().selectedId ?? -1) ? null : get().selectedId,
-        selectedIds: get().selectedIds.filter((item) => !gone.has(item)),
-        selectedTrack: gone.has(get().selectedTrack?.id ?? -1) ? null : get().selectedTrack,
+        tracks: nextTracks,
+        total: Math.max(0, total - gone.size),
+        selectedId: nextSelectedId,
+        selectedIds: nextSelectedIds,
+        selectedTrack:
+          nextSelectedId === null
+            ? null
+            : nextSelectedTrack?.id === nextSelectedId
+              ? nextSelectedTrack
+              : (nextTracks.find((track) => track.id === nextSelectedId) ?? null),
       });
       void get().refreshStats();
       void get().refreshFolders();

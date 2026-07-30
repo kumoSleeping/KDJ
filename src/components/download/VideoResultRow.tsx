@@ -73,7 +73,11 @@ const resolvedCache = new Map<string, VideoInfo>();
 export interface VideoResultRowProps extends VideoSeed {
   /** 已经解析好的完整信息（贴链接那条路）。不给就等这行滚进视口自己去解析。 */
   info?: VideoInfo | null;
-  /** 保留兼容；现已改成普通多列表格行，不再横跨。 */
+  /** 可见数据列（与 ResultTable / MergedGroupRow 同一套偏好）。 */
+  columns: ReadonlyArray<{ key: string; align?: "num" }>;
+  /** 整行单元格总数（勾选 + 动作 + 数据列），错误提示行用。 */
+  totalColumns: number;
+  /** @deprecated 保留兼容；请用 totalColumns。 */
   colSpan?: number;
 }
 
@@ -89,6 +93,8 @@ export function VideoResultRow({
   cover,
   duration,
   info: given,
+  columns,
+  totalColumns,
 }: VideoResultRowProps) {
   const settings = useAppStore((state) => state.settings);
   const openQueuePanel = useAppStore((state) => state.openQueuePanel);
@@ -254,46 +260,74 @@ export function VideoResultRow({
             <span className="kd-result-lead-spacer" aria-hidden="true" />
           </span>
         </td>
-        <td className="kd-td-strong" data-col="title" title={title} {...cellDrag}>
-          <span
-            className="kd-thumb"
-            onPointerDown={(event) => {
-              event.stopPropagation();
-              clearTextSelection();
-              bindPointerDrag(event);
-            }}
-          >
-            {thumbImg}
-          </span>
-          {title}
-        </td>
-        <td data-col="artist" title={author || undefined} {...cellDrag}>
-          {author || DASH}
-        </td>
-        <td data-col="album" {...cellDrag}>
-          {DASH}
-        </td>
-        <td className="kd-td-num" {...cellDrag}>
-          {formatDuration(duration ?? info?.duration ?? null)}
-        </td>
-        <td {...cellDrag}>
-          <span className="kd-source-dots" title="B站">
-            <span className="kd-source-dot" data-platform="bilibili" data-active="true">
-              <PlatformMark id="bilibili" size={12} />
-            </span>
-          </span>
-        </td>
-        <td className="kd-mono" {...cellDrag}>
-          B站
-        </td>
-        <td className="kd-td-num kd-mono" {...cellDrag}>
-          {qualityLabel}
-        </td>
-        <td style={{ width: "3rem" }} {...cellDrag} />
+        {columns.map((column) => {
+          switch (column.key) {
+            case "title":
+              return (
+                <td key={column.key} className="kd-td-strong" data-col="title" title={title} {...cellDrag}>
+                  <span
+                    className="kd-thumb"
+                    onPointerDown={(event) => {
+                      event.stopPropagation();
+                      clearTextSelection();
+                      bindPointerDrag(event);
+                    }}
+                  >
+                    {thumbImg}
+                  </span>
+                  {title}
+                </td>
+              );
+            case "artist":
+              return (
+                <td key={column.key} data-col="artist" title={author || undefined} {...cellDrag}>
+                  {author || DASH}
+                </td>
+              );
+            case "album":
+              return (
+                <td key={column.key} data-col="album" {...cellDrag}>
+                  {DASH}
+                </td>
+              );
+            case "duration":
+              return (
+                <td key={column.key} className="kd-td-num" data-col="duration" {...cellDrag}>
+                  {formatDuration(duration ?? info?.duration ?? null)}
+                </td>
+              );
+            case "sources":
+              return (
+                <td key={column.key} data-col="sources" {...cellDrag}>
+                  <span className="kd-source-dots" title="B站">
+                    <span className="kd-source-dot" data-platform="bilibili" data-active="true">
+                      <PlatformMark id="bilibili" size={12} />
+                    </span>
+                  </span>
+                </td>
+              );
+            case "from":
+              return (
+                <td key={column.key} className="kd-mono" data-col="from" {...cellDrag}>
+                  B站
+                </td>
+              );
+            case "quality":
+              return (
+                <td key={column.key} className="kd-td-num kd-mono" data-col="quality" {...cellDrag}>
+                  {qualityLabel}
+                </td>
+              );
+            case "vip":
+              return <td key={column.key} data-col="vip" style={{ width: "3rem" }} {...cellDrag} />;
+            default:
+              return <td key={column.key} {...cellDrag} />;
+          }
+        })}
       </tr>
       {sendError ? (
         <tr data-video="true">
-          <td colSpan={10}>
+          <td colSpan={totalColumns}>
             <InlineNotice text={sendError} onDismiss={() => setSendError("")} />
           </td>
         </tr>

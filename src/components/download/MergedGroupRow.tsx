@@ -31,6 +31,8 @@ export interface MergedGroupRowProps {
   selectable: boolean;
   selectionMode: boolean;
   expanded: boolean;
+  /** 可见数据列（顺序已按用户偏好排好；不含勾选/动作列）。 */
+  columns: ReadonlyArray<{ key: string; align?: "num" }>;
   /** 挂在某个"包"（歌单/一次搜索）底下时缩进并画导引线。 */
   indent?: boolean;
   /** 包里的最后一行，竖导引线到此为止。 */
@@ -57,6 +59,7 @@ export function MergedGroupRow({
   selectable,
   selectionMode,
   expanded,
+  columns,
   indent = false,
   last = false,
   onToggleSelect,
@@ -152,6 +155,143 @@ export function MergedGroupRow({
     }
     platformMarks.push({ platform: source.platform, active: index === sourceIndex });
   }
+
+  const cellDrag = selectable
+    ? {
+        draggable: true as const,
+        onDragStart,
+        onDragEnd,
+      }
+    : { draggable: false as const };
+
+  const dataCell = (key: string) => {
+    switch (key) {
+      case "title":
+        return (
+          <td key={key} className="kd-td-strong" data-col="title" title={group.title} {...cellDrag}>
+            {indent ? (
+              <span className="kd-tree-indent kd-truncate" data-last={last ? "true" : undefined}>
+                {titleCell}
+              </span>
+            ) : (
+              titleCell
+            )}
+          </td>
+        );
+      case "artist":
+        return (
+          <td key={key} data-col="artist" title={group.artists.join(", ")} {...cellDrag}>
+            {group.artists.join(", ") || DASH}
+          </td>
+        );
+      case "album":
+        return (
+          <td key={key} data-col="album" title={group.album} {...cellDrag}>
+            {group.album || DASH}
+          </td>
+        );
+      case "duration":
+        return (
+          <td key={key} className="kd-td-num" data-col="duration" {...cellDrag}>
+            {formatDuration(group.duration)}
+          </td>
+        );
+      case "sources":
+        return (
+          <td key={key} data-col="sources" {...cellDrag}>
+            <span
+              className="kd-source-dots"
+              title={platformMarks.map((mark) => PLATFORM_LABEL[mark.platform]).join(" / ")}
+            >
+              {platformMarks.map((mark) => (
+                <span
+                  key={mark.platform}
+                  className="kd-source-dot"
+                  data-platform={mark.platform}
+                  data-active={mark.active ? "true" : "false"}
+                >
+                  <PlatformMark id={mark.platform} size={12} />
+                </span>
+              ))}
+            </span>
+          </td>
+        );
+      case "from":
+        return (
+          <td key={key} className="kd-mono" data-col="from" {...cellDrag}>
+            {active ? PLATFORM_LABEL[active.platform] : DASH}
+          </td>
+        );
+      case "quality":
+        return (
+          <td key={key} className="kd-td-num kd-mono" data-col="quality" {...cellDrag}>
+            {active ? qualityLabel(active) : DASH}
+          </td>
+        );
+      case "vip":
+        return (
+          <td key={key} data-col="vip" style={{ width: "3rem" }} {...cellDrag}>
+            {active?.vip && (
+              <span className="kd-chip" data-tone="warn">
+                VIP
+              </span>
+            )}
+          </td>
+        );
+      default:
+        return <td key={key} {...cellDrag} />;
+    }
+  };
+
+  const sourceDataCell = (key: string, source: SongSource, index: number) => {
+    switch (key) {
+      case "title":
+        return (
+          <td key={key} colSpan={1} className="kd-muted" style={{ paddingLeft: "1.4rem" }}>
+            <span className="kd-row" style={{ gap: "0.4rem" }}>
+              {index === sourceIndex ? <Check size={12} /> : <span style={{ width: 12 }} />}
+              <span className="kd-truncate">{source.title}</span>
+              <span className="kd-faint">·</span>
+              <span className="kd-truncate kd-faint">{source.artists.join(", ") || DASH}</span>
+            </span>
+          </td>
+        );
+      case "artist":
+      case "album":
+      case "sources":
+        return <td key={key} />;
+      case "duration":
+        return (
+          <td key={key} className="kd-td-num kd-muted">
+            {formatDuration(source.duration)}
+          </td>
+        );
+      case "from":
+        return (
+          <td key={key} className="kd-mono kd-muted">
+            {PLATFORM_LABEL[source.platform]}
+          </td>
+        );
+      case "quality":
+        return (
+          <td key={key} className="kd-td-num kd-mono kd-muted">
+            {qualityLabel(source)}
+          </td>
+        );
+      case "vip":
+        return (
+          <td key={key}>
+            {source.vip && (
+              <span className="kd-chip" data-tone="warn">
+                VIP
+              </span>
+            )}
+          </td>
+        );
+      default:
+        return <td key={key} />;
+    }
+  };
 
   return (
     <Fragment>
@@ -263,94 +403,8 @@ export function MergedGroupRow({
             )}
           </span>
         </td>
-        <td
-          draggable={selectable}
-          onDragStart={selectable ? onDragStart : undefined}
-          onDragEnd={selectable ? onDragEnd : undefined}
-          className="kd-td-strong"
-          data-col="title"
-          title={group.title}
-        >
-          {indent ? (
-            <span className="kd-tree-indent kd-truncate" data-last={last ? "true" : undefined}>
-              {titleCell}
-            </span>
-          ) : (
-            titleCell
-          )}
-        </td>
-        <td
-          draggable={selectable}
-          onDragStart={selectable ? onDragStart : undefined}
-          onDragEnd={selectable ? onDragEnd : undefined}
-          data-col="artist"
-          title={group.artists.join(", ")}
-        >
-          {group.artists.join(", ") || DASH}
-        </td>
-        <td
-          draggable={selectable}
-          onDragStart={selectable ? onDragStart : undefined}
-          onDragEnd={selectable ? onDragEnd : undefined}
-          data-col="album"
-          title={group.album}
-        >
-          {group.album || DASH}
-        </td>
-        <td
-          draggable={selectable}
-          onDragStart={selectable ? onDragStart : undefined}
-          onDragEnd={selectable ? onDragEnd : undefined}
-          className="kd-td-num"
-        >
-          {formatDuration(group.duration)}
-        </td>
-        <td draggable={selectable} onDragStart={selectable ? onDragStart : undefined}
-          onDragEnd={selectable ? onDragEnd : undefined}>
-          <span
-            className="kd-source-dots"
-            title={platformMarks.map((mark) => PLATFORM_LABEL[mark.platform]).join(" / ")}
-          >
-            {platformMarks.map((mark) => (
-              <span
-                key={mark.platform}
-                className="kd-source-dot"
-                data-platform={mark.platform}
-                data-active={mark.active ? "true" : "false"}
-              >
-                <PlatformMark id={mark.platform} size={12} />
-              </span>
-            ))}
-          </span>
-        </td>
-        <td
-          draggable={selectable}
-          onDragStart={selectable ? onDragStart : undefined}
-          onDragEnd={selectable ? onDragEnd : undefined}
-          className="kd-mono"
-        >
-          {active ? PLATFORM_LABEL[active.platform] : DASH}
-        </td>
-        <td
-          draggable={selectable}
-          onDragStart={selectable ? onDragStart : undefined}
-          onDragEnd={selectable ? onDragEnd : undefined}
-          className="kd-td-num kd-mono"
-        >
-          {active ? qualityLabel(active) : DASH}
-        </td>
-        <td
-          draggable={selectable}
-          onDragStart={selectable ? onDragStart : undefined}
-          onDragEnd={selectable ? onDragEnd : undefined}
-          style={{ width: "3rem" }}
-        >
-          {active?.vip && (
-            <span className="kd-chip" data-tone="warn">
-              VIP
-            </span>
-          )}
-        </td>
+        {columns.map((column) => dataCell(column.key))}
+        <td className="kd-table-fill" aria-hidden="true" />
       </tr>
 
       {expanded &&
@@ -376,25 +430,8 @@ export function MergedGroupRow({
           >
             <td />
             <td />
-            <td colSpan={3} className="kd-muted" style={{ paddingLeft: "1.4rem" }}>
-              <span className="kd-row" style={{ gap: "0.4rem" }}>
-                {index === sourceIndex ? <Check size={12} /> : <span style={{ width: 12 }} />}
-                <span className="kd-truncate">{source.title}</span>
-                <span className="kd-faint">·</span>
-                <span className="kd-truncate kd-faint">{source.artists.join(", ") || DASH}</span>
-              </span>
-            </td>
-            <td className="kd-td-num kd-muted">{formatDuration(source.duration)}</td>
-            <td />
-            <td className="kd-mono kd-muted">{PLATFORM_LABEL[source.platform]}</td>
-            <td className="kd-td-num kd-mono kd-muted">{qualityLabel(source)}</td>
-            <td>
-              {source.vip && (
-                <span className="kd-chip" data-tone="warn">
-                  VIP
-                </span>
-              )}
-            </td>
+            {columns.map((column) => sourceDataCell(column.key, source, index))}
+            <td className="kd-table-fill" aria-hidden="true" />
           </tr>
         ))}
       {rowMenu && (

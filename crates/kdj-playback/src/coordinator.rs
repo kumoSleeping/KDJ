@@ -371,6 +371,9 @@ impl Actor {
         validate_source(&source)?;
         self.settle_transition()?;
         source.position = source.position.max(0.0);
+        // 状态先落账、激活后执行：一旦激活失败必须整体回滚，
+        // 否则状态层声称新曲目、硬件却还在旧 Deck 上发声。
+        let checkpoint = self.state.clone();
         self.state.desired_playing = source.autoplay;
         self.state.phase = PlaybackPhase::Loading;
         self.state.track_id = Some(source.track_id);
@@ -381,25 +384,29 @@ impl Actor {
         self.state.buffering = true;
         self.state.transitioning = false;
 
-        if let Some(deck) = self.reusable_deck(&source) {
-            return self.activate(deck, Activation::Hard, source.position);
+        let result = if let Some(deck) = self.reusable_deck(&source) {
+            self.activate(deck, Activation::Hard, source.position)
+        } else {
+            let target = self.target_deck();
+            if let Some(pending) = self.pending[target as usize]
+                .as_mut()
+                .filter(|pending| same_source(&pending.request, &source))
+            {
+                pending.activation = Some(Activation::Hard);
+                return Ok(());
+            }
+            self.start_stream(target, source, Some(Activation::Hard))
+        };
+        if result.is_err() {
+            self.state = checkpoint;
         }
-        let target = self.target_deck();
-        if let Some(pending) = self.pending[target as usize]
-            .as_mut()
-            .filter(|pending| same_source(&pending.request, &source))
-        {
-            pending.activation = Some(Activation::Hard);
-            return Ok(());
-        }
-        self.start_stream(target, source, Some(Activation::Hard))
+        result
     }
 
     fn prepare(&mut self, mut source: PlaybackSource) -> Result<(), String> {
         self.open_output()?;
         validate_source(&source)?;
         source.position = source.position.max(0.0);
-        self.state.prepared_track_id = Some(source.track_id);
         if self.reusable_deck(&source).is_some()
             || self
                 .pending
@@ -407,9 +414,11 @@ impl Actor {
                 .flatten()
                 .any(|pending| same_source(&pending.request, &source))
         {
+            self.state.prepared_track_id = Some(source.track_id);
             return Ok(());
         }
         if self.retire_after_transition.is_some() {
+            self.state.prepared_track_id = Some(source.track_id);
             self.deferred_stream = Some(DeferredStream {
                 request: source,
                 activation: None,
@@ -417,6 +426,17 @@ impl Actor {
             return Ok(());
         }
         let target = self.front.other();
+        // 目标 Deck 已承诺给换曲/跳转/接歌（带激活的待启用流）时，后台预热必须让路：
+        // 顶掉它会连同激活一起丢掉——状态已指向新曲目，却再没有人激活它，
+        // 结果就是界面显示新歌、喇叭里还是旧歌。预热放弃本轮即可，
+        // 下一次 activate/prewarm 会重新挑歌准备。
+        if self.pending[target as usize]
+            .as_ref()
+            .is_some_and(|pending| pending.activation.is_some())
+        {
+            return Ok(());
+        }
+        self.state.prepared_track_id = Some(source.track_id);
         self.start_stream(target, source, None)
     }
 
@@ -448,6 +468,18 @@ impl Actor {
     }
 
     fn seek(&mut self, position: f64) -> Result<(), String> {
+        // 换曲/接歌的激活还没落地时，front 上仍是旧曲目：这时跳转旧曲目会顶掉
+        // 新曲目的待激活流——状态已指向新曲目、声音却退回旧曲目。拒绝这次跳转，
+        // 装载通常在几百毫秒内完成，调用方看到新状态后再跳。连续 scrub
+        // （Activation::Seek 的 pending）不在此列，仍允许后到的跳转覆盖先到的。
+        if self.pending.iter().flatten().any(|pending| {
+            matches!(
+                pending.activation,
+                Some(Activation::Hard) | Some(Activation::Transition(_))
+            )
+        }) {
+            return Err("换曲进行中，等新歌起播后再跳转".into());
+        }
         self.settle_transition()?;
         let current = self.decks[self.front as usize]
             .as_ref()
@@ -457,12 +489,18 @@ impl Actor {
         let mut source = current;
         source.position = clamp_position(position, source.duration);
         source.autoplay = self.state.desired_playing;
+        // 与 load 同理：登记失败不能把状态留在 Seeking。
+        let checkpoint = self.state.clone();
         self.state.phase = PlaybackPhase::Seeking;
         self.state.current_time = source.position;
         self.state.buffering = true;
         self.state.transitioning = false;
         let target = self.front.other();
-        self.start_stream(target, source, Some(Activation::Seek))
+        let result = self.start_stream(target, source, Some(Activation::Seek));
+        if result.is_err() {
+            self.state = checkpoint;
+        }
+        result
     }
 
     fn handoff(
@@ -473,7 +511,6 @@ impl Actor {
         if expected <= 0 {
             return Err("接歌目标 id 无效".into());
         }
-        self.state.prepared_track_id = Some(expected);
         let target = self.front.other();
         if self.decks[target as usize]
             .as_ref()
@@ -487,6 +524,8 @@ impl Actor {
         {
             pending.activation = Some(Activation::Transition(transition));
             let request = pending.request.clone();
+            // 先确认能接单再落账；找不到目标时必须保持状态原样。
+            self.state.prepared_track_id = Some(expected);
             self.adopt_pending_transition_state(&request, transition);
             return Ok(());
         }
@@ -497,6 +536,7 @@ impl Actor {
         {
             deferred.activation = Some(Activation::Transition(transition));
             let request = deferred.request.clone();
+            self.state.prepared_track_id = Some(expected);
             self.adopt_pending_transition_state(&request, transition);
             return Ok(());
         }
@@ -822,7 +862,11 @@ impl Actor {
             if !audio.playing && runtime.source.drained() && self.state.desired_playing {
                 self.state.phase = PlaybackPhase::Ended;
                 self.state.desired_playing = false;
-            } else if !self.state.transitioning {
+            } else if !self.state.transitioning && self.state.phase != PlaybackPhase::Ended {
+                // Ended 是终态：ACTOR_TICK(10ms) 比 STATE_INTERVAL(100ms) 密，
+                // 若下一拍就盖回 Paused，Ended 快照会被发布节流吞掉，
+                // 前端永远收不到 ended，自动下一首因此卡死。
+                // 新 Load/Play 命令会自行把 phase 推进 Loading/Playing。
                 self.state.phase = if self.state.desired_playing {
                     PlaybackPhase::Playing
                 } else {
@@ -920,6 +964,14 @@ impl Actor {
         self.state.buffering = false;
         self.state.transitioning = false;
         self.state.error = error;
+        // 状态层已经判定不在播，硬件走带必须同步停下：
+        // 否则错误挂在那里，旧 Deck 却继续发声。
+        if self.player.is_some() {
+            let _ = self.send(RtCommand::SetPlaying {
+                playing: false,
+                fade_frames: 0,
+            });
+        }
     }
 
     fn bump_sequence(&mut self) {
@@ -1001,5 +1053,294 @@ fn realtime_plan(plan: PlaybackTransitionPlan, sample_rate: u32) -> TransitionPl
         beat_frames: (plan.beat_seconds.max(0.01) * f64::from(sample_rate))
             .round()
             .min(f64::from(u32::MAX)) as u32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::PlaybackOutputSpec;
+    use kdj_player::TransportSnapshot;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Mutex;
+
+    /// 不起真实声卡的输出替身：记录发送、按开关注入失败，快照由测试直接摆弄。
+    struct FakeKnobs {
+        fail_send: AtomicBool,
+        sent: Mutex<Vec<RtCommand>>,
+        snapshot: Mutex<TransportSnapshot>,
+    }
+
+    impl Default for FakeKnobs {
+        fn default() -> Self {
+            Self {
+                fail_send: AtomicBool::new(false),
+                sent: Mutex::new(Vec::new()),
+                snapshot: Mutex::new(TransportSnapshot::default()),
+            }
+        }
+    }
+
+    struct FakeOutput {
+        knobs: Arc<FakeKnobs>,
+        next_source_id: u64,
+    }
+
+    impl PlaybackOutput for FakeOutput {
+        fn spec(&self) -> PlaybackOutputSpec {
+            PlaybackOutputSpec {
+                sample_rate: 48_000,
+                channels: 2,
+            }
+        }
+
+        fn install_stream(
+            &mut self,
+            deck: DeckId,
+            _source: Arc<StreamSource>,
+            start_frame: u64,
+        ) -> Result<u64, String> {
+            self.next_source_id += 1;
+            let source_id = self.next_source_id;
+            let mut snapshot = self.knobs.snapshot.lock().unwrap();
+            snapshot.deck_source_ids[deck as usize] = source_id;
+            snapshot.deck_frames[deck as usize] = start_frame;
+            Ok(source_id)
+        }
+
+        fn clear(&mut self, deck: DeckId) -> Result<(), String> {
+            self.knobs.snapshot.lock().unwrap().deck_source_ids[deck as usize] = 0;
+            Ok(())
+        }
+
+        fn send(&mut self, command: RtCommand) -> Result<(), String> {
+            if self.knobs.fail_send.load(Ordering::Relaxed) {
+                return Err("注入的实时发送失败".to_string());
+            }
+            match command {
+                RtCommand::HandoffPrepared { to, .. } => {
+                    self.knobs.snapshot.lock().unwrap().active_deck = to;
+                }
+                RtCommand::SetPlaying { playing, .. } => {
+                    self.knobs.snapshot.lock().unwrap().playing = playing;
+                }
+                _ => {}
+            }
+            self.knobs.sent.lock().unwrap().push(command);
+            Ok(())
+        }
+
+        fn snapshot(&mut self) -> TransportSnapshot {
+            *self.knobs.snapshot.lock().unwrap()
+        }
+    }
+
+    struct FakeFactory {
+        knobs: Arc<FakeKnobs>,
+        taken: Mutex<bool>,
+    }
+
+    impl PlaybackOutputFactory for FakeFactory {
+        fn open(
+            &self,
+            _on_error: Box<dyn FnMut(String) + Send>,
+        ) -> Result<Box<dyn PlaybackOutput>, String> {
+            let mut taken = self.taken.lock().unwrap();
+            if *taken {
+                return Err("测试输出只能取走一次".to_string());
+            }
+            *taken = true;
+            Ok(Box::new(FakeOutput {
+                knobs: Arc::clone(&self.knobs),
+                next_source_id: 0,
+            }))
+        }
+    }
+
+    fn test_actor(knobs: &Arc<FakeKnobs>) -> Actor {
+        let (sender, receiver) = mpsc::channel();
+        let emit: StateEmitter = Arc::new(|_| {});
+        let factory = FakeFactory {
+            knobs: Arc::clone(knobs),
+            taken: Mutex::new(false),
+        };
+        Actor::new(sender, receiver, emit, Arc::new(factory))
+    }
+
+    fn source(track_id: i64, position: f64) -> PlaybackSource {
+        PlaybackSource {
+            track_id,
+            path: format!("/nonexistent/{track_id}.flac"),
+            position,
+            duration: Some(180.0),
+            rate: 1.0,
+            autoplay: false,
+        }
+    }
+
+    /// 造假一个“仍在发声”的 Deck：writer 故意泄漏，流永远不会 drained，
+    /// reusable_deck 才会承认它。
+    fn live_runtime(track_id: i64, position: f64) -> DeckRuntime {
+        let (stream, writer) = StreamSource::bounded(48_000);
+        std::mem::forget(writer);
+        DeckRuntime {
+            source_id: 100 + track_id as u64,
+            source: stream,
+            request: source(track_id, position),
+            output_sample_rate: 48_000,
+        }
+    }
+
+    /// 回归主竞态：handoff/load 已承诺的 pending 不得被后台预热顶掉，
+    /// 否则激活随之丢失——状态指向新曲目，旧 Deck 却继续发声。
+    #[test]
+    fn prepare_yields_to_a_committed_pending_stream() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.0));
+        actor.state.track_id = Some(1);
+        actor.load(source(2, 0.0)).expect("load 登记");
+        assert!(matches!(
+            actor.pending[DeckId::B as usize]
+                .as_ref()
+                .and_then(|pending| pending.activation),
+            Some(Activation::Hard)
+        ));
+
+        actor.prepare(source(3, 0.0)).expect("prepare 让路但成功");
+
+        let pending = actor.pending[DeckId::B as usize]
+            .as_ref()
+            .expect("已承诺的 pending 不能被顶掉");
+        assert_eq!(pending.request.track_id, 2);
+        assert!(pending.activation.is_some());
+        assert_ne!(actor.state.prepared_track_id, Some(3));
+    }
+
+    /// 保护不能误伤常规预热：不带激活的 pending 仍然后来居上。
+    #[test]
+    fn prepare_still_replaces_an_uncommitted_pending_stream() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.0));
+        actor.state.track_id = Some(1);
+        actor.prepare(source(2, 0.0)).expect("预热 2");
+        actor.prepare(source(3, 0.0)).expect("预热 3");
+
+        let pending = actor.pending[DeckId::B as usize]
+            .as_ref()
+            .expect("预热流还在");
+        assert_eq!(pending.request.track_id, 3);
+        assert!(pending.activation.is_none());
+    }
+
+    #[test]
+    fn handoff_without_a_prepared_deck_leaves_state_untouched() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.0));
+        actor.state.track_id = Some(1);
+        actor.state.phase = PlaybackPhase::Playing;
+        let before = actor.state.clone();
+
+        let error = actor
+            .handoff(
+                9,
+                PendingTransition {
+                    position: 0.0,
+                    seconds: 4.0,
+                    plan: PlaybackTransitionPlan::default(),
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.contains("尚未开始准备"));
+        assert_eq!(actor.state, before);
+    }
+
+    #[test]
+    fn load_failure_rolls_back_published_state() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.0));
+        actor.state.track_id = Some(1);
+        actor.state.phase = PlaybackPhase::Playing;
+        actor.state.desired_playing = true;
+        actor.state.is_playing = true;
+        knobs.fail_send.store(true, Ordering::Relaxed);
+
+        // 同曲目重载走 activate 捷径；发送失败必须整体回滚，
+        // 不能留下“状态说已暂停换曲、硬件还在放”的分叉。
+        let error = actor.load(source(1, 0.0)).unwrap_err();
+
+        assert!(error.contains("注入"));
+        assert_eq!(actor.state.track_id, Some(1));
+        assert_eq!(actor.state.phase, PlaybackPhase::Playing);
+        assert!(actor.state.desired_playing);
+        assert_eq!(actor.front, DeckId::A);
+    }
+
+    #[test]
+    fn seek_is_rejected_while_a_track_change_is_pending() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.0));
+        actor.state.track_id = Some(1);
+        actor.state.phase = PlaybackPhase::Playing;
+        actor.load(source(2, 0.0)).expect("load 登记");
+
+        let error = actor.seek(30.0).unwrap_err();
+
+        assert!(error.contains("换曲进行中"));
+        assert_eq!(
+            actor.pending[DeckId::B as usize]
+                .as_ref()
+                .map(|pending| pending.request.track_id),
+            Some(2),
+            "待激活的新曲目不能被这次跳转顶掉"
+        );
+    }
+
+    /// 没有激活承诺时跳转照常登记（保护不影响正常 seek）。
+    #[test]
+    fn seek_still_streams_when_no_activation_is_pending() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.0));
+        actor.state.track_id = Some(1);
+        actor.state.phase = PlaybackPhase::Playing;
+        actor.state.desired_playing = true;
+
+        actor.seek(30.0).expect("跳转登记");
+
+        assert_eq!(actor.state.phase, PlaybackPhase::Seeking);
+        let pending = actor.pending[DeckId::B as usize]
+            .as_ref()
+            .expect("seek 流已登记");
+        assert!(matches!(pending.activation, Some(Activation::Seek)));
+        assert!((pending.request.position - 30.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn fail_stops_the_hardware_transport() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        knobs.snapshot.lock().unwrap().playing = true;
+
+        actor.fail("测试错误".to_string());
+
+        assert!(!actor.state.is_playing);
+        assert!(knobs
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| matches!(
+                command,
+                RtCommand::SetPlaying {
+                    playing: false,
+                    ..
+                }
+            )));
     }
 }

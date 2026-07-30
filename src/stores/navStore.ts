@@ -10,7 +10,13 @@ import { create } from "zustand";
 import { useAppStore, type ListMode } from "./appStore";
 import { useLibraryStore } from "./libraryStore";
 
-export type OverlayKind = "settings" | "queue" | "preview" | "folders" | "vjExport";
+export type OverlayKind =
+  | "settings"
+  | "queue"
+  | "preview"
+  | "folders"
+  | "vjExport"
+  | "lyrics";
 
 export interface Place {
   listMode: ListMode;
@@ -30,6 +36,7 @@ function overlayOf(): OverlayKind | null {
   if (app.showPreview) return "preview";
   if (app.showQueue) return "queue";
   if (app.showVjExport) return "vjExport";
+  if (app.showLyrics) return "lyrics";
   return null;
 }
 
@@ -71,6 +78,7 @@ function applyOverlay(overlay: OverlayKind | null): void {
   else if (overlay === "queue") app.openQueuePanel();
   else if (overlay === "folders") app.openFoldersPanel();
   else if (overlay === "vjExport") app.openVjExportPanel();
+  else if (overlay === "lyrics") app.openLyricsPanel();
   else app.dismissOverlay();
 }
 
@@ -86,6 +94,7 @@ export function applyPlace(place: Place): void {
       showPreview: false,
       showFolders: false,
       showVjExport: false,
+      showLyrics: false,
     });
     if (lib.queueView !== place.queueView) lib.setQueueView(place.queueView);
     if (lib.filter.folder !== place.folder || lib.filter.folderDeep !== place.folderDeep) {

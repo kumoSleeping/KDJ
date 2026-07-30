@@ -17,9 +17,9 @@ tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
 anyhow = "1.0.104"
-kdj-core = { version = "0.2.11", path = "../crates/kdj-core" }
-kdj-library = { version = "0.2.11", path = "../crates/kdj-library" }
-kdj-server = { version = "0.2.11", path = "../crates/kdj-server" }
+kdj-core = { version = "0.2.12", path = "../crates/kdj-core" }
+kdj-library = { version = "0.2.12", path = "../crates/kdj-library" }
+kdj-server = { version = "0.2.12", path = "../crates/kdj-server" }
 rand = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }
 # tauri.conf.json 里一有 `plugins` 段，`generate_context!` 展开出来的代码就会
@@ -27,7 +27,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 # "could not find serde_json in the list of imported crates"，
 # 看着完全不像是"加了个 updater 配置"引起的。
 serde_json = "1.0"
-tauri = { version = "2.11", features = [] }
+# macOS 的透明 WebView 构建器受该 feature 保护；桌面歌词窗口需要真透明背景。
+tauri = { version = "2.11", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2.7"
 tauri-plugin-opener = "2.5"
 tokio = { version = "1.53.1", features = ["sync"] }
@@ -37,7 +38,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # 一键更新：updater 下载+minisign 校验+原地替换，process 提供替换后的自重启。
 # 只在桌面有意义（安卓走 Release 页下 APK），target 限定住免得安卓交叉编译多拖依赖。
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-kdj-playback = { version = "0.2.11", path = "../crates/kdj-playback" }
+kdj-playback = { version = "0.2.12", path = "../crates/kdj-playback" }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 

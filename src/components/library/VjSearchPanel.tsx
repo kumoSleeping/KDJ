@@ -3,7 +3,7 @@ import { Plus, Search, Trash2 } from "lucide-react";
 import { buildVjQuery, useVjKeywords } from "../../lib/vjKeywords";
 import type { Track } from "../../types";
 import { Button } from "../common";
-import { requestVjSearch } from "../workspace/Workspace";
+import { requestVjSearch } from "../../lib/vjSearch";
 
 function compactTag(value: string, max = 7): string {
   const chars = Array.from(value);

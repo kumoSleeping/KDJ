@@ -15,8 +15,8 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
 use kdj_core::models::{
-    Account, AccountState, Platform, Quality, QrSession, QrStateValue, ResolveKind, ResolveResponse,
-    SongSource,
+    Account, AccountState, LyricText, Platform, Quality, QrSession, QrStateValue, ResolveKind,
+    ResolveResponse, SongSource,
 };
 use kdj_core::paths::render_filename;
 use serde_json::{json, Map, Value};
@@ -512,6 +512,60 @@ impl MusicProvider for NeteaseProvider {
     async fn preview_url(&self, source: &SongSource) -> Result<Option<String>> {
         let (url, _ext, _size) = self.resolve_audio(&source.key, Quality::Q128).await?;
         Ok(Some(url))
+    }
+
+    async fn lyric(&self, key: &str) -> Result<Option<LyricText>> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Ok(None);
+        }
+        let body = self
+            .client
+            .weapi(
+                "/weapi/song/lyric",
+                payload([
+                    ("id", Value::String(key.to_string())),
+                    ("lv", json!(-1)),
+                    ("tv", json!(-1)),
+                    ("rv", json!(-1)),
+                    ("kv", json!(-1)),
+                ]),
+            )
+            .await
+            .context("请求网易云歌词失败")?;
+        // nolyric / uncollected 表示确实没词；lrc 空串也当没有。
+        if body.get("nolyric").and_then(Value::as_bool) == Some(true)
+            || body.get("uncollected").and_then(Value::as_bool) == Some(true)
+        {
+            return Ok(None);
+        }
+        let lrc = body
+            .pointer("/lrc/lyric")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if lrc.is_empty() {
+            return Ok(None);
+        }
+        let translated_lrc = body
+            .pointer("/tlyric/lyric")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        // rv=-1 已请求；有罗马音时落在 romalrc.lyric。
+        let romaji_lrc = body
+            .pointer("/romalrc/lyric")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        Ok(Some(LyricText {
+            lrc,
+            translated_lrc,
+            romaji_lrc,
+        }))
     }
 
     async fn download(&self, job: DownloadJob<'_>) -> Result<PathBuf> {

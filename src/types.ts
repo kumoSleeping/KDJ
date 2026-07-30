@@ -100,6 +100,29 @@ export interface SongSource {
   payload: Record<string, unknown>;
 }
 
+export interface LyricsRequest {
+  title: string;
+  artist?: string;
+  duration?: number | null;
+  platform?: Platform | null;
+  key?: string;
+  /** 启用的搜词引擎（顺序=同分偏好）。 */
+  engines?: Platform[];
+  /** follow | wyy | qqm */
+  prefer?: string;
+}
+
+export interface LyricsResponse {
+  lrc: string;
+  translated_lrc: string;
+  romaji_lrc?: string;
+  platform: Platform;
+  key: string;
+  title: string;
+  artist: string;
+  score: number;
+}
+
 export interface MergedGroup {
   group_id: string;
   title: string;
@@ -497,6 +520,18 @@ export interface KdjBridge {
    */
   applyUpdate?: null | ((onProgress?: (progress: UpdateProgress) => void) => Promise<void>);
   windowControl: (action: "minimize" | "maximize" | "close" | "drag") => void;
+  /** 桌面独立歌词窗口；浏览器与移动端没有该能力。 */
+  desktopLyrics?: null | ((options: {
+    visible: boolean;
+    position: "top" | "bottom";
+    locked: boolean;
+    /** 字号倍率；原生侧按此调整悬浮窗高度，避免放大后被裁切。 */
+    fontScale?: number;
+    /** 只有切换顶部/底部或重新打开时吸附；锁定切换不能抹掉自由拖动位置。 */
+    reposition: boolean;
+    x?: number | null;
+    y?: number | null;
+  }) => Promise<void>);
   onSidecarLog: (cb: (line: string) => void) => () => void;
 }
 

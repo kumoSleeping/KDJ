@@ -1,0 +1,356 @@
+import { create } from "zustand";
+
+const STORAGE_KEY = "kd-lyrics-prefs";
+
+export type LyricsEngine = "wyy" | "qqm";
+/** 跟随曲库来源，或强制只用来源平台搜/取词。 */
+export type LyricsDisplaySource = "follow" | "wyy" | "qqm";
+/**
+ * 歌词附加层（面板右上角一字切换）：
+ * off=原词 · meaning=意（翻译） · romaji=音（罗马音）
+ */
+export type LyricsExtra = "off" | "meaning" | "romaji";
+export type DesktopLyricsPosition = "top" | "bottom";
+/** 歌词模式下右栏双极：详情 ↔ 歌词。 */
+export type LyricsAsideFace = "detail" | "lyrics";
+
+export interface LyricsPrefs {
+  /**
+   * 歌词模式（自动显示歌词）：
+   * 开 = 播放时后台搜词；点曲目按 asideFace 打开详情/歌词，顶栏可切换；下一首预取。
+   * 关 = 不自动打开；点曲目仍开详情；播放条按钮可手动开歌词。
+   */
+  autoShow: boolean;
+  /** 启用的搜词引擎；顺序 = 同分时的偏好。至少保留一家。 */
+  engines: LyricsEngine[];
+  /** 显示来源：跟随曲目 / 强制网易云 / 强制 QQ。 */
+  displaySource: LyricsDisplaySource;
+  /** 当前附加层；点右上角单字在可用态之间循环。 */
+  lyricExtra: LyricsExtra;
+  /**
+   * 歌词模式下右栏记住上次点的是详情还是歌词。
+   * 之后点列表 / 定位正在播，都按这个面弹出。
+   */
+  asideFace: LyricsAsideFace;
+  /** 桌面歌词使用独立透明置顶窗口；移动端忽略。 */
+  desktopEnabled: boolean;
+  /** 桌面歌词贴近当前主屏的上沿或下沿。 */
+  desktopPosition: DesktopLyricsPosition;
+  /** 锁定后整个歌词窗口鼠标穿透。 */
+  desktopLocked: boolean;
+  /** 桌面歌词字号倍率；1=默认最小，最大 3（300%）。 */
+  desktopFontScale: number;
+  /** 自由拖动后的物理屏幕坐标；两者齐全时下次启动优先恢复。 */
+  desktopPositionX: number | null;
+  desktopPositionY: number | null;
+}
+
+const DEFAULTS: LyricsPrefs = {
+  autoShow: false,
+  engines: ["wyy", "qqm"],
+  displaySource: "follow",
+  lyricExtra: "meaning",
+  asideFace: "lyrics",
+  desktopEnabled: false,
+  desktopPosition: "bottom",
+  desktopLocked: false,
+  desktopFontScale: 1,
+  desktopPositionX: null,
+  desktopPositionY: null,
+};
+
+function normalizeEngines(value: unknown): LyricsEngine[] {
+  if (!Array.isArray(value)) return [...DEFAULTS.engines];
+  const out: LyricsEngine[] = [];
+  for (const item of value) {
+    if ((item === "wyy" || item === "qqm") && !out.includes(item)) out.push(item);
+  }
+  return out.length ? out : [...DEFAULTS.engines];
+}
+
+function normalizeSource(value: unknown): LyricsDisplaySource {
+  if (value === "wyy" || value === "qqm" || value === "follow") return value;
+  return DEFAULTS.displaySource;
+}
+
+function normalizeExtra(value: unknown): LyricsExtra {
+  if (value === "off" || value === "meaning" || value === "romaji") return value;
+  return DEFAULTS.lyricExtra;
+}
+
+function normalizeDesktopPosition(value: unknown): DesktopLyricsPosition {
+  return value === "top" || value === "bottom" ? value : DEFAULTS.desktopPosition;
+}
+
+/** 100%（默认字号）为最小，最大 300%。 */
+export const DESKTOP_FONT_SCALE_MIN = 1;
+export const DESKTOP_FONT_SCALE_MAX = 3;
+
+function normalizeDesktopFontScale(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(DESKTOP_FONT_SCALE_MAX, Math.max(DESKTOP_FONT_SCALE_MIN, value))
+    : DEFAULTS.desktopFontScale;
+}
+
+/** 搜词引擎三态：双开 / 仅网易云 / 仅 QQ。 */
+export type LyricsEngineMode = "both" | "wyy" | "qqm";
+
+export function enginesMode(engines: readonly LyricsEngine[]): LyricsEngineMode {
+  const hasWyy = engines.includes("wyy");
+  const hasQqm = engines.includes("qqm");
+  if (hasWyy && hasQqm) return "both";
+  if (hasQqm && !hasWyy) return "qqm";
+  return "wyy";
+}
+
+export function enginesFromMode(mode: LyricsEngineMode): LyricsEngine[] {
+  if (mode === "both") return ["wyy", "qqm"];
+  return [mode];
+}
+
+function normalizeCoordinate(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? Math.round(value) : null;
+}
+
+/** 按本首歌实际有的层，排出可点循环：原 → 意 → 音（缺的跳过）。 */
+export function lyricExtraCycle(hasMeaning: boolean, hasRomaji: boolean): LyricsExtra[] {
+  const cycle: LyricsExtra[] = ["off"];
+  if (hasMeaning) cycle.push("meaning");
+  if (hasRomaji) cycle.push("romaji");
+  return cycle;
+}
+
+export function lyricExtraLabel(extra: LyricsExtra): string {
+  if (extra === "meaning") return "意";
+  if (extra === "romaji") return "音";
+  return "原";
+}
+
+export function lyricExtraTitle(extra: LyricsExtra): string {
+  if (extra === "meaning") return "翻译（点击切换）";
+  if (extra === "romaji") return "罗马音（点击切换）";
+  return "原词（点击切换）";
+}
+
+function normalizeAsideFace(value: unknown): LyricsAsideFace {
+  return value === "detail" || value === "lyrics" ? value : DEFAULTS.asideFace;
+}
+
+function pickPrefs(state: LyricsPrefs): LyricsPrefs {
+  return {
+    autoShow: state.autoShow,
+    engines: [...state.engines],
+    displaySource: state.displaySource,
+    lyricExtra: state.lyricExtra,
+    asideFace: state.asideFace,
+    desktopEnabled: state.desktopEnabled,
+    desktopPosition: state.desktopPosition,
+    desktopLocked: state.desktopLocked,
+    desktopFontScale: state.desktopFontScale,
+    desktopPositionX: state.desktopPositionX,
+    desktopPositionY: state.desktopPositionY,
+  };
+}
+
+function load(): LyricsPrefs {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
+    if (!raw || typeof raw !== "object") return { ...DEFAULTS, engines: [...DEFAULTS.engines] };
+    const data = raw as Partial<LyricsPrefs> & {
+      floatWindow?: boolean;
+      showTranslation?: boolean;
+      showRomaji?: boolean;
+      desktopLockConfigured?: boolean;
+    };
+    // 兼容旧键 floatWindow
+    const autoShow =
+      typeof data.autoShow === "boolean"
+        ? data.autoShow
+        : typeof data.floatWindow === "boolean"
+          ? data.floatWindow
+          : DEFAULTS.autoShow;
+    // 兼容旧的双开关 → 单层状态
+    let lyricExtra = normalizeExtra(data.lyricExtra);
+    if (data.lyricExtra == null) {
+      if (data.showRomaji === true) lyricExtra = "romaji";
+      else if (data.showTranslation === false) lyricExtra = "off";
+      else lyricExtra = "meaning";
+    }
+    return {
+      autoShow,
+      engines: normalizeEngines(data.engines),
+      displaySource: normalizeSource(data.displaySource),
+      lyricExtra,
+      asideFace: normalizeAsideFace(data.asideFace),
+      desktopEnabled:
+        typeof data.desktopEnabled === "boolean" ? data.desktopEnabled : DEFAULTS.desktopEnabled,
+      desktopPosition: normalizeDesktopPosition(data.desktopPosition),
+      // 第一版开发态曾默认锁定，导致一打开就完全收不到拖动事件；没有配置标记的一律迁回可拖动。
+      desktopLocked:
+        data.desktopLockConfigured === true && typeof data.desktopLocked === "boolean"
+          ? data.desktopLocked
+          : DEFAULTS.desktopLocked,
+      desktopFontScale: normalizeDesktopFontScale(data.desktopFontScale),
+      desktopPositionX: normalizeCoordinate(data.desktopPositionX),
+      desktopPositionY: normalizeCoordinate(data.desktopPositionY),
+    };
+  } catch {
+    return { ...DEFAULTS, engines: [...DEFAULTS.engines] };
+  }
+}
+
+function save(prefs: LyricsPrefs): void {
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({ ...pickPrefs(prefs), desktopLockConfigured: true }),
+  );
+  // 桌面歌词是独立 WebView：WKWebView 往往不派发跨窗 storage 事件，改用 Tauri 广播。
+  notifyPrefsChanged();
+}
+
+function notifyPrefsChanged(): void {
+  void import("@tauri-apps/api/event")
+    .then(({ emit }) => emit("lyrics-prefs-changed"))
+    .catch(() => {});
+}
+
+/** 引擎或显示来源变了：清缓存，正在播的歌会重新按新偏好搜。 */
+function bustLyricsCache(): void {
+  void import("../stores/lyricsStore").then(({ useLyricsStore }) => {
+    useLyricsStore.getState().clear();
+  });
+}
+
+interface LyricsPrefsState extends LyricsPrefs {
+  /** 引擎 / 显示来源变更计数；LyricsHost 用来触发重搜。 */
+  prefsEpoch: number;
+  setAutoShow(value: boolean): void;
+  setEngines(engines: LyricsEngine[]): void;
+  toggleEngine(engine: LyricsEngine): void;
+  setDisplaySource(source: LyricsDisplaySource): void;
+  setLyricExtra(extra: LyricsExtra): void;
+  setAsideFace(face: LyricsAsideFace): void;
+  setDesktopEnabled(value: boolean): void;
+  setDesktopPosition(value: DesktopLyricsPosition): void;
+  setDesktopLocked(value: boolean): void;
+  setDesktopFontScale(value: number): void;
+  setDesktopCoordinates(x: number, y: number): void;
+  /** 从另一个 WebView 写入的 localStorage 重新同步偏好。 */
+  syncFromStorage(): void;
+  /** 按本首歌可用层循环切换。 */
+  cycleLyricExtra(hasMeaning: boolean, hasRomaji: boolean): void;
+}
+
+export const useLyricsPrefs = create<LyricsPrefsState>((set, get) => ({
+  ...load(),
+  prefsEpoch: 0,
+  setAutoShow(autoShow) {
+    const next = { ...get(), autoShow };
+    set({ autoShow });
+    save(next);
+    if (!autoShow) {
+      void import("../stores/appStore").then(({ useAppStore }) => {
+        if (useAppStore.getState().showLyrics) useAppStore.getState().dismissOverlay();
+      });
+    }
+  },
+  setEngines(engines) {
+    const normalized = normalizeEngines(engines);
+    let displaySource = get().displaySource;
+    // 关掉的正是强制来源时，退回跟随。
+    if (
+      (displaySource === "wyy" || displaySource === "qqm") &&
+      !normalized.includes(displaySource)
+    ) {
+      displaySource = "follow";
+    }
+    set((state) => ({
+      engines: normalized,
+      displaySource,
+      prefsEpoch: state.prefsEpoch + 1,
+    }));
+    save({ ...get(), engines: normalized, displaySource });
+    bustLyricsCache();
+  },
+  toggleEngine(engine) {
+    const current = get().engines;
+    let engines: LyricsEngine[];
+    let displaySource = get().displaySource;
+    if (current.includes(engine)) {
+      // 至少留一家，避免两边都关掉后没法搜。
+      engines = current.filter((item) => item !== engine);
+      if (!engines.length) return;
+      // 关掉的正是强制来源时，退回跟随。
+      if (displaySource === engine) displaySource = "follow";
+    } else {
+      engines = [...current, engine];
+    }
+    set((state) => ({ engines, displaySource, prefsEpoch: state.prefsEpoch + 1 }));
+    save({ ...get(), engines, displaySource });
+    bustLyricsCache();
+  },
+  setDisplaySource(displaySource) {
+    const source = normalizeSource(displaySource);
+    let engines = get().engines;
+    // 强制某家时自动启用对应引擎。
+    if ((source === "wyy" || source === "qqm") && !engines.includes(source)) {
+      engines = [...engines, source];
+    }
+    set((state) => ({ displaySource: source, engines, prefsEpoch: state.prefsEpoch + 1 }));
+    save({ ...get(), displaySource: source, engines });
+    bustLyricsCache();
+  },
+  setLyricExtra(lyricExtra) {
+    const extra = normalizeExtra(lyricExtra);
+    set({ lyricExtra: extra });
+    save({ ...get(), lyricExtra: extra });
+  },
+  setAsideFace(asideFace) {
+    const face = normalizeAsideFace(asideFace);
+    set({ asideFace: face });
+    save({ ...get(), asideFace: face });
+  },
+  setDesktopEnabled(desktopEnabled) {
+    set({ desktopEnabled });
+    save({ ...get(), desktopEnabled });
+  },
+  setDesktopPosition(desktopPosition) {
+    const position = normalizeDesktopPosition(desktopPosition);
+    set({ desktopPosition: position, desktopPositionX: null, desktopPositionY: null });
+    save({
+      ...get(),
+      desktopPosition: position,
+      desktopPositionX: null,
+      desktopPositionY: null,
+    });
+  },
+  setDesktopLocked(desktopLocked) {
+    set({ desktopLocked });
+    save({ ...get(), desktopLocked });
+  },
+  setDesktopFontScale(desktopFontScale) {
+    const scale = normalizeDesktopFontScale(desktopFontScale);
+    set({ desktopFontScale: scale });
+    save({ ...get(), desktopFontScale: scale });
+  },
+  setDesktopCoordinates(x, y) {
+    const desktopPositionX = normalizeCoordinate(x);
+    const desktopPositionY = normalizeCoordinate(y);
+    if (desktopPositionX == null || desktopPositionY == null) return;
+    set({ desktopPositionX, desktopPositionY });
+    save({ ...get(), desktopPositionX, desktopPositionY });
+  },
+  syncFromStorage() {
+    const next = load();
+    set((state) => ({ ...next, prefsEpoch: state.prefsEpoch + 1 }));
+  },
+  cycleLyricExtra(hasMeaning, hasRomaji) {
+    const cycle = lyricExtraCycle(hasMeaning, hasRomaji);
+    if (cycle.length < 2) return;
+    const current = get().lyricExtra;
+    const index = cycle.indexOf(current);
+    const next = cycle[(index >= 0 ? index + 1 : 0) % cycle.length];
+    set({ lyricExtra: next });
+    save({ ...get(), lyricExtra: next });
+  },
+}));

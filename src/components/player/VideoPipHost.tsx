@@ -7,7 +7,7 @@
  * panel：网络→右栏 VideoPreview；本地→曲库详情（宿主停）
  * float：本组件出画；系统画中画由此处手动打开，或切走应用时自动打开
  *
- * 呈现由 session/active/mode 的 effect 驱动，而不是只在事件回调里 play 一次——
+ * 呈现由 session/active/有效模式的 effect 驱动，而不是只在事件回调里 play 一次——
  * 否则 setSession 后首帧小窗还没挂上、或 MEDIA_SYNC 的 play 早于监听挂载时，
  * 本地视频会出现「有声音、没小窗」。
  */
@@ -172,8 +172,8 @@ function mediaUrl(session: VideoPipSession): string {
 
 /** panel 档的旁路 UI（右栏 / 曲库详情），与宿主 <video> 启停分开。 */
 function applyPanelChrome(session: VideoPipSession, mode: VideoPreviewMode): void {
-  // 网络视频右栏预览面板暂时关闭：panel 档也退回浮动小窗，细项改在下载队列里配。
-  if (mode === "panel" && session.source === "network") {
+  // 在线搜索结果的双击预览固定走浮动小窗；底栏模式只属于本地视频。
+  if (session.source === "network") {
     if (useAppStore.getState().showPreview) useAppStore.getState().dismissOverlay();
     return;
   }
@@ -223,7 +223,9 @@ export function VideoPipHost() {
   const [size, setSize] = useState({ w: FLOAT_DEFAULT_W });
   const [pos, setPos] = useState(() => defaultFloatPos(FLOAT_DEFAULT_W));
 
-  const hostActive = Boolean(session && active && mode === "float");
+  // 网络搜索结果始终浮动预览；保存的 panel/float 偏好只决定本地视频呈现。
+  const effectiveMode: VideoPreviewMode = session?.source === "network" ? "float" : mode;
+  const hostActive = Boolean(session && active && effectiveMode === "float");
   // 进了系统画中画就藏自研小窗，避免底下还留一块空壳
   const showFloating = Boolean(hostActive && !systemPip);
   const isLocal = session?.source === "local";
@@ -372,18 +374,21 @@ export function VideoPipHost() {
         }
         return;
       }
+      // 网络预览不响应本地视频模式切换，避免点一下底栏按钮把正在看的 B 站小窗关掉。
+      if (pip.session.source === "network") return;
       applyPanelChrome(pip.session, detail.mode);
-      // host 启停由 [session, active, mode] effect 接手
+      // host 启停由 [session, active, effectiveMode] effect 接手
     };
     window.addEventListener(APPLY_VIDEO_MODE_EVENT, onApply);
     return () => window.removeEventListener(APPLY_VIDEO_MODE_EVENT, onApply);
   }, []);
 
-  // 核心：session 就绪且浮动档 → 装载并播放；否则拆掉宿主。
+  // 核心：session 就绪且有效模式为浮动 → 装载并播放；否则拆掉宿主。
+  // 网络 session 的有效模式恒为 float；本地 session 才读取底栏保存的 mode。
   // 系统画中画不走 mode，由小窗按钮 / 切走应用另行 requestPictureInPicture。
   // rAF：等 data-floating / .kd-pip-float 那帧样式落地，避免在 1×1 idle shell 里 play 后被 WebKit 丢掉。
   useEffect(() => {
-    if (!session || !active || mode !== "float") {
+    if (!session || !active || effectiveMode !== "float") {
       stopHost();
       return;
     }
@@ -407,14 +412,15 @@ export function VideoPipHost() {
       cancelAnimationFrame(frame);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, active, mode]);
+  }, [key, active, effectiveMode]);
 
   // 切走应用（窗口失焦 / 页面隐藏）时，默认把正在播的浮动预览送进系统画中画
   useEffect(() => {
     let hideTimer = 0;
     const maybeAutoPip = () => {
       const pip = useVideoPip.getState();
-      if (!pip.active || pip.mode !== "float" || pip.systemPip || !pip.playing) return;
+      const floats = pip.session?.source === "network" || pip.mode === "float";
+      if (!pip.active || !floats || pip.systemPip || !pip.playing) return;
       const video = videoRef.current;
       if (!video || video.paused || !canSystemPip(video)) return;
       void enterSystemPip(video);

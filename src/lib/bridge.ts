@@ -125,6 +125,9 @@ async function createTauriBridge(): Promise<KdjBridge> {
       if (action === "close") silenceMediaForExit();
       void tauriInvoke("window_control", { action }).catch(() => {});
     },
+    desktopLyrics: desktop
+      ? (options) => tauriInvoke<void>("set_desktop_lyrics", options)
+      : null,
     // 纯 Rust 版没有 sidecar 子进程，日志直接落在 Rust 侧，这里给个空退订函数
     onSidecarLog: () => () => {},
   };

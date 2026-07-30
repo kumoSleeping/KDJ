@@ -23,6 +23,8 @@ import type {
   QrState,
   ResolveResponse,
   ScanResponseLike,
+  LyricsRequest,
+  LyricsResponse,
   SearchRequest,
   SearchResponse,
   Settings,
@@ -102,6 +104,8 @@ export const api = {
   logout: (platform: string) => post<Account>(`/accounts/${platform}/logout`),
 
   search: (body: SearchRequest) => post<SearchResponse>("/search", body),
+  /** 按曲名/艺人自动搜歌词（网易云 + QQ）；有来源 key 时优先直取。 */
+  lyrics: (body: LyricsRequest) => post<LyricsResponse>("/lyrics", body),
   /**
    * 歌曲试听直链（最低码率，不下载）。整个 SongSource 发过去：
    * QQ 的 media_mid、SoundCloud 的 transcoding_url 都在 payload 里。

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, ApiError } from "../../lib/api";
 import { clearTextSelection } from "../../lib/textSelection";
 import {
@@ -17,6 +17,7 @@ import {
   searchQueueDropAt,
 } from "../../lib/folderDrop";
 import { claimActiveTrackDragIds } from "../../lib/trackDrag";
+import { getPlayingTrack, subscribePlayingTrack } from "../../lib/playingTrack";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLayoutSignals } from "../../lib/useLayoutMode";
@@ -34,7 +35,10 @@ import {
 import type { IntakeItem, MergedGroup, Platform, SongSource, VideoInfo } from "../../types";
 import { InlineNotice, Sheet } from "../common";
 import { AppChrome } from "../chrome/AppChrome";
-import { AsideHead } from "../chrome/AsideHead";
+import { AsideFaceSwitch, AsideHead, type TrackAsideFace } from "../chrome/AsideHead";
+import { useLyricsPrefs, type LyricsAsideFace } from "../../lib/lyricsPrefs";
+import { VJ_SEARCH_EVENT } from "../../lib/vjSearch";
+import { ensureLyrics } from "../../stores/lyricsStore";
 import { ChromeActions } from "../chrome/ChromeActions";
 import { ChromeHistory } from "../chrome/ChromeHistory";
 import { LibraryWorkRail } from "../chrome/LibraryWorkRail";
@@ -52,6 +56,7 @@ import { VideoPreview } from "../download/VideoPreview";
 import { FolderTree, NarrowFolderRail } from "../library/FolderTree";
 import { VjExportPanel } from "../library/VjExportPanel";
 import { DETAIL_EVENT } from "../library/TrackTable";
+import { LyricsView } from "../player/LyricsView";
 import { SettingsPanel } from "../settings/SettingsPanel";
 import { LibraryToolbar } from "../library/LibraryToolbar";
 import { TrackDetail } from "../library/TrackDetail";
@@ -69,16 +74,9 @@ function errorText(error: unknown): string {
  */
 const BILI_RE = /bilibili\.com|b23\.tv|^\s*(?:BV[0-9A-Za-z]{10}|av\d+)\s*$/i;
 
-/** 「搜VJ(Bili)」从详情面板发过来：query 已经拼好（曲名 + 关键词）。 */
-export const VJ_SEARCH_EVENT = "kd:vj-search";
-
 /** 常驻两栏的身份。右侧面板现在只在本地列表区内展开，不参与换位。 */
 type ColumnId = "tree" | "list";
 const COLUMN_ORDER_KEY = "kd-column-order";
-
-export function requestVjSearch(query: string): void {
-  window.dispatchEvent(new CustomEvent<string>(VJ_SEARCH_EVENT, { detail: query }));
-}
 
 /**
  * 唯一的工作台。没有"下载板块"和"曲库板块"之分。
@@ -110,8 +108,17 @@ export function Workspace() {
   const foldersPanelEpoch = useAppStore((state) => state.foldersPanelEpoch);
   const showVjExport = useAppStore((state) => state.showVjExport);
   const vjExportPanelEpoch = useAppStore((state) => state.vjExportPanelEpoch);
+  const showLyrics = useAppStore((state) => state.showLyrics);
+  const lyricsPanelEpoch = useAppStore((state) => state.lyricsPanelEpoch);
+  const openLyricsPanel = useAppStore((state) => state.openLyricsPanel);
+  const setPreferredAsideFace = useLyricsPrefs((state) => state.setAsideFace);
   const toggleSettingsPanel = useAppStore((state) => state.toggleSettingsPanel);
   const toggleQueuePanel = useAppStore((state) => state.toggleQueuePanel);
+  const playingTrack = useSyncExternalStore(
+    subscribePlayingTrack,
+    getPlayingTrack,
+    getPlayingTrack,
+  );
   const enqueue = useDownloadStore((state) => state.enqueue);
   const activeDownloads = useDownloadStore((state) => state.activeCount);
 
@@ -392,8 +399,20 @@ export function Workspace() {
   useEffect(() => {
     asideLockedRef.current = asideLocked;
   }, [asideLocked]);
-  /** 用户点曲目或「正在播」入口后钉住详情；关闭后下一次单击曲目会重新打开。 */
+  /** 用户点曲目或「正在播」入口后钉住详情/歌词内容面；关闭后下一次单击曲目会重新打开。 */
   const [detailPinned, setDetailPinned] = useState(false);
+  /** 歌词模式下右栏双极：详情 ↔ 歌词。关歌词模式时点歌仍只开详情。 */
+  const [trackAsideFace, setTrackAsideFace] = useState<TrackAsideFace>(
+    () => useLyricsPrefs.getState().asideFace,
+  );
+  const trackAsideFaceRef = useRef(trackAsideFace);
+  useEffect(() => {
+    trackAsideFaceRef.current = trackAsideFace;
+  }, [trackAsideFace]);
+  const prevShowLyricsRef = useRef(showLyrics);
+
+  /** 点曲目只负责详情；歌词由右栏/播放器上的歌词入口显式打开。 */
+  const faceForTrackPin = useCallback((): LyricsAsideFace => "detail", []);
 
   /**
    * 双击播放会先走一下单击（detail=1）再走 dblclick。单击「查看这首」的详情
@@ -409,31 +428,54 @@ export function Workspace() {
   }, []);
   useEffect(() => clearDetailTimer, [clearDetailTimer]);
 
+  const pinTrackAside = useCallback(
+    (face: TrackAsideFace, trackId?: number) => {
+      // 先写 ref，避免紧接着的 store 更新抢先 re-render 时误把内容面关掉。
+      trackAsideFaceRef.current = face;
+      setDetailPinned(true);
+      setTrackAsideFace(face);
+      if (face === "lyrics") {
+        openLyricsPanel();
+        const track =
+          (trackId != null
+            ? useLibraryStore.getState().tracks.find((item) => item.id === trackId)
+            : null) ??
+          selectSelectedTrack(useLibraryStore.getState()) ??
+          getPlayingTrack();
+        void ensureLyrics(track);
+      } else {
+        showTrackDetail();
+      }
+    },
+    [openLyricsPanel, showTrackDetail],
+  );
+
   const selectTrack = useCallback(
     (id: number, mode: SelectMode, clickCount = 1) => {
       select(id, mode);
       // 普通单击既选择曲目，也明确表达“查看这首”的意图。修饰键/勾选多选
       // 只维护选区，不能让详情抽屉跟着每次批量选择反复弹出。
       if (mode !== "replace") return;
-      // 单栏、锁定、或单击已有明确动作（播放 / 加入下一首）时不抢详情；
-      // 详情统一留给底部唱盘或用户再次单击（双击播放、无附加动作时）。
       if (asideLockedRef.current) return;
+
+      const face = faceForTrackPin();
+
+      // 单栏、或单击已有明确动作（播放 / 加入下一首）时不抢详情；
+      // 详情统一留给底部唱盘或用户再次单击（双击播放、无附加动作时）。
       if (!shouldPinDetailOnClick(useTrackClickPrefs.getState(), layout)) return;
       clearDetailTimer();
       if (clickCount >= 2) {
-        // 双击播放：取消「单击查看」那一拍延迟即可，但详情仍然钉住。
+        // 双击播放：取消「单击查看」那一拍延迟即可，但内容面仍然钉住。
         // 以前这里会 unset，慢双击（第二下晚于 300ms）就会先弹出再被撤掉。
-        setDetailPinned(true);
-        showTrackDetail();
+        pinTrackAside(face, id);
         return;
       }
       detailTimerRef.current = window.setTimeout(() => {
         detailTimerRef.current = null;
-        setDetailPinned(true);
-        showTrackDetail();
+        pinTrackAside(face, id);
       }, 300);
     },
-    [clearDetailTimer, layout, select, showTrackDetail],
+    [clearDetailTimer, faceForTrackPin, layout, pinTrackAside, select],
   );
 
   /**
@@ -456,13 +498,27 @@ export function Workspace() {
       if (useAppStore.getState().listMode !== "library") {
         detailJumpRef.current = true;
       }
-      setDetailPinned(true);
-      showTrackDetail();
+      // 唱盘 / 定位：显式查看这首；歌词模式下按上次记住的面打开。
+      pinTrackAside(faceForTrackPin());
       if (layout === "narrow") setSheet("aside");
     };
     window.addEventListener(DETAIL_EVENT, onDetail);
     return () => window.removeEventListener(DETAIL_EVENT, onDetail);
-  }, [layout, portrait, showTrackDetail]);
+  }, [faceForTrackPin, layout, pinTrackAside, portrait]);
+
+  // 播放条 / 自动显示：store 打开歌词 → 钉住内容面并切到歌词极。
+  // 从歌词极关掉 store（播放条再点一次）→ 收起整块内容面。
+  // 顶栏切到详情会清 showLyrics，但 face 已是 detail，不能误关面板。
+  useEffect(() => {
+    if (showLyrics) {
+      setDetailPinned(true);
+      setTrackAsideFace("lyrics");
+    } else if (prevShowLyricsRef.current && trackAsideFaceRef.current === "lyrics") {
+      setDetailPinned(false);
+      setSheet(null);
+    }
+    prevShowLyricsRef.current = showLyrics;
+  }, [showLyrics, lyricsPanelEpoch]);
 
   // 网络视频：右栏预览面板暂时关闭，不再自动拉开预览板块。
   useEffect(() => {
@@ -475,15 +531,25 @@ export function Workspace() {
   // 写两份的话，以后加一种面板必然漏改一处
   // 下载队列只在显式打开 / 真正入队时出现；搜索半栏另看 hasResults。
   // 歌曲试听走主播放条；网络视频右栏预览暂时关闭。
-  // 空闲不挂「选一首看详情」占位——没旁路内容时右栏整块消失，列表吃满宽。
+  // 空闲不挂「选一首看详情」占位——没旁路内容时右栏整块消失。
+  // 右栏打开时叠在列表右侧，不挤中间区，列宽与空白保持不动。
+  // 歌词不再独占旁路槽：歌词模式下与详情同属内容面，顶栏双极切换。
   const queueAside = showQueue;
   // 暂时关掉右栏网络视频预览面板：细项改到下载队列里配；双击仍走浮动 / 系统 PiP。
   const previewAside = false;
-  const overlayAside =
+  const realOverlayAside =
     showFolders || showSettings || showVjExport || previewAside || queueAside;
-  const detailAside = detailPinned && Boolean(selected) && !overlayAside;
-  const hasAsideContent = overlayAside || detailAside;
+  const lyricsTrack = selected ?? playingTrack;
+  // 有 showLyrics / 歌词极时也要挂面板：无曲时 LyricsView 自己显示空态，
+  // 不能因为 lyricsTrack 为空就把整栏吞掉（看起来像点了没反应）。
+  const lyricsAside =
+    !realOverlayAside && detailPinned && trackAsideFace === "lyrics";
+  const detailAside =
+    !realOverlayAside && detailPinned && trackAsideFace === "detail" && Boolean(selected);
+  const trackAside = lyricsAside || detailAside;
+  const hasAsideContent = realOverlayAside || trackAside;
   const showAside = layout === "wide" && hasAsideContent;
+  const showTrackFaceSwitch = trackAside;
 
   const closeAside = useCallback(() => {
     setDetailPinned(false);
@@ -491,19 +557,40 @@ export function Workspace() {
     useAppStore.getState().dismissOverlay();
   }, []);
 
+  const onTrackAsideFace = useCallback(
+    (face: TrackAsideFace) => {
+      trackAsideFaceRef.current = face;
+      setTrackAsideFace(face);
+      setPreferredAsideFace(face);
+      if (face === "lyrics") {
+        openLyricsPanel();
+        void ensureLyrics(selectSelectedTrack(useLibraryStore.getState()) ?? getPlayingTrack());
+        return;
+      }
+      showTrackDetail();
+    },
+    [openLyricsPanel, setPreferredAsideFace, showTrackDetail],
+  );
+
   const asideLabel = showFolders
     ? "文件夹"
     : showSettings
       ? "设置"
       : showVjExport
-          ? "导出 VJ"
-          : previewAside
-            ? "预览"
-            : queueAside
-              ? "下载队列"
-              : detailAside
-                ? "曲目详情"
-                : "";
+        ? "导出 VJ"
+        : previewAside
+          ? "预览"
+          : queueAside
+            ? "下载队列"
+            : showTrackFaceSwitch
+              ? trackAsideFace === "lyrics"
+                ? "歌词"
+                : "曲目详情"
+              : lyricsAside
+                ? "歌词"
+                : detailAside
+                  ? "曲目详情"
+                  : "";
   const asidePanel = showFolders ? (
     <FolderTree />
   ) : showSettings ? (
@@ -527,11 +614,18 @@ export function Workspace() {
     </div>
   ) : queueAside ? (
     <QueuePanel />
+  ) : lyricsAside ? (
+    <LyricsView track={lyricsTrack} />
   ) : detailAside && selected ? (
     <TrackDetail key={selected.id} track={selected} />
   ) : null;
   const queueOpen =
-    showQueue && !showSettings && !showFolders && !showPreview && !showVjExport;
+    showQueue &&
+    !showSettings &&
+    !showFolders &&
+    !showPreview &&
+    !showVjExport &&
+    !showLyrics;
   // 宽屏是真正的右栏，窄屏则是承载同一份内容的抽屉；按钮位置和开关语义保持一致。
   const asideOpen = layout === "wide" ? showAside : sheet === "aside" && hasAsideContent;
   const asideState = asideOpen ? "open" : asideLocked ? "locked" : "closed";
@@ -563,7 +657,7 @@ export function Workspace() {
 
   // 显式旁路入口必须忽略锁定；窄屏没有右栏时拉开同一份内容的抽屉。
   useEffect(() => {
-    if (!(showSettings || showFolders || showVjExport)) return;
+    if (!(showSettings || showFolders || showVjExport || showLyrics)) return;
     setAsideLocked(false);
     if (layout === "narrow") setSheet("aside");
   }, [
@@ -571,9 +665,11 @@ export function Workspace() {
     showSettings,
     showFolders,
     showVjExport,
+    showLyrics,
     settingsPanelEpoch,
     foldersPanelEpoch,
     vjExportPanelEpoch,
+    lyricsPanelEpoch,
   ]);
 
   useEffect(() => {
@@ -1256,7 +1352,11 @@ export function Workspace() {
                     onDoubleClick={() => resetColumn("right")}
                   />
                   <aside className="kd-split-aside kd-pop-panel" ref={localAsideRef}>
-                    <AsideHead title={asideLabel} />
+                    <AsideHead
+                      title={asideLabel}
+                      face={showTrackFaceSwitch ? trackAsideFace : undefined}
+                      onFaceChange={showTrackFaceSwitch ? onTrackAsideFace : undefined}
+                    />
                     <div className="kd-split-aside-body kd-scroll">{asidePanel}</div>
                   </aside>
                 </>
@@ -1273,6 +1373,11 @@ export function Workspace() {
           <Sheet
             open={sheet === "aside" && hasAsideContent}
             title={asideLabel || "面板"}
+            heading={
+              showTrackFaceSwitch ? (
+                <AsideFaceSwitch face={trackAsideFace} onFaceChange={onTrackAsideFace} />
+              ) : undefined
+            }
             onClose={closeAside}
           >
             {asidePanel}

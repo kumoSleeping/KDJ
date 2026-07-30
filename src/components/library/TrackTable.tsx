@@ -54,6 +54,16 @@ import type { DownloadTask } from "../../types";
 import { useQueueStore } from "../../stores/queueStore";
 import type { FileDisposalMode, Track } from "../../types";
 import { playTrack } from "../../lib/playTrack";
+import {
+  beginColumnPointerReorder,
+  loadTableColumnPrefs,
+  moveColumnOrder,
+  orderByPrefs,
+  pxToRemString,
+  remStringToPx,
+  saveTableColumnPrefs,
+  type TableColumnPrefs,
+} from "../../lib/tableColumnPrefs";
 import { ContextMenu, EmptyState, InlineNotice } from "../common";
 
 /** @deprecated 请从 `lib/playTrack` 引用；保留 re-export 以免旧 import 断掉。 */
@@ -180,16 +190,11 @@ const COLUMN_PREFS_KEY = "kd-library-columns";
 const INDEX_COL_KEY = "index";
 const INDEX_DEFAULT_WIDTH = "3.2rem";
 
-interface ColumnPrefs {
-  order: string[];
-  hidden: string[];
-  /** 用户拖过的列宽（rem 字符串）。没出现的键走 COLUMNS / 序号默认值。 */
-  widths: Record<string, string>;
-}
+type ColumnPrefs = TableColumnPrefs;
 
 const COLUMN_MIN_WIDTH: Record<string, string> = {
   index: "2.4rem",
-  title: "8rem",
+  title: "4rem",
   artist: "3rem",
   album: "3rem",
   bpm: "2.8rem",
@@ -200,46 +205,9 @@ const COLUMN_MIN_WIDTH: Record<string, string> = {
   rating: "3rem",
 };
 
-function rootFontPx(): number {
-  if (typeof document === "undefined") return 16;
-  return parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
-}
-
-function remStringToPx(value: string): number {
-  const n = parseFloat(value);
-  if (!Number.isFinite(n)) return 0;
-  return value.trim().endsWith("px") ? n : n * rootFontPx();
-}
-
-function pxToRemString(px: number): string {
-  return `${Math.round((px / rootFontPx()) * 100) / 100}rem`;
-}
-
 function loadColumnPrefs(): ColumnPrefs {
-  try {
-    const raw: unknown = JSON.parse(localStorage.getItem(COLUMN_PREFS_KEY) ?? "null");
-    if (raw && typeof raw === "object") {
-      const { order, hidden, widths } = raw as Record<string, unknown>;
-      const strings = (value: unknown) =>
-        Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : [];
-      const widthMap: Record<string, string> = {};
-      if (widths && typeof widths === "object") {
-        for (const [key, value] of Object.entries(widths as Record<string, unknown>)) {
-          if (typeof value === "string" && remStringToPx(value) > 0) widthMap[key] = value;
-        }
-      }
-      // 标题列永远不准藏：它是唯一说明「这行是哪首歌」的列，藏掉整张表就没有主语了。
-      // 在读档这一层拦，而不是只在菜单里禁用——存档被手改坏也不会出现无标题的表
-      return {
-        order: strings(order),
-        hidden: strings(hidden).filter((key) => key !== "title"),
-        widths: widthMap,
-      };
-    }
-  } catch {
-    // 存档坏了就用默认，不值得为它报错
-  }
-  return { order: [], hidden: [], widths: {} };
+  // 标题列永远不准藏：它是唯一说明「这行是哪首歌」的列。
+  return loadTableColumnPrefs(COLUMN_PREFS_KEY, ["title"]);
 }
 
 export interface TrackTableProps {
@@ -870,6 +838,8 @@ export function TrackTable({
   const tracksRef = useRef(tracks);
   const selectedIdRef = useRef(selectedId);
   const pendingCountRef = useRef(0);
+  const onReorderRef = useRef(onReorder);
+  onReorderRef.current = onReorder;
   useEffect(() => {
     const centerSelected = () => {
       const box = scrollerRef.current;
@@ -910,11 +880,19 @@ export function TrackTable({
   /** 正在拖列宽的列 key；拖的时候禁掉列头换序，松手后压掉那一次排序 click。 */
   const [resizingCol, setResizingCol] = useState<string | null>(null);
   const suppressSortClickRef = useRef(false);
+  const suppressNextSortClick = () => {
+    suppressSortClickRef.current = true;
+    // pointerup 之后浏览器会同步补发 click；下一轮任务仍没消费就自动解锁，
+    // 避免拖到另一列时 click 没落在源表头，导致下次正常点排序被吞掉。
+    window.setTimeout(() => {
+      suppressSortClickRef.current = false;
+    }, 0);
+  };
   const colPrefsRef = useRef(colPrefs);
   colPrefsRef.current = colPrefs;
 
   const saveColPrefs = (next: ColumnPrefs) => {
-    localStorage.setItem(COLUMN_PREFS_KEY, JSON.stringify(next));
+    saveTableColumnPrefs(COLUMN_PREFS_KEY, next);
     setColPrefs(next);
   };
 
@@ -948,20 +926,15 @@ export function TrackTable({
       window.removeEventListener("pointerup", onUp);
       document.body.removeAttribute("data-kd-col-resizing");
       setResizingCol(null);
-      suppressSortClickRef.current = true;
+      suppressNextSortClick();
       // 松手时把最新宽度落盘；拖动过程只 setState，避免每个像素写 localStorage
-      localStorage.setItem(COLUMN_PREFS_KEY, JSON.stringify(colPrefsRef.current));
+      saveTableColumnPrefs(COLUMN_PREFS_KEY, colPrefsRef.current);
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
 
-  // 没记忆过的列排 MAX：stable sort 让它们之间保持 COLUMNS 里的默认相对顺序
-  const colRank = (key: string) => {
-    const index = colPrefs.order.indexOf(key);
-    return index === -1 ? Number.MAX_SAFE_INTEGER : index;
-  };
-  const orderedColumns = [...COLUMNS].sort((a, b) => colRank(a.key) - colRank(b.key));
+  const orderedColumns = orderByPrefs(COLUMNS, colPrefs.order);
   const colIds = orderedColumns.map((column) => column.key);
   const visibleColumns = orderedColumns.filter((column) => !colPrefs.hidden.includes(column.key));
   const indexWidth = widthFor(INDEX_COL_KEY, INDEX_DEFAULT_WIDTH);
@@ -983,6 +956,55 @@ export function TrackTable({
   tracksRef.current = tracks;
   selectedIdRef.current = selectedId;
   pendingCountRef.current = pendingDownloads.length;
+
+  // ↑↓：在可手排的文件夹里，按「当前列表顺序」把选中曲目上移/下移一格。
+  // 捕获阶段先于播放器音量快捷键，避免一边换位一边改音量。
+  // 不可手排（全部曲目 / 深目录 / 临时列表）时不接管，↑↓ 仍归音量。
+  useEffect(() => {
+    if (!reorderable) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      if (isEditable(event.target)) return;
+      if ((event.target as HTMLElement | null)?.closest?.('[role="menu"]')) return;
+      const up = event.key === "ArrowUp";
+      const down = event.key === "ArrowDown";
+      if (!up && !down) return;
+      const reorder = onReorderRef.current;
+      if (!reorder) return;
+
+      const list = tracksRef.current;
+      const selectedSet = new Set(useLibraryStore.getState().selectedIds);
+      const ordered = list.filter((track) => selectedSet.has(track.id));
+      if (ordered.length === 0) return;
+
+      const firstIndex = list.findIndex((track) => track.id === ordered[0]!.id);
+      const lastIndex = list.findIndex((track) => track.id === ordered[ordered.length - 1]!.id);
+      if (firstIndex < 0 || lastIndex < 0) return;
+
+      if (up) {
+        event.preventDefault();
+        if (firstIndex === 0) return;
+        reorder(
+          ordered.map((track) => track.id),
+          list[firstIndex - 1]!.id,
+          true,
+        );
+        return;
+      }
+
+      event.preventDefault();
+      if (lastIndex >= list.length - 1) return;
+      reorder(
+        ordered.map((track) => track.id),
+        list[lastIndex + 1]!.id,
+        false,
+      );
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [reorderable]);
+
   // 行高以真实渲染出来的第一行为准（字号/主题变了它才变），不靠猜。
   useEffect(() => {
     const row = scrollerRef.current?.querySelector<HTMLTableRowElement>("tr[data-kd-track-id]");
@@ -1009,11 +1031,7 @@ export function TrackTable({
   const moveColumn = (from: string, to: string) => {
     if (from === to) return;
     // 以当前看到的顺序为基准重排，理由同 PanelStack.commit。
-    // 插入点用未过滤的 indexOf：从左边拖来落在目标右侧、从右边拖来落在左侧，
-    // 这样拖到最右也够得着（落点竖线跟着画在对应的一侧，见 data-col-drop）
-    const next = colIds.filter((id) => id !== from);
-    next.splice(colIds.indexOf(to), 0, from);
-    saveColPrefs({ ...colPrefs, order: next });
+    saveColPrefs({ ...colPrefs, order: moveColumnOrder(colPrefs.order, colIds, from, to) });
   };
 
   if (loading && tracks.length === 0 && pendingDownloads.length === 0) {
@@ -1077,9 +1095,21 @@ export function TrackTable({
         data-layout={layout}
         style={{ minWidth: tableMinWidthPx }}
       >
+        {/* 每个真实列由 col 锁住自己的宽度，最后一列只吃剩余空白。
+            这样拖标题不会再按比例挤动艺人/BPM；总宽超过视口时由外层横向滚动。 */}
+        <colgroup>
+          <col style={{ width: indexWidth }} />
+          {visibleColumns.map((column) => (
+            <col
+              key={column.key}
+              style={{ width: widthFor(column.key, column.width ?? "4rem") }}
+            />
+          ))}
+          <col />
+        </colgroup>
         <thead>
           {/* 右键任意列头 = 选列菜单；拖列头 = 换列序；列头右缘把手 = 调列宽。
-              拖和点不冲突：一旦触发 dragstart，浏览器就不再发那次 click */}
+              指针移动超过阈值才算拖动，并拦掉松手后的排序 click。 */}
           <tr
             onContextMenu={(event) => {
               event.preventDefault();
@@ -1102,6 +1132,7 @@ export function TrackTable({
               <th
                 key={column.key}
                 data-col={column.key}
+                data-column-reorder="true"
                 style={{ width: colWidth }}
                 className={column.align === "num" ? "kd-td-num" : undefined}
                 data-sortable={column.id ? "true" : undefined}
@@ -1125,35 +1156,18 @@ export function TrackTable({
                         : undefined
                     : undefined
                 }
-                draggable={!resizingCol}
-                onDragStart={(event) => {
-                  if (resizingCol) {
-                    event.preventDefault();
-                    return;
-                  }
-                  setDragCol(column.key);
-                  event.dataTransfer.effectAllowed = "move";
-                  // Firefox 不设 data 就不触发 drag 事件
-                  event.dataTransfer.setData("text/plain", column.key);
-                }}
-                onDragEnd={() => {
-                  setDragCol(null);
-                  setOverCol(null);
-                }}
-                onDragOver={(event) => {
-                  // 只认自家的列拖拽：行拖拽和外来文件都不该在列头上放行
-                  if (!dragCol || dragCol === column.key || resizingCol) return;
-                  event.preventDefault();
-                  setOverCol(column.key);
-                }}
-                onDragLeave={() =>
-                  setOverCol((current) => (current === column.key ? null : current))
-                }
-                onDrop={(event) => {
-                  event.preventDefault();
-                  if (dragCol) moveColumn(dragCol, column.key);
-                  setDragCol(null);
-                  setOverCol(null);
+                onPointerDown={(event) => {
+                  if (resizingCol) return;
+                  beginColumnPointerReorder(event, column.key, visibleColumns.map((item) => item.key), {
+                    onStart: setDragCol,
+                    onOver: setOverCol,
+                    onMove: moveColumn,
+                    onEnd: () => {
+                      setDragCol(null);
+                      setOverCol(null);
+                    },
+                    onDragged: suppressNextSortClick,
+                  });
                 }}
                 data-dragging={dragCol === column.key ? "true" : undefined}
                 data-col-drop={
@@ -1166,10 +1180,10 @@ export function TrackTable({
                 title={
                   column.id
                     ? column.id === sort
-                      ? "再点一下换方向；方向转回来那一下取消这一列的排序"
+                      ? "再点一下换方向；拖动列头可调整顺序"
                       : column.id === sort2
-                        ? "副排序键。再点一下把它升为主排序（原主排序降为副）"
-                        : "点一下按它排。已经有主排序时，这一下加的是副排序"
+                        ? "副排序键；再点升为主排序，拖动可调整列顺序"
+                        : "点一下按它排；拖动列头可调整顺序"
                     : "拖动列头换列序；右缘拖动调列宽；右键选择显示哪些列"
                 }
               >
@@ -1196,6 +1210,7 @@ export function TrackTable({
               </th>
               );
             })}
+            <th className="kd-table-fill" aria-hidden="true" />
           </tr>
         </thead>
         <tbody>
@@ -1247,13 +1262,14 @@ export function TrackTable({
                 }
                 return <td key={column.key} data-col={column.key} />;
               })}
+              <td className="kd-table-fill" aria-hidden="true" />
             </tr>
           ))}
           {/* 虚拟滚动：只渲染视口附近的行，上方的高度由这根占位行撑住。
               行序号、拖放、选中都按 tracks 里的真实下标走，不被窗口影响。 */}
           {winStart > 0 && (
             <tr data-spacer="top" aria-hidden="true">
-              <td colSpan={visibleColumns.length + 1} style={{ height: winStart * rowH }} />
+              <td colSpan={visibleColumns.length + 2} style={{ height: winStart * rowH }} />
             </tr>
           )}
           {windowedTracks.map((track, index) => (
@@ -1383,12 +1399,13 @@ export function TrackTable({
                   draggable: false,
                 }, dragSurface);
               })}
+              <td className="kd-table-fill" aria-hidden="true" />
             </tr>
           ))}
           {winEnd < tracks.length && (
             <tr data-spacer="bottom" aria-hidden="true">
               <td
-                colSpan={visibleColumns.length + 1}
+                colSpan={visibleColumns.length + 2}
                 style={{ height: (tracks.length - winEnd) * rowH }}
               />
             </tr>
@@ -1427,7 +1444,7 @@ export function TrackTable({
             type="button"
             onClick={() => {
               localStorage.removeItem(COLUMN_PREFS_KEY);
-              setColPrefs({ order: [], hidden: [], widths: {} });
+              setColPrefs(loadColumnPrefs());
               setColMenu(null);
             }}
           >

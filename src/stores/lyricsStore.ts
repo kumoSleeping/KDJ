@@ -1,0 +1,227 @@
+/**
+ * 歌词缓存：听歌优先——播放绝不被搜词挡住；词到了再补上，并按当前进度对齐。
+ * 同时给右侧唱盘预告的「下一首」预取，切歌时尽量已经就绪。
+ */
+
+import { create } from "zustand";
+import { api, ApiError } from "../lib/api";
+import { useLyricsPrefs } from "../lib/lyricsPrefs";
+import { parseLrc, type LrcLine } from "../lib/lrc";
+import type { LyricsResponse, Platform, Track } from "../types";
+
+export type LyricsStatus = "idle" | "loading" | "ready" | "empty" | "error";
+
+export interface LyricsEntry {
+  status: LyricsStatus;
+  lines: LrcLine[];
+  translated: LrcLine[];
+  romaji: LrcLine[];
+  meta: LyricsResponse | null;
+  error: string;
+  /** 与 lyricsPrefs 搜词相关项对应；偏好变了视为未缓存。 */
+  fingerprint: string;
+  /** 正在飞的请求；同歌并发 ensure 共用一个 promise。 */
+  inflight: Promise<void> | null;
+}
+
+function prefsFingerprint(): string {
+  const prefs = useLyricsPrefs.getState();
+  return `${prefs.displaySource}|${prefs.engines.join(",")}`;
+}
+
+function emptyEntry(status: LyricsStatus = "idle"): LyricsEntry {
+  return {
+    status,
+    lines: [],
+    translated: [],
+    romaji: [],
+    meta: null,
+    error: "",
+    fingerprint: "",
+    inflight: null,
+  };
+}
+
+/** HMR / 旧缓存可能缺 romaji 等字段；读的时候补齐，避免 .some 炸成白屏。 */
+function normalizeEntry(entry: LyricsEntry): LyricsEntry {
+  if (
+    entry.lines &&
+    entry.translated &&
+    entry.romaji &&
+    entry.meta !== undefined &&
+    entry.error !== undefined &&
+    entry.fingerprint !== undefined &&
+    entry.inflight !== undefined
+  ) {
+    return entry;
+  }
+  return {
+    ...entry,
+    lines: entry.lines ?? [],
+    translated: entry.translated ?? [],
+    romaji: entry.romaji ?? [],
+    meta: entry.meta ?? null,
+    error: entry.error ?? "",
+    fingerprint: entry.fingerprint ?? "",
+    inflight: entry.inflight ?? null,
+  };
+}
+
+// useSyncExternalStore 要求未变化时返回同一个引用；每次 new 会触发无限重渲染。
+const EMPTY_ENTRY = emptyEntry();
+
+function platformOf(track: Track): Platform | null {
+  const raw = track.source_platform?.trim().toLowerCase();
+  if (raw === "wyy" || raw === "qqm") return raw;
+  return null;
+}
+
+function requestOf(track: Track) {
+  const prefs = useLyricsPrefs.getState();
+  const engines = prefs.engines;
+  const prefer = prefs.displaySource;
+  let platform = platformOf(track);
+  let key = track.source_key || "";
+
+  if (prefer === "wyy" || prefer === "qqm") {
+    // 强制来源：曲库 key 对得上才直取，否则清空 key 让后端按该引擎搜。
+    if (platform === prefer && key) {
+      platform = prefer;
+    } else {
+      platform = prefer;
+      key = "";
+    }
+  } else if (platform === "wyy" || platform === "qqm") {
+    if (!engines.includes(platform)) {
+      // 跟随，但曲库来源引擎被关掉了：改走搜索。
+      platform = null;
+      key = "";
+    }
+  } else if (platform) {
+    platform = null;
+    key = "";
+  }
+
+  return {
+    title: track.title || track.filename,
+    artist: track.artist || "",
+    duration: track.duration,
+    platform,
+    key,
+    engines: [...engines],
+    prefer,
+  };
+}
+
+interface LyricsStore {
+  byId: Record<number, LyricsEntry>;
+  ensure(track: Track | null | undefined): Promise<void>;
+  get(trackId: number | null | undefined): LyricsEntry;
+  /** 引擎 / 显示来源变更后清掉，避免旧偏好结果粘着。 */
+  clear(): void;
+}
+
+export const useLyricsStore = create<LyricsStore>((set, get) => ({
+  byId: {},
+
+  get(trackId) {
+    if (trackId == null) return EMPTY_ENTRY;
+    const entry = get().byId[trackId];
+    return entry ? normalizeEntry(entry) : EMPTY_ENTRY;
+  },
+
+  clear() {
+    set({ byId: {} });
+  },
+
+  async ensure(track) {
+    if (!track || track.id <= 0) return;
+    const fingerprint = prefsFingerprint();
+    const existing = get().byId[track.id];
+    if (
+      existing &&
+      existing.fingerprint === fingerprint &&
+      (existing.status === "ready" || existing.status === "empty")
+    ) {
+      return;
+    }
+    if (existing?.inflight && existing.fingerprint === fingerprint) {
+      await existing.inflight;
+      return;
+    }
+
+    const run = (async () => {
+      set((state) => ({
+        byId: {
+          ...state.byId,
+          [track.id]: {
+            ...(state.byId[track.id] ?? emptyEntry()),
+            status: "loading",
+            fingerprint,
+            error: "",
+          },
+        },
+      }));
+      try {
+        const meta = await api.lyrics(requestOf(track));
+        const lines = parseLrc(meta.lrc);
+        const translated = parseLrc(meta.translated_lrc || "");
+        const romaji = parseLrc(meta.romaji_lrc || "");
+        set((state) => ({
+          byId: {
+            ...state.byId,
+            [track.id]: {
+              status: lines.length ? "ready" : "empty",
+              lines,
+              translated,
+              romaji,
+              meta,
+              error: lines.length ? "" : "这首歌没有可用歌词",
+              fingerprint,
+              inflight: null,
+            },
+          },
+        }));
+      } catch (error) {
+        const message =
+          error instanceof ApiError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        set((state) => ({
+          byId: {
+            ...state.byId,
+            [track.id]: {
+              status: "error",
+              lines: [],
+              translated: [],
+              romaji: [],
+              meta: null,
+              error: message,
+              fingerprint,
+              inflight: null,
+            },
+          },
+        }));
+      }
+    })();
+
+    set((state) => ({
+      byId: {
+        ...state.byId,
+        [track.id]: {
+          ...(state.byId[track.id] ?? emptyEntry("loading")),
+          status: "loading",
+          fingerprint,
+          inflight: run,
+        },
+      },
+    }));
+    await run;
+  },
+}));
+
+export function ensureLyrics(track: Track | null | undefined): Promise<void> {
+  return useLyricsStore.getState().ensure(track);
+}

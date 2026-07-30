@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use async_trait::async_trait;
 use kdj_core::models::{
-    Account, Platform, Quality, QrSession, QrStateValue, ResolveResponse, SongSource,
+    Account, LyricText, Platform, Quality, QrSession, QrStateValue, ResolveResponse, SongSource,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -233,6 +233,12 @@ pub trait MusicProvider: Send + Sync {
     /// 地址会直接交给前端的 `<audio src>`，所以必须是浏览器裸 GET 就能放的直链。
     async fn preview_url(&self, source: &SongSource) -> Result<Option<String>> {
         let _ = source;
+        Ok(None)
+    }
+
+    /// 按平台歌曲 id / mid 取 LRC。没有歌词能力的平台默认 `Ok(None)`。
+    async fn lyric(&self, key: &str) -> Result<Option<LyricText>> {
+        let _ = key;
         Ok(None)
     }
 }

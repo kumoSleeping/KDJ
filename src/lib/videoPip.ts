@@ -1,8 +1,9 @@
 /**
- * 网络 / 本地视频预览呈现模式（底栏按钮两态切换）：
- * - panel：网络→右栏 VideoPreview；本地→曲库详情里的 LocalVideoPlayer
+ * 本地视频呈现模式（底栏按钮两态切换）：
+ * - panel：曲库详情里的 LocalVideoPlayer
  * - float：自研浮动小窗
  *
+ * 网络搜索/下载结果的双击预览固定使用浮动小窗，不读取也不修改这项本地偏好。
  * 系统画中画不是底栏模式：在浮动小窗里手动开，或切走应用时自动开。
  */
 
@@ -20,8 +21,8 @@ export const VIDEO_PREVIEW_MODE_UI: Record<
   VideoPreviewMode,
   { label: string; hint: string }
 > = {
-  float: { label: "浮动小窗", hint: "视频用自研小窗播放" },
-  panel: { label: "右栏面板", hint: "视频在右侧面板播放" },
+  float: { label: "浮动小窗", hint: "本地视频用自研小窗播放" },
+  panel: { label: "详情面板", hint: "本地视频在曲目详情中播放" },
 };
 
 export const APPLY_VIDEO_MODE_EVENT = "kd:apply-video-mode";

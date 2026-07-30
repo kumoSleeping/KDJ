@@ -8,6 +8,7 @@ pub mod aggregate;
 pub mod downloads;
 pub mod error;
 pub mod jobs;
+pub mod lyrics;
 pub mod routes;
 pub mod state;
 pub mod waveform;

@@ -234,6 +234,56 @@ pub struct QrState {
     pub account: Option<Account>,
 }
 
+// ---------------------------------------------------------------- 歌词
+
+/// 某平台上一首歌的歌词正文（LRC）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LyricText {
+    pub lrc: String,
+    #[serde(default)]
+    pub translated_lrc: String,
+    /// 罗马音 / 音译 LRC（网易云 romalrc、QQ roma）。
+    #[serde(default)]
+    pub romaji_lrc: String,
+}
+
+/// 按曲名/艺人自动搜歌词后的结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LyricsResponse {
+    pub lrc: String,
+    #[serde(default)]
+    pub translated_lrc: String,
+    #[serde(default)]
+    pub romaji_lrc: String,
+    pub platform: Platform,
+    pub key: String,
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    /// 候选与请求元数据的匹配分（0..1）。
+    #[serde(default)]
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LyricsRequest {
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    pub duration: Option<f64>,
+    /// 下载时记下的来源平台；有的话优先直取，不必再搜。
+    #[serde(default)]
+    pub platform: Option<Platform>,
+    #[serde(default)]
+    pub key: String,
+    /// 启用的搜词引擎（顺序=同分偏好）。空则默认网易云 → QQ。
+    #[serde(default)]
+    pub engines: Vec<Platform>,
+    /// 显示来源：`follow`（跟随曲库）/ `wyy` / `qqm`。
+    #[serde(default)]
+    pub prefer: String,
+}
+
 // ---------------------------------------------------------------- 搜索
 
 /// 一首歌在某个平台上的具体来源。

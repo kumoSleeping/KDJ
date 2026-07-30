@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use kdj_core::AppConfig;
-use serde::Serialize;
-use tauri::Manager;
+use serde::{Deserialize, Serialize};
+use tauri::{Emitter, Manager};
 #[cfg(desktop)]
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
@@ -320,7 +320,11 @@ async fn pick_folders(_app: tauri::AppHandle) -> Vec<String> {
 
 /// 自绘标题栏的窗口动作。`maximize` 是切换；`drag` 用于 Overlay 顶栏拖动。
 #[tauri::command]
-fn window_control(_window: tauri::Window, action: String) -> Result<(), String> {
+fn window_control(
+    _window: tauri::Window,
+    _app: tauri::AppHandle,
+    action: String,
+) -> Result<(), String> {
     #[cfg(desktop)]
     {
         let result = match action.as_str() {
@@ -330,7 +334,15 @@ fn window_control(_window: tauri::Window, action: String) -> Result<(), String> 
                 Ok(false) => _window.maximize(),
                 Err(err) => Err(err),
             },
-            "close" => _window.close(),
+            "close" => {
+                // 主窗口关闭时不能把透明歌词窗留成一个看不见入口的孤儿进程。
+                if _window.label() == "main" {
+                    if let Some(lyrics) = _app.get_webview_window("lyrics-overlay") {
+                        let _ = lyrics.close();
+                    }
+                }
+                _window.close()
+            }
             // data-tauri-drag-region 在 macOS Overlay 下经常失灵；顶栏 mousedown 显式开拖。
             "drag" => _window.start_dragging(),
             other => return Err(format!("未知的窗口动作：{other}")),
@@ -340,6 +352,144 @@ fn window_control(_window: tauri::Window, action: String) -> Result<(), String> 
     #[cfg(not(desktop))]
     {
         let _ = action;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DesktopLyricsPosition {
+    Top,
+    Bottom,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct DesktopLyricsCoordinates {
+    x: i32,
+    y: i32,
+}
+
+#[cfg(desktop)]
+fn position_desktop_lyrics(
+    window: &tauri::WebviewWindow,
+    position: DesktopLyricsPosition,
+) -> Result<(), String> {
+    let monitor = window
+        .primary_monitor()
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "找不到主显示器".to_string())?;
+    let monitor_position = monitor.position();
+    let monitor_size = monitor.size();
+    let window_size = window.outer_size().map_err(|err| err.to_string())?;
+    let margin = (24.0 * monitor.scale_factor()).round() as i32;
+    let x =
+        monitor_position.x + ((monitor_size.width as i64 - window_size.width as i64) / 2) as i32;
+    let y = match position {
+        DesktopLyricsPosition::Top => monitor_position.y + margin,
+        DesktopLyricsPosition::Bottom => {
+            monitor_position.y + monitor_size.height as i32 - window_size.height as i32 - margin
+        }
+    };
+    window
+        .set_position(tauri::PhysicalPosition::new(x, y))
+        .map_err(|err| err.to_string())
+}
+
+fn desktop_lyrics_inner_size(font_scale: f64) -> (f64, f64) {
+    let scale = font_scale.clamp(1.0, 3.0);
+    // 基准 680×92；高度随字号涨，避免 300% 时被窗口裁切。
+    let width = (680.0 * (0.92 + 0.08 * scale)).clamp(420.0, 960.0);
+    let height = (48.0 + 44.0 * scale).clamp(76.0, 220.0);
+    (width, height)
+}
+
+/// 创建/更新桌面歌词窗口。窗口由 Rust 持有原生层级和鼠标穿透，页面只负责绘字。
+#[tauri::command]
+fn set_desktop_lyrics(
+    app: tauri::AppHandle,
+    visible: bool,
+    position: DesktopLyricsPosition,
+    locked: bool,
+    font_scale: Option<f64>,
+    reposition: bool,
+    x: Option<i32>,
+    y: Option<i32>,
+) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        if !visible {
+            if let Some(window) = app.get_webview_window("lyrics-overlay") {
+                window.hide().map_err(|err| err.to_string())?;
+            }
+            return Ok(());
+        }
+
+        let scale = font_scale.unwrap_or(1.0).clamp(1.0, 3.0);
+        let (width, height) = desktop_lyrics_inner_size(scale);
+
+        let window = match app.get_webview_window("lyrics-overlay") {
+            Some(window) => window,
+            None => {
+                let window = tauri::WebviewWindowBuilder::new(
+                    &app,
+                    "lyrics-overlay",
+                    tauri::WebviewUrl::App("index.html?window=lyrics".into()),
+                )
+                .title("KDJ 桌面歌词")
+                .inner_size(width, height)
+                .min_inner_size(420.0, 76.0)
+                .resizable(true)
+                .decorations(false)
+                .transparent(true)
+                .shadow(false)
+                .always_on_top(true)
+                .visible_on_all_workspaces(true)
+                .skip_taskbar(true)
+                .focused(false)
+                .visible(false)
+                .build()
+                .map_err(|err| err.to_string())?;
+                let moved_app = app.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Moved(position) = event {
+                        let _ = moved_app.emit_to(
+                            "lyrics-overlay",
+                            "desktop-lyrics-moved",
+                            DesktopLyricsCoordinates {
+                                x: position.x,
+                                y: position.y,
+                            },
+                        );
+                    }
+                });
+                window
+            }
+        };
+
+        window
+            .set_size(tauri::LogicalSize::new(width, height))
+            .map_err(|err| err.to_string())?;
+        window
+            .set_always_on_top(true)
+            .map_err(|err| err.to_string())?;
+        window
+            .set_ignore_cursor_events(locked)
+            .map_err(|err| err.to_string())?;
+        if reposition {
+            if let (Some(x), Some(y)) = (x, y) {
+                window
+                    .set_position(tauri::PhysicalPosition::new(x, y))
+                    .map_err(|err| err.to_string())?;
+            } else {
+                position_desktop_lyrics(&window, position)?;
+            }
+        }
+        window.show().map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, visible, position, locked, font_scale, reposition, x, y);
         Ok(())
     }
 }
@@ -583,6 +733,7 @@ pub fn run() {
         pick_folder,
         pick_folders,
         window_control,
+        set_desktop_lyrics,
         desktop_player::playback_initialize,
         desktop_player::playback_command,
         desktop_player::playback_state
@@ -598,7 +749,8 @@ pub fn run() {
         apply_update,
         pick_folder,
         pick_folders,
-        window_control
+        window_control,
+        set_desktop_lyrics
     ]);
 
     builder

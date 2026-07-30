@@ -12,9 +12,10 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
+use base64::Engine as _;
 use kdj_core::models::{
-    Account, AccountState, Platform, Quality, QrSession, QrStateValue, ResolveKind, ResolveResponse,
-    SongSource,
+    Account, AccountState, LyricText, Platform, Quality, QrSession, QrStateValue, ResolveKind,
+    ResolveResponse, SongSource,
 };
 use kdj_core::paths::render_filename;
 use serde_json::{json, Value};
@@ -717,6 +718,51 @@ impl MusicProvider for QqMusicProvider {
         Ok(Some(url))
     }
 
+    async fn lyric(&self, key: &str) -> Result<Option<LyricText>> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Ok(None);
+        }
+        // 公开 LRC 接口：比 GetPlayLyricInfo 的 QRC 简单，匿名可用。
+        let response = self
+            .client
+            .http()
+            .get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg")
+            .query(&[
+                ("songmid", key),
+                ("format", "json"),
+                ("nobase64", "1"),
+                ("g_tk", "5381"),
+                ("loginUin", "0"),
+                ("hostUin", "0"),
+                ("inCharset", "utf8"),
+                ("outCharset", "utf-8"),
+                ("platform", "yqq.json"),
+                ("needNewCode", "0"),
+            ])
+            .header(reqwest::header::REFERER, "https://y.qq.com/portal/player.html")
+            .send()
+            .await
+            .context("请求 QQ 音乐歌词失败")?;
+        let body: Value = response.json().await.context("解析 QQ 音乐歌词失败")?;
+        let code = body.get("code").and_then(Value::as_i64).unwrap_or(-1);
+        if code != 0 {
+            return Ok(None);
+        }
+        let lrc = decode_qq_lyric_field(body.get("lyric"));
+        if lrc.trim().is_empty() {
+            return Ok(None);
+        }
+        let translated_lrc = decode_qq_lyric_field(body.get("trans"));
+        // 公开接口偶发带回 roma；没有就空串，面板不显示「音」开关。
+        let romaji_lrc = decode_qq_lyric_field(body.get("roma"));
+        Ok(Some(LyricText {
+            lrc,
+            translated_lrc,
+            romaji_lrc,
+        }))
+    }
+
     async fn download(&self, job: DownloadJob<'_>) -> Result<PathBuf> {
         job.check_canceled()?;
         let source = job.source;
@@ -843,6 +889,21 @@ fn parse_playlist(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// `fcg_query_lyric_new` 在 `nobase64=1` 时回明文，否则回 base64；两种都认。
+fn decode_qq_lyric_field(value: Option<&Value>) -> String {
+    let raw = value.and_then(Value::as_str).unwrap_or("").trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    if raw.contains('[') {
+        return raw.to_string();
+    }
+    match base64::engine::general_purpose::STANDARD.decode(raw) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(_) => raw.to_string(),
+    }
 }
 
 fn parse_song(text: &str) -> Option<String> {

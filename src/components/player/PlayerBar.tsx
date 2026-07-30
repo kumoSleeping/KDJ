@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
-  AppWindow,
   Blend,
   Clapperboard,
   Disc3,
@@ -8,14 +7,13 @@ import {
   Library,
   ListMusic,
   Music2,
-  PanelRight,
   Pause,
   Play,
   Repeat,
   Repeat1,
   RefreshCw,
   Shuffle,
-  SlidersHorizontal,
+  PictureInPicture2,
   SkipBack,
   SkipForward,
   Volume2,
@@ -43,6 +41,7 @@ import {
 import { useAppStore } from "../../stores/appStore";
 import { useCrossfade, deckGain } from "../../lib/crossfade";
 import { useHarmonicScope } from "../../lib/harmonicScope";
+import { useLyricsPrefs } from "../../lib/lyricsPrefs";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { usePlayMode, type PlayMode } from "../../lib/playMode";
 import {
@@ -57,12 +56,7 @@ import {
   type MediaSyncDetail,
 } from "../../lib/mediaSync";
 import { isStreamTrack, mediaUrlForTrack, streamCoverUrl } from "../../lib/streamTrack";
-import {
-  VIDEO_PREVIEW_MODE_UI,
-  seekVideoPip,
-  toggleVideoPip,
-  useVideoPip,
-} from "../../lib/videoPip";
+import { seekVideoPip, toggleVideoPip, useVideoPip } from "../../lib/videoPip";
 import type { Track } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useQueueStore } from "../../stores/queueStore";
@@ -76,6 +70,7 @@ import { DETAIL_EVENT } from "../library/TrackTable";
 import { pointPatch, SEEK_EVENT, Waveform, type SeekDetail } from "../library/Waveform";
 import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
 import { runtimePlayer, usesNativeMobilePlayer } from "../../lib/unifiedPlayer";
+import { LyricsHost } from "./LyricsHost";
 
 /** 广播播放位置的节流间隔：节拍网格的播放头不需要每帧更新。 */
 const POSITION_BROADCAST_MS = 200;
@@ -319,10 +314,10 @@ export function PlayerBar() {
   const applyInOutPoints = useDjConfig((state) => state.applyInOutPoints);
   const toggleDjEnabled = useDjConfig((state) => state.toggleEnabled);
   const transportFade = usePlaybackPrefs((state) => state.transportFade);
-  const showSettings = useAppStore((state) => state.showSettings);
-  const showTrackDetail = useAppStore((state) => state.showTrackDetail);
-  const openSettingsPanel = useAppStore((state) => state.openSettingsPanel);
-  const listMode = useAppStore((state) => state.listMode);
+  const focusLibrary = useAppStore((state) => state.focusLibrary);
+  const desktopLyricsOn = useLyricsPrefs((state) => state.desktopEnabled);
+  const setDesktopLyricsOn = useLyricsPrefs((state) => state.setDesktopEnabled);
+  const canDesktopLyrics = Boolean(window.kdj?.desktopLyrics);
   const pipMode = useVideoPip((state) => state.mode);
   const pipActive = useVideoPip((state) => state.active);
   const pipSystem = useVideoPip((state) => state.systemPip);
@@ -331,8 +326,6 @@ export function PlayerBar() {
   const pipDuration = useVideoPip((state) => state.duration);
   const pipPlaying = useVideoPip((state) => state.playing);
   const cyclePipMode = useVideoPip((state) => state.cycleMode);
-  const pipModeUi = VIDEO_PREVIEW_MODE_UI[pipMode];
-  const PipModeIcon = pipMode === "panel" ? PanelRight : AppWindow;
   /**
    * 播放元素归 djEngine 所有——它手里有两台 deck，接歌时互换正主，
    * 这里只拿"当前正主"。不再自己渲染 <audio>：JSX 里的元素没法互换，
@@ -488,6 +481,10 @@ export function PlayerBar() {
   const nativeLoadGenerationRef = useRef(0);
   /** 后台队列已自行切歌时，React 只接管显示，不能再次 load 把进度打回开头。 */
   const nativeAdoptedTrackIdRef = useRef<number | null>(null);
+  /** 桌面端 state.trackId 连续与 UI 曲目不一致的拍数；稳定分叉时以 UI 为准自愈。 */
+  const nativeTrackMismatchRef = useRef(0);
+  /** 同一首曲目的自愈补偿节流：补偿失败也不能每一拍都重发 load。 */
+  const lastNativeHealRef = useRef<{ trackId: number; at: number } | null>(null);
 
   // 上次退出时两台唱盘各留着哪一首，只存 id；恢复时重新取最新 Track，避免把
   // 分析前的旧 BPM / 封面版本快照跨会话带回来。曲目被删了就让预测逻辑补位。
@@ -579,6 +576,10 @@ export function PlayerBar() {
           position: cue,
           rate,
         });
+        // handoff 发出前 UI 就会切到 B（djViaRef 会拦下常规换曲 load）；
+        // 因此 handoff 一旦失败，必须补一条原子 load 让声音追上画面，
+        // 否则底部显示 B、喇叭里还是 A。uiCommitted 区分两个阶段。
+        let uiCommitted = false;
         void preparation
           .then(() => {
             if (generation !== nativeDjGenerationRef.current) return;
@@ -586,7 +587,7 @@ export function PlayerBar() {
             const visual = { outgoingIndex, incomingIndex, from, next };
             transitionVisualRef.current = visual;
             setTransitionVisual(visual);
-            showTrackDetail();
+            focusLibrary();
             djViaRef.current = next.id;
             setTrack(next);
             selectTrack(next);
@@ -595,6 +596,7 @@ export function PlayerBar() {
             commitPlaying(true);
             setNotice("");
             markPlayed(next.id);
+            uiCommitted = true;
             return nativePlayer.handoff(next.id, cue, seconds, {
               eq: chosenTransitions.includes("eq"),
               filter: chosenTransitions.includes("filter"),
@@ -608,7 +610,27 @@ export function PlayerBar() {
           .catch((error: unknown) => {
             if (generation !== nativeDjGenerationRef.current) return;
             setNotice(`原生接歌失败：${error instanceof Error ? error.message : String(error)}`);
-            // 准备失败时保持旧歌继续播放，不把 UI/声音硬切到半成品。
+            // prepare 失败：UI 还没切，保持旧歌继续播放，不把 UI/声音硬切到半成品。
+            if (!uiCommitted) return;
+            // handoff 失败：UI 已在新歌——清掉过渡视觉，用一条原子 load 硬切兜
+            // 底，让声音追上画面。失败路径才走这一步，正常快速切换不受影响。
+            transitionVisualRef.current = null;
+            setTransitionVisual(null);
+            setDjTransition({ phase: "idle", frontIndex: visualActiveIndexRef.current });
+            djViaRef.current = null;
+            void nativePlayer
+              .load({
+                src: mediaUrlForTrack(next),
+                track: next,
+                position: cue,
+                rate,
+                autoplay: true,
+              })
+              .catch((fallbackError: unknown) => {
+                setNotice(
+                  `接歌失败，硬切补偿也失败：${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+                );
+              });
           })
           .finally(() => {
             if (generation === nativeDjGenerationRef.current) nativeDjBusyRef.current = false;
@@ -631,7 +653,7 @@ export function PlayerBar() {
       const visual = { outgoingIndex, incomingIndex, from, next };
       transitionVisualRef.current = visual;
       setTransitionVisual(visual);
-      showTrackDetail();
+      focusLibrary();
       djViaRef.current = next.id;
       setFrontEl(djEngine.frontElement());
       setTrack(next);
@@ -643,7 +665,7 @@ export function PlayerBar() {
       markPlayed(next.id);
       return true;
     },
-    [mobileNative, desktopNative, nativePlayer, selectTrack, showTrackDetail, commitPlaying],
+    [mobileNative, desktopNative, nativePlayer, selectTrack, focusLibrary, commitPlaying],
   );
 
   // 曲库表格双击 / 在线试听 → 这里换曲并播放。用全局事件而不是共享 store，
@@ -670,8 +692,9 @@ export function PlayerBar() {
           window.dispatchEvent(new Event(DETAIL_EVENT));
         }
       } else if (!isStreamTrack(next)) {
-        // 音频起播只清 overlay，不自动钉右栏详情——空闲保持整页列表
-        showTrackDetail();
+        // 音频起播只清设置/队列等旁路，不自动钉详情；歌词内容面要保留，
+        // 否则双击刚钉住的歌词栏会被 showTrackDetail 的 clearOverlays 拆掉。
+        focusLibrary();
       }
       // DJ 亮着且正在放别的歌：**所有**播放入口（双击、右键播放、自动续播
       // 挑的下一首）都从当前位置接歌，不硬切。视频预览不走这条事件，不受影响。
@@ -705,7 +728,7 @@ export function PlayerBar() {
     };
     window.addEventListener(PLAY_EVENT, onPlay);
     return () => window.removeEventListener(PLAY_EVENT, onPlay);
-  }, [selectTrack, showTrackDetail, djSwitchTo, commitPlaying]);
+  }, [selectTrack, focusLibrary, djSwitchTo, commitPlaying]);
 
   // 本地视频会话只能属于正在走带的那首。自动续播 / DJ 过渡直接在 PlayerBar
   // 内部 setTrack，不一定经过 playTrack（后者原本才会清视频会话）；因此旧视频会在
@@ -1038,7 +1061,9 @@ export function PlayerBar() {
         position: target,
       });
       if (nativePlayer) {
-        void nativePlayer.seek(target);
+        // 换曲/接歌激活未落地时后端会拒绝这次跳转（保护待激活流）；静默即可，
+        // 下一拍状态事件会把进度显示纠正回来。
+        void nativePlayer.seek(target).catch(() => undefined);
       } else {
         void djEngine
           .seamlessSeek(mediaUrlForTrack(track), target, playingRef.current)
@@ -1196,6 +1221,45 @@ export function PlayerBar() {
       }
 
       if (state.playing && !playingRef.current) commitPlaying(true);
+      // 桌面端声音/画面对账：load 在飞、DJ 承诺未落地、过渡/缓冲都允许短暂分
+      // 歧；其余稳定状态下 state.trackId 连续多拍 ≠ UI 曲目，说明硬件还停在旧
+      // 歌上（例如接歌承诺被后台预热顶掉的竞态），以 UI 为准补一条原子 load
+      // 自愈。移动端有自己的 adopt 逻辑，不走这里。
+      if (
+        desktopNative &&
+        state.trackId !== null &&
+        current &&
+        state.trackId !== current.id &&
+        !state.transitioning &&
+        !state.buffering &&
+        (state.status === "playing" || state.status === "paused") &&
+        !nativeLoadInFlightRef.current &&
+        !nativeDjBusyRef.current &&
+        djViaRef.current === null
+      ) {
+        nativeTrackMismatchRef.current += 1;
+        const heal = lastNativeHealRef.current;
+        if (
+          nativeTrackMismatchRef.current >= 3 &&
+          (heal?.trackId !== current.id || performance.now() - heal.at > 5_000)
+        ) {
+          nativeTrackMismatchRef.current = 0;
+          lastNativeHealRef.current = { trackId: current.id, at: performance.now() };
+          const desynced = current;
+          // 作废旧 load 的迟到回调；自愈直接发命令，不经过 React effect 链。
+          nativeLoadGenerationRef.current += 1;
+          void nativePlayer
+            .load({
+              src: mediaUrlForTrack(desynced),
+              track: desynced,
+              position: 0,
+              autoplay: state.playing,
+            })
+            .catch(() => undefined);
+        }
+      } else {
+        nativeTrackMismatchRef.current = 0;
+      }
       if (
         state.status === "idle" &&
         previous.playing &&
@@ -1254,7 +1318,7 @@ export function PlayerBar() {
     // playTrack 会走 markPlayed，而回退**不该**改写历史——
     // 所以这里绕开它，直接换曲
     if (previous) {
-      showTrackDetail();
+      focusLibrary();
       setTrack(previous);
       selectTrack(previous); // 同上：详情栏跟着回退
       setPosition(0);
@@ -1533,6 +1597,10 @@ export function PlayerBar() {
   const video = Boolean(
     (pipDriving && pipSession) || (displayTrack && isVideoTrack(displayTrack.format)),
   );
+  const networkPreview = Boolean(pipDriving && pipSession?.source === "network");
+  // 同一颗按钮按当前媒体解释：音频控制桌面歌词，本地视频控制详情/小窗。
+  // B 站搜索结果固定浮动预览，不读取也不改这项本地视频偏好。
+  const sharedFloatOn = networkPreview ? true : video ? pipMode === "float" : desktopLyricsOn;
   const artistText = pipDriving && pipSession
     ? pipSession.author || "\u00a0"
     : displayTrack?.artist || "\u00a0";
@@ -1568,9 +1636,11 @@ export function PlayerBar() {
           ? pipDriving
             ? pipSystem
               ? "系统画中画"
-              : pipMode === "panel"
-                ? "右栏预览"
-                : "浮动预览"
+              : networkPreview
+                ? "浮动预览"
+                : pipMode === "panel"
+                  ? "详情预览"
+                  : "浮动预览"
             : "视频"
           : streaming
             ? "在线试听"
@@ -1795,6 +1865,7 @@ export function PlayerBar() {
           事件监听在上面的 effect 里挂到 frontEl 上 */}
       {/* 不再挂隐藏视频实例：详情面板已有可见播放器，双实例会同时解码并
           互相回传 seek，画面就一卡一卡。音频是主时钟，打开详情时再对齐即可。 */}
+      <LyricsHost current={track} next={predicted} allowDesktop={!video} />
 
       <div className="kd-player-leading">
         <PlayerDeck
@@ -1855,8 +1926,7 @@ export function PlayerBar() {
             onChange={(event) => setPlayerVolume(Number(event.currentTarget.value))}
           />
         </label>
-        {/* 接播拆成两个动作：Blend 只开关，旁边的调节图标只开设置。
-            开关和设置绑在一颗键上时，“只是想看看参数”也会误改播放行为。 */}
+        {/* 接播只留开关；旁边一颗悬浮键由音频歌词与视频/VJ 共用。 */}
         <div className="kd-player-dj">
           <button
             type="button"
@@ -1879,35 +1949,46 @@ export function PlayerBar() {
           >
             <Blend size={14} />
           </button>
-          <button
-            type="button"
-            className="kd-player-step kd-player-djsettings"
-            aria-label="打开接播设置"
-            aria-expanded={showSettings}
-            data-open={showSettings ? "true" : undefined}
-            title="接播设置"
-            onClick={openSettingsPanel}
-          >
-            <SlidersHorizontal size={13} />
-          </button>
+          {canDesktopLyrics ? (
+            <button
+              type="button"
+              className="kd-player-step kd-player-lyricsbtn"
+              aria-label={
+                networkPreview
+                  ? "B站预览使用浮动小窗"
+                  : video
+                    ? sharedFloatOn
+                      ? "本地视频改用详情播放"
+                      : "本地视频改用悬浮小窗播放"
+                    : sharedFloatOn
+                      ? "关闭桌面歌词"
+                      : "打开桌面歌词"
+              }
+              aria-pressed={sharedFloatOn}
+              data-on={sharedFloatOn ? "true" : undefined}
+              disabled={networkPreview}
+              title={
+                networkPreview
+                  ? "B站搜索结果固定使用浮动小窗；此设置只影响本地视频"
+                  : video
+                    ? sharedFloatOn
+                      ? "本地视频：浮动小窗。点一下改为详情播放"
+                      : "本地视频：详情播放。点一下改为浮动小窗"
+                    : sharedFloatOn
+                      ? "桌面悬浮歌词：开。点一下关闭"
+                      : "打开桌面悬浮歌词"
+              }
+              onClick={() => {
+                if (networkPreview) return;
+                if (video) cyclePipMode();
+                else setDesktopLyricsOn(!desktopLyricsOn);
+              }}
+            >
+              <PictureInPicture2 size={13} />
+            </button>
+          ) : null}
         </div>
 
-        {/* 搜索页 / 视频预览 / 本地视频：显示模式键。点一下立刻搬家（见 cycleMode → APPLY）。 */}
-        {(listMode === "search" || video || pipActive) && (
-          <button
-            type="button"
-            className="kd-player-step kd-player-pip"
-            aria-label={`视频预览：${pipModeUi.label}`}
-            data-mode={pipMode}
-            data-live={pipDriving ? "true" : undefined}
-            title={`${pipModeUi.label}：${pipModeUi.hint}。点一下切换右栏 / 浮动小窗`}
-            onClick={() => {
-              cyclePipMode();
-            }}
-          >
-            <PipModeIcon size={14} />
-          </button>
-        )}
 
         <button
           type="button"

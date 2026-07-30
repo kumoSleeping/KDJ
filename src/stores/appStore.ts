@@ -67,6 +67,9 @@ export interface AppStore {
   /** 右栏显示「按顺序导出 VJ」设置面板。 */
   showVjExport: boolean;
   vjExportPanelEpoch: number;
+  /** 右栏显示歌词（播放时后台搜到的 LRC）。 */
+  showLyrics: boolean;
+  lyricsPanelEpoch: number;
   health: Health | null;
   settings: Settings | null;
   accounts: Account[];
@@ -81,6 +84,11 @@ export interface AppStore {
   setHasResults(value: boolean): void;
   /** 让右栏回到曲目详情；任何显式选歌/换歌入口都走它。 */
   showTrackDetail(): void;
+  /**
+   * 回到曲库主面并清掉设置/队列等旁路，但**保留歌词内容面**。
+   * 起播、接歌、上一首走这条——别用 showTrackDetail，否则会把刚钉住的歌词栏拆掉。
+   */
+  focusLibrary(): void;
   toggleSettingsPanel(): void;
   openSettingsPanel(): void;
   toggleQueuePanel(): void;
@@ -91,10 +99,20 @@ export interface AppStore {
   openFoldersPanel(): void;
   /** 打开「按顺序导出 VJ」旁路（由文件夹右键触发）。 */
   openVjExportPanel(): void;
+  /** 打开右栏歌词面板。 */
+  openLyricsPanel(): void;
+  toggleLyricsPanel(): void;
   /** 只收起旁路面板，不改 listMode（窄屏抽屉点关闭 / 下拖时用）。 */
   dismissOverlay(): void;
   /** 当前打开的旁路面板种类；没有则 null。供浏览历史 / 撤销使用。 */
-  currentOverlay(): "settings" | "queue" | "preview" | "folders" | "vjExport" | null;
+  currentOverlay():
+    | "settings"
+    | "queue"
+    | "preview"
+    | "folders"
+    | "vjExport"
+    | "lyrics"
+    | null;
   bootstrap(): Promise<void>;
   refreshAccounts(): Promise<void>;
   saveSettings(patch: Partial<Settings>): Promise<void>;
@@ -109,6 +127,7 @@ function clearOverlays() {
     showPreview: false,
     showFolders: false,
     showVjExport: false,
+    showLyrics: false,
   } as const;
 }
 
@@ -128,6 +147,8 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   foldersPanelEpoch: 0,
   showVjExport: false,
   vjExportPanelEpoch: 0,
+  showLyrics: false,
+  lyricsPanelEpoch: 0,
   health: null,
   settings: null,
   accounts: [],
@@ -150,6 +171,17 @@ export const useAppStore = create<AppStore>()((set, get) => ({
 
   showTrackDetail() {
     set({ listMode: "library", ...clearOverlays() });
+  },
+
+  focusLibrary() {
+    set({
+      listMode: "library",
+      showSettings: false,
+      showQueue: false,
+      showPreview: false,
+      showFolders: false,
+      showVjExport: false,
+    });
   },
 
   // 旁路面板共用右栏/抽屉那一个位置，互斥：开一个就把另一个顶掉，
@@ -221,6 +253,23 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     });
   },
 
+  openLyricsPanel() {
+    set({
+      ...clearOverlays(),
+      showLyrics: true,
+      lyricsPanelEpoch: get().lyricsPanelEpoch + 1,
+    });
+  },
+
+  toggleLyricsPanel() {
+    const open = !get().showLyrics;
+    set({
+      ...clearOverlays(),
+      showLyrics: open,
+      lyricsPanelEpoch: open ? get().lyricsPanelEpoch + 1 : get().lyricsPanelEpoch,
+    });
+  },
+
   currentOverlay() {
     const state = get();
     if (state.showFolders) return "folders";
@@ -228,6 +277,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     if (state.showPreview) return "preview";
     if (state.showQueue) return "queue";
     if (state.showVjExport) return "vjExport";
+    if (state.showLyrics) return "lyrics";
     return null;
   },
 

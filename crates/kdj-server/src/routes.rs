@@ -39,6 +39,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         )
         .route("/api/accounts/{platform}/logout", post(logout))
         .route("/api/search", post(search))
+        .route("/api/lyrics", post(lyrics))
         .route("/api/song/preview", post(song_preview))
         .route("/api/song/preview/{token}", get(song_preview_stream))
         .route("/api/resolve", post(resolve))
@@ -217,6 +218,14 @@ async fn search(
     Json(payload): Json<SearchRequest>,
 ) -> Json<SearchResponse> {
     Json(crate::aggregate::search(&state, &payload).await)
+}
+
+/// 按曲名 / 艺人自动搜歌词（网易云 + QQ）。有 source_platform/key 时优先直取。
+async fn lyrics(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<LyricsRequest>,
+) -> ApiResult<Json<LyricsResponse>> {
+    Ok(Json(crate::lyrics::lookup(&state, payload).await?))
 }
 
 #[derive(Deserialize)]

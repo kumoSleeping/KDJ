@@ -39,7 +39,7 @@ export const DJ_EFFECTS: { id: DjEffect; label: string; hint: string }[] = [
 ];
 
 /** 接歌长度的可选小节数（按 4/4 拍换算成秒）。 */
-export const DJ_BARS_OPTIONS = [2, 4, 8, 16, 32] as const;
+export const DJ_BARS_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8] as const;
 
 const STORAGE_KEY = "kd-dj-config";
 /** v1 只存预设的旧键。读到就迁移（含 "vocal" 预设 → cross + 人声剔除开）。 */
@@ -155,6 +155,7 @@ export const useDjConfig = create<DjConfigState>((set, get) => ({
     saveDjConfig(get());
   },
   setBars(bars) {
+    if (!(DJ_BARS_OPTIONS as readonly number[]).includes(bars)) return;
     set({ bars });
     saveDjConfig(get());
   },

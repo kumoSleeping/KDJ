@@ -1,5 +1,9 @@
 import { useEffect, useRef } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import type {
+  CSSProperties,
+  PointerEvent as ReactPointerEvent,
+  RefObject,
+} from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
 import {
   DJ_BARS_OPTIONS,
@@ -8,6 +12,14 @@ import {
   mixSeconds,
   useDjConfig,
 } from "../../lib/djMix";
+import {
+  DESKTOP_FONT_SCALE_MAX,
+  DESKTOP_FONT_SCALE_MIN,
+  enginesFromMode,
+  enginesMode,
+  useLyricsPrefs,
+  type LyricsEngineMode,
+} from "../../lib/lyricsPrefs";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { useTrackClickPrefs } from "../../lib/trackClickPrefs";
 import { useAppStore } from "../../stores/appStore";
@@ -58,14 +70,91 @@ function Switch({
       onClick={onChange}
     >
       <span className="kd-djp-toggle-label">{label}</span>
-      <span className="kd-djp-toggle-state" aria-hidden="true">
+      <span className="kd-djp-toggle-state" aria-hidden="true" data-onoff={checked ? "on" : "off"}>
         {checked ? onState : offState}
       </span>
     </button>
   );
 }
 
-/** 离散档位滑条：指针拖动，避开原生 range 在 Tauri 里拖不动的问题。 */
+/** 左文右态：点击右侧文案循环搜词引擎模式。 */
+function CycleToggle<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+  title,
+}: {
+  label: string;
+  value: T;
+  options: ReadonlyArray<{ id: T; text: string; brand?: "wyy" | "qqm" | "both" | "follow" }>;
+  onChange(next: T): void;
+  title?: string;
+}) {
+  const index = Math.max(
+    0,
+    options.findIndex((item) => item.id === value),
+  );
+  const current = options[index]!;
+  return (
+    <button
+      type="button"
+      aria-label={`${label}：${current.text}`}
+      title={title}
+      className="kd-djp-toggle"
+      onClick={() => onChange(options[(index + 1) % options.length]!.id)}
+    >
+      <span className="kd-djp-toggle-label">{label}</span>
+      <span
+        className="kd-djp-toggle-state"
+        aria-hidden="true"
+        data-brand={current.brand}
+      >
+        {current.text}
+      </span>
+    </button>
+  );
+}
+
+const ENGINE_MODE_OPTIONS = [
+  { id: "both" as const, text: "双开", brand: "both" as const },
+  { id: "wyy" as const, text: "网易云", brand: "wyy" as const },
+  { id: "qqm" as const, text: "QQ", brand: "qqm" as const },
+] satisfies ReadonlyArray<{ id: LyricsEngineMode; text: string; brand: "both" | "wyy" | "qqm" }>;
+
+/** 指针拖动滑条：避开原生 range 在 Tauri 里拖不动的问题。 */
+function usePointerSlider(
+  trackRef: RefObject<HTMLDivElement | null>,
+  pick: (t: number) => void,
+  disabled = false,
+) {
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (disabled || event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const el = trackRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    pick(Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)));
+  };
+  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (disabled || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    const el = trackRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    pick(Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)));
+  };
+  const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+  return { onPointerDown, onPointerMove, onPointerUp };
+}
+
+/** 离散档位滑条（接歌小节）。 */
 function BarsSlider({
   bars,
   onChange,
@@ -82,23 +171,10 @@ function BarsSlider({
   );
   const max = DJ_BARS_OPTIONS.length - 1;
   const fill = max <= 0 ? 0 : index / max;
-
-  const pick = (clientX: number) => {
-    const el = trackRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    const t = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  const handlers = usePointerSlider(trackRef, (t) => {
     const next = DJ_BARS_OPTIONS[Math.round(t * max)];
     if (next != null) onChange(next);
-  };
-
-  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    pick(event.clientX);
-  };
+  });
 
   return (
     <div className="kd-djp-slider-block" title={hint}>
@@ -115,16 +191,7 @@ function BarsSlider({
             aria-valuenow={bars}
             aria-valuetext={`${bars} 小节`}
             style={{ "--kd-djp-fill": `${fill * 100}%` } as CSSProperties}
-            onPointerDown={onPointerDown}
-            onPointerMove={(event) => {
-              if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-              pick(event.clientX);
-            }}
-            onPointerUp={(event) => {
-              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                event.currentTarget.releasePointerCapture(event.pointerId);
-              }
-            }}
+            {...handlers}
             onKeyDown={(event) => {
               if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
                 event.preventDefault();
@@ -160,6 +227,66 @@ function BarsSlider({
   );
 }
 
+/** 连续字号滑条：视觉与接歌小节同一套 2px 红/灰线。 */
+function FontScaleSlider({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: number;
+  onChange(next: number): void;
+  disabled?: boolean;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const span = DESKTOP_FONT_SCALE_MAX - DESKTOP_FONT_SCALE_MIN;
+  const fill = span <= 0 ? 0 : (value - DESKTOP_FONT_SCALE_MIN) / span;
+  const pct = Math.round(value * 100);
+  const handlers = usePointerSlider(
+    trackRef,
+    (t) => onChange(DESKTOP_FONT_SCALE_MIN + t * span),
+    disabled,
+  );
+
+  return (
+    <div className="kd-lyrics-size-row" data-disabled={disabled || undefined}>
+      <span className="kd-djp-toggle-label">悬浮字号</span>
+      <div
+        ref={trackRef}
+        className="kd-djp-slider"
+        role="slider"
+        tabIndex={disabled ? -1 : 0}
+        aria-label="桌面歌词字号"
+        aria-valuemin={Math.round(DESKTOP_FONT_SCALE_MIN * 100)}
+        aria-valuemax={Math.round(DESKTOP_FONT_SCALE_MAX * 100)}
+        aria-valuenow={pct}
+        aria-valuetext={`${pct}%`}
+        aria-disabled={disabled || undefined}
+        style={{ "--kd-djp-fill": `${fill * 100}%` } as CSSProperties}
+        {...handlers}
+        onKeyDown={(event) => {
+          if (disabled) return;
+          const step = 0.05;
+          if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
+            event.preventDefault();
+            onChange(value - step);
+          } else if (event.key === "ArrowRight" || event.key === "ArrowUp") {
+            event.preventDefault();
+            onChange(value + step);
+          } else if (event.key === "Home") {
+            event.preventDefault();
+            onChange(DESKTOP_FONT_SCALE_MIN);
+          } else if (event.key === "End") {
+            event.preventDefault();
+            onChange(DESKTOP_FONT_SCALE_MAX);
+          }
+        }}
+      >
+        <span className="kd-djp-slider-track" aria-hidden="true" />
+      </div>
+    </div>
+  );
+}
+
 export function SettingsPanel() {
   const theme = useAppStore((state) => state.settings?.theme ?? "system");
   const saveSettings = useAppStore((state) => state.saveSettings);
@@ -183,6 +310,15 @@ export function SettingsPanel() {
   const addNextAvailable = widePlay === "double" || narrowPlay === "double";
   const transportFade = usePlaybackPrefs((state) => state.transportFade);
   const setTransportFade = usePlaybackPrefs((state) => state.setTransportFade);
+  const lyricsEngines = useLyricsPrefs((state) => state.engines);
+  const setLyricsEngines = useLyricsPrefs((state) => state.setEngines);
+  const desktopLyricsPosition = useLyricsPrefs((state) => state.desktopPosition);
+  const desktopLyricsLocked = useLyricsPrefs((state) => state.desktopLocked);
+  const desktopLyricsFontScale = useLyricsPrefs((state) => state.desktopFontScale);
+  const setDesktopLyricsPosition = useLyricsPrefs((state) => state.setDesktopPosition);
+  const setDesktopLyricsLocked = useLyricsPrefs((state) => state.setDesktopLocked);
+  const setDesktopLyricsFontScale = useLyricsPrefs((state) => state.setDesktopFontScale);
+  const isDesktop = ["darwin", "win32", "linux"].includes(window.kdj?.platform ?? "");
 
   const accounts = useAppStore((state) => state.accounts);
   const accountsError = useAppStore((state) => state.accountsError);
@@ -280,6 +416,44 @@ export function SettingsPanel() {
               label="播放 / 暂停渐入渐出"
               title="播放时用约 120 毫秒渐入，暂停时用约 120 毫秒渐出；关掉后立即播放或暂停。"
               onChange={() => setTransportFade(!transportFade)}
+            />
+          </div>
+        </Panel>
+
+        <Panel heading="歌词" dense>
+          <div className="kd-djp-switch-list" aria-label="歌词选项">
+            {isDesktop ? (
+              <>
+                <Switch
+                  checked={desktopLyricsLocked}
+                  label="鼠标穿透（开启后不能拖动）"
+                  title="关闭时按住歌词即可自由拖动；开启后点击会穿过歌词窗口，需要回这里关闭才能再次拖动。"
+                  onChange={() => setDesktopLyricsLocked(!desktopLyricsLocked)}
+                />
+                <Switch
+                  checked={desktopLyricsPosition === "bottom"}
+                  label="悬浮位置"
+                  onState="底部"
+                  offState="顶部"
+                  title="桌面歌词贴近当前主屏的上沿或下沿；自由拖动后下次仍会优先恢复拖动位置。"
+                  onChange={() =>
+                    setDesktopLyricsPosition(
+                      desktopLyricsPosition === "bottom" ? "top" : "bottom",
+                    )
+                  }
+                />
+                <FontScaleSlider
+                  value={desktopLyricsFontScale}
+                  onChange={setDesktopLyricsFontScale}
+                />
+              </>
+            ) : null}
+            <CycleToggle
+              label="搜词引擎"
+              value={enginesMode(lyricsEngines)}
+              options={ENGINE_MODE_OPTIONS}
+              title="点击切换：双开 / 仅网易云 / 仅 QQ。至少保留一家。"
+              onChange={(mode) => setLyricsEngines(enginesFromMode(mode))}
             />
           </div>
         </Panel>

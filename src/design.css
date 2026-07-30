@@ -219,6 +219,107 @@ body {
   -moz-osx-font-smoothing: auto;
 }
 
+/* 独立桌面歌词 WebView：原生窗口和页面两层都必须透明，任一层漏掉都会变黑底。 */
+:root[data-window="lyrics"],
+:root[data-window="lyrics"] body,
+:root[data-window="lyrics"] #root {
+  background: transparent !important;
+}
+
+.kd-desktop-lyrics {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.28rem;
+  padding: 0.3rem 1.5rem;
+  overflow: hidden;
+  color: #fff;
+  text-align: center;
+  user-select: none;
+  cursor: default;
+  /* KTV 式「先画粗黑边、再盖字面」：白底靠黑边，黑底靠亮字，CJK 内部不会被描黑。 */
+  paint-order: stroke fill;
+  text-shadow: 0 2px 2px rgba(0, 0, 0, 0.9);
+}
+.kd-desktop-lyrics-stage {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+.kd-desktop-lyrics-drag {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: min(64%, 40rem);
+  min-width: 18rem;
+  transform: translateX(-50%);
+  cursor: move;
+}
+.kd-desktop-lyrics[data-locked="true"] .kd-desktop-lyrics-drag {
+  cursor: default;
+}
+.kd-desktop-lyrics-content {
+  z-index: 1;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.28rem;
+  pointer-events: none;
+}
+.kd-desktop-lyrics-primary,
+.kd-desktop-lyrics-secondary {
+  width: 100%;
+  max-width: 100%;
+  padding-inline: 0.35rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-desktop-lyrics-primary {
+  color: #fff;
+  font-size: calc(clamp(1.35rem, 3.2vw, 2.15rem) * var(--kd-desktop-lyrics-scale, 1));
+  font-weight: 780;
+  letter-spacing: 0.035em;
+  line-height: 1.18;
+  -webkit-text-stroke: 3px rgba(0, 0, 0, 0.98);
+}
+.kd-desktop-lyrics-secondary {
+  color: rgba(255, 255, 255, 0.98);
+  font-size: calc(clamp(0.88rem, 2vw, 1.18rem) * var(--kd-desktop-lyrics-scale, 1));
+  font-weight: 650;
+  letter-spacing: 0.025em;
+  line-height: 1.2;
+  -webkit-text-stroke: 2px rgba(0, 0, 0, 0.98);
+}
+
+/* 桌面歌词连续字号：与接歌小节同一套 2px 红/灰线（.kd-djp-slider）。 */
+.kd-lyrics-size-row {
+  display: grid;
+  grid-template-columns: auto minmax(5rem, 1fr);
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 1.85rem;
+  margin-top: 0.05rem;
+  padding: 0.2rem 0;
+  -webkit-app-region: no-drag;
+}
+.kd-lyrics-size-row[data-disabled="true"] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+.kd-lyrics-size-row .kd-djp-slider {
+  width: 100%;
+  min-width: 0;
+}
+
 ::selection {
   background: var(--kd-theme-soft);
 }
@@ -547,10 +648,12 @@ textarea {
   overflow: hidden;
 }
 /*
- * 旁路面板从主内容区的最右边伸出，而不是成为工作台的第三整列。
- * 搜索框保持完整宽度；本地曲库与搜索结果作为一个整体给右栏让位。
+ * 旁路面板叠在主内容区右侧，而不是成为工作台的第三整列、也不挤中间列表。
+ * 搜索框保持完整宽度；开合右栏时曲目表列宽与空白不变。
+ * 右栏与底下的主列表是独立滚动面，指针停在右栏时不能带动主列表。
  */
 .kd-local-list-slot {
+  position: relative;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
@@ -558,23 +661,35 @@ textarea {
   overflow: hidden;
   background: var(--kd-panel);
 }
-.kd-local-list-slot[data-aside="open"] {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 1px var(--kd-right, 22rem);
-}
 .kd-local-list-slot > .kd-middle-split {
   min-width: 0;
   min-height: 0;
   flex: 1 1 auto;
 }
-.kd-local-list-slot[data-aside="open"] > .kd-middle-split {
-  grid-column: 1;
-}
 .kd-local-list-slot[data-aside="open"] > .kd-split-handle {
-  grid-column: 2;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: var(--kd-right, 25rem);
+  width: 1px;
+  z-index: 6;
 }
 .kd-local-list-slot[data-aside="open"] > .kd-split-aside {
-  grid-column: 3;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--kd-right, 25rem);
+  z-index: 5;
+  box-shadow: -10px 0 28px rgba(15, 18, 28, 0.08);
+}
+/*
+ * 搜索结果半栏与右旁路同时打开时，中间分割整体右缩给右栏让位；
+ * 否则绝对定位的详情/队列面板会盖住搜索工作条右侧的收折按钮。
+ * 仅在搜索态让位，平时曲库列表宽度不受右栏开合影响。
+ */
+.kd-local-list-slot[data-aside="open"] > .kd-middle-split[data-search="true"] {
+  margin-right: calc(var(--kd-right, 25rem) + 1px);
 }
 
 /* ============================================================
@@ -1424,6 +1539,35 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 详情 / 歌词双极：与眉目标题同级的字重切换，不再套一层 segmented 边框。 */
+.kd-aside-face {
+  flex: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  -webkit-app-region: no-drag;
+}
+.kd-aside-face > button {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-sm);
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+.kd-aside-face > button[aria-pressed="true"],
+.kd-aside-face > button[aria-selected="true"] {
+  color: var(--kd-text);
+}
+.kd-aside-face > button:hover {
+  color: var(--kd-text);
+}
+.kd-sheet-head .kd-aside-face {
+  margin-right: auto;
+}
 .kd-aside-head-drag {
   flex: 1 1 auto;
   align-self: stretch;
@@ -1433,6 +1577,8 @@ textarea {
 .kd-split-aside-body {
   flex: 1 1 auto;
   min-height: 0;
+  /* 详情滚到边界后也留在当前面板，不把触控板/滚轮手势串给底下的列表。 */
+  overscroll-behavior: contain;
 }
 .kd-aside-foot {
   flex: none;
@@ -1768,6 +1914,15 @@ body[data-kd-col-resizing="true"] * {
 .kd-table thead th[data-sortable="true"]:hover {
   color: var(--kd-text);
 }
+.kd-table thead th[data-column-reorder="true"] {
+  cursor: grab;
+}
+body[data-kd-col-dragging="true"],
+body[data-kd-col-dragging="true"] * {
+  cursor: grabbing !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
 .kd-selection-tools {
   appearance: none;
   display: inline-flex;
@@ -1880,7 +2035,7 @@ body[data-kd-track-pointer-dragging="true"] * {
   box-shadow: inset 0 -2px 0 var(--kd-theme);
 }
 .kd-table tbody td.kd-td-num > .kd-track-drag-surface {
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 .kd-row-select {
   appearance: none;
@@ -2314,7 +2469,8 @@ button.kd-result-lead-btn:hover {
 /* 曲库标题和搜索结果标题共用 .kd-td-strong：同一字重、同一字色。
    以前曲库单独压成 400，再叠灰度抗锯齿，CJK 笔画就会一块深一块浅。 */
 .kd-td-num {
-  text-align: right;
+  /* 数字和文字统一从左边起读；BPM/时长不再单独贴到列右缘。 */
+  text-align: left;
   font-variant-numeric: tabular-nums;
 }
 /* ============================================================
@@ -5667,6 +5823,29 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 .kd-middle-local > .kd-scroll,
 .kd-middle-search > .kd-scroll {
   overflow-x: auto;
+  overscroll-behavior-x: contain;
+  /* 全局默认藏滚动条，但表格列能自由加宽后必须给一条可拖回最左侧的横滚条。 */
+  scrollbar-width: thin;
+  scrollbar-color: var(--kd-line) transparent;
+}
+.kd-table-wrap > .kd-scroll::-webkit-scrollbar,
+.kd-middle-local > .kd-scroll::-webkit-scrollbar,
+.kd-middle-search > .kd-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 8px;
+}
+.kd-table-wrap > .kd-scroll::-webkit-scrollbar-thumb,
+.kd-middle-local > .kd-scroll::-webkit-scrollbar-thumb,
+.kd-middle-search > .kd-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--kd-line);
+}
+/* 固定宽度的真实列之外留一个弹性空白列：只由它吸收视口剩余宽度。
+   拖标题时艺人/BPM 等列因此不会跟着按比例伸缩。 */
+.kd-table .kd-table-fill {
+  width: auto;
+  max-width: none;
+  padding: 0;
 }
 /* 默认列宽合计的兜底；用户拖过列宽后由 TrackTable 内联 minWidth 覆盖。 */
 .kd-table[data-kind="library"] {
@@ -5832,28 +6011,18 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 .kd-player-djbtn[data-on="true"]:hover:not(:disabled) {
   color: var(--kd-theme-strong);
 }
-/* 视频预览三态：只靠图标区分；预览中用主题色。 */
-.kd-player-pip {
-  position: relative;
-}
-.kd-player-pip[data-mode="panel"] {
-  color: var(--kd-muted);
-}
-.kd-player-pip[data-mode="float"] {
-  color: var(--kd-text);
-}
-.kd-player-pip[data-live="true"] {
-  color: var(--kd-theme);
-}
-.kd-player-djsettings {
+.kd-player-lyricsbtn {
   position: relative;
   width: 1.45rem;
   height: 1.7rem;
   margin-left: 0;
 }
-.kd-player-djsettings[data-open="true"] {
+/* 与旁边接播键同一套：灰=歌词关闭/视频侧栏，红=歌词开启/视频小窗。 */
+.kd-player-lyricsbtn[data-on="true"] {
   color: var(--kd-theme);
-  background: transparent;
+}
+.kd-player-lyricsbtn[data-on="true"]:hover:not(:disabled) {
+  color: var(--kd-theme-strong);
 }
 
 /* ------------------------------------------------------------ 设置面板（接播 + 账号）
@@ -5924,6 +6093,23 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   text-align: right;
   transition: color 0.12s ease;
 }
+/* 开深一点、关浅一点；品牌三态另走 data-brand。 */
+.kd-djp-toggle-state[data-onoff="on"] {
+  color: var(--kd-text);
+}
+.kd-djp-toggle-state[data-onoff="off"] {
+  color: var(--kd-faint);
+}
+.kd-djp-toggle-state[data-brand="wyy"] {
+  color: #e02020;
+}
+.kd-djp-toggle-state[data-brand="qqm"] {
+  color: #31c27c;
+}
+.kd-djp-toggle-state[data-brand="both"],
+.kd-djp-toggle-state[data-brand="follow"] {
+  color: var(--kd-text);
+}
 .kd-djp-toggle:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -5931,6 +6117,12 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 .kd-djp-toggle:disabled:hover .kd-djp-toggle-label,
 .kd-djp-toggle:disabled:hover .kd-djp-toggle-state {
   color: var(--kd-muted);
+}
+.kd-djp-toggle:disabled .kd-djp-toggle-state[data-onoff="on"] {
+  color: var(--kd-text);
+}
+.kd-djp-toggle:disabled .kd-djp-toggle-state[data-onoff="off"] {
+  color: var(--kd-faint);
 }
 /* 外观主题：太阳 / 月亮 / 系统，选中用各自语义色，不用品牌红。 */
 .kd-djp-theme {
@@ -6129,4 +6321,203 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 /* 正在拖的那一栏压暗，落点那栏亮一条左边线 */
 [data-dragging="true"] {
   opacity: 0.5;
+}
+
+/* ------------------------------------------------------------ 歌词（右栏 + 悬浮窗）
+   色阶只用灰 / 墨：未播灰色，正在播用正文色（浅色主题≈黑，深色≈白）。
+   刻意不用 --kd-theme，避免红字抢戏。 */
+.kd-lyrics {
+  --kd-lyrics-ink: var(--kd-text);
+  --kd-lyrics-soft: color-mix(in srgb, var(--kd-muted) 72%, var(--kd-text) 28%);
+  --kd-lyrics-faint: color-mix(in srgb, var(--kd-muted) 55%, transparent);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  gap: 0;
+  background:
+    radial-gradient(120% 70% at 50% -10%, color-mix(in srgb, var(--kd-text) 5%, transparent), transparent 62%),
+    var(--kd-panel);
+}
+.kd-lyrics-head {
+  display: grid;
+  grid-template-columns: 3.4rem minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.85rem 0.95rem 0.7rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--kd-line) 80%, transparent);
+}
+.kd-lyrics-head[data-toggles="true"] {
+  grid-template-columns: 3.4rem minmax(0, 1fr) auto;
+}
+.kd-lyrics-cover {
+  width: 3.4rem;
+  height: 3.4rem;
+  border-radius: 0.55rem;
+  overflow: hidden;
+  background: var(--kd-panel-inset);
+  box-shadow: 0 6px 18px color-mix(in srgb, #000 16%, transparent);
+}
+.kd-lyrics-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.kd-lyrics-cover-fallback {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--kd-muted) 22%, transparent), transparent 60%),
+    var(--kd-panel-inset);
+}
+.kd-lyrics-head-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+}
+.kd-lyrics-head-title {
+  font-size: 1rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  color: var(--kd-lyrics-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-lyrics-head-artist {
+  font-size: 0.82rem;
+  color: var(--kd-lyrics-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-lyrics-head-source {
+  margin-top: 0.12rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--kd-lyrics-faint);
+}
+/* 右上角一字状态：原 / 意 / 音，无边框无底，点一下循环。 */
+.kd-lyrics-layer {
+  align-self: start;
+  margin: 0.05rem 0 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--kd-lyrics-faint);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.kd-lyrics-layer:hover {
+  color: var(--kd-lyrics-ink);
+}
+.kd-lyrics-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.kd-lyrics-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 2.4rem 1rem 3.2rem;
+  scroll-behavior: smooth;
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    #000 12%,
+    #000 78%,
+    transparent 100%
+  );
+}
+.kd-lyrics-line {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.55rem 0.65rem;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+  text-align: center;
+  color: var(--kd-lyrics-soft);
+  opacity: 0.42;
+  transform: scale(0.96);
+  transition:
+    color 220ms ease,
+    opacity 220ms ease,
+    transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.kd-lyrics-line:hover {
+  opacity: 0.88;
+  color: var(--kd-lyrics-ink);
+}
+.kd-lyrics-line:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--kd-text) 35%, transparent);
+  outline-offset: 2px;
+  border-radius: 0.4rem;
+}
+.kd-lyrics-line[data-dist="1"] {
+  opacity: 0.62;
+  transform: scale(0.98);
+}
+.kd-lyrics-line[data-dist="0"],
+.kd-lyrics-line[data-active="true"] {
+  color: var(--kd-lyrics-ink);
+  opacity: 1;
+  transform: scale(1.045);
+}
+.kd-lyrics-line-text {
+  font-size: 1.05rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  line-height: 1.45;
+  max-width: 22em;
+}
+.kd-lyrics-line[data-active="true"] .kd-lyrics-line-text {
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.kd-lyrics-line-roma {
+  font-size: 0.74rem;
+  font-weight: 400;
+  letter-spacing: 0.03em;
+  color: inherit;
+  opacity: 0.62;
+  max-width: 26em;
+  font-style: italic;
+}
+.kd-lyrics-line-trans {
+  font-size: 0.78rem;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  color: inherit;
+  opacity: 0.72;
+  max-width: 24em;
+}
+.kd-lyrics-line[data-active="true"] .kd-lyrics-line-roma {
+  opacity: 0.7;
+}
+.kd-lyrics-line[data-active="true"] .kd-lyrics-line-trans {
+  opacity: 0.78;
+}
+.kd-lyrics-empty {
+  margin: auto;
+  padding: 2rem 1rem;
+  text-align: center;
+  color: var(--kd-lyrics-soft);
+  font-size: 0.9rem;
+  letter-spacing: 0.02em;
 }
