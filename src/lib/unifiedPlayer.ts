@@ -59,6 +59,7 @@ export interface UnifiedPlayer {
   load(source: UnifiedPlayerSource): Promise<UnifiedPlayerState>;
   prepare(source: UnifiedPlayerSource): Promise<UnifiedPlayerState>;
   handoff(
+    trackId: number,
     position: number,
     seconds: number,
     plan?: UnifiedTransitionPlan,
@@ -376,12 +377,14 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 
   handoff(
+    trackId: number,
     position: number,
     seconds: number,
     plan?: UnifiedTransitionPlan,
   ): Promise<UnifiedPlayerState> {
     return this.command({
       type: "handoff",
+      trackId,
       position: Math.max(0, position),
       seconds: Math.max(0, seconds),
       plan: plan ?? {

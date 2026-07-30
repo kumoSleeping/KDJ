@@ -562,20 +562,14 @@ export function PlayerBar() {
           applyInOutPoints && next.cue_ms !== null
             ? next.cue_ms / 1000
             : (next.first_beat ?? 0);
-        const cached = nativePreparedRef.current;
-        const preparation =
-          cached &&
-          cached.fromId === from.id &&
-          cached.trackId === next.id &&
-          Math.abs(cached.rate - rate) < 0.0001 &&
-          Math.abs(cached.cue - cue) < 0.02
-            ? Promise.resolve(nativePlayer.state())
-            : nativePlayer.prepare({
-                src: mediaUrlForTrack(next),
-                track: next,
-                position: cue,
-                rate,
-              });
+        // prepare 命令本身只登记目标并立即 ACK；即使命中前端预热缓存也重新提交一次，
+        // 让随后 handoff 的显式 trackId 与后端 Deck 目标属于同一条命令序列。
+        const preparation = nativePlayer.prepare({
+          src: mediaUrlForTrack(next),
+          track: next,
+          position: cue,
+          rate,
+        });
         void preparation
           .then(() => {
             if (generation !== nativeDjGenerationRef.current) return;
@@ -592,7 +586,7 @@ export function PlayerBar() {
             commitPlaying(true);
             setNotice("");
             markPlayed(next.id);
-            return nativePlayer.handoff(cue, seconds, {
+            return nativePlayer.handoff(next.id, cue, seconds, {
               eq: chosenTransitions.includes("eq"),
               filter: chosenTransitions.includes("filter"),
               vocalCut,

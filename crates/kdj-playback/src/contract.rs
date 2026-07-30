@@ -48,6 +48,8 @@ pub enum PlaybackCommand {
     Pause,
     Seek { position: f64 },
     Handoff {
+        #[serde(rename = "trackId")]
+        track_id: i64,
         position: f64,
         seconds: f64,
         #[serde(default)]

@@ -325,14 +325,18 @@ impl Actor {
             PlaybackCommand::Pause => self.set_playing(false),
             PlaybackCommand::Seek { position } => self.seek(position),
             PlaybackCommand::Handoff {
+                track_id,
                 position,
                 seconds,
                 plan,
-            } => self.handoff(PendingTransition {
-                position,
-                seconds,
-                plan,
-            }),
+            } => self.handoff(
+                track_id,
+                PendingTransition {
+                    position,
+                    seconds,
+                    plan,
+                },
+            ),
             PlaybackCommand::SetVolume { volume } => self.set_volume(volume),
             PlaybackCommand::SetEq { low_db, high_db } => self.set_eq(low_db, high_db),
             PlaybackCommand::Dispose => {
@@ -460,11 +464,15 @@ impl Actor {
         self.start_stream(target, source, Some(Activation::Seek))
     }
 
-    fn handoff(&mut self, transition: PendingTransition) -> Result<(), String> {
-        let expected = self
-            .state
-            .prepared_track_id
-            .ok_or_else(|| "没有已请求的下一首".to_string())?;
+    fn handoff(
+        &mut self,
+        expected: i64,
+        transition: PendingTransition,
+    ) -> Result<(), String> {
+        if expected <= 0 {
+            return Err("接歌目标 id 无效".into());
+        }
+        self.state.prepared_track_id = Some(expected);
         let target = self.front.other();
         if self.decks[target as usize]
             .as_ref()
