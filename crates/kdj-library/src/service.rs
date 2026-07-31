@@ -2009,8 +2009,12 @@ mod tests {
         let (service, id, path) = scratch_track("mtime");
         // Windows CI 偶发：创建与写标签落在同一 mtime tick，after == before。
         // 先把磁盘时间拨回过去，再 sync 进库，后面的写入就一定能推高 mtime。
+        // 注意不能用 File::open()：Windows 上那是只读共享句柄，SetFileTime
+        // 需要 FILE_WRITE_ATTRIBUTES，会报 Access is denied (os error 5)。
         let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
-        std::fs::File::open(&path)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
             .unwrap()
             .set_modified(past)
             .unwrap();
