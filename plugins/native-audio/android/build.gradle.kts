@@ -34,6 +34,9 @@ android {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
+    // SAF 选目录回调要 androidx.activity.result.ActivityResult；
+    // core-ktx 不带它，官方 dialog 插件靠 appcompat 传递，这里直接声明并与 app 模块同版。
+    implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("androidx.media3:media3-common:1.4.1")
     implementation("androidx.media3:media3-session:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
