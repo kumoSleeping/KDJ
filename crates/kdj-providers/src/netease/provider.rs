@@ -368,6 +368,7 @@ impl MusicProvider for NeteaseProvider {
             image: qr_data_url_from_text(&url)?,
             url,
             expires_in: 180,
+            variants: Vec::new(),
         })
     }
 

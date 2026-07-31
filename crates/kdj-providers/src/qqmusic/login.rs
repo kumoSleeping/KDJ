@@ -1,16 +1,21 @@
-//! QQ 扫码登录。
+//! QQ 音乐扫码登录：两路并行。
 //!
-//! 这条链路比其他平台都长，五步缺一不可：
-//! 1. `ptqrshow` 拿二维码 PNG + `qrsig` cookie；
-//! 2. `ptqrlogin` 轮询，参数里的 `ptqrtoken = hash33(qrsig)`；
-//! 3. 成功时从返回的 JS 回调里抠出 `uin` 和 `ptsigx`；
-//! 4. `check_sig` 换 `p_skey`（**必须不跟随重定向**，p_skey 只在这一跳的 Set-Cookie 里）；
-//! 5. `graph.qq.com/oauth2.0/authorize` 拿 code → `QQConnectLogin.LoginServer` 换 musickey。
+//! 1. **QQ 互联**（`ptqrshow`）：用 **QQ App** 扫，五步 OAuth 换 musickey。
+//! 2. **QQ 音乐客户端**（`CreateQRCode` + MQTT）：用 **QQ 音乐 App** 扫。
+//!
+//! `create_dual_qr` 同时拉两张码；`poll_dual_qr` 任一路成功即登录完成。
+
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use base64::Engine as _;
+use rand::Rng as _;
 use serde_json::{json, Value};
+use tokio::task::JoinHandle;
 
 use super::client::{hash33, now_secs, Credential};
+use super::mqtt_ws::MqttWsClient;
 
 const APP_ID: &str = "716027609";
 const DAID: &str = "383";
@@ -31,6 +36,58 @@ pub enum QrOutcome {
     Refused,
     Expired,
     Done { uin: String, sigx: String },
+}
+
+/// 双通道会话：QQ App 一路 + QQ 音乐 App 一路。
+/// 任一路创建失败时对应字段为 `None`，只要至少一路成功就能登录。
+#[derive(Clone)]
+pub struct DualQrSession {
+    pub qq: Option<QqQrSession>,
+    pub mobile: Option<MobileQrSession>,
+}
+
+#[derive(Clone)]
+pub struct MobileQrSession {
+    pub png: Vec<u8>,
+    pub qrcode_id: String,
+    state: Arc<Mutex<MobileWatchState>>,
+    watch: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+#[derive(Debug, Clone)]
+enum MobileWatchState {
+    Waiting,
+    Scanned,
+    Refused,
+    Expired,
+    Done(Credential),
+    Error(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum DualQrOutcome {
+    Waiting,
+    Scanned,
+    Refused,
+    Expired,
+    Done(Credential),
+    Error(String),
+}
+
+impl MobileQrSession {
+    pub fn abort(&self) {
+        if let Some(handle) = self.watch.lock().unwrap().take() {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for MobileQrSession {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.watch) == 1 {
+            self.abort();
+        }
+    }
 }
 
 pub async fn create_qq_qr(http: &reqwest::Client) -> Result<QqQrSession> {
@@ -278,6 +335,374 @@ fn between(text: &str, start: &str, end: &str) -> Option<String> {
     }
 }
 
+// ---------------------------------------------------------------- QQ 音乐 App 扫码
+
+const MUSICU: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
+const MQTT_HOST: &str = "mu.y.qq.com";
+const MQTT_PATH: &str = "/ws/handshake";
+const MQTT_KEEP_ALIVE: u16 = 45;
+const MOBILE_WATCH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// 同时创建 QQ 互联码 + QQ 音乐客户端码。
+/// 两路并行；单路失败不拖垮另一路，两路都失败才返回 Err。
+pub async fn create_dual_qr(http: &reqwest::Client) -> Result<DualQrSession> {
+    let (qq_res, mobile_res) = tokio::join!(create_qq_qr(http), create_mobile_qr(http));
+    let qq = qq_res
+        .map_err(|err| tracing::warn!("QQ 互联二维码创建失败：{err:#}"))
+        .ok();
+    let mobile = mobile_res
+        .map_err(|err| tracing::warn!("QQ 音乐客户端二维码创建失败：{err:#}"))
+        .ok();
+    if qq.is_none() && mobile.is_none() {
+        bail!("QQ 音乐与 QQ 二维码均获取失败");
+    }
+    Ok(DualQrSession { qq, mobile })
+}
+
+fn abort_mobile(session: &DualQrSession) {
+    if let Some(mobile) = &session.mobile {
+        mobile.abort();
+    }
+}
+
+/// 轮询双通道：优先 QQ 互联，其次 QQ 音乐 App。
+/// 任一路成功即 Done；两边都过期/不可用才 Expired。
+pub async fn poll_dual_qr(
+    http: &reqwest::Client,
+    session: &DualQrSession,
+) -> Result<DualQrOutcome> {
+    let mobile_state = session
+        .mobile
+        .as_ref()
+        .map(poll_mobile_qr)
+        .unwrap_or(DualQrOutcome::Expired);
+
+    // App 侧已经拿到凭证 / 明确失败时，直接采纳（不阻塞在互联轮询上）。
+    match &mobile_state {
+        DualQrOutcome::Done(credential) => {
+            return Ok(DualQrOutcome::Done(credential.clone()));
+        }
+        DualQrOutcome::Error(message) => return Ok(DualQrOutcome::Error(message.clone())),
+        _ => {}
+    }
+
+    // 1) 优先 QQ 互联
+    let mut qq_alive = false;
+    if let Some(qq) = &session.qq {
+        match check_qq_qr(http, qq).await {
+            Ok(QrOutcome::Done { uin, sigx }) => match authorize(http, &uin, &sigx).await {
+                Ok(credential) => {
+                    abort_mobile(session);
+                    return Ok(DualQrOutcome::Done(credential));
+                }
+                Err(err) => {
+                    // 互联授权失败且 App 侧也帮不上 → 报错；否则继续等 App。
+                    if !matches!(
+                        mobile_state,
+                        DualQrOutcome::Waiting | DualQrOutcome::Scanned
+                    ) {
+                        return Ok(DualQrOutcome::Error(truncate(
+                            &format!("QQ 授权换凭证失败：{err:#}"),
+                            160,
+                        )));
+                    }
+                }
+            },
+            Ok(QrOutcome::Scanned) => return Ok(DualQrOutcome::Scanned),
+            Ok(QrOutcome::Waiting) => qq_alive = true,
+            Ok(QrOutcome::Refused) => {
+                if !matches!(mobile_state, DualQrOutcome::Waiting | DualQrOutcome::Scanned) {
+                    abort_mobile(session);
+                    return Ok(DualQrOutcome::Refused);
+                }
+            }
+            Ok(QrOutcome::Expired) => {}
+            Err(err) => {
+                if session.mobile.is_none() {
+                    return Ok(DualQrOutcome::Error(truncate(
+                        &format!("检查 QQ 二维码失败：{err:#}"),
+                        160,
+                    )));
+                }
+                tracing::debug!("QQ 互联轮询失败，回退 QQ 音乐 App：{err:#}");
+            }
+        }
+    }
+
+    // 2) 合并 QQ 音乐 App / 存活状态
+    match mobile_state {
+        DualQrOutcome::Scanned => Ok(DualQrOutcome::Scanned),
+        DualQrOutcome::Refused if !qq_alive => Ok(DualQrOutcome::Refused),
+        DualQrOutcome::Waiting | DualQrOutcome::Refused => Ok(DualQrOutcome::Waiting),
+        DualQrOutcome::Expired if qq_alive => Ok(DualQrOutcome::Waiting),
+        DualQrOutcome::Expired => Ok(DualQrOutcome::Expired),
+        // Done / Error 已在前面 return
+        DualQrOutcome::Done(credential) => Ok(DualQrOutcome::Done(credential)),
+        DualQrOutcome::Error(message) => Ok(DualQrOutcome::Error(message)),
+    }
+}
+
+pub async fn create_mobile_qr(http: &reqwest::Client) -> Result<MobileQrSession> {
+    let (png, qrcode_id) = request_mobile_qrcode(http).await?;
+    let state = Arc::new(Mutex::new(MobileWatchState::Waiting));
+    let watch_slot = Arc::new(Mutex::new(None));
+
+    let http = http.clone();
+    let state_bg = Arc::clone(&state);
+    let qrcode_id_bg = qrcode_id.clone();
+    let handle = tokio::spawn(async move {
+        match watch_mobile_qr(&http, &qrcode_id_bg, &state_bg).await {
+            Ok(credential) => {
+                *state_bg.lock().unwrap() = MobileWatchState::Done(credential);
+            }
+            Err(err) => {
+                let mut guard = state_bg.lock().unwrap();
+                if matches!(
+                    *guard,
+                    MobileWatchState::Refused
+                        | MobileWatchState::Expired
+                        | MobileWatchState::Done(_)
+                ) {
+                    return;
+                }
+                let message = format!("{err:#}");
+                if message.contains("超时") || message.to_lowercase().contains("timeout") {
+                    *guard = MobileWatchState::Expired;
+                } else if message.contains("取消") {
+                    *guard = MobileWatchState::Refused;
+                } else {
+                    *guard = MobileWatchState::Error(truncate(&message, 160));
+                }
+            }
+        }
+    });
+    *watch_slot.lock().unwrap() = Some(handle);
+
+    Ok(MobileQrSession {
+        png,
+        qrcode_id,
+        state,
+        watch: watch_slot,
+    })
+}
+
+fn poll_mobile_qr(session: &MobileQrSession) -> DualQrOutcome {
+    match session.state.lock().unwrap().clone() {
+        MobileWatchState::Waiting => DualQrOutcome::Waiting,
+        MobileWatchState::Scanned => DualQrOutcome::Scanned,
+        MobileWatchState::Refused => DualQrOutcome::Refused,
+        MobileWatchState::Expired => DualQrOutcome::Expired,
+        MobileWatchState::Done(credential) => DualQrOutcome::Done(credential),
+        MobileWatchState::Error(message) => DualQrOutcome::Error(message),
+    }
+}
+
+async fn request_mobile_qrcode(http: &reqwest::Client) -> Result<(Vec<u8>, String)> {
+    let payload = json!({
+        "comm": {"ct": 23, "cv": 0, "chid": "0"},
+        "req_0": {
+            "module": "music.login.LoginServer",
+            "method": "CreateQRCode",
+            "param": {
+                "tmeAppID": "qqmusic",
+                "ct": 19,
+                "cv": 2201
+            }
+        }
+    });
+    let response = http
+        .post(MUSICU)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(reqwest::header::REFERER, "https://y.qq.com/")
+        .json(&payload)
+        .send()
+        .await
+        .context("获取 QQ 音乐客户端二维码失败")?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "获取 QQ 音乐客户端二维码失败：HTTP {}",
+        response.status()
+    );
+    let value: Value = response.json().await.context("客户端二维码响应不是合法 JSON")?;
+    let item = value.get("req_0").context("客户端二维码响应缺少 req_0")?;
+    let code = item.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    anyhow::ensure!(code == 0, "获取 QQ 音乐客户端二维码失败：code={code}");
+    let data = item.get("data").context("客户端二维码响应缺少 data")?;
+    let qrcode = data
+        .get("qrcode")
+        .and_then(Value::as_str)
+        .context("客户端二维码响应缺少 qrcode")?;
+    let qrcode_id = data
+        .get("qrcodeID")
+        .and_then(Value::as_str)
+        .context("客户端二维码响应缺少 qrcodeID")?
+        .to_string();
+    anyhow::ensure!(!qrcode_id.is_empty(), "客户端二维码 qrcodeID 为空");
+
+    let b64 = qrcode.split(',').next_back().unwrap_or(qrcode);
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .context("客户端二维码 PNG base64 解码失败")?;
+    anyhow::ensure!(!png.is_empty(), "QQ 音乐客户端二维码为空");
+    Ok((png, qrcode_id))
+}
+
+async fn watch_mobile_qr(
+    http: &reqwest::Client,
+    qrcode_id: &str,
+    state: &Mutex<MobileWatchState>,
+) -> Result<Credential> {
+    let started = Instant::now();
+    let client_id = format!(
+        "{}{}",
+        now_secs() * 1000 + i64::from(rand::thread_rng().gen_range(0..1000)),
+        rand::thread_rng().gen_range(1000..10000)
+    );
+
+    let mut mqtt = MqttWsClient::connect(
+        MQTT_HOST,
+        MQTT_PATH,
+        &client_id,
+        MQTT_KEEP_ALIVE,
+        "pass",
+        &[
+            ("tmeAppID", "qqmusic"),
+            ("business", "management"),
+            ("hashTag", qrcode_id),
+            ("clientTag", "management.user"),
+            ("userID", qrcode_id),
+        ],
+        3,
+    )
+    .await?;
+
+    let topic = format!("management.qrcode_login/{qrcode_id}");
+    mqtt.subscribe(
+        &topic,
+        &[("authorization", "tmelogin"), ("pubsub", "unicast")],
+    )
+    .await?;
+
+    loop {
+        let remaining = MOBILE_WATCH_TIMEOUT.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            *state.lock().unwrap() = MobileWatchState::Expired;
+            bail!("二维码登录超时");
+        }
+        let publish = tokio::time::timeout(remaining, mqtt.next_publish())
+            .await
+            .context("二维码登录超时")?
+            .context("MQTT 连接已关闭")?
+            .context("MQTT 连接已关闭")?;
+
+        let event_type = publish
+            .user_properties
+            .iter()
+            .find(|(key, _)| key == "type")
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("");
+
+        match event_type {
+            "scanned" => {
+                let mut guard = state.lock().unwrap();
+                if matches!(*guard, MobileWatchState::Waiting) {
+                    *guard = MobileWatchState::Scanned;
+                }
+            }
+            "canceled" => {
+                *state.lock().unwrap() = MobileWatchState::Refused;
+                bail!("用户取消登录");
+            }
+            "timeout" => {
+                *state.lock().unwrap() = MobileWatchState::Expired;
+                bail!("二维码登录超时");
+            }
+            "loginFailed" => bail!("QQ 音乐扫码登录失败"),
+            "cookies" => {
+                let payload: Value = serde_json::from_slice(&publish.payload)
+                    .context("cookies 事件不是合法 JSON")?;
+                return authorize_mobile_cookies(http, qrcode_id, &payload).await;
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn authorize_mobile_cookies(
+    http: &reqwest::Client,
+    qrcode_id: &str,
+    payload: &Value,
+) -> Result<Credential> {
+    let cookies = payload
+        .get("cookies")
+        .and_then(Value::as_object)
+        .context("cookies 事件缺少 cookies 字段")?;
+    let uin = cookie_map_value(cookies, "qqmusic_uin").context("cookies 里没有 qqmusic_uin")?;
+    let key = cookie_map_value(cookies, "qqmusic_key").context("cookies 里没有 qqmusic_key")?;
+    let musicid: i64 = uin.parse().context("qqmusic_uin 不是数字")?;
+
+    let request_payload = json!({
+        "comm": {
+            "ct": 19,
+            "cv": 2201,
+            "chid": "0",
+            "tmeLoginType": 6
+        },
+        "req_0": {
+            "module": "music.login.LoginServer",
+            "method": "Login",
+            "param": {
+                "musicid": musicid,
+                "qrCodeID": qrcode_id,
+                "token": key
+            }
+        }
+    });
+    let response = http
+        .post(MUSICU)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(reqwest::header::REFERER, "https://y.qq.com/")
+        .json(&request_payload)
+        .send()
+        .await
+        .context("换取 QQ 音乐客户端凭证失败")?;
+    let value: Value = response.json().await.context("客户端凭证响应不是合法 JSON")?;
+    let item = value.get("req_0").context("客户端凭证响应缺少 req_0")?;
+    let code = item.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    if code != 0 {
+        bail!("QQ 音乐客户端登录失败：code={code}");
+    }
+    let data = item.get("data").cloned().unwrap_or(Value::Null);
+    let mut credential: Credential =
+        serde_json::from_value(data).context("客户端凭证字段不完整")?;
+    if credential.login_type == 0 {
+        credential.login_type = 6;
+    }
+    anyhow::ensure!(credential.is_present(), "QQ 音乐客户端没有返回可用的 musickey");
+    Ok(credential)
+}
+
+fn cookie_map_value(
+    cookies: &serde_json::Map<String, Value>,
+    name: &str,
+) -> Option<String> {
+    cookies
+        .get(name)
+        .and_then(|entry| entry.get("value").or(Some(entry)))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn truncate(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text.to_string()
+    } else {
+        let clipped: String = text.chars().take(max_chars).collect();
+        format!("{clipped}…")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,5 +760,18 @@ mod tests {
         assert_eq!(between("a=1&b=2", "b=", "&"), Some("2".into()));
         assert_eq!(between("a=1", "zzz=", "&"), None);
         assert_eq!(between("code=&x", "code=", "&"), None);
+    }
+
+    #[test]
+    fn cookie_map_value_reads_nested_and_plain_entries() {
+        let cookies = json!({
+            "qqmusic_uin": {"value": "12345"},
+            "qqmusic_key": "plain-token"
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        assert_eq!(cookie_map_value(&cookies, "qqmusic_uin").as_deref(), Some("12345"));
+        assert_eq!(cookie_map_value(&cookies, "qqmusic_key").as_deref(), Some("plain-token"));
     }
 }

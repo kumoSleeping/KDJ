@@ -72,12 +72,21 @@ export interface Account {
   supports_login: boolean;
 }
 
+/** 同一登录会话下的一张可选二维码（QQ 音乐会同时给 QQ 音乐 / QQ 两张）。 */
+export interface QrVariant {
+  id: string;
+  label: string;
+  image: string;
+}
+
 export interface QrSession {
   platform: Platform;
   session_id: string;
   image: string;
   url: string;
   expires_in: number;
+  /** 多通道登录时的全部二维码；空/缺省 = 只用 image。 */
+  variants?: QrVariant[];
 }
 
 export interface QrState {

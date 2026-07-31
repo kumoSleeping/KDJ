@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use futures_util::StreamExt as _;
 use base64::Engine as _;
 use kdj_core::models::{
-    Account, AccountState, LyricText, Platform, Quality, QrSession, QrStateValue, ResolveKind,
-    ResolveResponse, SongSource,
+    Account, AccountState, LyricText, Platform, Quality, QrSession, QrStateValue, QrVariant,
+    ResolveKind, ResolveResponse, SongSource,
 };
 use kdj_core::paths::render_filename;
 use serde_json::{json, Value};
@@ -153,7 +153,7 @@ fn file_type(quality: Quality) -> (&'static str, &'static str) {
 pub struct QqMusicProvider {
     ctx: ProviderContext,
     client: QqClient,
-    qr_sessions: Mutex<HashMap<String, (login::QqQrSession, Instant)>>,
+    qr_sessions: Mutex<HashMap<String, (login::DualQrSession, Instant)>>,
     cdn: Mutex<Option<(String, Instant)>>,
     profile: Mutex<Option<((String, String), Instant)>>,
 }
@@ -551,8 +551,32 @@ impl MusicProvider for QqMusicProvider {
     }
 
     async fn create_qr(&self) -> Result<QrSession> {
-        let session = login::create_qq_qr(self.client.http()).await?;
-        let image = qr_data_url_from_png(&session.png);
+        // 同时下发 QQ 音乐 App 码 + QQ 互联码；用户扫任意一张即可。
+        // 单路失败时仍返回成功的那一路，避免整次登录不可用。
+        let session = login::create_dual_qr(self.client.http()).await?;
+        // 顺序与主图都优先 QQ 互联（用 QQ 扫）；QQ 音乐 App 码作补充。
+        let mut variants = Vec::new();
+        if let Some(qq) = &session.qq {
+            variants.push(QrVariant {
+                id: "qq".into(),
+                label: "QQ".into(),
+                image: qr_data_url_from_png(&qq.png),
+            });
+        }
+        if let Some(mobile) = &session.mobile {
+            variants.push(QrVariant {
+                id: "qqmusic".into(),
+                label: "QQ音乐".into(),
+                image: qr_data_url_from_png(&mobile.png),
+            });
+        }
+        anyhow::ensure!(!variants.is_empty(), "没有可用的 QQ 登录二维码");
+        let image = variants
+            .iter()
+            .find(|item| item.id == "qq")
+            .or_else(|| variants.first())
+            .map(|item| item.image.clone())
+            .unwrap_or_default();
         let session_id = format!("{:032x}", rand::random::<u128>());
         self.prune_qr_sessions();
         self.qr_sessions
@@ -565,6 +589,7 @@ impl MusicProvider for QqMusicProvider {
             image,
             url: String::new(),
             expires_in: 180,
+            variants,
         })
     }
 
@@ -580,33 +605,37 @@ impl MusicProvider for QqMusicProvider {
             ));
         };
 
-        match login::check_qq_qr(self.client.http(), &session).await {
-            Ok(login::QrOutcome::Waiting) => Ok((QrStateValue::Waiting, "等待手机扫码".into())),
-            Ok(login::QrOutcome::Scanned) => {
+        match login::poll_dual_qr(self.client.http(), &session).await {
+            Ok(login::DualQrOutcome::Waiting) => {
+                Ok((QrStateValue::Waiting, "等待手机扫码（QQ 音乐或 QQ）".into()))
+            }
+            Ok(login::DualQrOutcome::Scanned) => {
                 Ok((QrStateValue::Scanned, "已扫码，请在手机上确认".into()))
             }
-            Ok(login::QrOutcome::Refused) => {
+            Ok(login::DualQrOutcome::Refused) => {
                 self.qr_sessions.lock().unwrap().remove(session_id);
+                if let Some(mobile) = &session.mobile {
+                    mobile.abort();
+                }
                 Ok((QrStateValue::Refused, "已在手机上拒绝登录".into()))
             }
-            Ok(login::QrOutcome::Expired) => {
+            Ok(login::DualQrOutcome::Expired) => {
                 self.qr_sessions.lock().unwrap().remove(session_id);
+                if let Some(mobile) = &session.mobile {
+                    mobile.abort();
+                }
                 Ok((QrStateValue::Expired, "二维码已过期，请重新获取".into()))
             }
-            Ok(login::QrOutcome::Done { uin, sigx }) => {
+            Ok(login::DualQrOutcome::Done(credential)) => {
                 self.qr_sessions.lock().unwrap().remove(session_id);
-                match login::authorize(self.client.http(), &uin, &sigx).await {
-                    Ok(credential) => {
-                        self.client.store_credential(credential);
-                        *self.profile.lock().unwrap() = None;
-                        Ok((QrStateValue::Done, "登录成功".into()))
-                    }
-                    Err(err) => Ok((
-                        QrStateValue::Error,
-                        truncate(&format!("换取登录凭证失败：{err:#}"), 160),
-                    )),
+                if let Some(mobile) = &session.mobile {
+                    mobile.abort();
                 }
+                self.client.store_credential(credential);
+                *self.profile.lock().unwrap() = None;
+                Ok((QrStateValue::Done, "登录成功".into()))
             }
+            Ok(login::DualQrOutcome::Error(message)) => Ok((QrStateValue::Error, message)),
             Err(err) => Ok((
                 QrStateValue::Error,
                 truncate(&format!("检查二维码状态失败：{err:#}"), 160),

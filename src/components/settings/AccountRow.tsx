@@ -189,15 +189,33 @@ export function AccountRow({ account }: { account: Account }) {
       const session = await api.loginQr(account.platform);
       if (generation !== qrGenerationRef.current) return;
       const bridge = getBridge();
-      const saved = await bridge.saveLoginQr({
-        platform: account.platform,
-        label: account.label,
-        image: session.image,
-      });
+      // QQ 音乐会一次返回「QQ 音乐 App」+「QQ」两张码；其它平台只有主图。
+      const variants =
+        session.variants && session.variants.length > 0
+          ? session.variants
+          : [{ id: "default", label: account.label, image: session.image }];
+      const savedList = [];
+      for (const variant of variants) {
+        const label =
+          variants.length > 1 ? `${account.label}-${variant.label}` : account.label;
+        savedList.push(
+          await bridge.saveLoginQr({
+            platform: account.platform,
+            label,
+            image: variant.image,
+          }),
+        );
+      }
       if (generation !== qrGenerationRef.current) return;
+      const saved = savedList[0];
       setSavedPath(saved.path);
       setSavedDisplayPath(saved.displayPath || saved.path);
-      setSavedHint(saved.location === "pictures" ? "已保存到相册/图片" : "已保存到下载文件夹");
+      const where = saved.location === "pictures" ? "已保存到相册/图片" : "已保存到下载文件夹";
+      setSavedHint(
+        variants.length > 1
+          ? `${where}（${variants.map((item) => item.label).join(" + ")} 两张）`
+          : where,
+      );
       setQrState("waiting");
       setQrBusy(false);
       // 保存完成就直接在文件管理器中定位；账号行本身继续留在设置里等待扫码。
