@@ -553,12 +553,58 @@ impl Actor {
             }
             return result;
         }
-        // 接歌（Transition 激活）的承诺涉及双 Deck 混合，仍不允许被跳转顶掉；
-        // 过渡通常在几秒内完成，调用方看到新状态后再跳。
-        if self.pending.iter().flatten().any(|pending| {
-            matches!(pending.activation, Some(Activation::Transition(_)))
+        // 接歌承诺已登记、Deck 尚未 activate：与 Hard 一样把跳转折进待激活流。
+        // 以前这里直接拒绝，前端却已乐观更新进度条 → 先跳过去再弹回 cue。
+        let pending_transition = self.pending.iter().position(|pending| {
+            pending.as_ref().is_some_and(|pending| {
+                matches!(pending.activation, Some(Activation::Transition(_)))
+                    && Some(pending.request.track_id) == self.state.track_id
+            })
+        });
+        if let Some(index) = pending_transition {
+            let checkpoint = self.state.clone();
+            let (mut request, mut transition) = {
+                let Some(pending) = self.pending[index].as_ref() else {
+                    return Err("换曲进行中，等新歌起播后再跳转".into());
+                };
+                let Some(Activation::Transition(transition)) = pending.activation else {
+                    return Err("换曲进行中，等新歌起播后再跳转".into());
+                };
+                (pending.request.clone(), transition)
+            };
+            let target = clamp_position(position, request.duration);
+            request.position = target;
+            request.autoplay = true;
+            transition.position = target;
+            self.state.current_time = target;
+            self.state.desired_playing = true;
+            self.state.phase = PlaybackPhase::Loading;
+            self.state.buffering = true;
+            let deck = if index == 0 { DeckId::A } else { DeckId::B };
+            let result =
+                self.start_stream(deck, request, Some(Activation::Transition(transition)));
+            if result.is_err() {
+                self.state = checkpoint;
+            }
+            return result;
+        }
+        // 连续接歌：第二场还在 deferred 时状态已指向它。跳转只改承诺位置，
+        // 等第一场混音收尾再按新位置起播；绝不能 settle 时把承诺清掉。
+        if let Some(deferred) = self.deferred_stream.as_mut().filter(|deferred| {
+            matches!(deferred.activation, Some(Activation::Transition(_)))
+                && Some(deferred.request.track_id) == self.state.track_id
         }) {
-            return Err("换曲进行中，等新歌起播后再跳转".into());
+            let target = clamp_position(position, deferred.request.duration);
+            deferred.request.position = target;
+            deferred.request.autoplay = true;
+            if let Some(Activation::Transition(transition)) = deferred.activation.as_mut() {
+                transition.position = target;
+            }
+            self.state.current_time = target;
+            self.state.desired_playing = true;
+            self.state.phase = PlaybackPhase::Loading;
+            self.state.buffering = true;
+            return Ok(());
         }
         self.settle_transition()?;
         let current = self.decks[self.front as usize]
@@ -662,7 +708,14 @@ impl Actor {
         })?;
         self.retire_deck(old);
         self.state.transitioning = false;
-        self.deferred_stream = None;
+        // 与自然收尾同一条路：旧 Deck 腾出后立刻承接已承诺的第二场接歌。
+        // 以前无条件 deferred_stream = None，混音中再切一首会被 seek/load 的
+        // settle 悄悄丢掉，表现成「切歌失败」（UI 已是下一首，喇叭还停在上一首）。
+        if let Some(deferred) = self.deferred_stream.take() {
+            if deferred.activation.is_some() {
+                self.start_stream(old, deferred.request, deferred.activation)?;
+            }
+        }
         Ok(())
     }
 
@@ -952,12 +1005,23 @@ impl Actor {
         }
         self.state.is_playing = audio.playing;
         if let Some(runtime) = &self.decks[self.front as usize] {
-            if audio.deck_source_ids[self.front as usize] == runtime.source_id {
-                self.state.current_time = runtime
-                    .seconds_for_frame(audio.deck_frames[self.front as usize]);
+            // 连续接歌：第二场已承诺（deferred）时 state 已指向新曲目，front 仍是
+            // 第一场混音的进场 Deck。它的时钟/时长/Ended 都不属于当前曲目——
+            // 拉进来进度条会先跳回第一场的进度，等第二场激活再弹走，
+            // 看起来就是「点完进度条又弹回去」。
+            let front_is_current = Some(runtime.request.track_id) == self.state.track_id;
+            if front_is_current {
+                if audio.deck_source_ids[self.front as usize] == runtime.source_id {
+                    self.state.current_time = runtime
+                        .seconds_for_frame(audio.deck_frames[self.front as usize]);
+                }
+                self.state.duration = runtime.duration();
             }
-            self.state.duration = runtime.duration();
-            if !audio.playing && runtime.source.drained() && self.state.desired_playing {
+            if front_is_current
+                && !audio.playing
+                && runtime.source.drained()
+                && self.state.desired_playing
+            {
                 self.state.phase = PlaybackPhase::Ended;
                 self.state.desired_playing = false;
             } else if !self.state.transitioning && self.state.phase != PlaybackPhase::Ended {
@@ -1505,6 +1569,163 @@ mod tests {
         assert!((actor.state.current_time - 30.0).abs() < 0.001);
         assert_eq!(actor.state.phase, PlaybackPhase::Loading);
         assert!(actor.state.buffering);
+    }
+
+    /// 接歌承诺未 activate 时点进度条：同样折进 Transition，避免乐观 UI 弹回 cue。
+    #[test]
+    fn seek_during_a_pending_transition_retargets_the_handoff() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.0));
+        actor.state.track_id = Some(1);
+        actor.state.phase = PlaybackPhase::Playing;
+        actor.prepare(source(2, 0.0)).expect("预热下一首");
+        actor
+            .handoff(
+                2,
+                PendingTransition {
+                    position: 0.0,
+                    seconds: 8.0,
+                    plan: PlaybackTransitionPlan::default(),
+                },
+            )
+            .expect("登记接歌承诺");
+
+        actor.seek(45.0).expect("跳转折进待激活的接歌");
+
+        let pending = actor.pending[DeckId::B as usize]
+            .as_ref()
+            .expect("接歌流仍在");
+        assert_eq!(pending.request.track_id, 2);
+        assert!((pending.request.position - 45.0).abs() < 0.001);
+        assert!(matches!(
+            pending.activation,
+            Some(Activation::Transition(transition))
+                if (transition.position - 45.0).abs() < 0.001 && transition.seconds == 8.0
+        ));
+        assert!((actor.state.current_time - 45.0).abs() < 0.001);
+        assert_eq!(actor.state.track_id, Some(2));
+        assert_eq!(actor.state.phase, PlaybackPhase::Loading);
+    }
+
+    /// 第二场接歌还在 deferred 时点进度条：只改承诺位置，不能 settle 清掉。
+    #[test]
+    fn seek_during_a_deferred_transition_retargets_without_dropping_it() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::B as usize] = Some(live_runtime(2, 0.0));
+        actor.front = DeckId::B;
+        actor.state.track_id = Some(3);
+        actor.state.phase = PlaybackPhase::Loading;
+        actor.retire_after_transition = Some(DeckId::A);
+        actor.state.transitioning = true;
+        actor.deferred_stream = Some(DeferredStream {
+            request: source(3, 0.0),
+            activation: Some(Activation::Transition(PendingTransition {
+                position: 0.0,
+                seconds: 8.0,
+                plan: PlaybackTransitionPlan::default(),
+            })),
+        });
+
+        actor.seek(22.0).expect("跳转折进 deferred 接歌");
+
+        let deferred = actor.deferred_stream.as_ref().expect("第二场承诺仍在");
+        assert_eq!(deferred.request.track_id, 3);
+        assert!((deferred.request.position - 22.0).abs() < 0.001);
+        assert!(matches!(
+            deferred.activation,
+            Some(Activation::Transition(transition))
+                if (transition.position - 22.0).abs() < 0.001 && transition.seconds == 8.0
+        ));
+        assert!(actor.retire_after_transition.is_some());
+        assert!(actor.state.transitioning);
+        assert!((actor.state.current_time - 22.0).abs() < 0.001);
+    }
+
+    /// 混音被 seek/load 强行收尾时，已承诺的第二场必须升到腾出的 Deck，不能丢。
+    #[test]
+    fn settle_transition_promotes_a_committed_deferred_handoff() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.0));
+        actor.decks[DeckId::B as usize] = Some(live_runtime(2, 0.0));
+        actor.front = DeckId::B;
+        actor.state.track_id = Some(2);
+        actor.state.phase = PlaybackPhase::Transitioning;
+        actor.state.transitioning = true;
+        actor.retire_after_transition = Some(DeckId::A);
+        actor.deferred_stream = Some(DeferredStream {
+            request: source(3, 1.5),
+            activation: Some(Activation::Transition(PendingTransition {
+                position: 1.5,
+                seconds: 6.0,
+                plan: PlaybackTransitionPlan::default(),
+            })),
+        });
+
+        actor.settle_transition().expect("强行收尾第一场");
+
+        assert!(actor.retire_after_transition.is_none());
+        assert!(!actor.state.transitioning);
+        assert!(actor.deferred_stream.is_none());
+        let pending = actor.pending[DeckId::A as usize]
+            .as_ref()
+            .expect("第二场应升到腾出的 Deck");
+        assert_eq!(pending.request.track_id, 3);
+        assert!((pending.request.position - 1.5).abs() < 0.001);
+        assert!(matches!(
+            pending.activation,
+            Some(Activation::Transition(transition))
+                if (transition.position - 1.5).abs() < 0.001 && transition.seconds == 6.0
+        ));
+    }
+
+    /// 连续接歌窗口：deferred 已承诺给新曲目后，state 指向新曲目，front 仍是
+    /// 第一场混音的进场 Deck。它的时钟/时长不能进状态，否则进度条先跳回
+    /// 第一场的进度，等第二场激活再弹走——看着就是「点完进度条又弹回去」。
+    #[test]
+    fn deferred_committed_state_ignores_the_front_deck_clock() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::B as usize] = Some(live_runtime(2, 0.0));
+        actor.front = DeckId::B;
+        actor.state.track_id = Some(3);
+        actor.state.phase = PlaybackPhase::Loading;
+        actor.state.transitioning = true;
+        actor.state.current_time = 45.0;
+        actor.state.duration = 240.0;
+        actor.retire_after_transition = Some(DeckId::A);
+        actor.deferred_stream = Some(DeferredStream {
+            request: source(3, 45.0),
+            activation: Some(Activation::Transition(PendingTransition {
+                position: 45.0,
+                seconds: 8.0,
+                plan: PlaybackTransitionPlan::default(),
+            })),
+        });
+        {
+            let mut snapshot = knobs.snapshot.lock().unwrap();
+            snapshot.active_deck = DeckId::B;
+            snapshot.transitioning = true;
+            snapshot.playing = true;
+            snapshot.deck_source_ids[DeckId::B as usize] = 102; // live_runtime(2)
+            snapshot.deck_frames[DeckId::B as usize] = 48_000; // 第一场才播到 1.0s
+        }
+
+        actor.refresh_from_audio();
+
+        assert!(
+            (actor.state.current_time - 45.0).abs() < 0.001,
+            "front Deck 的时钟不能盖掉已承诺曲目的位置，当前 {}",
+            actor.state.current_time
+        );
+        assert!(
+            (actor.state.duration - 240.0).abs() < 0.001,
+            "front Deck 的时长不能盖掉已承诺曲目的时长，当前 {}",
+            actor.state.duration
+        );
     }
 
     /// 点到进度条最右端：目标被收进末尾余量内，seek 不会读出流外。

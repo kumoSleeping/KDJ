@@ -613,7 +613,8 @@ export function PlayerBar() {
       const outgoingIndex = visualActiveIndexRef.current;
 
       if (desktopNative && nativePlayer?.supportsRealtimeDj) {
-        if (nativeDjBusyRef.current) return true;
+        // 在途 prepare/handoff 时再切一首：抬 generation 作废旧任务，开跑新候选。
+        // 以前 busy 时 return true，调用方以为接歌成功，实际 noop →「切歌失败」。
         nativeDjBusyRef.current = true;
         const generation = ++nativeDjGenerationRef.current;
         const currentRate = nativePlayer.state().rate || 1;
@@ -1142,10 +1143,20 @@ export function PlayerBar() {
         position: target,
       });
       if (nativePlayer) {
-        // 后端会把换曲装载期的跳转折进待激活流；先按住用户点下的位置，
+        // 后端会把换曲/接歌装载期的跳转折进待激活流；先按住用户点下的位置，
         // 等状态事件落到目标附近再交回跟随，避免进度条跳过去又被弹回。
         pendingSeekRef.current = { trackId: track.id, position: target, at: performance.now() };
-        void nativePlayer.seek(target).catch(() => undefined);
+        void nativePlayer.seek(target).catch(() => {
+          // 仍被拒绝时立刻松手，让下一拍权威时钟纠正；不要 pin 满 1.5s 再弹回。
+          const pending = pendingSeekRef.current;
+          if (
+            pending &&
+            pending.trackId === track.id &&
+            Math.abs(pending.position - target) < 0.001
+          ) {
+            pendingSeekRef.current = null;
+          }
+        });
       } else {
         void djEngine
           .seamlessSeek(mediaUrlForTrack(track), target, playingRef.current)
@@ -2485,7 +2496,17 @@ export function PlayerBar() {
               const at = ((event.clientX - rect.left) / rect.width) * duration;
               if (nativePlayer) {
                 pendingSeekRef.current = { trackId: track.id, position: at, at: performance.now() };
-                void nativePlayer.seek(at).catch(() => undefined);
+                void nativePlayer.seek(at).catch(() => {
+                  // 与主进度条同一套：被拒就立刻松手，不 pin 满 1.5s 再弹回。
+                  const pending = pendingSeekRef.current;
+                  if (
+                    pending &&
+                    pending.trackId === track.id &&
+                    Math.abs(pending.position - at) < 0.001
+                  ) {
+                    pendingSeekRef.current = null;
+                  }
+                });
               } else frontEl.currentTime = at;
               setPosition(at);
             }}
