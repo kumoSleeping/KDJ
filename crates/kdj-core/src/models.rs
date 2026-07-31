@@ -212,16 +212,31 @@ impl Account {
     }
 }
 
+/// 同一登录会话下的一张可选二维码（例如 QQ 音乐同时给「QQ 音乐 App」和「QQ」两张）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QrVariant {
+    /// 机器可读 id：`qqmusic` / `qq` 等。
+    pub id: String,
+    /// 落盘文件名和 UI 用的短标签。
+    pub label: String,
+    /// `data:image/png;base64,...`
+    pub image: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QrSession {
     pub platform: Platform,
     pub session_id: String,
+    /// 主图：兼容老前端；有 variants 时等于第一张。
     /// `data:image/png;base64,...`
     pub image: String,
     #[serde(default)]
     pub url: String,
     #[serde(default = "default_qr_ttl")]
     pub expires_in: u32,
+    /// 多通道登录时的全部二维码。空 = 只有上面那一张 `image`。
+    #[serde(default)]
+    pub variants: Vec<QrVariant>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -99,8 +99,9 @@ pub struct Settings {
 
 impl Settings {
     pub fn with_download_dir(dir: &Path) -> Self {
+        let download = dir.to_string_lossy().into_owned();
         Settings {
-            download_dir: dir.to_string_lossy().into_owned(),
+            download_dir: download.clone(),
             library_dirs: Vec::new(),
             default_quality: Quality::Flac,
             filename_template: default_filename_template(),
@@ -113,7 +114,8 @@ impl Settings {
             netease_use_download_api: false,
             video_max_height: default_video_height(),
             video_transcode: false,
-            video_download_dir: default_video_dir(),
+            // 与 download_dir 对齐，避免再走 default_video_dir()→directories（安卓会炸）
+            video_download_dir: download,
             video_format: default_video_format(),
             platform_priority: default_platform_priority(),
             search_platforms: default_search_platforms(),
@@ -199,10 +201,21 @@ fn default_video_dir() -> String {
 
 /// 系统的「下载」目录。Windows / Linux 上这个目录可能被本地化或挪过位置
 /// （XDG、注册表），必须问系统而不是拼死 `~/Downloads`；问不到才退回去。
+///
+/// **安卓/iOS 不要走 `directories`**：部分链路会间接碰到尚未初始化的
+/// `ndk-context`，直接 abort（真机 log：`android context was not initialized`）。
+/// 移动端应由 Tauri PathResolver 给沙箱路径；这里只作最后兜底。
 pub fn system_download_dir() -> PathBuf {
-    directories::UserDirs::new()
-        .and_then(|dirs| dirs.download_dir().map(Path::to_path_buf))
-        .unwrap_or_else(|| home_dir().join("Downloads"))
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        return home_dir().join("Download");
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        directories::UserDirs::new()
+            .and_then(|dirs| dirs.download_dir().map(Path::to_path_buf))
+            .unwrap_or_else(|| home_dir().join("Downloads"))
+    }
 }
 
 /// 全新安装的默认下载落点：系统「下载」目录下的 KDJ 子目录。
@@ -213,9 +226,23 @@ pub fn default_download_root() -> PathBuf {
 }
 
 pub fn home_dir() -> PathBuf {
-    directories::UserDirs::new()
-        .map(|dirs| dirs.home_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."))
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        // 优先环境变量；都没有就用相对路径，避免 directories/ndk。
+        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            return PathBuf::from(home);
+        }
+        if let Some(dir) = std::env::var_os("ANDROID_DATA").filter(|h| !h.is_empty()) {
+            return PathBuf::from(dir);
+        }
+        return PathBuf::from(".");
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        directories::UserDirs::new()
+            .map(|dirs| dirs.home_dir().to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
 }
 
 /// `~` 展开。Python 版每个路径都过了 `Path.expanduser()`，这里补齐同样的行为。

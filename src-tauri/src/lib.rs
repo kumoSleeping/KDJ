@@ -365,45 +365,98 @@ async fn apply_update() -> Result<(), String> {
 /// 用回调版而不是 `blocking_pick_folder`：命令有可能落在事件循环所在的线程上，
 /// 阻塞式对话框在那里会和事件循环互等死锁。oneshot 把回调转回 async。
 #[tauri::command]
-async fn pick_folder(_app: tauri::AppHandle) -> Option<String> {
+async fn pick_folder(app: tauri::AppHandle) -> Option<String> {
     #[cfg(desktop)]
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        _app.dialog().file().pick_folder(move |picked| {
+        app.dialog().file().pick_folder(move |picked| {
             // 接收端只有在整个命令被取消时才会没了，忽略即可
             let _ = tx.send(picked);
         });
-        rx.await
+        return rx
+            .await
             .ok()
             .flatten()
             .and_then(|file| file.into_path().ok())
-            .map(|path| path.to_string_lossy().into_owned())
+            .map(|path| path.to_string_lossy().into_owned());
     }
-    // 安卓是 scoped storage，没有「任意目录」这回事，前端也不会显示这些入口
+    // 移动端 dialog 没有 folder picker；提供应用可写的音乐目录作为曲库根。
     #[cfg(not(desktop))]
-    None
+    {
+        mobile_library_roots(&app).into_iter().next()
+    }
 }
 
 /// 选多个目录，取消返回 `[]`（Electron 版同样返回空数组而不是 null）。
 #[tauri::command]
-async fn pick_folders(_app: tauri::AppHandle) -> Vec<String> {
+async fn pick_folders(app: tauri::AppHandle) -> Vec<String> {
     #[cfg(desktop)]
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        _app.dialog().file().pick_folders(move |picked| {
+        app.dialog().file().pick_folders(move |picked| {
             let _ = tx.send(picked);
         });
-        rx.await
+        return rx
+            .await
             .ok()
             .flatten()
             .unwrap_or_default()
             .into_iter()
             .filter_map(|file| file.into_path().ok())
             .map(|path| path.to_string_lossy().into_owned())
-            .collect()
+            .collect();
     }
+    // 安卓/iOS：系统 folder picker 未实现。返回应用沙箱内可扫描的音乐目录，
+    // 用户把文件放进该目录（或系统 Music 同步进去）即可被曲库扫到。
+    // 完整 SAF 树选择后续再补；先解决「点添加什么都不发生」。
     #[cfg(not(desktop))]
-    Vec::new()
+    {
+        mobile_library_roots(&app)
+    }
+}
+
+/// 移动端可写、可扫的曲库候选根目录。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn mobile_library_roots(app: &tauri::AppHandle) -> Vec<String> {
+    let mut roots = Vec::new();
+    let mut push_dir = |dir: PathBuf| {
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let text = dir.to_string_lossy().into_owned();
+            if !roots.iter().any(|existing| existing == &text) {
+                roots.push(text);
+            }
+        }
+    };
+
+    // 1) 应用专属外部 Music（无需整盘存储权限，Android 10+ 可写）
+    if let Ok(audio) = app.path().audio_dir() {
+        push_dir(audio.join("KDJ"));
+    }
+    // 2) 应用文档/数据目录兜底
+    if let Ok(docs) = app.path().document_dir() {
+        push_dir(docs.join("KDJ-Music"));
+    }
+    if let Ok(data) = app.path().app_data_dir() {
+        push_dir(data.join("music"));
+    }
+    // 3) 常见公共 Music 路径（有权限时 scan 能读到用户已有文件）
+    #[cfg(target_os = "android")]
+    {
+        for candidate in [
+            "/storage/emulated/0/Music",
+            "/storage/emulated/0/Download/Music",
+            "/sdcard/Music",
+        ] {
+            let path = PathBuf::from(candidate);
+            if path.is_dir() {
+                let text = path.to_string_lossy().into_owned();
+                if !roots.iter().any(|existing| existing == &text) {
+                    roots.push(text);
+                }
+            }
+        }
+    }
+    roots
 }
 
 /// 自绘标题栏的窗口动作。`maximize` 是切换；`drag` 用于 Overlay 顶栏拖动。
@@ -757,40 +810,97 @@ fn reconcile_database_alias(data_dir: &Path) {
 }
 
 fn default_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
-    let current = app.path().app_config_dir()?.join("data");
-    let base = app
-        .path()
-        .app_config_dir()?
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| anyhow::anyhow!("拿不到配置目录的父目录"))?;
-
-    // 旧版本实际使用过 kumodeck，也有一版迁移代码预期 kdj；两处都认，
-    // 但不会把当前 com.kdj.app/data 当成旧目录再次拷贝。
-    let legacy_candidates = [base.join("kumodeck").join("data"), base.join("kdj").join("data")];
-    let current_has_sessions = current.join("sessions").exists();
-    let marker = current.join(".legacy-data-migrated");
-    for legacy in legacy_candidates {
-        let legacy_has_database = has_file_bytes(&legacy.join("kumodeck.db"))
-            || has_file_bytes(&legacy.join("kdj.db"));
-        let legacy_has_sessions = legacy.join("sessions").exists();
-        if legacy_has_database && !marker.exists() && (!current_has_sessions || legacy_has_sessions)
-        {
-            // 当前目录可能已经被错误版本创建过空库，首次发现旧会话时以旧数据为准，
-            // 强制整体替换数据库及 WAL，避免新旧 WAL 混在一起造成 SQLite 不一致。
-            if migrate_legacy_data(&current, &legacy, true)? {
-                std::fs::write(&marker, b"migrated\n")?;
-                eprintln!("KDJ: 已从 {} 迁移曲库、封面和登录凭证", legacy.display());
-            }
-            break;
-        }
+    // 移动端：只使用应用沙箱目录。不要做桌面 Electron 那套 parent()/kdj 迁移——
+    // 那是为 macOS/Windows/Linux 的 productName 布局写的；在安卓上乱翻父目录
+    // 既无意义，也更容易在 Path/JNI 未就绪时踩坑。
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let current = app
+            .path()
+            .app_config_dir()
+            .or_else(|_| app.path().app_data_dir())
+            .map_err(|err| anyhow::anyhow!("移动端拿不到应用数据目录：{err}"))?
+            .join("data");
+        std::fs::create_dir_all(&current)?;
+        reconcile_database_alias(&current);
+        return Ok(current);
     }
-    reconcile_database_alias(&current);
-    Ok(current)
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let current = app.path().app_config_dir()?.join("data");
+        let base = app
+            .path()
+            .app_config_dir()?
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| anyhow::anyhow!("拿不到配置目录的父目录"))?;
+
+        // 旧版本实际使用过 kumodeck，也有一版迁移代码预期 kdj；两处都认，
+        // 但不会把当前 com.kdj.app/data 当成旧目录再次拷贝。
+        let legacy_candidates =
+            [base.join("kumodeck").join("data"), base.join("kdj").join("data")];
+        let current_has_sessions = current.join("sessions").exists();
+        let marker = current.join(".legacy-data-migrated");
+        for legacy in legacy_candidates {
+            let legacy_has_database = has_file_bytes(&legacy.join("kumodeck.db"))
+                || has_file_bytes(&legacy.join("kdj.db"));
+            let legacy_has_sessions = legacy.join("sessions").exists();
+            if legacy_has_database
+                && !marker.exists()
+                && (!current_has_sessions || legacy_has_sessions)
+            {
+                // 当前目录可能已经被错误版本创建过空库，首次发现旧会话时以旧数据为准，
+                // 强制整体替换数据库及 WAL，避免新旧 WAL 混在一起造成 SQLite 不一致。
+                if migrate_legacy_data(&current, &legacy, true)? {
+                    std::fs::write(&marker, b"migrated\n")?;
+                    eprintln!("KDJ: 已从 {} 迁移曲库、封面和登录凭证", legacy.display());
+                }
+                break;
+            }
+        }
+        reconcile_database_alias(&current);
+        Ok(current)
+    }
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).map(PathBuf::from)
+}
+
+/// 解析默认下载目录。移动端**禁止**回落到 `directories`/`ndk-context` 链路。
+fn resolve_download_dir(app: &tauri::AppHandle, data_dir: &Path) -> PathBuf {
+    if let Some(raw) = env_path("KDJ_DOWNLOAD_DIR") {
+        return raw;
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        // 优先系统 Download（Tauri Path 插件，走 Activity，不经 ndk-context）；
+        // 再退 app 数据目录；最后 data_dir/downloads——保证总能起服。
+        if let Ok(dir) = app.path().download_dir() {
+            let target = dir.join("KDJ");
+            let _ = std::fs::create_dir_all(&target);
+            return target;
+        }
+        if let Ok(dir) = app.path().app_data_dir() {
+            let target = dir.join("KDJ-downloads");
+            let _ = std::fs::create_dir_all(&target);
+            return target;
+        }
+        let target = data_dir.join("downloads");
+        let _ = std::fs::create_dir_all(&target);
+        return target;
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = data_dir;
+        app.path()
+            .download_dir()
+            .map(|dir| dir.join("KDJ"))
+            .unwrap_or_else(|_| kdj_core::config::default_download_root())
+    }
 }
 
 /// 起进程内的 axum server，返回前端要的 baseUrl / token。
@@ -801,17 +911,7 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
         .unwrap_or_else(|| default_data_dir(app))?;
     // 调试覆盖目录同样可能来自出过问题的版本，不能绕过数据库别名修复。
     reconcile_database_alias(&data_dir);
-    // 默认落到系统的「下载」目录（本地化的那个）+ KDJ 子目录。
-    // 这只是全新安装的默认值：settings.json 里存过的目录永远优先。
-    // 安卓上 Tauri 的 download_dir() 会报错，退回 core 里同一套解析。
-    let download_dir = match env_path("KDJ_DOWNLOAD_DIR") {
-        Some(raw) => raw,
-        None => app
-            .path()
-            .download_dir()
-            .map(|dir| dir.join("KDJ"))
-            .unwrap_or_else(|_| kdj_core::config::default_download_root()),
-    };
+    let download_dir = resolve_download_dir(app, &data_dir);
 
     // 端口传 0 让内核挑：Electron 版是先 listen(0) 探一个再关掉再交给 Python，
     // 那中间有一段「探到的端口被别人抢走」的竞态窗口，这里直接没有。

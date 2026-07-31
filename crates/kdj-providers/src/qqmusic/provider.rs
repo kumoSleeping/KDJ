@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use futures_util::StreamExt as _;
 use base64::Engine as _;
 use kdj_core::models::{
-    Account, AccountState, LyricText, Platform, Quality, QrSession, QrStateValue, ResolveKind,
-    ResolveResponse, SongSource,
+    Account, AccountState, LyricText, Platform, Quality, QrSession, QrStateValue, QrVariant,
+    ResolveKind, ResolveResponse, SongSource,
 };
 use kdj_core::paths::render_filename;
 use serde_json::{json, Value};
@@ -153,7 +153,7 @@ fn file_type(quality: Quality) -> (&'static str, &'static str) {
 pub struct QqMusicProvider {
     ctx: ProviderContext,
     client: QqClient,
-    qr_sessions: Mutex<HashMap<String, (login::QqQrSession, Instant)>>,
+    qr_sessions: Mutex<HashMap<String, (login::DualQrSession, Instant)>>,
     cdn: Mutex<Option<(String, Instant)>>,
     profile: Mutex<Option<((String, String), Instant)>>,
 }
@@ -198,6 +198,33 @@ impl QqMusicProvider {
     }
 
     // ------------------------------------------------------------ API
+
+    async fn search_songs(&self, keyword: &str, limit: usize) -> Result<Vec<SongSource>> {
+        let data = self
+            .client
+            .call(
+                "music.search.SearchCgiService",
+                "DoSearchForQQMusicMobile",
+                json!({
+                    // searchid 必须是 18~19 位的大数，短值会让接口回空结果却依然 code=0
+                    "searchid": new_search_id(),
+                    "query": keyword,
+                    "search_type": 0,
+                    "num_per_page": limit,
+                    "page_num": 1,
+                    "highlight": false,
+                    "grp": true
+                }),
+                QqPlatform::Desktop,
+            )
+            .await?;
+        let songs = data
+            .pointer("/body/item_song")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(songs.iter().take(limit).map(to_source).collect())
+    }
 
     async fn query_song(&self, key: &str) -> Result<Value> {
         let param = if key.chars().all(|c| c.is_ascii_digit()) {
@@ -551,8 +578,32 @@ impl MusicProvider for QqMusicProvider {
     }
 
     async fn create_qr(&self) -> Result<QrSession> {
-        let session = login::create_qq_qr(self.client.http()).await?;
-        let image = qr_data_url_from_png(&session.png);
+        // 同时下发 QQ 音乐 App 码 + QQ 互联码；用户扫任意一张即可。
+        // 单路失败时仍返回成功的那一路，避免整次登录不可用。
+        let session = login::create_dual_qr(self.client.http()).await?;
+        // 顺序与主图都优先 QQ 互联（用 QQ 扫）；QQ 音乐 App 码作补充。
+        let mut variants = Vec::new();
+        if let Some(qq) = &session.qq {
+            variants.push(QrVariant {
+                id: "qq".into(),
+                label: "QQ".into(),
+                image: qr_data_url_from_png(&qq.png),
+            });
+        }
+        if let Some(mobile) = &session.mobile {
+            variants.push(QrVariant {
+                id: "qqmusic".into(),
+                label: "QQ音乐".into(),
+                image: qr_data_url_from_png(&mobile.png),
+            });
+        }
+        anyhow::ensure!(!variants.is_empty(), "没有可用的 QQ 登录二维码");
+        let image = variants
+            .iter()
+            .find(|item| item.id == "qq")
+            .or_else(|| variants.first())
+            .map(|item| item.image.clone())
+            .unwrap_or_default();
         let session_id = format!("{:032x}", rand::random::<u128>());
         self.prune_qr_sessions();
         self.qr_sessions
@@ -565,6 +616,7 @@ impl MusicProvider for QqMusicProvider {
             image,
             url: String::new(),
             expires_in: 180,
+            variants,
         })
     }
 
@@ -580,33 +632,37 @@ impl MusicProvider for QqMusicProvider {
             ));
         };
 
-        match login::check_qq_qr(self.client.http(), &session).await {
-            Ok(login::QrOutcome::Waiting) => Ok((QrStateValue::Waiting, "等待手机扫码".into())),
-            Ok(login::QrOutcome::Scanned) => {
+        match login::poll_dual_qr(self.client.http(), &session).await {
+            Ok(login::DualQrOutcome::Waiting) => {
+                Ok((QrStateValue::Waiting, "等待手机扫码（QQ 音乐或 QQ）".into()))
+            }
+            Ok(login::DualQrOutcome::Scanned) => {
                 Ok((QrStateValue::Scanned, "已扫码，请在手机上确认".into()))
             }
-            Ok(login::QrOutcome::Refused) => {
+            Ok(login::DualQrOutcome::Refused) => {
                 self.qr_sessions.lock().unwrap().remove(session_id);
+                if let Some(mobile) = &session.mobile {
+                    mobile.abort();
+                }
                 Ok((QrStateValue::Refused, "已在手机上拒绝登录".into()))
             }
-            Ok(login::QrOutcome::Expired) => {
+            Ok(login::DualQrOutcome::Expired) => {
                 self.qr_sessions.lock().unwrap().remove(session_id);
+                if let Some(mobile) = &session.mobile {
+                    mobile.abort();
+                }
                 Ok((QrStateValue::Expired, "二维码已过期，请重新获取".into()))
             }
-            Ok(login::QrOutcome::Done { uin, sigx }) => {
+            Ok(login::DualQrOutcome::Done(credential)) => {
                 self.qr_sessions.lock().unwrap().remove(session_id);
-                match login::authorize(self.client.http(), &uin, &sigx).await {
-                    Ok(credential) => {
-                        self.client.store_credential(credential);
-                        *self.profile.lock().unwrap() = None;
-                        Ok((QrStateValue::Done, "登录成功".into()))
-                    }
-                    Err(err) => Ok((
-                        QrStateValue::Error,
-                        truncate(&format!("换取登录凭证失败：{err:#}"), 160),
-                    )),
+                if let Some(mobile) = &session.mobile {
+                    mobile.abort();
                 }
+                self.client.store_credential(credential);
+                *self.profile.lock().unwrap() = None;
+                Ok((QrStateValue::Done, "登录成功".into()))
             }
+            Ok(login::DualQrOutcome::Error(message)) => Ok((QrStateValue::Error, message)),
             Err(err) => Ok((
                 QrStateValue::Error,
                 truncate(&format!("检查二维码状态失败：{err:#}"), 160),
@@ -638,30 +694,16 @@ impl MusicProvider for QqMusicProvider {
             return Ok(Vec::new());
         }
         let limit = effective_limit(limit, 20);
-        let data = self
-            .client
-            .call(
-                "music.search.SearchCgiService",
-                "DoSearchForQQMusicMobile",
-                json!({
-                    // searchid 必须是 18~19 位的大数，短值会让接口回空结果却依然 code=0
-                    "searchid": new_search_id(),
-                    "query": keyword,
-                    "search_type": 0,
-                    "num_per_page": limit,
-                    "page_num": 1,
-                    "highlight": false,
-                    "grp": true
-                }),
-                QqPlatform::Desktop,
-            )
-            .await?;
-        let songs = data
-            .pointer("/body/item_song")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        Ok(songs.iter().take(limit).map(to_source).collect())
+        // QQ 搜索对书名号/直角引号很脆：`「拉海洛」之心` 会直接空结果（code=0），
+        // 去掉装饰引号后的 `拉海洛之心` 又能命中。先原样搜，空了再 stripped 兜底。
+        let mut songs = self.search_songs(keyword, limit).await?;
+        if songs.is_empty() {
+            let stripped = strip_qq_search_decorations(keyword);
+            if stripped != keyword && !stripped.is_empty() {
+                songs = self.search_songs(&stripped, limit).await?;
+            }
+        }
+        Ok(songs)
     }
 
     async fn resolve(&self, url: &str, limit: usize) -> Result<Option<ResolveResponse>> {
@@ -889,6 +931,34 @@ fn parse_playlist(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// 去掉 QQ 搜索不吃的装饰性引号/书名号。
+///
+/// 实测 `DoSearchForQQMusicMobile`：
+/// - `「拉海洛」之心` / `『…』` / `《…》` → `item_song=[]`（仍 code=0）
+/// - `拉海洛之心` / `拉海洛` → 正常命中
+/// 网易云同一关键词能搜到，所以问题在 QQ 侧查询解析，不在曲库本身。
+fn strip_qq_search_decorations(keyword: &str) -> String {
+    keyword
+        .chars()
+        .filter(|ch| {
+            !matches!(
+                ch,
+                '「' | '」'
+                    | '『' | '』'
+                    | '《' | '》'
+                    | '〈' | '〉'
+                    | '“' | '”'
+                    | '‘' | '’'
+                    | '"' | '\''
+            )
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `fcg_query_lyric_new` 在 `nobase64=1` 时回明文，否则回 base64；两种都认。
@@ -1282,5 +1352,14 @@ mod tests {
         );
         // 没有专辑 mid 就不要拼出一个必然 404 的地址
         assert_eq!(to_source(&json!({"name": "x", "mid": "m"})).cover, "");
+    }
+
+    #[test]
+    fn qq_search_decorations_are_stripped_for_the_fallback_query() {
+        assert_eq!(strip_qq_search_decorations("「拉海洛」之心"), "拉海洛之心");
+        assert_eq!(strip_qq_search_decorations("『拉海洛』之心"), "拉海洛之心");
+        assert_eq!(strip_qq_search_decorations("《拉海洛》之心"), "拉海洛之心");
+        assert_eq!(strip_qq_search_decorations("拉海洛之心"), "拉海洛之心");
+        assert_eq!(strip_qq_search_decorations("  「定玄」  "), "定玄");
     }
 }

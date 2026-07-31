@@ -739,6 +739,7 @@ impl MusicProvider for BilibiliProvider {
             image: qr_data_url_from_text(&session.url)?,
             url: session.url,
             expires_in: 180,
+            variants: Vec::new(),
         })
     }
 

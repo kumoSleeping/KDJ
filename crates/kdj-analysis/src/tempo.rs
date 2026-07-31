@@ -203,28 +203,16 @@ pub fn tempo_candidates(env: &[f64], fps: f64, top: usize) -> Vec<f64> {
         .collect()
 }
 
-fn promote_low_tempo(bpm_raw: f64, candidates: &[f64]) -> f64 {
-    if bpm_raw >= 100.0 {
-        return bpm_raw;
-    }
-
-    // 3:2 误判通常来自每三个八分音符形成的强重音。只要 1.5× 层已经进入
-    // 自相关候选集，它几乎总是实际四分音符速度；先处理它，不让更高的倍频抢走。
-    if let Some(candidate) = candidates
+/// 在自相关候选里找与 `bpm_raw` 成 `lo..=hi` 倍关系的峰。
+fn find_ratio_peak(bpm_raw: f64, candidates: &[f64], lo: f64, hi: f64) -> Option<f64> {
+    candidates
         .iter()
         .copied()
-        .find(|candidate| (1.45..=1.55).contains(&(*candidate / bpm_raw)))
-    {
-        return candidate;
-    }
+        .find(|candidate| (lo..=hi).contains(&(*candidate / bpm_raw)))
+}
 
-    // 2:1 不同：80/160、98/196 都可能是音乐上合理的 metrical level。
-    // 真实曲库对拍显示 75–84 与 90–99 的主峰通常就是专业 DJ 软件采用的层级；
-    // 旧逻辑“低于 100 一律找最高倍频”会把大量 80/90 BPM 曲目错误翻倍。
-    let allow_double = bpm_raw < 75.0 || (85.0..90.0).contains(&bpm_raw);
-    if !allow_double {
-        return bpm_raw;
-    }
+/// 在候选里取与 raw 成近 2× 的最快峰。
+fn find_double_peak(bpm_raw: f64, candidates: &[f64]) -> Option<f64> {
     candidates
         .iter()
         .copied()
@@ -233,7 +221,139 @@ fn promote_low_tempo(bpm_raw: f64, candidates: &[f64]) -> f64 {
             (1.95..=2.05).contains(&ratio)
         })
         .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap_or(bpm_raw)
+}
+
+/// 起音包络里局部峰的密度（峰/秒）。阈值 0.15 对应归一化后的中等起音。
+fn onset_peak_rate(env: &[f64], fps: f64) -> f64 {
+    if env.len() < 3 || fps <= 0.0 {
+        return 0.0;
+    }
+    let mut peaks = 0usize;
+    for i in 1..env.len() - 1 {
+        if env[i] >= 0.15 && env[i] > env[i - 1] && env[i] >= env[i + 1] {
+            peaks += 1;
+        }
+    }
+    let duration = env.len() as f64 / fps;
+    if duration <= 0.0 {
+        0.0
+    } else {
+        peaks as f64 / duration
+    }
+}
+
+/// 若把 `bpm` 当拍速，平均每拍落多少起音峰。>1 说明网格偏慢（细分被算成拍）。
+fn onsets_per_beat(env: &[f64], fps: f64, bpm: f64) -> f64 {
+    if bpm <= 0.0 {
+        return 0.0;
+    }
+    onset_peak_rate(env, fps) / (bpm / 60.0)
+}
+
+/// 4:3 提升：主峰常是「每三拍一组」的慢网格，真四分在 4/3 倍。
+///
+/// Our Chant：raw 92、次峰 184（2×）、第三峰 123（4/3）；梳状分 123 最高 → 123。
+/// 只有当 4/3 峰的梳状分不弱于 raw **且不弱于 2×** 才升，避免和真倍速抢。
+fn promote_four_three(
+    env: &[f64],
+    fps: f64,
+    bpm_raw: f64,
+    candidates: &[f64],
+) -> Option<f64> {
+    // 只修「主峰偏慢」：raw 已在常见舞曲区就别再抬（Sky High 128 不该→172）。
+    if bpm_raw >= 110.0 {
+        return None;
+    }
+    let mid = find_ratio_peak(bpm_raw, candidates, 1.28, 1.40)?;
+    // 起音过密（每拍 >1.4 个峰）是典型「高速曲被听成半速」：交给 2×，
+    // 不让差一点的 4:3 峰（VICTORY 的 127）截胡真 2×（188）。
+    if onsets_per_beat(env, fps, bpm_raw) >= 1.4 {
+        return None;
+    }
+    let raw_score = comb_score(env, 60.0 * fps / bpm_raw);
+    let mid_score = comb_score(env, 60.0 * fps / mid);
+    if mid_score < raw_score {
+        return None;
+    }
+    if let Some(double) = find_double_peak(bpm_raw, candidates) {
+        let double_score = comb_score(env, 60.0 * fps / double);
+        // 必须明显优于 2×，平局或微弱优势都留给倍速通道。
+        if mid_score < double_score * 1.15 {
+            return None;
+        }
+    }
+    Some(mid)
+}
+
+/// 2× 半速救援。
+///
+/// - `bpm_raw < 75` 或 `85..90`：历史无条件提升（只要 2× 已是自相关峰）。
+/// - 其它区间：单靠梳状会在 EDM 100↔200 与动画高速曲上互打脸
+///   （Full Glory 梳状站 99、Summersong 梳状站 199，真相相反）。
+///   用「每拍起音数」辅助：raw 上每拍 >~1.4 个起音 → 网格偏慢，抬到 2×；
+///   每拍 ≤1 且只是梳状略偏 2× → 保持 raw（Summersong ~100）。
+fn promote_double_tempo(
+    env: &[f64],
+    fps: f64,
+    bpm_raw: f64,
+    candidates: &[f64],
+) -> Option<f64> {
+    let fast = find_double_peak(bpm_raw, candidates)?;
+    let allow_unconditional = bpm_raw < 75.0 || (85.0..90.0).contains(&bpm_raw);
+    if allow_unconditional {
+        return Some(fast);
+    }
+
+    let raw_score = comb_score(env, 60.0 * fps / bpm_raw);
+    let fast_score = comb_score(env, 60.0 * fps / fast);
+    let opb = onsets_per_beat(env, fps, bpm_raw);
+
+    // 起音明显密于「一拍一下」→ 主峰是半速（Full Glory opb≈1.6 / VICTORY≈1.5）。
+    if opb >= 1.4 {
+        return Some(fast);
+    }
+    let comb_ratio = fast_score / raw_score.max(1e-9);
+    // 起音极稀（铺底长、鼓点很晚才进，如 ONENESS 约 21s 后才上速度）：
+    // 密度统计失真，改信梳状。限定 raw∈[85,105]（高速曲半速主峰的典型落点），
+    // 避免和 Summersong（opb≈0.95、同样 comb 略偏 2×）搅在一起。
+    if opb < 0.5 && comb_ratio >= 1.3 && (85.0..105.0).contains(&bpm_raw) {
+        return Some(fast);
+    }
+    // 梳状明显偏好 2× + 不算稀疏：BRAVE JEWEL（comb×3、opb≈1.0）。
+    if comb_ratio >= 1.5 && opb >= 1.0 {
+        return Some(fast);
+    }
+    // 梳状压倒性偏好 2×（≥2.5×）：流行朋克半速主峰（The Other Line comb×3.5、
+    // opb≈0.71）。Summersong 2025 只有 comb×1.7 且 opb≈0.95，不会误触。
+    if comb_ratio >= 2.5 && opb >= 0.65 {
+        return Some(fast);
+    }
+    // 梳状略偏 2× + 中等偏密。
+    if comb_ratio >= 1.0 && opb >= 1.25 {
+        return Some(fast);
+    }
+    None
+}
+
+/// 3:2（×1.5）提升：每三个八分音符的强重音会把自相关主峰钉在真速度的 ⅔。
+///
+/// - `bpm_raw < 100`：历史规则，直接升到 1.5×（85→128/171、93→141 一类偶像曲）。
+/// - `bpm_raw ≥ 100`：必须 1.5× 已是自相关峰，且梳状对比**不弱于**主峰才升。
+///   Sing Alive 官方 195：主峰 129（=195×⅔），次峰 195，梳状分 195≥129 → 提升；
+///   对正确的 120 不会仅仅因为存在弱 180 峰就被拉走。
+fn promote_three_two(
+    env: &[f64],
+    fps: f64,
+    bpm_raw: f64,
+    candidates: &[f64],
+) -> Option<f64> {
+    let fast = find_ratio_peak(bpm_raw, candidates, 1.45, 1.55)?;
+    if bpm_raw < 100.0 {
+        return Some(fast);
+    }
+    let raw_score = comb_score(env, 60.0 * fps / bpm_raw);
+    let fast_score = comb_score(env, 60.0 * fps / fast);
+    (fast_score >= raw_score).then_some(fast)
 }
 
 /// 返回 `(最终 bpm, 自相关粗估 bpm)`。倍频修正在这里做。
@@ -247,12 +367,17 @@ pub fn choose_tempo(env: &[f64], fps: f64) -> (f64, f64) {
     // 以最强自相关峰为主，不再让梳状滤波在互不相关的速度族之间投票。
     // 后者会把 150 BPM 的 final phase 稳定选成三连音脉冲 100 BPM。
     //
-    // 仅对低于 100 的主峰做一次“明显的快速脉冲”救援：很多动画/偶像曲的
-    // 强拍落在半速（85→171）或三拍分组（93→141），而实际 DJ 网格使用较快
-    // 的那层。候选必须已经是自相关强峰且精确接近 1.5×/2×，不会凭空倍速。
-    let promoted = promote_low_tempo(bpm_raw, &cands);
-    if (promoted - bpm_raw).abs() > 1e-9 {
-        return (promoted, bpm_raw);
+    // 同一速度族内的关系按「更细 → 更粗」试：3:2、4:3、2:1。
+    // 候选必须已经是自相关强峰，不会凭空造速度。
+    if let Some(fast) = promote_three_two(env, fps, bpm_raw, &cands) {
+        return (fast, bpm_raw);
+    }
+    // 4:3 必须在 2× 之前：否则 Our Chant 会先被 92→184 吃掉。
+    if let Some(mid) = promote_four_three(env, fps, bpm_raw, &cands) {
+        return (mid, bpm_raw);
+    }
+    if let Some(fast) = promote_double_tempo(env, fps, bpm_raw, &cands) {
+        return (fast, bpm_raw);
     }
 
     // 高速主峰也可能只是细分拍。这里只在同一速度族内部比较梳状对比度：
@@ -665,16 +790,121 @@ mod tests {
     }
 
     #[test]
-    fn low_tempo_promotion_only_accepts_explicit_fast_pulses() {
-        assert!((promote_low_tempo(92.94, &[92.94, 141.10, 69.95]) - 141.10).abs() < 1e-9);
-        assert!((promote_low_tempo(85.74, &[85.74, 171.30, 113.58]) - 171.30).abs() < 1e-9);
-        // 80/160 与 98/196 是最容易被旧规则误翻倍的 DJ metrical level。
-        assert!((promote_low_tempo(82.0, &[82.0, 164.0, 109.3]) - 82.0).abs() < 1e-9);
-        assert!((promote_low_tempo(98.5, &[98.5, 197.0, 131.3]) - 98.5).abs() < 1e-9);
-        // 4:3 的次级节奏不是整曲速度，不能把 92.5 擅自提到 123.3。
-        assert!((promote_low_tempo(92.5, &[92.5, 123.3, 73.9]) - 92.5).abs() < 1e-9);
-        // 100 以上的强主峰不再被三连音候选拉走（final phase 的回归形状）。
-        assert!((promote_low_tempo(150.17, &[150.17, 99.38, 74.26]) - 150.17).abs() < 1e-9);
+    fn low_tempo_double_promotion_only_accepts_explicit_fast_pulses() {
+        let empty = vec![0.0; 64];
+        // 85–90：无条件允许明确的 2×。
+        assert_eq!(
+            promote_double_tempo(&empty, 43.0, 85.74, &[85.74, 171.30, 113.58]),
+            Some(171.30)
+        );
+        // 4:3 不是 2×。
+        assert_eq!(
+            promote_double_tempo(&empty, 43.0, 92.5, &[92.5, 123.3, 73.9]),
+            None
+        );
+
+        let fps = 43.0664;
+
+        // 真半速 EDM：每拍一个起音（opb≈1），即使有 2× 候选也不升。
+        let mut half_time = vec![0.0f64; 4000];
+        let period = 60.0 * fps / 100.0;
+        let mut pos = 0.0_f64;
+        while (pos as usize) + 1 < half_time.len() {
+            half_time[pos.round() as usize] = 1.0;
+            pos += period;
+        }
+        assert!(
+            (onsets_per_beat(&half_time, fps, 100.0) - 1.0).abs() < 0.15,
+            "构造的 EDM 包络应约 1 起音/拍"
+        );
+        assert_eq!(
+            promote_double_tempo(&half_time, fps, 99.8, &[99.8, 199.6]),
+            None,
+            "Summersong 类 100 BPM 不应翻到 200"
+        );
+
+        // 高速曲半速主峰：真 200 网格上每拍都有起音，在 100 上看就是 opb≈2。
+        let mut dense = vec![0.0f64; 4000];
+        let true_period = 60.0 * fps / 199.4;
+        let mut pos = 0.0_f64;
+        while (pos as usize) + 1 < dense.len() {
+            dense[pos.round() as usize] = 1.0;
+            pos += true_period;
+        }
+        assert!(
+            onsets_per_beat(&dense, fps, 99.8) >= 1.4,
+            "Full Glory 类应看到偏密的起音"
+        );
+        assert_eq!(
+            promote_double_tempo(&dense, fps, 99.8, &[99.8, 199.4]),
+            Some(199.4),
+            "起音过密的 99 主峰应升到 199"
+        );
+    }
+
+    #[test]
+    fn four_three_beats_double_when_comb_agrees() {
+        let fps = 43.0664;
+        // 真 123 网格；raw 会像 92，2× 像 184。
+        let mut env = vec![0.0f64; 4000];
+        let period = 60.0 * fps / 123.1;
+        let mut pos = 0.0_f64;
+        while (pos as usize) + 1 < env.len() {
+            env[pos.round() as usize] = 1.0;
+            pos += period;
+        }
+        assert_eq!(
+            promote_four_three(&env, fps, 92.4, &[92.4, 184.5, 123.1, 61.6]),
+            Some(123.1),
+            "Our Chant 类应选 4:3 而不是 2×"
+        );
+    }
+
+    #[test]
+    fn three_two_promotion_lifts_sing_alive_style_raw_peaks() {
+        // raw < 100：不看梳状，只要 1.5× 峰在候选里就升（旧行为）。
+        let empty = vec![0.0; 64];
+        assert_eq!(
+            promote_three_two(&empty, 43.0, 92.94, &[92.94, 141.10, 69.95]),
+            Some(141.10)
+        );
+        // 4:3 不是 1.5×。
+        assert_eq!(
+            promote_three_two(&empty, 43.0, 92.5, &[92.5, 123.3, 73.9]),
+            None
+        );
+
+        // Sing Alive 形状：主峰 129，次峰 195（=1.5×）。
+        // 包络只在真周期（195）上放脉冲 → 梳状分站在 195，应提升。
+        let fps = 43.0664;
+        let raw = 129.1825;
+        let fast = 195.4130;
+        let true_period = 60.0 * fps / fast;
+        let mut env = vec![0.0f64; 4000];
+        let mut pos = 0.0_f64;
+        while (pos as usize) + 1 < env.len() {
+            env[pos.round() as usize] = 1.0;
+            pos += true_period;
+        }
+        assert_eq!(
+            promote_three_two(&env, fps, raw, &[raw, fast, 97.73]),
+            Some(fast),
+            "129 主峰应被提升到 195"
+        );
+
+        // 包络只在 120 周期上有脉冲时，即使候选里有 180 也不提升。
+        let mut raw_favored = vec![0.0f64; 4000];
+        let raw_period = 60.0 * fps / 120.0;
+        let mut pos = 0.0_f64;
+        while (pos as usize) + 1 < raw_favored.len() {
+            raw_favored[pos.round() as usize] = 1.0;
+            pos += raw_period;
+        }
+        assert_eq!(
+            promote_three_two(&raw_favored, fps, 120.0, &[120.0, 180.0]),
+            None,
+            "真 120 不应被 180 候选拉走"
+        );
     }
 
     #[test]
