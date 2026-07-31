@@ -10,6 +10,11 @@ export interface SeekDetail {
   position: number;
   /** 拖动中的视觉预览不启动解码；松手或键盘操作时才真正跳转。 */
   preview?: boolean;
+  /**
+   * scrub 手势边界：pointerdown 发 true，pointerup（随正式跳转）/pointercancel
+   * 发 false。拖动期间 PlayerBar 压制权威时钟，不把播放头从手底下顶回去。
+   */
+  scrubbing?: boolean;
 }
 
 /**
@@ -138,13 +143,38 @@ export function Waveform({
     [],
   );
 
-  const dispatchSeek = (nextPosition: number, preview = false) => {
+  const dispatchSeek = (nextPosition: number, preview = false, scrubbing?: boolean) => {
     window.dispatchEvent(
       new CustomEvent<SeekDetail>(SEEK_EVENT, {
-        detail: { trackId, position: nextPosition, preview },
+        detail: { trackId, position: nextPosition, preview, scrubbing },
       }),
     );
   };
+
+  const trackIdRef = useRef(trackId);
+  useEffect(() => {
+    trackIdRef.current = trackId;
+  }, [trackId]);
+
+  // 拖动中组件被卸载（切歌/切试听流）也必须松开 PlayerBar 的 scrub 标记，
+  // 否则权威时钟被永久压制、播放头冻结。卸载时 trackId 可能已换，走 ref。
+  useEffect(
+    () => () => {
+      if (draggingRef.current) {
+        window.dispatchEvent(
+          new CustomEvent<SeekDetail>(SEEK_EVENT, {
+            detail: {
+              trackId: trackIdRef.current,
+              position: previewPositionRef.current,
+              preview: true,
+              scrubbing: false,
+            },
+          }),
+        );
+      }
+    },
+    [],
+  );
 
   // 原生 range 在指针下自己移动；播放头预览最多每帧同步一次。真正的媒体 seek
   // 只在松手执行一次，避免拖动时反复 load/解码 shadow deck 把主线程堵住。
@@ -334,6 +364,8 @@ export function Waveform({
             event.stopPropagation();
             draggingRef.current = true;
             event.currentTarget.setPointerCapture(event.pointerId);
+            // scrub 开始：告诉 PlayerBar 压制权威时钟，别顶回播放头。
+            dispatchSeek(Number(event.currentTarget.value), true, true);
           }}
           onPointerUp={(event) => {
             event.stopPropagation();
@@ -344,8 +376,10 @@ export function Waveform({
             }
             dispatchSeek(Number(event.currentTarget.value));
           }}
-          onPointerCancel={() => {
+          onPointerCancel={(event) => {
             draggingRef.current = false;
+            // scrub 中止：不发正式跳转，只松开时钟压制。
+            dispatchSeek(Number(event.currentTarget.value), true, false);
           }}
           onClick={(event) => event.stopPropagation()}
           onInput={(event) => {

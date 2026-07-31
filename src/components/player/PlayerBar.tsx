@@ -536,6 +536,13 @@ export function PlayerBar() {
   }, []);
   /** 已提交、等待后端落地的跳转；期间迟到的旧位置事件不能把进度条弹回去。 */
   const pendingSeekRef = useRef<{ trackId: number; position: number; at: number } | null>(null);
+  /**
+   * 波形 scrub 拖动中（pointerdown→up/cancel，由波形显式发边界事件）。
+   * 拖动期间权威时钟每 100ms 一拍，若不压制会把拖到一半的播放头从手底下
+   * 顶回去；松手瞬间受控 range 的 value 若刚被时钟改写，提交的甚至是旧
+   * 位置——这次拖动就被整个弹回。松手后的正式跳转由 pendingSeekRef 接管。
+   */
+  const scrubbingRef = useRef(false);
   /** 原生播放器换 source 会短暂回 idle；这不是用户/系统按了暂停。 */
   const nativeLoadInFlightRef = useRef(false);
   /** 快速连点换歌时，迟到的旧 decode 结果不能覆盖新曲目的 UI/transport。 */
@@ -1128,12 +1135,21 @@ export function PlayerBar() {
   useEffect(() => {
     const onSeek = (event: Event) => {
       const detail = (event as CustomEvent<SeekDetail>).detail;
+      // scrub 边界先落标记、再查 id：拖动中换曲后，cancel/卸载清理可能带着
+      // 上一首的 id 到达，若被下面的守卫提前 return，时钟压制就永远松不开。
+      if (detail.scrubbing !== undefined) scrubbingRef.current = detail.scrubbing;
       if (!track || detail.trackId !== track.id || !Number.isFinite(detail.position)) return;
       const target = Math.max(0, detail.position);
-      // 拖动时只更新视觉位置；松手再启动一次真正的媒体跳转。否则每个 pointermove
+      // 拖动时只更新视觉位置（期间权威时钟被 scrub 标记压制，不会顶回播放头）；
+      // 松手再启动一次真正的媒体跳转。否则每个 pointermove
       // 都会重建 shadow deck / 发 Range 请求，越拖积压越多，看起来像整条波形黏住。
+      if (detail.preview) {
+        setPosition(target);
+        return;
+      }
+      // 正式跳转 = 拖动结束，时钟恢复跟随（双保险：波形 pointerup 也会发边界）。
+      scrubbingRef.current = false;
       setPosition(target);
-      if (detail.preview) return;
       if (!shouldCommitSeek(track.id, target)) return;
       const generation = ++seekGenerationRef.current;
       broadcastMediaSync({
@@ -1305,7 +1321,10 @@ export function PlayerBar() {
       const shownTime = pendingSeek ? pendingSeek.position : state.currentTime;
       positionRef.current = shownTime;
       durationRef.current = state.duration || durationRef.current;
-      setPosition(shownTime);
+      // scrub 拖动中不收时钟：否则每 100ms 一拍就把拖到一半的播放头顶回去。
+      if (!scrubbingRef.current) {
+        setPosition(shownTime);
+      }
       if (state.duration > 0) setDuration(state.duration);
 
       if (desktopNative) {
@@ -1669,7 +1688,10 @@ export function PlayerBar() {
       // shadow deck 准备时旧声仍在走，但不能让旧时钟把刚点击的播放头拉回去。
       if (djEngine.isSeeking()) return;
       const seconds = djEngine.currentTime(audio);
-      setPosition(seconds);
+      // 与原生订阅同一套：scrub 拖动中不让时钟把播放头顶回去。
+      if (!scrubbingRef.current) {
+        setPosition(seconds);
+      }
       broadcast(seconds);
       broadcastMediaSync({
         owner: "player",
