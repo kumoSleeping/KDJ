@@ -45,6 +45,7 @@ data class LyricsColorPaint(
                 "none" -> LyricsColorPaint(false, Color.TRANSPARENT, Color.TRANSPARENT, none = true)
                 "black" -> LyricsColorPaint(false, Color.BLACK, Color.BLACK)
                 "white" -> LyricsColorPaint(false, Color.WHITE, Color.WHITE)
+                "gray" -> LyricsColorPaint(false, Color.parseColor("#9E9E9E"), Color.parseColor("#9E9E9E"))
                 "gradient" -> {
                     val parsedStart = parseColor(start, fallback)
                     LyricsColorPaint(true, parsedStart, parseColor(end, parsedStart))
@@ -72,6 +73,7 @@ data class LyricsOverlayConfig(
     val fontScale: Float,
     val accent: LyricsColorPaint,
     val secondary: LyricsColorPaint,
+    val dim: LyricsColorPaint,
     val stroke: LyricsColorPaint,
     val opacity: Float,
 ) {
@@ -83,6 +85,7 @@ data class LyricsOverlayConfig(
             fontScale = 1f,
             accent = LyricsColorPaint(false, Color.WHITE, Color.WHITE),
             secondary = LyricsColorPaint(false, Color.argb(0xF0, 0xFF, 0xFF, 0xFF), Color.WHITE),
+            dim = LyricsColorPaint(false, Color.argb(0x9E, 0xFF, 0xFF, 0xFF), Color.GRAY),
             stroke = LyricsColorPaint(false, Color.BLACK, Color.BLACK),
             opacity = 1f,
         )
@@ -95,7 +98,11 @@ data class LyricsOverlayConfig(
  * **时间轴由这里驱动，而不是由前端每帧推一行文字过来**，这是整个功能能用的前提：
  * 息屏或切到别的应用之后 WebView 会被冻结/降频，靠 JS 定时器推歌词会直接卡住，
  * 而那正是悬浮歌词唯一的使用场景。所以前端只在换歌或切附加层时推一次时间轴，
- * 之后由这里读 [NativeAudioRuntime] 手里那个 ExoPlayer 的播放位置自己选行。
+ * 之后由这里读 [NativeAudioRuntime] 的播放时钟自己选行。
+ *
+ * 注意：Android 出声已切共享 Rust coordinator（CPAL/AAudio），ExoPlayer 不再是
+ * transport owner。悬浮歌词时钟需要后续接到 coordinator / 插件侧镜像进度，
+ * 否则息屏歌词会停在旧 Exo 时钟上。
  */
 object LyricsOverlayRuntime {
 
@@ -167,12 +174,20 @@ object LyricsOverlayRuntime {
                 scale = next.fontScale,
                 accent = next.accent,
                 secondary = next.secondary,
+                dim = next.dim,
                 stroke = next.stroke,
                 opacity = next.opacity,
             )
             if (attached) {
                 overlay.applyPlacement(next.edge, repositionY, next.locked)
-                overlay.applyStyle(next.fontScale, next.accent, next.secondary, next.stroke, next.opacity)
+                overlay.applyStyle(
+                    next.fontScale,
+                    next.accent,
+                    next.secondary,
+                    next.dim,
+                    next.stroke,
+                    next.opacity,
+                )
                 renderOnce()
                 scheduleTick()
             }
@@ -232,6 +247,7 @@ object LyricsOverlayRuntime {
         }
         if (overlay == null || !snapshotConfig.visible || !overlay.isAttached()) return 0L
 
+        // 读 coordinator 镜像（含播放中外推），不碰 WebView / ExoPlayer。
         val clock = NativeAudioRuntime.clock()
         val lines = snapshotTimeline.lines
         val stale = snapshotTimeline.trackId != null &&

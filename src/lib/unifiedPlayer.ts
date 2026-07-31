@@ -590,19 +590,26 @@ let mobilePlayer: MobileNativePlayer | null = null;
 let desktopPlayer: DesktopNativePlayer | null = null;
 let browserPlayer: BrowserPreviewPlayer | null = null;
 
+/** iOS 仍走系统 AVPlayer 连续播放；Android 已切共享 coordinator。 */
 export function usesNativeMobilePlayer(): boolean {
-  const platform = window.kdj?.platform;
-  return platform === "android" || platform === "ios";
+  return window.kdj?.platform === "ios";
 }
 
+/**
+ * 共享 Rust 播放协调器（CPAL）：桌面 + Android。
+ * kind 仍叫 desktop-native，避免再拆一套前端契约。
+ */
 export function usesNativeDesktopPlayer(): boolean {
   const platform = window.kdj?.platform;
-  return Boolean(window.__TAURI_INTERNALS__) && ["darwin", "win32", "linux"].includes(platform ?? "");
+  return (
+    Boolean(window.__TAURI_INTERNALS__) &&
+    ["darwin", "win32", "linux", "android"].includes(platform ?? "")
+  );
 }
 
 export function nativeMobilePlayer(): UnifiedPlayer {
   if (!usesNativeMobilePlayer()) {
-    throw new Error("原生移动播放器只能在 Android/iOS Tauri 壳中使用");
+    throw new Error("原生移动播放器只能在 iOS Tauri 壳中使用");
   }
   mobilePlayer ??= new MobileNativePlayer();
   return mobilePlayer;
@@ -610,7 +617,7 @@ export function nativeMobilePlayer(): UnifiedPlayer {
 
 export function nativeDesktopPlayer(): UnifiedPlayer {
   if (!usesNativeDesktopPlayer()) {
-    throw new Error("桌面原生播放器只能在 Tauri 桌面壳中使用");
+    throw new Error("共享原生播放器只能在 Tauri 桌面或 Android 壳中使用");
   }
   desktopPlayer ??= new DesktopNativePlayer();
   return desktopPlayer;

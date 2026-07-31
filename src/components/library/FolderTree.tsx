@@ -5,6 +5,7 @@ import {
   BarChart3,
   Clapperboard,
   ClipboardPaste,
+  Link2,
   Folder,
   FolderDown,
   FolderInput,
@@ -26,6 +27,7 @@ import {
   SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR,
   SEARCH_DEFAULT_DOWNLOAD_SENTINEL,
 } from "../../lib/folderDrop";
+import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder, OUTSIDE_FOLDER } from "../../lib/outsideFolder";
 import {
   enqueueSearchDrop,
@@ -267,8 +269,12 @@ export function NarrowFolderRail({
             }
             const ids = trackIdsFromDrop(event);
             if (ids.length === 0) return;
-            void applyFolderOp(ids, node.path, event.altKey ? "move" : "link").catch(
-              (reason: unknown) => setError((reason as Error).message),
+            const op = resolveLibraryPasteOp({
+              settings: useAppStore.getState().settings,
+              forceMove: event.altKey,
+            });
+            void applyFolderOp(ids, node.path, op).catch((reason: unknown) =>
+              setError((reason as Error).message),
             );
           }}
         >
@@ -455,7 +461,10 @@ export function FolderTree({
 
   const runOp = (ids: number[], dest: string, alt: boolean) => {
     if (ids.length === 0) return;
-    const op = alt ? "move" : "link";
+    const op = resolveLibraryPasteOp({
+      settings: useAppStore.getState().settings,
+      forceMove: alt,
+    });
     setNotice("");
     void applyFolderOp(ids, dest, op)
       .then((result) => {
@@ -466,8 +475,9 @@ export function FolderTree({
         const detail = Object.entries(result.methods)
           .map(([method, count]) => `${METHOD_LABEL[method] ?? method} ${count}`)
           .join(" · ");
+        const verb = op === "move" ? "移动" : op === "copy" ? "复制" : "链接";
         setNotice(
-          `${op === "link" ? "链接" : "移动"} ${result.track_ids.length} 首${detail ? `（${detail}）` : ""}，${failed} 首失败`,
+          `${verb} ${result.track_ids.length} 首${detail ? `（${detail}）` : ""}，${failed} 首失败`,
         );
       })
       .catch((error: unknown) => setNotice(`操作失败：${(error as Error).message}`));
@@ -950,21 +960,42 @@ export function FolderTree({
               </button>
             );
           })()}
-          {/* 粘贴：底栏那颗按钮删掉之后，这里是它唯一的界面入口。
-              键盘走 Cmd/Ctrl+V（见 useLibraryClipboard）。 */}
+          {/* 链接 = 硬链接；粘贴 = 移动。键盘 Cmd/Ctrl+V 走设置，Option+V 移动。 */}
           <button
             type="button"
             disabled={!clipboard}
             title={
               clipboard
-                ? `把剪贴板里的 ${clipboard.ids.length} 首${clipboard.op === "move" ? "移动" : "链接"}到这里`
+                ? `把剪贴板里的 ${clipboard.ids.length} 首链接到这里`
                 : "先在曲目表里按 Cmd/Ctrl+C 或 Cmd/Ctrl+X"
             }
             onClick={() => {
               const dest = menu.node.path;
               setMenu(null);
               setNotice("");
-              void paste(dest).catch((error: unknown) => setNotice((error as Error).message));
+              void paste(dest, "link").catch((error: unknown) =>
+                setNotice((error as Error).message),
+              );
+            }}
+          >
+            <Link2 size={12} />
+            链接{clipboard ? ` ${clipboard.ids.length} 首` : ""}
+          </button>
+          <button
+            type="button"
+            disabled={!clipboard}
+            title={
+              clipboard
+                ? `把剪贴板里的 ${clipboard.ids.length} 首移动到这里`
+                : "先在曲目表里按 Cmd/Ctrl+C 或 Cmd/Ctrl+X"
+            }
+            onClick={() => {
+              const dest = menu.node.path;
+              setMenu(null);
+              setNotice("");
+              void paste(dest, "move").catch((error: unknown) =>
+                setNotice((error as Error).message),
+              );
             }}
           >
             <ClipboardPaste size={12} />

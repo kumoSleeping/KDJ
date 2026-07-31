@@ -1,14 +1,19 @@
 /** 悬浮歌词取色：色相线上的位置 ↔ `#RRGGBB`。 */
 
-/** 主行 / 副行：黑、白、单色（色相线）、渐变。 */
-export type LyricsFillMode = "black" | "white" | "solid" | "gradient";
+/** 主行 / 未唱：黑、白、灰、单色（色相线）、渐变。灰主要给未唱用。 */
+export type LyricsFillMode = "black" | "white" | "gray" | "solid" | "gradient";
+/** 副行多一个「跟随」主行已唱色。 */
+export type LyricsSecondaryMode = LyricsFillMode | "follow";
 /** 边框多一个「无」。 */
 export type LyricsStrokeMode = LyricsFillMode | "none";
-export type LyricsColorMode = LyricsStrokeMode;
+export type LyricsColorMode = LyricsFillMode | "none" | "follow";
+
+/** 未唱「灰」预设，约等于旧版半透明白在深色底上的观感。 */
+export const LYRICS_GRAY_HEX = "#9e9e9e";
 
 export interface LyricsColorPaint {
   mode: LyricsColorMode;
-  /** 单色，或渐变左端。黑 / 白 / 无 模式下可忽略。 */
+  /** 单色，或渐变左端。黑 / 白 / 灰 / 无 / 跟随 模式下可忽略。 */
   start: string;
   /** 渐变右端。 */
   end: string;
@@ -20,13 +25,21 @@ export function normalizeHex(value: unknown, fallback = "#ffffff"): string {
   return /^#[0-9a-f]{6}$/.test(trimmed) ? trimmed : fallback;
 }
 
-export function normalizeColorMode(value: unknown, allowNone = false): LyricsColorMode {
-  if (value === "black" || value === "white" || value === "solid" || value === "gradient") {
+export function normalizeColorMode(
+  value: unknown,
+  options: { allowNone?: boolean; allowFollow?: boolean } = {},
+): LyricsColorMode {
+  if (
+    value === "black" ||
+    value === "white" ||
+    value === "gray" ||
+    value === "solid" ||
+    value === "gradient"
+  ) {
     return value;
   }
-  if (allowNone && value === "none") return "none";
-  // 旧版只有 solid / gradient
-  if (value === "gradient") return "gradient";
+  if (options.allowNone && value === "none") return "none";
+  if (options.allowFollow && value === "follow") return "follow";
   return "solid";
 }
 
@@ -35,10 +48,11 @@ export function normalizePaint(
   start: unknown,
   end: unknown,
   fallback: LyricsColorPaint,
-  allowNone = false,
+  options: boolean | { allowNone?: boolean; allowFollow?: boolean } = false,
 ): LyricsColorPaint {
+  const flags = typeof options === "boolean" ? { allowNone: options } : options;
   return {
-    mode: normalizeColorMode(mode ?? fallback.mode, allowNone),
+    mode: normalizeColorMode(mode ?? fallback.mode, flags),
     start: normalizeHex(start, fallback.start),
     end: normalizeHex(end, fallback.end),
   };
@@ -98,15 +112,18 @@ function rgbToHsl(r: number, g: number, b: number): { h: number; s: number; l: n
   return { h: h * 360, s, l };
 }
 
-/** 解析后的实际填色（黑 / 白会盖过 start）。 */
+/** 解析后的实际填色（黑 / 白会盖过 start；跟随需先 resolve 再传入）。 */
 export function effectivePaint(paint: LyricsColorPaint): {
   mode: "solid" | "gradient" | "none";
   start: string;
   end: string;
 } {
-  if (paint.mode === "none") return { mode: "none", start: "#000000", end: "#000000" };
+  if (paint.mode === "none" || paint.mode === "follow") {
+    return { mode: "none", start: "#000000", end: "#000000" };
+  }
   if (paint.mode === "black") return { mode: "solid", start: "#000000", end: "#000000" };
   if (paint.mode === "white") return { mode: "solid", start: "#ffffff", end: "#ffffff" };
+  if (paint.mode === "gray") return { mode: "solid", start: LYRICS_GRAY_HEX, end: LYRICS_GRAY_HEX };
   if (paint.mode === "gradient") {
     return { mode: "gradient", start: paint.start, end: paint.end };
   }
@@ -116,6 +133,14 @@ export function effectivePaint(paint: LyricsColorPaint): {
 /** 色相线是否需要展示（只有单色 / 渐变）。 */
 export function needsHueLine(mode: LyricsColorMode): boolean {
   return mode === "solid" || mode === "gradient";
+}
+
+/** 副行选「跟随」时用主行已唱色。 */
+export function resolveFollowPaint(
+  paint: LyricsColorPaint,
+  accent: LyricsColorPaint,
+): LyricsColorPaint {
+  return paint.mode === "follow" ? accent : paint;
 }
 
 /** 色相线位置 → 颜色。整条都是满饱和色相，不含黑白。 */

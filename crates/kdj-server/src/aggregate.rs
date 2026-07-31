@@ -889,8 +889,10 @@ pub async fn search(state: &Arc<AppState>, payload: &SearchRequest) -> SearchRes
         if *platform == Platform::Local || targets.contains(platform) {
             continue;
         }
-        if *platform == Platform::Soundcloud && !settings.soundcloud_enabled {
-            errors.insert(platform.to_string(), "SoundCloud 未在设置中启用".into());
+        let enabled = &settings.enabled_platforms;
+        let key = platform.as_str();
+        if !enabled.iter().any(|id| id == key) {
+            errors.insert(platform.to_string(), format!("{platform} 未在设置中启用"));
             continue;
         }
         if state.provider(*platform).is_none() {

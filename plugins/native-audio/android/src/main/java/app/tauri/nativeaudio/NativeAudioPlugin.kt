@@ -2,31 +2,14 @@ package app.tauri.nativeaudio
 
 import android.Manifest
 import android.app.Activity
-import android.app.PendingIntent
-import android.content.Context
-import android.content.SharedPreferences
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
-import android.app.ActivityManager
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
-import android.os.PowerManager
 import android.provider.Settings
-import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.media3.common.AudioAttributes
-import androidx.media3.common.C
-import androidx.media3.common.ForwardingPlayer
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.session.MediaSession
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -35,22 +18,9 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import kotlin.math.max
 
-private const val TAG = "plugin/native-audio"
 private const val EVENT_STATE = "native_audio_state"
 private const val EVENT_OVERLAY_MOVED = "native_lyrics_overlay_moved"
 private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 9512
-private const val FOREGROUND_PROGRESS_TICK_MS = 25L
-private const val BACKGROUND_PROGRESS_TICK_MS = 250L
-private const val SEEK_INCREMENT_MS = 10_000L
-private const val SEEK_STATE_STALE_MS = 1_500L
-private const val PROGRESS_PERSIST_THROTTLE_MS = 1_000L
-private const val PROGRESS_NEAR_START_EPSILON_SEC = 0.25
-private const val PROGRESS_PERSIST_EPSILON_SEC = 0.05
-private const val PROGRESS_PREFS_NAME = "tauri_native_audio_progress"
-private const val PROGRESS_KEY_STORY_ID = "story_id"
-private const val PROGRESS_KEY_CURRENT_TIME = "current_time"
-private const val PROGRESS_KEY_UPDATED_AT_MS = "updated_at_ms"
-private const val PROGRESS_KEY_STATUS = "status"
 
 data class NativeAudioState(
     val id: Long? = null,
@@ -112,6 +82,25 @@ class SetVolumeArgs {
 }
 
 @InvokeArg
+class ApplyPlaybackSnapshotArgs {
+    var sequence: Long? = null
+    var phase: String? = null
+    var trackId: Long? = null
+    var title: String? = null
+    var artist: String? = null
+    var album: String? = null
+    var artworkUrl: String? = null
+    var currentTime: Double? = null
+    var duration: Double? = null
+    var desiredPlaying: Boolean? = null
+    var isPlaying: Boolean? = null
+    var buffering: Boolean? = null
+    var rate: Double? = null
+    var volume: Double? = null
+    var error: String? = null
+}
+
+@InvokeArg
 class LyricsLineArgs {
     var time: Double? = null
     var text: String? = null
@@ -140,6 +129,9 @@ class SetLyricsOverlayArgs {
     var secondaryAccent: String? = null
     var secondaryAccentEnd: String? = null
     var secondaryMode: String? = null
+    var dim: String? = null
+    var dimEnd: String? = null
+    var dimMode: String? = null
     var stroke: String? = null
     var strokeEnd: String? = null
     var strokeMode: String? = null
@@ -159,553 +151,6 @@ class SavePngToGalleryArgs {
 @InvokeArg
 class OpenLocalPathArgs {
     var path: String? = null
-}
-
-private data class PendingSeekState(
-    val shouldResume: Boolean,
-    val startedAtMs: Long,
-)
-
-object NativeAudioRuntime {
-    private val lock = Any()
-    private val tickHandler = Handler(Looper.getMainLooper())
-    private var tickScheduled = false
-
-    private var player: ExoPlayer? = null
-    private var appContext: Context? = null
-    private var mediaSession: MediaSession? = null
-    private var mediaSessionPlayer: Player? = null
-    private var lastError: String? = null
-    private var pendingSeekState: PendingSeekState? = null
-    private var currentStoryId: Long? = null
-    private var lastProgressPersistedAtMs = 0L
-    private var lastProgressPersistedStoryId: Long? = null
-    private var lastProgressPersistedTimeSec: Double? = null
-
-    private val tickRunnable = object : Runnable {
-        override fun run() {
-            val shouldContinue = synchronized(lock) {
-                val snapshot = snapshotLocked()
-                appContext?.let { persistProgressCheckpointLocked(it, snapshot, force = false) }
-                NativeAudioPlugin.emitToActive(snapshot)
-                val isPlaying = player?.isPlaying == true
-                tickScheduled = isPlaying
-                isPlaying
-            }
-            if (shouldContinue) {
-                val delay = synchronized(lock) { nextProgressTickDelayLocked() }
-                tickHandler.postDelayed(this, delay)
-            }
-        }
-    }
-
-    private val playerListener = object : Player.Listener {
-        override fun onPlaybackStateChanged(playbackState: Int) {
-            if (playbackState == Player.STATE_ENDED) {
-                synchronized(lock) {
-                    appContext?.let { persistProgressCheckpointLocked(it, snapshotLocked(), force = true) }
-                }
-            }
-            syncTicking()
-            emitState()
-        }
-
-        override fun onIsPlayingChanged(isPlaying: Boolean) {
-            syncTicking()
-            emitState()
-        }
-
-        override fun onPlaybackParametersChanged(playbackParameters: androidx.media3.common.PlaybackParameters) {
-            emitState()
-        }
-
-        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            synchronized(lock) {
-                currentStoryId = mediaItem?.mediaId?.toLongOrNull()?.takeIf { it != 0L }
-                appContext?.let { persistProgressCheckpointLocked(it, snapshotLocked(), force = true) }
-            }
-            syncTicking()
-            emitState()
-        }
-
-        override fun onPositionDiscontinuity(
-            oldPosition: Player.PositionInfo,
-            newPosition: Player.PositionInfo,
-            reason: Int,
-        ) {
-            if (reason == Player.DISCONTINUITY_REASON_SEEK || reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) {
-                synchronized(lock) {
-                    val exoPlayer = player ?: return@synchronized
-                    val pendingSeek = pendingSeekState
-                    val shouldResume = pendingSeek?.shouldResume ?: exoPlayer.playWhenReady
-                    if (!shouldResume && exoPlayer.playWhenReady) exoPlayer.pause()
-                    val shouldRecoverPlayback =
-                        shouldResume &&
-                            !exoPlayer.isPlaying &&
-                            exoPlayer.playbackState == Player.STATE_READY &&
-                            lastError == null
-                    if (shouldRecoverPlayback) exoPlayer.play()
-                    appContext?.let { persistProgressCheckpointLocked(it, snapshotLocked(), force = true) }
-                }
-            }
-            syncTicking()
-            emitState()
-        }
-
-        override fun onPlayerError(error: PlaybackException) {
-            Log.e(TAG, "onPlayerError code=${error.errorCodeName} message=${error.message}", error)
-            synchronized(lock) {
-                lastError = error.message ?: "unknown"
-                pendingSeekState = null
-            }
-            syncTicking()
-            emitState()
-        }
-    }
-
-    fun ensure(context: Context) {
-        synchronized(lock) {
-            if (player != null && mediaSession != null) return
-
-            val ctx = context.applicationContext
-            appContext = ctx
-
-            val audioAttributes = AudioAttributes.Builder()
-                .setUsage(C.USAGE_MEDIA)
-                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-                .build()
-
-            val exoPlayer = ExoPlayer.Builder(ctx)
-                .setSeekBackIncrementMs(SEEK_INCREMENT_MS)
-                .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
-                .build()
-            exoPlayer.setAudioAttributes(audioAttributes, true)
-            exoPlayer.setHandleAudioBecomingNoisy(true)
-            exoPlayer.setWakeMode(C.WAKE_MODE_LOCAL)
-            exoPlayer.addListener(playerListener)
-            player = exoPlayer
-            mediaSessionPlayer = object : ForwardingPlayer(exoPlayer) {
-                override fun getAvailableCommands(): Player.Commands {
-                    return super.getAvailableCommands()
-                        .buildUpon()
-                        .add(Player.COMMAND_SEEK_BACK)
-                        .add(Player.COMMAND_SEEK_FORWARD)
-                        .build()
-                }
-
-                override fun isCommandAvailable(command: Int): Boolean {
-                    if (command == Player.COMMAND_SEEK_BACK || command == Player.COMMAND_SEEK_FORWARD) return true
-                    return super.isCommandAvailable(command)
-                }
-
-                override fun seekToPrevious() = exoPlayer.seekToPrevious()
-
-                override fun seekToPreviousMediaItem() = exoPlayer.seekToPreviousMediaItem()
-
-                override fun seekToNext() = exoPlayer.seekToNext()
-
-                override fun seekToNextMediaItem() = exoPlayer.seekToNextMediaItem()
-            }
-
-            val launchIntent = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)
-            val pendingIntent = launchIntent?.let {
-                val flags = PendingIntent.FLAG_UPDATE_CURRENT or
-                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
-                PendingIntent.getActivity(ctx, 0, it, flags)
-            }
-
-            val sessionPlayer = mediaSessionPlayer ?: exoPlayer
-            mediaSession = MediaSession.Builder(ctx, sessionPlayer)
-                .apply {
-                    if (pendingIntent != null) setSessionActivity(pendingIntent)
-                }
-                .build()
-
-            lastError = null
-            syncTickingLocked()
-        }
-    }
-
-    fun initialize(context: Context) {
-        ensure(context)
-        emitState()
-    }
-
-    fun startService(context: Context) {
-        val serviceIntent = Intent(context.applicationContext, NativeAudioService::class.java)
-        runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.applicationContext.startForegroundService(serviceIntent)
-            } else {
-                context.applicationContext.startService(serviceIntent)
-            }
-        }.onFailure { error ->
-            Log.w(TAG, "startService failed", error)
-        }
-    }
-
-    fun stopService(context: Context) {
-        val serviceIntent = Intent(context.applicationContext, NativeAudioService::class.java)
-        context.applicationContext.stopService(serviceIntent)
-    }
-
-    fun setSource(
-        context: Context,
-        src: String,
-        storyId: Long?,
-        title: String?,
-        artist: String?,
-        album: String?,
-        artworkUrl: String?,
-    ) {
-        synchronized(lock) {
-            ensure(context)
-            val exoPlayer = player ?: return
-
-            val mediaItem = buildMediaItem(src, storyId, title, artist, album, artworkUrl)
-
-            pendingSeekState = null
-            currentStoryId = storyId?.takeIf { it > 0 }
-            exoPlayer.setMediaItem(mediaItem)
-            exoPlayer.prepare()
-            lastError = null
-            syncTickingLocked()
-        }
-        emitState()
-    }
-
-    fun setQueue(context: Context, items: List<SetSourceArgs>) {
-        synchronized(lock) {
-            ensure(context)
-            val exoPlayer = player ?: return
-            val mediaItems = items.mapNotNull { item ->
-                val src = item.src?.trim().orEmpty()
-                if (src.isEmpty()) null
-                else buildMediaItem(src, item.id, item.title, item.artist, item.album, item.artworkUrl)
-            }
-            if (mediaItems.isEmpty()) return
-
-            val currentId = currentStoryId
-            if (exoPlayer.currentMediaItem?.mediaId == mediaItems.first().mediaId) {
-                // Queue edits must not rebuild the currently audible MediaSource. Replacing only
-                // the tail keeps playback sample flow intact while the WebView is in foreground.
-                if (exoPlayer.mediaItemCount > 1) exoPlayer.removeMediaItems(1, exoPlayer.mediaItemCount)
-                if (mediaItems.size > 1) exoPlayer.addMediaItems(mediaItems.drop(1))
-                syncTickingLocked()
-                return@synchronized
-            }
-
-            val currentIndex = mediaItems.indexOfFirst { it.mediaId.toLongOrNull() == currentId }
-                .takeIf { it >= 0 } ?: 0
-            val currentPosition = if (currentId == null) 0L else exoPlayer.currentPosition
-            val shouldResume = exoPlayer.playWhenReady || exoPlayer.isPlaying
-            exoPlayer.setMediaItems(mediaItems, currentIndex, max(0L, currentPosition))
-            exoPlayer.prepare()
-            exoPlayer.playWhenReady = shouldResume
-            currentStoryId = mediaItems[currentIndex].mediaId.toLongOrNull()?.takeIf { it != 0L }
-            lastError = null
-            syncTickingLocked()
-        }
-        emitState()
-    }
-
-    fun play(context: Context) {
-        startService(context)
-        synchronized(lock) {
-            ensure(context)
-            val exoPlayer = player ?: return
-            if (exoPlayer.playbackState == Player.STATE_ENDED) {
-                exoPlayer.seekTo(0L)
-            }
-            pendingSeekState = null
-            exoPlayer.playWhenReady = true
-            exoPlayer.play()
-            lastError = null
-            syncTickingLocked()
-        }
-        emitState()
-    }
-
-    fun pause(context: Context) {
-        synchronized(lock) {
-            ensure(context)
-            pendingSeekState = null
-            player?.pause()
-            syncTickingLocked()
-            persistProgressCheckpointLocked(context.applicationContext, snapshotLocked(), force = true)
-        }
-        emitState()
-    }
-
-    fun seekTo(context: Context, positionSec: Double) {
-        if (!positionSec.isFinite()) return
-        synchronized(lock) {
-            ensure(context)
-            val safeMs = max(0L, (positionSec * 1000.0).toLong())
-            val exoPlayer = player ?: return@synchronized
-            val shouldResume = exoPlayer.playWhenReady || exoPlayer.isPlaying
-            pendingSeekState = PendingSeekState(shouldResume = shouldResume, startedAtMs = System.currentTimeMillis())
-            if (!shouldResume && exoPlayer.playWhenReady) exoPlayer.pause()
-            exoPlayer.seekTo(safeMs)
-        }
-        emitState()
-    }
-
-    fun setRate(context: Context, rate: Double) {
-        if (!rate.isFinite() || rate <= 0.0) return
-        synchronized(lock) {
-            ensure(context)
-            player?.setPlaybackSpeed(rate.toFloat())
-        }
-        emitState()
-    }
-
-    fun setVolume(context: Context, volume: Double) {
-        if (!volume.isFinite()) return
-        synchronized(lock) {
-            ensure(context)
-            player?.volume = volume.coerceIn(0.0, 1.0).toFloat()
-        }
-        emitState()
-    }
-
-    fun getState(context: Context): NativeAudioState {
-        synchronized(lock) {
-            ensure(context)
-            return snapshotLocked()
-        }
-    }
-
-    /** 只读播放位置，播放器还没建起来时返回 null。见 [NativeAudioClock]。 */
-    fun clock(): NativeAudioClock? {
-        synchronized(lock) {
-            val exoPlayer = player ?: return null
-            val rawDurationMs = exoPlayer.duration
-            return NativeAudioClock(
-                trackId = currentStoryId,
-                positionSec = max(0L, exoPlayer.currentPosition) / 1000.0,
-                durationSec = if (rawDurationMs > 0) rawDurationMs / 1000.0 else 0.0,
-                isPlaying = exoPlayer.isPlaying,
-            )
-        }
-    }
-
-    fun getProgressCheckpoint(context: Context): NativeAudioProgressCheckpoint? {
-        val prefs = progressPrefs(context.applicationContext)
-        val storyId = prefs.getLong(PROGRESS_KEY_STORY_ID, 0L)
-        if (storyId <= 0L) return null
-        val currentTime = prefs.getFloat(PROGRESS_KEY_CURRENT_TIME, 0f).toDouble()
-        val updatedAtMs = prefs.getLong(PROGRESS_KEY_UPDATED_AT_MS, 0L)
-        if (!currentTime.isFinite() || currentTime <= 0.0 || updatedAtMs <= 0L) return null
-        val status = prefs.getString(PROGRESS_KEY_STATUS, null)
-        return NativeAudioProgressCheckpoint(
-            id = storyId,
-            currentTime = currentTime,
-            updatedAtMs = updatedAtMs,
-            status = status,
-        )
-    }
-
-    fun clearProgressCheckpoint(context: Context) {
-        synchronized(lock) {
-            progressPrefs(context.applicationContext).edit()
-                .remove(PROGRESS_KEY_STORY_ID)
-                .remove(PROGRESS_KEY_CURRENT_TIME)
-                .remove(PROGRESS_KEY_UPDATED_AT_MS)
-                .remove(PROGRESS_KEY_STATUS)
-                .apply()
-            lastProgressPersistedAtMs = 0L
-            lastProgressPersistedStoryId = null
-            lastProgressPersistedTimeSec = null
-        }
-    }
-
-    fun dispose(context: Context) {
-        synchronized(lock) {
-            persistProgressCheckpointLocked(context.applicationContext, snapshotLocked(), force = true)
-            tickHandler.removeCallbacks(tickRunnable)
-            tickScheduled = false
-
-            player?.removeListener(playerListener)
-            player?.release()
-            player = null
-
-            mediaSession?.release()
-            mediaSession = null
-            mediaSessionPlayer = null
-
-            lastError = null
-            pendingSeekState = null
-            currentStoryId = null
-            appContext = null
-        }
-        stopService(context)
-        emitState()
-    }
-
-    fun mediaSession(): MediaSession? {
-        synchronized(lock) {
-            return mediaSession
-        }
-    }
-
-    fun mediaSessionPlayer(): Player? {
-        synchronized(lock) {
-            return mediaSessionPlayer ?: player
-        }
-    }
-
-    private fun syncTicking() {
-        synchronized(lock) {
-            syncTickingLocked()
-        }
-    }
-
-    private fun syncTickingLocked() {
-        val isPlaying = player?.isPlaying == true
-        if (isPlaying && !tickScheduled) {
-            tickScheduled = true
-            tickHandler.removeCallbacks(tickRunnable)
-            tickHandler.post(tickRunnable)
-            return
-        }
-        if (!isPlaying && tickScheduled) {
-            tickScheduled = false
-            tickHandler.removeCallbacks(tickRunnable)
-        }
-    }
-
-    private fun nextProgressTickDelayLocked(): Long {
-        val context = appContext ?: return BACKGROUND_PROGRESS_TICK_MS
-        val isForeground = isAppInForeground()
-        val isInteractive = isDeviceInteractive(context)
-        return if (isForeground && isInteractive) FOREGROUND_PROGRESS_TICK_MS else BACKGROUND_PROGRESS_TICK_MS
-    }
-
-    private fun isAppInForeground(): Boolean {
-        val processInfo = ActivityManager.RunningAppProcessInfo()
-        ActivityManager.getMyMemoryState(processInfo)
-        return processInfo.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND ||
-            processInfo.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE
-    }
-
-    private fun isDeviceInteractive(context: Context): Boolean {
-        val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
-        return powerManager?.isInteractive ?: true
-    }
-
-    private fun emitState() {
-        val snapshot = synchronized(lock) { snapshotLocked() }
-        NativeAudioPlugin.emitToActive(snapshot)
-    }
-
-    private fun progressPrefs(context: Context): SharedPreferences =
-        context.getSharedPreferences(PROGRESS_PREFS_NAME, Context.MODE_PRIVATE)
-
-    private fun persistProgressCheckpointLocked(context: Context, snapshot: NativeAudioState, force: Boolean) {
-        val storyId = currentStoryId ?: return
-        if (storyId <= 0L) return
-        if (!snapshot.currentTime.isFinite() || snapshot.currentTime <= PROGRESS_NEAR_START_EPSILON_SEC) return
-
-        val now = System.currentTimeMillis()
-        if (!force && now - lastProgressPersistedAtMs < PROGRESS_PERSIST_THROTTLE_MS) return
-
-        val prevStoryId = lastProgressPersistedStoryId
-        val prevTime = lastProgressPersistedTimeSec
-        if (!force && prevStoryId == storyId && prevTime != null && kotlin.math.abs(prevTime - snapshot.currentTime) <= PROGRESS_PERSIST_EPSILON_SEC) {
-            return
-        }
-
-        progressPrefs(context).edit()
-            .putLong(PROGRESS_KEY_STORY_ID, storyId)
-            .putFloat(PROGRESS_KEY_CURRENT_TIME, snapshot.currentTime.toFloat())
-            .putLong(PROGRESS_KEY_UPDATED_AT_MS, now)
-            .putString(PROGRESS_KEY_STATUS, snapshot.status)
-            .apply()
-
-        lastProgressPersistedAtMs = now
-        lastProgressPersistedStoryId = storyId
-        lastProgressPersistedTimeSec = snapshot.currentTime
-    }
-
-    private fun buildMediaItem(
-        src: String,
-        storyId: Long?,
-        title: String?,
-        artist: String?,
-        album: String?,
-        artworkUrl: String?,
-    ): MediaItem {
-        val metadataBuilder = MediaMetadata.Builder()
-        if (!title.isNullOrBlank()) metadataBuilder.setTitle(title)
-        if (!artist.isNullOrBlank()) metadataBuilder.setArtist(artist)
-        if (!album.isNullOrBlank()) metadataBuilder.setAlbumTitle(album)
-        if (!artworkUrl.isNullOrBlank()) {
-            runCatching { Uri.parse(artworkUrl) }
-                .onSuccess { metadataBuilder.setArtworkUri(it) }
-        }
-        return MediaItem.Builder()
-            .setMediaId(storyId?.toString() ?: "0")
-            .setUri(src)
-            .setMediaMetadata(metadataBuilder.build())
-            .build()
-    }
-
-    private fun snapshotLocked(): NativeAudioState {
-        val exoPlayer = player
-            ?: return NativeAudioState(
-                status = "idle",
-                currentTime = 0.0,
-                duration = 0.0,
-                isPlaying = false,
-                buffering = false,
-                rate = 1.0,
-                error = null,
-            )
-
-        val rawDurationMs = exoPlayer.duration
-        val durationMs = if (rawDurationMs > 0) rawDurationMs else 0L
-        val currentMs = max(0L, exoPlayer.currentPosition)
-        val buffering = exoPlayer.playbackState == Player.STATE_BUFFERING
-
-        val seekState = activeSeekStateLocked()
-        if (seekState?.shouldResume == true && exoPlayer.isPlaying) pendingSeekState = null
-
-        val hasTerminalState = lastError != null || exoPlayer.playbackState == Player.STATE_ENDED
-        if (hasTerminalState) pendingSeekState = null
-        val effectiveIsPlaying = if (hasTerminalState) false else (seekState?.shouldResume ?: exoPlayer.isPlaying)
-        val effectiveBuffering = if (hasTerminalState || seekState?.shouldResume == false) false else buffering
-
-        val status = when {
-            lastError != null -> "error"
-            exoPlayer.playbackState == Player.STATE_ENDED -> "ended"
-            seekState?.shouldResume == true -> "playing"
-            effectiveBuffering -> "loading"
-            effectiveIsPlaying -> "playing"
-            else -> "idle"
-        }
-
-        return NativeAudioState(
-            id = currentStoryId,
-            status = status,
-            currentTime = currentMs / 1000.0,
-            duration = durationMs / 1000.0,
-            isPlaying = effectiveIsPlaying,
-            buffering = effectiveBuffering,
-            rate = exoPlayer.playbackParameters.speed.toDouble(),
-            error = lastError,
-        )
-    }
-
-    private fun activeSeekStateLocked(): PendingSeekState? {
-        val seekState = pendingSeekState ?: return null
-        val now = System.currentTimeMillis()
-        if (now - seekState.startedAtMs > SEEK_STATE_STALE_MS) {
-            pendingSeekState = null
-            return null
-        }
-        return seekState
-    }
 }
 
 @TauriPlugin
@@ -732,6 +177,22 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve(toJsObject(NativeAudioRuntime.getState(activity.applicationContext)))
         }.onFailure {
             invoke.reject(it.message ?: "initialize failed")
+        }
+    }
+
+    /**
+     * Rust coordinator 镜像入口。驱动 MediaSession / FGS / 焦点 / 歌词时钟，
+     * 不走 WebView，息屏仍可用。
+     */
+    @Command
+    fun applyPlaybackSnapshot(invoke: Invoke) {
+        val args = invoke.parseArgs(ApplyPlaybackSnapshotArgs::class.java)
+        runCatching {
+            NativeAudioRuntime.applySnapshot(activity.applicationContext, args)
+        }.onSuccess {
+            invoke.resolve()
+        }.onFailure {
+            invoke.reject(it.message ?: "applyPlaybackSnapshot failed")
         }
     }
 
@@ -900,7 +361,7 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
 
     /**
      * 推入整首歌的歌词时间轴。**前端只在换歌或切附加层时调一次**，
-     * 之后由 [LyricsOverlayRuntime] 读 ExoPlayer 位置自己滚——WebView 被冻结时
+     * 之后由 [LyricsOverlayRuntime] 读 coordinator 镜像位置自己滚——WebView 被冻结时
      * 悬浮歌词照样走，见该类注释。
      */
     @Command
@@ -952,6 +413,12 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
                 args.secondaryAccent,
                 args.secondaryAccentEnd,
                 Color.argb(0xF0, 0xFF, 0xFF, 0xFF),
+            ),
+            dim = LyricsColorPaint.parse(
+                args.dimMode,
+                args.dim,
+                args.dimEnd,
+                Color.argb(0x9E, 0xFF, 0xFF, 0xFF),
             ),
             stroke = LyricsColorPaint.parse(args.strokeMode, args.stroke, args.strokeEnd, Color.BLACK),
             opacity = args.opacity?.takeIf { it.isFinite() }?.toFloat() ?: 1f,

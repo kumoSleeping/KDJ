@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/mobile-schema.json",
   "identifier": "mobile-player",
-  "description": "移动端原生播放器。播放生命周期由 Android MediaSessionService / iOS AVPlayer 持有，不依赖 WebView 常驻。",
+  "description": "移动端能力。Android 出声与 MediaSession 已走共享 playback coordinator（CPAL/AAudio + applyPlaybackSnapshot）；native-audio 负责通知栏/FGS/焦点/歌词 overlay/相册。iOS 出声仍由 AVPlayer 持有。",
   "windows": ["main"],
   "platforms": ["android", "iOS"],
   "permissions": ["native-audio:default"]

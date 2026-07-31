@@ -5,6 +5,7 @@ Default permissions for the plugin
 #### This default permission set includes the following:
 
 - `allow-initialize`
+- `allow-apply-playback-snapshot`
 - `allow-register-listener`
 - `allow-remove-listener`
 - `allow-set-source`
@@ -33,6 +34,32 @@ Default permissions for the plugin
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`native-audio:allow-apply-playback-snapshot`
+
+</td>
+<td>
+
+Enables the apply_playback_snapshot command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-apply-playback-snapshot`
+
+</td>
+<td>
+
+Denies the apply_playback_snapshot command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>
@@ -193,6 +220,32 @@ Denies the initialize command without any pre-configured scope.
 <tr>
 <td>
 
+`native-audio:allow-open-local-path`
+
+</td>
+<td>
+
+Enables the open_local_path command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-open-local-path`
+
+</td>
+<td>
+
+Denies the open_local_path command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `native-audio:allow-pause`
 
 </td>
@@ -316,6 +369,32 @@ Enables the request_overlay_permission command without any pre-configured scope.
 <td>
 
 Denies the request_overlay_permission command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:allow-save-png-to-gallery`
+
+</td>
+<td>
+
+Enables the save_png_to_gallery command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-save-png-to-gallery`
+
+</td>
+<td>
+
+Denies the save_png_to_gallery command without any pre-configured scope.
 
 </td>
 </tr>

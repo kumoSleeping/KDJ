@@ -1,12 +1,20 @@
 import { create } from "zustand";
 import {
   normalizePaint,
+  resolveFollowPaint,
   type LyricsColorPaint,
   type LyricsFillMode,
+  type LyricsSecondaryMode,
   type LyricsStrokeMode,
 } from "./lyricsColor";
 
-export type { LyricsColorMode, LyricsColorPaint, LyricsFillMode, LyricsStrokeMode } from "./lyricsColor";
+export type {
+  LyricsColorMode,
+  LyricsColorPaint,
+  LyricsFillMode,
+  LyricsSecondaryMode,
+  LyricsStrokeMode,
+} from "./lyricsColor";
 
 const STORAGE_KEY = "kd-lyrics-prefs";
 
@@ -45,7 +53,10 @@ export interface LyricsPrefs {
    * `TYPE_APPLICATION_OVERLAY` 浮层（需要「显示在其他应用上层」权限）。
    */
   desktopEnabled: boolean;
-  /** 悬浮歌词贴近屏幕的上沿或下沿。 */
+  /**
+   * 内部默认吸附边（无拖动坐标时）。设置里已去掉顶/底开关，只靠自由拖动；
+   * 字段保留给原生浮层 gravity / 首次打开兜底。
+   */
   desktopPosition: DesktopLyricsPosition;
   /** 锁定后整个歌词窗口触摸/鼠标穿透。 */
   desktopLocked: boolean;
@@ -58,16 +69,20 @@ export interface LyricsPrefs {
   desktopPositionX: number | null;
   desktopPositionY: number | null;
   /**
-   * 主行填色。Android 上同时是逐字高亮色。
+   * 主行已唱部分填色（桌面 / Android 都做逐字推进）。
    * `mode=gradient` 时用 start→end 横向渐变。
    */
   desktopAccentMode: LyricsFillMode;
   desktopAccent: string;
   desktopAccentEnd: string;
-  /** 副行（翻译 / 下一句）填色。 */
-  desktopSecondaryMode: LyricsFillMode;
+  /** 副行（翻译 / 下一句）已唱填色；`follow` = 跟主行。 */
+  desktopSecondaryMode: LyricsSecondaryMode;
   desktopSecondaryAccent: string;
   desktopSecondaryAccentEnd: string;
+  /** 未唱部分填色（主行 / 副行共用）。 */
+  desktopDimMode: LyricsFillMode;
+  desktopDim: string;
+  desktopDimEnd: string;
   /** 描边 / 边框色。 */
   desktopStrokeMode: LyricsStrokeMode;
   desktopStroke: string;
@@ -91,9 +106,12 @@ const DEFAULTS: LyricsPrefs = {
   desktopAccentMode: "white",
   desktopAccent: "#ff3b5c",
   desktopAccentEnd: "#ff6b9d",
-  desktopSecondaryMode: "white",
+  desktopSecondaryMode: "follow",
   desktopSecondaryAccent: "#3b82f6",
   desktopSecondaryAccentEnd: "#7dd3fc",
+  desktopDimMode: "gray",
+  desktopDim: "#9e9e9e",
+  desktopDimEnd: "#9e9e9e",
   desktopStrokeMode: "black",
   desktopStroke: "#ff3b5c",
   desktopStrokeEnd: "#334155",
@@ -109,6 +127,11 @@ const DEFAULT_SECONDARY_PAINT: LyricsColorPaint = {
   mode: DEFAULTS.desktopSecondaryMode,
   start: DEFAULTS.desktopSecondaryAccent,
   end: DEFAULTS.desktopSecondaryAccentEnd,
+};
+const DEFAULT_DIM_PAINT: LyricsColorPaint = {
+  mode: DEFAULTS.desktopDimMode,
+  start: DEFAULTS.desktopDim,
+  end: DEFAULTS.desktopDimEnd,
 };
 const DEFAULT_STROKE_PAINT: LyricsColorPaint = {
   mode: DEFAULTS.desktopStrokeMode,
@@ -138,6 +161,17 @@ export function secondaryPaint(prefs: Pick<
   };
 }
 
+export function dimPaint(prefs: Pick<
+  LyricsPrefs,
+  "desktopDimMode" | "desktopDim" | "desktopDimEnd"
+>): LyricsColorPaint {
+  return {
+    mode: prefs.desktopDimMode,
+    start: prefs.desktopDim,
+    end: prefs.desktopDimEnd,
+  };
+}
+
 export function strokePaint(prefs: Pick<
   LyricsPrefs,
   "desktopStrokeMode" | "desktopStroke" | "desktopStrokeEnd"
@@ -147,6 +181,11 @@ export function strokePaint(prefs: Pick<
     start: prefs.desktopStroke,
     end: prefs.desktopStrokeEnd,
   };
+}
+
+/** 副行已解析色：跟随主行时直接返回主行 paint。 */
+export function resolvedSecondaryPaint(prefs: LyricsPrefs): LyricsColorPaint {
+  return resolveFollowPaint(secondaryPaint(prefs), accentPaint(prefs));
 }
 
 function normalizeEngines(value: unknown): LyricsEngine[] {
@@ -254,6 +293,9 @@ function pickPrefs(state: LyricsPrefs): LyricsPrefs {
     desktopSecondaryMode: state.desktopSecondaryMode,
     desktopSecondaryAccent: state.desktopSecondaryAccent,
     desktopSecondaryAccentEnd: state.desktopSecondaryAccentEnd,
+    desktopDimMode: state.desktopDimMode,
+    desktopDim: state.desktopDim,
+    desktopDimEnd: state.desktopDimEnd,
     desktopStrokeMode: state.desktopStrokeMode,
     desktopStroke: state.desktopStroke,
     desktopStrokeEnd: state.desktopStrokeEnd,
@@ -314,6 +356,13 @@ function load(): LyricsPrefs {
           data.desktopSecondaryAccent,
           data.desktopSecondaryAccentEnd,
           DEFAULT_SECONDARY_PAINT,
+          { allowFollow: true },
+        );
+        const dim = normalizePaint(
+          data.desktopDimMode,
+          data.desktopDim,
+          data.desktopDimEnd,
+          DEFAULT_DIM_PAINT,
         );
         const stroke = normalizePaint(
           data.desktopStrokeMode,
@@ -323,22 +372,31 @@ function load(): LyricsPrefs {
           true,
         );
         // 旧版「单色 + 纯白/纯黑」迁到黑/白预设，避免色相线左右端再塞灰阶。
-        const migrateBw = (paint: typeof accent) => {
+        const migrateBw = (paint: LyricsColorPaint) => {
           if (paint.mode !== "solid") return paint;
           if (paint.start === "#ffffff") return { ...paint, mode: "white" as const };
           if (paint.start === "#000000") return { ...paint, mode: "black" as const };
           return paint;
         };
         const accentNext = migrateBw(accent);
-        const secondaryNext = migrateBw(secondary);
+        const secondaryNext =
+          secondary.mode === "follow" ? secondary : migrateBw(secondary);
+        // 旧默认 solid #9e9e9e 迁到「灰」预设。
+        const dimNext =
+          dim.mode === "solid" && dim.start === "#9e9e9e"
+            ? { ...dim, mode: "gray" as const }
+            : migrateBw(dim);
         const strokeNext = migrateBw(stroke);
         return {
           desktopAccentMode: accentNext.mode as LyricsFillMode,
           desktopAccent: accentNext.start,
           desktopAccentEnd: accentNext.end,
-          desktopSecondaryMode: secondaryNext.mode as LyricsFillMode,
+          desktopSecondaryMode: secondaryNext.mode as LyricsSecondaryMode,
           desktopSecondaryAccent: secondaryNext.start,
           desktopSecondaryAccentEnd: secondaryNext.end,
+          desktopDimMode: dimNext.mode as LyricsFillMode,
+          desktopDim: dimNext.start,
+          desktopDimEnd: dimNext.end,
           desktopStrokeMode: strokeNext.mode as LyricsStrokeMode,
           desktopStroke: strokeNext.start,
           desktopStrokeEnd: strokeNext.end,
@@ -388,6 +446,7 @@ interface LyricsPrefsState extends LyricsPrefs {
   setDesktopFontScale(value: number): void;
   setDesktopAccentPaint(paint: LyricsColorPaint): void;
   setDesktopSecondaryPaint(paint: LyricsColorPaint): void;
+  setDesktopDimPaint(paint: LyricsColorPaint): void;
   setDesktopStrokePaint(paint: LyricsColorPaint): void;
   setDesktopOpacity(value: number): void;
   setDesktopCoordinates(x: number, y: number): void;
@@ -505,12 +564,29 @@ export const useLyricsPrefs = create<LyricsPrefsState>((set, get) => ({
     save({ ...get(), ...patch });
   },
   setDesktopSecondaryPaint(paint) {
-    const next = normalizePaint(paint.mode, paint.start, paint.end, DEFAULT_SECONDARY_PAINT);
-    const mode = (next.mode === "none" ? "solid" : next.mode) as LyricsFillMode;
+    const next = normalizePaint(paint.mode, paint.start, paint.end, DEFAULT_SECONDARY_PAINT, {
+      allowFollow: true,
+    });
+    const mode = (
+      next.mode === "none" ? "solid" : next.mode === "follow" ? "follow" : next.mode
+    ) as LyricsSecondaryMode;
     const patch = {
       desktopSecondaryMode: mode,
       desktopSecondaryAccent: next.start,
       desktopSecondaryAccentEnd: next.end,
+    };
+    set(patch);
+    save({ ...get(), ...patch });
+  },
+  setDesktopDimPaint(paint) {
+    const next = normalizePaint(paint.mode, paint.start, paint.end, DEFAULT_DIM_PAINT);
+    const mode = (
+      next.mode === "none" || next.mode === "follow" ? "gray" : next.mode
+    ) as LyricsFillMode;
+    const patch = {
+      desktopDimMode: mode,
+      desktopDim: next.start,
+      desktopDimEnd: next.end,
     };
     set(patch);
     save({ ...get(), ...patch });
@@ -569,6 +645,9 @@ export const useLyricsPrefs = create<LyricsPrefsState>((set, get) => ({
       secondaryAccent: state.desktopSecondaryAccent,
       secondaryAccentEnd: state.desktopSecondaryAccentEnd,
       secondaryMode: state.desktopSecondaryMode,
+      dim: state.desktopDim,
+      dimEnd: state.desktopDimEnd,
+      dimMode: state.desktopDimMode,
       stroke: state.desktopStroke,
       strokeEnd: state.desktopStrokeEnd,
       strokeMode: state.desktopStrokeMode,

@@ -556,7 +556,7 @@ export function TrackDetail({ track }: { track: Track }) {
         )}
       </Panel>
 
-      <Panel key="vj" heading="VJ search Bili" padded dense>
+      <Panel key="vj" heading="Explore" padded dense>
         <VjSearchPanel track={track} />
       </Panel>
 

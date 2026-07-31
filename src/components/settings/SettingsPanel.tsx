@@ -25,6 +25,7 @@ import {
   DESKTOP_FONT_SCALE_MAX,
   DESKTOP_FONT_SCALE_MIN,
   DESKTOP_OPACITY_MIN,
+  dimPaint,
   enginesFromMode,
   enginesMode,
   secondaryPaint,
@@ -34,7 +35,11 @@ import {
 } from "../../lib/lyricsPrefs";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { useTrackClickPrefs } from "../../lib/trackClickPrefs";
+import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
+import { libraryPasteMode } from "../../lib/libraryPaste";
+import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
+import type { LibraryPasteMode } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { InlineNotice, Panel } from "../common";
@@ -310,6 +315,19 @@ const FILL_MODE_OPTIONS = [
   { id: "gradient" as const, text: "渐变" },
 ] satisfies ReadonlyArray<{ id: LyricsColorMode; text: string }>;
 
+const DIM_MODE_OPTIONS = [
+  { id: "black" as const, text: "黑" },
+  { id: "white" as const, text: "白" },
+  { id: "gray" as const, text: "灰" },
+  { id: "solid" as const, text: "单色" },
+  { id: "gradient" as const, text: "渐变" },
+] satisfies ReadonlyArray<{ id: LyricsColorMode; text: string }>;
+
+const SECONDARY_MODE_OPTIONS = [
+  { id: "follow" as const, text: "跟随" },
+  ...FILL_MODE_OPTIONS,
+] satisfies ReadonlyArray<{ id: LyricsColorMode; text: string }>;
+
 const STROKE_MODE_OPTIONS = [
   { id: "black" as const, text: "黑" },
   { id: "white" as const, text: "白" },
@@ -319,8 +337,8 @@ const STROKE_MODE_OPTIONS = [
 ] satisfies ReadonlyArray<{ id: LyricsColorMode; text: string }>;
 
 /**
- * 悬浮歌词取色行：右侧在「黑 / 白 / 单色 / 渐变」（边框多「无」）间切换；
- * 单色 / 渐变时下面一根纯彩色相线——单色一颗球，渐变左右两颗。
+ * 悬浮歌词取色行：右侧在「黑 / 白 / 单色 / 渐变」（边框多「无」、副行多「跟随」、未唱多「灰」）间切换；
+ * 单色 / 渐变时下面一根纯彩色相线——单色一个尖朝下三角标，渐变左右两个。
  */
 function LyricsColorRow({
   label,
@@ -328,12 +346,16 @@ function LyricsColorRow({
   value,
   onChange,
   allowNone = false,
+  allowFollow = false,
+  allowGray = false,
 }: {
   label: string;
   title?: string;
   value: LyricsColorPaint;
   onChange(next: LyricsColorPaint): void;
   allowNone?: boolean;
+  allowFollow?: boolean;
+  allowGray?: boolean;
 }) {
   const trackRef = useRef<HTMLDivElement>(null);
   const activeRef = useRef<"start" | "end">("start");
@@ -342,7 +364,13 @@ function LyricsColorRow({
   const endT = hexToT(value.end);
   const gradient = value.mode === "gradient";
   const showHue = needsHueLine(value.mode);
-  const options = allowNone ? STROKE_MODE_OPTIONS : FILL_MODE_OPTIONS;
+  const options = allowNone
+    ? STROKE_MODE_OPTIONS
+    : allowFollow
+      ? SECONDARY_MODE_OPTIONS
+      : allowGray
+        ? DIM_MODE_OPTIONS
+        : FILL_MODE_OPTIONS;
 
   const applyT = (t: number, which: "start" | "end") => {
     const hex = tToHex(t);
@@ -456,6 +484,7 @@ function LyricsColorRow({
 
 export function SettingsPanel() {
   const theme = useAppStore((state) => state.settings?.theme ?? "system");
+  const settings = useAppStore((state) => state.settings);
   const saveSettings = useAppStore((state) => state.saveSettings);
   const transitions = useDjConfig((state) => state.transitions);
   const effects = useDjConfig((state) => state.effects);
@@ -479,7 +508,6 @@ export function SettingsPanel() {
   const setTransportFade = usePlaybackPrefs((state) => state.setTransportFade);
   const lyricsEngines = useLyricsPrefs((state) => state.engines);
   const setLyricsEngines = useLyricsPrefs((state) => state.setEngines);
-  const desktopLyricsPosition = useLyricsPrefs((state) => state.desktopPosition);
   const desktopLyricsLocked = useLyricsPrefs((state) => state.desktopLocked);
   const desktopLyricsFontScale = useLyricsPrefs((state) => state.desktopFontScale);
   const desktopLyricsOpacity = useLyricsPrefs((state) => state.desktopOpacity);
@@ -489,14 +517,17 @@ export function SettingsPanel() {
   const desktopSecondaryMode = useLyricsPrefs((state) => state.desktopSecondaryMode);
   const desktopSecondaryStart = useLyricsPrefs((state) => state.desktopSecondaryAccent);
   const desktopSecondaryEnd = useLyricsPrefs((state) => state.desktopSecondaryAccentEnd);
+  const desktopDimMode = useLyricsPrefs((state) => state.desktopDimMode);
+  const desktopDimStart = useLyricsPrefs((state) => state.desktopDim);
+  const desktopDimEnd = useLyricsPrefs((state) => state.desktopDimEnd);
   const desktopStrokeMode = useLyricsPrefs((state) => state.desktopStrokeMode);
   const desktopStrokeStart = useLyricsPrefs((state) => state.desktopStroke);
   const desktopStrokeEnd = useLyricsPrefs((state) => state.desktopStrokeEnd);
-  const setDesktopLyricsPosition = useLyricsPrefs((state) => state.setDesktopPosition);
   const setDesktopLyricsLocked = useLyricsPrefs((state) => state.setDesktopLocked);
   const setDesktopLyricsFontScale = useLyricsPrefs((state) => state.setDesktopFontScale);
   const setDesktopAccentPaint = useLyricsPrefs((state) => state.setDesktopAccentPaint);
   const setDesktopSecondaryPaint = useLyricsPrefs((state) => state.setDesktopSecondaryPaint);
+  const setDesktopDimPaint = useLyricsPrefs((state) => state.setDesktopDimPaint);
   const setDesktopStrokePaint = useLyricsPrefs((state) => state.setDesktopStrokePaint);
   const setDesktopLyricsOpacity = useLyricsPrefs((state) => state.setDesktopOpacity);
   const desktopAccent = accentPaint({
@@ -508,6 +539,11 @@ export function SettingsPanel() {
     desktopSecondaryMode,
     desktopSecondaryAccent: desktopSecondaryStart,
     desktopSecondaryAccentEnd: desktopSecondaryEnd,
+  });
+  const desktopDim = dimPaint({
+    desktopDimMode,
+    desktopDim: desktopDimStart,
+    desktopDimEnd,
   });
   const desktopStroke = strokePaint({
     desktopStrokeMode,
@@ -591,6 +627,21 @@ export function SettingsPanel() {
           </div>
         </Panel>
 
+        <Panel heading="曲库粘贴" dense>
+          <div className="kd-djp-switch-list" aria-label="曲库粘贴">
+            <CycleToggle<LibraryPasteMode>
+              label="粘贴快捷键"
+              value={libraryPasteMode(settings)}
+              options={[
+                { id: "link", text: "链接" },
+                { id: "copy", text: "复制文件" },
+              ]}
+              title="Cmd/Ctrl+V 与不按 Option 的拖放：链接（硬链接优先）或真复制一份。移动始终走 Option/Alt+V、剪切，或右键「粘贴」。"
+              onChange={(next) => void saveSettings({ library_paste: next })}
+            />
+          </div>
+        </Panel>
+
         <Panel heading="列表点击" dense>
           <div className="kd-djp-switch-list" aria-label="列表点击">
             <Switch
@@ -648,18 +699,6 @@ export function SettingsPanel() {
                   }
                   onChange={() => setDesktopLyricsLocked(!desktopLyricsLocked)}
                 />
-                <Switch
-                  checked={desktopLyricsPosition === "bottom"}
-                  label="悬浮位置"
-                  onState="底部"
-                  offState="顶部"
-                  title="悬浮歌词贴近屏幕的上沿或下沿；自由拖动后下次仍会优先恢复拖动位置。"
-                  onChange={() =>
-                    setDesktopLyricsPosition(
-                      desktopLyricsPosition === "bottom" ? "top" : "bottom",
-                    )
-                  }
-                />
                 <RatioSlider
                   label="悬浮字号"
                   ariaLabel="悬浮歌词字号"
@@ -678,23 +717,27 @@ export function SettingsPanel() {
                 />
                 <LyricsColorRow
                   label={overlayIsNative ? "高亮色" : "主行颜色"}
-                  title={
-                    overlayIsNative
-                      ? "已唱部分：黑 / 白 / 单色（色相线）/ 渐变。未唱部分仍是半透明白。"
-                      : "主行：黑 / 白 / 单色（色相线）/ 渐变。"
-                  }
+                  title="主行已唱部分：黑 / 白 / 单色（色相线）/ 渐变。超长句跟着进度滚动。"
                   value={desktopAccent}
                   onChange={setDesktopAccentPaint}
                 />
                 <LyricsColorRow
                   label="副行颜色"
-                  title="翻译或下一句：黑 / 白 / 单色 / 渐变。"
+                  title="翻译或下一句已唱部分：跟随主行 / 黑 / 白 / 单色 / 渐变。超长句跟着进度滚动。"
                   value={desktopSecondary}
                   onChange={setDesktopSecondaryPaint}
+                  allowFollow
+                />
+                <LyricsColorRow
+                  label="未唱颜色"
+                  title="还没唱到的字：黑 / 白 / 灰 / 单色 / 渐变。主行与副行共用。"
+                  value={desktopDim}
+                  onChange={setDesktopDimPaint}
+                  allowGray
                 />
                 <LyricsColorRow
                   label="边框颜色"
-                  title="描边：黑 / 白 / 单色 / 渐变 / 无。"
+                  title="描边（整行始终绘制）：黑 / 白 / 单色 / 渐变 / 无。"
                   value={desktopStroke}
                   onChange={setDesktopStrokePaint}
                   allowNone
@@ -750,6 +793,35 @@ export function SettingsPanel() {
               <span className="kd-djp-label">接歌长度</span>
               <BarsSlider bars={bars} onChange={setBars} hint={lengthHint} />
             </div>
+          </div>
+        </Panel>
+
+        <Panel heading="下载源" dense>
+          <div className="kd-djp-switch-list" aria-label="下载源">
+            {SEARCH_PLATFORMS.map((item) => {
+              const enabled = normalizeEnabledPlatforms(settings?.enabled_platforms).includes(
+                item.id,
+              );
+              return (
+                <Switch
+                  key={item.id}
+                  checked={enabled}
+                  label={item.label}
+                  title={
+                    enabled
+                      ? `关闭后搜索条里「${item.label}」会变灰，也无法搜索或下载`
+                      : `开启后可在搜索条勾选「${item.label}」`
+                  }
+                  onChange={() => {
+                    if (!settings) return;
+                    // 最后一个开着的不准关。
+                    const current = normalizeEnabledPlatforms(settings.enabled_platforms);
+                    if (enabled && current.length <= 1) return;
+                    void saveSettings(patchEnabledPlatform(settings, item.id, !enabled));
+                  }}
+                />
+              );
+            })}
           </div>
         </Panel>
 

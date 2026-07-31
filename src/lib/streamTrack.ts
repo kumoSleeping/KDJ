@@ -21,6 +21,41 @@ interface StreamMeta {
 const metaById = new Map<number, StreamMeta>();
 let nextId = -1;
 
+/** 给独立歌词 WebView 读：主窗写入当前试听曲目快照。 */
+const PUBLISHED_STREAM_KEY = "kd-active-stream-track";
+
+function notifyStreamTrackChanged(): void {
+  void import("@tauri-apps/api/event")
+    .then(({ emit }) => emit("stream-track-changed"))
+    .catch(() => {});
+}
+
+/** 主窗播放 / 切换在线试听时调用，供桌面歌词窗直取平台歌词。 */
+export function publishStreamTrack(track: Track | null): void {
+  try {
+    if (track && track.id < 0) {
+      localStorage.setItem(PUBLISHED_STREAM_KEY, JSON.stringify(track));
+    } else {
+      localStorage.removeItem(PUBLISHED_STREAM_KEY);
+    }
+  } catch {
+    // localStorage 满了也不挡播放。
+  }
+  notifyStreamTrackChanged();
+}
+
+export function readPublishedStreamTrack(trackId: number): Track | null {
+  if (trackId >= 0) return null;
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(PUBLISHED_STREAM_KEY) ?? "null");
+    if (!raw || typeof raw !== "object") return null;
+    const track = raw as Track;
+    return track.id === trackId ? track : null;
+  } catch {
+    return null;
+  }
+}
+
 export function isStreamTrack(track: Track | null | undefined): boolean {
   return Boolean(track && track.id < 0);
 }
@@ -57,7 +92,7 @@ export function makeSongStreamTrack(source: SongSource, url: string): Track {
     nextTrack: null,
   });
   const now = new Date().toISOString();
-  return {
+  const track: Track = {
     id,
     path: `stream:${source.platform}:${source.key}`,
     filename: title,
@@ -97,6 +132,7 @@ export function makeSongStreamTrack(source: SongSource, url: string): Track {
     folder: "",
     link: "",
   };
+  return track;
 }
 
 /** 搜索结果的后继项先只建展示元数据；真正轮到它播放时才解析直链。 */

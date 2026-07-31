@@ -135,7 +135,8 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
   },
 
   async ensure(track) {
-    if (!track || track.id <= 0) return;
+    // 曲库 id > 0；在线试听用负数 id，同样要按 source_platform/key 直取歌词。
+    if (!track || track.id === 0) return;
     const fingerprint = prefsFingerprint();
     const existing = get().byId[track.id];
     if (

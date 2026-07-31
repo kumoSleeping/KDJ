@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 /**
- * 「搜VJ(Bili)」的候选关键词。
+ * Explore「搜索 VJ」的候选关键词。
  *
  * 这些词是拿来**拼进 B 站搜索框**的，所以选词标准只有一条：
  * 加上它之后，搜出来的东西是不是更可能是"能当 VJ 素材用的画面"。
@@ -80,7 +80,8 @@ function loadPicked(): string[] {
 export const useVjKeywords = create<VjKeywordState>((set, get) => ({
   keywords: load(),
   picked: loadPicked(),
-  withArtist: localStorage.getItem(ARTIST_KEY) === "1",
+  // 未写过开关时默认带上艺人（和旧版「永远带艺人」一致）；显式存 "0" 才关掉。
+  withArtist: localStorage.getItem(ARTIST_KEY) !== "0",
 
   toggle(word) {
     const picked = get().picked;

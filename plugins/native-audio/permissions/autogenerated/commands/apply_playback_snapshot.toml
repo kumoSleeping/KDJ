@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-apply-playback-snapshot"
+description = "Enables the apply_playback_snapshot command without any pre-configured scope."
+commands.allow = ["apply_playback_snapshot"]
+
+[[permission]]
+identifier = "deny-apply-playback-snapshot"
+description = "Denies the apply_playback_snapshot command without any pre-configured scope."
+commands.deny = ["apply_playback_snapshot"]

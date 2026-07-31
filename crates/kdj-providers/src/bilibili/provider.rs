@@ -390,8 +390,13 @@ impl BilibiliProvider {
                 bail!("哔哩哔哩没有返回可下载的音频流");
             };
             let source_path = temp_dir.join(if is_single { "source.flv" } else { "audio.m4s" });
-            self.fetch_streams(&[(source.url.clone(), source_path.clone())], &cookies, cancel, progress)
-                .await?;
+            self.fetch_streams(
+                &[(source.candidate_urls(), source_path.clone())],
+                &cookies,
+                cancel,
+                progress,
+            )
+            .await?;
             self.extract_audio(&source_path, &staged, &log_path, req.offset_ms, cancel)
                 .await?;
         } else {
@@ -402,7 +407,7 @@ impl BilibiliProvider {
                 // 安卓路径：单流本身就是完整文件，直接落盘，不经过 ffmpeg
                 let direct = AtomicDownload::new(&output_path);
                 self.fetch_streams(
-                    &[(video.url.clone(), direct.partial().to_path_buf())],
+                    &[(video.candidate_urls(), direct.partial().to_path_buf())],
                     &cookies,
                     cancel,
                     progress,
@@ -413,15 +418,15 @@ impl BilibiliProvider {
             let mut plan = Vec::new();
             let inputs = if is_single {
                 let source_path = temp_dir.join("source.flv");
-                plan.push((video.url.clone(), source_path.clone()));
+                plan.push((video.candidate_urls(), source_path.clone()));
                 vec![source_path]
             } else {
                 let video_path = temp_dir.join("video.m4s");
-                plan.push((video.url.clone(), video_path.clone()));
+                plan.push((video.candidate_urls(), video_path.clone()));
                 let mut inputs = vec![video_path];
                 if let Some(audio) = &audio_stream {
                     let audio_path = temp_dir.join("audio.m4s");
-                    plan.push((audio.url.clone(), audio_path.clone()));
+                    plan.push((audio.candidate_urls(), audio_path.clone()));
                     inputs.push(audio_path);
                 }
                 inputs
@@ -459,20 +464,18 @@ impl BilibiliProvider {
     }
 
     /// 把这次任务要下的所有流当成一条进度上报（video + audio 字节数累加）。
+    /// 每个流带一组候选直链：主 CDN 连不上（常见于区域节点如 cn-gd）时换 backup。
     async fn fetch_streams(
         &self,
-        plan: &[(String, PathBuf)],
+        plan: &[(Vec<String>, PathBuf)],
         cookies: &str,
         cancel: &CancellationToken,
         progress: &ProgressSink,
     ) -> Result<()> {
-        for (url, _) in plan {
-            ensure_media_url(url).await?;
-        }
         let mut total = 0u64;
         let mut sizes = Vec::with_capacity(plan.len());
-        for (url, _) in plan {
-            let size = self.probe_size(url, cookies).await;
+        for (urls, _) in plan {
+            let size = self.probe_size(urls, cookies).await;
             sizes.push(size);
             total += size;
         }
@@ -483,15 +486,28 @@ impl BilibiliProvider {
         progress(0, total);
 
         let mut done = 0u64;
-        for (url, destination) in plan {
+        for (urls, destination) in plan {
             done = self
-                .download_stream(url, destination, cookies, cancel, progress, done, total)
+                .download_stream(urls, destination, cookies, cancel, progress, done, total)
                 .await?;
         }
         Ok(())
     }
 
-    async fn probe_size(&self, url: &str, cookies: &str) -> u64 {
+    async fn probe_size(&self, urls: &[String], cookies: &str) -> u64 {
+        for url in urls {
+            if ensure_media_url(url).await.is_err() {
+                continue;
+            }
+            let size = self.probe_one_size(url, cookies).await;
+            if size > 0 {
+                return size;
+            }
+        }
+        0
+    }
+
+    async fn probe_one_size(&self, url: &str, cookies: &str) -> u64 {
         let request = |method: reqwest::Method| {
             let mut builder = self
                 .client
@@ -542,6 +558,49 @@ impl BilibiliProvider {
 
     #[allow(clippy::too_many_arguments)]
     async fn download_stream(
+        &self,
+        urls: &[String],
+        destination: &PathBuf,
+        cookies: &str,
+        cancel: &CancellationToken,
+        progress: &ProgressSink,
+        offset: u64,
+        total: u64,
+    ) -> Result<u64> {
+        let mut last_err: Option<anyhow::Error> = None;
+        for (index, url) in urls.iter().enumerate() {
+            if cancel.is_cancelled() {
+                bail!("下载已取消");
+            }
+            if let Err(err) = ensure_media_url(url).await {
+                last_err = Some(err);
+                continue;
+            }
+            match self
+                .download_one_stream(url, destination, cookies, cancel, progress, offset, total)
+                .await
+            {
+                Ok(written) => return Ok(written),
+                Err(err) if err.to_string().contains("下载已取消") => return Err(err),
+                Err(err) => {
+                    // 主链常是区域 CDN（cn-gd 之类），建连失败就换 backup，别整任务直接挂
+                    if index + 1 < urls.len() {
+                        tracing::warn!(
+                            "哔哩哔哩媒体流候选 {}/{} 失败，改试备用：{err}",
+                            index + 1,
+                            urls.len()
+                        );
+                    }
+                    let _ = tokio::fs::remove_file(destination).await;
+                    last_err = Some(err);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("哔哩哔哩没有可用的媒体流地址")))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn download_one_stream(
         &self,
         url: &str,
         destination: &PathBuf,

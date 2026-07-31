@@ -7,7 +7,13 @@
  */
 
 import { useEffect, useRef } from "react";
-import { useLyricsPrefs } from "../../lib/lyricsPrefs";
+import {
+  accentPaint,
+  dimPaint,
+  resolvedSecondaryPaint,
+  strokePaint,
+  useLyricsPrefs,
+} from "../../lib/lyricsPrefs";
 import { buildOverlayTimeline } from "../../lib/lyricsOverlay";
 import { ensureLyrics, useLyricsStore } from "../../stores/lyricsStore";
 import { useAppStore } from "../../stores/appStore";
@@ -30,23 +36,19 @@ export function LyricsHost({
   const desktopFontScale = useLyricsPrefs((state) => state.desktopFontScale);
   const desktopPositionX = useLyricsPrefs((state) => state.desktopPositionX);
   const desktopPositionY = useLyricsPrefs((state) => state.desktopPositionY);
-  const desktopAccent = useLyricsPrefs((state) => state.desktopAccent);
-  const desktopAccentEnd = useLyricsPrefs((state) => state.desktopAccentEnd);
-  const desktopAccentMode = useLyricsPrefs((state) => state.desktopAccentMode);
-  const desktopSecondaryAccent = useLyricsPrefs((state) => state.desktopSecondaryAccent);
-  const desktopSecondaryAccentEnd = useLyricsPrefs((state) => state.desktopSecondaryAccentEnd);
-  const desktopSecondaryMode = useLyricsPrefs((state) => state.desktopSecondaryMode);
-  const desktopStroke = useLyricsPrefs((state) => state.desktopStroke);
-  const desktopStrokeEnd = useLyricsPrefs((state) => state.desktopStrokeEnd);
-  const desktopStrokeMode = useLyricsPrefs((state) => state.desktopStrokeMode);
-  const desktopOpacity = useLyricsPrefs((state) => state.desktopOpacity);
+  const prefs = useLyricsPrefs();
+  const desktopOpacity = prefs.desktopOpacity;
   const lyricExtra = useLyricsPrefs((state) => state.lyricExtra);
   const setDesktopVerticalOffset = useLyricsPrefs((state) => state.setDesktopVerticalOffset);
   const showLyrics = useAppStore((state) => state.showLyrics);
   const entry = useLyricsStore((state) => state.get(current?.id));
-  const prevDesktopWindow = useRef({ enabled: false, position: desktopPosition });
+  const prevDesktopWindow = useRef({ enabled: false });
 
   const overlayOn = desktopEnabled && allowDesktop;
+  const accent = accentPaint(prefs);
+  const secondary = resolvedSecondaryPaint(prefs);
+  const dim = dimPaint(prefs);
+  const stroke = strokePaint(prefs);
 
   // 右栏或独立悬浮歌词任一路径正在使用时搜词并预取。
   // prefsEpoch：引擎偏好变更后清缓存再重搜。
@@ -66,8 +68,9 @@ export function LyricsHost({
     if (!control) return;
     const visible = overlayOn && Boolean(current);
     const previous = prevDesktopWindow.current;
-    const reposition = visible && (!previous.enabled || previous.position !== desktopPosition);
-    prevDesktopWindow.current = { enabled: visible, position: desktopPosition };
+    // 顶/底开关已去掉；只在重新打开时带坐标吸附，平时改样式不挪位置。
+    const reposition = visible && !previous.enabled;
+    prevDesktopWindow.current = { enabled: visible };
     void control({
       visible,
       position: desktopPosition,
@@ -76,15 +79,26 @@ export function LyricsHost({
       reposition,
       x: desktopPositionX,
       y: desktopPositionY,
-      accent: desktopAccent,
-      accentEnd: desktopAccentEnd,
-      accentMode: desktopAccentMode,
-      secondaryAccent: desktopSecondaryAccent,
-      secondaryAccentEnd: desktopSecondaryAccentEnd,
-      secondaryMode: desktopSecondaryMode,
-      stroke: desktopStroke,
-      strokeEnd: desktopStrokeEnd,
-      strokeMode: desktopStrokeMode,
+      accent: accent.start,
+      accentEnd: accent.end,
+      accentMode: accent.mode === "none" || accent.mode === "follow" ? "solid" : accent.mode,
+      secondaryAccent: secondary.start,
+      secondaryAccentEnd: secondary.end,
+      secondaryMode:
+        secondary.mode === "none" || secondary.mode === "follow" ? "solid" : secondary.mode,
+      dim: dim.start,
+      dimEnd: dim.end,
+      dimMode:
+        dim.mode === "black" ||
+        dim.mode === "white" ||
+        dim.mode === "gray" ||
+        dim.mode === "solid" ||
+        dim.mode === "gradient"
+          ? dim.mode
+          : "gray",
+      stroke: stroke.start,
+      strokeEnd: stroke.end,
+      strokeMode: stroke.mode === "follow" ? "none" : stroke.mode,
       opacity: desktopOpacity,
     }).catch((error) => {
       console.error("悬浮歌词窗口更新失败", error);
@@ -98,15 +112,18 @@ export function LyricsHost({
     desktopFontScale,
     desktopPositionX,
     desktopPositionY,
-    desktopAccent,
-    desktopAccentEnd,
-    desktopAccentMode,
-    desktopSecondaryAccent,
-    desktopSecondaryAccentEnd,
-    desktopSecondaryMode,
-    desktopStroke,
-    desktopStrokeEnd,
-    desktopStrokeMode,
+    accent.start,
+    accent.end,
+    accent.mode,
+    secondary.start,
+    secondary.end,
+    secondary.mode,
+    dim.start,
+    dim.end,
+    dim.mode,
+    stroke.start,
+    stroke.end,
+    stroke.mode,
     desktopOpacity,
     current?.id,
   ]);

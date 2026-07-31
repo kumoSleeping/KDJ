@@ -26,6 +26,11 @@ export interface Health {
 /** 删除曲目时怎么处置文件：只删记录 / 移到系统回收站 / 直接删掉。 */
 export type FileDisposalMode = "keep" | "trash" | "remove";
 
+/** 粘贴快捷键：链接进文件夹，或真复制一份文件。移动不在此列。 */
+export type LibraryPasteMode = "link" | "copy";
+
+export type VideoFormat = "mp4" | "mkv" | "mov";
+
 export interface Settings {
   download_dir: string;
   library_dirs: string[];
@@ -47,10 +52,20 @@ export interface Settings {
   platform_priority: string[];
   /** 搜索时勾选的来源平台（点选结果；与排序独立）。 */
   search_platforms: string[];
+  /**
+   * 设置里开启的下载/搜索源。未开启的在搜索条灰掉。
+   * 全新安装默认只有网易云与 QQ；旧配置会按以前勾选情况迁移。
+   */
+  enabled_platforms: string[];
   /** 入队后是否立刻开始下载；关着就攒在队列里等这个开关拨开。 */
   auto_start_downloads: boolean;
   /** 播放条使用分析波形；关掉时显示常规进度条。 */
   player_waveform: boolean;
+  /**
+   * 曲库 Cmd/Ctrl+V（及不按 Option 的拖放）默认行为。
+   * 移动始终走 Option/Alt+V、剪切，或右键「粘贴」。
+   */
+  library_paste: LibraryPasteMode;
   /**
    * 只读派生字段（后端 GET/PUT /api/settings 附带）：全新安装的默认下载落点
    * ——系统「下载」目录 + KDJ。「保存到」菜单里的「系统下载」项用它。
@@ -58,8 +73,6 @@ export interface Settings {
    */
   default_download_dir?: string;
 }
-
-export type VideoFormat = "mp4" | "mkv" | "mov";
 
 export interface Account {
   platform: Platform;
@@ -350,7 +363,7 @@ export interface FolderForgetResult {
   tree: FolderTree;
 }
 
-export type FileOp = "move" | "link";
+export type FileOp = "move" | "link" | "copy";
 
 export interface FolderOpResult {
   /** move：被改了路径的曲目；link：新建出来的曲目。 */
@@ -552,16 +565,20 @@ export interface KdjBridge {
     reposition: boolean;
     x?: number | null;
     y?: number | null;
-    /** 主行颜色 `#RRGGBB`；Android 上同时是逐字填充的高亮色。 */
+    /** 主行已唱部分颜色 `#RRGGBB`；桌面 / Android 悬浮歌词逐字高亮共用。 */
     accent?: string;
     accentEnd?: string;
-    accentMode?: "black" | "white" | "solid" | "gradient";
+    accentMode?: "black" | "white" | "gray" | "solid" | "gradient";
     secondaryAccent?: string;
     secondaryAccentEnd?: string;
-    secondaryMode?: "black" | "white" | "solid" | "gradient";
+    secondaryMode?: "black" | "white" | "gray" | "solid" | "gradient" | "follow";
+    /** 未唱部分；前端在 follow 时会先把副行解析成具体色再下发。 */
+    dim?: string;
+    dimEnd?: string;
+    dimMode?: "black" | "white" | "gray" | "solid" | "gradient";
     stroke?: string;
     strokeEnd?: string;
-    strokeMode?: "black" | "white" | "solid" | "gradient" | "none";
+    strokeMode?: "black" | "white" | "gray" | "solid" | "gradient" | "none";
     opacity?: number;
   }) => Promise<void>);
   /**

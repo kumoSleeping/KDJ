@@ -1,13 +1,27 @@
 import { useEffect, useRef } from "react";
 
-export type SearchBurstTone = "rainbow" | "pink";
+export type SearchBurstTone = "rainbow" | "pink" | "orange";
 
 /**
- * 搜索提交瞬间的炫彩竖向波形柱 + 少量横向细波线。
- * 左→右推进；不要前缘那条竖向电弧线。
+ * 搜索提交的炫彩竖向波形柱 + 横向细波线。
+ * 左→右扫满一次后停在全宽继续波动，等结果出来再淡出；不反复重扫。
+ * pink = B 站代搜；orange = SoundCloud 代搜；rainbow = 手动提交。
  */
-export function SearchBurstFX({ tone }: { tone: SearchBurstTone }) {
+export function SearchBurstFX({
+  tone,
+  active,
+  onFinished,
+}: {
+  tone: SearchBurstTone;
+  /** true = 还在等结果，扫光继续；false = 开始淡出关闭。 */
+  active: boolean;
+  onFinished?: () => void;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const activeRef = useRef(active);
+  const onFinishedRef = useRef(onFinished);
+  activeRef.current = active;
+  onFinishedRef.current = onFinished;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -16,9 +30,13 @@ export function SearchBurstFX({ tone }: { tone: SearchBurstTone }) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const duration = tone === "pink" ? 980 : 860;
-    const start = performance.now();
+    const sweepMs = tone === "pink" || tone === "orange" ? 980 : 860;
+    const fadeMs = 380;
+    let cycleStart = performance.now();
+    let fading = false;
+    let fadeStart = 0;
     let raf = 0;
+    let finished = false;
 
     type Particle = {
       x: number;
@@ -38,12 +56,21 @@ export function SearchBurstFX({ tone }: { tone: SearchBurstTone }) {
         const h = hues[Math.floor(u * (hues.length - 1))];
         return `hsla(${h}, 95%, ${58 + u * 18}%, ${alpha})`;
       }
+      if (tone === "orange") {
+        // SoundCloud 经典橙 #ff5500 附近色簇
+        const hues = [12, 18, 24, 28, 8];
+        const h = hues[Math.floor(u * (hues.length - 1))];
+        return `hsla(${h}, 100%, ${52 + u * 16}%, ${alpha})`;
+      }
       const h = 350 + u * 280;
       return `hsla(${h % 360}, 92%, ${52 + Math.sin(u * Math.PI) * 12}%, ${alpha})`;
     };
 
-    const hueAt = (u: number): number =>
-      tone === "pink" ? 320 + u * 40 : (350 + u * 280) % 360;
+    const hueAt = (u: number): number => {
+      if (tone === "pink") return 320 + u * 40;
+      if (tone === "orange") return 8 + u * 28;
+      return (350 + u * 280) % 360;
+    };
 
     const spawn = (x: number, y: number, w: number, u: number) => {
       if (particles.length > 90) return;
@@ -66,10 +93,29 @@ export function SearchBurstFX({ tone }: { tone: SearchBurstTone }) {
         (0.7 * Math.sin(x * 0.014 + time * 1.15 + phase) +
           0.3 * Math.sin(x * 0.033 - time * 2.1 + phase * 1.6));
 
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      onFinishedRef.current?.();
+    };
+
     const frame = (now: number) => {
-      const t = Math.min(1, (now - start) / duration);
+      if (!activeRef.current && !fading) {
+        fading = true;
+        fadeStart = now;
+      }
+
+      const closeFade = fading ? 1 - Math.min(1, (now - fadeStart) / fadeMs) : 1;
+      if (fading && closeFade <= 0) {
+        finish();
+        return;
+      }
+
+      // 只扫一次左→右；扫满后 front 钉在全宽，波形/粒子继续动。
+      const t = Math.min(1, (now - cycleStart) / sweepMs);
       const ease = 1 - (1 - t) ** 2.4;
-      const fade = t < 0.55 ? 1 : 1 - (t - 0.55) / 0.45;
+      const fade = closeFade;
 
       const rect = parent.getBoundingClientRect();
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -212,11 +258,14 @@ export function SearchBurstFX({ tone }: { tone: SearchBurstTone }) {
       ctx.fillRect(0, 0, w, h);
       ctx.restore();
 
-      if (t < 1) raf = requestAnimationFrame(frame);
+      raf = requestAnimationFrame(frame);
     };
 
     raf = requestAnimationFrame(frame);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      finished = true;
+    };
   }, [tone]);
 
   return <canvas ref={canvasRef} className="kd-search-burst-fx" aria-hidden="true" />;

@@ -148,49 +148,58 @@ export function LibraryWorkRail({
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
       };
+      const afterPaint = () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        });
+      /** 在当前列表视图里翻页找正在播；找到就选中并滚过去。 */
+      const locateInCurrentView = async () => {
+        const store = useLibraryStore.getState();
+        store.selectTrack(playingTrack);
+        await store.ensureTrackLoaded(playingTrack.id);
+        if (!useLibraryStore.getState().tracks.some((track) => track.id === playingTrack.id)) {
+          return false;
+        }
+        // 等虚拟列表吃进新页再滚，否则 rAF 时行还没挂上会看起来像「点了没反应」。
+        await afterPaint();
+        window.dispatchEvent(
+          new CustomEvent(DETAIL_EVENT, {
+            detail: { source: "locate-playing", trackId: playingTrack.id } satisfies DetailEventDetail,
+          }),
+        );
+        return true;
+      };
 
-      let store = useLibraryStore.getState();
-      const inPage = store.tracks.some((track) => track.id === playingTrack.id);
-      if (!inPage) {
+      // 1) 优先就在当前文件夹 / 搜索 / 临时列表里定位，别一上来跳走。
+      //    只有路径明显不在当前夹时才跳过翻页（避免错夹里把整库页翻完再退）。
+      {
+        const store = useLibraryStore.getState();
         const folder = store.filter.folder.trim().replaceAll("\\", "/").replace(/\/+$/, "");
         const q = store.filter.q.trim();
         const path = (playingTrack.path || "").replaceAll("\\", "/");
-        const onAllTracks = !folder && !q && !store.queueView;
-        // 仍在「这首歌所属的文件夹」里：继续往下翻页找。
-        const staysInFolder =
+        const clearlyElsewhere =
           Boolean(folder) &&
           !isOutsideFolder(folder) &&
           !q &&
           !store.queueView &&
-          path.startsWith(`${folder}/`);
-        // 临时列表 / 搜索 / 其它文件夹盖不住正在播的歌：退回全部曲目再定位。
-        if (!onAllTracks && !staysInFolder) {
-          if (store.queueView) store.setQueueView(false);
-          useLibraryStore.getState().setFilter({
-            folder: "",
-            q: "",
-            sort: "added_at",
-            order: "desc",
-          });
-          await waitLoading();
-        }
+          !path.startsWith(`${folder}/`);
+        if (!clearlyElsewhere && (await locateInCurrentView())) return;
       }
 
-      store = useLibraryStore.getState();
-      store.selectTrack(playingTrack);
-      await store.ensureTrackLoaded(playingTrack.id);
-      if (!useLibraryStore.getState().tracks.some((track) => track.id === playingTrack.id)) {
-        return;
-      }
-      // 等虚拟列表吃进新页再滚，否则 rAF 时行还没挂上会看起来像「点了没反应」。
-      await new Promise<void>((resolve) => {
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      // 2) 当前视图盖不住：退回全部曲目再定位。
+      const store = useLibraryStore.getState();
+      const onAllTracks =
+        !store.filter.folder.trim() && !store.filter.q.trim() && !store.queueView;
+      if (onAllTracks) return;
+      if (store.queueView) store.setQueueView(false);
+      useLibraryStore.getState().setFilter({
+        folder: "",
+        q: "",
+        sort: "added_at",
+        order: "desc",
       });
-      window.dispatchEvent(
-        new CustomEvent(DETAIL_EVENT, {
-          detail: { source: "locate-playing", trackId: playingTrack.id } satisfies DetailEventDetail,
-        }),
-      );
+      await waitLoading();
+      await locateInCurrentView();
     } finally {
       setLocating(false);
     }

@@ -53,7 +53,7 @@ KDJ packs cross-platform search, download, local library management, and music a
   - Deduplicated merged results; track / playlist links and batch intake
   - In-app preview with quality fallback (FLAC / 320 / 128)
   - One-click playlist download and a configurable download queue
-  - Automatic VJ matching search
+  - Explore: search Remix and VJ
 - Library
   - Drag-first organization
   - Local library / folder scanning and tag editing

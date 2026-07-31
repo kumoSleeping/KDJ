@@ -804,6 +804,19 @@ pub struct FolderTree {
 pub enum FileOp {
     Move,
     Link,
+    /// 真复制一份文件（不共享 inode）。
+    Copy,
+}
+
+/// Cmd/Ctrl+V 默认怎么进目标文件夹（Option/Alt+V 始终移动）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LibraryPasteMode {
+    /// 优先硬链接，退符号链接 / 复制（见 `link_file`）。
+    #[default]
+    Link,
+    /// 始终真复制一份。
+    Copy,
 }
 
 #[derive(Debug, Clone, Deserialize)]

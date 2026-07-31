@@ -614,10 +614,19 @@ impl AudioRenderer {
             };
         };
         let progress = (transition.elapsed_frames + 1) as f32 / transition.total_frames as f32;
-        // Equal-power crossfade keeps perceived loudness stable around the midpoint; a linear
-        // 0.5 + 0.5 handoff audibly dips when the decks are not phase-correlated.
-        let outgoing = (progress * std::f32::consts::FRAC_PI_2).cos();
-        let incoming = (progress * std::f32::consts::FRAC_PI_2).sin();
+        let (outgoing, incoming) = if transition.plan.contains(TransitionPlan::SEEK_DUCK) {
+            // 新位置立刻满幅；旧位置按平方曲线快速让路。等功率交叉会在中点把
+            // 同一首歌的两个时间线都放到 ~0.7，听成同一个音响两下。
+            let rest = 1.0 - progress;
+            (rest * rest, 1.0)
+        } else {
+            // Equal-power crossfade keeps perceived loudness stable around the midpoint; a linear
+            // 0.5 + 0.5 handoff audibly dips when the decks are not phase-correlated.
+            (
+                (progress * std::f32::consts::FRAC_PI_2).cos(),
+                (progress * std::f32::consts::FRAC_PI_2).sin(),
+            )
+        };
         match (transition.from, transition.to) {
             (DeckId::A, DeckId::B) => (outgoing, incoming),
             (DeckId::B, DeckId::A) => (incoming, outgoing),
@@ -821,6 +830,44 @@ mod tests {
         let snapshot = controller.snapshot();
         assert_eq!(snapshot.active_deck, DeckId::B);
         assert_eq!(snapshot.deck_frames, [4, 8_004]);
+    }
+
+    #[test]
+    fn seek_duck_keeps_incoming_full_while_outgoing_decays() {
+        let (mut controller, mut renderer) = command_channel(4);
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::HandoffPrepared {
+                to: DeckId::B,
+                target_frame: 0,
+                transition_frames: 4,
+                plan: TransitionPlan {
+                    flags: TransitionPlan::SEEK_DUCK,
+                    beat_frames: 0,
+                },
+            })
+            .unwrap();
+
+        // A=+1, B=-1；SEEK_DUCK 下 B 始终满幅，A 按 (1-p)^2 衰减。
+        let mut output = [0.0; 4];
+        renderer.render(&[1.0; 4], &[-1.0; 4], &mut output, 1);
+        let expected = [
+            (0.75f32).powi(2) * 1.0 + (-1.0),
+            (0.5f32).powi(2) * 1.0 + (-1.0),
+            (0.25f32).powi(2) * 1.0 + (-1.0),
+            -1.0,
+        ];
+        for (actual, expected) in output.into_iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 0.000_01,
+                "actual={actual} expected={expected}"
+            );
+        }
     }
 
     #[test]

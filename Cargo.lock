@@ -2647,6 +2647,7 @@ version = "0.2.20"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "jni 0.21.1",
  "kdj-core",
  "kdj-library",
  "kdj-playback",
@@ -5549,6 +5550,7 @@ dependencies = [
 name = "tauri-plugin-native-audio"
 version = "1.0.5"
 dependencies = [
+ "serde",
  "tauri",
  "tauri-plugin",
 ]

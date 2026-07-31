@@ -1392,6 +1392,8 @@ async fn folder_apply(
     let mut track_ids = Vec::new();
     let mut methods: BTreeMap<String, i64> = BTreeMap::new();
     let mut errors: BTreeMap<String, String> = BTreeMap::new();
+    // 移动时删掉的目标夹内冗余链接、以及改址的符号链接，也要广播刷新。
+    let mut side_ids = Vec::new();
 
     for id in &payload.track_ids {
         let Some(track) = state.library.get(*id)? else {
@@ -1408,10 +1410,11 @@ async fn folder_apply(
             continue;
         }
         match payload.op {
-            FileOp::Move => match kdj_library::folders::move_file(&source, &dest) {
-                Ok(target) => {
+            FileOp::Move => match move_track_resolving_links(&state, *id, &source, &dest) {
+                Ok((target, touched)) => {
                     state.library.relocate(*id, &target)?;
                     track_ids.push(*id);
+                    side_ids.extend(touched);
                     *methods.entry("move".into()).or_insert(0) += 1;
                 }
                 Err(err) => {
@@ -1436,12 +1439,33 @@ async fn folder_apply(
                     errors.insert(id.to_string(), format!("{err:#}"));
                 }
             },
+            FileOp::Copy => match kdj_library::folders::copy_file(&source, &dest) {
+                Ok(target) => {
+                    match state.library.upsert_file(&target, &track.source_platform, &track.source_key) {
+                        Ok(new_id) => {
+                            state.library.clone_metadata(*id, new_id)?;
+                            track_ids.push(new_id);
+                            *methods.entry("copy".into()).or_insert(0) += 1;
+                        }
+                        Err(err) => {
+                            errors.insert(id.to_string(), format!("{err:#}"));
+                        }
+                    }
+                }
+                Err(err) => {
+                    errors.insert(id.to_string(), format!("{err:#}"));
+                }
+            },
         }
     }
 
     // 一条都没动时不发事件：白发一条 library.updated 会让前端整表刷一次
-    if !track_ids.is_empty() {
-        state.hub.publish_library_updated(&track_ids);
+    if !track_ids.is_empty() || !side_ids.is_empty() {
+        let mut all = track_ids.clone();
+        all.extend(side_ids);
+        all.sort_unstable();
+        all.dedup();
+        state.hub.publish_library_updated(&all);
     }
     Ok(Json(FolderOpResult {
         track_ids,
@@ -1449,6 +1473,80 @@ async fn folder_apply(
         methods,
         errors,
     }))
+}
+
+/// 移动曲目，并按「链接」语义收拾周边：
+///
+/// 1. 目标夹里已有这份歌的硬链接 / 指向源路径的符号链接 → 删掉那条（腾出名额给真身）
+/// 2. 别处的硬链接 → 不管（rename 后仍指向同一 inode）
+/// 3. 别处指向源路径的符号链接 → 改写到新路径
+///
+/// 返回 `(新路径, 被删/被改址而需要前端刷新的曲目 id)`。
+fn move_track_resolving_links(
+    state: &AppState,
+    moving_id: i64,
+    source: &Path,
+    dest: &Path,
+) -> anyhow::Result<(PathBuf, Vec<i64>)> {
+    use kdj_library::folders::{
+        move_file, retarget_symlink, same_hardlink, symlink_points_to,
+    };
+
+    let mut touched = Vec::new();
+    // dest 可能是 canonicalize 过的；库里的 path 是 normalize 过的——用同一套 normalize 比父目录。
+    let dest_key = kdj_library::service::normalize_path(dest);
+
+    // 先扫库里所有路径，分类：目标夹内冗余链接 vs 别处需改址的符号链接。
+    let paths = state.library.all_paths()?;
+    let mut remove_in_dest: Vec<(i64, PathBuf)> = Vec::new();
+    let mut retarget_elsewhere: Vec<(i64, PathBuf)> = Vec::new();
+
+    for path_str in paths {
+        let path = PathBuf::from(&path_str);
+        if path == source {
+            continue;
+        }
+        let Some(other) = state.library.get_by_path(&path)? else {
+            continue;
+        };
+        if other.id == moving_id {
+            continue;
+        }
+
+        let in_dest = path
+            .parent()
+            .map(|parent| kdj_library::service::normalize_path(parent) == dest_key)
+            .unwrap_or(false);
+        let hard = same_hardlink(source, &path);
+        let soft = symlink_points_to(&path, source);
+
+        if in_dest && (hard || soft) {
+            remove_in_dest.push((other.id, path));
+        } else if !in_dest && soft {
+            // 别处硬链接故意不管；只改符号链接地址。
+            retarget_elsewhere.push((other.id, path));
+        }
+    }
+
+    for (id, path) in remove_in_dest {
+        // Remove：去掉这个目录项（硬链接只减 nlink；符号链接整条删掉），并摘库。
+        state.library.delete(id, FileDisposal::Remove)?;
+        touched.push(id);
+        let _ = path; // 文件已由 delete(Remove) 处理
+    }
+
+    let target = move_file(source, dest)?;
+
+    for (id, path) in retarget_elsewhere {
+        if let Err(err) = retarget_symlink(&path, &target) {
+            // 改址失败不回滚移动：真身已经到位；记下来让前端刷新后用户能看见坏链。
+            tracing::warn!("改写符号链接失败 {}: {err:#}", path.display());
+            continue;
+        }
+        touched.push(id);
+    }
+
+    Ok((target, touched))
 }
 
 // ---------------------------------------------------------------- 扫描 / 分析

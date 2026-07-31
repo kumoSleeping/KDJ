@@ -1,50 +1,98 @@
-//! Desktop platform adapter for the shared Rust playback coordinator.
+//! Platform adapter for the shared Rust playback coordinator.
 //!
-//! Tauri owns serialization and event delivery only. Command ordering, decode workers, Deck
-//! lifecycle and authoritative state live in `kdj-playback`; CPAL selection lives in `kdj-player`.
+//! Desktop and Android both submit through this thin Tauri surface. Command ordering, decode
+//! workers, Deck lifecycle and authoritative state live in `kdj-playback`; CPAL (CoreAudio /
+//! WASAPI / AAudio) selection lives in `kdj-player`. System media-session policy stays outside:
+//! souvlaki on desktop, Kotlin MediaSession on Android.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use kdj_playback::{CommandAck, PlaybackCommand, PlaybackCoordinator, PlaybackSnapshot};
 use tauri::{AppHandle, Emitter};
 
+#[cfg(desktop)]
 use crate::desktop_media::DesktopMediaSession;
+#[cfg(target_os = "android")]
+use crate::android_media::AndroidMediaSession;
 
 pub const STATE_EVENT: &str = "playback-state";
 
 pub struct DesktopPlayerHandle {
     coordinator: Arc<PlaybackCoordinator>,
+    #[cfg(desktop)]
     _media_session: Option<DesktopMediaSession>,
+    #[cfg(target_os = "android")]
+    _media_session: Option<AndroidMediaSession>,
 }
 
 impl DesktopPlayerHandle {
     pub fn spawn(app: AppHandle) -> Result<Self, String> {
-        let coordinator_slot = Arc::new(OnceLock::new());
-        let media_session =
-            match DesktopMediaSession::spawn(app.clone(), Arc::clone(&coordinator_slot)) {
-                Ok(session) => Some(session),
-                Err(error) => {
-                    tracing::warn!("{error}；播放器仍可使用，但系统媒体键不可用");
-                    None
+        #[cfg(desktop)]
+        {
+            let coordinator_slot = Arc::new(OnceLock::new());
+            let media_session =
+                match DesktopMediaSession::spawn(app.clone(), Arc::clone(&coordinator_slot)) {
+                    Ok(session) => Some(session),
+                    Err(error) => {
+                        tracing::warn!("{error}；播放器仍可使用，但系统媒体键不可用");
+                        None
+                    }
+                };
+            let event_app = app.clone();
+            let event_media = media_session.clone();
+            let coordinator = Arc::new(PlaybackCoordinator::spawn(move |snapshot| {
+                if let Some(media) = &event_media {
+                    media.update(&snapshot);
                 }
-            };
-        let event_app = app.clone();
-        let event_media = media_session.clone();
-        let coordinator = Arc::new(PlaybackCoordinator::spawn(move |snapshot| {
-            if let Some(media) = &event_media {
-                media.update(&snapshot);
-            }
-            if let Err(error) = event_app.emit(STATE_EVENT, snapshot) {
-                tracing::warn!("发送播放器状态失败：{error}");
-            }
-        })?);
-        coordinator_slot
-            .set(Arc::clone(&coordinator))
-            .map_err(|_| "系统媒体控制重复绑定播放器".to_string())?;
-        Ok(Self {
-            coordinator,
-            _media_session: media_session,
-        })
+                if let Err(error) = event_app.emit(STATE_EVENT, snapshot) {
+                    tracing::warn!("发送播放器状态失败：{error}");
+                }
+            })?);
+            coordinator_slot
+                .set(Arc::clone(&coordinator))
+                .map_err(|_| "系统媒体控制重复绑定播放器".to_string())?;
+            return Ok(Self {
+                coordinator,
+                _media_session: media_session,
+            });
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            let coordinator_slot = Arc::new(OnceLock::new());
+            let media_session =
+                match AndroidMediaSession::spawn(app.clone(), Arc::clone(&coordinator_slot)) {
+                    Ok(session) => Some(session),
+                    Err(error) => {
+                        tracing::warn!("{error}；播放器仍可使用，但通知栏/线控不可用");
+                        None
+                    }
+                };
+            let event_app = app;
+            let event_media = media_session.clone();
+            let coordinator = Arc::new(PlaybackCoordinator::spawn(move |snapshot| {
+                if let Some(media) = &event_media {
+                    media.update(&snapshot);
+                }
+                if let Err(error) = event_app.emit(STATE_EVENT, snapshot) {
+                    tracing::warn!("发送播放器状态失败：{error}");
+                }
+            })?);
+            coordinator_slot
+                .set(Arc::clone(&coordinator))
+                .map_err(|_| "Android 媒体控制重复绑定播放器".to_string())?;
+            return Ok(Self {
+                coordinator,
+                _media_session: media_session,
+            });
+        }
+
+        #[cfg(not(any(desktop, target_os = "android")))]
+        {
+            let _ = app;
+            Err("当前平台未启用共享播放器".to_string())
+        }
     }
 
     fn submit(&self, command_id: u64, command: PlaybackCommand) -> Result<CommandAck, String> {

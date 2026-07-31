@@ -10,7 +10,7 @@ use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::models::{Quality, Theme, VideoFormat};
+use crate::models::{LibraryPasteMode, Quality, Theme, VideoFormat};
 
 pub const SETTINGS_FILENAME: &str = "settings.json";
 // 桌面版历史主库一直叫 kumodeck.db。改名会在同一 data_dir 静默创建一份空库，
@@ -37,8 +37,10 @@ const SETTINGS_FIELDS: &[&str] = &[
     "video_format",
     "platform_priority",
     "search_platforms",
+    "enabled_platforms",
     "auto_start_downloads",
     "player_waveform",
+    "library_paste",
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,12 +81,20 @@ pub struct Settings {
     /// 搜索时勾选的来源平台（前端点选后存这里；与排序独立）
     #[serde(default = "default_search_platforms")]
     pub search_platforms: Vec<String>,
+    /// 设置里开启的下载/搜索源。未开启的在搜索条里灰掉，搜不到也下不了。
+    /// 缺省字段见 `load()` 里的旧配置迁移；全新安装默认只有网易云 + QQ。
+    #[serde(default = "default_enabled_platforms")]
+    pub enabled_platforms: Vec<String>,
     /// 入队后是否立刻开始下载。DJ 常常先攒一批再统一下，默认攒着。
     #[serde(default)]
     pub auto_start_downloads: bool,
     /// 播放条默认展示分析波形；可切回传统进度条，给偏好简洁界面的用户。
     #[serde(default = "yes")]
     pub player_waveform: bool,
+    /// 曲库 Cmd/Ctrl+V（及不按 Option 的拖放）默认：链接，或真复制一份。
+    /// 移动始终走 Cmd/Ctrl+Option/Alt+V、剪切，或右键「粘贴」。
+    #[serde(default)]
+    pub library_paste: LibraryPasteMode,
 }
 
 impl Settings {
@@ -107,8 +117,10 @@ impl Settings {
             video_format: default_video_format(),
             platform_priority: default_platform_priority(),
             search_platforms: default_search_platforms(),
+            enabled_platforms: default_enabled_platforms(),
             auto_start_downloads: false,
             player_waveform: true,
+            library_paste: LibraryPasteMode::Link,
         }
     }
 }
@@ -144,11 +156,42 @@ fn default_platform_priority() -> Vec<String> {
     ]
 }
 fn default_search_platforms() -> Vec<String> {
-    vec![
-        "wyy".to_string(),
-        "qqm".to_string(),
-        "bilibili".to_string(),
-    ]
+    vec!["wyy".to_string(), "qqm".to_string()]
+}
+
+fn default_enabled_platforms() -> Vec<String> {
+    vec!["wyy".to_string(), "qqm".to_string()]
+}
+
+/// 旧 settings.json 没有 `enabled_platforms` 时：按以前「能用的源」推断，避免升级后突然关掉 B 站。
+fn migrate_enabled_platforms(settings: &mut Settings, raw: &Value) {
+    if raw
+        .as_object()
+        .and_then(|map| map.get("enabled_platforms"))
+        .is_some()
+    {
+        return;
+    }
+    let mut enabled = settings.search_platforms.clone();
+    if enabled.is_empty() {
+        enabled = vec![
+            "wyy".to_string(),
+            "qqm".to_string(),
+            "bilibili".to_string(),
+        ];
+    }
+    if settings.soundcloud_enabled && !enabled.iter().any(|id| id == "soundcloud") {
+        enabled.push("soundcloud".to_string());
+    }
+    settings.enabled_platforms = enabled;
+}
+
+/// 与 SoundCloud 旧开关双向对齐：列表里有 soundcloud ↔ soundcloud_enabled。
+fn sync_soundcloud_flag(settings: &mut Settings) {
+    settings.soundcloud_enabled = settings
+        .enabled_platforms
+        .iter()
+        .any(|id| id == "soundcloud");
 }
 fn default_video_dir() -> String {
     default_download_root().to_string_lossy().into_owned()
@@ -277,9 +320,11 @@ impl AppConfig {
     /// 用一份完整 Settings 覆盖当前配置并落盘。
     pub fn apply_settings(&self, settings: Settings) -> Settings {
         {
+            let mut next = settings;
+            sync_soundcloud_flag(&mut next);
             let mut guard = self.inner.write().unwrap();
-            guard.download_dir = expand_user(&settings.download_dir);
-            guard.settings = settings;
+            guard.download_dir = expand_user(&next.download_dir);
+            guard.settings = next;
         }
         self.ensure_dirs();
         self.save();
@@ -311,10 +356,12 @@ impl AppConfig {
 
         let base = serde_json::to_value(self.to_settings()).expect("Settings 一定可序列化");
         let merged = merge_settings(&base, &raw);
-        let settings: Settings = match serde_json::from_value(merged) {
+        let mut settings: Settings = match serde_json::from_value(merged) {
             Ok(settings) => settings,
             Err(_) => merge_field_by_field(&base, &raw),
         };
+        migrate_enabled_platforms(&mut settings, &raw);
+        sync_soundcloud_flag(&mut settings);
 
         let mut guard = self.inner.write().unwrap();
         guard.download_dir = expand_user(&settings.download_dir);

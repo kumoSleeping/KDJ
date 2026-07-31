@@ -6,6 +6,7 @@ import {
   Disc3,
   FolderOpen,
   Library,
+  ListPlus,
   ListMusic,
   Music2,
   Pause,
@@ -63,8 +64,10 @@ import {
   mediaUrlForTrack,
   resolvePendingStreamTrack,
   streamCoverUrl,
+  streamMeta,
   streamNextTrack,
 } from "../../lib/streamTrack";
+import { useDownloadStore } from "../../stores/downloadStore";
 import { seekVideoPip, toggleVideoPip, useVideoPip } from "../../lib/videoPip";
 import type { Track } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
@@ -231,6 +234,8 @@ function PlayerDeck({
   onDragOver,
   onDragLeave,
   onDrop,
+  onEnqueue,
+  enqueueBusy = false,
 }: {
   side: "left" | "right";
   view: PlayerDeckView | null;
@@ -239,60 +244,84 @@ function PlayerDeck({
   transitioning: boolean;
   dropActive: boolean;
   onOpen(): void;
-  onDragOver(event: React.DragEvent<HTMLButtonElement>): void;
-  onDragLeave(event: React.DragEvent<HTMLButtonElement>): void;
-  onDrop(event: React.DragEvent<HTMLButtonElement>): void;
+  onDragOver(event: React.DragEvent<HTMLElement>): void;
+  onDragLeave(event: React.DragEvent<HTMLElement>): void;
+  onDrop(event: React.DragEvent<HTMLElement>): void;
+  /** 在线试听：曲名右侧的下载入口。 */
+  onEnqueue?: () => void;
+  enqueueBusy?: boolean;
 }) {
   const [coverFailed, setCoverFailed] = useState(false);
   useEffect(() => setCoverFailed(false), [view?.key]);
   // 接歌途中也只保留这两个身份；真正交接完成后，父组件才交换 active。
   const stateLabel = active ? "正在播放" : "下一首";
   return (
-    <button
-      type="button"
+    <div
       className="kd-player-deck"
       data-side={side}
       data-active={active ? "true" : undefined}
       data-transitioning={transitioning ? "true" : undefined}
       data-empty={!view ? "true" : undefined}
       data-drop-active={dropActive ? "true" : undefined}
-      aria-label={view ? `${stateLabel}：${view.title}` : side === "left" ? "左唱盘空闲" : "右唱盘空闲"}
-      title={view ? `${stateLabel}：${view.title}` : "等待曲目"}
-      onClick={onOpen}
+      data-enqueue={onEnqueue ? "true" : undefined}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
-      <span className="kd-player-disc" aria-hidden="true">
-        <span className="kd-player-disc-record" data-spinning={spinning ? "true" : undefined}>
-          {view?.cover && !coverFailed ? (
-            <img
-              src={view.cover}
-              alt=""
-              referrerPolicy="no-referrer"
-              onError={(event) => {
-                event.currentTarget.style.opacity = "0";
-                setCoverFailed(true);
-              }}
-              onLoad={(event) => {
-                event.currentTarget.style.opacity = "1";
-              }}
-            />
-          ) : view?.video ? (
-            <Clapperboard size={15} />
-          ) : view ? (
-            <Disc3 size={17} />
-          ) : (
-            <Music2 size={15} />
-          )}
+      {/* display:contents：碟片/文案仍参与外层 grid；下载键可单独挂在曲名旁。 */}
+      <button
+        type="button"
+        className="kd-player-deck-main"
+        aria-label={view ? `${stateLabel}：${view.title}` : side === "left" ? "左唱盘空闲" : "右唱盘空闲"}
+        title={view ? `${stateLabel}：${view.title}` : "等待曲目"}
+        onClick={onOpen}
+      >
+        <span className="kd-player-disc" aria-hidden="true">
+          <span className="kd-player-disc-record" data-spinning={spinning ? "true" : undefined}>
+            {view?.cover && !coverFailed ? (
+              <img
+                src={view.cover}
+                alt=""
+                referrerPolicy="no-referrer"
+                onError={(event) => {
+                  event.currentTarget.style.opacity = "0";
+                  setCoverFailed(true);
+                }}
+                onLoad={(event) => {
+                  event.currentTarget.style.opacity = "1";
+                }}
+              />
+            ) : view?.video ? (
+              <Clapperboard size={15} />
+            ) : view ? (
+              <Disc3 size={17} />
+            ) : (
+              <Music2 size={15} />
+            )}
+          </span>
         </span>
-      </span>
-      <span className="kd-player-deck-copy">
-        <span className="kd-player-deck-state">{stateLabel}</span>
-        <MarqueeText className="kd-player-title" text={view?.title ?? "等待下一首"} />
-        <MarqueeText className="kd-player-artist" text={view?.subtitle ?? "\u00a0"} />
-      </span>
-    </button>
+        <span className="kd-player-deck-copy">
+          <span className="kd-player-deck-state">{stateLabel}</span>
+          <MarqueeText className="kd-player-title" text={view?.title ?? "等待下一首"} />
+          <MarqueeText className="kd-player-artist" text={view?.subtitle ?? "\u00a0"} />
+        </span>
+      </button>
+      {onEnqueue && (
+        <button
+          type="button"
+          className="kd-player-enqueue"
+          disabled={enqueueBusy}
+          aria-label="添加到下载列表"
+          title="添加到下载列表，不会立刻下载"
+          onClick={(event) => {
+            event.stopPropagation();
+            onEnqueue();
+          }}
+        >
+          <ListPlus size={14} aria-hidden="true" />
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -324,6 +353,10 @@ export function PlayerBar() {
   const toggleDjEnabled = useDjConfig((state) => state.toggleEnabled);
   const transportFade = usePlaybackPrefs((state) => state.transportFade);
   const focusLibrary = useAppStore((state) => state.focusLibrary);
+  const openQueuePanel = useAppStore((state) => state.openQueuePanel);
+  const defaultQuality = useAppStore((state) => state.settings?.default_quality ?? null);
+  const enqueueDownload = useDownloadStore((state) => state.enqueue);
+  const [enqueueBusy, setEnqueueBusy] = useState(false);
   const desktopLyricsOn = useLyricsPrefs((state) => state.desktopEnabled);
   const setDesktopLyricsOn = useLyricsPrefs((state) => state.setDesktopEnabled);
   const canDesktopLyrics = Boolean(window.kdj?.desktopLyrics);
@@ -2014,7 +2047,7 @@ export function PlayerBar() {
   };
 
   const dropOnDeck = async (
-    event: React.DragEvent<HTMLButtonElement>,
+    event: React.DragEvent<HTMLElement>,
     side: "left" | "right",
   ) => {
     event.preventDefault();
@@ -2042,7 +2075,7 @@ export function PlayerBar() {
   };
 
   const deckDragOver = (
-    event: React.DragEvent<HTMLButtonElement>,
+    event: React.DragEvent<HTMLElement>,
     side: "left" | "right",
   ) => {
     if (!isTrackDrag(event)) return;
@@ -2073,6 +2106,28 @@ export function PlayerBar() {
             if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDeckDropSide(null);
           }}
           onDrop={(event) => void dropOnDeck(event, "left")}
+          onEnqueue={
+            leftDeckView?.track &&
+            isStreamTrack(leftDeckView.track) &&
+            streamMeta(leftDeckView.track)?.source
+              ? () => {
+                  const source = streamMeta(leftDeckView.track)?.source;
+                  if (!source || enqueueBusy) return;
+                  setEnqueueBusy(true);
+                  void enqueueDownload([source], { quality: defaultQuality })
+                    .then(() => {
+                      openQueuePanel();
+                    })
+                    .catch((error: unknown) => {
+                      setNotice(
+                        `加入下载列表失败：${error instanceof Error ? error.message : String(error)}`,
+                      );
+                    })
+                    .finally(() => setEnqueueBusy(false));
+                }
+              : undefined
+          }
+          enqueueBusy={enqueueBusy}
         />
       </div>
       <InlineNotice text={notice} onDismiss={() => setNotice("")} />

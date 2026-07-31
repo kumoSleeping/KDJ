@@ -766,6 +766,88 @@ pub fn move_file(source: &Path, directory: &Path) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// 真复制一份到目录（不共享 inode）。返回新路径。
+pub fn copy_file(source: &Path, directory: &Path) -> Result<PathBuf> {
+    let name = source
+        .file_name()
+        .context("源文件没有文件名")?
+        .to_string_lossy()
+        .into_owned();
+    let target = unique_target(directory, &name)?;
+    std::fs::copy(source, &target).context("复制失败")?;
+    Ok(target)
+}
+
+/// 两个路径是不是同一份数据的硬链接（同一 device + inode）。
+/// 符号链接本身不算；要比内容身份请先解析到真实文件。
+pub fn same_hardlink(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let Ok(ma) = std::fs::symlink_metadata(a) else {
+            return false;
+        };
+        let Ok(mb) = std::fs::symlink_metadata(b) else {
+            return false;
+        };
+        if ma.file_type().is_symlink() || mb.file_type().is_symlink() {
+            return false;
+        }
+        ma.dev() == mb.dev() && ma.ino() == mb.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (a, b);
+        false
+    }
+}
+
+/// `link` 是不是指向 `target` 的符号链接（相对路径按 link 所在目录解析）。
+pub fn symlink_points_to(link: &Path, target: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(link) else {
+        return false;
+    };
+    if !meta.file_type().is_symlink() {
+        return false;
+    }
+    let Ok(dest) = std::fs::read_link(link) else {
+        return false;
+    };
+    let resolved = if dest.is_absolute() {
+        dest
+    } else {
+        match link.parent() {
+            Some(parent) => parent.join(dest),
+            None => dest,
+        }
+    };
+    let left = std::fs::canonicalize(&resolved).unwrap_or(resolved);
+    let right = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    left == right
+}
+
+/// 把已有的符号链接改写到 `new_target`（先删再建，保持 link 路径不变）。
+pub fn retarget_symlink(link: &Path, new_target: &Path) -> Result<()> {
+    let Ok(meta) = std::fs::symlink_metadata(link) else {
+        bail!("不是符号链接：{}", link.display());
+    };
+    if !meta.file_type().is_symlink() {
+        bail!("不是符号链接：{}", link.display());
+    }
+    std::fs::remove_file(link).with_context(|| format!("删除旧符号链接失败：{}", link.display()))?;
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(new_target, link)
+            .with_context(|| format!("重建符号链接失败：{}", link.display()))?;
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(new_target, link)
+            .with_context(|| format!("重建符号链接失败：{}", link.display()))?;
+    }
+    Ok(())
+}
+
 /// 优先硬链接，退符号链接，再退真复制。返回 `(目标路径, 实际用的方式)`。
 pub fn link_file(source: &Path, directory: &Path) -> Result<(PathBuf, &'static str)> {
     let name = source
@@ -1208,6 +1290,40 @@ mod tests {
         // 两端都应当被标记成链接
         assert_eq!(link_state(&source), "hardlink");
         assert_eq!(link_state(&target), "hardlink");
+        assert!(same_hardlink(&source, &target));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_file_does_not_share_inode() {
+        let base = scratch("copy");
+        let source_dir = base.join("src");
+        let dest_dir = base.join("dst");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let source = source_dir.join("song.mp3");
+        std::fs::write(&source, b"audio").unwrap();
+        let target = copy_file(&source, &dest_dir).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"audio");
+        assert!(!same_hardlink(&source, &target));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retarget_symlink_rewrites_destination() {
+        let base = scratch("retarget");
+        let a = base.join("a.mp3");
+        let b = base.join("b.mp3");
+        let link = base.join("link.mp3");
+        std::fs::write(&a, b"old").unwrap();
+        std::fs::write(&b, b"new").unwrap();
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        assert!(symlink_points_to(&link, &a));
+        retarget_symlink(&link, &b).unwrap();
+        assert!(symlink_points_to(&link, &b));
+        assert!(!symlink_points_to(&link, &a));
         let _ = std::fs::remove_dir_all(&base);
     }
 

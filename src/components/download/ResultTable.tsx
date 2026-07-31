@@ -312,7 +312,7 @@ export function ResultTable({
 
   return (
     <>
-      <table className="kd-table" style={{ minWidth: tableMinWidthPx }}>
+      <table className="kd-table" data-kind="results" style={{ minWidth: tableMinWidthPx }}>
         <colgroup>
           <col style={{ width: selectionColWidth }} />
           <col style={{ width: leadWidth }} />

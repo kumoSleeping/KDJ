@@ -45,7 +45,14 @@ tauri-plugin-process = "2"
 souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
 
-[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+# Android Playback v2：与桌面共用 coordinator + CPAL/AAudio；Kotlin 插件只留
+# MediaSession / 前台保活 / 歌词 overlay，不再用 ExoPlayer 出声。
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+kdj-playback = { version = "0.2.20", path = "../crates/kdj-playback" }
+tauri-plugin-native-audio = { version = "=1.0.5", path = "../plugins/native-audio" }
+
+[target.'cfg(target_os = "ios")'.dependencies]
 # Vendored from tauri-plugin-native-audio 1.0.5 (f9186d9) so KDJ can audit and
 # extend the mobile transport contract without trusting an unpinned moving branch.
 tauri-plugin-native-audio = { version = "=1.0.5", path = "../plugins/native-audio" }

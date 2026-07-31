@@ -35,11 +35,28 @@ const CODEC_PRIORITY: [&str; 3] = ["avc", "hev", "av01"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaStream {
+    /// 主直链（baseUrl）。B 站常把流量指到区域 CDN，个别节点会连不上。
     pub url: String,
+    /// 备用直链（backupUrl）。主链建连/读流失败时按顺序试。
+    pub backup_urls: Vec<String>,
     pub quality_id: i64,
     pub codec: String,
     pub height: i64,
     pub bandwidth: i64,
+}
+
+impl MediaStream {
+    /// 主链 + 备用，去重后的候选列表。下载/探测都按这个顺序试。
+    pub fn candidate_urls(&self) -> Vec<String> {
+        let mut urls = Vec::with_capacity(1 + self.backup_urls.len());
+        urls.push(self.url.clone());
+        for backup in &self.backup_urls {
+            if !backup.is_empty() && !urls.iter().any(|existing| existing == backup) {
+                urls.push(backup.clone());
+            }
+        }
+        urls
+    }
 }
 
 /// playurl 的两种形态。
@@ -51,7 +68,11 @@ pub enum PlayUrlData {
         audios: Vec<MediaStream>,
     },
     /// durl：单文件 flv/mp4，直接就能用（安卓上没有 ffmpeg 时走这条）
-    Single { url: String, container: String },
+    Single {
+        url: String,
+        backup_urls: Vec<String>,
+        container: String,
+    },
 }
 
 pub fn quality_meta(quality_id: i64, fallback_height: i64) -> (String, i64) {
@@ -92,10 +113,11 @@ pub fn parse_playurl(data: &Value) -> PlayUrlData {
         .and_then(Value::as_array)
         .and_then(|list| list.first())
     {
-        if let Some(url) = first.get("url").and_then(Value::as_str) {
+        if let Some((url, backup_urls)) = primary_and_backups(first, &["url"]) {
             let container = if url.contains(".flv") { "flv" } else { "mp4" };
             return PlayUrlData::Single {
-                url: url.to_string(),
+                url,
+                backup_urls,
                 container: container.to_string(),
             };
         }
@@ -112,13 +134,11 @@ fn parse_streams(list: Option<&Value>) -> Vec<MediaStream> {
     };
     list.iter()
         .filter_map(|item| {
-            let url = item
-                .get("baseUrl")
-                .or_else(|| item.get("base_url"))
-                .and_then(Value::as_str)
-                .filter(|url| !url.is_empty())?;
+            let (url, backup_urls) =
+                primary_and_backups(item, &["baseUrl", "base_url"])?;
             Some(MediaStream {
-                url: url.to_string(),
+                url,
+                backup_urls,
                 quality_id: item.get("id").and_then(Value::as_i64).unwrap_or(0),
                 codec: item
                     .get("codecs")
@@ -132,6 +152,28 @@ fn parse_streams(list: Option<&Value>) -> Vec<MediaStream> {
         .collect()
 }
 
+/// 抽出主直链 + 备用列表。DASH 用 baseUrl，durl 用 url；备用键两种驼峰都认。
+fn primary_and_backups(item: &Value, primary_keys: &[&str]) -> Option<(String, Vec<String>)> {
+    let primary = primary_keys
+        .iter()
+        .find_map(|key| item.get(*key).and_then(Value::as_str))
+        .filter(|url| !url.is_empty())?
+        .to_string();
+    let backups = item
+        .get("backupUrl")
+        .or_else(|| item.get("backup_url"))
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .filter(|url| !url.is_empty() && *url != primary.as_str())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some((primary, backups))
+}
+
 /// 挑出最合适的一对流。
 ///
 /// 返回 `(视频流, 音频流)`——**位置固定**，缺哪个哪个是 `None`。
@@ -140,9 +182,12 @@ pub fn pick_best(
     max_height: i64,
 ) -> (Option<MediaStream>, Option<MediaStream>) {
     match data {
-        PlayUrlData::Single { url, .. } => (
+        PlayUrlData::Single {
+            url, backup_urls, ..
+        } => (
             Some(MediaStream {
                 url: url.clone(),
+                backup_urls: backup_urls.clone(),
                 quality_id: 0,
                 codec: String::new(),
                 height: 0,
@@ -260,7 +305,14 @@ mod tests {
         json!({
             "dash": {
                 "video": [
-                    {"id": 80, "baseUrl": "https://cdn/v-1080-avc.m4s", "codecs": "avc1.640032", "height": 1080, "bandwidth": 3000},
+                    {
+                        "id": 80,
+                        "baseUrl": "https://cdn/v-1080-avc.m4s",
+                        "backupUrl": ["https://cdn-backup/v-1080-avc.m4s", "https://cdn/v-1080-avc.m4s"],
+                        "codecs": "avc1.640032",
+                        "height": 1080,
+                        "bandwidth": 3000
+                    },
                     {"id": 80, "baseUrl": "https://cdn/v-1080-hev.m4s", "codecs": "hev1.1.6.L120", "height": 1080, "bandwidth": 2500},
                     {"id": 120, "baseUrl": "https://cdn/v-4k.m4s", "codecs": "avc1.640033", "height": 2160, "bandwidth": 9000},
                     {"id": 32, "baseUrl": "https://cdn/v-480.m4s", "codecs": "avc1.64001f", "height": 480, "bandwidth": 800}
@@ -284,6 +336,14 @@ mod tests {
         assert_eq!(
             video.url, "https://cdn/v-1080-avc.m4s",
             "同一档位要挑 AVC，HEVC 很多 DJ 软件读不了"
+        );
+        assert_eq!(
+            video.candidate_urls(),
+            vec![
+                "https://cdn/v-1080-avc.m4s".to_string(),
+                "https://cdn-backup/v-1080-avc.m4s".to_string(),
+            ],
+            "备用链要保留，且别把和主链重复的再塞一遍"
         );
         assert_eq!(audio.unwrap().url, "https://cdn/a-192.m4s", "音频取最高码率");
     }
@@ -319,11 +379,25 @@ mod tests {
 
     #[test]
     fn durl_single_stream_is_reported_as_video_only() {
-        let payload = json!({"durl": [{"url": "https://cdn/whole.flv", "size": 123}]});
+        let payload = json!({
+            "durl": [{
+                "url": "https://cdn/whole.flv",
+                "backup_url": ["https://cdn-backup/whole.flv"],
+                "size": 123
+            }]
+        });
         let parsed = parse_playurl(&payload);
         assert!(matches!(parsed, PlayUrlData::Single { .. }));
         let (video, audio) = pick_best(&parsed, 1080);
-        assert_eq!(video.unwrap().url, "https://cdn/whole.flv");
+        let video = video.unwrap();
+        assert_eq!(video.url, "https://cdn/whole.flv");
+        assert_eq!(
+            video.candidate_urls(),
+            vec![
+                "https://cdn/whole.flv".to_string(),
+                "https://cdn-backup/whole.flv".to_string(),
+            ]
+        );
         assert!(audio.is_none(), "单流里音画已经在一起了");
     }
 

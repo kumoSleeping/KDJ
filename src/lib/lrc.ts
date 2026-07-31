@@ -53,3 +53,31 @@ export function activeLrcIndex(lines: LrcLine[], position: number): number {
   }
   return hit;
 }
+
+/** 与 Android `LyricsOverlayRuntime.fillOf` 对齐：行内演唱进度 0..1。 */
+const MIN_FILL_SEC = 1.2;
+const PER_CHAR_SEC = 0.34;
+const TAIL_LINE_SEC = 6;
+
+/**
+ * LRC 只有行级时间戳，行内只能线性推算。直接用「到下一行的间隔」当分母，
+ * 遇到间奏会让填充慢到看不出在动，所以再按字数估一个合理演唱时长，取较小值：
+ * 唱完就填满，剩下的时间停在满格等下一句。
+ */
+export function lineFillProgress(
+  lines: LrcLine[],
+  index: number,
+  positionSec: number,
+  durationSec = 0,
+): number {
+  if (index < 0 || index >= lines.length) return 0;
+  const line = lines[index]!;
+  const nextTime =
+    lines[index + 1]?.time ??
+    (durationSec > line.time ? durationSec : line.time + TAIL_LINE_SEC);
+  const gap = nextTime - line.time;
+  if (gap <= 0) return 1;
+  const estimated = Math.max(MIN_FILL_SEC, line.text.length * PER_CHAR_SEC);
+  const span = Math.min(gap, estimated);
+  return Math.min(1, Math.max(0, (positionSec - line.time) / span));
+}

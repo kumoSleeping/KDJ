@@ -16,11 +16,14 @@ use crate::contract::{
 use crate::platform::{CpalOutputFactory, PlaybackOutput, PlaybackOutputFactory};
 
 const ACTOR_TICK: Duration = Duration::from_millis(10);
+/// Seeking 时加密轮询，尽快提权已就绪的 shadow Deck（不降低预缓冲）。
+const SEEK_ACTOR_TICK: Duration = Duration::from_millis(1);
 const STATE_INTERVAL: Duration = Duration::from_millis(100);
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const STARTUP_BUFFER_MS: u64 = 120;
 const SEEK_BUFFER_MS: u64 = 40;
-const SEEK_CROSSFADE_MS: u64 = 5;
+/// 同曲 seek 单侧让路时长：旧声短促衰减，新声满进（见 TransitionPlan::SEEK_DUCK）。
+const SEEK_DUCK_MS: u64 = 3;
 const TRANSPORT_FADE_MS: u64 = 120;
 
 type CommandReply = SyncSender<Result<CommandAck, String>>;
@@ -242,7 +245,12 @@ impl Actor {
     fn run(mut self) {
         self.publish(true);
         while !self.shutdown {
-            match self.receiver.recv_timeout(ACTOR_TICK) {
+            let tick = if self.awaiting_seek_promotion() {
+                SEEK_ACTOR_TICK
+            } else {
+                ACTOR_TICK
+            };
+            match self.receiver.recv_timeout(tick) {
                 Ok(request) => self.handle(request),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -254,6 +262,13 @@ impl Actor {
         self.invalidate(DeckId::A);
         self.invalidate(DeckId::B);
         self.player.take();
+    }
+
+    fn awaiting_seek_promotion(&self) -> bool {
+        self.state.phase == PlaybackPhase::Seeking
+            || self.pending.iter().flatten().any(|pending| {
+                matches!(pending.activation, Some(Activation::Seek))
+            })
     }
 
     fn handle(&mut self, request: Request) {
@@ -832,8 +847,11 @@ impl Actor {
                 (frames, realtime_plan(transition.plan, runtime.output_sample_rate))
             }
             Activation::Seek if self.state.desired_playing => (
-                (u64::from(runtime.output_sample_rate) * SEEK_CROSSFADE_MS / 1_000) as u32,
-                TransitionPlan::default(),
+                (u64::from(runtime.output_sample_rate) * SEEK_DUCK_MS / 1_000) as u32,
+                TransitionPlan {
+                    flags: TransitionPlan::SEEK_DUCK,
+                    beat_frames: 0,
+                },
             ),
             Activation::Seek => (0, TransitionPlan::default()),
             Activation::Hard => (0, TransitionPlan::default()),

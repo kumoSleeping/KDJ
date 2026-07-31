@@ -27,6 +27,8 @@ import {
   shouldPinDetailOnClick,
   useTrackClickPrefs,
 } from "../../lib/trackClickPrefs";
+import { isPlatformEnabled, patchEnabledPlatform } from "../../lib/enabledPlatforms";
+import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
 import { useLibraryClipboard } from "../../lib/useLibraryClipboard";
 import {
@@ -39,10 +41,14 @@ import { InlineNotice, Sheet } from "../common";
 import { AppChrome } from "../chrome/AppChrome";
 import { AsideFaceSwitch, AsideHead, AsideToggleButton, type TrackAsideFace } from "../chrome/AsideHead";
 import { useLyricsPrefs, type LyricsAsideFace } from "../../lib/lyricsPrefs";
-import { VJ_SEARCH_EVENT } from "../../lib/vjSearch";
+import {
+  EXPLORE_SEARCH_EVENT,
+  type ExploreSearchDetail,
+  type ExploreSearchPlatform,
+} from "../../lib/vjSearch";
+import type { SearchBurstTone } from "../download/SearchBurstFX";
 import { ensureLyrics } from "../../stores/lyricsStore";
 import { ChromeActions } from "../chrome/ChromeActions";
-import { ChromeHistory } from "../chrome/ChromeHistory";
 import { LibraryWorkRail } from "../chrome/LibraryWorkRail";
 import { SearchWorkRail } from "../chrome/SearchWorkRail";
 import { QueuePanel } from "../download/QueuePanel";
@@ -144,10 +150,11 @@ export function Workspace() {
 
   const [query, setQuery] = useState("");
   // 勾选与排序都进 settings.json：排序是 platform_priority，勾选是 search_platforms。
-  const platforms = useMemo(
-    () => normalizeSearchPlatforms(settings?.search_platforms),
-    [settings?.search_platforms],
-  );
+  // 未在设置里开启的源不能参与搜索勾选。
+  const platforms = useMemo(() => {
+    const selected = normalizeSearchPlatforms(settings?.search_platforms);
+    return selected.filter((id) => isPlatformEnabled(settings, id));
+  }, [settings]);
   const saveSettings = useAppStore((state) => state.saveSettings);
   // 跨平台去重恒为开，开关已删：不合并的话搜一次出四条一模一样的结果，
   // 没有人会想要那个。留常量而不是把 true 写进调用点，是为了让
@@ -236,16 +243,18 @@ export function Workspace() {
       if (ids.length > 0) {
         // 「全部曲目」只接搜索下载，不接曲目搬家。
         if (dest === SEARCH_DEFAULT_DOWNLOAD_SENTINEL) return;
-        const op = event.altKey ? "move" : "link";
+        const op = resolveLibraryPasteOp({
+          settings: useAppStore.getState().settings,
+          forceMove: event.altKey,
+        });
         void useLibraryStore
           .getState()
           .applyFolderOp(ids, dest, op)
           .then((result) => {
             const failed = Object.keys(result.errors).length;
             if (failed > 0) {
-              setFolderDropError(
-                `已${op === "link" ? "链接" : "移动"} ${result.track_ids.length} 首，${failed} 首失败`,
-              );
+              const verb = op === "move" ? "移动" : op === "copy" ? "复制" : "链接";
+              setFolderDropError(`已${verb} ${result.track_ids.length} 首，${failed} 首失败`);
             }
           })
           .catch((error: unknown) => setFolderDropError(errorText(error)));
@@ -270,7 +279,11 @@ export function Workspace() {
 
   const togglePlatform = useCallback(
     (platform: Platform) => {
-      const current = normalizeSearchPlatforms(useAppStore.getState().settings?.search_platforms);
+      const snap = useAppStore.getState().settings;
+      if (!isPlatformEnabled(snap, platform)) return;
+      const current = normalizeSearchPlatforms(snap?.search_platforms).filter((id) =>
+        isPlatformEnabled(snap, id),
+      );
       const next = current.includes(platform)
         ? current.filter((item) => item !== platform)
         : [...current, platform];
@@ -282,7 +295,7 @@ export function Workspace() {
   );
 
   /**
-   * `platformsOverride` 是一次性的：代搜（搜VJ）只搜 B 站，但**不动**搜索框上
+   * `platformsOverride` 是一次性的：Explore 代搜只打目标平台，但**不动**搜索框上
    * 勾着的平台——那是用户为"下歌"调好的状态，程序替他搜一次不该顺手改掉。
    */
   const submit = useCallback(async (platformsOverride?: Platform[]) => {
@@ -348,10 +361,6 @@ export function Workspace() {
     }
     // merge 是常量，不进依赖
   }, [query, platforms, batch, settings, setHasResults]);
-
-  // 曲目表的 Cmd/Ctrl + C / X / V。挂在这里而不是 TrackTable 里：
-  // 快捷键是全局的，要覆盖整个工作台（含搜索半栏开着时）。
-  useLibraryClipboard();
 
   /* ------------------------------------------------------------ 布局档位 */
   const { columns: layout, chrome, portrait } = useLayoutSignals();
@@ -676,8 +685,10 @@ export function Workspace() {
   }, [layout, listMode]);
 
   // 显式旁路（设置 / 下载队列 / 文件夹…）打开时收起曲目详情，避免右栏叠两层内容。
+  // 歌词属于曲目内容面（详情 ↔ 歌词），上面已有 effect 钉住；这里不能 unpin，
+  // 否则一点「歌词」就被拆掉，看起来像弹不出来。
   useEffect(() => {
-    if (!(showSettings || showFolders || showVjExport || showLyrics || showQueue)) return;
+    if (!(showSettings || showFolders || showVjExport || showQueue)) return;
     setDetailPinned(false);
     setAsideLocked(false);
     if (layout === "narrow") setSheet("aside");
@@ -687,11 +698,9 @@ export function Workspace() {
     showQueue,
     showFolders,
     showVjExport,
-    showLyrics,
     settingsPanelEpoch,
     foldersPanelEpoch,
     vjExportPanelEpoch,
-    lyricsPanelEpoch,
     queuePanelEpoch,
   ]);
 
@@ -841,35 +850,45 @@ export function Workspace() {
   };
 
   /**
-   * 「搜VJ(Bili)」：详情面板把拼好的词发过来，这里代填搜索框、然后提交。
+   * Explore 代搜：详情面板把拼好的词 + 目标平台发过来，这里代填搜索框再提交。
    * 提交不能在事件回调里直接调 submit()——那个闭包看到的还是旧 query——
    * 所以立一个"待发射"标记，等 state 落定后的渲染周期里再开枪。
    *
-   * 只搜 B 站走的是 submit 的一次性覆盖参数，**不动**平台勾选：
+   * 只搜目标平台走的是 submit 的一次性覆盖参数，**不动**平台勾选：
    * 这是程序代搜，不是用户改了主意；搜完回来下歌，勾着的还是原来那几家。
+   * B 站扫光粉、SoundCloud 扫光橙。
    */
-  const [vjPending, setVjPending] = useState("");
+  const [explorePending, setExplorePending] = useState<{
+    query: string;
+    platform: ExploreSearchPlatform;
+  } | null>(null);
   const [searchBurstNonce, setSearchBurstNonce] = useState(0);
-  const [searchBurstTone, setSearchBurstTone] = useState<"rainbow" | "pink">("rainbow");
+  const [searchBurstTone, setSearchBurstTone] = useState<SearchBurstTone>("rainbow");
   useEffect(() => {
-    const onVj = (event: Event) => {
-      const q = (event as CustomEvent<string>).detail?.trim();
-      if (!q) return;
+    const onExplore = (event: Event) => {
+      const detail = (event as CustomEvent<ExploreSearchDetail>).detail;
+      const q = detail?.query?.trim();
+      if (!q || !detail?.platform) return;
       setQuery(q);
       // 只撑开中间搜索半栏（submit → setHasResults）；不弹右栏下载队列。
-      setVjPending(q);
+      setExplorePending({ query: q, platform: detail.platform });
     };
-    window.addEventListener(VJ_SEARCH_EVENT, onVj);
-    return () => window.removeEventListener(VJ_SEARCH_EVENT, onVj);
+    window.addEventListener(EXPLORE_SEARCH_EVENT, onExplore);
+    return () => window.removeEventListener(EXPLORE_SEARCH_EVENT, onExplore);
   }, []);
   useEffect(() => {
-    if (vjPending && query === vjPending) {
-      setVjPending("");
-      setSearchBurstTone("pink");
+    if (explorePending && query === explorePending.query) {
+      const { platform } = explorePending;
+      setExplorePending(null);
+      setSearchBurstTone(platform === "soundcloud" ? "orange" : "pink");
       setSearchBurstNonce((n) => n + 1);
-      void submit(["bilibili"]);
+      // 目标源若还没在设置里开过，代搜时顺手启用（同平台条首次点击）。
+      if (settings && !isPlatformEnabled(settings, platform)) {
+        void saveSettings(patchEnabledPlatform(settings, platform, true));
+      }
+      void submit([platform]);
     }
-  }, [vjPending, query, submit]);
+  }, [explorePending, query, submit, settings, saveSettings]);
 
   const toggleSelect = useCallback((key: string) => {
     setChosen((current) => {
@@ -970,6 +989,17 @@ export function Workspace() {
       setQueueError(`加入队列失败：${errorText(error)}`);
     }
   }, [chosenSources, settings?.default_quality, enqueue, openQueuePanel, refreshStats]);
+
+  // 曲目表 / 搜索结果：Cmd/Ctrl + A · C · X · V（Option+V 强制移动）。
+  useLibraryClipboard({
+    active: () => Boolean(hasResults && items && items.length > 0),
+    selectAll: () => {
+      setSearchSelectionMode(true);
+      selectAllSearch();
+    },
+    chosenSources: () => chosenSources,
+    enqueueChosen: () => addToQueue(),
+  });
 
   /** 歌单/专辑父行的明确主动作：无需先全选再找顶部按钮，整包直接进下载队列。 */
   const downloadItem = useCallback(
@@ -1090,10 +1120,14 @@ export function Workspace() {
         ref={shellRef}
         data-compact-tree={compactTreeExpanded ? "open" : "closed"}
       >
-        {/* 顶栏：横屏历史在侧栏宽内；竖屏/移动端历史改右侧与设置共处。 */}
         <AppChrome
-          history={<ChromeHistory />}
-          historyEnd={portrait}
+          // Mac 用 Overlay 红绿灯；Windows / Linux 关掉系统标题栏后自绘三键。
+          showWindowControls={
+            Boolean(window.kdj?.platform) &&
+            window.kdj?.platform !== "darwin" &&
+            window.kdj?.platform !== "android" &&
+            window.kdj?.platform !== "ios"
+          }
           actions={
             <ChromeActions
               settingsOpen={showSettings}
@@ -1168,7 +1202,6 @@ export function Workspace() {
                 burstTone={searchBurstTone}
                 platforms={platforms}
                 onTogglePlatform={togglePlatform}
-                soundcloudEnabled={settings?.soundcloud_enabled ?? false}
                 stacked={chrome === "stacked"}
               />
             </div>

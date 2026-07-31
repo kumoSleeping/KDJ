@@ -16,9 +16,9 @@ import kotlin.math.min
  * 悬浮歌词的绘制层。只画字，不碰窗口层级也不读播放器：
  * 帧数据由 [LyricsOverlayRuntime] 在主线程推进来。
  *
- * 视觉对齐桌面的 `.kd-desktop-lyrics`（可配填色/描边 + 粗描边 + 投影），额外做了
- * 桌面那边 CSS 做不到的逐字填充：未唱部分压暗，已唱部分用强调色，
- * 分界线按行内进度水平推进。
+ * 视觉对齐桌面的 `.kd-desktop-lyrics`（可配填色/描边 + 投影）。主行与副行都做
+ * 逐字填充：未唱部分压暗，已唱部分用各自强调色，分界线按行内进度水平推进；
+ * 超长句先缩字号，再跟着填充点横向平移。
  *
  * 字号在两处出现：`baseSize` 是配置算出来的基准，绘制时按 [squeeze] 收缩。
  * 每次 onMeasure / onDraw 都把 paint 的 textSize 显式设成当次要用的值，
@@ -30,7 +30,8 @@ class LyricsOverlayView(context: Context) : View(context) {
     private val primaryDim = fillPaint()
     private val primaryLit = fillPaint()
     private val secondaryStroke = strokePaint()
-    private val secondaryFill = fillPaint()
+    private val secondaryDim = fillPaint()
+    private val secondaryLit = fillPaint()
 
     private var primaryText = ""
     private var secondaryText = ""
@@ -38,6 +39,7 @@ class LyricsOverlayView(context: Context) : View(context) {
     private var fontScale = 1f
     private var accent = LyricsColorPaint(false, Color.WHITE, Color.WHITE)
     private var secondary = LyricsColorPaint(false, SECONDARY_COLOR, SECONDARY_COLOR)
+    private var dim = LyricsColorPaint(false, DIM_COLOR, DIM_COLOR)
     private var stroke = LyricsColorPaint(false, Color.BLACK, Color.BLACK)
     /** 整首歌都没有副行时不预留第二行高度，避免悬浮窗白占一条。 */
     private var reserveSecondary = false
@@ -68,6 +70,7 @@ class LyricsOverlayView(context: Context) : View(context) {
         scale: Float,
         accentPaint: LyricsColorPaint,
         secondaryPaint: LyricsColorPaint,
+        dimPaint: LyricsColorPaint,
         strokePaint: LyricsColorPaint,
     ) {
         val safeScale = scale.coerceIn(1f, 3f)
@@ -75,6 +78,7 @@ class LyricsOverlayView(context: Context) : View(context) {
             fontScale == safeScale &&
             accent == accentPaint &&
             secondary == secondaryPaint &&
+            dim == dimPaint &&
             stroke == strokePaint
         ) {
             return
@@ -82,6 +86,7 @@ class LyricsOverlayView(context: Context) : View(context) {
         fontScale = safeScale
         accent = accentPaint
         secondary = secondaryPaint
+        dim = dimPaint
         stroke = strokePaint
         applyTypography()
         invalidateLayoutCache()
@@ -106,8 +111,8 @@ class LyricsOverlayView(context: Context) : View(context) {
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         primaryDim.textSize = primaryBaseSize
-        secondaryFill.textSize = secondaryBaseSize
-        val secondaryHeight = if (reserveSecondary) secondaryFill.fontSpacing + dp(LINE_GAP_DP) else 0f
+        secondaryDim.textSize = secondaryBaseSize
+        val secondaryHeight = if (reserveSecondary) secondaryDim.fontSpacing + dp(LINE_GAP_DP) else 0f
         val height = paddingTop + paddingBottom + primaryDim.fontSpacing + secondaryHeight
         setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), height.toInt())
     }
@@ -131,8 +136,7 @@ class LyricsOverlayView(context: Context) : View(context) {
         val baseY = paddingTop - primaryDim.ascent()
 
         applyPaint(primaryLit, accent, baseX, baseX + primaryWidth)
-        primaryDim.shader = null
-        primaryDim.color = DIM_COLOR
+        applyPaint(primaryDim, dim, baseX, baseX + primaryWidth)
 
         if (!stroke.none) {
             applyPaint(primaryStroke, stroke, baseX, baseX + primaryWidth)
@@ -154,16 +158,27 @@ class LyricsOverlayView(context: Context) : View(context) {
         val secondarySize = secondaryBaseSize * squeeze
         secondaryStroke.textSize = secondarySize
         secondaryStroke.strokeWidth = secondarySize * STROKE_RATIO
-        secondaryFill.textSize = secondarySize
-        val secondaryWidth = secondaryFill.measureText(secondaryText)
-        val secondaryX = paddingLeft + max(0f, (available - secondaryWidth) / 2f)
-        val secondaryY = baseY + primaryDim.descent() + dp(LINE_GAP_DP) - secondaryFill.ascent()
-        applyPaint(secondaryFill, secondary, secondaryX, secondaryX + secondaryWidth)
+        secondaryDim.textSize = secondarySize
+        secondaryLit.textSize = secondarySize
+        val secondaryWidth = secondaryDim.measureText(secondaryText)
+        val secondaryCentered = paddingLeft + max(0f, (available - secondaryWidth) / 2f)
+        val secondaryX = secondaryCentered + overflowShift(secondaryWidth, available)
+        val secondaryY = baseY + primaryDim.descent() + dp(LINE_GAP_DP) - secondaryDim.ascent()
+
+        applyPaint(secondaryLit, secondary, secondaryX, secondaryX + secondaryWidth)
+        applyPaint(secondaryDim, dim, secondaryX, secondaryX + secondaryWidth)
+
         if (!stroke.none) {
             applyPaint(secondaryStroke, stroke, secondaryX, secondaryX + secondaryWidth)
             canvas.drawText(secondaryText, secondaryX, secondaryY, secondaryStroke)
         }
-        canvas.drawText(secondaryText, secondaryX, secondaryY, secondaryFill)
+        canvas.drawText(secondaryText, secondaryX, secondaryY, secondaryDim)
+        if (fill > 0f) {
+            canvas.save()
+            canvas.clipRect(0f, 0f, secondaryX + secondaryWidth * fill, height.toFloat())
+            canvas.drawText(secondaryText, secondaryX, secondaryY, secondaryLit)
+            canvas.restore()
+        }
     }
 
     /** 长句先按可用宽度缩字号，缩到下限为止；再放不下交给 [overflowShift]。 */
@@ -200,20 +215,29 @@ class LyricsOverlayView(context: Context) : View(context) {
         primaryBaseSize = sp(PRIMARY_SP) * fontScale
         secondaryBaseSize = sp(SECONDARY_SP) * fontScale
         val bold = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-        for (paint in listOf(primaryStroke, primaryDim, primaryLit, secondaryStroke, secondaryFill)) {
+        for (paint in listOf(
+            primaryStroke,
+            primaryDim,
+            primaryLit,
+            secondaryStroke,
+            secondaryDim,
+            secondaryLit,
+        )) {
             paint.typeface = bold
             paint.shader = null
         }
-        primaryDim.color = DIM_COLOR
+        primaryDim.color = dim.start
         primaryLit.color = accent.start
-        secondaryFill.color = secondary.start
+        secondaryDim.color = dim.start
+        secondaryLit.color = secondary.start
         primaryStroke.color = stroke.start
         secondaryStroke.color = stroke.start
 
         val shadow = dp(1.5f)
         primaryDim.setShadowLayer(shadow, 0f, shadow, SHADOW_COLOR)
         primaryLit.setShadowLayer(shadow, 0f, shadow, SHADOW_COLOR)
-        secondaryFill.setShadowLayer(shadow, 0f, shadow, SHADOW_COLOR)
+        secondaryDim.setShadowLayer(shadow, 0f, shadow, SHADOW_COLOR)
+        secondaryLit.setShadowLayer(shadow, 0f, shadow, SHADOW_COLOR)
     }
 
     private fun applyPaint(paint: Paint, color: LyricsColorPaint, x0: Float, x1: Float) {

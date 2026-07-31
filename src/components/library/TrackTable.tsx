@@ -35,6 +35,7 @@ import {
   type TrackDragDetail,
 } from "../../lib/trackDrag";
 import { folderDropElementAt, FOLDER_DROP_PATH_ATTR } from "../../lib/folderDrop";
+import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
 import { DASH, formatBpm, formatDuration, isVideoTrack, thumbUrl } from "../../lib/format";
 import {
@@ -558,14 +559,11 @@ export function TrackTable({
   const [drop, setDrop] = useState<{ id: number; before: boolean } | null>(null);
 
   // Esc 的语义是取消这一轮显式批选：菜单、复选框和选区一起收掉。
+  // 全选走 useLibraryClipboard（Cmd/Ctrl+A），不挂在「仅多选时」——
+  // 只选了一首时也要能全选。
   useEffect(() => {
     if (!selectionMode && selectedIds.length <= 1) return;
     const onKey = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a" && !isEditable(event.target)) {
-        event.preventDefault();
-        useLibraryStore.getState().selectAll();
-        return;
-      }
       if (event.key !== "Escape") return;
       event.preventDefault();
       setSelectionMode(false);
@@ -693,13 +691,19 @@ export function TrackTable({
         const dest = folder.getAttribute(FOLDER_DROP_PATH_ATTR)?.trim() ?? "";
         const claimed = claimActiveTrackDragIds();
         if (!dest || claimed.length === 0) return;
-        const op = up.altKey ? "move" : "link";
+        const op = resolveLibraryPasteOp({
+          settings: useAppStore.getState().settings,
+          forceMove: up.altKey,
+        });
         void useLibraryStore
           .getState()
           .applyFolderOp(claimed, dest, op)
           .then((result) => {
             const failed = Object.keys(result.errors).length;
-            if (failed > 0) setNotice(`已${op === "link" ? "链接" : "移动"} ${result.track_ids.length} 首，${failed} 首失败`);
+            if (failed > 0) {
+              const verb = op === "move" ? "移动" : op === "copy" ? "复制" : "链接";
+              setNotice(`已${verb} ${result.track_ids.length} 首，${failed} 首失败`);
+            }
           })
           .catch((error: unknown) => setNotice(`操作失败：${(error as Error).message}`));
         return;

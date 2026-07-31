@@ -6,7 +6,9 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
 import { continueDataUpgrade } from "../lib/dataUpgrade";
+import { resolveLibraryPasteOp } from "../lib/libraryPaste";
 import { isOutsideFolder } from "../lib/outsideFolder";
+import { useAppStore } from "./appStore";
 import { useQueueStore } from "./queueStore";
 import type {
   AnalyzeProgress,
@@ -239,7 +241,8 @@ export interface LibraryStore {
   selectAll(): void;
   setSelectionMode(on: boolean): void;
   copyToClipboard(op: FileOp): void;
-  paste(dest: string): Promise<FolderOpResult | null>;
+  /** `op` 覆盖剪贴板里记的操作：Cmd+Option+V 强制按移动粘贴。 */
+  paste(dest: string, op?: FileOp): Promise<FolderOpResult | null>;
   applyFolderOp(ids: number[], dest: string, op: FileOp): Promise<FolderOpResult>;
   /**
    * 「添加文件夹」背后的一整套后台动作：把目录登记成曲库根、遍历入库、
@@ -561,12 +564,19 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     if (ids.length > 0) set({ clipboard: { ids: [...ids], op } });
   },
 
-  async paste(dest) {
+  async paste(dest, op) {
     const clip = get().clipboard;
     if (!clip || !dest) return null;
-    const result = await get().applyFolderOp(clip.ids, dest, clip.op);
-    // 剪切粘贴一次就用掉，复制的留着可以连粘几个文件夹
-    if (clip.op === "move") set({ clipboard: null });
+    // 未显式指定时：剪切仍移动；否则跟设置里的「链接 / 复制文件」。
+    const used =
+      op ??
+      resolveLibraryPasteOp({
+        settings: useAppStore.getState().settings,
+        clipboardOp: clip.op,
+      });
+    const result = await get().applyFolderOp(clip.ids, dest, used);
+    // 剪切、或 Option 强制移动：粘一次就清空；普通复制可连粘
+    if (used === "move") set({ clipboard: null });
     return result;
   },
 
@@ -575,8 +585,8 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     await get().refresh();
     void get().refreshFolders();
     void get().refreshStats();
-    // 移动后选中项还在（id 没变），链接出来的是新 id，选中它们更符合预期
-    if (op === "link" && result.track_ids.length > 0) {
+    // 移动后选中项还在（id 没变）；链接 / 复制出来的是新 id，选中它们更符合预期
+    if ((op === "link" || op === "copy") && result.track_ids.length > 0) {
       set({ selectedIds: result.track_ids, selectedId: result.track_ids[0] });
     }
     return result;

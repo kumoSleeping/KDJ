@@ -1,44 +1,28 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { Platform } from "../../types";
-import { clearTextSelection } from "../../lib/textSelection";
+import { isPlatformEnabled, patchEnabledPlatform } from "../../lib/enabledPlatforms";
+import {
+  DEFAULT_PRIORITY,
+  DEFAULT_SEARCH_PLATFORMS,
+  normalizePriority,
+  normalizeSearchPlatforms,
+  SEARCH_PLATFORMS,
+} from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
 import { PlatformMark } from "./PlatformMark";
 import { SearchBurstFX, type SearchBurstTone } from "./SearchBurstFX";
 
-/** 平台一览（仅在线源）。本地曲库在左侧树里浏览，不再占搜索来源位。 */
-export const SEARCH_PLATFORMS: ReadonlyArray<{ id: Platform; label: string; video?: boolean }> = [
-  { id: "wyy", label: "网易云" },
-  { id: "qqm", label: "QQ 音乐" },
-  { id: "soundcloud", label: "SOUNDCLOUD" },
-  { id: "bilibili", label: "哔哩哔哩", video: true },
-];
-
-export const DEFAULT_PRIORITY: readonly string[] = ["wyy", "qqm", "soundcloud", "bilibili"];
-/** 默认勾选：网易云 / QQ / B 站；SoundCloud 需先启用。 */
-export const DEFAULT_SEARCH_PLATFORMS: readonly Platform[] = ["wyy", "qqm", "bilibili"];
-
-/** 补齐缺失平台；丢掉已下线的 local 等旧项。 */
-function normalizePriority(priority: readonly string[]): Platform[] {
-  const known = SEARCH_PLATFORMS.map((item) => item.id);
-  const ordered = priority.filter((id): id is Platform => known.includes(id as Platform));
-  for (const id of known) {
-    if (!ordered.includes(id)) ordered.push(id);
-  }
-  return ordered;
-}
-
-/** 勾选列表：只保留仍在线的平台；空/缺省回落到默认勾选。 */
-export function normalizeSearchPlatforms(selected: readonly string[] | undefined): Platform[] {
-  const known = SEARCH_PLATFORMS.map((item) => item.id);
-  const next = (selected ?? []).filter((id): id is Platform => known.includes(id as Platform));
-  return next.length > 0 ? next : [...DEFAULT_SEARCH_PLATFORMS];
-}
+export {
+  DEFAULT_PRIORITY,
+  DEFAULT_SEARCH_PLATFORMS,
+  normalizeSearchPlatforms,
+  SEARCH_PLATFORMS,
+};
 
 /** 平台选择那一行单独一个组件（SearchPlatforms），props 也分开列。 */
 export interface SearchPlatformProps {
   platforms: Platform[];
   onTogglePlatform(platform: Platform): void;
-  soundcloudEnabled: boolean;
 }
 
 export interface SearchBarProps extends SearchPlatformProps {
@@ -51,8 +35,8 @@ export interface SearchBarProps extends SearchPlatformProps {
   /** 竖屏/极窄：输入与平台拆成两段。 */
   stacked?: boolean;
   /**
-   * 外部触发扫光（如「搜 VJ」代填提交）。数值变化即重放；
-   * 搭配 burstTone 选彩虹或粉色。
+   * 外部触发扫光（如 Explore 代填提交）。数值变化即重放；
+   * 搭配 burstTone 选彩虹 / B 站粉 / SoundCloud 橙。
    */
   burstNonce?: number;
   burstTone?: SearchBurstTone;
@@ -80,28 +64,34 @@ export function SearchBar({
   // flag settles. Keep our own composition state and also honor keyCode 229.
   const composingRef = useRef(false);
   const [burst, setBurst] = useState<SearchBurstTone | null>(null);
-  const burstTimerRef = useRef<number | null>(null);
+  /** 扫光还在等结果：见过 busy=true 之后，busy 落回 false 才淡出关闭。 */
+  const burstPendingRef = useRef(false);
+  const burstSawBusyRef = useRef(false);
+  const [burstActive, setBurstActive] = useState(false);
   const lastNonceRef = useRef(burstNonce);
   const canSubmit = query.trim().length > 0 && !busy;
 
   const playBurst = (tone: SearchBurstTone) => {
-    if (burstTimerRef.current != null) window.clearTimeout(burstTimerRef.current);
+    burstPendingRef.current = true;
+    // Explore 代搜时 submit 可能已经把 busy 拉高，这一帧就要算「见过 busy」。
+    burstSawBusyRef.current = busy;
+    setBurstActive(true);
+    // 先卸再挂，保证同色重搜也会重开动效。
     setBurst(null);
-    const duration = tone === "pink" ? 1000 : 900;
-    requestAnimationFrame(() => {
-      setBurst(tone);
-      burstTimerRef.current = window.setTimeout(() => {
-        setBurst(null);
-        burstTimerRef.current = null;
-      }, duration);
-    });
+    requestAnimationFrame(() => setBurst(tone));
   };
 
   useEffect(() => {
-    return () => {
-      if (burstTimerRef.current != null) window.clearTimeout(burstTimerRef.current);
-    };
-  }, []);
+    if (!burstPendingRef.current) return;
+    if (busy) {
+      burstSawBusyRef.current = true;
+      return;
+    }
+    // 提交瞬间 busy 还没拉高：先别关。等真正跑完一轮再淡出。
+    if (!burstSawBusyRef.current) return;
+    burstPendingRef.current = false;
+    setBurstActive(false);
+  }, [busy]);
 
   useEffect(() => {
     if (burstNonce === lastNonceRef.current) return;
@@ -134,7 +124,13 @@ export function SearchBar({
           inputRef.current?.focus();
         }}
       >
-        {burst ? <SearchBurstFX tone={burst} /> : null}
+        {burst ? (
+          <SearchBurstFX
+            tone={burst}
+            active={burstActive}
+            onFinished={() => setBurst(null)}
+          />
+        ) : null}
         <div className="kd-searchbar-tools">
           <SearchPlatforms {...platformProps} />
         </div>
@@ -176,20 +172,28 @@ export function SearchBar({
 }
 
 /**
- * 搜索平台。只负责来源多选与拖动排序——不再打开账号面板。
+ * 搜索平台。多选 + 指针拖动排序。
+ *
+ * 不用 HTML5 draggable：WKWebView 上经常只 dragstart 不 drop，还会抢走 pointer 序列。
  */
 export function SearchPlatforms({
   platforms,
   onTogglePlatform,
-  soundcloudEnabled,
 }: SearchPlatformProps) {
   const saveSettings = useAppStore((state) => state.saveSettings);
-  const priority = useAppStore(
-    (state) => state.settings?.platform_priority ?? (DEFAULT_PRIORITY as string[]),
-  );
+  const settings = useAppStore((state) => state.settings);
+  const priority = settings?.platform_priority ?? (DEFAULT_PRIORITY as string[]);
   const [dragging, setDragging] = useState<Platform | null>(null);
-  // dragover 比 setState 重渲染更早：必须用 ref，否则 preventDefault 来不及，整段拖不动。
-  const draggingRef = useRef<Platform | null>(null);
+  const [over, setOver] = useState<Platform | null>(null);
+  const dragRef = useRef<{
+    from: Platform;
+    originX: number;
+    originY: number;
+    moved: boolean;
+    over: Platform | null;
+    pointerId: number;
+    el: HTMLElement;
+  } | null>(null);
 
   const orderedIds = normalizePriority(priority);
   const ordered = orderedIds
@@ -198,67 +202,137 @@ export function SearchPlatforms({
 
   const reorder = (from: Platform, to: Platform) => {
     if (from === to) return;
-    const current = ordered.map((item) => item.id);
-    const next = current.filter((id) => id !== from);
-    const at = next.indexOf(to);
-    if (at < 0) return;
-    next.splice(at, 0, from);
-    void saveSettings({ platform_priority: next });
+    const current = orderedIds.slice();
+    const fromAt = current.indexOf(from);
+    const toAt = current.indexOf(to);
+    if (fromAt < 0 || toAt < 0) return;
+    current.splice(fromAt, 1);
+    // 再取一次 to 的下标：from 抽走后后面的项会前移。
+    const insertAt = current.indexOf(to);
+    if (insertAt < 0) return;
+    current.splice(insertAt, 0, from);
+    void saveSettings({ platform_priority: current });
+  };
+
+  const platAtPoint = (x: number, y: number): Platform | null => {
+    const hit = document.elementFromPoint(x, y) as HTMLElement | null;
+    const btn = hit?.closest?.(".kd-plat") as HTMLElement | null;
+    const id = btn?.getAttribute("data-platform");
+    return id && orderedIds.includes(id as Platform) ? (id as Platform) : null;
+  };
+
+  const endDrag = () => {
+    const session = dragRef.current;
+    dragRef.current = null;
+    if (!session) return;
+    try {
+      session.el.releasePointerCapture(session.pointerId);
+    } catch {
+      /* ignore */
+    }
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+    window.removeEventListener("pointercancel", onPointerUp);
+
+    if (session.moved) {
+      const target = session.over;
+      if (target) reorder(session.from, target);
+    } else {
+      const id = session.from;
+      const enabled = isPlatformEnabled(useAppStore.getState().settings, id);
+      if (!enabled) {
+        const snap = useAppStore.getState().settings;
+        if (snap) {
+          void saveSettings(patchEnabledPlatform(snap, id, true));
+          if (!platforms.includes(id)) onTogglePlatform(id);
+        }
+      } else {
+        onTogglePlatform(id);
+      }
+    }
+    setDragging(null);
+    setOver(null);
+  };
+
+  const onPointerMove = (ev: PointerEvent) => {
+    const session = dragRef.current;
+    if (!session || ev.pointerId !== session.pointerId) return;
+    if (!session.moved) {
+      if (Math.hypot(ev.clientX - session.originX, ev.clientY - session.originY) < 4) return;
+      session.moved = true;
+      setDragging(session.from);
+      try {
+        session.el.setPointerCapture(session.pointerId);
+      } catch {
+        /* ignore */
+      }
+    }
+    ev.preventDefault();
+    const target = platAtPoint(ev.clientX, ev.clientY);
+    const next = target && target !== session.from ? target : null;
+    session.over = next;
+    setOver(next);
+  };
+
+  const onPointerUp = (ev: PointerEvent) => {
+    const session = dragRef.current;
+    if (!session || ev.pointerId !== session.pointerId) return;
+    // 松手前再瞄一次落点；指在缝隙上也用最后悬停过的目标。
+    if (session.moved) {
+      const target = platAtPoint(ev.clientX, ev.clientY);
+      if (target && target !== session.from) session.over = target;
+    }
+    endDrag();
+  };
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>, id: Platform) => {
+    if (event.button !== 0) return;
+    // 挡住浏览器默认拖图 / 选中，否则 pointer 序列会被掐断。
+    event.preventDefault();
+    event.stopPropagation();
+    if (dragRef.current) endDrag();
+    dragRef.current = {
+      from: id,
+      originX: event.clientX,
+      originY: event.clientY,
+      moved: false,
+      over: null,
+      pointerId: event.pointerId,
+      el: event.currentTarget,
+    };
+    window.addEventListener("pointermove", onPointerMove, { passive: false });
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
   };
 
   return (
     <div className="kd-plats" role="group" aria-label="搜索平台（拖动排序 = 来源优先级）">
       {ordered.map((item) => {
-        const off = item.id === "soundcloud" && !soundcloudEnabled;
+        const off = !isPlatformEnabled(settings, item.id);
         return (
           <button
             key={item.id}
             type="button"
             className="kd-plat"
-            aria-pressed={platforms.includes(item.id)}
+            aria-pressed={!off && platforms.includes(item.id)}
             aria-label={item.label}
             data-platform={item.id}
             data-off={off || undefined}
             data-dragging={dragging === item.id || undefined}
-            draggable
+            data-drop={over === item.id || undefined}
+            draggable={false}
             title={
               off
-                ? `${item.label}：未启用，点一下就启用`
+                ? `${item.label}：未在设置中启用，点一下开启`
                 : item.video
                   ? `${item.label}（贴链接或 BV 号自动走视频解析）· 拖动排序`
                   : `${item.label} · 拖动排序：排前面的优先作为下载来源`
             }
-            onDragStart={(event) => {
-              clearTextSelection();
-              event.dataTransfer.effectAllowed = "move";
-              event.dataTransfer.setData("text/plain", item.id);
-              draggingRef.current = item.id;
-              setDragging(item.id);
-            }}
-            onDragEnd={() => {
-              draggingRef.current = null;
-              setDragging(null);
-            }}
-            onDragOver={(event) => {
-              if (draggingRef.current && draggingRef.current !== item.id) {
-                event.preventDefault();
-                event.dataTransfer.dropEffect = "move";
-              }
-            }}
-            onDrop={(event) => {
+            onPointerDown={(event) => onPointerDown(event, item.id)}
+            onDragStart={(event) => event.preventDefault()}
+            onClick={(event) => {
+              // 真正的点击在 pointerup 里处理；这里挡住 form 提交式 click。
               event.preventDefault();
-              const from = draggingRef.current;
-              if (from) reorder(from, item.id);
-              draggingRef.current = null;
-              setDragging(null);
-            }}
-            onClick={() => {
-              if (off) {
-                void saveSettings({ soundcloud_enabled: true });
-                if (!platforms.includes(item.id)) onTogglePlatform(item.id);
-                return;
-              }
-              onTogglePlatform(item.id);
             }}
           >
             <PlatformMark id={item.id} />

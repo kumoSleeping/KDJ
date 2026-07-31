@@ -1,34 +1,45 @@
 import { useState } from "react";
 import { Plus, Search, Trash2 } from "lucide-react";
 import { buildVjQuery, useVjKeywords } from "../../lib/vjKeywords";
+import { useScKeywords } from "../../lib/scKeywords";
 import type { Track } from "../../types";
 import { Button } from "../common";
-import { requestVjSearch } from "../../lib/vjSearch";
+import { requestExploreSearch, type ExploreSearchPlatform } from "../../lib/vjSearch";
 
 function compactTag(value: string, max = 7): string {
   const chars = Array.from(value);
   return chars.length > max ? `${chars.slice(0, max).join("")}…` : value;
 }
 
-/**
- * 「搜 VJ（B 站）」：拿当前这首歌去 B 站找可以当画面用的视频。
- *
- * 关键词是**可多选的选项**，不是"点一下就搜"的按钮：一次搜索常常要
- * 好几个词一起限定（比如「官方 + 4K」），点一个搜一次等于每次只能试一个。
- * 勾完之后底下那颗「搜索」才真的发起——搜索是要等网络的动作，
- * 不该由"勾选"这种随手操作触发。
- *
- * 勾选和关键词列表长期保存：它们描述的是
- * **这个人怎么找素材**，常年搜手书的和常年搜现场的是两种用法，
- * 每次开软件重设一遍没有道理。
- */
-export function VjSearchPanel({ track }: { track: Track }) {
-  const keywords = useVjKeywords((state) => state.keywords);
-  const picked = useVjKeywords((state) => state.picked);
-  const toggle = useVjKeywords((state) => state.toggle);
-  const add = useVjKeywords((state) => state.add);
-  const remove = useVjKeywords((state) => state.remove);
+type ExploreTone = "bili" | "sc";
 
+type KeywordOps = {
+  keywords: string[];
+  picked: string[];
+  withArtist: boolean;
+  toggle(word: string): void;
+  add(word: string): void;
+  remove(word: string): void;
+  setWithArtist(value: boolean): void;
+};
+
+/**
+ * Explore 里上下两块共用的关键词 + 搜索条。
+ * tone 决定品牌色（B 站粉 / SoundCloud 橙），platform 决定代搜目标。
+ */
+function ExploreBlock({
+  label,
+  tone,
+  platform,
+  track,
+  ops,
+}: {
+  label: string;
+  tone: ExploreTone;
+  platform: ExploreSearchPlatform;
+  track: Track;
+  ops: KeywordOps;
+}) {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
   /** 第一次右键只上膛；再次右键同一个词才删除。 */
@@ -36,54 +47,60 @@ export function VjSearchPanel({ track }: { track: Track }) {
 
   const title = track.title || track.filename;
   const artist = track.artist.trim();
-  // 只把**还在列表里**的勾选算进去，顺序按列表来（不按勾选先后）：
-  // 同样几个词，搜出来的结果应该是同一批，不该取决于点的顺序
-  const active = keywords.filter((word) => picked.includes(word));
-  // 艺人不再做成一个容易忘记打开的开关：有值就永远排在曲名后的第一项。
-  const query = buildVjQuery(title, artist, active, true);
+  const active = ops.keywords.filter((word) => ops.picked.includes(word));
+  const withArtist = Boolean(artist) && ops.withArtist;
+  const query = buildVjQuery(title, artist, active, withArtist);
+  const taggedCount = active.length + (withArtist ? 1 : 0);
 
   const commitAdd = () => {
-    if (draft.trim()) add(draft);
+    if (draft.trim()) ops.add(draft);
     setDraft("");
     setAdding(false);
   };
 
   return (
-    <div className="kd-col" style={{ gap: "0.5rem" }}>
-      <div className="kd-opts kd-vj-words" data-tone="bili">
-          {artist && (
-            <span className="kd-vj-artist" title={`艺人：${artist}`}>
-              @{compactTag(artist)}
-            </span>
-          )}
-          {keywords.map((word) => (
+    <div className="kd-explore-block" data-tone={tone}>
+      <div className="kd-explore-block-label">{label}</div>
+      <div className="kd-opts kd-vj-words" data-tone={tone}>
+        {artist && (
+          <button
+            type="button"
+            className="kd-opt kd-vj-artist"
+            aria-pressed={ops.withArtist}
+            title={ops.withArtist ? "取消艺人" : "加上艺人"}
+            onClick={() => ops.setWithArtist(!ops.withArtist)}
+          >
+            @{compactTag(artist)}
+          </button>
+        )}
+        {ops.keywords.map((word) => (
           <button
             key={word}
             type="button"
             className="kd-opt"
-            aria-pressed={picked.includes(word)}
+            aria-pressed={ops.picked.includes(word)}
             aria-label={armedWord === word ? `再次右键删除 ${word}` : word}
             data-delete-armed={armedWord === word ? "true" : undefined}
             title={
               armedWord === word
                 ? `再次右键删除「${word}」`
-                : picked.includes(word)
+                : ops.picked.includes(word)
                   ? "取消这个词"
                   : "加上这个词"
             }
             onClick={() => {
               if (armedWord === word) {
-                remove(word);
+                ops.remove(word);
                 setArmedWord("");
                 return;
               }
               setArmedWord("");
-              toggle(word);
+              ops.toggle(word);
             }}
             onContextMenu={(event) => {
               event.preventDefault();
               if (armedWord === word) {
-                remove(word);
+                ops.remove(word);
                 setArmedWord("");
               } else {
                 setArmedWord(word);
@@ -95,7 +112,7 @@ export function VjSearchPanel({ track }: { track: Track }) {
           </button>
         ))}
 
-          {adding ? (
+        {adding ? (
           <input
             className="kd-input kd-vj-add"
             autoFocus
@@ -114,7 +131,7 @@ export function VjSearchPanel({ track }: { track: Track }) {
               }
             }}
           />
-          ) : (
+        ) : (
           <button
             type="button"
             className="kd-vj-word-add"
@@ -125,15 +142,77 @@ export function VjSearchPanel({ track }: { track: Track }) {
             <Plus size={11} />
             加词
           </button>
-          )}
+        )}
       </div>
       <div className="kd-vj-actions">
-        {/* 搜索紧跟关键词，不再被 column stretch 拉成整栏通宽。 */}
-        <Button variant="primary" size="sm" onClick={() => requestVjSearch(query)}>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={() => requestExploreSearch(query, platform)}
+        >
           <Search size={12} />
-          搜索{active.length + (artist ? 1 : 0) > 0 && `（${active.length + (artist ? 1 : 0)}）`}
+          搜索{taggedCount > 0 && `（${taggedCount}）`}
         </Button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Explore：曲目详情里上下两块——上面搜 VJ（B 站），下面搜 SoundCloud。
+ *
+ * 关键词是可多选的选项，勾完后点「搜索」才发起。
+ * 勾选与词表长期保存，描述的是「这个人怎么找素材」。
+ */
+export function VjSearchPanel({ track }: { track: Track }) {
+  const vjKeywords = useVjKeywords((state) => state.keywords);
+  const vjPicked = useVjKeywords((state) => state.picked);
+  const vjWithArtist = useVjKeywords((state) => state.withArtist);
+  const vjToggle = useVjKeywords((state) => state.toggle);
+  const vjAdd = useVjKeywords((state) => state.add);
+  const vjRemove = useVjKeywords((state) => state.remove);
+  const vjSetWithArtist = useVjKeywords((state) => state.setWithArtist);
+
+  const scKeywords = useScKeywords((state) => state.keywords);
+  const scPicked = useScKeywords((state) => state.picked);
+  const scWithArtist = useScKeywords((state) => state.withArtist);
+  const scToggle = useScKeywords((state) => state.toggle);
+  const scAdd = useScKeywords((state) => state.add);
+  const scRemove = useScKeywords((state) => state.remove);
+  const scSetWithArtist = useScKeywords((state) => state.setWithArtist);
+
+  return (
+    <div className="kd-explore">
+      <ExploreBlock
+        label="搜索 VJ"
+        tone="bili"
+        platform="bilibili"
+        track={track}
+        ops={{
+          keywords: vjKeywords,
+          picked: vjPicked,
+          withArtist: vjWithArtist,
+          toggle: vjToggle,
+          add: vjAdd,
+          remove: vjRemove,
+          setWithArtist: vjSetWithArtist,
+        }}
+      />
+      <ExploreBlock
+        label="搜索 SoundCloud"
+        tone="sc"
+        platform="soundcloud"
+        track={track}
+        ops={{
+          keywords: scKeywords,
+          picked: scPicked,
+          withArtist: scWithArtist,
+          toggle: scToggle,
+          add: scAdd,
+          remove: scRemove,
+          setWithArtist: scSetWithArtist,
+        }}
+      />
     </div>
   );
 }

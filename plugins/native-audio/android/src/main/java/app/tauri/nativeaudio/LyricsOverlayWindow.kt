@@ -66,12 +66,13 @@ class LyricsOverlayWindow(context: Context) {
         scale: Float,
         accent: LyricsColorPaint,
         secondary: LyricsColorPaint,
+        dim: LyricsColorPaint,
         stroke: LyricsColorPaint,
         opacity: Float,
     ): Boolean {
         if (view != null) {
             applyPlacement(edge, y, locked)
-            applyStyle(scale, accent, secondary, stroke, opacity)
+            applyStyle(scale, accent, secondary, dim, stroke, opacity)
             return true
         }
         if (!canDraw()) return false
@@ -94,7 +95,7 @@ class LyricsOverlayWindow(context: Context) {
             view = overlay
             params = layout
             overlay.alpha = opacity.coerceIn(MIN_OPACITY, 1f)
-            overlay.setStyle(scale, accent, secondary, stroke)
+            overlay.setStyle(scale, accent, secondary, dim, stroke)
             bindDrag(overlay)
             true
         }.onFailure { error ->
@@ -115,12 +116,13 @@ class LyricsOverlayWindow(context: Context) {
         scale: Float,
         accent: LyricsColorPaint,
         secondary: LyricsColorPaint,
+        dim: LyricsColorPaint,
         stroke: LyricsColorPaint,
         opacity: Float,
     ) {
         val overlay = view ?: return
         overlay.alpha = opacity.coerceIn(MIN_OPACITY, 1f)
-        overlay.setStyle(scale, accent, secondary, stroke)
+        overlay.setStyle(scale, accent, secondary, dim, stroke)
     }
 
     /**

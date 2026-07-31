@@ -15,7 +15,10 @@
 
 #[cfg(desktop)]
 mod desktop_media;
-#[cfg(desktop)]
+#[cfg(target_os = "android")]
+mod android_media;
+/// 桌面 + Android 共用 playback_* 命令；iOS 仍走 native-audio 插件。
+#[cfg(any(desktop, target_os = "android"))]
 mod desktop_player;
 
 use std::path::{Path, PathBuf};
@@ -837,8 +840,8 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init());
-    // 移动端由 MediaSessionService / AVPlayer 承载；桌面由进程内 kdj-player +
-    // CPAL 承载。两边最终声音都不再依赖 WebView 生命周期，移动插件仍只在手机入包。
+    // Android：出声已切共享 coordinator（CPAL/AAudio）；native-audio 插件仍入包，
+    // 负责前台保活、歌词 overlay、相册等。iOS 仍由插件内 AVPlayer 出声。
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let builder = builder.plugin(tauri_plugin_native_audio::init());
     // updater/process 只在桌面注册：安卓的更新走 Release 页下 APK
@@ -849,7 +852,7 @@ pub fn run() {
 
     let builder = builder.setup(|app| {
         app.manage(UpdateProgressState::default());
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_os = "android"))]
         app.manage(
             desktop_player::DesktopPlayerHandle::spawn(app.handle().clone())
                 .map_err(anyhow::Error::msg)?,
@@ -870,6 +873,12 @@ pub fn run() {
                 let resolved = resolve_startup_theme(theme, &window);
                 if let Err(err) = apply_main_window_background(&window, resolved) {
                     tracing::warn!("启动时设置窗口底色失败：{err}");
+                }
+                // Mac 用 Overlay + 红绿灯即可；Windows / Linux 的 Overlay/hiddenTitle
+                // 无效，系统标题栏会画出图标和「KDJ」。关掉 decorations，由前端自绘三键。
+                #[cfg(not(target_os = "macos"))]
+                if let Err(err) = window.set_decorations(false) {
+                    tracing::warn!("关闭系统标题栏失败：{err}");
                 }
             }
             #[cfg(not(desktop))]
@@ -898,7 +907,26 @@ pub fn run() {
         desktop_player::playback_command,
         desktop_player::playback_state
     ]);
-    #[cfg(mobile)]
+    #[cfg(all(mobile, target_os = "android"))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        get_bridge_info,
+        open_path,
+        reveal_path,
+        save_login_qr,
+        open_external,
+        check_desktop_update,
+        get_update_progress,
+        apply_update,
+        pick_folder,
+        pick_folders,
+        window_control,
+        set_window_background,
+        set_desktop_lyrics,
+        desktop_player::playback_initialize,
+        desktop_player::playback_command,
+        desktop_player::playback_state
+    ]);
+    #[cfg(all(mobile, target_os = "ios"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_bridge_info,
         open_path,

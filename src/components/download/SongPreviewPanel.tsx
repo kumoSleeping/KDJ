@@ -13,7 +13,7 @@ import { PLATFORM_LABEL } from "./MergedGroupRow";
  * 不把媒体接进 AudioContext：部分平台直链没有 CORS，强接会让声音变成静音。
  *
  * 元信息只用搜索结果里已经带回来的网络字段（封面 / 专辑 / 平台 / VIP），
- * 不下载、不分析、也不挂「搜 VJ」——那些是本地曲目详情的事。
+ * 不下载、不分析、也不挂 Explore——那些是本地曲目详情的事。
  */
 function previewBars(seed: string, count = 72): number[] {
   let state = 2166136261;

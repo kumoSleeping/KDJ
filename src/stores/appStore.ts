@@ -13,7 +13,7 @@ import { useQueueStore } from "./queueStore";
 
 /**
  * hasResults 只管中间搜索半栏是否展开；右栏下载队列只看 showQueue。
- * 搜完（含搜 VJ）不再自动把右栏切成队列——真有任务入队时再 openQueuePanel。
+ * 搜完（含 Explore 代搜）不再自动把右栏切成队列——真有任务入队时再 openQueuePanel。
  *
  * 视频曾经是并列的第三个标签，现在并回了搜索半栏：贴 B 站链接和搜关键词都是
  * "去网上找东西下"。视频和歌的差别只体现在结果行的长相上（见 VideoResultRow）。

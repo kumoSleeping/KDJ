@@ -57,7 +57,7 @@ export type NativeLyricsTimelinePayload = {
   lines: NativeLyricsLine[];
 };
 
-export type NativeLyricsColorMode = 'black' | 'white' | 'solid' | 'gradient' | 'none';
+export type NativeLyricsColorMode = 'black' | 'white' | 'gray' | 'solid' | 'gradient' | 'none' | 'follow';
 
 export type NativeLyricsOverlayPayload = {
   visible: boolean;
@@ -71,6 +71,10 @@ export type NativeLyricsOverlayPayload = {
   secondaryAccent?: string;
   secondaryAccentEnd?: string;
   secondaryMode?: NativeLyricsColorMode;
+  /** 未唱部分颜色。 */
+  dim?: string;
+  dimEnd?: string;
+  dimMode?: NativeLyricsColorMode;
   stroke?: string;
   strokeEnd?: string;
   strokeMode?: NativeLyricsColorMode;
