@@ -31,6 +31,14 @@ export function LyricsHost({
   const desktopPositionX = useLyricsPrefs((state) => state.desktopPositionX);
   const desktopPositionY = useLyricsPrefs((state) => state.desktopPositionY);
   const desktopAccent = useLyricsPrefs((state) => state.desktopAccent);
+  const desktopAccentEnd = useLyricsPrefs((state) => state.desktopAccentEnd);
+  const desktopAccentMode = useLyricsPrefs((state) => state.desktopAccentMode);
+  const desktopSecondaryAccent = useLyricsPrefs((state) => state.desktopSecondaryAccent);
+  const desktopSecondaryAccentEnd = useLyricsPrefs((state) => state.desktopSecondaryAccentEnd);
+  const desktopSecondaryMode = useLyricsPrefs((state) => state.desktopSecondaryMode);
+  const desktopStroke = useLyricsPrefs((state) => state.desktopStroke);
+  const desktopStrokeEnd = useLyricsPrefs((state) => state.desktopStrokeEnd);
+  const desktopStrokeMode = useLyricsPrefs((state) => state.desktopStrokeMode);
   const desktopOpacity = useLyricsPrefs((state) => state.desktopOpacity);
   const lyricExtra = useLyricsPrefs((state) => state.lyricExtra);
   const setDesktopVerticalOffset = useLyricsPrefs((state) => state.setDesktopVerticalOffset);
@@ -69,6 +77,14 @@ export function LyricsHost({
       x: desktopPositionX,
       y: desktopPositionY,
       accent: desktopAccent,
+      accentEnd: desktopAccentEnd,
+      accentMode: desktopAccentMode,
+      secondaryAccent: desktopSecondaryAccent,
+      secondaryAccentEnd: desktopSecondaryAccentEnd,
+      secondaryMode: desktopSecondaryMode,
+      stroke: desktopStroke,
+      strokeEnd: desktopStrokeEnd,
+      strokeMode: desktopStrokeMode,
       opacity: desktopOpacity,
     }).catch((error) => {
       console.error("悬浮歌词窗口更新失败", error);
@@ -83,6 +99,14 @@ export function LyricsHost({
     desktopPositionX,
     desktopPositionY,
     desktopAccent,
+    desktopAccentEnd,
+    desktopAccentMode,
+    desktopSecondaryAccent,
+    desktopSecondaryAccentEnd,
+    desktopSecondaryMode,
+    desktopStroke,
+    desktopStrokeEnd,
+    desktopStrokeMode,
     desktopOpacity,
     current?.id,
   ]);

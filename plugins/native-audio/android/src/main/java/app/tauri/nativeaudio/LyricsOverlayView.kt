@@ -3,7 +3,9 @@ package app.tauri.nativeaudio
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.View
@@ -14,7 +16,7 @@ import kotlin.math.min
  * 悬浮歌词的绘制层。只画字，不碰窗口层级也不读播放器：
  * 帧数据由 [LyricsOverlayRuntime] 在主线程推进来。
  *
- * 视觉对齐桌面的 `.kd-desktop-lyrics`（白字 + 粗黑描边 + 投影），额外做了
+ * 视觉对齐桌面的 `.kd-desktop-lyrics`（可配填色/描边 + 粗描边 + 投影），额外做了
  * 桌面那边 CSS 做不到的逐字填充：未唱部分压暗，已唱部分用强调色，
  * 分界线按行内进度水平推进。
  *
@@ -34,7 +36,9 @@ class LyricsOverlayView(context: Context) : View(context) {
     private var secondaryText = ""
     private var fill = 0f
     private var fontScale = 1f
-    private var accentColor = Color.WHITE
+    private var accent = LyricsColorPaint(false, Color.WHITE, Color.WHITE)
+    private var secondary = LyricsColorPaint(false, SECONDARY_COLOR, SECONDARY_COLOR)
+    private var stroke = LyricsColorPaint(false, Color.BLACK, Color.BLACK)
     /** 整首歌都没有副行时不预留第二行高度，避免悬浮窗白占一条。 */
     private var reserveSecondary = false
 
@@ -60,11 +64,25 @@ class LyricsOverlayView(context: Context) : View(context) {
         invalidate()
     }
 
-    fun setStyle(scale: Float, accent: Int) {
+    fun setStyle(
+        scale: Float,
+        accentPaint: LyricsColorPaint,
+        secondaryPaint: LyricsColorPaint,
+        strokePaint: LyricsColorPaint,
+    ) {
         val safeScale = scale.coerceIn(1f, 3f)
-        if (fontScale == safeScale && accentColor == accent) return
+        if (
+            fontScale == safeScale &&
+            accent == accentPaint &&
+            secondary == secondaryPaint &&
+            stroke == strokePaint
+        ) {
+            return
+        }
         fontScale = safeScale
-        accentColor = accent
+        accent = accentPaint
+        secondary = secondaryPaint
+        stroke = strokePaint
         applyTypography()
         invalidateLayoutCache()
         requestLayout()
@@ -112,7 +130,14 @@ class LyricsOverlayView(context: Context) : View(context) {
         val baseX = centered + overflowShift(primaryWidth, available)
         val baseY = paddingTop - primaryDim.ascent()
 
-        canvas.drawText(primaryText, baseX, baseY, primaryStroke)
+        applyPaint(primaryLit, accent, baseX, baseX + primaryWidth)
+        primaryDim.shader = null
+        primaryDim.color = DIM_COLOR
+
+        if (!stroke.none) {
+            applyPaint(primaryStroke, stroke, baseX, baseX + primaryWidth)
+            canvas.drawText(primaryText, baseX, baseY, primaryStroke)
+        }
         canvas.drawText(primaryText, baseX, baseY, primaryDim)
 
         // 已唱部分：同一串字重画一遍，按行内进度裁出分界线。裁剪比渐变
@@ -133,7 +158,11 @@ class LyricsOverlayView(context: Context) : View(context) {
         val secondaryWidth = secondaryFill.measureText(secondaryText)
         val secondaryX = paddingLeft + max(0f, (available - secondaryWidth) / 2f)
         val secondaryY = baseY + primaryDim.descent() + dp(LINE_GAP_DP) - secondaryFill.ascent()
-        canvas.drawText(secondaryText, secondaryX, secondaryY, secondaryStroke)
+        applyPaint(secondaryFill, secondary, secondaryX, secondaryX + secondaryWidth)
+        if (!stroke.none) {
+            applyPaint(secondaryStroke, stroke, secondaryX, secondaryX + secondaryWidth)
+            canvas.drawText(secondaryText, secondaryX, secondaryY, secondaryStroke)
+        }
         canvas.drawText(secondaryText, secondaryX, secondaryY, secondaryFill)
     }
 
@@ -173,15 +202,36 @@ class LyricsOverlayView(context: Context) : View(context) {
         val bold = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
         for (paint in listOf(primaryStroke, primaryDim, primaryLit, secondaryStroke, secondaryFill)) {
             paint.typeface = bold
+            paint.shader = null
         }
         primaryDim.color = DIM_COLOR
-        primaryLit.color = accentColor
-        secondaryFill.color = SECONDARY_COLOR
+        primaryLit.color = accent.start
+        secondaryFill.color = secondary.start
+        primaryStroke.color = stroke.start
+        secondaryStroke.color = stroke.start
 
         val shadow = dp(1.5f)
         primaryDim.setShadowLayer(shadow, 0f, shadow, SHADOW_COLOR)
         primaryLit.setShadowLayer(shadow, 0f, shadow, SHADOW_COLOR)
         secondaryFill.setShadowLayer(shadow, 0f, shadow, SHADOW_COLOR)
+    }
+
+    private fun applyPaint(paint: Paint, color: LyricsColorPaint, x0: Float, x1: Float) {
+        if (color.gradient && color.start != color.end && x1 > x0) {
+            paint.shader = LinearGradient(
+                x0,
+                0f,
+                x1,
+                0f,
+                color.start,
+                color.end,
+                Shader.TileMode.CLAMP,
+            )
+            paint.color = Color.WHITE
+        } else {
+            paint.shader = null
+            paint.color = color.start
+        }
     }
 
     private fun strokePaint() = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -206,7 +256,8 @@ class LyricsOverlayView(context: Context) : View(context) {
     private companion object {
         const val PRIMARY_SP = 21f
         const val SECONDARY_SP = 13f
-        const val STROKE_RATIO = 0.14f
+        // 旧 0.14 描边太粗，压到接近细线。
+        const val STROKE_RATIO = 0.055f
         const val MIN_SQUEEZE = 0.62f
         const val LINE_GAP_DP = 2f
         val DIM_COLOR = Color.argb(0x9E, 0xFF, 0xFF, 0xFF)

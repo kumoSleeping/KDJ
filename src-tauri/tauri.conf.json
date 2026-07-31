@@ -20,7 +20,7 @@
         "height": 880,
         "minWidth": 360,
         "minHeight": 480,
-        "backgroundColor": "#111113",
+        "backgroundColor": "#f2f2f2",
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "acceptFirstMouse": true,

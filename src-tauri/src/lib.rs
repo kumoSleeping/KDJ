@@ -148,28 +148,40 @@ struct SavedLoginQr {
 /// 把登录二维码 PNG（data URL）写到本机，方便用另一台设备扫。
 ///
 /// - 桌面：系统「下载」目录
-/// - 手机：系统「图片」目录（相册里能直接挑到）
+/// - 安卓：不走这条命令（scoped storage 直写进不了相册），前端调
+///   `plugin:native-audio|save_png_to_gallery` 走 MediaStore
 #[tauri::command]
 fn save_login_qr(platform: String, label: String, image: String) -> Result<SavedLoginQr, String> {
-    let png = decode_png_data_url(&image)?;
-    let (dir, location) = login_qr_save_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|err| format!("创建目录失败：{err}"))?;
+    #[cfg(target_os = "android")]
+    {
+        let _ = (platform, label, image);
+        return Err(
+            "安卓请通过相册接口保存登录二维码（MediaStore），不要直写 Pictures 目录".into(),
+        );
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let png = decode_png_data_url(&image)?;
+        let (dir, location) = login_qr_save_dir()?;
+        std::fs::create_dir_all(&dir).map_err(|err| format!("创建目录失败：{err}"))?;
 
-    let safe_label = sanitize_filename(if label.trim().is_empty() {
-        platform.as_str()
-    } else {
-        label.trim()
-    });
-    // 固定文件名：换一张就覆盖，下载/相册里不会堆一堆过期码。
-    let path = dir.join(format!("KDJ-登录二维码-{safe_label}.png"));
-    std::fs::write(&path, png).map_err(|err| format!("写入二维码失败：{err}"))?;
+        let safe_label = sanitize_filename(if label.trim().is_empty() {
+            platform.as_str()
+        } else {
+            label.trim()
+        });
+        // 固定文件名：换一张就覆盖，下载/相册里不会堆一堆过期码。
+        let path = dir.join(format!("KDJ-登录二维码-{safe_label}.png"));
+        std::fs::write(&path, png).map_err(|err| format!("写入二维码失败：{err}"))?;
 
-    Ok(SavedLoginQr {
-        path: path.to_string_lossy().into_owned(),
-        location,
-    })
+        Ok(SavedLoginQr {
+            path: path.to_string_lossy().into_owned(),
+            location,
+        })
+    }
 }
 
+#[cfg(not(target_os = "android"))]
 fn decode_png_data_url(image: &str) -> Result<Vec<u8>, String> {
     use base64::Engine as _;
     let payload = image
@@ -182,6 +194,7 @@ fn decode_png_data_url(image: &str) -> Result<Vec<u8>, String> {
 }
 
 /// 文件名里去掉路径分隔符和明显的非法字符，避免写到奇怪位置。
+#[cfg(not(target_os = "android"))]
 fn sanitize_filename(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
@@ -199,21 +212,11 @@ fn sanitize_filename(raw: &str) -> String {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn login_qr_save_dir() -> Result<(PathBuf, &'static str), String> {
-    // 手机：进图片目录，相册/图库一般能直接扫到；桌面：进下载，最容易找到。
-    #[cfg(target_os = "android")]
-    {
-        Ok((PathBuf::from("/storage/emulated/0/Pictures/KDJ"), "pictures"))
-    }
-    #[cfg(target_os = "ios")]
-    {
-        // iOS 沙盒写不进系统相册；先落到下载目录，仍可用「打开」定位文件。
-        Ok((kdj_core::config::system_download_dir(), "downloads"))
-    }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        Ok((kdj_core::config::system_download_dir(), "downloads"))
-    }
+    // iOS 沙盒写不进系统相册；先落到下载目录。桌面进系统下载，最容易找到。
+    // 安卓正式路径走 native-audio 的 MediaStore，不经过这里。
+    Ok((kdj_core::config::system_download_dir(), "downloads"))
 }
 
 /// 用系统浏览器开外链（Release 下载页）。只放行 http(s)——
@@ -444,24 +447,48 @@ fn window_control(
     }
 }
 
+/// 主窗原生底色：与 design.css 的 `--kd-bg` 对齐。
+#[cfg(desktop)]
+fn window_theme_color(theme: &str) -> Result<tauri::window::Color, String> {
+    match theme {
+        "dark" => Ok(tauri::window::Color(0x11, 0x11, 0x13, 0xff)),
+        "light" => Ok(tauri::window::Color(0xf2, 0xf2, 0xf2, 0xff)),
+        other => Err(format!("未知的窗口主题：{other}")),
+    }
+}
+
+/// 把主窗原生底色改成与 Web 主题一致。歌词窗必须保持透明，这里直接跳过。
+#[cfg(desktop)]
+fn apply_main_window_background(window: &tauri::WebviewWindow, theme: &str) -> Result<(), String> {
+    if window.label() != "main" {
+        return Ok(());
+    }
+    let color = window_theme_color(theme)?;
+    window
+        .set_background_color(Some(color))
+        .map_err(|err| err.to_string())
+}
+
+/// settings 里的 system 要落到具体深/浅；读不到系统偏好时按浅色（与 default_theme 一致）。
+#[cfg(desktop)]
+fn resolve_startup_theme(theme: kdj_core::Theme, window: &tauri::WebviewWindow) -> &'static str {
+    match theme {
+        kdj_core::Theme::Dark => "dark",
+        kdj_core::Theme::Light => "light",
+        kdj_core::Theme::System => match window.theme() {
+            Ok(tauri::Theme::Dark) => "dark",
+            _ => "light",
+        },
+    }
+}
+
 /// 让原生窗口底色跟随 Web 主题。macOS 快速拖窗时系统会短暂直接合成窗口底层；
 /// 若浅色页面仍垫着配置中的深色底色，右缘就会露出一块黑影。
 #[tauri::command]
 fn set_window_background(window: tauri::WebviewWindow, theme: String) -> Result<(), String> {
     #[cfg(desktop)]
     {
-        // 歌词悬浮窗依赖透明背景，不能被主界面的主题同步改成不透明。
-        if window.label() != "main" {
-            return Ok(());
-        }
-        let color = match theme.as_str() {
-            "dark" => tauri::window::Color(0x11, 0x11, 0x13, 0xff),
-            "light" => tauri::window::Color(0xf2, 0xf2, 0xf2, 0xff),
-            other => return Err(format!("未知的窗口主题：{other}")),
-        };
-        return window
-            .set_background_color(Some(color))
-            .map_err(|err| err.to_string());
+        return apply_main_window_background(&window, &theme);
     }
     #[cfg(not(desktop))]
     {
@@ -764,7 +791,7 @@ fn env_path(name: &str) -> Option<PathBuf> {
 }
 
 /// 起进程内的 axum server，返回前端要的 baseUrl / token。
-fn start_server(app: &tauri::AppHandle) -> anyhow::Result<Bridge> {
+fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::Theme)> {
     // 环境变量只是给调试留的后门；正常启动走带旧数据迁移的 default_data_dir。
     let data_dir = env_path("KDJ_DATA_DIR")
         .map(Ok)
@@ -786,14 +813,19 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<Bridge> {
     // 端口传 0 让内核挑：Electron 版是先 listen(0) 探一个再关掉再交给 Python，
     // 那中间有一段「探到的端口被别人抢走」的竞态窗口，这里直接没有。
     let config = Arc::new(AppConfig::create(data_dir, download_dir, 0));
+    // show() 前要用这份主题垫原生底色，否则浅色用户会先看到配置默认底闪一下。
+    let theme = config.to_settings().theme;
     // serve() 内部 tokio::spawn，需要运行时上下文；Tauri 的全局运行时就是 tokio。
     // 返回的 JoinHandle 故意丢掉——tokio 里 drop JoinHandle 不会取消任务，
     // 服务的生命周期跟着进程走，和 Electron 版 sidecar 跟着主进程走是一个意思。
     let (port, _serve_task) = tauri::async_runtime::block_on(kdj_server::serve(config))?;
 
-    Ok(Bridge {
-        base_url: format!("http://127.0.0.1:{port}"),
-    })
+    Ok((
+        Bridge {
+            base_url: format!("http://127.0.0.1:{port}"),
+        },
+        theme,
+    ))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -822,14 +854,26 @@ pub fn run() {
             desktop_player::DesktopPlayerHandle::spawn(app.handle().clone())
                 .map_err(anyhow::Error::msg)?,
         );
-        let bridge = start_server(app.handle())?;
+        let (bridge, theme) = start_server(app.handle())?;
         tracing::info!("KDJ 后端就绪：{}", bridge.base_url);
         app.manage(bridge);
         // 服务起好再显示窗口。窗口在配置里是 visible:false，这里补一次 show()——
         // Electron 版靠 `ready-to-show` 做同样的事，为的是不让用户看见
         // 「空窗口 → 内容」的跳变。start_server 失败时直接返回 Err，
         // 窗口不会露面，也就不会出现一个连不上后端的空壳。
+        //
+        // show 之前必须先按 settings 垫好原生底色：WebView 首帧前用户看到的是
+        // 原生背景；若仍是配置默认色，浅色主题会先闪一块深色大面板。
         if let Some(window) = app.get_webview_window("main") {
+            #[cfg(desktop)]
+            {
+                let resolved = resolve_startup_theme(theme, &window);
+                if let Err(err) = apply_main_window_background(&window, resolved) {
+                    tracing::warn!("启动时设置窗口底色失败：{err}");
+                }
+            }
+            #[cfg(not(desktop))]
+            let _ = theme;
             let _ = window.show();
         }
         Ok(())

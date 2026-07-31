@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   CSSProperties,
   PointerEvent as ReactPointerEvent,
@@ -13,11 +13,22 @@ import {
   useDjConfig,
 } from "../../lib/djMix";
 import {
+  HUE_LINE_GRADIENT,
+  hexToT,
+  needsHueLine,
+  tToHex,
+  type LyricsColorMode,
+  type LyricsColorPaint,
+} from "../../lib/lyricsColor";
+import {
+  accentPaint,
   DESKTOP_FONT_SCALE_MAX,
   DESKTOP_FONT_SCALE_MIN,
   DESKTOP_OPACITY_MIN,
   enginesFromMode,
   enginesMode,
+  secondaryPaint,
+  strokePaint,
   useLyricsPrefs,
   type LyricsEngineMode,
 } from "../../lib/lyricsPrefs";
@@ -292,6 +303,157 @@ function RatioSlider({
   );
 }
 
+const FILL_MODE_OPTIONS = [
+  { id: "black" as const, text: "黑" },
+  { id: "white" as const, text: "白" },
+  { id: "solid" as const, text: "单色" },
+  { id: "gradient" as const, text: "渐变" },
+] satisfies ReadonlyArray<{ id: LyricsColorMode; text: string }>;
+
+const STROKE_MODE_OPTIONS = [
+  { id: "black" as const, text: "黑" },
+  { id: "white" as const, text: "白" },
+  { id: "solid" as const, text: "单色" },
+  { id: "gradient" as const, text: "渐变" },
+  { id: "none" as const, text: "无" },
+] satisfies ReadonlyArray<{ id: LyricsColorMode; text: string }>;
+
+/**
+ * 悬浮歌词取色行：右侧在「黑 / 白 / 单色 / 渐变」（边框多「无」）间切换；
+ * 单色 / 渐变时下面一根纯彩色相线——单色一颗球，渐变左右两颗。
+ */
+function LyricsColorRow({
+  label,
+  title,
+  value,
+  onChange,
+  allowNone = false,
+}: {
+  label: string;
+  title?: string;
+  value: LyricsColorPaint;
+  onChange(next: LyricsColorPaint): void;
+  allowNone?: boolean;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const activeRef = useRef<"start" | "end">("start");
+  const [active, setActive] = useState<"start" | "end">("start");
+  const startT = hexToT(value.start);
+  const endT = hexToT(value.end);
+  const gradient = value.mode === "gradient";
+  const showHue = needsHueLine(value.mode);
+  const options = allowNone ? STROKE_MODE_OPTIONS : FILL_MODE_OPTIONS;
+
+  const applyT = (t: number, which: "start" | "end") => {
+    const hex = tToHex(t);
+    if (!gradient || which === "start") {
+      onChange({ ...value, start: hex });
+      return;
+    }
+    onChange({ ...value, end: hex });
+  };
+
+  const pickHandle = (t: number): "start" | "end" => {
+    if (!gradient) return "start";
+    return Math.abs(t - startT) <= Math.abs(t - endT) ? "start" : "end";
+  };
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const el = trackRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const t = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    const which = pickHandle(t);
+    activeRef.current = which;
+    setActive(which);
+    applyT(t, which);
+  };
+  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    const el = trackRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const t = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    applyT(t, activeRef.current);
+  };
+  const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  return (
+    <div className="kd-lyrics-color-block" title={title}>
+      <CycleToggle
+        label={label}
+        value={value.mode}
+        options={options}
+        title={title}
+        onChange={(mode) => onChange({ ...value, mode })}
+      />
+      {showHue ? (
+        <div
+          ref={trackRef}
+          className="kd-lyrics-hue-line"
+          role="slider"
+          tabIndex={0}
+          aria-label={`${label}色相`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round((gradient && active === "end" ? endT : startT) * 100)}
+          style={{ background: HUE_LINE_GRADIENT }}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onKeyDown={(event) => {
+            const which = gradient ? active : "start";
+            const current = which === "end" ? endT : startT;
+            const step = 0.02;
+            if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
+              event.preventDefault();
+              applyT(current - step, which);
+            } else if (event.key === "ArrowRight" || event.key === "ArrowUp") {
+              event.preventDefault();
+              applyT(current + step, which);
+            } else if (event.key === "Home") {
+              event.preventDefault();
+              applyT(0, which);
+            } else if (event.key === "End") {
+              event.preventDefault();
+              applyT(1, which);
+            } else if (gradient && (event.key === "[" || event.key === "]")) {
+              event.preventDefault();
+              const next = event.key === "[" ? "start" : "end";
+              activeRef.current = next;
+              setActive(next);
+            }
+          }}
+        >
+          <span
+            className="kd-lyrics-hue-knob"
+            data-active={!gradient || active === "start" ? "true" : undefined}
+            style={{ left: `${startT * 100}%`, background: value.start }}
+            aria-hidden="true"
+          />
+          {gradient ? (
+            <span
+              className="kd-lyrics-hue-knob"
+              data-active={active === "end" ? "true" : undefined}
+              style={{ left: `${endT * 100}%`, background: value.end }}
+              aria-hidden="true"
+            />
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function SettingsPanel() {
   const theme = useAppStore((state) => state.settings?.theme ?? "system");
   const saveSettings = useAppStore((state) => state.saveSettings);
@@ -320,13 +482,38 @@ export function SettingsPanel() {
   const desktopLyricsPosition = useLyricsPrefs((state) => state.desktopPosition);
   const desktopLyricsLocked = useLyricsPrefs((state) => state.desktopLocked);
   const desktopLyricsFontScale = useLyricsPrefs((state) => state.desktopFontScale);
-  const desktopLyricsAccent = useLyricsPrefs((state) => state.desktopAccent);
   const desktopLyricsOpacity = useLyricsPrefs((state) => state.desktopOpacity);
+  const desktopAccentMode = useLyricsPrefs((state) => state.desktopAccentMode);
+  const desktopAccentStart = useLyricsPrefs((state) => state.desktopAccent);
+  const desktopAccentEnd = useLyricsPrefs((state) => state.desktopAccentEnd);
+  const desktopSecondaryMode = useLyricsPrefs((state) => state.desktopSecondaryMode);
+  const desktopSecondaryStart = useLyricsPrefs((state) => state.desktopSecondaryAccent);
+  const desktopSecondaryEnd = useLyricsPrefs((state) => state.desktopSecondaryAccentEnd);
+  const desktopStrokeMode = useLyricsPrefs((state) => state.desktopStrokeMode);
+  const desktopStrokeStart = useLyricsPrefs((state) => state.desktopStroke);
+  const desktopStrokeEnd = useLyricsPrefs((state) => state.desktopStrokeEnd);
   const setDesktopLyricsPosition = useLyricsPrefs((state) => state.setDesktopPosition);
   const setDesktopLyricsLocked = useLyricsPrefs((state) => state.setDesktopLocked);
   const setDesktopLyricsFontScale = useLyricsPrefs((state) => state.setDesktopFontScale);
-  const setDesktopLyricsAccent = useLyricsPrefs((state) => state.setDesktopAccent);
+  const setDesktopAccentPaint = useLyricsPrefs((state) => state.setDesktopAccentPaint);
+  const setDesktopSecondaryPaint = useLyricsPrefs((state) => state.setDesktopSecondaryPaint);
+  const setDesktopStrokePaint = useLyricsPrefs((state) => state.setDesktopStrokePaint);
   const setDesktopLyricsOpacity = useLyricsPrefs((state) => state.setDesktopOpacity);
+  const desktopAccent = accentPaint({
+    desktopAccentMode,
+    desktopAccent: desktopAccentStart,
+    desktopAccentEnd,
+  });
+  const desktopSecondary = secondaryPaint({
+    desktopSecondaryMode,
+    desktopSecondaryAccent: desktopSecondaryStart,
+    desktopSecondaryAccentEnd: desktopSecondaryEnd,
+  });
+  const desktopStroke = strokePaint({
+    desktopStrokeMode,
+    desktopStroke: desktopStrokeStart,
+    desktopStrokeEnd,
+  });
   // 桌面是独立置顶窗口，Android 是原生浮层；两边都由这组设置驱动。
   // 浏览器预览和 iOS 没有悬浮歌词，桥接层那边就是 null。
   const canOverlayLyrics = Boolean(window.kdj?.desktopLyrics);
@@ -489,23 +676,29 @@ export function SettingsPanel() {
                   value={desktopLyricsOpacity}
                   onChange={setDesktopLyricsOpacity}
                 />
-                <div className="kd-lyrics-size-row">
-                  <span className="kd-djp-toggle-label">
-                    {overlayIsNative ? "逐字高亮色" : "歌词颜色"}
-                  </span>
-                  <input
-                    type="color"
-                    className="kd-lyrics-color"
-                    value={desktopLyricsAccent}
-                    aria-label={overlayIsNative ? "悬浮歌词逐字高亮色" : "悬浮歌词颜色"}
-                    title={
-                      overlayIsNative
-                        ? "已唱部分用这个颜色点亮，未唱部分保持半透明白。"
-                        : "悬浮歌词主行的文字颜色。"
-                    }
-                    onChange={(event) => setDesktopLyricsAccent(event.target.value)}
-                  />
-                </div>
+                <LyricsColorRow
+                  label={overlayIsNative ? "高亮色" : "主行颜色"}
+                  title={
+                    overlayIsNative
+                      ? "已唱部分：黑 / 白 / 单色（色相线）/ 渐变。未唱部分仍是半透明白。"
+                      : "主行：黑 / 白 / 单色（色相线）/ 渐变。"
+                  }
+                  value={desktopAccent}
+                  onChange={setDesktopAccentPaint}
+                />
+                <LyricsColorRow
+                  label="副行颜色"
+                  title="翻译或下一句：黑 / 白 / 单色 / 渐变。"
+                  value={desktopSecondary}
+                  onChange={setDesktopSecondaryPaint}
+                />
+                <LyricsColorRow
+                  label="边框颜色"
+                  title="描边：黑 / 白 / 单色 / 渐变 / 无。"
+                  value={desktopStroke}
+                  onChange={setDesktopStrokePaint}
+                  allowNone
+                />
               </>
             ) : null}
             <CycleToggle

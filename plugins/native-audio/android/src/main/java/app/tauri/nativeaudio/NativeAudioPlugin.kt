@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.net.Uri
 import android.app.ActivityManager
 import android.os.Build
@@ -134,10 +135,30 @@ class SetLyricsOverlayArgs {
     var locked: Boolean? = null
     var fontScale: Double? = null
     var accent: String? = null
+    var accentEnd: String? = null
+    var accentMode: String? = null
+    var secondaryAccent: String? = null
+    var secondaryAccentEnd: String? = null
+    var secondaryMode: String? = null
+    var stroke: String? = null
+    var strokeEnd: String? = null
+    var strokeMode: String? = null
     var opacity: Double? = null
     /** 只有换边或重新打开时才吸附，避免抹掉用户拖出来的位置。 */
     var reposition: Boolean? = null
     var y: Int? = null
+}
+
+@InvokeArg
+class SavePngToGalleryArgs {
+    var platform: String? = null
+    var label: String? = null
+    var image: String? = null
+}
+
+@InvokeArg
+class OpenLocalPathArgs {
+    var path: String? = null
 }
 
 private data class PendingSeekState(
@@ -925,7 +946,14 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
             edge = LyricsOverlayEdge.parse(args.position),
             locked = args.locked != false,
             fontScale = args.fontScale?.takeIf { it.isFinite() }?.toFloat() ?: 1f,
-            accentColor = LyricsOverlayConfig.parseAccent(args.accent),
+            accent = LyricsColorPaint.parse(args.accentMode, args.accent, args.accentEnd, Color.WHITE),
+            secondary = LyricsColorPaint.parse(
+                args.secondaryMode,
+                args.secondaryAccent,
+                args.secondaryAccentEnd,
+                Color.argb(0xF0, 0xFF, 0xFF, 0xFF),
+            ),
+            stroke = LyricsColorPaint.parse(args.strokeMode, args.stroke, args.strokeEnd, Color.BLACK),
             opacity = args.opacity?.takeIf { it.isFinite() }?.toFloat() ?: 1f,
         )
         val repositionY = if (args.reposition == true) args.y else null
@@ -996,6 +1024,56 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve()
         }.onFailure {
             invoke.reject(it.message ?: "dispose failed")
+        }
+    }
+
+    /**
+     * 把 PNG data URL 写进系统相册（MediaStore / Pictures/KDJ）。
+     * 返回 content URI（path）+ 用户可读路径（displayPath），location 固定 pictures。
+     */
+    @Command
+    fun savePngToGallery(invoke: Invoke) {
+        val args = invoke.parseArgs(SavePngToGalleryArgs::class.java)
+        val image = args.image?.trim().orEmpty()
+        if (image.isEmpty()) {
+            invoke.reject("image is required")
+            return
+        }
+        runCatching {
+            GalleryHelper.savePngDataUrl(
+                activity,
+                args.platform?.trim().orEmpty().ifEmpty { "login" },
+                args.label?.trim().orEmpty(),
+                image,
+            )
+        }.onSuccess { (uri, displayPath) ->
+            invoke.resolve(
+                JSObject().apply {
+                    put("path", uri)
+                    put("displayPath", displayPath)
+                    put("location", "pictures")
+                },
+            )
+        }.onFailure {
+            invoke.reject(it.message ?: "savePngToGallery failed")
+        }
+    }
+
+    /** 用系统查看器打开本地文件或 content URI（登录二维码、曲库「显示所在位置」）。 */
+    @Command
+    fun openLocalPath(invoke: Invoke) {
+        val args = invoke.parseArgs(OpenLocalPathArgs::class.java)
+        val path = args.path?.trim().orEmpty()
+        if (path.isEmpty()) {
+            invoke.reject("path is required")
+            return
+        }
+        runCatching {
+            GalleryHelper.openLocalPath(activity, path)
+        }.onSuccess {
+            invoke.resolve()
+        }.onFailure {
+            invoke.reject(it.message ?: "openLocalPath failed")
         }
     }
 

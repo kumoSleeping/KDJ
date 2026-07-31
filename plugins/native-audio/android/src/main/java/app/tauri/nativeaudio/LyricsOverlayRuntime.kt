@@ -32,12 +32,47 @@ data class LyricsOverlayTimeline(
     }
 }
 
+/** 黑 / 白 / 单色 / 渐变 / 无；与前端 `LyricsColorPaint` 对齐。 */
+data class LyricsColorPaint(
+    val gradient: Boolean,
+    val start: Int,
+    val end: Int,
+    val none: Boolean = false,
+) {
+    companion object {
+        fun parse(mode: String?, start: String?, end: String?, fallback: Int): LyricsColorPaint {
+            return when (mode?.trim()?.lowercase()) {
+                "none" -> LyricsColorPaint(false, Color.TRANSPARENT, Color.TRANSPARENT, none = true)
+                "black" -> LyricsColorPaint(false, Color.BLACK, Color.BLACK)
+                "white" -> LyricsColorPaint(false, Color.WHITE, Color.WHITE)
+                "gradient" -> {
+                    val parsedStart = parseColor(start, fallback)
+                    LyricsColorPaint(true, parsedStart, parseColor(end, parsedStart))
+                }
+                else -> {
+                    // solid / 未知：用色相线上的 start
+                    val parsedStart = parseColor(start, fallback)
+                    LyricsColorPaint(false, parsedStart, parsedStart)
+                }
+            }
+        }
+
+        fun parseColor(value: String?, fallback: Int): Int {
+            val raw = value?.trim().orEmpty()
+            if (raw.isEmpty()) return fallback
+            return runCatching { Color.parseColor(raw) }.getOrDefault(fallback)
+        }
+    }
+}
+
 data class LyricsOverlayConfig(
     val visible: Boolean,
     val edge: LyricsOverlayEdge,
     val locked: Boolean,
     val fontScale: Float,
-    val accentColor: Int,
+    val accent: LyricsColorPaint,
+    val secondary: LyricsColorPaint,
+    val stroke: LyricsColorPaint,
     val opacity: Float,
 ) {
     companion object {
@@ -46,15 +81,11 @@ data class LyricsOverlayConfig(
             edge = LyricsOverlayEdge.BOTTOM,
             locked = true,
             fontScale = 1f,
-            accentColor = Color.WHITE,
+            accent = LyricsColorPaint(false, Color.WHITE, Color.WHITE),
+            secondary = LyricsColorPaint(false, Color.argb(0xF0, 0xFF, 0xFF, 0xFF), Color.WHITE),
+            stroke = LyricsColorPaint(false, Color.BLACK, Color.BLACK),
             opacity = 1f,
         )
-
-        fun parseAccent(value: String?): Int {
-            val raw = value?.trim().orEmpty()
-            if (raw.isEmpty()) return Color.WHITE
-            return runCatching { Color.parseColor(raw) }.getOrDefault(Color.WHITE)
-        }
     }
 }
 
@@ -134,12 +165,14 @@ object LyricsOverlayRuntime {
                 y = repositionY,
                 locked = next.locked,
                 scale = next.fontScale,
-                accent = next.accentColor,
+                accent = next.accent,
+                secondary = next.secondary,
+                stroke = next.stroke,
                 opacity = next.opacity,
             )
             if (attached) {
                 overlay.applyPlacement(next.edge, repositionY, next.locked)
-                overlay.applyStyle(next.fontScale, next.accentColor, next.opacity)
+                overlay.applyStyle(next.fontScale, next.accent, next.secondary, next.stroke, next.opacity)
                 renderOnce()
                 scheduleTick()
             }

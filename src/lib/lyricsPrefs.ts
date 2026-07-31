@@ -1,4 +1,12 @@
 import { create } from "zustand";
+import {
+  normalizePaint,
+  type LyricsColorPaint,
+  type LyricsFillMode,
+  type LyricsStrokeMode,
+} from "./lyricsColor";
+
+export type { LyricsColorMode, LyricsColorPaint, LyricsFillMode, LyricsStrokeMode } from "./lyricsColor";
 
 const STORAGE_KEY = "kd-lyrics-prefs";
 
@@ -49,8 +57,21 @@ export interface LyricsPrefs {
    */
   desktopPositionX: number | null;
   desktopPositionY: number | null;
-  /** 主行文字颜色，`#RRGGBB`。Android 上同时是逐字填充的高亮色。 */
+  /**
+   * 主行填色。Android 上同时是逐字高亮色。
+   * `mode=gradient` 时用 start→end 横向渐变。
+   */
+  desktopAccentMode: LyricsFillMode;
   desktopAccent: string;
+  desktopAccentEnd: string;
+  /** 副行（翻译 / 下一句）填色。 */
+  desktopSecondaryMode: LyricsFillMode;
+  desktopSecondaryAccent: string;
+  desktopSecondaryAccentEnd: string;
+  /** 描边 / 边框色。 */
+  desktopStrokeMode: LyricsStrokeMode;
+  desktopStroke: string;
+  desktopStrokeEnd: string;
   /** 整体不透明度 0.2–1。 */
   desktopOpacity: number;
 }
@@ -67,9 +88,66 @@ const DEFAULTS: LyricsPrefs = {
   desktopFontScale: 1,
   desktopPositionX: null,
   desktopPositionY: null,
-  desktopAccent: "#ffffff",
+  desktopAccentMode: "white",
+  desktopAccent: "#ff3b5c",
+  desktopAccentEnd: "#ff6b9d",
+  desktopSecondaryMode: "white",
+  desktopSecondaryAccent: "#3b82f6",
+  desktopSecondaryAccentEnd: "#7dd3fc",
+  desktopStrokeMode: "black",
+  desktopStroke: "#ff3b5c",
+  desktopStrokeEnd: "#334155",
   desktopOpacity: 1,
 };
+
+const DEFAULT_ACCENT_PAINT: LyricsColorPaint = {
+  mode: DEFAULTS.desktopAccentMode,
+  start: DEFAULTS.desktopAccent,
+  end: DEFAULTS.desktopAccentEnd,
+};
+const DEFAULT_SECONDARY_PAINT: LyricsColorPaint = {
+  mode: DEFAULTS.desktopSecondaryMode,
+  start: DEFAULTS.desktopSecondaryAccent,
+  end: DEFAULTS.desktopSecondaryAccentEnd,
+};
+const DEFAULT_STROKE_PAINT: LyricsColorPaint = {
+  mode: DEFAULTS.desktopStrokeMode,
+  start: DEFAULTS.desktopStroke,
+  end: DEFAULTS.desktopStrokeEnd,
+};
+
+export function accentPaint(prefs: Pick<
+  LyricsPrefs,
+  "desktopAccentMode" | "desktopAccent" | "desktopAccentEnd"
+>): LyricsColorPaint {
+  return {
+    mode: prefs.desktopAccentMode,
+    start: prefs.desktopAccent,
+    end: prefs.desktopAccentEnd,
+  };
+}
+
+export function secondaryPaint(prefs: Pick<
+  LyricsPrefs,
+  "desktopSecondaryMode" | "desktopSecondaryAccent" | "desktopSecondaryAccentEnd"
+>): LyricsColorPaint {
+  return {
+    mode: prefs.desktopSecondaryMode,
+    start: prefs.desktopSecondaryAccent,
+    end: prefs.desktopSecondaryAccentEnd,
+  };
+}
+
+export function strokePaint(prefs: Pick<
+  LyricsPrefs,
+  "desktopStrokeMode" | "desktopStroke" | "desktopStrokeEnd"
+>): LyricsColorPaint {
+  return {
+    mode: prefs.desktopStrokeMode,
+    start: prefs.desktopStroke,
+    end: prefs.desktopStrokeEnd,
+  };
+}
 
 function normalizeEngines(value: unknown): LyricsEngine[] {
   if (!Array.isArray(value)) return [...DEFAULTS.engines];
@@ -124,13 +202,6 @@ function normalizeCoordinate(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? Math.round(value) : null;
 }
 
-/** 原生侧用 Color.parseColor 解析，非法值会被回落成白色，这里先挡一道。 */
-function normalizeAccent(value: unknown): string {
-  if (typeof value !== "string") return DEFAULTS.desktopAccent;
-  const trimmed = value.trim().toLowerCase();
-  return /^#[0-9a-f]{6}$/.test(trimmed) ? trimmed : DEFAULTS.desktopAccent;
-}
-
 /** 全透明的悬浮歌词等于消失且无法找回，所以下限留 0.2。 */
 export const DESKTOP_OPACITY_MIN = 0.2;
 
@@ -177,7 +248,15 @@ function pickPrefs(state: LyricsPrefs): LyricsPrefs {
     desktopFontScale: state.desktopFontScale,
     desktopPositionX: state.desktopPositionX,
     desktopPositionY: state.desktopPositionY,
+    desktopAccentMode: state.desktopAccentMode,
     desktopAccent: state.desktopAccent,
+    desktopAccentEnd: state.desktopAccentEnd,
+    desktopSecondaryMode: state.desktopSecondaryMode,
+    desktopSecondaryAccent: state.desktopSecondaryAccent,
+    desktopSecondaryAccentEnd: state.desktopSecondaryAccentEnd,
+    desktopStrokeMode: state.desktopStrokeMode,
+    desktopStroke: state.desktopStroke,
+    desktopStrokeEnd: state.desktopStrokeEnd,
     desktopOpacity: state.desktopOpacity,
   };
 }
@@ -223,7 +302,48 @@ function load(): LyricsPrefs {
       desktopFontScale: normalizeDesktopFontScale(data.desktopFontScale),
       desktopPositionX: normalizeCoordinate(data.desktopPositionX),
       desktopPositionY: normalizeCoordinate(data.desktopPositionY),
-      desktopAccent: normalizeAccent(data.desktopAccent),
+      ...(() => {
+        const accent = normalizePaint(
+          data.desktopAccentMode,
+          data.desktopAccent,
+          data.desktopAccentEnd,
+          DEFAULT_ACCENT_PAINT,
+        );
+        const secondary = normalizePaint(
+          data.desktopSecondaryMode,
+          data.desktopSecondaryAccent,
+          data.desktopSecondaryAccentEnd,
+          DEFAULT_SECONDARY_PAINT,
+        );
+        const stroke = normalizePaint(
+          data.desktopStrokeMode,
+          data.desktopStroke,
+          data.desktopStrokeEnd,
+          DEFAULT_STROKE_PAINT,
+          true,
+        );
+        // 旧版「单色 + 纯白/纯黑」迁到黑/白预设，避免色相线左右端再塞灰阶。
+        const migrateBw = (paint: typeof accent) => {
+          if (paint.mode !== "solid") return paint;
+          if (paint.start === "#ffffff") return { ...paint, mode: "white" as const };
+          if (paint.start === "#000000") return { ...paint, mode: "black" as const };
+          return paint;
+        };
+        const accentNext = migrateBw(accent);
+        const secondaryNext = migrateBw(secondary);
+        const strokeNext = migrateBw(stroke);
+        return {
+          desktopAccentMode: accentNext.mode as LyricsFillMode,
+          desktopAccent: accentNext.start,
+          desktopAccentEnd: accentNext.end,
+          desktopSecondaryMode: secondaryNext.mode as LyricsFillMode,
+          desktopSecondaryAccent: secondaryNext.start,
+          desktopSecondaryAccentEnd: secondaryNext.end,
+          desktopStrokeMode: strokeNext.mode as LyricsStrokeMode,
+          desktopStroke: strokeNext.start,
+          desktopStrokeEnd: strokeNext.end,
+        };
+      })(),
       desktopOpacity: normalizeOpacity(data.desktopOpacity),
     };
   } catch {
@@ -266,7 +386,9 @@ interface LyricsPrefsState extends LyricsPrefs {
   setDesktopPosition(value: DesktopLyricsPosition): void;
   setDesktopLocked(value: boolean): void;
   setDesktopFontScale(value: number): void;
-  setDesktopAccent(value: string): void;
+  setDesktopAccentPaint(paint: LyricsColorPaint): void;
+  setDesktopSecondaryPaint(paint: LyricsColorPaint): void;
+  setDesktopStrokePaint(paint: LyricsColorPaint): void;
   setDesktopOpacity(value: number): void;
   setDesktopCoordinates(x: number, y: number): void;
   /** Android 浮层满宽，只有垂直偏移会变。 */
@@ -371,10 +493,37 @@ export const useLyricsPrefs = create<LyricsPrefsState>((set, get) => ({
     set({ desktopFontScale: scale });
     save({ ...get(), desktopFontScale: scale });
   },
-  setDesktopAccent(value) {
-    const desktopAccent = normalizeAccent(value);
-    set({ desktopAccent });
-    save({ ...get(), desktopAccent });
+  setDesktopAccentPaint(paint) {
+    const next = normalizePaint(paint.mode, paint.start, paint.end, DEFAULT_ACCENT_PAINT);
+    const mode = (next.mode === "none" ? "solid" : next.mode) as LyricsFillMode;
+    const patch = {
+      desktopAccentMode: mode,
+      desktopAccent: next.start,
+      desktopAccentEnd: next.end,
+    };
+    set(patch);
+    save({ ...get(), ...patch });
+  },
+  setDesktopSecondaryPaint(paint) {
+    const next = normalizePaint(paint.mode, paint.start, paint.end, DEFAULT_SECONDARY_PAINT);
+    const mode = (next.mode === "none" ? "solid" : next.mode) as LyricsFillMode;
+    const patch = {
+      desktopSecondaryMode: mode,
+      desktopSecondaryAccent: next.start,
+      desktopSecondaryAccentEnd: next.end,
+    };
+    set(patch);
+    save({ ...get(), ...patch });
+  },
+  setDesktopStrokePaint(paint) {
+    const next = normalizePaint(paint.mode, paint.start, paint.end, DEFAULT_STROKE_PAINT, true);
+    const patch = {
+      desktopStrokeMode: next.mode as LyricsStrokeMode,
+      desktopStroke: next.start,
+      desktopStrokeEnd: next.end,
+    };
+    set(patch);
+    save({ ...get(), ...patch });
   },
   setDesktopOpacity(value) {
     const desktopOpacity = normalizeOpacity(value);
@@ -415,6 +564,14 @@ export const useLyricsPrefs = create<LyricsPrefsState>((set, get) => ({
       x: state.desktopPositionX,
       y: state.desktopPositionY,
       accent: state.desktopAccent,
+      accentEnd: state.desktopAccentEnd,
+      accentMode: state.desktopAccentMode,
+      secondaryAccent: state.desktopSecondaryAccent,
+      secondaryAccentEnd: state.desktopSecondaryAccentEnd,
+      secondaryMode: state.desktopSecondaryMode,
+      stroke: state.desktopStroke,
+      strokeEnd: state.desktopStrokeEnd,
+      strokeMode: state.desktopStrokeMode,
       opacity: state.desktopOpacity,
     }).catch(() => undefined);
   },

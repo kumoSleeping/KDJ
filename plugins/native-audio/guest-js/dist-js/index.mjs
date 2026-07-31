@@ -29,3 +29,8 @@ export const checkOverlayPermission = async () => await call('check_overlay_perm
 export const requestOverlayPermission = async () => await call('request_overlay_permission');
 export const addOverlayMovedListener = async (handler) =>
   await addPluginListener(PLUGIN_NAME, OVERLAY_MOVED_EVENT, handler);
+
+/** 安卓：PNG data URL → MediaStore 相册（Pictures/KDJ）。 */
+export const savePngToGallery = async (payload) => await call('save_png_to_gallery', payload);
+/** 安卓：用系统查看器打开本地路径或 content URI。 */
+export const openLocalPath = async (path) => await call('open_local_path', { path });

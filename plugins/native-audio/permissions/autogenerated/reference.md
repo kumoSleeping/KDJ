@@ -22,6 +22,8 @@ Default permissions for the plugin
 - `allow-check-overlay-permission`
 - `allow-request-overlay-permission`
 - `allow-dispose`
+- `allow-save-png-to-gallery`
+- `allow-open-local-path`
 
 ## Permission Table
 

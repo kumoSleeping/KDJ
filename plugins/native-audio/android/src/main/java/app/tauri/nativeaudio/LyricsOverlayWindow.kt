@@ -59,10 +59,19 @@ class LyricsOverlayWindow(context: Context) {
      * 挂上悬浮窗。没有「显示在其他应用上层」权限时直接返回 false，
      * 让上层去引导授权而不是抛给用户一个崩溃。
      */
-    fun attach(edge: LyricsOverlayEdge, y: Int?, locked: Boolean, scale: Float, accent: Int, opacity: Float): Boolean {
+    fun attach(
+        edge: LyricsOverlayEdge,
+        y: Int?,
+        locked: Boolean,
+        scale: Float,
+        accent: LyricsColorPaint,
+        secondary: LyricsColorPaint,
+        stroke: LyricsColorPaint,
+        opacity: Float,
+    ): Boolean {
         if (view != null) {
             applyPlacement(edge, y, locked)
-            applyStyle(scale, accent, opacity)
+            applyStyle(scale, accent, secondary, stroke, opacity)
             return true
         }
         if (!canDraw()) return false
@@ -85,7 +94,7 @@ class LyricsOverlayWindow(context: Context) {
             view = overlay
             params = layout
             overlay.alpha = opacity.coerceIn(MIN_OPACITY, 1f)
-            overlay.setStyle(scale, accent)
+            overlay.setStyle(scale, accent, secondary, stroke)
             bindDrag(overlay)
             true
         }.onFailure { error ->
@@ -102,10 +111,16 @@ class LyricsOverlayWindow(context: Context) {
             .onFailure { Log.w(TAG, "overlay removeView failed", it) }
     }
 
-    fun applyStyle(scale: Float, accent: Int, opacity: Float) {
+    fun applyStyle(
+        scale: Float,
+        accent: LyricsColorPaint,
+        secondary: LyricsColorPaint,
+        stroke: LyricsColorPaint,
+        opacity: Float,
+    ) {
         val overlay = view ?: return
         overlay.alpha = opacity.coerceIn(MIN_OPACITY, 1f)
-        overlay.setStyle(scale, accent)
+        overlay.setStyle(scale, accent, secondary, stroke)
     }
 
     /**

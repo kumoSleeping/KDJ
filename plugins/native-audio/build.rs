@@ -17,6 +17,8 @@ const COMMANDS: &[&str] = &[
     "check_overlay_permission",
     "request_overlay_permission",
     "dispose",
+    "save_png_to_gallery",
+    "open_local_path",
 ];
 
 fn main() {

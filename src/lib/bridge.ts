@@ -6,7 +6,9 @@
 import {
   addOverlayMovedListener,
   checkOverlayPermission,
+  openLocalPath,
   requestOverlayPermission,
+  savePngToGallery,
   setLyricsOverlay,
   setLyricsTimeline,
 } from "tauri-plugin-native-audio-api";
@@ -82,14 +84,23 @@ async function createTauriBridge(): Promise<KdjBridge> {
   const android = info.platform === "android";
   return {
     ...info,
-    openPath: (path: string) => tauriInvoke<void>("open_path", { path }),
-    revealPath: (path: string) => tauriInvoke<void>("reveal_path", { path }),
+    // 安卓：opener 的 reveal 不支持，open_path 也打不开 file://；走 MediaStore / FileProvider。
+    openPath: (path: string) =>
+      android ? openLocalPath(path) : tauriInvoke<void>("open_path", { path }),
+    revealPath: (path: string) =>
+      android ? openLocalPath(path) : tauriInvoke<void>("reveal_path", { path }),
     saveLoginQr: (options) =>
-      tauriInvoke<SavedLoginQr>("save_login_qr", {
-        platform: options.platform,
-        label: options.label,
-        image: options.image,
-      }),
+      android
+        ? savePngToGallery({
+            platform: options.platform,
+            label: options.label,
+            image: options.image,
+          })
+        : tauriInvoke<SavedLoginQr>("save_login_qr", {
+            platform: options.platform,
+            label: options.label,
+            image: options.image,
+          }),
     openExternal: (url: string) => tauriInvoke<void>("open_external", { url }),
     // 检查也必须走 updater 本身，不能先问 GitHub releases/latest：Release 先建、
     // 三平台包后到的窗口里，后者会谎报"可更新"，真正安装时才发现 latest.json
@@ -165,6 +176,14 @@ async function createTauriBridge(): Promise<KdjBridge> {
               locked: options.locked,
               fontScale: options.fontScale,
               accent: options.accent,
+              accentEnd: options.accentEnd,
+              accentMode: options.accentMode,
+              secondaryAccent: options.secondaryAccent,
+              secondaryAccentEnd: options.secondaryAccentEnd,
+              secondaryMode: options.secondaryMode,
+              stroke: options.stroke,
+              strokeEnd: options.strokeEnd,
+              strokeMode: options.strokeMode,
               opacity: options.opacity,
               reposition: options.reposition,
               // 浮层满宽，水平坐标没有意义；只有垂直偏移会用到。
@@ -271,6 +290,12 @@ export function initBridge(): Promise<KdjBridge> {
           writable: false,
           configurable: true,
         });
+      }
+      // theme-init.js 已在首帧前写好 data-theme；桥一通就立刻对齐原生底色，
+      // 不必等 settings 异步回来再 applyTheme，缩短 show 与主题同步之间的空隙。
+      const theme = document.documentElement.dataset.theme;
+      if (theme === "dark" || theme === "light") {
+        resolved.setWindowBackground(theme);
       }
       return resolved;
     });

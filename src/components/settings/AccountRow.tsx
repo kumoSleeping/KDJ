@@ -155,7 +155,10 @@ export function AccountRow({ account }: { account: Account }) {
   const openSettingsPanel = useAppStore((state) => state.openSettingsPanel);
   const [busy, setBusy] = useState(false);
   const [qrBusy, setQrBusy] = useState(false);
+  /** 打开用（安卓可能是 content URI）。 */
   const [savedPath, setSavedPath] = useState("");
+  /** 给用户看的路径；没有就退化成 savedPath。 */
+  const [savedDisplayPath, setSavedDisplayPath] = useState("");
   const [savedHint, setSavedHint] = useState("");
   const [qrState, setQrState] = useState<QrStateValue | null>(null);
   const qrGenerationRef = useRef(0);
@@ -178,6 +181,7 @@ export function AccountRow({ account }: { account: Account }) {
     const generation = ++qrGenerationRef.current;
     setQrBusy(true);
     setSavedPath("");
+    setSavedDisplayPath("");
     setSavedHint("");
     setQrState(null);
     setNotice("");
@@ -192,6 +196,7 @@ export function AccountRow({ account }: { account: Account }) {
       });
       if (generation !== qrGenerationRef.current) return;
       setSavedPath(saved.path);
+      setSavedDisplayPath(saved.displayPath || saved.path);
       setSavedHint(saved.location === "pictures" ? "已保存到相册/图片" : "已保存到下载文件夹");
       setQrState("waiting");
       setQrBusy(false);
@@ -303,7 +308,7 @@ export function AccountRow({ account }: { account: Account }) {
               ` · ${account.detail}`}
           </div>
           {savedPath && !loggedIn && (
-            <div style={settingRow.hint} title={savedPath}>
+            <div style={settingRow.hint} title={savedDisplayPath || savedPath}>
               {savedHint}
               {" · "}
               {qrState === "waiting"
@@ -332,7 +337,7 @@ export function AccountRow({ account }: { account: Account }) {
             variant="ghost"
             iconOnly
             aria-label="在文件夹中显示登录二维码"
-            title={savedPath}
+            title={savedDisplayPath || savedPath}
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
               event.stopPropagation();

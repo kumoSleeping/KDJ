@@ -811,6 +811,12 @@ impl Actor {
         let runtime = self.decks[deck as usize]
             .clone()
             .ok_or_else(|| "目标 Deck 尚未准备".to_string())?;
+        // 接歌就是继续播。曲目刚 Ended 时 desired_playing 已被清掉；若已预热的
+        // Deck 走 activate 捷径而不拉回 true，交接会以暂停态建立，过渡帧永不推进，
+        // 前端只能再硬切——听感就是曲末「咔」一下跳过去。
+        if matches!(activation, Activation::Transition(_)) {
+            self.state.desired_playing = true;
+        }
         let position = match activation {
             Activation::Transition(transition) => transition.position.max(0.0),
             Activation::Hard | Activation::Seek => requested_position.max(0.0),
@@ -1401,6 +1407,40 @@ mod tests {
 
         assert!(error.contains("尚未开始准备"));
         assert_eq!(actor.state, before);
+    }
+
+    /// 曲目 Ended 会清掉 desired_playing。已预热 Deck 的 handoff 必须把它拉回，
+    /// 否则过渡以暂停态建立、帧不推进，前端只能再走硬切。
+    #[test]
+    fn handoff_after_ended_restores_desired_playing() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 170.0));
+        actor.decks[DeckId::B as usize] = Some(live_runtime(2, 0.0));
+        actor.front = DeckId::A;
+        actor.state.track_id = Some(1);
+        actor.state.phase = PlaybackPhase::Ended;
+        actor.state.desired_playing = false;
+        actor.state.is_playing = false;
+
+        actor
+            .handoff(
+                2,
+                PendingTransition {
+                    position: 0.0,
+                    seconds: 4.0,
+                    plan: PlaybackTransitionPlan::default(),
+                },
+            )
+            .expect("Ended 后仍应能 handoff");
+
+        assert!(actor.state.desired_playing);
+        assert!(actor.state.is_playing);
+        assert!(actor.state.transitioning);
+        assert_eq!(actor.front, DeckId::B);
+        assert_eq!(actor.state.track_id, Some(2));
+        assert_eq!(actor.state.phase, PlaybackPhase::Transitioning);
     }
 
     #[test]

@@ -57,6 +57,8 @@ export type NativeLyricsTimelinePayload = {
   lines: NativeLyricsLine[];
 };
 
+export type NativeLyricsColorMode = 'black' | 'white' | 'solid' | 'gradient' | 'none';
+
 export type NativeLyricsOverlayPayload = {
   visible: boolean;
   position: 'top' | 'bottom';
@@ -64,6 +66,14 @@ export type NativeLyricsOverlayPayload = {
   fontScale?: number;
   /** 逐字高亮色，`#RRGGBB`；缺省为白。 */
   accent?: string;
+  accentEnd?: string;
+  accentMode?: NativeLyricsColorMode;
+  secondaryAccent?: string;
+  secondaryAccentEnd?: string;
+  secondaryMode?: NativeLyricsColorMode;
+  stroke?: string;
+  strokeEnd?: string;
+  strokeMode?: NativeLyricsColorMode;
   opacity?: number;
   /** 只有换边或重新打开时才吸附，否则会抹掉用户拖出来的位置。 */
   reposition?: boolean;
@@ -90,3 +100,16 @@ export declare const requestOverlayPermission: () => Promise<{ granted: boolean 
 export declare const addOverlayMovedListener: (
   handler: (moved: NativeLyricsOverlayMoved) => void,
 ) => Promise<() => void>;
+
+export type SavedGalleryPng = {
+  path: string;
+  displayPath?: string;
+  location: string;
+};
+
+export declare const savePngToGallery: (payload: {
+  platform: string;
+  label: string;
+  image: string;
+}) => Promise<SavedGalleryPng>;
+export declare const openLocalPath: (path: string) => Promise<void>;

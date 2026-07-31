@@ -33,6 +33,8 @@ struct MetadataKey {
 struct SessionState {
     controls: MediaControls,
     metadata: MetadataKey,
+    /// Local `file://` cover already published for `metadata.artwork_url`.
+    cached_cover_url: Option<String>,
 }
 
 pub struct DesktopMediaSession {
@@ -56,6 +58,7 @@ impl DesktopMediaSession {
             state: Arc::new(Mutex::new(SessionState {
                 controls,
                 metadata: MetadataKey::default(),
+                cached_cover_url: None,
             })),
         })
     }
@@ -68,13 +71,22 @@ impl DesktopMediaSession {
         let metadata = metadata_key(snapshot);
         let mut cache_metadata = None;
         if metadata != state.metadata {
-            // MPNowPlaying and SMTC do not reliably fetch loopback HTTP artwork. Publish text
-            // immediately, then replace the cover with a cached file:// URL off the audio thread.
-            if let Err(error) = set_metadata(&mut state.controls, &metadata, None) {
+            // MPNowPlaying/SMTC cannot fetch loopback HTTP artwork reliably. Keep any already
+            // cached local cover across text/duration refreshes so souvlaki does not wipe it,
+            // and only download when the artwork identity actually changes.
+            if !same_artwork(&state.metadata, &metadata) {
+                state.cached_cover_url = None;
+            }
+            let cover_url = state.cached_cover_url.clone();
+            let needs_cache =
+                metadata.artwork_url.is_some() && state.cached_cover_url.is_none();
+            if let Err(error) =
+                set_metadata(&mut state.controls, &metadata, cover_url.as_deref())
+            {
                 tracing::warn!("更新系统媒体元数据失败：{error}");
             } else {
                 state.metadata = metadata.clone();
-                if metadata.artwork_url.is_some() {
+                if needs_cache {
                     cache_metadata = Some(metadata);
                 }
             }
@@ -251,14 +263,21 @@ fn cache_artwork(state: Arc<Mutex<SessionState>>, metadata: MetadataKey) {
                     let mut state = state
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if state.metadata != metadata {
+                    // Duration/title can change while the download runs; only abandon if the
+                    // artwork target itself moved on.
+                    if !same_artwork(&state.metadata, &metadata) {
                         return;
                     }
+                    if state.cached_cover_url.as_deref() == Some(local_url.as_str()) {
+                        return;
+                    }
+                    let current = state.metadata.clone();
                     if let Err(error) =
-                        set_metadata(&mut state.controls, &metadata, Some(local_url.as_str()))
+                        set_metadata(&mut state.controls, &current, Some(local_url.as_str()))
                     {
                         tracing::warn!("更新系统媒体封面失败：{error}");
                     } else {
+                        state.cached_cover_url = Some(local_url.clone());
                         tracing::debug!("系统媒体封面已更新：{local_url}");
                     }
                 }
@@ -270,9 +289,13 @@ fn cache_artwork(state: Arc<Mutex<SessionState>>, metadata: MetadataKey) {
     }
 }
 
+fn same_artwork(left: &MetadataKey, right: &MetadataKey) -> bool {
+    left.track_id == right.track_id && left.artwork_url == right.artwork_url
+}
+
 fn local_artwork_url(source_url: &str, track_id: Option<i64>) -> Result<String, String> {
     if source_url.starts_with("file://") {
-        return Ok(source_url.to_string());
+        return Ok(normalize_file_url(source_url));
     }
     if !source_url.starts_with("http://") && !source_url.starts_with("https://") {
         return Err("封面地址不是受支持的 HTTP/file URL".into());
@@ -342,11 +365,22 @@ fn image_extension(content_type: Option<&str>) -> &'static str {
 }
 
 fn file_url(path: &Path) -> String {
-    let path = path.to_string_lossy();
+    // On Windows, prefer file://C:\... over file:///C:/... — souvlaki trims only
+    // "file://" then passes the rest to GetFileFromPathAsync, so a leading slash breaks SMTC.
+    format!("file://{}", path.to_string_lossy())
+}
+
+fn normalize_file_url(url: &str) -> String {
     #[cfg(target_os = "windows")]
-    return format!("file:///{}", path.replace('\\', "/"));
+    {
+        let rest = url.trim_start_matches("file://");
+        let path = rest.trim_start_matches('/').replace('/', "\\");
+        format!("file://{path}")
+    }
     #[cfg(not(target_os = "windows"))]
-    format!("file://{path}")
+    {
+        url.to_string()
+    }
 }
 
 fn nonempty(value: &str) -> Option<&str> {
@@ -414,13 +448,49 @@ mod tests {
         server.join().expect("封面服务线程");
 
         assert!(url.starts_with("file://"));
-        // Windows: file:///C:/Users/...  — 三个斜杠；Unix: file:///tmp/... 或 file:///var/...
-        let path = if cfg!(windows) {
-            PathBuf::from(url.trim_start_matches("file:///"))
-        } else {
-            PathBuf::from(url.trim_start_matches("file://"))
-        };
+        // Windows souvlaki workaround: file://C:\... ; Unix: file:///tmp/...
+        let path = PathBuf::from(url.trim_start_matches("file://"));
         assert_eq!(fs::read(&path).expect("读取封面缓存"), b"jpeg");
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn same_artwork_ignores_duration_and_text() {
+        let base = MetadataKey {
+            track_id: Some(1),
+            title: "a".into(),
+            artist: "b".into(),
+            album: "c".into(),
+            artwork_url: Some("http://127.0.0.1/cover".into()),
+            duration_millis: 0,
+        };
+        let mut later = base.clone();
+        later.title = "changed".into();
+        later.duration_millis = 180_000;
+        assert!(same_artwork(&base, &later));
+        later.artwork_url = Some("http://127.0.0.1/other".into());
+        assert!(!same_artwork(&base, &later));
+    }
+
+    #[test]
+    fn windows_artwork_file_url_is_souvlaki_compatible() {
+        let path = PathBuf::from(if cfg!(windows) {
+            r"C:\Users\test\AppData\Local\Temp\kdj-media-artwork\1.jpg"
+        } else {
+            "/tmp/kdj-media-artwork/1.jpg"
+        });
+        let url = file_url(&path);
+        assert!(url.starts_with("file://"));
+        let trimmed = url.trim_start_matches("file://");
+        #[cfg(windows)]
+        {
+            assert!(!trimmed.starts_with('/'), "souvlaki must not see a leading slash");
+            assert!(trimmed.contains('\\') || trimmed.contains(':'));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(trimmed.starts_with('/'));
+            assert_eq!(PathBuf::from(trimmed), path);
+        }
     }
 }

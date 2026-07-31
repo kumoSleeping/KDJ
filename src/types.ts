@@ -501,7 +501,10 @@ export type WsEvent =
 
 /** `saveLoginQr` 的返回：本机落盘路径 + 落在下载还是相册。 */
 export interface SavedLoginQr {
+  /** 打开用：桌面是真实文件路径；安卓是 content URI。 */
   path: string;
+  /** 给用户看的路径（安卓 MediaStore 时有；没有就退化成 path）。 */
+  displayPath?: string;
   /** downloads = 系统下载目录；pictures = 图片/相册目录 */
   location: "downloads" | "pictures" | string;
 }
@@ -551,6 +554,14 @@ export interface KdjBridge {
     y?: number | null;
     /** 主行颜色 `#RRGGBB`；Android 上同时是逐字填充的高亮色。 */
     accent?: string;
+    accentEnd?: string;
+    accentMode?: "black" | "white" | "solid" | "gradient";
+    secondaryAccent?: string;
+    secondaryAccentEnd?: string;
+    secondaryMode?: "black" | "white" | "solid" | "gradient";
+    stroke?: string;
+    strokeEnd?: string;
+    strokeMode?: "black" | "white" | "solid" | "gradient" | "none";
     opacity?: number;
   }) => Promise<void>);
   /**

@@ -3,7 +3,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { api } from "../../lib/api";
 import { activeLrcIndex } from "../../lib/lrc";
 import { effectiveLyricExtra } from "../../lib/lyricsOverlay";
-import { useLyricsPrefs } from "../../lib/lyricsPrefs";
+import { paintCss, strokeCss } from "../../lib/lyricsColor";
+import {
+  accentPaint,
+  secondaryPaint,
+  strokePaint,
+  useLyricsPrefs,
+} from "../../lib/lyricsPrefs";
 import { runtimePlayer, type UnifiedPlayerState } from "../../lib/unifiedPlayer";
 import { ensureLyrics, useLyricsStore } from "../../stores/lyricsStore";
 import type { Track } from "../../types";
@@ -24,8 +30,16 @@ export function DesktopLyricsOverlay() {
   const prefsEpoch = useLyricsPrefs((state) => state.prefsEpoch);
   const locked = useLyricsPrefs((state) => state.desktopLocked);
   const fontScale = useLyricsPrefs((state) => state.desktopFontScale);
-  const accent = useLyricsPrefs((state) => state.desktopAccent);
   const opacity = useLyricsPrefs((state) => state.desktopOpacity);
+  const accentMode = useLyricsPrefs((state) => state.desktopAccentMode);
+  const accentStart = useLyricsPrefs((state) => state.desktopAccent);
+  const accentEnd = useLyricsPrefs((state) => state.desktopAccentEnd);
+  const secondaryMode = useLyricsPrefs((state) => state.desktopSecondaryMode);
+  const secondaryStart = useLyricsPrefs((state) => state.desktopSecondaryAccent);
+  const secondaryEnd = useLyricsPrefs((state) => state.desktopSecondaryAccentEnd);
+  const strokeMode = useLyricsPrefs((state) => state.desktopStrokeMode);
+  const strokeStart = useLyricsPrefs((state) => state.desktopStroke);
+  const strokeEnd = useLyricsPrefs((state) => state.desktopStrokeEnd);
   const setDesktopCoordinates = useLyricsPrefs((state) => state.setDesktopCoordinates);
   const entry = useSyncExternalStore(
     useLyricsStore.subscribe,
@@ -136,6 +150,28 @@ export function DesktopLyricsOverlay() {
     secondary = extra || next?.text || "";
   }
 
+  const accent = paintCss(
+    accentPaint({
+      desktopAccentMode: accentMode,
+      desktopAccent: accentStart,
+      desktopAccentEnd: accentEnd,
+    }),
+  );
+  const secondaryColor = paintCss(
+    secondaryPaint({
+      desktopSecondaryMode: secondaryMode,
+      desktopSecondaryAccent: secondaryStart,
+      desktopSecondaryAccentEnd: secondaryEnd,
+    }),
+  );
+  const stroke = strokeCss(
+    strokePaint({
+      desktopStrokeMode: strokeMode,
+      desktopStroke: strokeStart,
+      desktopStrokeEnd: strokeEnd,
+    }),
+  );
+
   return (
     <main
       className="kd-desktop-lyrics"
@@ -143,8 +179,16 @@ export function DesktopLyricsOverlay() {
       style={
         {
           "--kd-desktop-lyrics-scale": fontScale,
-          "--kd-desktop-lyrics-accent": accent,
           "--kd-desktop-lyrics-opacity": opacity,
+          "--kd-desktop-lyrics-accent": accent.color,
+          "--kd-desktop-lyrics-accent-fill": accent.backgroundImage ?? "none",
+          "--kd-desktop-lyrics-accent-clip": accent.clipText ? "text" : "border-box",
+          "--kd-desktop-lyrics-secondary": secondaryColor.color,
+          "--kd-desktop-lyrics-secondary-fill": secondaryColor.backgroundImage ?? "none",
+          "--kd-desktop-lyrics-secondary-clip": secondaryColor.clipText ? "text" : "border-box",
+          "--kd-desktop-lyrics-stroke": stroke.color,
+          "--kd-desktop-lyrics-stroke-width": stroke.widthPrimary,
+          "--kd-desktop-lyrics-stroke-width-secondary": stroke.widthSecondary,
         } as CSSProperties
       }
     >

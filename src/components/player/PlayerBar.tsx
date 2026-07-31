@@ -1176,7 +1176,11 @@ export function PlayerBar() {
 
   const continueAfterEnded = useCallback(
     (finished: Track | null) => {
-      if (djBusyRef.current) return;
+      // 正在挑歌 / 原生 prepare·handoff / UI 已切到接歌目标：别硬切把过渡顶掉。
+      // djBusy 在 djSwitchTo 同步返回后就会清掉，必须同时看 nativeDjBusy。
+      if (djBusyRef.current || nativeDjBusyRef.current || djViaRef.current !== null) {
+        return;
+      }
       setPosition(0);
       if (!finished) {
         commitPlaying(false);
@@ -1195,6 +1199,9 @@ export function PlayerBar() {
       }
       markPlayed(finished.id);
       void pickNext(finished, false, predictedRef.current).then((next) => {
+        if (djBusyRef.current || nativeDjBusyRef.current || djViaRef.current !== null) {
+          return;
+        }
         if (!next) {
           commitPlaying(false);
           return;
@@ -1215,13 +1222,16 @@ export function PlayerBar() {
           setPosition(cueSec);
           return;
         }
+        // 接播开着时优先走双 Deck 过渡；只有引擎接不住才硬切。
+        // 以前这里一律 playTrack，曲末稍晚触发就会「咔」一下跳过去。
+        if (djEnabled && djSwitchTo(next, finished)) return;
         autoInOutCueRef.current = useDjConfig.getState().applyInOutPoints
           ? next.id
           : null;
         playTrack(next);
       });
     },
-    [nativePlayer, commitPlaying],
+    [nativePlayer, commitPlaying, djEnabled, djSwitchTo],
   );
 
   // 原生播放器即使 WebView 暂停也持续走时钟；回到前台后事件会带回权威状态。
@@ -1304,13 +1314,18 @@ export function PlayerBar() {
         ) {
           const total = state.duration || current.duration || 0;
           const remain = total - state.currentTime;
+          const mixLead = mixSeconds(current.bpm, djBars);
           const outro = djOutroRef.current;
-          const due =
-            outro.trackId === current.id && outro.at !== null
-              ? state.currentTime >= outro.at
-              : remain > 0 &&
-                remain <= mixSeconds(current.bpm, djBars);
-          if (total >= 30 && due) void nativeDjNextRef.current(false);
+          // outro.at 若比真实可播时长偏长（波形/元数据偏长），单靠 at 会永远不 due；
+          // 用剩余时长再兜一层，避免拖到 ended 后硬切。
+          const outroDue =
+            outro.trackId === current.id &&
+            outro.at !== null &&
+            state.currentTime >= outro.at;
+          const remainDue = remain > 0 && remain <= mixLead;
+          const due = outroDue || remainDue;
+          const allowShort = applyInOutPoints && current.end_ms != null;
+          if ((total >= 30 || allowShort) && due) void nativeDjNextRef.current(false);
         }
       }
 
@@ -1371,8 +1386,12 @@ export function PlayerBar() {
         commitPlaying(false);
       }
       if (state.status === "ended" && previous.status !== "ended") {
-        commitPlaying(false);
-        continueAfterEnded(current);
+        // 接播进行中：不要先把 playing 打成 false，否则可能和 handoff 收尾打架。
+        // 无在途接歌时由 continueAfterEnded 决定硬切或补一次过渡。
+        if (!djBusyRef.current && !nativeDjBusyRef.current && djViaRef.current === null) {
+          if (!djEnabled) commitPlaying(false);
+          continueAfterEnded(current);
+        }
       }
       if (state.status === "error") {
         commitPlaying(false);
@@ -1393,6 +1412,7 @@ export function PlayerBar() {
     desktopNative,
     djEnabled,
     djBars,
+    applyInOutPoints,
     broadcast,
     commitPlaying,
     selectTrack,
@@ -1663,13 +1683,14 @@ export function PlayerBar() {
       if (remain <= 0) return;
       const outro = djOutroRef.current;
       const mixLead = mixSeconds(track.bpm, djBars);
-      const due =
-        outro.trackId === track.id && outro.at !== null
-          ? seconds >= outro.at
-          : remain > 0 && remain <= mixLead;
+      const outroDue =
+        outro.trackId === track.id && outro.at !== null && seconds >= outro.at;
+      const remainDue = remain > 0 && remain <= mixLead;
+      const due = outroDue || remainDue;
       if (
         due &&
         !djBusyRef.current &&
+        !nativeDjBusyRef.current &&
         !djEngine.isTransitioning() &&
         djGaveUpRef.current !== track.id
       ) {
