@@ -368,10 +368,22 @@ export function Workspace() {
   // chrome：inline 一行搜索，stacked 竖屏两段式——见 useLayoutMode。
   // 文件夹导航在所有尺寸都常驻；竖屏只收成窄轨，避免手机状态下失去入口。
   const showTree = true;
-  const [compactTreeExpanded, setCompactTreeExpanded] = useState(() => !portrait);
+  // 竖屏侧栏展开状态要固化：用户拖宽/展开后点文件夹不该再弹回窄轨。
+  // 桌面（非竖屏）恒从展开起步（与旧版一致），持久化只服务竖屏；
+  // 否则桌面启动会先渲染一帧窄轨再被下面的 effect 撑开。
+  const [compactTreeExpanded, setCompactTreeExpanded] = useState(() => {
+    if (!portrait) return true;
+    const saved = localStorage.getItem("kd-compact-tree-expanded");
+    if (saved !== null) return saved === "1";
+    return false;
+  });
   useEffect(() => {
-    // 进入竖屏默认收起；离开竖屏必须恢复完整侧栏，不能把手机轨道状态带到 1:1/横屏。
-    setCompactTreeExpanded(!portrait);
+    localStorage.setItem("kd-compact-tree-expanded", compactTreeExpanded ? "1" : "0");
+  }, [compactTreeExpanded]);
+  useEffect(() => {
+    // 离开竖屏必须恢复完整侧栏，不能把手机窄轨状态带到 1:1/横屏。
+    // 进入竖屏沿用已保存的展开宽度，不再强制收起。
+    if (!portrait) setCompactTreeExpanded(true);
   }, [portrait]);
   const [searchSplitPercent, setSearchSplitPercent] = useState(50);
   const searchSplitRef = useRef<HTMLDivElement | null>(null);
@@ -574,11 +586,10 @@ export function Workspace() {
     useAppStore.getState().dismissOverlay();
   }, []);
 
-  /** 竖屏 / 窄屏：点左侧文件夹后收起弹出面板，把列表让出来。 */
+  /** 窄屏：点左侧文件夹后只收右侧详情抽屉；左侧展开宽度由用户拖动手势决定并持久化。 */
   const onFolderNavigate = useCallback(() => {
-    if (portrait) setCompactTreeExpanded(false);
     if (layout === "narrow") closeAside();
-  }, [portrait, layout, closeAside]);
+  }, [layout, closeAside]);
 
   const toggleAside = useCallback(() => {
     if (showAside) {

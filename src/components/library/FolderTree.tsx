@@ -147,7 +147,7 @@ export function NarrowFolderRail({
   onNavigate,
 }: {
   expanded: boolean;
-  /** 点选文件夹 / 临时列表 / 全部曲目等导航项后回调（竖屏收起弹出面板用）。 */
+  /** 点选文件夹 / 临时列表 / 全部曲目等导航项后回调（窄屏收右侧抽屉用）。 */
   onNavigate?: () => void;
 }) {
   const folders = useLibraryStore((state) => state.folders);
@@ -363,7 +363,7 @@ function useExpanded(roots: FolderNode[]) {
 export function FolderTree({
   onNavigate,
 }: {
-  /** 点选文件夹 / 临时列表 / 全部曲目等导航项后回调（竖屏收起弹出面板用）。 */
+  /** 点选文件夹 / 临时列表 / 全部曲目等导航项后回调（窄屏收右侧抽屉用）。 */
   onNavigate?: () => void;
 } = {}) {
   const folders = useLibraryStore((state) => state.folders);
