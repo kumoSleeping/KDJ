@@ -2652,6 +2652,7 @@ dependencies = [
  "kdj-library",
  "kdj-playback",
  "kdj-server",
+ "ndk-context",
  "rand 0.10.2",
  "reqwest 0.12.28",
  "serde",

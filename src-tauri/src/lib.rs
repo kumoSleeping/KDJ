@@ -931,6 +931,32 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
     ))
 }
 
+/// 安卓 JNI 入口：Tauri 的 `mobile_entry_point` 不会初始化 `ndk-context`，
+/// 而 cpal 的 AAudio host 在第一次打开输出时就要用 JNI 上下文（
+/// `ndk_context::android_context()`，拿不到就 panic `android context was not initialized`）。
+/// Kotlin 侧 `MainActivity.onCreate` 最先调用本函数（在 Tauri setup 启动播放器线程之前），
+/// 把 JavaVM 与 Activity 存进 ndk-context 全局，CPAL/AAudio 才能工作。
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_kdj_app_MainActivity_initNdkContext(
+    env: jni::JNIEnv,
+    activity: jni::objects::JObject,
+) {
+    let vm = match env.get_java_vm() {
+        Ok(vm) => vm,
+        Err(err) => {
+            tracing::error!("KDJ: 拿不到 JavaVM，ndk-context 初始化失败：{err}");
+            return;
+        }
+    };
+    let vm_ptr = vm.get_java_vm_pointer() as *mut std::ffi::c_void;
+    let context_ptr = activity.into_raw() as *mut std::ffi::c_void;
+    unsafe {
+        ndk_context::initialize_android_context(vm_ptr, context_ptr);
+    }
+    tracing::info!("KDJ: ndk-context 已初始化");
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()

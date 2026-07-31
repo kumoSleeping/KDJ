@@ -49,6 +49,7 @@ reqwest = { version = "0.12.28", default-features = false, features = ["blocking
 # MediaSession / 前台保活 / 歌词 overlay，不再用 ExoPlayer 出声。
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
+ndk-context = "0.1"
 kdj-playback = { version = "0.2.21", path = "../crates/kdj-playback" }
 tauri-plugin-native-audio = { version = "=1.0.5", path = "../plugins/native-audio" }
 

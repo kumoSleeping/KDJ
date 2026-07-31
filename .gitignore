@@ -23,6 +23,9 @@ data/
 # gen/ 是 `tauri android init` / `tauri ios init` 生成的原生工程骨架，
 # 和 target/ 一样属于可重建产物
 src-tauri/gen/
+# 例外：MainActivity 含必需的 ndk-context JNI 初始化（cpal/AAudio 依赖），
+# 必须随仓库走；tauri android init 对已存在文件不覆盖。
+!src-tauri/gen/android/app/src/main/java/com/kdj/app/MainActivity.kt
 src-tauri/target/
 
 # Agent / tool / dev scratch
