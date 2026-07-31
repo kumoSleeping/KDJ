@@ -199,6 +199,33 @@ impl QqMusicProvider {
 
     // ------------------------------------------------------------ API
 
+    async fn search_songs(&self, keyword: &str, limit: usize) -> Result<Vec<SongSource>> {
+        let data = self
+            .client
+            .call(
+                "music.search.SearchCgiService",
+                "DoSearchForQQMusicMobile",
+                json!({
+                    // searchid 必须是 18~19 位的大数，短值会让接口回空结果却依然 code=0
+                    "searchid": new_search_id(),
+                    "query": keyword,
+                    "search_type": 0,
+                    "num_per_page": limit,
+                    "page_num": 1,
+                    "highlight": false,
+                    "grp": true
+                }),
+                QqPlatform::Desktop,
+            )
+            .await?;
+        let songs = data
+            .pointer("/body/item_song")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(songs.iter().take(limit).map(to_source).collect())
+    }
+
     async fn query_song(&self, key: &str) -> Result<Value> {
         let param = if key.chars().all(|c| c.is_ascii_digit()) {
             json!({"ctx": 0, "client": 1, "ids": [key.parse::<i64>().unwrap_or(0)],
@@ -667,30 +694,16 @@ impl MusicProvider for QqMusicProvider {
             return Ok(Vec::new());
         }
         let limit = effective_limit(limit, 20);
-        let data = self
-            .client
-            .call(
-                "music.search.SearchCgiService",
-                "DoSearchForQQMusicMobile",
-                json!({
-                    // searchid 必须是 18~19 位的大数，短值会让接口回空结果却依然 code=0
-                    "searchid": new_search_id(),
-                    "query": keyword,
-                    "search_type": 0,
-                    "num_per_page": limit,
-                    "page_num": 1,
-                    "highlight": false,
-                    "grp": true
-                }),
-                QqPlatform::Desktop,
-            )
-            .await?;
-        let songs = data
-            .pointer("/body/item_song")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        Ok(songs.iter().take(limit).map(to_source).collect())
+        // QQ 搜索对书名号/直角引号很脆：`「拉海洛」之心` 会直接空结果（code=0），
+        // 去掉装饰引号后的 `拉海洛之心` 又能命中。先原样搜，空了再 stripped 兜底。
+        let mut songs = self.search_songs(keyword, limit).await?;
+        if songs.is_empty() {
+            let stripped = strip_qq_search_decorations(keyword);
+            if stripped != keyword && !stripped.is_empty() {
+                songs = self.search_songs(&stripped, limit).await?;
+            }
+        }
+        Ok(songs)
     }
 
     async fn resolve(&self, url: &str, limit: usize) -> Result<Option<ResolveResponse>> {
@@ -918,6 +931,34 @@ fn parse_playlist(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// 去掉 QQ 搜索不吃的装饰性引号/书名号。
+///
+/// 实测 `DoSearchForQQMusicMobile`：
+/// - `「拉海洛」之心` / `『…』` / `《…》` → `item_song=[]`（仍 code=0）
+/// - `拉海洛之心` / `拉海洛` → 正常命中
+/// 网易云同一关键词能搜到，所以问题在 QQ 侧查询解析，不在曲库本身。
+fn strip_qq_search_decorations(keyword: &str) -> String {
+    keyword
+        .chars()
+        .filter(|ch| {
+            !matches!(
+                ch,
+                '「' | '」'
+                    | '『' | '』'
+                    | '《' | '》'
+                    | '〈' | '〉'
+                    | '“' | '”'
+                    | '‘' | '’'
+                    | '"' | '\''
+            )
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `fcg_query_lyric_new` 在 `nobase64=1` 时回明文，否则回 base64；两种都认。
@@ -1311,5 +1352,14 @@ mod tests {
         );
         // 没有专辑 mid 就不要拼出一个必然 404 的地址
         assert_eq!(to_source(&json!({"name": "x", "mid": "m"})).cover, "");
+    }
+
+    #[test]
+    fn qq_search_decorations_are_stripped_for_the_fallback_query() {
+        assert_eq!(strip_qq_search_decorations("「拉海洛」之心"), "拉海洛之心");
+        assert_eq!(strip_qq_search_decorations("『拉海洛』之心"), "拉海洛之心");
+        assert_eq!(strip_qq_search_decorations("《拉海洛》之心"), "拉海洛之心");
+        assert_eq!(strip_qq_search_decorations("拉海洛之心"), "拉海洛之心");
+        assert_eq!(strip_qq_search_decorations("  「定玄」  "), "定玄");
     }
 }
