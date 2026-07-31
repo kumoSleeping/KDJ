@@ -544,6 +544,8 @@ export interface KdjBridge {
   }) => Promise<SavedLoginQr>;
   pickFolder: () => Promise<string | null>;
   pickFolders: () => Promise<string[]>;
+  /** 安卓：媒体读取权限（READ_MEDIA_AUDIO）是否已授予；桌面恒为 true。 */
+  mediaPermissionGranted: () => Promise<boolean>;
   /** 用系统浏览器开外链（Release 页等）。 */
   openExternal?: (url: string) => Promise<void>;
   /**

@@ -145,6 +145,10 @@ async function createTauriBridge(): Promise<KdjBridge> {
       const picked = await tauriInvoke<unknown>("pick_folders");
       return Array.isArray(picked) ? picked.filter((p): p is string => typeof p === "string") : [];
     },
+    // 安卓：查询是否已授予媒体读取权限（供扫描 0 首时区分「没权限」和「真没歌」）。
+    mediaPermissionGranted: android
+      ? () => tauriInvoke<boolean>("media_permission_granted")
+      : () => Promise.resolve(true),
     // 契约里 windowControl 是同步的（Electron 走 ipcRenderer.send 不等回包），
     // 改成 async 会波及所有窗口控制入口，所以这里 fire-and-forget 保持签名不变
     windowControl: (action) => {
@@ -239,6 +243,8 @@ function createBrowserBridge(): KdjBridge {
     revealPath: async (path: string) => {
       console.info("[browser] revealPath", path);
     },
+    // 浏览器/桌面无安卓媒体权限概念
+    mediaPermissionGranted: async () => true,
     saveLoginQr: async ({ platform, label, image }) => {
       const safe = (label.trim() || platform).replace(/[\\/:*?"<>|]/g, "-");
       const filename = `KDJ-登录二维码-${safe}.png`;

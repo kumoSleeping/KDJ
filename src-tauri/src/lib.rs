@@ -419,10 +419,14 @@ async fn pick_folders(app: tauri::AppHandle) -> Vec<String> {
 #[cfg(any(target_os = "android", target_os = "ios"))]
 fn mobile_library_roots(app: &tauri::AppHandle) -> Vec<String> {
     let mut roots = Vec::new();
+    // 用规范化后的真实路径去重：/sdcard 与 /storage/emulated/0 是同一目录的
+    // 两个写法，字符串比较认不出，会导致同一文件夹被扫两遍。
+    let mut seen = std::collections::HashSet::new();
     let mut push_dir = |dir: PathBuf| {
         if std::fs::create_dir_all(&dir).is_ok() {
+            let key = dir.canonicalize().unwrap_or_else(|_| dir.clone());
             let text = dir.to_string_lossy().into_owned();
-            if !roots.iter().any(|existing| existing == &text) {
+            if seen.insert(key) {
                 roots.push(text);
             }
         }
@@ -449,10 +453,7 @@ fn mobile_library_roots(app: &tauri::AppHandle) -> Vec<String> {
         ] {
             let path = PathBuf::from(candidate);
             if path.is_dir() {
-                let text = path.to_string_lossy().into_owned();
-                if !roots.iter().any(|existing| existing == &text) {
-                    roots.push(text);
-                }
+                push_dir(path);
             }
         }
     }
@@ -931,6 +932,12 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
     ))
 }
 
+/// Activity 的全局 JNI 引用。局部引用只在创建它的 Java 线程内有效，
+/// 而播放器线程 / IPC 线程都要拿它调 JNI（cpal AAudio、权限检查），
+/// 所以必须转全局引用并保活——直接存局部引用会导致 CheckJNI SIGABRT。
+#[cfg(target_os = "android")]
+static ANDROID_ACTIVITY_GLOBAL: std::sync::OnceLock<jni::objects::GlobalRef> = std::sync::OnceLock::new();
+
 /// 安卓 JNI 入口：Tauri 的 `mobile_entry_point` 不会初始化 `ndk-context`，
 /// 而 cpal 的 AAudio host 在第一次打开输出时就要用 JNI 上下文（
 /// `ndk_context::android_context()`，拿不到就 panic `android context was not initialized`）。
@@ -939,7 +946,7 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_com_kdj_app_MainActivity_initNdkContext(
-    env: jni::JNIEnv,
+    mut env: jni::JNIEnv,
     activity: jni::objects::JObject,
 ) {
     let vm = match env.get_java_vm() {
@@ -949,12 +956,64 @@ pub extern "system" fn Java_com_kdj_app_MainActivity_initNdkContext(
             return;
         }
     };
+    let global = match env.new_global_ref(&activity) {
+        Ok(g) => g,
+        Err(err) => {
+            tracing::error!("KDJ: 转全局引用失败，ndk-context 初始化失败：{err}");
+            return;
+        }
+    };
     let vm_ptr = vm.get_java_vm_pointer() as *mut std::ffi::c_void;
-    let context_ptr = activity.into_raw() as *mut std::ffi::c_void;
+    let context_ptr = global.as_obj().as_raw() as *mut std::ffi::c_void;
     unsafe {
         ndk_context::initialize_android_context(vm_ptr, context_ptr);
     }
-    tracing::info!("KDJ: ndk-context 已初始化");
+    let _ = ANDROID_ACTIVITY_GLOBAL.set(global);
+    tracing::info!("KDJ: ndk-context 已初始化（全局引用保活）");
+}
+
+/// 安卓：查询是否已授予媒体读取权限（READ_MEDIA_AUDIO / READ_EXTERNAL_STORAGE）。
+/// 前端在「添加文件夹后扫到 0 首」时调用，区分「没权限」和「目录里真没歌」。
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn media_permission_granted() -> bool {
+    use jni::objects::{JObject, JValue};
+    use jni::JavaVM;
+
+    let ctx = ndk_context::android_context();
+    if ctx.vm().is_null() || ctx.context().is_null() {
+        return false;
+    }
+    let Ok(vm) = (unsafe { JavaVM::from_raw(ctx.vm().cast()) }) else {
+        return false;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return false;
+    };
+    let activity = unsafe { JObject::from_raw(ctx.context() as jni::sys::jobject) };
+    // API 33+ 用 READ_MEDIA_AUDIO，≤32 用 READ_EXTERNAL_STORAGE；任一授予即可读媒体。
+    for permission in [
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+    ] {
+        let Ok(perm) = env.new_string(permission) else {
+            continue;
+        };
+        let Ok(result) = env.call_method(
+            &activity,
+            "checkSelfPermission",
+            "(Ljava/lang/String;)I",
+            &[JValue::Object(&perm)],
+        ) else {
+            // checkSelfPermission 是 API 23+ 才有的方法；更老的系统权限安装时已授予，
+            // 查不了就当作已授予，避免误报。
+            return true;
+        };
+        if result.i().map(|code| code == 0 /* PERMISSION_GRANTED */).unwrap_or(false) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1050,7 +1109,8 @@ pub fn run() {
         set_desktop_lyrics,
         desktop_player::playback_initialize,
         desktop_player::playback_command,
-        desktop_player::playback_state
+        desktop_player::playback_state,
+        media_permission_granted
     ]);
     #[cfg(all(mobile, target_os = "ios"))]
     let builder = builder.invoke_handler(tauri::generate_handler![

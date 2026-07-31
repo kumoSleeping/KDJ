@@ -26,6 +26,8 @@ src-tauri/gen/
 # 例外：MainActivity 含必需的 ndk-context JNI 初始化（cpal/AAudio 依赖），
 # 必须随仓库走；tauri android init 对已存在文件不覆盖。
 !src-tauri/gen/android/app/src/main/java/com/kdj/app/MainActivity.kt
+# 例外：AndroidManifest 声明了 READ_MEDIA_AUDIO 等曲库权限，同样必须入库。
+!src-tauri/gen/android/app/src/main/AndroidManifest.xml
 src-tauri/target/
 
 # Agent / tool / dev scratch

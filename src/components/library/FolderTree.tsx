@@ -120,7 +120,18 @@ export async function pickAndScanFolders(): Promise<void> {
   const paths = await window.kdj?.pickFolders();
   if (!paths?.length) return;
   const autoAnalyze = useAppStore.getState().settings?.auto_analyze ?? true;
-  await useLibraryStore.getState().startScan(paths, autoAnalyze);
+  const response = await useLibraryStore.getState().startScan(paths, autoAnalyze);
+  // 安卓：扫到 0 首时优先怀疑媒体权限（公共 Music 目录要 READ_MEDIA_AUDIO）。
+  // 权限在首次启动时申请过；被拒后系统不再弹，指引用户去系统设置开。
+  if (
+    response.found === 0 &&
+    window.kdj?.mediaPermissionGranted &&
+    !(await window.kdj.mediaPermissionGranted())
+  ) {
+    throw new Error(
+      "没有在手机存储里找到音乐。KDJ 需要「媒体和照片」权限才能读取公共 Music 目录——请到 系统设置 → 应用 → KDJ → 权限 里允许后，再点一次添加。",
+    );
+  }
 }
 
 function flattenFolders(nodes: FolderNode[]): FolderNode[] {
