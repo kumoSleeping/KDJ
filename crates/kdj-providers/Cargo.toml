@@ -21,7 +21,7 @@ hex = "0.4.3"
 # webp/gif/bmp 必须留：load_from_memory 靠嗅探魔数选解码器，
 # 四家平台的封面 CDN 就在发 webp，砍掉的表现是"某些歌没封面"、只在真机暴露。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
-kdj-core = { version = "0.2.20", path = "../kdj-core" }
+kdj-core = { version = "0.2.21", path = "../kdj-core" }
 lofty = "0.24.0"
 md-5 = "0.10"
 num-bigint = "0.4"

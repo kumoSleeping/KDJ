@@ -1,7 +1,13 @@
 use serde::Serialize;
 use tauri::{
-    plugin::{Builder, PluginHandle, TauriPlugin},
-    Manager, Runtime,
+    plugin::{Builder, TauriPlugin},
+    Runtime,
+};
+
+#[cfg(target_os = "android")]
+use tauri::{
+    plugin::PluginHandle,
+    Manager,
 };
 
 #[cfg(target_os = "android")]
@@ -11,6 +17,7 @@ const PLUGIN_IDENTIFIER: &str = "app.tauri.nativeaudio";
 tauri::ios_plugin_binding!(init_plugin_native_audio);
 
 /// Android 侧 PluginHandle 包装，供应用层把 coordinator snapshot 推给 Kotlin。
+#[cfg(target_os = "android")]
 pub struct NativeAudio<R: Runtime>(PluginHandle<R>);
 
 #[derive(Clone, Debug, Serialize)]
@@ -33,6 +40,7 @@ pub struct ApplyPlaybackSnapshotArgs {
     pub error: String,
 }
 
+#[cfg(target_os = "android")]
 impl<R: Runtime> NativeAudio<R> {
     pub fn apply_playback_snapshot(&self, args: &ApplyPlaybackSnapshotArgs) -> Result<(), String> {
         self.0
