@@ -20,6 +20,7 @@ const COMMANDS: &[&str] = &[
     "dispose",
     "save_png_to_gallery",
     "open_local_path",
+    "pick_library_folder",
 ];
 
 fn main() {

@@ -25,6 +25,7 @@ Default permissions for the plugin
 - `allow-dispose`
 - `allow-save-png-to-gallery`
 - `allow-open-local-path`
+- `allow-pick-library-folder`
 
 ## Permission Table
 
@@ -265,6 +266,32 @@ Enables the pause command without any pre-configured scope.
 <td>
 
 Denies the pause command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:allow-pick-library-folder`
+
+</td>
+<td>
+
+Enables the pick_library_folder command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-pick-library-folder`
+
+</td>
+<td>
+
+Denies the pick_library_folder command without any pre-configured scope.
 
 </td>
 </tr>

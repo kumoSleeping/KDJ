@@ -380,8 +380,14 @@ async fn pick_folder(app: tauri::AppHandle) -> Option<String> {
             .and_then(|file| file.into_path().ok())
             .map(|path| path.to_string_lossy().into_owned());
     }
-    // 移动端 dialog 没有 folder picker；提供应用可写的音乐目录作为曲库根。
-    #[cfg(not(desktop))]
+    // 安卓正式选目录走前端 bridge → native-audio；这里只作兼容空实现。
+    // iOS 仍回落应用可扫音乐目录。
+    #[cfg(all(not(desktop), target_os = "android"))]
+    {
+        let _ = app;
+        None
+    }
+    #[cfg(all(not(desktop), target_os = "ios"))]
     {
         mobile_library_roots(&app).into_iter().next()
     }
@@ -406,10 +412,15 @@ async fn pick_folders(app: tauri::AppHandle) -> Vec<String> {
             .map(|path| path.to_string_lossy().into_owned())
             .collect();
     }
-    // 安卓/iOS：系统 folder picker 未实现。返回应用沙箱内可扫描的音乐目录，
-    // 用户把文件放进该目录（或系统 Music 同步进去）即可被曲库扫到。
-    // 完整 SAF 树选择后续再补；先解决「点添加什么都不发生」。
-    #[cfg(not(desktop))]
+    // 安卓正式入口在前端 bridge → native-audio `pick_library_folder`
+    //（ACTION_OPEN_DOCUMENT_TREE）；这里返回空，避免再整包塞入 Music/Download。
+    // iOS：系统 folder picker 仍未接上，继续回落应用可扫目录。
+    #[cfg(all(not(desktop), target_os = "android"))]
+    {
+        let _ = app;
+        Vec::new()
+    }
+    #[cfg(all(not(desktop), target_os = "ios"))]
     {
         mobile_library_roots(&app)
     }

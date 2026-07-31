@@ -117,3 +117,5 @@ export declare const savePngToGallery: (payload: {
   image: string;
 }) => Promise<SavedGalleryPng>;
 export declare const openLocalPath: (path: string) => Promise<void>;
+/** 安卓：系统文件夹选择器；取消返回 null。 */
+export declare const pickLibraryFolder: () => Promise<string | null>;

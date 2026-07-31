@@ -7,6 +7,7 @@ import {
   addOverlayMovedListener,
   checkOverlayPermission,
   openLocalPath,
+  pickLibraryFolder,
   requestOverlayPermission,
   savePngToGallery,
   setLyricsOverlay,
@@ -137,11 +138,19 @@ async function createTauriBridge(): Promise<KdjBridge> {
         }
       : null,
     pickFolder: async () => {
+      // 安卓 dialog 没有 folder picker；走系统 ACTION_OPEN_DOCUMENT_TREE。
+      if (android) {
+        return pickLibraryFolder();
+      }
       const picked = await tauriInvoke<unknown>("pick_folder");
       // 用户取消时 Tauri 的对话框返回 null，契约要求的也是 null
       return typeof picked === "string" && picked ? picked : null;
     },
     pickFolders: async () => {
+      if (android) {
+        const path = await pickLibraryFolder();
+        return path ? [path] : [];
+      }
       const picked = await tauriInvoke<unknown>("pick_folders");
       return Array.isArray(picked) ? picked.filter((p): p is string => typeof p === "string") : [];
     },

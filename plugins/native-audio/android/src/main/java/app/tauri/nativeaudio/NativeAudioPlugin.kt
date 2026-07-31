@@ -8,8 +8,10 @@ import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.activity.result.ActivityResult
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -541,6 +543,57 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve()
         }.onFailure {
             invoke.reject(it.message ?: "openLocalPath failed")
+        }
+    }
+
+    /**
+     * 调起系统文件夹选择器（ACTION_OPEN_DOCUMENT_TREE），把选中目录解析成
+     * 可被 Rust 曲库扫描的真实路径。取消时 path 为 null，不 reject。
+     */
+    @Command
+    fun pickLibraryFolder(invoke: Invoke) {
+        try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            }
+            startActivityForResult(invoke, intent, "pickLibraryFolderResult")
+        } catch (error: Exception) {
+            invoke.reject(error.message ?: "无法打开系统文件夹选择器")
+        }
+    }
+
+    @ActivityCallback
+    fun pickLibraryFolderResult(invoke: Invoke, result: ActivityResult) {
+        when (result.resultCode) {
+            Activity.RESULT_CANCELED -> {
+                invoke.resolve(JSObject().apply { put("path", null as String?) })
+            }
+            Activity.RESULT_OK -> {
+                val uri = result.data?.data
+                if (uri == null) {
+                    invoke.resolve(JSObject().apply { put("path", null as String?) })
+                    return
+                }
+                val takeFlags =
+                    (result.data?.flags ?: 0) and
+                        (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                runCatching {
+                    activity.contentResolver.takePersistableUriPermission(
+                        uri,
+                        takeFlags or Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                }
+                val path = FolderPickerHelper.treeUriToFilesystemPath(uri)
+                if (path.isNullOrBlank()) {
+                    invoke.reject(
+                        "无法把所选文件夹解析为可扫描路径。请选择内部共享存储里的目录（如 Music、Download），不要选应用私有或云盘虚拟目录。",
+                    )
+                    return
+                }
+                invoke.resolve(JSObject().apply { put("path", path) })
+            }
+            else -> invoke.reject("选择文件夹失败")
         }
     }
 
