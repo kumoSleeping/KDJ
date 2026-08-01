@@ -615,10 +615,11 @@ impl AudioRenderer {
         };
         let progress = (transition.elapsed_frames + 1) as f32 / transition.total_frames as f32;
         let (outgoing, incoming) = if transition.plan.contains(TransitionPlan::SEEK_DUCK) {
-            // 新位置立刻满幅；旧位置按平方曲线快速让路。等功率交叉会在中点把
-            // 同一首歌的两个时间线都放到 ~0.7，听成同一个音响两下。
-            let rest = 1.0 - progress;
-            (rest * rest, 1.0)
+            // seek 两端通常是毫不相关的采样点。新位置若从第一帧就满幅叠上来，
+            // 会制造一次幅度阶跃/削波，听起来正是“点了以后顿一下”。用零斜率的
+            // 互补 smootherstep 换手：总增益始终为 1，既不叠成两下也不硬切爆点。
+            let incoming = progress * progress * (3.0 - 2.0 * progress);
+            (1.0 - incoming, incoming)
         } else {
             // Equal-power crossfade keeps perceived loudness stable around the midpoint; a linear
             // 0.5 + 0.5 handoff audibly dips when the decks are not phase-correlated.
@@ -833,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn seek_duck_keeps_incoming_full_while_outgoing_decays() {
+    fn seek_handoff_is_smooth_and_never_stacks_both_decks() {
         let (mut controller, mut renderer) = command_channel(4);
         controller
             .send(RtCommand::SetPlaying {
@@ -853,21 +854,39 @@ mod tests {
             })
             .unwrap();
 
-        // A=+1, B=-1；SEEK_DUCK 下 B 始终满幅，A 按 (1-p)^2 衰减。
+        // A=+1、B=-1：互补 smootherstep 从旧位置单调、连续地走到新位置。
         let mut output = [0.0; 4];
         renderer.render(&[1.0; 4], &[-1.0; 4], &mut output, 1);
-        let expected = [
-            (0.75f32).powi(2) * 1.0 + (-1.0),
-            (0.5f32).powi(2) * 1.0 + (-1.0),
-            (0.25f32).powi(2) * 1.0 + (-1.0),
-            -1.0,
-        ];
+        let expected = [0.6875, 0.0, -0.6875, -1.0];
         for (actual, expected) in output.into_iter().zip(expected) {
             assert!(
                 (actual - expected).abs() < 0.000_01,
                 "actual={actual} expected={expected}"
             );
         }
+
+        // 同相的最坏峰值也始终为 1；旧实现第一帧会把两台叠到 1.56，造成削波顿挫。
+        let (mut controller, mut renderer) = command_channel(4);
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::HandoffPrepared {
+                to: DeckId::B,
+                target_frame: 0,
+                transition_frames: 4,
+                plan: TransitionPlan {
+                    flags: TransitionPlan::SEEK_DUCK,
+                    beat_frames: 0,
+                },
+            })
+            .unwrap();
+        let mut output = [0.0; 4];
+        renderer.render(&[1.0; 4], &[1.0; 4], &mut output, 1);
+        assert_eq!(output, [1.0; 4]);
     }
 
     #[test]

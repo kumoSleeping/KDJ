@@ -301,7 +301,7 @@ export function DesktopLyricsOverlay() {
   else if (track && (entry.status === "idle" || entry.status === "loading")) {
     primary = `${track.title || track.filename} · 正在搜歌词…`;
   } else if (entry.status === "error" || entry.status === "empty") {
-    primary = entry.error || "没有找到歌词";
+    primary = "";
   } else if (current) {
     primary = current.text;
     secondary = extra || next?.text || "";

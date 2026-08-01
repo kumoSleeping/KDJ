@@ -101,6 +101,7 @@ export interface DownloadStore {
     options?: { quality?: Quality | null; analyze?: boolean | null; dest_dir?: string },
   ): Promise<DownloadTask[]>;
   cancel(taskId: string): Promise<void>;
+  retry(taskId: string): Promise<void>;
   remove(taskId: string): Promise<void>;
   clear(): Promise<void>;
   /** 视频下载等"接口直接返回任务"的场景，先本地插一条，等 WS 覆盖。 */
@@ -163,6 +164,11 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       set({ tasks: map, ...derive(map) });
       return;
     }
+    get().mergeTasks([task]);
+  },
+
+  async retry(taskId) {
+    const task = await api.retryDownload(taskId);
     get().mergeTasks([task]);
   },
 

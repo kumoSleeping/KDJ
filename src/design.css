@@ -2733,6 +2733,17 @@ button.kd-result-lead-btn:hover {
 .kd-chip[data-tone="danger"] {
   color: var(--kd-danger);
 }
+.kd-chip-action {
+  font-family: inherit;
+  cursor: pointer;
+}
+.kd-chip-action:hover:not(:disabled) {
+  text-decoration: underline;
+}
+.kd-chip-action:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
 
 /* Camelot 原色只作 accent。深色模式不能直接铺浅色 HSL：会像荧光贴纸；
    在面板底上压低亮度，文字取同色的浅色版本，既能认色又不刺眼。 */

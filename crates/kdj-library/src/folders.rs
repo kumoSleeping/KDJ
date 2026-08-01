@@ -25,12 +25,165 @@ use kdj_providers::tags::is_media_extension;
 /// 因为数据库在应用数据目录里，换台电脑就不会跟着音乐走。
 pub const METADATA_DIR_NAME: &str = ".kdj";
 pub const MANIFEST_NAME: &str = "manifest.json";
+/// 歌词正文和附加歌词都落在曲库目录自己的 KDJ 元数据目录里。
+pub const LYRICS_DIR_NAME: &str = "lyrics";
 /// 前端侧栏「其他」用的哨兵路径：不是真实目录，只表示「落在所有曲库根之外」。
 pub const OUTSIDE_FOLDER: &str = "__kd_outside__";
 /// v0.2.8 及以前把清单直接放在歌曲旁边。升级时双读并安全搬进 `.kdj/`。
 pub const LEGACY_MANIFEST_NAME: &str = ".kdj.json";
 const LEGACY_BACKUP_NAME: &str = "legacy-manifest-v1.json";
 const MANIFEST_VERSION: i64 = 1;
+
+#[derive(Debug, Clone, Default)]
+pub struct StoredLyrics {
+    pub lrc: String,
+    pub translated_lrc: String,
+    pub romaji_lrc: String,
+}
+
+/// 用平台 + 来源 key 生成稳定文件名；不使用数据库 track id，避免换库后歌词断链。
+fn lyrics_paths(audio_path: &Path, platform: &str, key: &str) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    let parent = audio_path.parent()?;
+    let platform = platform.trim();
+    let key = key.trim();
+    if platform.is_empty() || key.is_empty() {
+        return None;
+    }
+    let encoded_key: String = key.bytes().map(|byte| format!("{byte:02x}")).collect();
+    let stem = format!("{platform}-{encoded_key}");
+    let dir = parent.join(METADATA_DIR_NAME).join(LYRICS_DIR_NAME);
+    Some((
+        dir.join(format!("{stem}.lrc")),
+        dir.join(format!("{stem}.trans.lrc")),
+        dir.join(format!("{stem}.roma.lrc")),
+    ))
+}
+
+fn write_text_atomic(path: &Path, text: &str) -> Result<()> {
+    let tmp = path.with_extension("lrc.partial");
+    std::fs::write(&tmp, text.as_bytes())
+        .with_context(|| format!("写歌词临时文件失败：{}", tmp.display()))?;
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err).with_context(|| format!("提交歌词文件失败：{}", path.display()));
+    }
+    Ok(())
+}
+
+fn write_optional_lyrics_file(path: &Path, text: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        if path.exists() {
+            std::fs::remove_file(path)
+                .with_context(|| format!("清理旧歌词文件失败：{}", path.display()))?;
+        }
+    } else {
+        write_text_atomic(path, text.trim())?;
+    }
+    Ok(())
+}
+
+/// 保存下载结果对应的 LRC。返回 false 表示没有主歌词，不创建空文件。
+pub fn write_lyrics(
+    audio_path: &Path,
+    platform: &str,
+    key: &str,
+    lrc: &str,
+    translated_lrc: &str,
+    romaji_lrc: &str,
+) -> Result<bool> {
+    let Some((main, translated, romaji)) = lyrics_paths(audio_path, platform, key) else {
+        return Ok(false);
+    };
+    if lrc.trim().is_empty() {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(main.parent().expect("歌词路径一定有父目录"))
+        .with_context(|| format!("创建歌词目录失败：{}", main.display()))?;
+    write_text_atomic(&main, lrc.trim())?;
+    write_optional_lyrics_file(&translated, translated_lrc)?;
+    write_optional_lyrics_file(&romaji, romaji_lrc)?;
+    Ok(true)
+}
+
+/// 读取下载时保存的歌词；只认有主 LRC 的完整条目。
+pub fn read_lyrics(audio_path: &Path, platform: &str, key: &str) -> Result<Option<StoredLyrics>> {
+    let Some((main, translated, romaji)) = lyrics_paths(audio_path, platform, key) else {
+        return Ok(None);
+    };
+    if !main.is_file() {
+        return Ok(None);
+    }
+    let lrc = std::fs::read_to_string(&main)
+        .with_context(|| format!("读取歌词失败：{}", main.display()))?;
+    if lrc.trim().is_empty() {
+        return Ok(None);
+    }
+    let read_optional = |path: &Path| -> Result<String> {
+        if !path.is_file() {
+            return Ok(String::new());
+        }
+        Ok(std::fs::read_to_string(path)
+            .with_context(|| format!("读取歌词附加文件失败：{}", path.display()))?)
+    };
+    Ok(Some(StoredLyrics {
+        lrc,
+        translated_lrc: read_optional(&translated)?,
+        romaji_lrc: read_optional(&romaji)?,
+    }))
+}
+
+fn transfer_lyrics(
+    source_audio: &Path,
+    target_audio: &Path,
+    platform: &str,
+    key: &str,
+    move_files: bool,
+) -> Result<()> {
+    let (Some(source), Some(target)) = (
+        lyrics_paths(source_audio, platform, key),
+        lyrics_paths(target_audio, platform, key),
+    ) else {
+        return Ok(());
+    };
+    for (from, to) in [
+        (source.0, target.0),
+        (source.1, target.1),
+        (source.2, target.2),
+    ] {
+        if !from.is_file() {
+            continue;
+        }
+        if to.exists() {
+            if move_files {
+                let _ = std::fs::remove_file(&from);
+            }
+            continue;
+        }
+        std::fs::create_dir_all(to.parent().expect("歌词路径一定有父目录"))
+            .with_context(|| format!("创建目标歌词目录失败：{}", to.display()))?;
+        if move_files {
+            if let Err(err) = std::fs::rename(&from, &to) {
+                std::fs::copy(&from, &to).with_context(|| {
+                    format!("移动歌词失败（rename: {err}）：{}", from.display())
+                })?;
+                std::fs::remove_file(&from)
+                    .with_context(|| format!("清理旧歌词文件失败：{}", from.display()))?;
+            }
+        } else {
+            std::fs::copy(&from, &to)
+                .with_context(|| format!("复制歌词失败：{}", from.display()))?;
+        }
+    }
+    Ok(())
+}
+
+pub fn move_lyrics(source_audio: &Path, target_audio: &Path, platform: &str, key: &str) -> Result<()> {
+    transfer_lyrics(source_audio, target_audio, platform, key, true)
+}
+
+pub fn copy_lyrics(source_audio: &Path, target_audio: &Path, platform: &str, key: &str) -> Result<()> {
+    transfer_lyrics(source_audio, target_audio, platform, key, false)
+}
 
 /// 扫描目录树的深度上限。DJ 的歌单目录一般 1~2 层，给到 6 层足够，
 /// 同时挡住 node_modules 那种病态深度把 UI 卡死。
@@ -702,13 +855,26 @@ pub fn delete_folder(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
         for entry in std::fs::read_dir(&meta).context("读 KDJ 元数据目录失败")? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            anyhow::ensure!(
-                entry.file_type()?.is_file()
-                    && (name == MANIFEST_NAME
-                        || name == LEGACY_BACKUP_NAME
-                        || name.ends_with(".partial")),
-                "KDJ 元数据目录里有未知内容，拒绝删除"
-            );
+            if name == LYRICS_DIR_NAME {
+                anyhow::ensure!(entry.file_type()?.is_dir(), "KDJ 歌词目录类型不正确，拒绝删除");
+                for lyric in std::fs::read_dir(entry.path()).context("读 KDJ 歌词目录失败")? {
+                    let lyric = lyric?;
+                    anyhow::ensure!(
+                        lyric.file_type()?.is_file()
+                            && (lyric.file_name().to_string_lossy().ends_with(".lrc")
+                                || lyric.file_name().to_string_lossy().ends_with(".partial")),
+                        "KDJ 歌词目录里有未知内容，拒绝删除"
+                    );
+                }
+            } else {
+                anyhow::ensure!(
+                    entry.file_type()?.is_file()
+                        && (name == MANIFEST_NAME
+                            || name == LEGACY_BACKUP_NAME
+                            || name.ends_with(".partial")),
+                    "KDJ 元数据目录里有未知内容，拒绝删除"
+                );
+            }
         }
         std::fs::remove_dir_all(&meta).context("删除 KDJ 元数据失败")?;
     }
@@ -994,6 +1160,30 @@ mod tests {
         // 坏清单不该让整棵树打不开
         std::fs::write(manifest_path(&dir), "{ not json").unwrap();
         assert_eq!(read_manifest_order(&dir), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lyrics_roundtrip_uses_source_key_not_track_id() {
+        let dir = scratch("lyrics");
+        let audio = dir.join("song.flac");
+        std::fs::write(&audio, b"audio").unwrap();
+
+        assert!(write_lyrics(
+            &audio,
+            "wyy",
+            "123/abc",
+            "[00:01.00]主歌词",
+            "[00:01.00]翻译",
+            "[00:01.00]romaji",
+        )
+        .unwrap());
+        let stored = read_lyrics(&audio, "wyy", "123/abc").unwrap().unwrap();
+        assert_eq!(stored.lrc, "[00:01.00]主歌词");
+        assert_eq!(stored.translated_lrc, "[00:01.00]翻译");
+        assert_eq!(stored.romaji_lrc, "[00:01.00]romaji");
+        assert!(dir.join(".kdj/lyrics").is_dir());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

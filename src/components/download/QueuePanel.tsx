@@ -77,9 +77,11 @@ function QueueRow({
   onOpenTask(task: DownloadTask): void;
 }) {
   const cancel = useDownloadStore((store) => store.cancel);
+  const retry = useDownloadStore((store) => store.retry);
   const remove = useDownloadStore((store) => store.remove);
-  /** 取消这一条失败时的原因，和任务自己的 error 共用行尾那一行。 */
+  /** 行内操作失败的原因，和任务自己的 error 共用行尾那一行。 */
   const [cancelError, setCancelError] = useState("");
+  const [retrying, setRetrying] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const active =
     task.state === "queued" || task.state === "running" || task.state === "processing";
@@ -112,7 +114,26 @@ function QueueRow({
             {kind}
           </span>
         ) : null}
-        {task.state !== "queued" ? (
+        {task.state === "failed" && task.kind === "audio" ? (
+          <button
+            type="button"
+            className="kd-chip kd-chip-action"
+            data-tone="danger"
+            disabled={retrying}
+            aria-label="重试下载"
+            onClick={() => {
+              setCancelError("");
+              setRetrying(true);
+              void retry(task.id)
+                .catch((error: unknown) =>
+                  setCancelError(`重试失败：${(error as Error).message}`),
+                )
+                .finally(() => setRetrying(false));
+            }}
+          >
+            {retrying ? "重试中" : "重试"}
+          </button>
+        ) : task.state !== "queued" ? (
           <span className="kd-chip" data-tone={STATE_TONE[task.state]}>
             {stateLabel(task)}
           </span>

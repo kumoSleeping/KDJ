@@ -38,6 +38,8 @@ export interface Settings {
   filename_template: string;
   concurrent_downloads: number;
   auto_analyze: boolean;
+  /** 下载完成后按来源 ID 保存 LRC 到曲库目录的 `.kdj/lyrics/`。 */
+  download_lyrics: boolean;
   write_tags_after_analyze: boolean;
   analysis_duration: number;
   theme: "light" | "dark" | "system";
@@ -143,6 +145,12 @@ export interface LyricsResponse {
   title: string;
   artist: string;
   score: number;
+}
+
+export interface LocalLyricsResponse {
+  lrc: string;
+  translated_lrc: string;
+  romaji_lrc: string;
 }
 
 export interface MergedGroup {

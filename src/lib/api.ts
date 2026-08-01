@@ -25,6 +25,7 @@ import type {
   ScanResponseLike,
   LyricsRequest,
   LyricsResponse,
+  LocalLyricsResponse,
   SearchRequest,
   SearchResponse,
   Settings,
@@ -106,6 +107,7 @@ export const api = {
   search: (body: SearchRequest) => post<SearchResponse>("/search", body),
   /** 按曲名/艺人自动搜歌词（网易云 + QQ）；有来源 key 时优先直取。 */
   lyrics: (body: LyricsRequest) => post<LyricsResponse>("/lyrics", body),
+  libraryLyrics: (trackId: number) => request<LocalLyricsResponse>(`/library/lyrics/${trackId}`),
   /**
    * 歌曲试听直链（最低码率，不下载）。整个 SongSource 发过去：
    * QQ 的 media_mid、SoundCloud 的 transcoding_url 都在 payload 里。
@@ -122,6 +124,7 @@ export const api = {
   enqueue: (body: DownloadRequest) => post<DownloadTask[]>("/downloads", body),
   startDownloads: () => post<{ started: boolean }>("/downloads/start"),
   cancelDownload: (id: string) => post<DownloadTask>(`/downloads/${id}/cancel`),
+  retryDownload: (id: string) => post<DownloadTask>(`/downloads/${id}/retry`),
   /** 只移除一条已结束的队列记录，避免「清空」影响其他历史任务。 */
   removeDownload: (id: string) => request<{ removed: boolean }>(`/downloads/${id}`, { method: "DELETE" }),
   clearDownloads: () => post<{ removed: number }>("/downloads/clear"),

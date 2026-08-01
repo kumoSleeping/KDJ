@@ -508,6 +508,8 @@ export function SettingsPanel() {
   const setTransportFade = usePlaybackPrefs((state) => state.setTransportFade);
   const lyricsEngines = useLyricsPrefs((state) => state.engines);
   const setLyricsEngines = useLyricsPrefs((state) => state.setEngines);
+  const tryOnlineWhenMissing = useLyricsPrefs((state) => state.tryOnlineWhenMissing);
+  const setTryOnlineWhenMissing = useLyricsPrefs((state) => state.setTryOnlineWhenMissing);
   const desktopLyricsLocked = useLyricsPrefs((state) => state.desktopLocked);
   const desktopLyricsFontScale = useLyricsPrefs((state) => state.desktopFontScale);
   const desktopLyricsOpacity = useLyricsPrefs((state) => state.desktopOpacity);
@@ -687,6 +689,18 @@ export function SettingsPanel() {
 
         <Panel heading="歌词" dense>
           <div className="kd-djp-switch-list" aria-label="歌词选项">
+            <Switch
+              checked={settings?.download_lyrics ?? true}
+              label="下载歌词"
+              title="下载音频后按当前平台歌曲 ID 获取 LRC，保存到歌曲所在目录的 .kdj/lyrics/；歌词失败不影响歌曲下载。"
+              onChange={() => void saveSettings({ download_lyrics: !(settings?.download_lyrics ?? true) })}
+            />
+            <Switch
+              checked={tryOnlineWhenMissing}
+              label="无歌词时尝试匹配"
+              title="本地 .kdj/lyrics/ 没有歌词时，才按曲名、艺人和时长在线匹配；关闭后只使用本地歌词。在线试听仍按来源 ID 取词。"
+              onChange={() => setTryOnlineWhenMissing(!tryOnlineWhenMissing)}
+            />
             {canOverlayLyrics ? (
               <>
                 <Switch

@@ -17,7 +17,9 @@ use kdj_library::service::{FileDisposal, TrackQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::downloads::{enqueue_audio, enqueue_video, enqueue_vj_export, DownloadManager};
+use crate::downloads::{
+    enqueue_audio, enqueue_video, enqueue_vj_export, retry_audio, DownloadManager,
+};
 use crate::error::{ApiError, ApiResult};
 use crate::state::{AppState, PLATFORMS};
 
@@ -48,6 +50,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/downloads/{id}", delete(remove_download))
         .route("/api/downloads/start", post(start_downloads))
         .route("/api/downloads/{id}/cancel", post(cancel_download))
+        .route("/api/downloads/{id}/retry", post(retry_download))
         .route("/api/downloads/clear", post(clear_downloads))
         .route("/api/video/resolve", post(video_resolve))
         .route("/api/video/download", post(video_download))
@@ -56,6 +59,7 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/vj/export", post(vj_export))
         .route("/api/library/tracks", get(library_tracks))
         .route("/api/library/tracks/{id}", get(library_track))
+        .route("/api/library/lyrics/{id}", get(library_lyrics))
         .route("/api/library/tracks/{id}", patch(library_patch))
         .route("/api/library/tracks/{id}", delete(library_delete))
         // 静态段和 {id} 同位并存：axum 的 matchit 保证静态优先，
@@ -544,6 +548,16 @@ async fn cancel_download(
         .ok_or_else(|| ApiError::not_found("任务不存在"))
 }
 
+async fn retry_download(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(ctx): axum::Extension<Ctx>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<DownloadTask>> {
+    retry_audio(state, ctx.downloads.clone(), &id)
+        .map(Json)
+        .map_err(ApiError::from)
+}
+
 async fn clear_downloads(axum::Extension(ctx): axum::Extension<Ctx>) -> Json<serde_json::Value> {
     Json(json!({ "removed": ctx.downloads.clear_finished() }))
 }
@@ -909,6 +923,27 @@ async fn library_track(
         .get(id)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("曲目不存在"))
+}
+
+async fn library_lyrics(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i64>,
+) -> ApiResult<Json<LocalLyricsResponse>> {
+    let track = state
+        .library
+        .get(id)?
+        .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
+    let stored = kdj_library::folders::read_lyrics(
+        Path::new(&track.path),
+        &track.source_platform,
+        &track.source_key,
+    )?
+    .ok_or_else(|| ApiError::not_found("本地没有歌词"))?;
+    Ok(Json(LocalLyricsResponse {
+        lrc: stored.lrc,
+        translated_lrc: stored.translated_lrc,
+        romaji_lrc: stored.romaji_lrc,
+    }))
 }
 
 async fn library_patch(
@@ -1412,6 +1447,14 @@ async fn folder_apply(
         match payload.op {
             FileOp::Move => match move_track_resolving_links(&state, *id, &source, &dest) {
                 Ok((target, touched)) => {
+                    if let Err(err) = kdj_library::folders::move_lyrics(
+                        &source,
+                        &target,
+                        &track.source_platform,
+                        &track.source_key,
+                    ) {
+                        tracing::warn!("移动歌词失败 {}：{err:#}", target.display());
+                    }
                     state.library.relocate(*id, &target)?;
                     track_ids.push(*id);
                     side_ids.extend(touched);
@@ -1423,6 +1466,14 @@ async fn folder_apply(
             },
             FileOp::Link => match kdj_library::folders::link_file(&source, &dest) {
                 Ok((target, method)) => {
+                    if let Err(err) = kdj_library::folders::copy_lyrics(
+                        &source,
+                        &target,
+                        &track.source_platform,
+                        &track.source_key,
+                    ) {
+                        tracing::warn!("复制链接歌词失败 {}：{err:#}", target.display());
+                    }
                     // 链接出来的那一份是新曲目，把分析结果和人工标记一并带过去
                     match state.library.upsert_file(&target, &track.source_platform, &track.source_key) {
                         Ok(new_id) => {
@@ -1441,6 +1492,14 @@ async fn folder_apply(
             },
             FileOp::Copy => match kdj_library::folders::copy_file(&source, &dest) {
                 Ok(target) => {
+                    if let Err(err) = kdj_library::folders::copy_lyrics(
+                        &source,
+                        &target,
+                        &track.source_platform,
+                        &track.source_key,
+                    ) {
+                        tracing::warn!("复制歌词失败 {}：{err:#}", target.display());
+                    }
                     match state.library.upsert_file(&target, &track.source_platform, &track.source_key) {
                         Ok(new_id) => {
                             state.library.clone_metadata(*id, new_id)?;

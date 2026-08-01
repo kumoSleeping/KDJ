@@ -26,6 +26,7 @@ const SETTINGS_FIELDS: &[&str] = &[
     "filename_template",
     "concurrent_downloads",
     "auto_analyze",
+    "download_lyrics",
     "write_tags_after_analyze",
     "analysis_duration",
     "theme",
@@ -56,6 +57,9 @@ pub struct Settings {
     pub concurrent_downloads: u32,
     #[serde(default = "yes")]
     pub auto_analyze: bool,
+    /// 下载音频后按来源 ID 拉取 LRC，写入曲库目录的 `.kdj/lyrics/`。
+    #[serde(default = "yes")]
+    pub download_lyrics: bool,
     #[serde(default)]
     pub write_tags_after_analyze: bool,
     #[serde(default = "default_analysis_duration")]
@@ -107,6 +111,7 @@ impl Settings {
             filename_template: default_filename_template(),
             concurrent_downloads: default_concurrent(),
             auto_analyze: true,
+            download_lyrics: true,
             write_tags_after_analyze: false,
             analysis_duration: default_analysis_duration(),
             theme: default_theme(),

@@ -126,7 +126,7 @@ export function buildOverlayTimeline(options: {
     return { ...base, placeholder: `${title} · 正在搜歌词…`, lines: [] };
   }
   if (entry.status === "error" || entry.status === "empty" || !entry.lines.length) {
-    return { ...base, placeholder: entry.error || "没有找到歌词", lines: [] };
+    return { ...base, placeholder: "", lines: [] };
   }
 
   const hasMeaning = entry.translated.some((line) => line.text.trim());

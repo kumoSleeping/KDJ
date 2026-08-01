@@ -74,9 +74,18 @@ fn window_speed(samples: &mut VecDeque<(f64, u64)>, now: f64) -> f64 {
     ((b1 as f64 - b0 as f64) / dt).max(0.0)
 }
 
+#[derive(Clone)]
+struct AudioRetry {
+    source: SongSource,
+    quality: Quality,
+    analyze: bool,
+    dest_dir: String,
+}
+
 struct Entry {
     task: DownloadTask,
     cancel: CancellationToken,
+    audio_retry: Option<AudioRetry>,
     /// 测速滑窗：(单调秒, 已下字节)
     samples: VecDeque<(f64, u64)>,
     /// 上一次真正广播出去的时刻 / 进度。`-1.0` = 还没广播过，第一次一定放行。
@@ -89,6 +98,7 @@ impl Entry {
         Entry {
             task,
             cancel,
+            audio_retry: None,
             samples: VecDeque::new(),
             last_emit: -1.0,
             last_progress: -1.0,
@@ -188,6 +198,48 @@ impl DownloadManager {
             trim_locked(&mut entries);
         }
         self.hub.publish("download.updated", &task);
+    }
+
+    fn attach_audio_retry(&self, id: &str, retry: AudioRetry) {
+        if let Some(entry) = self.entries.lock().unwrap().get_mut(id) {
+            entry.audio_retry = Some(retry);
+        }
+    }
+
+    fn prepare_audio_retry(
+        &self,
+        id: &str,
+    ) -> Result<(DownloadTask, AudioRetry, CancellationToken)> {
+        let (task, retry, cancel) = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries.get_mut(id).context("任务不存在")?;
+            anyhow::ensure!(entry.task.kind == TaskKind::Audio, "只有歌曲下载支持重试");
+            anyhow::ensure!(
+                entry.task.state == TaskState::Failed,
+                "只有失败的任务可以重试"
+            );
+            let retry = entry
+                .audio_retry
+                .clone()
+                .context("这条旧任务没有可用的重试参数")?;
+            let cancel = CancellationToken::new();
+            entry.cancel = cancel.clone();
+            entry.samples.clear();
+            entry.last_emit = monotonic();
+            entry.last_progress = 0.0;
+            entry.task.state = TaskState::Queued;
+            entry.task.progress = 0.0;
+            entry.task.downloaded_bytes = 0;
+            entry.task.total_bytes = 0;
+            entry.task.speed_bps = 0.0;
+            entry.task.path.clear();
+            entry.task.error.clear();
+            entry.task.track_id = None;
+            entry.task.updated_at = now_secs();
+            (entry.task.clone(), retry, cancel)
+        };
+        self.hub.publish("download.updated", &task);
+        Ok((task, retry, cancel))
     }
 
     /// 改任务并**立刻**广播。状态变更走这里，进度走 `progress`（有节流）。
@@ -538,6 +590,15 @@ pub fn enqueue_audio(
     );
     let cancel = CancellationToken::new();
     manager.insert(task.clone(), cancel.clone());
+    manager.attach_audio_retry(
+        &task.id,
+        AudioRetry {
+            source: source.clone(),
+            quality,
+            analyze,
+            dest_dir: dest_dir.clone(),
+        },
+    );
     let queued_generation = manager.start_generation();
 
     let id = task.id.clone();
@@ -552,10 +613,40 @@ pub fn enqueue_audio(
             dest_dir,
             cancel,
             queued_generation,
+            false,
         )
         .await;
     });
     task
+}
+
+/// 用原任务冻结的来源、音质和目标目录重新执行一条失败的歌曲下载。
+/// 沿用任务 id，前端不需要先删旧行再插新行；用户主动点击重试时立即开始，
+/// 不受“自动下载”开关影响。
+pub fn retry_audio(
+    state: Arc<AppState>,
+    manager: Arc<DownloadManager>,
+    id: &str,
+) -> Result<DownloadTask> {
+    let (task, retry, cancel) = manager.prepare_audio_retry(id)?;
+    let task_id = task.id.clone();
+    let queued_generation = manager.start_generation();
+    tokio::spawn(async move {
+        run_audio(
+            state,
+            manager,
+            task_id,
+            retry.source,
+            retry.quality,
+            retry.analyze,
+            retry.dest_dir,
+            cancel,
+            queued_generation,
+            true,
+        )
+        .await;
+    });
+    Ok(task)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -569,8 +660,9 @@ async fn run_audio(
     dest_dir: String,
     cancel: CancellationToken,
     queued_generation: u64,
+    start_immediately: bool,
 ) {
-    if !wait_until_started(&manager, &cancel, queued_generation).await {
+    if !start_immediately && !wait_until_started(&manager, &cancel, queued_generation).await {
         return;
     }
     let permits = manager.permits();
@@ -622,6 +714,30 @@ async fn run_audio(
                     return;
                 }
             };
+            // 音频已经完整落到目标目录，先释放下载并发槽。歌词接口可能很慢，
+            // 不该让网络取词占住一个下载名额、挡住队列里的下一首。
+            drop(_permit);
+
+            // 歌词跟着下载结果的精确平台 key 保存，不经过标题模糊匹配。
+            // 歌曲本体已经完成后，歌词失败只记日志，不影响下载任务成功。
+            if state.config.to_settings().download_lyrics {
+                match provider.lyric(&source.key).await {
+                    Ok(Some(text)) => {
+                        if let Err(err) = kdj_library::folders::write_lyrics(
+                            &path,
+                            source.platform.as_str(),
+                            &source.key,
+                            &text.lrc,
+                            &text.translated_lrc,
+                            &text.romaji_lrc,
+                        ) {
+                            tracing::warn!("下载后写歌词失败 {}：{err:#}", path.display());
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => tracing::warn!("下载后取歌词失败 {}：{err:#}", source.title),
+                }
+            }
             // 下载完立刻入库，并把来源信息带上，这样曲库里能看出这首是从哪来的
             let track_id = match state.library.upsert_file(
                 &path,
@@ -1135,6 +1251,49 @@ mod tests {
             created_at,
             updated_at: created_at,
         }
+    }
+
+    #[test]
+    fn failed_audio_can_be_reset_with_its_original_retry_parameters() {
+        let manager = manager();
+        let cancel = CancellationToken::new();
+        let mut task = sample_task("retry", TaskState::Failed, 1.0);
+        task.progress = 0.8;
+        task.downloaded_bytes = 800;
+        task.total_bytes = 1000;
+        task.error = "网络失败".into();
+        manager.insert(task, cancel);
+        manager.attach_audio_retry(
+            "retry",
+            AudioRetry {
+                source: SongSource {
+                    platform: Platform::Wyy,
+                    key: "123".into(),
+                    title: "song".into(),
+                    artists: vec!["artist".into()],
+                    album: String::new(),
+                    duration: None,
+                    cover: String::new(),
+                    max_quality: None,
+                    vip: false,
+                    payload: Default::default(),
+                },
+                quality: Quality::Flac,
+                analyze: true,
+                dest_dir: "/music".into(),
+            },
+        );
+
+        let (task, retry, fresh_cancel) = manager.prepare_audio_retry("retry").unwrap();
+        assert_eq!(task.state, TaskState::Queued);
+        assert_eq!(task.progress, 0.0);
+        assert_eq!(task.downloaded_bytes, 0);
+        assert_eq!(task.total_bytes, 0);
+        assert!(task.error.is_empty());
+        assert_eq!(retry.source.key, "123");
+        assert_eq!(retry.dest_dir, "/music");
+        assert!(!fresh_cancel.is_cancelled());
+        assert!(manager.prepare_audio_retry("retry").is_err());
     }
 
     #[test]

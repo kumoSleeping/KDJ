@@ -280,6 +280,16 @@ pub struct LyricsResponse {
     pub score: f64,
 }
 
+/// 曲库目录 `.kdj/lyrics/` 里的本地歌词文件集合。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalLyricsResponse {
+    pub lrc: String,
+    #[serde(default)]
+    pub translated_lrc: String,
+    #[serde(default)]
+    pub romaji_lrc: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LyricsRequest {
     pub title: String,

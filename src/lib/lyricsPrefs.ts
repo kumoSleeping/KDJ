@@ -41,6 +41,8 @@ export interface LyricsPrefs {
   engines: LyricsEngine[];
   /** 显示来源：跟随曲目 / 强制网易云 / 强制 QQ。 */
   displaySource: LyricsDisplaySource;
+  /** 本地没有下载歌词时，是否再按标题/艺人在线匹配。 */
+  tryOnlineWhenMissing: boolean;
   /** 当前附加层；点右上角单字在可用态之间循环。 */
   lyricExtra: LyricsExtra;
   /**
@@ -95,6 +97,7 @@ const DEFAULTS: LyricsPrefs = {
   autoShow: false,
   engines: ["wyy", "qqm"],
   displaySource: "follow",
+  tryOnlineWhenMissing: false,
   lyricExtra: "meaning",
   asideFace: "detail",
   desktopEnabled: false,
@@ -279,6 +282,7 @@ function pickPrefs(state: LyricsPrefs): LyricsPrefs {
     autoShow: state.autoShow,
     engines: [...state.engines],
     displaySource: state.displaySource,
+    tryOnlineWhenMissing: state.tryOnlineWhenMissing,
     lyricExtra: state.lyricExtra,
     asideFace: state.asideFace,
     desktopEnabled: state.desktopEnabled,
@@ -331,6 +335,10 @@ function load(): LyricsPrefs {
       autoShow,
       engines: normalizeEngines(data.engines),
       displaySource: normalizeSource(data.displaySource),
+      tryOnlineWhenMissing:
+        typeof data.tryOnlineWhenMissing === "boolean"
+          ? data.tryOnlineWhenMissing
+          : DEFAULTS.tryOnlineWhenMissing,
       lyricExtra,
       asideFace: normalizeAsideFace(data.asideFace),
       desktopEnabled:
@@ -438,6 +446,7 @@ interface LyricsPrefsState extends LyricsPrefs {
   setEngines(engines: LyricsEngine[]): void;
   toggleEngine(engine: LyricsEngine): void;
   setDisplaySource(source: LyricsDisplaySource): void;
+  setTryOnlineWhenMissing(value: boolean): void;
   setLyricExtra(extra: LyricsExtra): void;
   setAsideFace(face: LyricsAsideFace): void;
   setDesktopEnabled(value: boolean): void;
@@ -517,6 +526,14 @@ export const useLyricsPrefs = create<LyricsPrefsState>((set, get) => ({
     }
     set((state) => ({ displaySource: source, engines, prefsEpoch: state.prefsEpoch + 1 }));
     save({ ...get(), displaySource: source, engines });
+    bustLyricsCache();
+  },
+  setTryOnlineWhenMissing(tryOnlineWhenMissing) {
+    set((state) => ({
+      tryOnlineWhenMissing,
+      prefsEpoch: state.prefsEpoch + 1,
+    }));
+    save({ ...get(), tryOnlineWhenMissing });
     bustLyricsCache();
   },
   setLyricExtra(lyricExtra) {

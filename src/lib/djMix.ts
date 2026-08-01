@@ -1253,12 +1253,13 @@ export interface DjBeginOptions {
 /**
  * 从波形估算接歌起手时刻（秒）。
  *
- * 1. 在全曲「有声」段算平均响度 amp；
- * 2. 仍 ≥ 平均值一半的最后一段视为真实尾音结束；
+ * 1. 从有效波形估算一个较低的相对尾音阈值；
+ * 2. 用约 1.5 秒的连续窗口找最后一段真实声音，忽略尾部孤立尖峰和底噪；
  * 3. 起手 = 尾音结束 − mixSecs（设置里选 N 小节，就提前 N 小节接入）。
  *
- * 比旧版中频占比 heuristic 更贴近「最后一音放完再接」——不会在
- * 人声暂歇、鼓还在时误判成 outro。
+ * amp 已在后端按每首歌的 P5/P99 归一化，固定数值并不是物理意义上的“绝对噪声底”。
+ * 阈值取有效段平均响度的 12%（远低于旧版 50%，保住渐弱尾奏），再要求窗口内多数
+ * bucket 都达标，避免一个编码残响把尾点拖到文件末端。
  */
 export function findMixStartTime(
   wave: { duration: number; amp: number[] },
@@ -1269,20 +1270,25 @@ export function findMixStartTime(
   const secPerBucket = wave.duration / n;
 
   const NOISE_FLOOR = 0.02;
-  const active: number[] = [];
-  for (let i = 0; i < n; i += 1) {
-    if (wave.amp[i] > NOISE_FLOOR) active.push(wave.amp[i]);
-  }
+  const active = wave.amp.filter((value) => Number.isFinite(value) && value > NOISE_FLOOR);
   if (active.length < 8) return null;
 
   const average = active.reduce((sum, value) => sum + value, 0) / active.length;
-  const threshold = average * 0.5;
-  if (threshold <= NOISE_FLOOR) return null;
+  const threshold = Math.max(NOISE_FLOOR, average * 0.12);
+  const windowBuckets = Math.max(2, Math.ceil(1.5 / secPerBucket));
+  const requiredAudible = Math.ceil(windowBuckets * 0.6);
 
   let lastAudible = -1;
-  for (let i = n - 1; i >= 0; i -= 1) {
-    if (wave.amp[i] >= threshold) {
-      lastAudible = i;
+  for (let end = n - 1; end >= windowBuckets - 1; end -= 1) {
+    let audible = 0;
+    let sum = 0;
+    for (let i = end - windowBuckets + 1; i <= end; i += 1) {
+      const value = Number.isFinite(wave.amp[i]) ? wave.amp[i] : 0;
+      sum += value;
+      if (value >= threshold) audible += 1;
+    }
+    if (audible >= requiredAudible && sum / windowBuckets >= threshold) {
+      lastAudible = end;
       break;
     }
   }

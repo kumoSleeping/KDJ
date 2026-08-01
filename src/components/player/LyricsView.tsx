@@ -147,9 +147,7 @@ export function LyricsView({ track }: { track: Track | null }) {
           canCycle={false}
           onCycle={() => undefined}
         />
-        <div className="kd-lyrics-stage">
-          <p className="kd-lyrics-empty">{entry.error || "没有找到歌词"}</p>
-        </div>
+        <div className="kd-lyrics-stage" />
       </div>
     );
   }

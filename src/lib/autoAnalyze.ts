@@ -200,6 +200,8 @@ async function analyzeSelection(): Promise<void> {
  * 显式登记，登记过就不再去 DOM 里现找。
  */
 let scroller: HTMLElement | null = null;
+/** 只关心竖向可视区；横滚不会换一首眼前的曲目，不能为它反复重置分析防抖。 */
+let scrollerTop = 0;
 
 /**
  * 显式登记曲目表的滚动容器（可选）。TrackTable 给 `.kd-scroll` 挂个 ref 调这里，
@@ -207,6 +209,7 @@ let scroller: HTMLElement | null = null;
  */
 export function observeTrackScroller(element: HTMLElement | null): void {
   scroller = element;
+  scrollerTop = element?.scrollTop ?? 0;
 }
 
 /**
@@ -220,6 +223,7 @@ function findScroller(): HTMLElement | null {
   if (scroller?.isConnected) return scroller;
   const cell = document.querySelector("td[data-col='title']");
   scroller = cell?.closest<HTMLElement>(".kd-scroll") ?? null;
+  scrollerTop = scroller?.scrollTop ?? 0;
   return scroller;
 }
 
@@ -300,6 +304,11 @@ function onScrollCapture(event: Event): void {
   const target = event.target;
   if (!(target instanceof HTMLElement) || !target.classList.contains("kd-scroll")) return;
   if (target !== findScroller()) return;
+  // 曲目表横向滚动也发同一种 scroll 事件，但眼前曲目完全没变。此前这里仍然
+  // clearTimeout + setTimeout，和 TrackTable 的无效 React 重渲染一起放大了横滚卡顿。
+  const top = target.scrollTop;
+  if (top === scrollerTop) return;
+  scrollerTop = top;
   // 光是"在滚"就足以让后台补齐让路：用户显然在找东西，
   // 这时候灌 20 首进队列，等他停下来时眼前这屏得排在那 20 首后面。
   viewportAt = Date.now();

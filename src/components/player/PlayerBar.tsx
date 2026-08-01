@@ -518,22 +518,26 @@ export function PlayerBar() {
    * 去重必须放在真正调用音频引擎的边界，而不能只相信任一 UI 的 suppress 标记。
    */
   const lastCommittedSeekRef = useRef<{ trackId: number; position: number; at: number } | null>(null);
-  const shouldCommitSeek = useCallback((trackId: number, position: number) => {
-    const now = performance.now();
-    const previous = lastCommittedSeekRef.current;
-    if (
-      previous &&
-      previous.trackId === trackId &&
-      now - previous.at < 750 &&
-      // 回声落地时视频已经继续走了几十到几百毫秒，不能只按浮点完全相等去重。
-      // 真正的快速跳远仍远大于 1 秒，会正常提交。
-      Math.abs(previous.position - position) < 1
-    ) {
-      return false;
-    }
-    lastCommittedSeekRef.current = { trackId, position, at: now };
-    return true;
-  }, []);
+  const shouldCommitSeek = useCallback(
+    (trackId: number, position: number, force = false) => {
+      const now = performance.now();
+      const previous = lastCommittedSeekRef.current;
+      if (
+        !force &&
+        previous &&
+        previous.trackId === trackId &&
+        now - previous.at < 750 &&
+        // 回声落地时视频已经继续走了几十到几百毫秒，不能只按浮点完全相等去重。
+        // 真正的快速跳远仍远大于 1 秒，会正常提交。
+        Math.abs(previous.position - position) < 1
+      ) {
+        return false;
+      }
+      lastCommittedSeekRef.current = { trackId, position, at: now };
+      return true;
+    },
+    [],
+  );
   /** 已提交、等待后端落地的跳转；期间迟到的旧位置事件不能把进度条弹回去。 */
   const pendingSeekRef = useRef<{ trackId: number; position: number; at: number } | null>(null);
   /**
@@ -1147,10 +1151,11 @@ export function PlayerBar() {
         setPosition(target);
         return;
       }
-      // 正式跳转 = 拖动结束，时钟恢复跟随（双保险：波形 pointerup 也会发边界）。
-      scrubbingRef.current = false;
+      // 第一次 input 会在指针仍按着时立刻正式跳转，并携带 scrubbing=true；
+      // 这时继续压住权威时钟。只有松手/键盘跳转才恢复跟随。
+      if (detail.scrubbing !== true) scrubbingRef.current = false;
       setPosition(target);
-      if (!shouldCommitSeek(track.id, target)) return;
+      if (!shouldCommitSeek(track.id, target, detail.forceCommit)) return;
       const generation = ++seekGenerationRef.current;
       broadcastMediaSync({
         owner: "player",

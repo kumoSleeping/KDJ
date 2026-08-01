@@ -15,6 +15,8 @@ export interface SeekDetail {
    * 发 false。拖动期间 PlayerBar 压制权威时钟，不把播放头从手底下顶回去。
    */
   scrubbing?: boolean;
+  /** 同一次手势的最终落点不能被媒体同步回声去重吞掉。 */
+  forceCommit?: boolean;
 }
 
 /**
@@ -133,6 +135,8 @@ export function Waveform({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const draggingRef = useRef(false);
+  /** 指针按下后的第一次 value 变化会立刻 seek；后续拖动只预览，松手再落最终点。 */
+  const gestureCommitPositionRef = useRef<number | null>(null);
   const previewFrameRef = useRef<number | null>(null);
   const previewPositionRef = useRef(0);
 
@@ -143,10 +147,15 @@ export function Waveform({
     [],
   );
 
-  const dispatchSeek = (nextPosition: number, preview = false, scrubbing?: boolean) => {
+  const dispatchSeek = (
+    nextPosition: number,
+    preview = false,
+    scrubbing?: boolean,
+    forceCommit = false,
+  ) => {
     window.dispatchEvent(
       new CustomEvent<SeekDetail>(SEEK_EVENT, {
-        detail: { trackId, position: nextPosition, preview, scrubbing },
+        detail: { trackId, position: nextPosition, preview, scrubbing, forceCommit },
       }),
     );
   };
@@ -176,8 +185,9 @@ export function Waveform({
     [],
   );
 
-  // 原生 range 在指针下自己移动；播放头预览最多每帧同步一次。真正的媒体 seek
-  // 只在松手执行一次，避免拖动时反复 load/解码 shadow deck 把主线程堵住。
+  // 原生 range 在指针下自己移动；播放头预览最多每帧同步一次。指针点到新位置时
+  // 第一次 input 立刻提交，不能等 pointerup（一次普通点击会凭空多出一拍延迟）；
+  // 真正连续拖动的后续 input 仍只预览，避免反复 load/解码 shadow deck。
   const previewSeek = (nextPosition: number) => {
     previewPositionRef.current = nextPosition;
     if (previewFrameRef.current !== null) return;
@@ -363,6 +373,7 @@ export function Waveform({
           onPointerDown={(event) => {
             event.stopPropagation();
             draggingRef.current = true;
+            gestureCommitPositionRef.current = null;
             event.currentTarget.setPointerCapture(event.pointerId);
             // scrub 开始：告诉 PlayerBar 压制权威时钟，别顶回播放头。
             dispatchSeek(Number(event.currentTarget.value), true, true);
@@ -374,10 +385,20 @@ export function Waveform({
               cancelAnimationFrame(previewFrameRef.current);
               previewFrameRef.current = null;
             }
-            dispatchSeek(Number(event.currentTarget.value));
+            const finalPosition = Number(event.currentTarget.value);
+            const firstCommit = gestureCommitPositionRef.current;
+            gestureCommitPositionRef.current = null;
+            if (firstCommit !== null && Math.abs(firstCommit - finalPosition) < 0.0005) {
+              // 普通点击已在第一次 input 立刻提交；这里只结束 scrub，不重复重启解码。
+              dispatchSeek(finalPosition, true, false);
+            } else {
+              // 真正拖动过：最终落点是新的用户意图，不能被前一次近邻 seek 去重。
+              dispatchSeek(finalPosition, false, false, firstCommit !== null);
+            }
           }}
           onPointerCancel={(event) => {
             draggingRef.current = false;
+            gestureCommitPositionRef.current = null;
             // scrub 中止：不发正式跳转，只松开时钟压制。
             dispatchSeek(Number(event.currentTarget.value), true, false);
           }}
@@ -386,8 +407,19 @@ export function Waveform({
             event.stopPropagation();
             if (menu || total <= 0) return;
             const nextPosition = Number(event.currentTarget.value);
-            if (draggingRef.current) previewSeek(nextPosition);
-            else dispatchSeek(nextPosition);
+            if (!draggingRef.current) {
+              dispatchSeek(nextPosition);
+              return;
+            }
+            if (gestureCommitPositionRef.current === null) {
+              // range 的第一次 input 紧跟 pointerdown 默认动作，比 pointerup 早一整个
+              // 点击手势；保留 scrubbing=true，让后续拖动预览仍不被权威时钟顶回。
+              gestureCommitPositionRef.current = nextPosition;
+              previewPositionRef.current = nextPosition;
+              dispatchSeek(nextPosition, false, true);
+              return;
+            }
+            previewSeek(nextPosition);
           }}
           style={{
             position: "absolute",

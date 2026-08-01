@@ -22,8 +22,8 @@ const STATE_INTERVAL: Duration = Duration::from_millis(100);
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const STARTUP_BUFFER_MS: u64 = 120;
 const SEEK_BUFFER_MS: u64 = 40;
-/// 同曲 seek 单侧让路时长：旧声短促衰减，新声满进（见 TransitionPlan::SEEK_DUCK）。
-const SEEK_DUCK_MS: u64 = 3;
+/// 同曲 seek 的互补平滑换手时长：短到无感，长到足以消掉随机采样点之间的阶跃。
+const SEEK_HANDOFF_MS: u64 = 5;
 const TRANSPORT_FADE_MS: u64 = 120;
 
 type CommandReply = SyncSender<Result<CommandAck, String>>;
@@ -900,7 +900,7 @@ impl Actor {
                 (frames, realtime_plan(transition.plan, runtime.output_sample_rate))
             }
             Activation::Seek if self.state.desired_playing => (
-                (u64::from(runtime.output_sample_rate) * SEEK_DUCK_MS / 1_000) as u32,
+                (u64::from(runtime.output_sample_rate) * SEEK_HANDOFF_MS / 1_000) as u32,
                 TransitionPlan {
                     flags: TransitionPlan::SEEK_DUCK,
                     beat_frames: 0,

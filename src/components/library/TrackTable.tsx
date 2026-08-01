@@ -838,12 +838,15 @@ export function TrackTable({
   const [view, setView] = useState({ top: 0, height: 0 });
   const [rowH, setRowH] = useState(FALLBACK_ROW_H);
   const rowHRef = useRef(FALLBACK_ROW_H);
+  /** 横向滚动不能进入虚拟列表更新链；否则拖底部横滚条时每帧重渲染整张可视表。 */
+  const scrollTopRef = useRef(0);
   const scrollRafRef = useRef(0);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   /** 滚动容器 ref：身份必须稳定（见 JSX 处的注释）。值没变就不 setState，
       否则 ResizeObserver 的初次回调会和自己触发的重渲染互相喂食。 */
   const trackScrollerRef = useCallback((el: HTMLDivElement | null) => {
     scrollerRef.current = el;
+    scrollTopRef.current = el?.scrollTop ?? 0;
     observeTrackScroller(el);
     // 视口高度决定渲染窗口：面板拖宽拖窄、窗口缩放都要重算。
     resizeObserverRef.current?.disconnect();
@@ -1131,15 +1134,25 @@ export function TrackTable({
       ref={trackScrollerRef}
       onScroll={(event) => {
         const el = event.currentTarget;
+        const top = el.scrollTop;
+        // 这一个容器同时横滚和竖滚。底部横滚条每移动一个像素也会发 scroll；
+        // 旧代码不看方向就 requestAnimationFrame → setView(新对象)，导致可视区
+        // 没变也每帧重渲染几十行表格，主线程被占后原生 thumb 只能顿一下再追上。
+        // 横滚完全不影响虚拟窗口，必须在进入 React/预取路径前同步退出。
+        if (top === scrollTopRef.current) return;
+        scrollTopRef.current = top;
         // 距底 200px 就预取下一页，滚到底再等请求会有明显空白
-        if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) onScrollEnd();
-        // 滚动事件比帧率高得多，每个事件都 setState 重渲染就是卡顿本身；
-        // 压到一帧一次，滚动和重绘对齐。
+        if (el.scrollHeight - top - el.clientHeight < 200) onScrollEnd();
+        // 竖向滚动事件比帧率高得多；只对真正变化的 scrollTop 一帧合并一次。
         if (scrollRafRef.current) return;
         scrollRafRef.current = requestAnimationFrame(() => {
           scrollRafRef.current = 0;
           const node = scrollerRef.current;
-          if (node) setView({ top: node.scrollTop, height: node.clientHeight });
+          if (!node) return;
+          const next = { top: node.scrollTop, height: node.clientHeight };
+          setView((current) =>
+            current.top === next.top && current.height === next.height ? current : next,
+          );
         });
       }}
     >

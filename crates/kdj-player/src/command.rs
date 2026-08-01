@@ -38,7 +38,7 @@ impl TransitionPlan {
     pub const ECHO: u8 = 1 << 3;
     pub const ALARM: u8 = 1 << 4;
     pub const HYDRANT: u8 = 1 << 5;
-    /// 同曲 seek：新 Deck 满幅进、旧 Deck 短促衰减，避免等功率交叉把两个时间线叠成「哒哒」。
+    /// 同曲 seek：两台 Deck 做总增益恒定的极短平滑换手，避免阶跃爆点和双时间线叠音。
     pub const SEEK_DUCK: u8 = 1 << 6;
 
     pub const fn contains(self, flag: u8) -> bool {
