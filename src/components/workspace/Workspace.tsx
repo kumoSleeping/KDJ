@@ -29,6 +29,10 @@ import {
 } from "../../lib/trackClickPrefs";
 import { isPlatformEnabled, patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
+import {
+  STREAM_LIBRARY_OPEN_EVENT,
+  type StreamLibraryOpenDetail,
+} from "../../lib/streamLibrary";
 import { isOutsideFolder } from "../../lib/outsideFolder";
 import { useLibraryClipboard } from "../../lib/useLibraryClipboard";
 import {
@@ -36,7 +40,15 @@ import {
   useLibraryStore,
   type SelectMode,
 } from "../../stores/libraryStore";
-import type { IntakeItem, MergedGroup, Platform, SongSource, VideoInfo } from "../../types";
+import type {
+  CollectionResult,
+  IntakeItem,
+  MergedGroup,
+  Platform,
+  SearchKind,
+  SongSource,
+  VideoInfo,
+} from "../../types";
 import { InlineNotice, Sheet } from "../common";
 import { AppChrome } from "../chrome/AppChrome";
 import { AsideFaceSwitch, AsideHead, AsideToggleButton, type TrackAsideFace } from "../chrome/AsideHead";
@@ -99,6 +111,7 @@ const COLUMN_ORDER_KEY = "kd-column-order";
  */
 export function Workspace() {
   const settings = useAppStore((state) => state.settings);
+  const searchCapabilities = useAppStore((state) => state.searchCapabilities);
   const listMode = useAppStore((state) => state.listMode);
   const hasResults = useAppStore((state) => state.hasResults);
   const openQueuePanel = useAppStore((state) => state.openQueuePanel);
@@ -148,12 +161,24 @@ export function Workspace() {
   }, [refresh]);
 
   const [query, setQuery] = useState("");
+  const [searchKind, setSearchKind] = useState<SearchKind>("song");
   // 勾选与排序都进 settings.json：排序是 platform_priority，勾选是 search_platforms。
   // 未在设置里开启的源不能参与搜索勾选。
   const platforms = useMemo(() => {
     const selected = normalizeSearchPlatforms(settings?.search_platforms);
     return selected.filter((id) => isPlatformEnabled(settings, id));
   }, [settings]);
+  const searchKinds = useMemo<readonly SearchKind[]>(() => {
+    const order: SearchKind[] = ["song", "artist", "album"];
+    // 集合搜索只在一个平台，或两个平台有共同接口时开放；三家及以上
+    // 继续保持“单曲”语义，避免把不同集合混成一张不可解释的列表。
+    if (platforms.length === 0 || platforms.length > 2) return ["song"];
+    const supported = platforms.map((platform) => searchCapabilities[platform] ?? ["song"]);
+    return order.filter((kind) => supported.every((kinds) => kinds.includes(kind)));
+  }, [platforms, searchCapabilities]);
+  useEffect(() => {
+    if (!searchKinds.includes(searchKind)) setSearchKind("song");
+  }, [searchKind, searchKinds]);
   const saveSettings = useAppStore((state) => state.saveSettings);
   // 跨平台去重恒为开，开关已删：不合并的话搜一次出四条一模一样的结果，
   // 没有人会想要那个。留常量而不是把 true 写进调用点，是为了让
@@ -176,6 +201,7 @@ export function Workspace() {
   const [searchDragActive, setSearchDragActive] = useState(() => Boolean(activeSearchDrag()));
   const [chosen, setChosen] = useState<Set<string>>(new Set());
   const [searchSelectionMode, setSearchSelectionMode] = useState(false);
+  const [loadingCollections, setLoadingCollections] = useState<Set<string>>(new Set());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [collapsedItems, setCollapsedItems] = useState<Set<number>>(new Set());
   const [sourceIndex, setSourceIndex] = useState<Record<string, number>>({});
@@ -194,6 +220,46 @@ export function Workspace() {
     setChosen(new Set());
     setSearchSelectionMode(false);
   }, [hasResults]);
+
+  useEffect(() => {
+    const onOpenStreamLibrary = (event: Event) => {
+      const detail = (event as CustomEvent<StreamLibraryOpenDetail>).detail;
+      if (!detail?.items) return;
+      const groups: MergedGroup[] = detail.items.map((item, index) => ({
+        group_id: `stream-library:${detail.platform}:${item.id}:${index}`,
+        title: item.source.title,
+        artists: item.source.artists,
+        album: item.source.album,
+        duration: item.source.duration,
+        cover: item.source.cover,
+        sources: [item.source],
+        best_source_index: 0,
+        score: 0,
+        in_library: item.downloaded,
+      }));
+      setQuery("我的收藏");
+      setVideo(null);
+      setItems([
+        {
+          entry: `stream-library:${detail.platform}`,
+          kind: "search",
+          platform: detail.platform,
+          title: "我的收藏",
+          groups,
+          collections: [],
+          errors: {},
+          error: "",
+        },
+      ]);
+      setChosen(new Set());
+      setExpandedGroups(new Set());
+      setCollapsedItems(new Set());
+      setSourceIndex({});
+      setHasResults(true);
+    };
+    window.addEventListener(STREAM_LIBRARY_OPEN_EVENT, onOpenStreamLibrary);
+    return () => window.removeEventListener(STREAM_LIBRARY_OPEN_EVENT, onOpenStreamLibrary);
+  }, [setHasResults]);
 
   useEffect(() => {
     const onSearchDragState = (event: Event) => {
@@ -346,6 +412,7 @@ export function Workspace() {
         limit: 30,
         merge,
         max_entries: batch ? 50 : 1,
+        kind: searchKind,
       });
       setItems(response.items);
       setHasResults(true);
@@ -359,7 +426,7 @@ export function Workspace() {
       setBusy(false);
     }
     // merge 是常量，不进依赖
-  }, [query, platforms, batch, settings, setHasResults]);
+  }, [query, platforms, batch, searchKind, settings, setHasResults]);
 
   /* ------------------------------------------------------------ 布局档位 */
   const { columns: layout, chrome, portrait } = useLayoutSignals();
@@ -977,6 +1044,57 @@ export function Workspace() {
     );
   }, [items]);
 
+  const loadCollection = useCallback(async (collection: CollectionResult) => {
+    const token = `${collection.platform}:${collection.kind}:${collection.key}`;
+    setLoadingCollections((current) => new Set(current).add(token));
+    try {
+      const response = await api.resolveCollection(collection, 500);
+      const groups: MergedGroup[] = response.sources.map((source, index) => ({
+        group_id: `${token}:${source.key}:${index}`,
+        title: source.title,
+        artists: source.artists,
+        album: source.album,
+        duration: source.duration,
+        cover: source.cover || collection.cover,
+        sources: [source],
+        best_source_index: 0,
+        score: 0,
+        in_library: false,
+      }));
+      setItems((current) =>
+        current?.map((item) => {
+          const hasCollection = item.collections.some(
+            (candidate) =>
+              candidate.platform === collection.platform &&
+              candidate.kind === collection.kind &&
+              candidate.key === collection.key,
+          );
+          if (!hasCollection) return item;
+          return {
+            ...item,
+            collections: item.collections.filter(
+              (candidate) =>
+                !(
+                  candidate.platform === collection.platform &&
+                  candidate.kind === collection.kind &&
+                  candidate.key === collection.key
+                ),
+            ),
+            groups: [...item.groups, ...groups],
+          };
+        }) ?? null,
+      );
+    } catch (error) {
+      setSearchError(`载入集合失败：${errorText(error)}`);
+    } finally {
+      setLoadingCollections((current) => {
+        const next = new Set(current);
+        next.delete(token);
+        return next;
+      });
+    }
+  }, []);
+
   const chosenSources = useMemo(() => {
     const picked: SongSource[] = [];
     const seen = new Set<string>();
@@ -1052,6 +1170,31 @@ export function Workspace() {
   );
 
   /** 结果行首那颗小下载键：当前选中来源直接入队。 */
+  const addToLibrary = useCallback(
+    async (group: MergedGroup) => {
+      const pickedIndex = sourceIndex[group.group_id] ?? group.best_source_index;
+      const source =
+        group.sources[pickedIndex]?.platform !== "bilibili" &&
+        group.sources[pickedIndex]?.platform !== "local"
+          ? group.sources[pickedIndex]
+          : group.sources.find(
+              (entry) => entry.platform !== "bilibili" && entry.platform !== "local",
+            );
+      if (!source) return;
+      setQueueError("");
+      const folder =
+        filter.folder && !isOutsideFolder(filter.folder)
+          ? filter.folder
+          : settings?.library_dirs?.[0] ?? "";
+      try {
+        await api.addStreamLibrary(source, folder);
+      } catch (error) {
+        setQueueError(`添加到曲库失败：${errorText(error)}`);
+      }
+    },
+    [sourceIndex, filter.folder, settings?.library_dirs],
+  );
+
   const downloadGroup = useCallback(
     async (group: MergedGroup) => {
       const pickedIndex = sourceIndex[group.group_id] ?? group.best_source_index;
@@ -1216,6 +1359,9 @@ export function Workspace() {
             <div className="kd-search-band">
               <SearchBar
                 query={query}
+                searchKind={searchKind}
+                searchKinds={searchKinds}
+                onSearchKindChange={setSearchKind}
                 onQueryChange={setQuery}
                 batch={batch}
                 busy={busy}
@@ -1424,6 +1570,9 @@ export function Workspace() {
                           onToggleAll={toggleAll}
                           onDownloadItem={(index) => void downloadItem(index)}
                           onDownloadGroup={(group) => void downloadGroup(group)}
+                          onAddToLibrary={(group) => void addToLibrary(group)}
+                          onLoadCollection={(collection) => void loadCollection(collection)}
+                          loadingCollections={loadingCollections}
                         />
                       </div>
                     </div>

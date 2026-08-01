@@ -150,12 +150,17 @@ export function streamNextTrack(track: Track | null | undefined): Track | null {
 }
 
 /** 将搜索结果占位曲目解析成可播放流，保留 id 和已经串好的后继链。 */
-export async function resolvePendingStreamTrack(track: Track): Promise<Track> {
+export async function preloadStreamTrack(track: Track): Promise<void> {
   const meta = streamMeta(track);
-  if (!meta) throw new Error("在线试听上下文已经失效");
-  if (meta.url) return track;
+  if (!meta || meta.url) return;
   if (!meta.source) throw new Error("在线试听来源缺失");
   const { url } = await api.songPreview(meta.source);
   meta.url = url;
+}
+
+export async function resolvePendingStreamTrack(track: Track): Promise<Track> {
+  const meta = streamMeta(track);
+  if (!meta) throw new Error("在线试听上下文已经失效");
+  await preloadStreamTrack(track);
   return track;
 }

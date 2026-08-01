@@ -3,7 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
-use kdj_core::models::{MergedGroup, Platform, Quality, SearchRequest, SearchResponse, SongSource};
+use kdj_core::models::{
+    CollectionResult, MergedGroup, Platform, Quality, SearchKind, SearchRequest, SearchResponse,
+    SongSource,
+};
 use kdj_library::service::TrackQuery;
 use serde_json::json;
 
@@ -20,6 +23,11 @@ fn provider_search_timeout(platform: Platform) -> std::time::Duration {
     } else {
         SEARCH_TIMEOUT
     }
+}
+
+enum ProviderSearchRows {
+    Songs(Vec<SongSource>),
+    Collections(Vec<CollectionResult>),
 }
 
 /// 平台默认分。请求里没给顺序时用它。
@@ -908,8 +916,15 @@ pub async fn search(state: &Arc<AppState>, payload: &SearchRequest) -> SearchRes
             errors.insert(platform.to_string(), format!("{platform} 未在设置中启用"));
             continue;
         }
-        if state.provider(*platform).is_none() {
+        let Some(provider) = state.provider(*platform) else {
             errors.insert(platform.to_string(), "平台不可用".into());
+            continue;
+        };
+        if !provider.capabilities().search_kinds.contains(&payload.kind) {
+            errors.insert(
+                platform.to_string(),
+                format!("{}不支持{}搜索", provider.label(), search_kind_label(payload.kind)),
+            );
             continue;
         }
         targets.push(*platform);
@@ -921,11 +936,21 @@ pub async fn search(state: &Arc<AppState>, payload: &SearchRequest) -> SearchRes
         let provider = state.provider(*platform).cloned().expect("上面已确认存在");
         let keyword = payload.query.clone();
         let limit = payload.limit;
+        let search_kind = payload.kind;
         let platform = *platform;
         handles.push(tokio::spawn(async move {
             let result = tokio::time::timeout(
                 provider_search_timeout(platform),
-                provider.search(&keyword, limit),
+                async move {
+                    if search_kind == SearchKind::Song {
+                        provider.search(&keyword, limit).await.map(ProviderSearchRows::Songs)
+                    } else {
+                        provider
+                            .search_collections(&keyword, search_kind, limit)
+                            .await
+                            .map(ProviderSearchRows::Collections)
+                    }
+                },
             )
             .await;
             (platform, result)
@@ -934,22 +959,33 @@ pub async fn search(state: &Arc<AppState>, payload: &SearchRequest) -> SearchRes
 
     let mut per_platform: BTreeMap<Platform, Vec<SongSource>> = BTreeMap::new();
     if payload.platforms.contains(&Platform::Local) {
-        match search_local_library(state, &payload.query, payload.limit) {
-            Ok(items) => {
-                per_platform.insert(Platform::Local, items);
-            }
-            Err(err) => {
-                errors.insert(Platform::Local.to_string(), format!("{err:#}"));
+        if payload.kind != SearchKind::Song {
+            errors.insert(
+                Platform::Local.to_string(),
+                format!("本地曲库不支持{}搜索", search_kind_label(payload.kind)),
+            );
+        } else {
+            match search_local_library(state, &payload.query, payload.limit) {
+                Ok(items) => {
+                    per_platform.insert(Platform::Local, items);
+                }
+                Err(err) => {
+                    errors.insert(Platform::Local.to_string(), format!("{err:#}"));
+                }
             }
         }
     }
+    let mut collections = Vec::new();
     for handle in handles {
         let Ok((platform, result)) = handle.await else {
             continue;
         };
         match result {
-            Ok(Ok(items)) => {
+            Ok(Ok(ProviderSearchRows::Songs(items))) => {
                 per_platform.insert(platform, items);
+            }
+            Ok(Ok(ProviderSearchRows::Collections(items))) => {
+                collections.extend(items);
             }
             Ok(Err(err)) => {
                 errors.insert(platform.to_string(), format!("{err:#}"));
@@ -963,24 +999,47 @@ pub async fn search(state: &Arc<AppState>, payload: &SearchRequest) -> SearchRes
     // 梯队和优先级用**请求里原样的** platforms，不是过滤后的 targets：
     // 网易云和 QQ 共用靠前那一个的梯队，其中一家没搜（未登录/provider 缺失）时，
     // 另一家仍然应该继承它的位置——用 targets 的话 B 站会趁虚上浮到音乐平台前面。
-    let mut groups = if payload.merge {
-        merge_results(&payload.query, &per_platform, &payload.platforms)
+    let mut groups = if payload.kind == SearchKind::Song {
+        if payload.merge {
+            merge_results(&payload.query, &per_platform, &payload.platforms)
+        } else {
+            // 不合并时也要给出 groups：前端结果表只认它，空数组等于整页空白
+            singleton_groups(&per_platform, &payload.platforms)
+        }
     } else {
-        // 不合并时也要给出 groups：前端结果表只认它，空数组等于整页空白
-        singleton_groups(&per_platform, &payload.platforms)
+        Vec::new()
     };
     // 「已在库」角标：一次取回曲库里的来源键，在内存里比
     mark_in_library(&mut groups, &library_source_keys(state));
 
+    // 同一关键词的集合结果按用户的平台优先级稳定排列；集合之间不跨平台合并，
+    // 因为不同平台的作者/专辑 ID 没有可证明的一一对应关系。
+    collections.sort_by_key(|item| {
+        payload
+            .platforms
+            .iter()
+            .position(|platform| *platform == item.platform)
+            .unwrap_or(usize::MAX)
+    });
+
     SearchResponse {
         query: payload.query.clone(),
         groups,
+        collections,
         per_platform: per_platform
             .into_iter()
             .map(|(platform, items)| (platform.to_string(), items))
             .collect(),
         errors,
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+    }
+}
+
+fn search_kind_label(kind: SearchKind) -> &'static str {
+    match kind {
+        SearchKind::Song => "单曲",
+        SearchKind::Artist => "作者",
+        SearchKind::Album => "专辑",
     }
 }
 

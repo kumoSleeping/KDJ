@@ -39,7 +39,7 @@ import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { libraryPasteMode } from "../../lib/libraryPaste";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
-import type { LibraryPasteMode } from "../../types";
+import type { LibraryPasteMode, Quality, SearchDropMode } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { InlineNotice, Panel } from "../common";
@@ -644,6 +644,21 @@ export function SettingsPanel() {
           </div>
         </Panel>
 
+        <Panel heading="搜索结果拖放" dense>
+          <div className="kd-djp-switch-list" aria-label="搜索结果拖放">
+            <CycleToggle<SearchDropMode>
+              label="拖入曲库文件夹"
+              value={settings?.search_drop_mode === "download" ? "download" : "stream"}
+              options={[
+                { id: "stream", text: "添加流媒体" },
+                { id: "download", text: "下载到本地" },
+              ]}
+              title="搜索结果拖入左侧文件夹时的默认动作。默认只加入流媒体来源，不立即下载；视频结果始终下载。"
+              onChange={(next) => void saveSettings({ search_drop_mode: next })}
+            />
+          </div>
+        </Panel>
+
         <Panel heading="列表点击" dense>
           <div className="kd-djp-switch-list" aria-label="列表点击">
             <Switch
@@ -683,6 +698,36 @@ export function SettingsPanel() {
               label="播放 / 暂停渐入渐出"
               title="播放时用约 120 毫秒渐入，暂停时用约 120 毫秒渐出；关掉后立即播放或暂停。"
               onChange={() => setTransportFade(!transportFade)}
+            />
+          </div>
+        </Panel>
+
+        <Panel heading="流媒体播放" dense>
+          <div className="kd-djp-switch-list" aria-label="流媒体播放">
+            <CycleToggle<Quality>
+              label="音质"
+              value={settings?.stream_quality ?? "128"}
+              options={[
+                { id: "128", text: "128K" },
+                { id: "320", text: "320K" },
+                { id: "flac", text: "FLAC" },
+              ]}
+              title="在线流媒体播放请求的起始音质；平台、版权或会员不允许时会自动降级。"
+              onChange={(next) => void saveSettings({ stream_quality: next })}
+            />
+            <CycleToggle
+              label="视频画质"
+              value={String(settings?.video_playback_max_height ?? 1080)}
+              options={[
+                { id: "360", text: "360p" },
+                { id: "480", text: "480p" },
+                { id: "720", text: "720p" },
+                { id: "1080", text: "1080p" },
+                { id: "1440", text: "1440p" },
+                { id: "2160", text: "4K" },
+              ]}
+              title="视频在线播放画质上限；实际画质仍由平台账号和视频本身决定。"
+              onChange={(next) => void saveSettings({ video_playback_max_height: Number(next) })}
             />
           </div>
         </Panel>

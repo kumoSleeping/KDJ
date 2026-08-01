@@ -14,7 +14,8 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use async_trait::async_trait;
 use kdj_core::models::{
-    Account, LyricText, Platform, Quality, QrSession, QrStateValue, ResolveResponse, SongSource,
+    Account, CollectionResolveResponse, CollectionResult, LyricText, Platform, Quality, QrSession,
+    QrStateValue, ResolveResponse, SearchKind, SongSource, StreamPlaylist, StreamPlaylistResponse,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -127,23 +128,30 @@ pub struct Capabilities {
     pub has_quality_tiers: bool,
     /// 下载产物是视频而不是音频
     pub is_video: bool,
+    /// provider 真正实现的搜索维度；前端筛选器和后端门禁都读这里。
+    pub search_kinds: &'static [SearchKind],
 }
+
+pub const SONG_SEARCH_KINDS: &[SearchKind] = &[SearchKind::Song];
 
 impl Capabilities {
     pub const MUSIC: Capabilities = Capabilities {
         supports_login: true,
         has_quality_tiers: true,
         is_video: false,
+        search_kinds: SONG_SEARCH_KINDS,
     };
     pub const VIDEO: Capabilities = Capabilities {
         supports_login: true,
         has_quality_tiers: false,
         is_video: true,
+        search_kinds: SONG_SEARCH_KINDS,
     };
     pub const ANONYMOUS_MUSIC: Capabilities = Capabilities {
         supports_login: false,
         has_quality_tiers: true,
         is_video: false,
+        search_kinds: SONG_SEARCH_KINDS,
     };
 }
 
@@ -219,6 +227,40 @@ pub trait MusicProvider: Send + Sync {
 
     async fn search(&self, keyword: &str, limit: usize) -> Result<Vec<SongSource>>;
 
+    /// 搜索作者/专辑集合。默认不支持，避免把集合 ID 伪装成歌曲 ID。
+    async fn search_collections(
+        &self,
+        _keyword: &str,
+        _kind: SearchKind,
+        _limit: usize,
+    ) -> Result<Vec<CollectionResult>> {
+        Ok(Vec::new())
+    }
+
+    /// 展开一个作者/专辑集合为真实歌曲来源。
+    async fn resolve_collection(
+        &self,
+        _kind: SearchKind,
+        _key: &str,
+        _limit: usize,
+    ) -> Result<Option<CollectionResolveResponse>> {
+        Ok(None)
+    }
+
+    /// 登录后可见的平台歌单；没有账号或平台不支持时返回空列表。
+    async fn stream_playlists(&self) -> Result<Vec<StreamPlaylist>> {
+        Ok(Vec::new())
+    }
+
+    /// 读取平台歌单中的真实歌曲来源。
+    async fn stream_playlist_tracks(
+        &self,
+        _key: &str,
+        _limit: usize,
+    ) -> Result<Option<StreamPlaylistResponse>> {
+        Ok(None)
+    }
+
     /// 解析歌曲/歌单链接。
     /// **不是本平台的链接返回 `Ok(None)`**，让上层继续问别的 provider。
     async fn resolve(&self, url: &str, limit: usize) -> Result<Option<ResolveResponse>>;
@@ -234,6 +276,15 @@ pub trait MusicProvider: Send + Sync {
     async fn preview_url(&self, source: &SongSource) -> Result<Option<String>> {
         let _ = source;
         Ok(None)
+    }
+
+    /// 按播放音质请求试听流。默认平台只有一档或沿用旧的最低码率实现。
+    async fn preview_url_at_quality(
+        &self,
+        source: &SongSource,
+        _quality: Quality,
+    ) -> Result<Option<String>> {
+        self.preview_url(source).await
     }
 
     /// 按平台歌曲 id / mid 取 LRC。没有歌词能力的平台默认 `Ok(None)`。

@@ -42,6 +42,8 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         )
         .route("/api/accounts/{platform}/logout", post(logout))
         .route("/api/search", post(search))
+        .route("/api/search/capabilities", get(search_capabilities))
+        .route("/api/search/collection", post(resolve_collection))
         .route("/api/lyrics", post(lyrics))
         .route("/api/song/preview", post(song_preview))
         .route("/api/song/preview/{token}", get(song_preview_stream))
@@ -59,6 +61,13 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/video/calibrate", post(video_calibrate))
         .route("/api/vj/export", post(vj_export))
         .route("/api/library/tracks", get(library_tracks))
+        .route(
+            "/api/library/stream",
+            get(list_stream_library).post(add_stream_library),
+        )
+        .route("/api/library/stream/{id}", delete(remove_stream_library))
+        .route("/api/stream/playlists/{platform}", get(stream_playlists))
+        .route("/api/stream/playlist", post(stream_playlist))
         .route("/api/library/tracks/{id}", get(library_track))
         .route("/api/library/lyrics/{id}", get(library_lyrics))
         .route("/api/library/tracks/{id}", patch(library_patch))
@@ -225,6 +234,45 @@ async fn search(
     Json(crate::aggregate::search(&state, &payload).await)
 }
 
+async fn search_capabilities(
+    State(state): State<Arc<AppState>>,
+) -> Json<BTreeMap<String, Vec<kdj_core::models::SearchKind>>> {
+    let mut result = BTreeMap::new();
+    for platform in PLATFORMS {
+        if let Some(provider) = state.provider(platform) {
+            result.insert(
+                platform.to_string(),
+                provider.capabilities().search_kinds.to_vec(),
+            );
+        }
+    }
+    Json(result)
+}
+
+async fn resolve_collection(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CollectionResolveRequest>,
+) -> ApiResult<Json<CollectionResolveResponse>> {
+    if payload.key.trim().is_empty() || !payload.kind.is_collection() {
+        return Err(ApiError::bad_request("集合来源参数不完整"));
+    }
+    let provider = state
+        .provider(payload.platform)
+        .ok_or_else(|| ApiError::not_found("平台不可用"))?;
+    if !provider
+        .capabilities()
+        .search_kinds
+        .contains(&payload.kind)
+    {
+        return Err(ApiError::bad_request("这个平台不支持该集合搜索"));
+    }
+    provider
+        .resolve_collection(payload.kind, &payload.key, payload.limit)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::bad_request("该集合暂时无法展开"))
+}
+
 /// 按曲名 / 艺人自动搜歌词（网易云 + QQ）。有 source_platform/key 时优先直取。
 async fn lyrics(
     State(state): State<Arc<AppState>>,
@@ -236,6 +284,8 @@ async fn lyrics(
 #[derive(Deserialize)]
 struct SongPreviewBody {
     source: SongSource,
+    #[serde(default)]
+    quality: Option<Quality>,
 }
 
 /// 搜索结果里的「试听」：拿一条**最低码率**的播放直链，不下载不入库。
@@ -249,7 +299,13 @@ async fn song_preview(
     let Some(provider) = state.provider(body.source.platform) else {
         return Err(ApiError::bad_request("不认识的平台"));
     };
-    match provider.preview_url(&body.source).await? {
+    let quality = body
+        .quality
+        .unwrap_or_else(|| state.config.to_settings().stream_quality);
+    match provider
+        .preview_url_at_quality(&body.source, quality)
+        .await?
+    {
         Some(url) => {
             let token = format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>());
             let mut previews = state.song_previews.lock().unwrap();
@@ -389,6 +445,7 @@ fn intake_error(entry: String, message: impl Into<String>) -> IntakeItem {
         platform: None,
         title: String::new(),
         groups: Vec::new(),
+        collections: Vec::new(),
         errors: Default::default(),
         error: message.into(),
     }
@@ -447,6 +504,7 @@ async fn intake_one(
         platform: None,
         title: String::new(),
         groups: Vec::new(),
+        collections: Vec::new(),
         errors: Default::default(),
         error: String::new(),
     };
@@ -486,11 +544,13 @@ async fn intake_one(
             platforms: payload.platforms.clone(),
             limit: payload.limit,
             merge: payload.merge,
+            kind: payload.kind,
         },
     )
     .await;
     item.title = entry.to_string();
     item.groups = response.groups;
+    item.collections = response.collections;
     item.errors = response.errors;
     item
 }
@@ -693,6 +753,9 @@ struct VideoPreviewParams {
     /// 分 P 下标，从 0 起。
     #[serde(default)]
     page: usize,
+    /// 视频在线播放上限；省略时跟随 settings.json。
+    #[serde(default)]
+    max_height: Option<i64>,
 }
 
 /// 视频预览流代理。B 站 CDN 认 Referer + Cookie 的防盗链，webview 里的
@@ -707,9 +770,12 @@ async fn video_preview(
         .get(header::RANGE)
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.trim().is_empty());
+    let max_height = params
+        .max_height
+        .unwrap_or_else(|| state.config.to_settings().video_playback_max_height);
     let stream = state
         .bilibili
-        .preview_stream(&params.bvid, params.page, range)
+        .preview_stream_at_height(&params.bvid, params.page, max_height, range)
         .await?;
     let mut builder = Response::builder()
         .status(StatusCode::from_u16(stream.status).unwrap_or(StatusCode::OK))
@@ -882,6 +948,59 @@ struct TrackQueryParams {
     order2: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+}
+
+async fn list_stream_library(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<StreamLibraryListRequest>,
+) -> ApiResult<Json<Vec<StreamLibraryItem>>> {
+    Ok(Json(state.library.list_stream_sources(&query.folder)?))
+}
+
+async fn add_stream_library(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<StreamLibraryAddRequest>,
+) -> ApiResult<Json<StreamLibraryItem>> {
+    let folder = normalize_dest_dir(&state, &payload.folder)?;
+    Ok(Json(state.library.add_stream_source(&payload.source, &folder)?))
+}
+
+async fn remove_stream_library(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !state.library.remove_stream_source(id)? {
+        return Err(ApiError::not_found("流媒体曲目不存在"));
+    }
+    Ok(Json(json!({ "removed": true })))
+}
+
+async fn stream_playlists(
+    State(state): State<Arc<AppState>>,
+    AxumPath(platform): AxumPath<String>,
+) -> ApiResult<Json<Vec<StreamPlaylist>>> {
+    let platform = parse_platform(&platform)?;
+    let provider = state
+        .provider(platform)
+        .ok_or_else(|| ApiError::not_found("平台不可用"))?;
+    Ok(Json(provider.stream_playlists().await?))
+}
+
+async fn stream_playlist(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<StreamPlaylistRequest>,
+) -> ApiResult<Json<StreamPlaylistResponse>> {
+    if payload.key.trim().is_empty() {
+        return Err(ApiError::bad_request("歌单来源缺少 key"));
+    }
+    let provider = state
+        .provider(payload.platform)
+        .ok_or_else(|| ApiError::not_found("平台不可用"))?;
+    provider
+        .stream_playlist_tracks(&payload.key, payload.limit)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::bad_request("该平台暂不支持歌单展开"))
 }
 
 async fn library_tracks(

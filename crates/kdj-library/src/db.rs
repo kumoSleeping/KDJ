@@ -64,6 +64,15 @@ CREATE TABLE IF NOT EXISTS waveform_assets (
   generated_at TEXT NOT NULL,
   error TEXT
 );
+CREATE TABLE IF NOT EXISTS stream_library (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  folder TEXT NOT NULL DEFAULT '',
+  platform TEXT NOT NULL,
+  source_key TEXT NOT NULL,
+  source_json TEXT NOT NULL,
+  added_at TEXT NOT NULL,
+  UNIQUE(folder, platform, source_key)
+);
 CREATE TRIGGER IF NOT EXISTS cleanup_waveform_asset
 AFTER DELETE ON tracks BEGIN
   DELETE FROM waveform_assets WHERE track_id = OLD.id;
@@ -82,6 +91,8 @@ CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(path);
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
 CREATE INDEX IF NOT EXISTS idx_waveform_assets_profile ON waveform_assets(profile, revision);
+CREATE INDEX IF NOT EXISTS idx_stream_library_folder ON stream_library(folder, added_at);
+CREATE INDEX IF NOT EXISTS idx_stream_library_source ON stream_library(platform, source_key);
 "#;
 
 /// 老库升级用：只列可空列（NOT NULL 列没法 ALTER ADD，而它们从 v1 起就存在）。

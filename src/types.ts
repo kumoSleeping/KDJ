@@ -5,6 +5,7 @@
 
 export type Platform = "wyy" | "qqm" | "soundcloud" | "bilibili" | "local";
 export type Quality = "flac" | "320" | "128";
+export type SearchKind = "song" | "artist" | "album";
 export type TaskState = "queued" | "running" | "processing" | "done" | "failed" | "canceled";
 export type AccountState = "missing" | "valid" | "expired" | "unknown";
 export type QrStateValue = "waiting" | "scanned" | "done" | "expired" | "refused" | "error";
@@ -28,6 +29,8 @@ export type FileDisposalMode = "keep" | "trash" | "remove";
 
 /** 粘贴快捷键：链接进文件夹，或真复制一份文件。移动不在此列。 */
 export type LibraryPasteMode = "link" | "copy";
+/** 搜索结果拖入曲库文件夹时默认添加来源，或直接入下载队列。 */
+export type SearchDropMode = "stream" | "download";
 
 export type VideoFormat = "mp4" | "mkv" | "mov";
 
@@ -35,6 +38,10 @@ export interface Settings {
   download_dir: string;
   library_dirs: string[];
   default_quality: Quality;
+  /** 在线流媒体播放请求的起始音质，与下载音质分开。 */
+  stream_quality: Quality;
+  /** 视频在线播放的画质上限，与视频下载画质分开。 */
+  video_playback_max_height: number;
   filename_template: string;
   concurrent_downloads: number;
   auto_analyze: boolean;
@@ -68,6 +75,8 @@ export interface Settings {
    * 移动始终走 Option/Alt+V、剪切，或右键「粘贴」。
    */
   library_paste: LibraryPasteMode;
+  /** 搜索结果拖入文件夹的默认语义；默认 stream。 */
+  search_drop_mode: SearchDropMode;
   /**
    * 只读派生字段（后端 GET/PUT /api/settings 附带）：全新安装的默认下载落点
    * ——系统「下载」目录 + KDJ。「保存到」菜单里的「系统下载」项用它。
@@ -166,16 +175,31 @@ export interface MergedGroup {
   in_library: boolean;
 }
 
+export interface CollectionResult {
+  /** 集合 ID，不是歌曲 ID，必须先展开才能进入下载队列。 */
+  kind: Exclude<SearchKind, "song">;
+  platform: Platform;
+  key: string;
+  title: string;
+  subtitle: string;
+  cover: string;
+  count: number;
+}
+
+export type SearchCapabilities = Record<string, SearchKind[]>;
+
 export interface SearchRequest {
   query: string;
   platforms: Platform[];
   limit: number;
   merge: boolean;
+  kind?: SearchKind;
 }
 
 export interface SearchResponse {
   query: string;
   groups: MergedGroup[];
+  collections: CollectionResult[];
   per_platform: Record<string, SongSource[]>;
   errors: Record<string, string>;
   elapsed_ms: number;
@@ -183,6 +207,13 @@ export interface SearchResponse {
 
 export interface ResolveResponse {
   kind: "song" | "playlist" | "album" | "unknown";
+  platform: Platform;
+  title: string;
+  sources: SongSource[];
+}
+
+export interface CollectionResolveResponse {
+  kind: Exclude<SearchKind, "song">;
   platform: Platform;
   title: string;
   sources: SongSource[];
@@ -196,6 +227,7 @@ export interface IntakeRequest {
   limit: number;
   merge: boolean;
   max_entries?: number;
+  kind?: SearchKind;
 }
 
 export interface IntakeItem {
@@ -205,6 +237,7 @@ export interface IntakeItem {
   platform: Platform | null;
   title: string;
   groups: MergedGroup[];
+  collections: CollectionResult[];
   errors: Record<string, string>;
   error: string;
 }
@@ -304,6 +337,30 @@ export interface VjExportRequest {
   quality: "1080p" | "720p" | "480p";
   keep_audio: boolean;
   unify_gain: boolean;
+}
+
+export interface StreamLibraryItem {
+  id: number;
+  folder: string;
+  source: SongSource;
+  added_at: string;
+  downloaded: boolean;
+}
+
+export interface StreamPlaylist {
+  platform: Exclude<Platform, "local" | "bilibili">;
+  key: string;
+  title: string;
+  cover: string;
+  count: number;
+  is_favorite: boolean;
+}
+
+export interface StreamPlaylistResponse {
+  platform: Exclude<Platform, "local" | "bilibili">;
+  key: string;
+  title: string;
+  sources: SongSource[];
 }
 
 export interface Track {

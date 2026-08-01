@@ -3,9 +3,12 @@
  */
 
 import { getBridge } from "./bridge";
+import { notifyStreamLibraryChanged } from "./streamLibrary";
 import type {
   Account,
   AnalyzeResponseLike,
+  CollectionResolveResponse,
+  SearchCapabilities,
   DownloadRequest,
   DownloadTask,
   FileOp,
@@ -22,10 +25,15 @@ import type {
   QrSession,
   QrState,
   ResolveResponse,
+  CollectionResult,
   ScanResponseLike,
+  StreamLibraryItem,
+  StreamPlaylist,
+  StreamPlaylistResponse,
   LyricsRequest,
   LyricsResponse,
   LocalLyricsResponse,
+  Platform,
   SearchRequest,
   SearchResponse,
   Settings,
@@ -105,6 +113,14 @@ export const api = {
   logout: (platform: string) => post<Account>(`/accounts/${platform}/logout`),
 
   search: (body: SearchRequest) => post<SearchResponse>("/search", body),
+  searchCapabilities: () => request<SearchCapabilities>("/search/capabilities"),
+  resolveCollection: (collection: CollectionResult, limit = 500) =>
+    post<CollectionResolveResponse>("/search/collection", {
+      platform: collection.platform,
+      kind: collection.kind,
+      key: collection.key,
+      limit,
+    }),
   /** 按曲名/艺人自动搜歌词（网易云 + QQ）；有来源 key 时优先直取。 */
   lyrics: (body: LyricsRequest) => post<LyricsResponse>("/lyrics", body),
   libraryLyrics: (trackId: number) => request<LocalLyricsResponse>(`/library/lyrics/${trackId}`),
@@ -212,6 +228,26 @@ export const api = {
   stats: () => request<LibraryStats>("/library/stats"),
   /** 检查更新走后端：CSP/证书链三个壳一条路，见 routes.rs::update_check。 */
   checkUpdate: () => request<UpdateInfo>("/update/check"),
+
+  streamLibrary: (folder = "") =>
+    request<StreamLibraryItem[]>(
+      `/library/stream${folder ? `?folder=${encodeURIComponent(folder)}` : ""}`,
+    ),
+  addStreamLibrary: async (source: SongSource, folder = "") => {
+    const result = await post<StreamLibraryItem>("/library/stream", { source, folder });
+    notifyStreamLibraryChanged();
+    return result;
+  },
+  removeStreamLibrary: (id: number) =>
+    request<{ removed: boolean }>(`/library/stream/${id}`, { method: "DELETE" }),
+  streamPlaylists: (platform: Exclude<Platform, "local" | "bilibili">) =>
+    request<StreamPlaylist[]>(`/stream/playlists/${platform}`),
+  streamPlaylist: (playlist: StreamPlaylist, limit = 500) =>
+    post<StreamPlaylistResponse>("/stream/playlist", {
+      platform: playlist.platform,
+      key: playlist.key,
+      limit,
+    }),
 
   folders: () => request<FolderTree>("/library/folders"),
   createFolder: (parent: string, name: string) =>

@@ -19,11 +19,12 @@ const MUSICS: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
 const DESKTOP_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                           (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-/// 请求平台。Desktop 是默认；Web 只在个别接口（歌曲详情）上用。
+/// 请求平台。Desktop 是默认；Mobile 用于作者/专辑搜索和集合详情。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QqPlatform {
     Desktop,
     Web,
+    Mobile,
 }
 
 /// 登录凭证。字段名和 v0.1.x 写出来的 `qqmusic.json` 兼容，
@@ -297,6 +298,23 @@ impl QqClient {
                 comm.insert("outCharset".into(), json!("utf-8"));
                 comm.insert("notice".into(), json!(0));
                 comm.insert("need_new_code".into(), json!(1));
+            }
+            QqPlatform::Mobile => {
+                // QQ 的非单曲搜索接口按移动端 comm 放行；QIMEI36 是公开客户端
+                // 的通用匿名值，不能当作登录或会员凭证。若接口再次收紧，必须报错，
+                // 不能悄悄退回 Desktop comm 并把空结果当成“没有找到”。
+                comm.insert("ct".into(), json!(11));
+                comm.insert("cv".into(), json!("13.2.5.8"));
+                comm.insert("v".into(), json!("13.2.5.8"));
+                comm.insert("tmeAppID".into(), json!("qqmusic"));
+                comm.insert("format".into(), json!("json"));
+                comm.insert("inCharset".into(), json!("utf-8"));
+                comm.insert("outCharset".into(), json!("utf-8"));
+                comm.insert("uid".into(), json!("3931641530"));
+                comm.insert(
+                    "QIMEI36".into(),
+                    json!("6c9d3cd110abca9b16311cee10001e717614"),
+                );
             }
         }
         if credential.musicid != 0 {

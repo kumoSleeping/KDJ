@@ -6,7 +6,8 @@
 
 import { create } from "zustand";
 import { api, events } from "../lib/api";
-import type { Account, Health, Settings, WsEvent } from "../types";
+import type { Account, Health, SearchCapabilities, Settings, WsEvent } from "../types";
+import { notifyStreamLibraryChanged } from "../lib/streamLibrary";
 import { useDownloadStore } from "./downloadStore";
 import { useLibraryStore } from "./libraryStore";
 import { useQueueStore } from "./queueStore";
@@ -76,6 +77,8 @@ export interface AppStore {
   health: Health | null;
   settings: Settings | null;
   accounts: Account[];
+  /** provider 声明的搜索维度；失败时空对象只保留单曲搜索。 */
+  searchCapabilities: SearchCapabilities;
   /** 账号状态刷新失败的原因；空串 = 正常。登录面板自己显示这一行。 */
   accountsError: string;
   booting: boolean;
@@ -155,6 +158,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   health: null,
   settings: null,
   accounts: [],
+  searchCapabilities: {},
   accountsError: "",
   booting: true,
   bootError: "",
@@ -298,10 +302,11 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     if (bootInFlight) return bootInFlight;
     set({ booting: true });
     const run = (async () => {
-      const [health, settings, accounts] = await Promise.allSettled([
+      const [health, settings, accounts, searchCapabilities] = await Promise.allSettled([
         api.health(),
         api.getSettings(),
         api.accounts(),
+        api.searchCapabilities(),
       ]);
       if (health.status === "fulfilled") {
         set({ health: health.value, bootError: "" });
@@ -315,6 +320,12 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       // 账号拉不到不挡启动，但要把原因留下：登录面板不然只会一直写着"稍等一下"
       if (accounts.status === "fulfilled") set({ accounts: accounts.value, accountsError: "" });
       else set({ accountsError: `账号状态拉取失败：${errorText(accounts.reason)}` });
+      if (searchCapabilities.status === "fulfilled") {
+        set({ searchCapabilities: searchCapabilities.value });
+      } else {
+        // 能力接口失败不影响单曲搜索；UI 会退回“单曲”且不冒充支持集合。
+        set({ searchCapabilities: {} });
+      }
       set({ booting: false });
     })().finally(() => {
       bootInFlight = null;
@@ -352,6 +363,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   },
 
   handleEvent(event) {
+    if (event.type === "library.updated") notifyStreamLibraryChanged();
     if (event.type === "account.changed") {
       const account = event.payload;
       const accounts = get().accounts;

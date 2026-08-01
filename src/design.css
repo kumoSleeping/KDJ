@@ -5828,6 +5828,24 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   gap: 0.35rem;
   min-width: 0;
 }
+.kd-search-kind {
+  appearance: none;
+  height: 1.75rem;
+  max-width: 3.6rem;
+  padding: 0 0.18rem;
+  border: none;
+  border-bottom: 1px solid var(--kd-line);
+  background: transparent;
+  color: var(--kd-muted);
+  font-size: 0.72rem;
+  cursor: pointer;
+  outline: none;
+}
+.kd-search-kind:hover,
+.kd-search-kind:focus-visible {
+  color: var(--kd-text-body);
+  border-bottom-color: var(--kd-theme);
+}
 .kd-searchbar-sep {
   grid-column: 2;
   grid-row: 1;

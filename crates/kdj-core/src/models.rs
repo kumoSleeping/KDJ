@@ -375,6 +375,41 @@ pub struct MergedGroup {
     pub in_library: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchKind {
+    Song,
+    Artist,
+    Album,
+}
+
+impl SearchKind {
+    pub fn is_collection(self) -> bool {
+        !matches!(self, SearchKind::Song)
+    }
+}
+
+impl Default for SearchKind {
+    fn default() -> Self {
+        SearchKind::Song
+    }
+}
+
+/// 搜索结果中的作者/专辑集合。集合 ID 不是歌曲 ID，不能直接送进下载队列。
+#[derive(Debug, Clone, Serialize)]
+pub struct CollectionResult {
+    pub kind: SearchKind,
+    pub platform: Platform,
+    pub key: String,
+    pub title: String,
+    #[serde(default)]
+    pub subtitle: String,
+    #[serde(default)]
+    pub cover: String,
+    #[serde(default)]
+    pub count: usize,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
@@ -384,12 +419,16 @@ pub struct SearchRequest {
     pub limit: usize,
     #[serde(default = "default_true")]
     pub merge: bool,
+    #[serde(default)]
+    pub kind: SearchKind,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SearchResponse {
     pub query: String,
     pub groups: Vec<MergedGroup>,
+    #[serde(default)]
+    pub collections: Vec<CollectionResult>,
     pub per_platform: std::collections::BTreeMap<String, Vec<SongSource>>,
     pub errors: std::collections::BTreeMap<String, String>,
     pub elapsed_ms: f64,
@@ -444,6 +483,8 @@ pub struct IntakeRequest {
     pub merge: bool,
     #[serde(default = "default_max_entries")]
     pub max_entries: usize,
+    #[serde(default)]
+    pub kind: SearchKind,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -454,6 +495,8 @@ pub struct IntakeItem {
     pub platform: Option<Platform>,
     pub title: String,
     pub groups: Vec<MergedGroup>,
+    #[serde(default)]
+    pub collections: Vec<CollectionResult>,
     pub errors: std::collections::BTreeMap<String, String>,
     pub error: String,
 }
@@ -464,6 +507,25 @@ pub struct IntakeResponse {
     /// 超出 max_entries 被丢掉的条数
     pub skipped: usize,
     pub elapsed_ms: f64,
+}
+
+/// 展开作者/专辑集合时使用的稳定请求。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CollectionResolveRequest {
+    pub platform: Platform,
+    pub kind: SearchKind,
+    pub key: String,
+    #[serde(default = "default_resolve_limit")]
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CollectionResolveResponse {
+    pub kind: SearchKind,
+    pub platform: Platform,
+    pub title: String,
+    #[serde(default)]
+    pub sources: Vec<SongSource>,
 }
 
 // ---------------------------------------------------------------- 下载
@@ -701,6 +763,59 @@ pub struct Track {
     pub link: String,
 }
 
+/// 持久化的流媒体曲目来源。它不是 `Track`：没有本地 path，不能被文件扫描器当成文件。
+#[derive(Debug, Clone, Serialize)]
+pub struct StreamLibraryItem {
+    pub id: i64,
+    pub folder: String,
+    pub source: SongSource,
+    pub added_at: String,
+    pub downloaded: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamLibraryAddRequest {
+    pub source: SongSource,
+    #[serde(default)]
+    pub folder: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamLibraryListRequest {
+    #[serde(default)]
+    pub folder: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StreamPlaylist {
+    pub platform: Platform,
+    pub key: String,
+    pub title: String,
+    #[serde(default)]
+    pub cover: String,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub is_favorite: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamPlaylistRequest {
+    pub platform: Platform,
+    pub key: String,
+    #[serde(default = "default_resolve_limit")]
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StreamPlaylistResponse {
+    pub platform: Platform,
+    pub key: String,
+    pub title: String,
+    #[serde(default)]
+    pub sources: Vec<SongSource>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TrackPage {
     pub items: Vec<Track>,
@@ -842,6 +957,15 @@ pub enum LibraryPasteMode {
     Link,
     /// 始终真复制一份。
     Copy,
+}
+
+/// 搜索结果拖入曲库文件夹时的默认动作。视频结果始终走下载。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchDropMode {
+    #[default]
+    Stream,
+    Download,
 }
 
 #[derive(Debug, Clone, Deserialize)]

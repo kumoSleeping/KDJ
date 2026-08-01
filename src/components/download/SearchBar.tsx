@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import type { Platform } from "../../types";
+import type { Platform, SearchKind } from "../../types";
 import { isPlatformEnabled, patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import {
   DEFAULT_PRIORITY,
@@ -33,6 +33,9 @@ export interface SearchPlatformProps {
 
 export interface SearchBarProps extends SearchPlatformProps {
   query: string;
+  searchKind: SearchKind;
+  searchKinds: readonly SearchKind[];
+  onSearchKindChange(kind: SearchKind): void;
   onQueryChange(value: string): void;
   /** 批量模式由输入内容推导（有换行/多条链接），不再有开关按钮。 */
   batch: boolean;
@@ -54,8 +57,17 @@ export interface SearchBarProps extends SearchPlatformProps {
  * 搜索来源在最前，细分割线后是输入；平台键只负责来源多选与顺序。
  * 提交靠 Enter（Shift+Enter 换行），不再单独放放大镜。
  */
+const SEARCH_KIND_LABEL: Record<SearchKind, string> = {
+  song: "单曲",
+  artist: "作者",
+  album: "专辑",
+};
+
 export function SearchBar({
   query,
+  searchKind,
+  searchKinds,
+  onSearchKindChange,
   onQueryChange,
   batch,
   busy,
@@ -139,6 +151,21 @@ export function SearchBar({
           />
         ) : null}
         <div className="kd-searchbar-tools">
+          {searchKinds.length > 1 && (
+            <select
+              className="kd-search-kind"
+              aria-label="搜索类型"
+              value={searchKind}
+              onChange={(event) => onSearchKindChange(event.target.value as SearchKind)}
+              title="只查询作者或专辑接口；集合结果需要先载入曲目"
+            >
+              {searchKinds.map((kind) => (
+                <option key={kind} value={kind}>
+                  {SEARCH_KIND_LABEL[kind]}
+                </option>
+              ))}
+            </select>
+          )}
           <SearchPlatforms {...platformProps} />
         </div>
         <span className="kd-searchbar-sep" aria-hidden="true" />

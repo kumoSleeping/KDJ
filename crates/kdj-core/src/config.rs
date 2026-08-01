@@ -10,7 +10,7 @@ use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::models::{LibraryPasteMode, Quality, Theme, VideoFormat};
+use crate::models::{LibraryPasteMode, Quality, SearchDropMode, Theme, VideoFormat};
 
 pub const SETTINGS_FILENAME: &str = "settings.json";
 // 桌面版历史主库一直叫 kumodeck.db。改名会在同一 data_dir 静默创建一份空库，
@@ -23,6 +23,8 @@ const SETTINGS_FIELDS: &[&str] = &[
     "download_dir",
     "library_dirs",
     "default_quality",
+    "stream_quality",
+    "video_playback_max_height",
     "filename_template",
     "concurrent_downloads",
     "auto_analyze",
@@ -42,6 +44,7 @@ const SETTINGS_FIELDS: &[&str] = &[
     "auto_start_downloads",
     "player_waveform",
     "library_paste",
+    "search_drop_mode",
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,6 +54,12 @@ pub struct Settings {
     pub library_dirs: Vec<String>,
     #[serde(default)]
     pub default_quality: Quality,
+    /// 在线流播放请求的起始音质；下载音质仍由 default_quality 控制。
+    #[serde(default = "default_stream_quality")]
+    pub stream_quality: Quality,
+    /// 视频在线播放的画质上限；下载画质仍由 video_max_height 控制。
+    #[serde(default = "default_video_playback_height")]
+    pub video_playback_max_height: i64,
     #[serde(default = "default_filename_template")]
     pub filename_template: String,
     #[serde(default = "default_concurrent")]
@@ -99,6 +108,9 @@ pub struct Settings {
     /// 移动始终走 Cmd/Ctrl+Option/Alt+V、剪切，或右键「粘贴」。
     #[serde(default)]
     pub library_paste: LibraryPasteMode,
+    /// 搜索结果拖进曲库文件夹时默认添加流媒体来源，或直接下载。
+    #[serde(default)]
+    pub search_drop_mode: SearchDropMode,
 }
 
 impl Settings {
@@ -108,6 +120,8 @@ impl Settings {
             download_dir: download.clone(),
             library_dirs: Vec::new(),
             default_quality: Quality::Flac,
+            stream_quality: Quality::Q128,
+            video_playback_max_height: default_video_playback_height(),
             filename_template: default_filename_template(),
             concurrent_downloads: default_concurrent(),
             auto_analyze: true,
@@ -128,12 +142,19 @@ impl Settings {
             auto_start_downloads: false,
             player_waveform: true,
             library_paste: LibraryPasteMode::Link,
+            search_drop_mode: SearchDropMode::Stream,
         }
     }
 }
 
 fn yes() -> bool {
     true
+}
+fn default_stream_quality() -> Quality {
+    Quality::Q128
+}
+fn default_video_playback_height() -> i64 {
+    1080
 }
 fn default_filename_template() -> String {
     "{title} - {artist}".to_string()

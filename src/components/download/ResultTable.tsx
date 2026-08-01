@@ -11,7 +11,13 @@ import {
   RotateCcw,
   SearchX,
 } from "lucide-react";
-import type { IntakeItem, IntakeKind, MergedGroup, VideoInfo } from "../../types";
+import type {
+  CollectionResult,
+  IntakeItem,
+  IntakeKind,
+  MergedGroup,
+  VideoInfo,
+} from "../../types";
 import type { SongPreviewItem } from "../../lib/songPreview";
 import {
   beginColumnPointerReorder,
@@ -25,6 +31,7 @@ import {
 } from "../../lib/tableColumnPrefs";
 import { ContextMenu, EmptyState } from "../common";
 import { MergedGroupRow, PLATFORM_LABEL } from "./MergedGroupRow";
+import { PlatformMark } from "./PlatformMark";
 import { endSearchDrag, writeSearchSourcesDrag } from "../../lib/searchDrag";
 import {
   isVideoGroup,
@@ -70,6 +77,14 @@ export function selectableGroups(item: IntakeItem): MergedGroup[] {
   );
 }
 
+function collectionToken(collection: CollectionResult): string {
+  return `${collection.platform}:${collection.kind}:${collection.key}`;
+}
+
+function collectionKindLabel(collection: CollectionResult): string {
+  return collection.kind === "artist" ? "作者" : "专辑";
+}
+
 function previewItem(group: MergedGroup, preferredIndex: number): SongPreviewItem | null {
   if (isVideoGroup(group)) return null;
   const preferred = group.sources[preferredIndex] ?? group.sources[0];
@@ -113,6 +128,11 @@ export interface ResultTableProps {
   onDownloadItem(index: number): void;
   /** 单首直接入队（行首下载键）。 */
   onDownloadGroup(group: MergedGroup): void;
+  /** 把在线来源持久化到指定曲库文件夹，不下载。 */
+  onAddToLibrary(group: MergedGroup): void;
+  /** 作者/专辑集合必须先展开为歌曲，不能直接入队。 */
+  onLoadCollection(collection: CollectionResult): void;
+  loadingCollections: Set<string>;
 }
 
 function loadPrefs(): TableColumnPrefs {
@@ -139,6 +159,9 @@ export function ResultTable({
   onToggleAll,
   onDownloadItem,
   onDownloadGroup,
+  onAddToLibrary,
+  onLoadCollection,
+  loadingCollections,
 }: ResultTableProps) {
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
@@ -267,6 +290,44 @@ export function ResultTable({
       selectableGroups(item).every((group) => selected.has(selectionKey(index, group.group_id))),
     );
 
+  const renderCollectionRows = (item: IntakeItem) =>
+    item.collections.map((collection) => {
+      const token = collectionToken(collection);
+      const loadingCollection = loadingCollections.has(token);
+      return (
+        <tr key={`collection:${token}`} data-collection="true">
+          <td />
+          <td />
+          <td colSpan={Math.max(1, visibleColumns.length + 1)}>
+            <span className="kd-row" style={{ gap: "0.45rem", minWidth: 0 }}>
+              <PlatformMark id={collection.platform} size={13} />
+              <span className="kd-chip" data-tone="theme">
+                {collectionKindLabel(collection)}
+              </span>
+              <strong className="kd-truncate" title={collection.title}>
+                {collection.title}
+              </strong>
+              {collection.subtitle && (
+                <span className="kd-faint kd-truncate" title={collection.subtitle}>
+                  {collection.subtitle}
+                </span>
+              )}
+              <button
+                type="button"
+                className="kd-result-download-all"
+                disabled={loadingCollection}
+                onClick={() => onLoadCollection(collection)}
+                title="先载入真实歌曲，再试听或加入队列"
+              >
+                {loadingCollection ? <LoaderCircle className="kd-spin" size={12} /> : <ListMusic size={12} />}
+                {loadingCollection ? "载入中" : "载入曲目"}
+              </button>
+            </span>
+          </td>
+        </tr>
+      );
+    });
+
   const renderColumnHead = (column: ResultColumn) => {
     const colWidth = widthFor(column.key, column.width);
     return (
@@ -374,9 +435,7 @@ export function ResultTable({
               pickable.length > 0 &&
               pickable.every((group) => selected.has(selectionKey(index, group.group_id)));
 
-            const rows = collapsed
-              ? null
-              : item.groups.map((group, position) =>
+            const groupRows = item.groups.map((group, position) =>
                   // 视频行横跨整张表，所以它不吃 indent/last 那套导引线——
                   // 一条挂在两倍高的块上的肘线只会显得断掉
                   isVideoGroup(group) ? (
@@ -413,6 +472,7 @@ export function ResultTable({
                       onToggleExpand={() => onToggleExpand(group.group_id)}
                       onPickSource={(sourceIdx) => onPickSource(group.group_id, sourceIdx)}
                       onDownload={() => onDownloadGroup(group)}
+                      onAddToLibrary={() => onAddToLibrary(group)}
                       layout={layout}
                       onDragStart={(event) => {
                         const currentKey = selectionKey(index, group.group_id);
@@ -452,6 +512,7 @@ export function ResultTable({
                     />
                   ),
                 );
+            const rows = collapsed ? null : <>{renderCollectionRows(item)}{groupRows}</>;
 
             if (flat) return <Fragment key={item.entry}>{rows}</Fragment>;
 
@@ -502,7 +563,7 @@ export function ResultTable({
                     )}
                   </td>
                   <td className="kd-result-lead">
-                    {item.groups.length > 0 && (
+                    {(item.groups.length > 0 || item.collections.length > 0) && (
                       <span className="kd-result-lead-actions">
                         <span className="kd-result-lead-spacer" aria-hidden="true" />
                         <span className="kd-result-lead-btn" aria-hidden="true">
@@ -547,7 +608,8 @@ export function ResultTable({
                         </span>
                       ))}
                       <span className="kd-result-package-actions" style={{ marginLeft: "auto" }}>
-                        {item.groups.length > 0 ? `${item.groups.length} 首` : ""}
+                        {item.collections.length > 0 ? `${item.collections.length} 个集合` : ""}
+                        {item.groups.length > 0 ? `${item.collections.length > 0 ? " · " : ""}${item.groups.length} 首` : ""}
                         {(item.kind === "playlist" || item.kind === "album") &&
                           pickable.length > 0 && (
                             <button

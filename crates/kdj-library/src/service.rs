@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use kdj_analysis::engine::AnalysisResult;
 use kdj_core::models::{
-    HarmonicMatch, HarmonicRelation, LibraryStats, Track, TrackPage, TrackPatch,
+    HarmonicMatch, HarmonicRelation, LibraryStats, SongSource, StreamLibraryItem, Track, TrackPage,
+    TrackPatch,
 };
 use kdj_providers::tags::{read_tags, write_cover, write_metadata, MetadataEdit};
 use rusqlite::types::Value as SqlValue;
@@ -139,6 +140,10 @@ pub struct TrackQuery {
     pub order2: String,
     pub limit: i64,
     pub offset: i64,
+}
+
+fn stream_library_row(row: &Row<'_>) -> rusqlite::Result<(i64, String, String, String)> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
 }
 
 pub struct LibraryService {
@@ -362,6 +367,102 @@ impl LibraryService {
             return Ok(None);
         };
         Ok(self.attach_tags(&conn, vec![track])?.into_iter().next())
+    }
+
+    /// 保存一个远程来源。它只进入独立的 stream_library 表，不制造虚假的本地 Track。
+    pub fn add_stream_source(&self, source: &SongSource, folder: &str) -> Result<StreamLibraryItem> {
+        anyhow::ensure!(
+            !source.key.trim().is_empty(),
+            "流媒体来源缺少歌曲 key"
+        );
+        anyhow::ensure!(
+            !matches!(source.platform, kdj_core::models::Platform::Local),
+            "本地文件不能作为流媒体来源保存"
+        );
+        let folder = folder.trim().to_string();
+        let source_json = serde_json::to_string(source).context("序列化流媒体来源失败")?;
+        let added_at = now_iso();
+        let conn = self.db.conn()?;
+        conn.execute(
+            "INSERT INTO stream_library (folder, platform, source_key, source_json, added_at) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT(folder, platform, source_key) DO UPDATE SET \
+             source_json = excluded.source_json",
+            rusqlite::params![
+                folder.as_str(),
+                source.platform.as_str(),
+                source.key.trim(),
+                source_json,
+                added_at,
+            ],
+        )?;
+        let (id, stored, added_at): (i64, String, String) = conn.query_row(
+            "SELECT id, source_json, added_at FROM stream_library \
+             WHERE folder = ? AND platform = ? AND source_key = ?",
+            rusqlite::params![folder.as_str(), source.platform.as_str(), source.key.trim()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let source: SongSource = serde_json::from_str(&stored).context("读取已保存流媒体来源失败")?;
+        let downloaded = self.stream_source_downloaded(&conn, &source)?;
+        Ok(StreamLibraryItem {
+            id,
+            folder,
+            source,
+            added_at,
+            downloaded,
+        })
+    }
+
+    /// 按目标文件夹列出远程来源；空文件夹表示整个流媒体曲库。
+    pub fn list_stream_sources(&self, folder: &str) -> Result<Vec<StreamLibraryItem>> {
+        let conn = self.db.conn()?;
+        let folder = folder.trim();
+        let mut stmt = if folder.is_empty() {
+            conn.prepare(
+                "SELECT id, folder, source_json, added_at \
+                 FROM stream_library ORDER BY added_at DESC, id DESC",
+            )?
+        } else {
+            conn.prepare(
+                "SELECT id, folder, source_json, added_at FROM stream_library \
+                 WHERE folder = ? ORDER BY added_at DESC, id DESC",
+            )?
+        };
+        let rows: Vec<(i64, String, String, String)> = if folder.is_empty() {
+            stmt.query_map([], stream_library_row)?
+                .collect::<std::result::Result<_, _>>()?
+        } else {
+            stmt.query_map([folder], stream_library_row)?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        drop(stmt);
+        let mut result = Vec::new();
+        for (id, stored_folder, source_json, added_at) in rows {
+            let source: SongSource =
+                serde_json::from_str(&source_json).context("解析流媒体曲目失败")?;
+            let downloaded = self.stream_source_downloaded(&conn, &source)?;
+            result.push(StreamLibraryItem {
+                id,
+                folder: stored_folder,
+                source,
+                added_at,
+                downloaded,
+            });
+        }
+        Ok(result)
+    }
+
+    pub fn remove_stream_source(&self, id: i64) -> Result<bool> {
+        let conn = self.db.conn()?;
+        Ok(conn.execute("DELETE FROM stream_library WHERE id = ?", [id])? > 0)
+    }
+
+    fn stream_source_downloaded(&self, conn: &Conn, source: &SongSource) -> Result<bool> {
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tracks WHERE source_platform = ? AND source_key = ?)",
+            rusqlite::params![source.platform.as_str(), source.key.trim()],
+            |row| row.get::<_, i64>(0),
+        )? != 0)
     }
 
     /// 一次查完整页的 tags，避免 N+1。
@@ -1508,6 +1609,53 @@ mod tests {
 
     fn service() -> LibraryService {
         LibraryService::new(Database::open_in_memory().unwrap())
+    }
+
+    fn stream_source(key: &str) -> SongSource {
+        SongSource {
+            platform: kdj_core::models::Platform::Wyy,
+            key: key.into(),
+            title: "测试流".into(),
+            artists: vec!["测试作者".into()],
+            album: "测试专辑".into(),
+            duration: Some(120.0),
+            cover: String::new(),
+            max_quality: Some(kdj_core::models::Quality::Q128),
+            vip: false,
+            payload: Default::default(),
+        }
+    }
+
+    #[test]
+    fn stream_library_keeps_remote_sources_out_of_tracks_and_marks_downloads() {
+        let service = service();
+        let source = stream_source("stream-1");
+        let saved = service.add_stream_source(&source, ROOT).unwrap();
+        assert_eq!(saved.folder, ROOT);
+        assert!(!saved.downloaded);
+
+        let listed = service.list_stream_sources(ROOT).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].source.key, "stream-1");
+        assert!(service.list_tracks(&TrackQuery::default()).unwrap().items.is_empty());
+
+        insert(
+            &service,
+            Row {
+                path: "/lib/stream-1.mp3",
+                ..Default::default()
+            },
+        );
+        let conn = service.db().conn().unwrap();
+        conn.execute(
+            "UPDATE tracks SET source_platform = 'wyy', source_key = 'stream-1' WHERE path = '/lib/stream-1.mp3'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(service.list_stream_sources(ROOT).unwrap()[0].downloaded);
+        assert!(service.remove_stream_source(saved.id).unwrap());
+        assert!(service.list_stream_sources(ROOT).unwrap().is_empty());
     }
 
     fn insert(service: &LibraryService, row: Row<'_>) -> i64 {

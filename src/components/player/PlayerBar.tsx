@@ -62,6 +62,7 @@ import {
 import {
   isStreamTrack,
   mediaUrlForTrack,
+  preloadStreamTrack,
   resolvePendingStreamTrack,
   streamCoverUrl,
   streamMeta,
@@ -441,6 +442,10 @@ export function PlayerBar() {
   useEffect(() => {
     prefetchWaveform(track);
     prefetchWaveform(predicted);
+    // 在线试听没有本地波形可预热，但下一曲的短期流地址可以提前取。
+    // 这样曲末切换只等待浏览器缓冲，不再等待 provider 再走一遍 vkey/transcoding。
+    const next = track && isStreamTrack(track) ? streamNextTrack(track) : null;
+    if (next) void preloadStreamTrack(next).catch(() => {});
   }, [track?.id, predicted?.id]);
   const visualActiveIndexRef = useRef<0 | 1>(deckMemoryRef.current.activeIndex);
   const [djTransition, setDjTransition] = useState(() => djEngine.transitionState());

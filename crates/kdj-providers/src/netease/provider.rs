@@ -15,14 +15,15 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
 use kdj_core::models::{
-    Account, AccountState, LyricText, Platform, Quality, QrSession, QrStateValue, ResolveKind,
-    ResolveResponse, SongSource,
+    Account, AccountState, CollectionResolveResponse, CollectionResult, LyricText, Platform, Quality,
+    QrSession, QrStateValue, ResolveKind, ResolveResponse, SearchKind, SongSource, StreamPlaylist,
+    StreamPlaylistResponse,
 };
 use kdj_core::paths::render_filename;
 use serde_json::{json, Map, Value};
 use tokio::io::AsyncWriteExt as _;
 
-use super::client::{expect_ok, payload, NeteaseClient};
+use super::client::{expect_ok, payload, NeteaseClient, HOST};
 use crate::net::{host_is, AtomicDownload};
 use crate::provider::{
     effective_limit, first_truthy, is_truthy, loose_int, qr_data_url_from_text, unique_download_path,
@@ -32,6 +33,7 @@ use crate::tags;
 
 const LABEL: &str = "网易云音乐";
 const QR_SESSION_TTL_SECS: u64 = 15 * 60;
+const SEARCH_KINDS: &[SearchKind] = &[SearchKind::Song, SearchKind::Artist, SearchKind::Album];
 
 /// 契约音质 → (网易云 level, 期望容器)
 fn level_of(quality: Quality) -> (&'static str, &'static str) {
@@ -278,7 +280,10 @@ impl MusicProvider for NeteaseProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::MUSIC
+        Capabilities {
+            search_kinds: SEARCH_KINDS,
+            ..Capabilities::MUSIC
+        }
     }
 
     async fn account(&self) -> Account {
@@ -478,6 +483,208 @@ impl MusicProvider for NeteaseProvider {
         Ok(songs.iter().take(limit).map(to_source).collect())
     }
 
+    async fn search_collections(
+        &self,
+        keyword: &str,
+        kind: SearchKind,
+        limit: usize,
+    ) -> Result<Vec<CollectionResult>> {
+        let keyword = keyword.trim();
+        if keyword.is_empty() || !matches!(kind, SearchKind::Artist | SearchKind::Album) {
+            return Ok(Vec::new());
+        }
+        let kind_code = match kind {
+            SearchKind::Album => "10",
+            SearchKind::Artist => "100",
+            SearchKind::Song => return Ok(Vec::new()),
+        };
+        let limit = effective_limit(limit, 20);
+        let body = self
+            .client
+            .eapi(
+                "/eapi/cloudsearch/pc",
+                payload([
+                    ("s", Value::String(keyword.to_string())),
+                    ("type", Value::String(kind_code.into())),
+                    ("limit", Value::String(limit.to_string())),
+                    ("offset", Value::String("0".into())),
+                ]),
+            )
+            .await?;
+        expect_ok(&body, "网易云集合搜索")?;
+        let result = body.get("result").unwrap_or(&Value::Null);
+        let entries = match kind {
+            SearchKind::Album => result.get("albums").and_then(Value::as_array),
+            SearchKind::Artist => result.get("artists").and_then(Value::as_array),
+            SearchKind::Song => None,
+        }
+        .cloned()
+        .unwrap_or_default();
+        Ok(entries
+            .iter()
+            .take(limit)
+            .filter_map(|entry| {
+                let key = entry.get("id").map(stringify_id).filter(|key| !key.is_empty())?;
+                let title = str_field(entry, "name")?.to_string();
+                let (subtitle, cover, count) = match kind {
+                    SearchKind::Album => (
+                        format!(
+                            "{} 首 · {}",
+                            loose_int(entry.get("size")),
+                            str_field(entry.get("artist").unwrap_or(&Value::Null), "name")
+                                .unwrap_or("未知艺人")
+                        ),
+                        str_field(entry, "picUrl").unwrap_or_default().to_string(),
+                        loose_int(entry.get("size")).max(0) as usize,
+                    ),
+                    SearchKind::Artist => (
+                        format!(
+                            "{} 首 · {} 张专辑",
+                            loose_int(entry.get("musicSize")),
+                            loose_int(entry.get("albumSize"))
+                        ),
+                        str_field(entry, "picUrl").unwrap_or_default().to_string(),
+                        loose_int(entry.get("musicSize")).max(0) as usize,
+                    ),
+                    SearchKind::Song => (String::new(), String::new(), 0),
+                };
+                Some(CollectionResult {
+                    kind,
+                    platform: Platform::Wyy,
+                    key,
+                    title,
+                    subtitle,
+                    cover,
+                    count,
+                })
+            })
+            .collect())
+    }
+
+    async fn resolve_collection(
+        &self,
+        kind: SearchKind,
+        key: &str,
+        limit: usize,
+    ) -> Result<Option<CollectionResolveResponse>> {
+        let key = key.trim();
+        if key.is_empty() || !matches!(kind, SearchKind::Artist | SearchKind::Album) {
+            return Ok(None);
+        }
+        let endpoint = match kind {
+            SearchKind::Album => format!("{HOST}/api/v1/album/{key}"),
+            SearchKind::Artist => format!("{HOST}/api/v1/artist/{key}"),
+            SearchKind::Song => return Ok(None),
+        };
+        let body: Value = self
+            .client
+            .http()
+            .get(endpoint)
+            .send()
+            .await
+            .context("读取网易云集合详情失败")?
+            .error_for_status()
+            .context("网易云集合详情返回错误")?
+            .json()
+            .await
+            .context("解析网易云集合详情失败")?;
+        let list_key = if kind == SearchKind::Album { "songs" } else { "hotSongs" };
+        let songs = body
+            .get(list_key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if songs.is_empty() {
+            bail!("网易云集合没有可用歌曲（{key}）");
+        }
+        let title = body
+            .get(if kind == SearchKind::Album { "album" } else { "artist" })
+            .and_then(|value| str_field(value, "name"))
+            .unwrap_or_else(|| if kind == SearchKind::Album { "网易云专辑" } else { "网易云作者" })
+            .to_string();
+        Ok(Some(CollectionResolveResponse {
+            kind,
+            platform: Platform::Wyy,
+            title,
+            sources: songs.iter().take(effective_limit(limit, 500)).map(to_source).collect(),
+        }))
+    }
+
+    async fn stream_playlists(&self) -> Result<Vec<StreamPlaylist>> {
+        if !self.client.logged_in() {
+            return Ok(Vec::new());
+        }
+        let uid = self
+            .client
+            .profile()
+            .and_then(|profile| {
+                profile
+                    .pointer("/data/account/id")
+                    .or_else(|| profile.pointer("/account/id"))
+                    .map(stringify_id)
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default();
+        if uid.is_empty() {
+            return Ok(Vec::new());
+        }
+        let body = self
+            .client
+            .weapi(
+                "/weapi/user/playlist",
+                payload([
+                    ("uid", Value::String(uid)),
+                    ("limit", Value::String("1000".into())),
+                    ("offset", Value::String("0".into())),
+                    ("includeVideo", Value::String("true".into())),
+                ]),
+            )
+            .await?;
+        expect_ok(&body, "读取网易云歌单")?;
+        let mut playlists: Vec<StreamPlaylist> = body
+            .get("playlist")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let key = entry.get("id").map(stringify_id).filter(|value| !value.is_empty())?;
+                let title = str_field(entry, "name")?.to_string();
+                Some(StreamPlaylist {
+                    platform: Platform::Wyy,
+                    key,
+                    title,
+                    cover: str_field(entry, "coverImgUrl").unwrap_or_default().to_string(),
+                    count: loose_int(entry.get("trackCount")).max(0) as usize,
+                    is_favorite: loose_int(entry.get("specialType")) == 5,
+                })
+            })
+            .collect();
+        playlists.sort_by_key(|item| (!item.is_favorite, item.title.to_lowercase()));
+        Ok(playlists)
+    }
+
+    async fn stream_playlist_tracks(
+        &self,
+        key: &str,
+        limit: usize,
+    ) -> Result<Option<StreamPlaylistResponse>> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Ok(None);
+        }
+        let limit = effective_limit(limit, 500);
+        let (title, songs) = self.playlist_tracks(key, limit).await?;
+        if songs.is_empty() {
+            bail!("网易云歌单没有可用歌曲（{key}）");
+        }
+        Ok(Some(StreamPlaylistResponse {
+            platform: Platform::Wyy,
+            key: key.to_string(),
+            title,
+            sources: songs.iter().take(limit).map(to_source).collect(),
+        }))
+    }
+
     async fn resolve(&self, url: &str, limit: usize) -> Result<Option<ResolveResponse>> {
         let Some((kind, key)) = self.parse_url(url).await else {
             return Ok(None);
@@ -511,7 +718,15 @@ impl MusicProvider for NeteaseProvider {
 
     /// 试听走 128K 档：`Q128.gradient()` 只有一级，天然就是"最低码率"。
     async fn preview_url(&self, source: &SongSource) -> Result<Option<String>> {
-        let (url, _ext, _size) = self.resolve_audio(&source.key, Quality::Q128).await?;
+        self.preview_url_at_quality(source, Quality::Q128).await
+    }
+
+    async fn preview_url_at_quality(
+        &self,
+        source: &SongSource,
+        quality: Quality,
+    ) -> Result<Option<String>> {
+        let (url, _ext, _size) = self.resolve_audio(&source.key, quality).await?;
         Ok(Some(url))
     }
 

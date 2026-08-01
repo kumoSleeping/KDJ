@@ -1,5 +1,5 @@
 import { Fragment, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Check, Copy, Download, Play } from "lucide-react";
+import { BookPlus, ChevronDown, ChevronRight, Check, Copy, Download, Play } from "lucide-react";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { api } from "../../lib/api";
 import { requestSongPreview, type SongPreviewItem } from "../../lib/songPreview";
@@ -50,6 +50,8 @@ export interface MergedGroupRowProps {
   onPickSource(index: number): void;
   /** 把当前选中来源直接丢进下载队列，省掉先勾选再找顶栏。 */
   onDownload(): void;
+  /** 持久化在线来源；它和下载是两个明确动作。 */
+  onAddToLibrary(): void;
   /** 当前搜索结果里排在本行之后的可播放歌曲。 */
   followingSongs?: SongPreviewItem[];
   onDragStart?(event: React.DragEvent<HTMLElement>): void;
@@ -77,6 +79,7 @@ export function MergedGroupRow({
   onToggleExpand,
   onPickSource,
   onDownload,
+  onAddToLibrary,
   followingSongs = [],
   onDragStart,
   onDragEnd,
@@ -99,6 +102,7 @@ export function MergedGroupRow({
       : (group.sources.find(
           (source) => source.platform !== "bilibili" && source.platform !== "local",
         ) ?? null);
+  const streamable = Boolean(previewSource);
   const toggleSelection = () => {
     onToggleSelect();
   };
@@ -383,6 +387,22 @@ export function MergedGroupRow({
           {/* 下载在前、展开在后：窄屏上这两颗键常被表头 1.6rem + 左右 padding 裁掉，
               单独给一列够宽的动作格，别再吃通用 td 的 0.6rem 内边距。 */}
           <span className="kd-result-lead-actions">
+            {streamable ? (
+              <button
+                type="button"
+                className="kd-result-lead-btn"
+                aria-label={`添加 ${group.title} 到曲库`}
+                title="添加到流媒体曲库（不下载）"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onAddToLibrary();
+                }}
+              >
+                <BookPlus size={13} />
+              </button>
+            ) : (
+              <span className="kd-result-lead-spacer" aria-hidden="true" />
+            )}
             {selectable ? (
               <button
                 type="button"
@@ -472,6 +492,18 @@ export function MergedGroupRow({
             <Copy size={12} />
             复制标题
           </button>
+          {streamable && (
+            <button
+              type="button"
+              onClick={() => {
+                onAddToLibrary();
+                setRowMenu(null);
+              }}
+            >
+              <BookPlus size={12} />
+              添加到曲库（不下载）
+            </button>
+          )}
           {selectable && (
             <button
               type="button"

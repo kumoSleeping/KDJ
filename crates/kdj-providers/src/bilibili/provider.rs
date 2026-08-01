@@ -173,6 +173,31 @@ impl BilibiliProvider {
         Ok(url)
     }
 
+    async fn preview_url_at_height(
+        &self,
+        bvid: &str,
+        page_index: usize,
+        max_height: i64,
+    ) -> Result<String> {
+        let info = self.client.view(bvid).await?;
+        let pages: Vec<Value> = info
+            .get("pages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let index = page_index.min(pages.len().saturating_sub(1));
+        let cid = cid_at(&info, &pages, index);
+        let playurl = self
+            .client
+            .playurl(bvid, cid, super::qn_for_height(max_height), false)
+            .await?;
+        let PlayUrlData::Single { url, .. } = streams::parse_playurl(&playurl) else {
+            bail!("哔哩哔哩没有返回可直接播放的预览流");
+        };
+        ensure_media_url(&url).await?;
+        Ok(url)
+    }
+
     /// 自动音频对齐给 ffmpeg 使用的预览源。URL 仍由同一套缓存/过期刷新逻辑
     /// 产生；Cookie 单独返回，调用方必须连同 Referer/UA 一起传给 ffmpeg。
     pub async fn preview_source(&self, bvid: &str, page_index: usize) -> Result<(String, String)> {
@@ -219,6 +244,16 @@ impl BilibiliProvider {
         page_index: usize,
         range: Option<&str>,
     ) -> Result<PreviewStream> {
+        self.preview_stream_at_height(bvid, page_index, 0, range).await
+    }
+
+    pub async fn preview_stream_at_height(
+        &self,
+        bvid: &str,
+        page_index: usize,
+        max_height: i64,
+        range: Option<&str>,
+    ) -> Result<PreviewStream> {
         let bvid = normalize_bvid(bvid);
         anyhow::ensure!(!bvid.is_empty(), "BV 号格式不正确");
         let cookies = self.client.cookie_header();
@@ -240,7 +275,11 @@ impl BilibiliProvider {
             }
         };
 
-        let url = self.preview_url(&bvid, page_index).await?;
+        let url = if max_height > 0 {
+            self.preview_url_at_height(&bvid, page_index, max_height).await?
+        } else {
+            self.preview_url(&bvid, page_index).await?
+        };
         let mut response = send(url, range.map(str::to_string)).await?;
         if matches!(response.status().as_u16(), 403 | 410 | 412) {
             // 直链签名过期（缓存的太老 / 出口 IP 变了）：重解析一次再试，
@@ -249,7 +288,11 @@ impl BilibiliProvider {
                 .lock()
                 .unwrap()
                 .remove(&(bvid.clone(), page_index));
-            let fresh = self.preview_url(&bvid, page_index).await?;
+            let fresh = if max_height > 0 {
+                self.preview_url_at_height(&bvid, page_index, max_height).await?
+            } else {
+                self.preview_url(&bvid, page_index).await?
+            };
             response = send(fresh, range.map(str::to_string)).await?;
         }
         let status = response.status();
