@@ -122,7 +122,7 @@ export const api = {
 
   downloads: () => request<DownloadTask[]>("/downloads"),
   enqueue: (body: DownloadRequest) => post<DownloadTask[]>("/downloads", body),
-  startDownloads: () => post<{ started: boolean }>("/downloads/start"),
+  startDownloads: () => post<{ started: boolean; retried: number }>("/downloads/start"),
   cancelDownload: (id: string) => post<DownloadTask>(`/downloads/${id}/cancel`),
   retryDownload: (id: string) => post<DownloadTask>(`/downloads/${id}/retry`),
   /** 只移除一条已结束的队列记录，避免「清空」影响其他历史任务。 */

@@ -1,11 +1,32 @@
 import { useEffect, useRef } from "react";
+import type { Platform } from "../../types";
 
-export type SearchBurstTone = "rainbow" | "pink" | "orange";
+export type SearchBurstTone = "rainbow" | "pink" | "orange" | "red" | "green";
+
+/**
+ * 按勾选平台数决定扫光色：只开一家用品牌色，多家用彩色。
+ * 顶栏手动搜与一键搜索共用同一套规则。
+ */
+export function burstToneForPlatforms(platforms: readonly Platform[]): SearchBurstTone {
+  if (platforms.length !== 1) return "rainbow";
+  switch (platforms[0]) {
+    case "bilibili":
+      return "pink";
+    case "soundcloud":
+      return "orange";
+    case "wyy":
+      return "red";
+    case "qqm":
+      return "green";
+    default:
+      return "rainbow";
+  }
+}
 
 /**
  * 搜索提交的炫彩竖向波形柱 + 横向细波线。
  * 左→右扫满一次后停在全宽继续波动，等结果出来再淡出；不反复重扫。
- * pink = B 站代搜；orange = SoundCloud 代搜；rainbow = 手动提交。
+ * 单平台 = 品牌色；多平台 = rainbow。
  */
 export function SearchBurstFX({
   tone,
@@ -30,7 +51,8 @@ export function SearchBurstFX({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const sweepMs = tone === "pink" || tone === "orange" ? 980 : 860;
+    const mono = tone !== "rainbow";
+    const sweepMs = mono ? 980 : 860;
     const fadeMs = 380;
     let cycleStart = performance.now();
     let fading = false;
@@ -62,6 +84,18 @@ export function SearchBurstFX({
         const h = hues[Math.floor(u * (hues.length - 1))];
         return `hsla(${h}, 100%, ${52 + u * 16}%, ${alpha})`;
       }
+      if (tone === "red") {
+        // 网易云红 #e02020
+        const hues = [0, 4, 8, 356, 350];
+        const h = hues[Math.floor(u * (hues.length - 1))];
+        return `hsla(${h}, 90%, ${48 + u * 14}%, ${alpha})`;
+      }
+      if (tone === "green") {
+        // QQ 音乐绿 #31c27c
+        const hues = [145, 152, 158, 140, 135];
+        const h = hues[Math.floor(u * (hues.length - 1))];
+        return `hsla(${h}, 72%, ${42 + u * 16}%, ${alpha})`;
+      }
       const h = 350 + u * 280;
       return `hsla(${h % 360}, 92%, ${52 + Math.sin(u * Math.PI) * 12}%, ${alpha})`;
     };
@@ -69,6 +103,8 @@ export function SearchBurstFX({
     const hueAt = (u: number): number => {
       if (tone === "pink") return 320 + u * 40;
       if (tone === "orange") return 8 + u * 28;
+      if (tone === "red") return (356 + u * 12) % 360;
+      if (tone === "green") return 140 + u * 20;
       return (350 + u * 280) % 360;
     };
 

@@ -242,6 +242,23 @@ impl DownloadManager {
         Ok((task, retry, cancel))
     }
 
+    /// 「开始」除了放行 queued，也要把能重试的失败歌曲一并带上。
+    /// 先拍快照再逐条重试，避免在持有 entries 锁时启动异步任务。
+    pub fn retryable_failed_audio_ids(&self) -> Vec<String> {
+        let entries = self.entries.lock().unwrap();
+        let mut ids: Vec<(f64, String)> = entries
+            .iter()
+            .filter(|(_, entry)| {
+                entry.task.kind == TaskKind::Audio
+                    && entry.task.state == TaskState::Failed
+                    && entry.audio_retry.is_some()
+            })
+            .map(|(id, entry)| (entry.task.created_at, id.clone()))
+            .collect();
+        ids.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        ids.into_iter().map(|(_, id)| id).collect()
+    }
+
     /// 改任务并**立刻**广播。状态变更走这里，进度走 `progress`（有节流）。
     fn update(&self, id: &str, mutate: impl FnOnce(&mut DownloadTask)) -> Option<DownloadTask> {
         let updated = {
@@ -647,6 +664,16 @@ pub fn retry_audio(
         .await;
     });
     Ok(task)
+}
+
+/// 重试当前快照里所有可重试的失败歌曲。单条可能被另一个点击抢先重试，
+/// 这种竞态直接跳过即可，其余任务仍照常启动。
+pub fn retry_failed_audio(state: Arc<AppState>, manager: Arc<DownloadManager>) -> usize {
+    manager
+        .retryable_failed_audio_ids()
+        .into_iter()
+        .filter(|id| retry_audio(state.clone(), manager.clone(), id).is_ok())
+        .count()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1284,6 +1311,7 @@ mod tests {
             },
         );
 
+        assert_eq!(manager.retryable_failed_audio_ids(), vec!["retry"]);
         let (task, retry, fresh_cancel) = manager.prepare_audio_retry("retry").unwrap();
         assert_eq!(task.state, TaskState::Queued);
         assert_eq!(task.progress, 0.0);
@@ -1293,6 +1321,7 @@ mod tests {
         assert_eq!(retry.source.key, "123");
         assert_eq!(retry.dest_dir, "/music");
         assert!(!fresh_cancel.is_cancelled());
+        assert!(manager.retryable_failed_audio_ids().is_empty());
         assert!(manager.prepare_audio_retry("retry").is_err());
     }
 

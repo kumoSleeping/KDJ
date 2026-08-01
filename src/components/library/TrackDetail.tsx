@@ -1,8 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { FolderOpen, Pencil, Play, RotateCcw, Star, Trash2 } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
-import { camelotToLabel } from "../../lib/camelot";
 import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isVideoTrack } from "../../lib/format";
 import { useLibraryStore } from "../../stores/libraryStore";
 import type { Track, TrackPatch } from "../../types";
@@ -13,7 +12,7 @@ import { useVideoPip } from "../../lib/videoPip";
 import { LocalVideoPlayer } from "./LocalVideoPlayer";
 import { VjSearchPanel } from "./VjSearchPanel";
 import { pointPatch, Waveform } from "./Waveform";
-import { CamelotChip, EnergyMeter, playTrack } from "./TrackTable";
+import { EnergyMeter, playTrack } from "./TrackTable";
 
 /** PlayerBar 播放时广播的位置，用来在节拍网格上画播放头。 */
 export const POSITION_EVENT = "kd:position";
@@ -224,6 +223,8 @@ export function TrackDetail({ track }: { track: Track }) {
   };
 
   const coverUrl = api.coverUrl(track.id, coverKey);
+  const bpmConfPct =
+    track.bpm_confidence !== null ? Math.round(track.bpm_confidence * 100) : null;
 
   return (
     <div className="kd-col" style={{ gap: "0.6rem", padding: "0.7rem" }}>
@@ -499,48 +500,81 @@ export function TrackDetail({ track }: { track: Track }) {
       </Panel>
 
       <Panel key="analysis" heading="Analysis" padded dense>
-        <div className="kd-stat-grid" data-dense="true" style={{ marginBottom: "0.5rem" }}>
-          <div className="kd-stat">
-            <div className="kd-stat-label">BPM</div>
-            <div className="kd-stat-value">{formatBpm(track.bpm)}</div>
-            <div className="kd-stat-hint">
-              置信度 {track.bpm_confidence !== null ? `${Math.round(track.bpm_confidence * 100)}%` : DASH}
-            </div>
+        {/* 调号轮 + 读数同处一面：像一套仪表，而不是圆旁边再挂一个框。 */}
+        <div className="kd-analysis-deck">
+          <div
+            className="kd-analysis-wheel"
+            title="亮起的是能和它接上的调；点任意一格按调筛选曲库"
+          >
+            <CamelotWheel
+              code={track.camelot}
+              size={128}
+              onPick={(code) => setFilter({ key: keyFilter === code ? "" : code })}
+            />
+            {keyFilter && (
+              <button
+                type="button"
+                className="kd-wheel-filter"
+                title="清除调号筛选"
+                onClick={() => setFilter({ key: "" })}
+              >
+                正在筛选 {keyFilter}
+                <span aria-hidden="true">×</span>
+              </button>
+            )}
           </div>
-          <div className="kd-stat">
-            <div className="kd-stat-label">KEY</div>
-            <div className="kd-stat-value kd-row" style={{ gap: "0.4rem" }}>
-              <CamelotChip code={track.camelot} />
+
+          <div className="kd-analysis-readout" aria-label="节奏与响度">
+            <div className="kd-analysis-metric">
+              <span className="kd-analysis-metric-label">BPM</span>
+              <span className="kd-analysis-metric-value">{formatBpm(track.bpm)}</span>
+              <div
+                className="kd-analysis-meter"
+                style={
+                  bpmConfPct !== null
+                    ? ({ "--kd-meter": `${bpmConfPct}%` } as CSSProperties)
+                    : undefined
+                }
+                data-empty={bpmConfPct === null || undefined}
+                title={bpmConfPct !== null ? `置信度 ${bpmConfPct}%` : "未分析"}
+              >
+                <i aria-hidden="true" />
+              </div>
+              <span className="kd-analysis-metric-hint">
+                置信度 {bpmConfPct !== null ? `${bpmConfPct}%` : DASH}
+              </span>
             </div>
-            <div className="kd-stat-hint">{track.music_key || camelotToLabel(track.camelot) || DASH}</div>
-          </div>
-          <div className="kd-stat">
-            <div className="kd-stat-label">相对响度</div>
-            <div className="kd-stat-value kd-row" style={{ gap: "0.35rem" }}>
-              <EnergyMeter value={track.energy} rmsDb={track.rms_db} peakDb={track.peak_db} />
-            </div>
-            <div className="kd-stat-hint">
-              {track.rms_db !== null ? `${track.rms_db.toFixed(1)} dBFS` : DASH}
+
+            <div className="kd-analysis-metric-sep" aria-hidden="true" />
+
+            <div className="kd-analysis-metric">
+              <span className="kd-analysis-metric-label">相对响度</span>
+              <span className="kd-analysis-metric-value">
+                <EnergyMeter value={track.energy} rmsDb={track.rms_db} peakDb={track.peak_db} />
+              </span>
+              <span className="kd-analysis-metric-hint">
+                {track.rms_db !== null ? `${track.rms_db.toFixed(1)} dBFS` : DASH}
+                {track.peak_db !== null ? ` · peak ${track.peak_db.toFixed(1)}` : ""}
+              </span>
             </div>
           </div>
         </div>
 
-        {/* 只留波形。原来波形下面还有一条"首拍附近 16 秒的拍子网格"，
-            但它是由 bpm+first_beat 外推出来的，既不能编辑也不能对齐，看着像装饰，已删。 */}
+        {/* 波形独占底行。KEY 已由左侧圆图表达，不再重复。 */}
         <Waveform
           trackId={track.id}
           position={position}
           duration={track.duration ?? 0}
           cueMs={track.cue_ms}
           endMs={track.end_ms}
-          height={64}
+          height={56}
           onSetPoint={async (kind, at) => {
             const patch = pointPatch(kind, at, track.cue_ms, track.end_ms);
             if (typeof patch === "string") return patch;
             await updateTrack(track.id, patch);
           }}
         />
-        <div className="kd-row kd-faint" style={{ marginTop: "0.35rem", fontSize: "var(--kd-size-xs)" }}>
+        <div className="kd-row kd-faint kd-analysis-meta">
           开始{" "}
           {track.cue_ms !== null ? `${(track.cue_ms / 1000).toFixed(2)}s` : DASH}
           <span className="kd-toolbar-gap" />
@@ -552,11 +586,11 @@ export function TrackDetail({ track }: { track: Track }) {
           {track.analyzed_at ? `分析于 ${formatDate(track.analyzed_at)}` : "未分析"}
         </div>
         {track.analysis_error && (
-          <p style={{ color: "var(--kd-warn)", marginTop: "0.4rem" }}>{track.analysis_error}</p>
+          <p style={{ color: "var(--kd-warn)" }}>{track.analysis_error}</p>
         )}
       </Panel>
 
-      <Panel key="vj" heading="Explore" padded dense>
+      <Panel key="vj" heading="一键搜索" padded dense>
         <VjSearchPanel track={track} />
       </Panel>
 
@@ -588,38 +622,6 @@ export function TrackDetail({ track }: { track: Track }) {
         </div>
       </Panel>
 
-      <Panel
-        key="wheel"
-        heading="Camelot wheel"
-        padded
-        dense
-        // 说明文字挪进 title：它只在第一次有用，占一整行不值
-        className="kd-relative"
-      >
-        <div
-          style={{ display: "flex", justifyContent: "center" }}
-          title="亮起的是能和它接上的调；点任意一格按调筛选曲库"
-        >
-          <div className="kd-col" style={{ alignItems: "center", gap: "0.35rem" }}>
-            <CamelotWheel
-              code={track.camelot}
-              size={168}
-              onPick={(code) => setFilter({ key: keyFilter === code ? "" : code })}
-            />
-            {keyFilter && (
-              <button
-                type="button"
-                className="kd-wheel-filter"
-                title="清除调号筛选"
-                onClick={() => setFilter({ key: "" })}
-              >
-                正在筛选 {keyFilter}
-                <span aria-hidden="true">×</span>
-              </button>
-            )}
-          </div>
-        </div>
-      </Panel>
       </PanelStack>
     </div>
   );

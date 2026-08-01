@@ -278,6 +278,7 @@ function QueuePrefsBar({
   canStart,
   canClear,
   queuedCount,
+  retryableCount,
   activeCount,
   totalCount,
   onStart,
@@ -286,6 +287,7 @@ function QueuePrefsBar({
   canStart: boolean;
   canClear: boolean;
   queuedCount: number;
+  retryableCount: number;
   activeCount: number;
   totalCount: number;
   onStart(): void;
@@ -304,6 +306,12 @@ function QueuePrefsBar({
   const heightIndex = VIDEO_HEIGHTS.indexOf(height);
   const heightLabel = `${height > 0 ? height : 1080}p`;
   const downloadDir = settings.download_dir;
+  const startActions = [
+    queuedCount > 0 ? `开始 ${queuedCount} 个排队任务` : "",
+    retryableCount > 0 ? `重试 ${retryableCount} 个失败任务` : "",
+  ]
+    .filter(Boolean)
+    .join("，");
 
   return (
     <div className="kd-download-prefs">
@@ -312,11 +320,7 @@ function QueuePrefsBar({
           variant="primary"
           size="sm"
           disabled={!canStart}
-          title={
-            canStart
-              ? `开始排队中的 ${queuedCount} 个任务（下载 / 导出）`
-              : "队列里没有排队中的任务"
-          }
+          title={canStart ? `${startActions}（下载 / 导出）` : "没有排队或可重试的任务"}
           onClick={onStart}
         >
           <Play size={12} />
@@ -405,14 +409,16 @@ export function QueuePanel() {
   const setListMode = useAppStore((store) => store.setListMode);
   const finishedCount = list.length - activeCount;
   const queuedCount = list.reduce((sum, task) => sum + (task.state === "queued" ? 1 : 0), 0);
+  const retryableCount = list.reduce(
+    (sum, task) => sum + (task.state === "failed" && task.kind === "audio" ? 1 : 0),
+    0,
+  );
   const canClear = finishedCount > 0 || queuedCount > 0;
   /**
-   * 「开始下载」按得动的唯一情形：闸门关着，且真有人被它拦在外面。
-   *
-   * 后端用一次性 generation 放行点击前已经排队的任务；以后新加的任务继续排队，
+   * 「开始下载」同时放行当前队列并重试失败歌曲；以后新加的任务仍继续排队，
    * 不会因为点过一次「开始下载」就永久锁进自动下载模式。
    */
-  const canStart = queuedCount > 0;
+  const canStart = queuedCount > 0 || retryableCount > 0;
   /** 队列头上两个动作共用一条错误行：一次只按得动一个，堆两条只会把列表往下挤。 */
   const [actionError, setActionError] = useState("");
 
@@ -477,6 +483,7 @@ export function QueuePanel() {
         canStart={canStart}
         canClear={canClear}
         queuedCount={queuedCount}
+        retryableCount={retryableCount}
         activeCount={activeCount}
         totalCount={list.length}
         onStart={() => {

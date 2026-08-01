@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::downloads::{
-    enqueue_audio, enqueue_video, enqueue_vj_export, retry_audio, DownloadManager,
+    enqueue_audio, enqueue_video, enqueue_vj_export, retry_audio, retry_failed_audio,
+    DownloadManager,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::state::{AppState, PLATFORMS};
@@ -500,9 +501,15 @@ async fn list_downloads(axum::Extension(ctx): axum::Extension<Ctx>) -> Json<Vec<
     Json(ctx.downloads.list())
 }
 
-async fn start_downloads(axum::Extension(ctx): axum::Extension<Ctx>) -> Json<serde_json::Value> {
+async fn start_downloads(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(ctx): axum::Extension<Ctx>,
+) -> Json<serde_json::Value> {
+    // 「开始」是队列的统一执行入口：新排队任务和之前失败、可重试的歌曲
+    // 应该在同一次点击里一起跑，不能逼用户再逐行点一遍「重试」。
+    let retried = retry_failed_audio(state, ctx.downloads.clone());
     ctx.downloads.release_queued();
-    Json(json!({ "started": true }))
+    Json(json!({ "started": true, "retried": retried }))
 }
 
 async fn enqueue(

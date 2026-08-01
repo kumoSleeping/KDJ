@@ -10,7 +10,7 @@ import {
 } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
 import { PlatformMark } from "./PlatformMark";
-import { SearchBurstFX, type SearchBurstTone } from "./SearchBurstFX";
+import { burstToneForPlatforms, SearchBurstFX, type SearchBurstTone } from "./SearchBurstFX";
 
 export {
   DEFAULT_PRIORITY,
@@ -23,6 +23,12 @@ export {
 export interface SearchPlatformProps {
   platforms: Platform[];
   onTogglePlatform(platform: Platform): void;
+  /**
+   * 不传则读写 settings.platform_priority（顶栏搜索）。
+   * 一键搜索传入自己的 priority / onReorder，与顶栏互不同步。
+   */
+  priority?: readonly string[];
+  onReorder?: (next: Platform[]) => void;
 }
 
 export interface SearchBarProps extends SearchPlatformProps {
@@ -35,8 +41,8 @@ export interface SearchBarProps extends SearchPlatformProps {
   /** 竖屏/极窄：输入与平台拆成两段。 */
   stacked?: boolean;
   /**
-   * 外部触发扫光（如 Explore 代填提交）。数值变化即重放；
-   * 搭配 burstTone 选彩虹 / B 站粉 / SoundCloud 橙。
+   * 外部触发扫光（如一键搜索代填提交）。数值变化即重放；
+   * burstTone：单平台品牌色 / 多平台彩虹（与手动提交同一规则）。
    */
   burstNonce?: number;
   burstTone?: SearchBurstTone;
@@ -101,7 +107,8 @@ export function SearchBar({
 
   const fireSubmit = () => {
     if (!canSubmit) return;
-    playBurst("rainbow");
+    // 与一键搜索同一规则：只开一家用品牌色，多家用彩色。
+    playBurst(burstToneForPlatforms(platformProps.platforms));
     onSubmit();
   };
 
@@ -179,10 +186,13 @@ export function SearchBar({
 export function SearchPlatforms({
   platforms,
   onTogglePlatform,
+  priority: priorityProp,
+  onReorder,
 }: SearchPlatformProps) {
   const saveSettings = useAppStore((state) => state.saveSettings);
   const settings = useAppStore((state) => state.settings);
-  const priority = settings?.platform_priority ?? (DEFAULT_PRIORITY as string[]);
+  const settingsPriority = settings?.platform_priority ?? (DEFAULT_PRIORITY as string[]);
+  const priority = priorityProp ?? settingsPriority;
   const [dragging, setDragging] = useState<Platform | null>(null);
   const [over, setOver] = useState<Platform | null>(null);
   const dragRef = useRef<{
@@ -195,6 +205,8 @@ export function SearchPlatforms({
     el: HTMLElement;
   } | null>(null);
 
+  /** 传入 onReorder = 一键搜索独立条：勾选/排序自管，不跟顶栏同步。 */
+  const independent = Boolean(onReorder);
   const orderedIds = normalizePriority(priority);
   const ordered = orderedIds
     .map((id) => SEARCH_PLATFORMS.find((item) => item.id === id))
@@ -211,6 +223,10 @@ export function SearchPlatforms({
     const insertAt = current.indexOf(to);
     if (insertAt < 0) return;
     current.splice(insertAt, 0, from);
+    if (onReorder) {
+      onReorder(current);
+      return;
+    }
     void saveSettings({ platform_priority: current });
   };
 
@@ -239,15 +255,23 @@ export function SearchPlatforms({
       if (target) reorder(session.from, target);
     } else {
       const id = session.from;
-      const enabled = isPlatformEnabled(useAppStore.getState().settings, id);
-      if (!enabled) {
-        const snap = useAppStore.getState().settings;
-        if (snap) {
+      const snap = useAppStore.getState().settings;
+      if (independent) {
+        // 一键搜索：勾选独立；若全局未开该源则顺手启用，方便真正发出请求。
+        if (!platforms.includes(id) && snap && !isPlatformEnabled(snap, id)) {
           void saveSettings(patchEnabledPlatform(snap, id, true));
-          if (!platforms.includes(id)) onTogglePlatform(id);
         }
-      } else {
         onTogglePlatform(id);
+      } else {
+        const enabled = isPlatformEnabled(snap, id);
+        if (!enabled) {
+          if (snap) {
+            void saveSettings(patchEnabledPlatform(snap, id, true));
+            if (!platforms.includes(id)) onTogglePlatform(id);
+          }
+        } else {
+          onTogglePlatform(id);
+        }
       }
     }
     setDragging(null);
@@ -306,9 +330,17 @@ export function SearchPlatforms({
   };
 
   return (
-    <div className="kd-plats" role="group" aria-label="搜索平台（拖动排序 = 来源优先级）">
+    <div
+      className="kd-plats"
+      role="group"
+      aria-label={
+        independent
+          ? "一键搜索平台（拖动排序 = 来源优先级，与顶栏搜索独立）"
+          : "搜索平台（拖动排序 = 来源优先级）"
+      }
+    >
       {ordered.map((item) => {
-        const off = !isPlatformEnabled(settings, item.id);
+        const off = independent ? false : !isPlatformEnabled(settings, item.id);
         return (
           <button
             key={item.id}

@@ -44,9 +44,8 @@ import { useLyricsPrefs, type LyricsAsideFace } from "../../lib/lyricsPrefs";
 import {
   EXPLORE_SEARCH_EVENT,
   type ExploreSearchDetail,
-  type ExploreSearchPlatform,
 } from "../../lib/vjSearch";
-import type { SearchBurstTone } from "../download/SearchBurstFX";
+import { burstToneForPlatforms, type SearchBurstTone } from "../download/SearchBurstFX";
 import { ensureLyrics } from "../../stores/lyricsStore";
 import { ChromeActions } from "../chrome/ChromeActions";
 import { LibraryWorkRail } from "../chrome/LibraryWorkRail";
@@ -861,17 +860,17 @@ export function Workspace() {
   };
 
   /**
-   * Explore 代搜：详情面板把拼好的词 + 目标平台发过来，这里代填搜索框再提交。
+   * 一键搜索代搜：详情面板把拼好的词 + 目标平台发过来，这里代填搜索框再提交。
    * 提交不能在事件回调里直接调 submit()——那个闭包看到的还是旧 query——
    * 所以立一个"待发射"标记，等 state 落定后的渲染周期里再开枪。
    *
-   * 只搜目标平台走的是 submit 的一次性覆盖参数，**不动**平台勾选：
+   * 只搜目标平台走的是 submit 的一次性覆盖参数，**不动**顶栏平台勾选：
    * 这是程序代搜，不是用户改了主意；搜完回来下歌，勾着的还是原来那几家。
-   * B 站扫光粉、SoundCloud 扫光橙。
+   * 扫光色与顶栏手动搜同一规则：单平台品牌色，多平台彩色。
    */
   const [explorePending, setExplorePending] = useState<{
     query: string;
-    platform: ExploreSearchPlatform;
+    platforms: Platform[];
   } | null>(null);
   const [searchBurstNonce, setSearchBurstNonce] = useState(0);
   const [searchBurstTone, setSearchBurstTone] = useState<SearchBurstTone>("rainbow");
@@ -879,25 +878,37 @@ export function Workspace() {
     const onExplore = (event: Event) => {
       const detail = (event as CustomEvent<ExploreSearchDetail>).detail;
       const q = detail?.query?.trim();
-      if (!q || !detail?.platform) return;
+      const plats = detail?.platforms?.filter((id) => id !== "local") ?? [];
+      if (!q || plats.length === 0) return;
       setQuery(q);
       // 只撑开中间搜索半栏（submit → setHasResults）；不弹右栏下载队列。
-      setExplorePending({ query: q, platform: detail.platform });
+      setExplorePending({ query: q, platforms: plats });
     };
     window.addEventListener(EXPLORE_SEARCH_EVENT, onExplore);
     return () => window.removeEventListener(EXPLORE_SEARCH_EVENT, onExplore);
   }, []);
   useEffect(() => {
     if (explorePending && query === explorePending.query) {
-      const { platform } = explorePending;
+      const { platforms: plats } = explorePending;
       setExplorePending(null);
-      setSearchBurstTone(platform === "soundcloud" ? "orange" : "pink");
+      setSearchBurstTone(burstToneForPlatforms(plats));
       setSearchBurstNonce((n) => n + 1);
       // 目标源若还没在设置里开过，代搜时顺手启用（同平台条首次点击）。
-      if (settings && !isPlatformEnabled(settings, platform)) {
-        void saveSettings(patchEnabledPlatform(settings, platform, true));
+      if (settings) {
+        let current = settings;
+        const patch: ReturnType<typeof patchEnabledPlatform> = {};
+        let dirty = false;
+        for (const platform of plats) {
+          if (!isPlatformEnabled(current, platform)) {
+            const next = patchEnabledPlatform(current, platform, true);
+            Object.assign(patch, next);
+            current = { ...current, ...next };
+            dirty = true;
+          }
+        }
+        if (dirty) void saveSettings(patch);
       }
-      void submit([platform]);
+      void submit(plats);
     }
   }, [explorePending, query, submit, settings, saveSettings]);
 

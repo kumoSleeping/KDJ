@@ -9,6 +9,19 @@ use serde_json::json;
 
 use crate::state::AppState;
 
+/// 普通平台 25 秒足够快速失败；SoundCloud 首次搜索还要从网页 bundle
+/// 提取 client_id，在高延迟网络下常常刚拿到凭据就被统一上限掐掉。
+const SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+const SOUNDCLOUD_SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
+
+fn provider_search_timeout(platform: Platform) -> std::time::Duration {
+    if platform == Platform::Soundcloud {
+        SOUNDCLOUD_SEARCH_TIMEOUT
+    } else {
+        SEARCH_TIMEOUT
+    }
+}
+
 /// 平台默认分。请求里没给顺序时用它。
 fn default_priority(platform: Platform) -> f64 {
     match platform {
@@ -911,7 +924,7 @@ pub async fn search(state: &Arc<AppState>, payload: &SearchRequest) -> SearchRes
         let platform = *platform;
         handles.push(tokio::spawn(async move {
             let result = tokio::time::timeout(
-                std::time::Duration::from_secs(25),
+                provider_search_timeout(platform),
                 provider.search(&keyword, limit),
             )
             .await;
@@ -988,6 +1001,16 @@ mod tests {
             vip: false,
             payload: Default::default(),
         }
+    }
+
+    #[test]
+    fn soundcloud_gets_a_longer_search_window() {
+        assert_eq!(provider_search_timeout(Platform::Wyy), SEARCH_TIMEOUT);
+        assert_eq!(
+            provider_search_timeout(Platform::Soundcloud),
+            SOUNDCLOUD_SEARCH_TIMEOUT
+        );
+        assert!(SOUNDCLOUD_SEARCH_TIMEOUT > SEARCH_TIMEOUT);
     }
 
     #[test]

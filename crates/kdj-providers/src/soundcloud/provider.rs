@@ -25,6 +25,10 @@ use crate::tags;
 const LABEL: &str = "SoundCloud";
 const DISABLED_MESSAGE: &str = "未启用，在「下载」里打开开关";
 const API: &str = "https://api-v2.soundcloud.com";
+/// SoundCloud 在部分网络下首包和 CDN 分片都明显慢于其它来源。
+/// 这里只放宽 SoundCloud，避免把四个平台共同的故障发现时间一起拖长。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_TIMEOUT: Duration = Duration::from_secs(120);
 /// client_id 大约每几周换一次，缓存半天足够。
 const CLIENT_ID_TTL: Duration = Duration::from_secs(12 * 3600);
 
@@ -36,12 +40,17 @@ pub struct SoundCloudProvider {
 
 impl SoundCloudProvider {
     pub fn new(ctx: ProviderContext) -> Result<Self> {
-        let http = crate::net::http_timeouts(reqwest::Client::builder().user_agent(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+        // 不设全程 timeout：歌曲一直有数据就允许下多久都行。read_timeout
+        // 只限制相邻两次读取的空窗，给慢速 SoundCloud CDN 留足恢复时间。
+        let http = reqwest::Client::builder()
+            .user_agent(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
                  (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        ))
-        .build()
-        .context("构建 SoundCloud HTTP 客户端失败")?;
+            )
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
+            .build()
+            .context("构建 SoundCloud HTTP 客户端失败")?;
         Ok(SoundCloudProvider {
             ctx,
             http,

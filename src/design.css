@@ -1183,6 +1183,99 @@ textarea {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+/* Analysis：圆图 + 读数共处一面（仪表盘），波形另占底行。 */
+.kd-analysis-deck {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.75rem 0.85rem;
+  min-width: 0;
+  padding: 0.55rem 0.65rem;
+  background: var(--kd-panel-inset);
+  border: 1px solid var(--kd-line-soft);
+}
+.kd-analysis-wheel {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+}
+.kd-analysis-readout {
+  flex: 1 1 7.5rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.55rem;
+  padding: 0.15rem 0.1rem 0.15rem 0;
+}
+.kd-analysis-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
+}
+.kd-analysis-metric-label {
+  color: var(--kd-muted);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+.kd-analysis-metric-value {
+  color: var(--kd-text);
+  font-size: 1.55rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+}
+.kd-analysis-metric-value .kd-loudness-number {
+  min-width: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  line-height: inherit;
+}
+.kd-analysis-metric-hint {
+  color: var(--kd-faint);
+  font-size: var(--kd-size-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.kd-analysis-meter {
+  --kd-meter: 0%;
+  position: relative;
+  height: 3px;
+  margin-top: 0.2rem;
+  background: color-mix(in oklab, var(--kd-line) 70%, transparent);
+  overflow: hidden;
+}
+.kd-analysis-meter > i {
+  display: block;
+  height: 100%;
+  width: var(--kd-meter);
+  background: var(--kd-theme);
+  transition: width 180ms var(--kd-pop-ease);
+}
+.kd-analysis-meter[data-empty="true"] > i {
+  width: 0;
+  opacity: 0;
+}
+.kd-analysis-metric-sep {
+  height: 1px;
+  background: var(--kd-line-soft);
+}
+.kd-analysis-meta {
+  margin-top: 0;
+  font-size: var(--kd-size-xs);
+  flex-wrap: wrap;
+  row-gap: 0.15rem;
+}
+
 .kd-field {
   display: flex;
   flex-direction: column;
@@ -5262,8 +5355,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   background: var(--kd-hover);
 }
 
-/* Explore：上下两块（搜 VJ / 搜 SoundCloud），关键词走 .kd-opts/.kd-opt。
-   品牌色只染字：B 站粉 / SoundCloud 橙。 */
+/* 一键搜索：提供商条 + 预设词 + 一次提交。关键词走 .kd-opts/.kd-opt。 */
 .kd-explore {
   display: flex;
   flex-direction: column;
@@ -5275,15 +5367,21 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   gap: 0.45rem;
   min-width: 0;
 }
-.kd-explore-block + .kd-explore-block {
-  padding-top: 0.7rem;
-  border-top: 1px solid var(--kd-line);
-}
 .kd-explore-block-label {
   color: var(--kd-muted);
   font-size: var(--kd-size-xs);
   font-weight: 600;
   letter-spacing: 0.02em;
+}
+.kd-explore-plats {
+  min-width: 0;
+}
+.kd-explore-plats .kd-plats {
+  gap: 0.2rem;
+}
+.kd-explore-plats .kd-plat {
+  width: 1.55rem;
+  height: 1.55rem;
 }
 .kd-vj-words {
   min-height: 1.55rem;
@@ -5296,14 +5394,14 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   min-width: 0;
   font-size: var(--kd-size-xs);
 }
-/* 艺人是可取消的选项：勾上才参与拼词；选中色跟板块 tone（走 data-tone 的 .kd-opt） */
+/* 艺人是可取消的选项：勾上才参与拼词 */
 .kd-vj-artist {
   font-weight: 700;
   max-width: 9rem;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 加词：低调字钮，hover 才亮出板块品牌色 */
+/* 加词：低调字钮，hover 才亮主题色 */
 .kd-vj-word-add {
   appearance: none;
   border: none;
@@ -5317,30 +5415,19 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   font-size: var(--kd-size-xs);
   cursor: pointer;
 }
-.kd-explore-block[data-tone="bili"] .kd-vj-word-add:hover {
-  color: #fb7299;
-}
-.kd-explore-block[data-tone="sc"] .kd-vj-word-add:hover {
-  color: #ff5500;
+.kd-vj-word-add:hover {
+  color: var(--kd-theme);
 }
 .kd-vj-actions .kd-btn[data-variant="primary"] {
   background: transparent;
   /* 关键词几乎无水平内边距；按钮默认 sm padding 会让放大镜比标签缩进去一截。 */
   padding-inline: 0;
+  color: var(--kd-theme);
 }
-.kd-explore-block[data-tone="bili"] .kd-vj-actions .kd-btn[data-variant="primary"] {
-  color: #fb7299;
-}
-.kd-explore-block[data-tone="bili"] .kd-vj-actions .kd-btn[data-variant="primary"]:hover:not(:disabled) {
+.kd-vj-actions .kd-btn[data-variant="primary"]:hover:not(:disabled) {
   background: transparent;
-  color: #e85f88;
-}
-.kd-explore-block[data-tone="sc"] .kd-vj-actions .kd-btn[data-variant="primary"] {
-  color: #ff5500;
-}
-.kd-explore-block[data-tone="sc"] .kd-vj-actions .kd-btn[data-variant="primary"]:hover:not(:disabled) {
-  background: transparent;
-  color: #e64d00;
+  color: var(--kd-theme);
+  filter: brightness(0.92);
 }
 .kd-vj-actions .kd-btn[data-variant="primary"] > svg {
   color: inherit;
