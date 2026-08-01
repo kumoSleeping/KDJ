@@ -64,6 +64,8 @@ cargo test -p kdj-core -p kdj-providers -p kdj-server
 
 Rust、provider、路由或配置改动后，按仓库规则停止并重启 `npm run tauri:dev` 做一次端到端验证；不使用 Electron/Python sidecar 作为运行时证据。
 
+本次验证还通过了 `cargo test --workspace`。`cargo fmt --all -- --check` 仍会报告仓库既有的大量格式差异（包括未参与本功能的旧文件）；本次没有用全仓格式化覆盖历史改动。
+
 ## 当前执行记录
 
 - 已在开始改动前创建本地 checkpoint commit：`52b212f chore: checkpoint local workspace changes`；未推送。
