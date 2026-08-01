@@ -2628,7 +2628,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-analysis"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "anyhow",
  "kdj-core",
@@ -2643,7 +2643,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-app"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2672,7 +2672,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-core"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "anyhow",
  "directories",
@@ -2685,7 +2685,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-library"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2706,7 +2706,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-playback"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "kdj-player",
  "serde",
@@ -2714,7 +2714,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-player"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "anyhow",
  "cpal",
@@ -2726,7 +2726,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-providers"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "aes",
  "anyhow",
@@ -2761,7 +2761,7 @@ dependencies = [
 
 [[package]]
 name = "kdj-server"
-version = "0.2.27"
+version = "0.2.28"
 dependencies = [
  "anyhow",
  "axum",

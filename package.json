@@ -1,6 +1,6 @@
 {
   "name": "kdj",
-  "version": "0.2.27",
+  "version": "0.2.28",
   "private": true,
   "description": "KDJ — DJ 曲库与多平台音乐/视频下载工作台",
   "scripts": {
