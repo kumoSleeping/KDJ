@@ -16,6 +16,7 @@ use base64::Engine as _;
 use kdj_core::models::{
     Account, AccountState, CollectionResolveResponse, CollectionResult, LyricText, Platform, Quality,
     QrSession, QrStateValue, QrVariant, ResolveKind, ResolveResponse, SearchKind, SongSource,
+    StreamPlaylist, StreamPlaylistResponse,
 };
 use kdj_core::paths::render_filename;
 use serde_json::{json, Value};
@@ -37,6 +38,15 @@ const CDN_FALLBACK: &str = "https://isure.stream.qqmusic.qq.com/";
 const QR_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const PROFILE_TTL: Duration = Duration::from_secs(300);
 const SEARCH_KINDS: &[SearchKind] = &[SearchKind::Song, SearchKind::Artist, SearchKind::Album];
+
+fn qq_value_id(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| value.as_i64().map(|number| number.to_string()))
+        .or_else(|| value.as_u64().map(|number| number.to_string()))
+        .unwrap_or_default()
+}
 
 fn is_qq_audio_url(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else { return false };
@@ -834,6 +844,134 @@ impl MusicProvider for QqMusicProvider {
                 })
             })
             .collect())
+    }
+
+    async fn stream_playlists(&self) -> Result<Vec<StreamPlaylist>> {
+        let credential = self.client.credential();
+        if !credential.is_present() {
+            return Ok(Vec::new());
+        }
+        let mut playlists = vec![StreamPlaylist {
+            platform: Platform::Qqm,
+            key: "__qq_favorite__".into(),
+            title: "我的收藏".into(),
+            cover: String::new(),
+            count: 0,
+            is_favorite: true,
+        }];
+        if let Ok(data) = self
+            .client
+            .call(
+                "music.musicasset.PlaylistBaseRead",
+                "GetPlaylistByUin",
+                json!({ "uin": credential.str_musicid() }),
+                QqPlatform::Desktop,
+            )
+            .await
+        {
+            if let Some(entries) = data.get("v_playlist").and_then(Value::as_array) {
+                playlists.extend(entries.iter().filter_map(|entry| {
+                    let key = entry
+                        .get("tid")
+                        .or_else(|| entry.get("dissid"))
+                        .or_else(|| entry.get("dirid"))
+                        .map(qq_value_id)
+                        .filter(|value| !value.is_empty() && value != "0")?;
+                    let title = str_field(entry, "dirname")
+                        .or_else(|| str_field(entry, "name"))
+                        .or_else(|| str_field(entry, "title"))
+                        .unwrap_or("QQ 音乐歌单")
+                        .to_string();
+                    Some(StreamPlaylist {
+                        platform: Platform::Qqm,
+                        key,
+                        title,
+                        cover: str_field(entry, "logo")
+                            .or_else(|| str_field(entry, "cover"))
+                            .unwrap_or_default()
+                            .to_string(),
+                        count: loose_int(
+                            entry
+                                .get("song_num")
+                                .or_else(|| entry.get("songNum"))
+                                .or_else(|| entry.get("song_count")),
+                        )
+                        .max(0) as usize,
+                        is_favorite: false,
+                    })
+                }));
+            }
+        }
+        Ok(playlists)
+    }
+
+    async fn stream_playlist_tracks(
+        &self,
+        key: &str,
+        limit: usize,
+    ) -> Result<Option<StreamPlaylistResponse>> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Ok(None);
+        }
+        let credential = self.client.credential();
+        if !credential.is_present() {
+            return Ok(None);
+        }
+        let limit = effective_limit(limit, 500).min(100);
+        let (title, entries) = if key == "__qq_favorite__" {
+            let data = self
+                .client
+                .call(
+                    "music.srfDissInfo.DissInfo",
+                    "CgiGetDiss",
+                    json!({
+                        "disstid": 0,
+                        "dirid": 201,
+                        "tag": true,
+                        "song_begin": 0,
+                        "song_num": limit,
+                        "userinfo": true,
+                        "orderlist": true,
+                        "onlysonglist": false,
+                        "enc_host_uin": credential.encrypt_uin,
+                    }),
+                    QqPlatform::Desktop,
+                )
+                .await?;
+            let title = data
+                .get("dirinfo")
+                .and_then(|info| {
+                    str_field(info, "title")
+                        .or_else(|| str_field(info, "dirname"))
+                        .or_else(|| str_field(info, "dissname"))
+                })
+                .unwrap_or("我的收藏")
+                .to_string();
+            let entries = data
+                .get("songlist")
+                .or_else(|| data.get("songs"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            (title, entries)
+        } else {
+            self.playlist_tracks(key, limit).await?
+        };
+        let sources: Vec<SongSource> = entries
+            .iter()
+            .map(|entry| to_source(entry.get("songInfo").unwrap_or(entry)))
+            .filter(|source| !source.key.is_empty())
+            .collect();
+        if sources.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(StreamPlaylistResponse {
+            platform: Platform::Qqm,
+            key: key.to_string(),
+            title,
+            sources,
+        }))
     }
 
     async fn resolve_collection(
