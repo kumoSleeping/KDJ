@@ -310,7 +310,14 @@ impl QqClient {
                 comm.insert("format".into(), json!("json"));
                 comm.insert("inCharset".into(), json!("utf-8"));
                 comm.insert("outCharset".into(), json!("utf-8"));
-                comm.insert("uid".into(), json!("3931641530"));
+                // 不冒用 SDK 示例里的固定用户 ID：登录时带当前账号，匿名时用 0。
+                // 该字段只是移动端 comm 的匿名请求标识，不授予任何会员权限。
+                let uid = if credential.is_present() {
+                    credential.str_musicid()
+                } else {
+                    "0".to_string()
+                };
+                comm.insert("uid".into(), json!(uid));
                 comm.insert(
                     "QIMEI36".into(),
                     json!("6c9d3cd110abca9b16311cee10001e717614"),

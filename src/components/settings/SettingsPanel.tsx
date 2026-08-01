@@ -723,7 +723,6 @@ export function SettingsPanel() {
                 { id: "480", text: "480p" },
                 { id: "720", text: "720p" },
                 { id: "1080", text: "1080p" },
-                { id: "1440", text: "1440p" },
                 { id: "2160", text: "4K" },
               ]}
               title="视频在线播放画质上限；实际画质仍由平台账号和视频本身决定。"

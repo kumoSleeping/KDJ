@@ -152,7 +152,8 @@ export function streamNextTrack(track: Track | null | undefined): Track | null {
 /** 将搜索结果占位曲目解析成可播放流，保留 id 和已经串好的后继链。 */
 export async function preloadStreamTrack(track: Track): Promise<void> {
   const meta = streamMeta(track);
-  if (!meta || meta.url) return;
+  if (!meta) throw new Error("在线试听上下文已经失效");
+  if (meta.url) return;
   if (!meta.source) throw new Error("在线试听来源缺失");
   const { url } = await api.songPreview(meta.source);
   meta.url = url;
