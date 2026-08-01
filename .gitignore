@@ -24,10 +24,12 @@ data/
 # 和 target/ 一样属于可重建产物
 src-tauri/gen/
 # 例外：MainActivity 含必需的 ndk-context JNI 初始化（cpal/AAudio 依赖），
-# 必须随仓库走；tauri android init 对已存在文件不覆盖。
+# 必须随仓库走（已 git add -f 强制入库）；tauri android init 对已存在文件不覆盖。
 !src-tauri/gen/android/app/src/main/java/com/kdj/app/MainActivity.kt
-# 例外：AndroidManifest 声明了 READ_MEDIA_AUDIO 等曲库权限，同样必须入库。
-!src-tauri/gen/android/app/src/main/AndroidManifest.xml
+# AndroidManifest 的曲库权限【不能】用同样的 `!` 例外入库：父目录 gen/ 被整体
+# 排除时 git 不会重新包含其中的文件，例外形同虚设（0.2.23–0.2.25 的正式包
+# 就是因此丢了权限声明）。权限改由 scripts/android-postinit.sh 在 init 后注入，
+# 本地与 CI 走同一份。
 src-tauri/target/
 
 # Agent / tool / dev scratch

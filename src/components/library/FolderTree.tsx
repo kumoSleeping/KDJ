@@ -120,11 +120,11 @@ export async function pickAndScanFolders(): Promise<void> {
   const paths = await window.kdj?.pickFolders();
   if (!paths?.length) return;
   const autoAnalyze = useAppStore.getState().settings?.auto_analyze ?? true;
-  const response = await useLibraryStore.getState().startScan(paths, autoAnalyze);
-  // 安卓：扫到 0 首时优先怀疑媒体权限（公共 Music 目录要 READ_MEDIA_AUDIO）。
-  // 权限在首次启动时申请过；被拒后系统不再弹，指引用户去系统设置开。
+  await useLibraryStore.getState().startScan(paths, autoAnalyze);
+  // 安卓兜底：服务端 found 恒为 0（数量走 scan.progress 事件），这里只能靠
+  // 权限状态区分「没权限」和「真没歌」。正常路径上插件交还目录前已验证过
+  // 可读性，这条兜的是权限在系统设置里被收回这类非常规情况。
   if (
-    response.found === 0 &&
     window.kdj?.mediaPermissionGranted &&
     !(await window.kdj.mediaPermissionGranted())
   ) {

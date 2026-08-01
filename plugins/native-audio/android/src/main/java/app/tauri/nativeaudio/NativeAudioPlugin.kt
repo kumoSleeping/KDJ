@@ -14,6 +14,8 @@ import androidx.core.content.ContextCompat
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
+import app.tauri.annotation.Permission
+import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
@@ -155,7 +157,20 @@ class OpenLocalPathArgs {
     var path: String? = null
 }
 
-@TauriPlugin
+@TauriPlugin(
+    permissions = [
+        // 13+ 细粒度媒体权限：曲库扫描把音频和视频容器都当媒体，两个都要。
+        Permission(
+            strings = [Manifest.permission.READ_MEDIA_AUDIO, Manifest.permission.READ_MEDIA_VIDEO],
+            alias = "libraryMedia",
+        ),
+        // ≤12 旧存储权限（manifest 里 maxSdkVersion=32，只在 ≤32 的设备上声明）。
+        Permission(
+            strings = [Manifest.permission.READ_EXTERNAL_STORAGE],
+            alias = "legacyStorage",
+        ),
+    ],
+)
 class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
 
     init {
@@ -546,6 +561,11 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    /** 等待权限结果的选目录请求；同一时刻只有一个（系统选择器是模态的）。 */
+    private data class PendingFolderPick(val treeUri: Uri, val path: String)
+
+    private var pendingFolderPick: PendingFolderPick? = null
+
     /**
      * 调起系统文件夹选择器（ACTION_OPEN_DOCUMENT_TREE），把选中目录解析成
      * 可被 Rust 曲库扫描的真实路径。取消时 path 为 null，不 reject。
@@ -591,11 +611,110 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
                     )
                     return
                 }
-                invoke.resolve(JSObject().apply { put("path", path) })
+                // SAF 授权只覆盖 content://；曲库扫描走 std::fs 裸路径，能不能读
+                // 取决于媒体运行时权限——两者互不相干。先验证再交还路径，不能把
+                // 读不了的目录当成功交出去（否则就是「授权完文件夹是空的」）。
+                Thread { verifyPickedFolder(invoke, uri, path) }.start()
             }
             else -> invoke.reject("选择文件夹失败")
         }
     }
+
+    /** 探测选中的目录；读不到媒体时先尝试在场景里补权限，再不行给出明确原因。 */
+    private fun verifyPickedFolder(invoke: Invoke, treeUri: Uri, path: String) {
+        val probe = FolderPickerHelper.probeFilesystemDir(path)
+        if (probe.visibleMedia > 0 || (probe.readable && probe.truncated)) {
+            resolvePickedFolder(invoke, path)
+            return
+        }
+        if (!mediaPermissionHeld()) {
+            // 在场景里当场申请：启动时那一次申请被拒后系统不再主动弹，
+            // 用户是在「添加音乐」这个动作里最清楚为什么需要它。
+            pendingFolderPick = PendingFolderPick(treeUri, path)
+            activity.runOnUiThread {
+                runCatching {
+                    requestPermissionForAlias(mediaPermissionAlias(), invoke, "libraryMediaPermissionResult")
+                }.onFailure { error ->
+                    pendingFolderPick = null
+                    invoke.reject("无法申请媒体读取权限：${error.message}")
+                }
+            }
+            return
+        }
+        rejectUnreadableFolder(invoke, treeUri, path, probe)
+    }
+
+    @PermissionCallback
+    fun libraryMediaPermissionResult(invoke: Invoke) {
+        val pending = pendingFolderPick
+        pendingFolderPick = null
+        if (pending == null) {
+            invoke.reject("文件夹选择状态已丢失，请重新选择")
+            return
+        }
+        Thread {
+            val probe = FolderPickerHelper.probeFilesystemDir(pending.path)
+            if (probe.visibleMedia > 0 || (probe.readable && probe.truncated)) {
+                resolvePickedFolder(invoke, pending.path)
+            } else {
+                rejectUnreadableFolder(invoke, pending.treeUri, pending.path, probe)
+            }
+        }.start()
+    }
+
+    private fun resolvePickedFolder(invoke: Invoke, path: String) {
+        invoke.resolve(JSObject().apply { put("path", path) })
+    }
+
+    /**
+     * 文件 API 看不到东西时用 SAF 授权视角交叉验证，区分
+     * 「真没歌」「没权限」「文件还没进系统媒体库」，各给各的指引。
+     */
+    private fun rejectUnreadableFolder(
+        invoke: Invoke,
+        treeUri: Uri,
+        path: String,
+        probe: FolderPickerHelper.DirProbe,
+    ) {
+        when (FolderPickerHelper.safTreeHasMedia(activity.contentResolver, treeUri)) {
+            true ->
+                if (!mediaPermissionHeld()) {
+                    invoke.reject(
+                        "已授权访问该文件夹，但系统仍未允许 KDJ 读取存储里的文件。" +
+                            "请到 系统设置 → 应用 → KDJ → 权限 中允许「音乐和音频」，再重新添加。",
+                    )
+                } else {
+                    invoke.reject(
+                        "文件夹里的媒体文件暂时无法直接读取（可能还没被系统媒体库收录）。" +
+                            "稍等片刻重试，或重启手机后再添加。",
+                    )
+                }
+            false ->
+                invoke.reject("所选文件夹（含子文件夹）里没有可导入的音乐或视频文件。")
+            // SAF 树走不完 / 查不动：不挡路，目录可读就把路径交出去让扫描自己试
+            null ->
+                if (probe.readable) {
+                    resolvePickedFolder(invoke, path)
+                } else {
+                    invoke.reject("无法读取所选文件夹（可能已断开或受系统保护），请换一个目录。")
+                }
+        }
+    }
+
+    /** 曲库扫描需要的运行时权限是否已授予（音频为主，≤12 看旧存储权限）。 */
+    private fun mediaPermissionHeld(): Boolean {
+        val permissions = if (Build.VERSION.SDK_INT >= 33) {
+            arrayOf(Manifest.permission.READ_MEDIA_AUDIO, Manifest.permission.READ_MEDIA_VIDEO)
+        } else {
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+        return permissions.any {
+            ContextCompat.checkSelfPermission(activity, it) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun mediaPermissionAlias(): String =
+        if (Build.VERSION.SDK_INT >= 33) "libraryMedia" else "legacyStorage"
 
     override fun onDestroy() {
         if (activeInstance === this) {

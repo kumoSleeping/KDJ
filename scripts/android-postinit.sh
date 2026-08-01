@@ -7,10 +7,13 @@
 # 的东西，都只能做成 init 之后的补丁步骤，且本地和 CI 必须跑同一份——
 # 两边各写一套的下场是"我这儿能装，CI 出来的装不上"。
 #
-# 做三件事：
+# 做四件事：
 #   1. release 放行 localhost 明文（不然装到真机是白屏）
-#   2. 注入签名配置（不签名的 APK 在 Android 7+ 上根本装不了）
-#   3. 把仓库里的真图标盖过模板默认图标
+#   2. AndroidManifest 注入曲库媒体读取权限（gen/android 不进版本库，
+#      清单手改会被 init 冲掉；缺了它们运行时申请会被系统静默拒绝，
+#      曲库在共享存储里永远扫到 0 首）
+#   3. 注入签名配置（不签名的 APK 在 Android 7+ 上根本装不了）
+#   4. 把仓库里的真图标盖过模板默认图标
 #
 # 签名的钥匙从环境变量来，脚本本身不含任何密码：
 #   ANDROID_KEYSTORE_BASE64   keystore 文件的 base64（CI 用；本地可省）
@@ -45,7 +48,55 @@ if grep -q 'usesCleartextTraffic"\] = "false"' "$GRADLE"; then
 fi
 echo "✓ 明文放行"
 
-# ---------------------------------------------------------------- 2. 签名
+# ---------------------------------------------------------------- 2. 清单权限
+# 曲库扫描走 std::fs 裸路径，Android 13+ 要 READ_MEDIA_AUDIO/VIDEO
+#（视频容器也是曲库媒体），≤12 要 READ_EXTERNAL_STORAGE。
+# 这三条必须进 AndroidManifest 运行时申请才有意义：没声明的权限，
+# requestPermissions 不弹窗、直接返回拒绝，系统设置里也不出现——
+# 用户看到的是「授权了文件夹却什么都扫不到」。
+MANIFEST="$GEN/app/src/main/AndroidManifest.xml"
+[ -f "$MANIFEST" ] || { echo "::error::$MANIFEST 不存在，先跑 tauri android init"; exit 1; }
+python3 - "$MANIFEST" <<'PY'
+import re
+import sys
+
+p = sys.argv[1]
+s = open(p).read()
+
+SNIPPETS = {
+    "android.permission.READ_MEDIA_AUDIO":
+        '    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />',
+    "android.permission.READ_MEDIA_VIDEO":
+        '    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />',
+    # 13+ 起由细粒度媒体权限接替，旧权限只声明到 32
+    "android.permission.READ_EXTERNAL_STORAGE":
+        '    <uses-permission\n'
+        '        android:name="android.permission.READ_EXTERNAL_STORAGE"\n'
+        '        android:maxSdkVersion="32" />',
+}
+
+missing = [snippet for name, snippet in SNIPPETS.items() if name not in s]
+if missing:
+    anchor = re.search(r"<manifest[^>]*>", s)
+    if anchor is None:
+        print("::error::清单里找不到 <manifest> 标签，模板形状变了，去对一下")
+        sys.exit(1)
+    block = (
+        "\n    <!-- 曲库媒体读取权限（android-postinit.sh 注入；直接手改会被 init 冲掉） -->\n"
+        + "\n".join(missing)
+    )
+    s = s[: anchor.end()] + block + s[anchor.end() :]
+    open(p, "w").write(s)
+
+for name in SNIPPETS:
+    if name not in s:
+        print(f"::error::{name} 注入失败")
+        sys.exit(1)
+print("  权限已就位" if not missing else f"  已注入 {len(missing)} 条权限")
+PY
+echo "✓ 清单权限（READ_MEDIA_AUDIO / READ_MEDIA_VIDEO / READ_EXTERNAL_STORAGE≤32）"
+
+# ---------------------------------------------------------------- 3. 签名
 KEYSTORE="${ANDROID_KEYSTORE_PATH:-$HOME/.android/kdj-release.jks}"
 if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
   KEYSTORE="$GEN/app/release.jks"
@@ -109,7 +160,7 @@ else
   echo "⚠ 没有 keystore 或口令，跳过签名——出来的是 unsigned APK，装不进真机"
 fi
 
-# ---------------------------------------------------------------- 3. 图标
+# ---------------------------------------------------------------- 4. 图标
 # init 出来的工程带的是 Tauri 默认图标；真图标（tauri icon 的产物）在仓库里。
 # 顺带把自适应图标的背景层从模板的 #fff 换成应用底色——白底配深色前景，
 # 在圆形遮罩里会露一圈白边。

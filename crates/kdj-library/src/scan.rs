@@ -126,21 +126,49 @@ pub fn collect_files(paths: &[String], recursive: bool) -> Vec<String> {
     found
 }
 
-/// 扫描并入库，返回本次扫到的全部 track id（新增 + 更新 + 未变化）。
-///
-/// 返回值**包含未变化的曲目**，这样调用方可以直接拿它当"这批文件对应的曲目集合"
-/// 去做后续的自动分析；要不要重分析由 `pending_analysis_ids` 决定。
+/// 一次扫描的结果。
+pub struct ScanReport {
+    /// 本次扫到的全部 track id（新增 + 更新 + 未变化）。
+    ///
+    /// **包含未变化的曲目**，这样调用方可以直接拿它当"这批文件对应的曲目集合"
+    /// 去做后续的自动分析；要不要重分析由 `pending_analysis_ids` 决定。
+    pub track_ids: Vec<i64>,
+    /// 请求的根里**存在但 readdir 失败**的（权限被拒 / 挂载断开 / TCC 拦截）。
+    ///
+    /// 扫描本身不算失败，但调用方必须让用户知道——否则一次"成功"的扫描
+    /// 扫出 0 首，和文件夹真空在界面上长得一模一样（安卓丢权限、macOS
+    /// TCC 被拒、外置盘掉线，全是这个形状）。不存在的路径不算在内：
+    /// 那是"还没建好"，不是"读不了"。
+    pub unreadable_roots: Vec<String>,
+}
+
+/// 探测请求的根目录哪些 readdir 直接失败。只查一层：子目录读不了由
+/// walkdir 静默跳过（部分子目录没权限不该惊动用户），根读不了必须说。
+fn probe_unreadable_roots(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|raw| PathBuf::from(normalize_path(Path::new(raw))))
+        .filter(|root| root.is_dir() && std::fs::read_dir(root).is_err())
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// 扫描并入库。
 pub fn scan_paths(
     service: &LibraryService,
     paths: &[String],
     recursive: bool,
     on_progress: ProgressFn<'_>,
-) -> Result<Vec<i64>> {
+) -> Result<ScanReport> {
     let files = collect_files(paths, recursive);
     let total = files.len();
     on_progress(0, total, "");
+    let unreadable_roots = probe_unreadable_roots(paths);
     if total == 0 {
-        return Ok(Vec::new());
+        return Ok(ScanReport {
+            track_ids: Vec::new(),
+            unreadable_roots,
+        });
     }
 
     // 一次性拉出已入库文件的 mtime，逐个查库在几万首的曲库上会慢得离谱
@@ -170,7 +198,10 @@ pub fn scan_paths(
         }
         on_progress(done + 1, total, file_path);
     }
-    Ok(track_ids)
+    Ok(ScanReport {
+        track_ids,
+        unreadable_roots,
+    })
 }
 
 #[cfg(test)]
@@ -339,5 +370,56 @@ mod tests {
         assert_eq!(events[0], (0, 3), "第一条就要给出真实总数");
         assert_eq!(events.last().copied(), Some((3, 3)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_but_readable_directory_is_not_reported_as_unreadable() {
+        let dir = scratch("empty-ok");
+        let service =
+            crate::service::LibraryService::new(crate::db::Database::open_in_memory().unwrap());
+        let report = scan_paths(&service, &[dir.to_string_lossy().into_owned()], true, &|_, _, _| {})
+            .unwrap();
+        assert!(report.track_ids.is_empty());
+        assert!(report.unreadable_roots.is_empty(), "真空目录不是故障");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_without_read_permission_is_reported() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = scratch("no-perm");
+        std::fs::write(dir.join("a.mp3"), b"x").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let service =
+            crate::service::LibraryService::new(crate::db::Database::open_in_memory().unwrap());
+        let report = scan_paths(&service, &[dir.to_string_lossy().into_owned()], true, &|_, _, _| {})
+            .unwrap();
+        assert!(report.track_ids.is_empty());
+        assert_eq!(
+            report.unreadable_roots,
+            vec![dir.to_string_lossy().into_owned()],
+            "读不了的根必须点名，不能静默扫 0"
+        );
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_roots_are_still_silent() {
+        // 「还没建好」和「读不了」是两回事：前者静默跳过，后者必须上报
+        let service =
+            crate::service::LibraryService::new(crate::db::Database::open_in_memory().unwrap());
+        let report = scan_paths(
+            &service,
+            &["/definitely/not/here".to_string()],
+            true,
+            &|_, _, _| {},
+        )
+        .unwrap();
+        assert!(report.track_ids.is_empty());
+        assert!(report.unreadable_roots.is_empty());
     }
 }

@@ -55,8 +55,8 @@ pub fn spawn_scan(state: Arc<AppState>, paths: Vec<String>, recursive: bool, ana
         };
 
         let result = kdj_library::scan::scan_paths(&state.library, &paths, recursive, &progress);
-        let track_ids = match result {
-            Ok(ids) => ids,
+        let report = match result {
+            Ok(report) => report,
             Err(err) => {
                 tracing::error!("导入失败：{err:#}");
                 // 失败原因必须**跟着终局事件一起走**。前端不再有浮层通知，
@@ -70,14 +70,21 @@ pub fn spawn_scan(state: Arc<AppState>, paths: Vec<String>, recursive: bool, ana
             }
         };
 
-        let total = track_ids.len();
-        hub.publish("scan.progress", &scan_done_event(&job, total, total, None));
-        hub.publish_library_updated(&track_ids);
+        let total = report.track_ids.len();
+        // 根目录读不了（权限被拒/挂载断开）不能静默：扫出 0 首和文件夹真空
+        // 在界面上长得一模一样。终局事件的 error 字段就是干这个的。
+        let error = if report.unreadable_roots.is_empty() {
+            None
+        } else {
+            Some(unreadable_roots_message(&report.unreadable_roots, total == 0))
+        };
+        hub.publish("scan.progress", &scan_done_event(&job, total, total, error));
+        hub.publish_library_updated(&report.track_ids);
 
         // 扫描可能比用户点「暂停自动分析」早开始许久。这里重新读设置，
         // 才不会在暂停后仍把刚导入的一整批曲目塞进分析队列。
-        if analyze && state.config.to_settings().auto_analyze && !track_ids.is_empty() {
-            match state.library.pending_analysis_ids(Some(&track_ids), false) {
+        if analyze && state.config.to_settings().auto_analyze && !report.track_ids.is_empty() {
+            match state.library.pending_analysis_ids(Some(&report.track_ids), false) {
                 Ok(pending) => {
                     // 扫描顺带跑的批量分析是后台活，「停止分析」应该停得掉
                     spawn_analysis(state.clone(), pending, false);
@@ -87,6 +94,33 @@ pub fn spawn_scan(state: Arc<AppState>, paths: Vec<String>, recursive: bool, ana
         }
     });
     job_id
+}
+
+/// 终局事件里"根目录读不了"的措辞。全灭和部分可读分开说：
+/// 全灭是导入失败，部分是提醒（其余已经入库）。
+fn unreadable_roots_message(roots: &[String], all_failed: bool) -> String {
+    let first = roots.first().map(String::as_str).unwrap_or_default();
+    let list = if roots.len() > 1 {
+        format!("{first} 等 {} 个文件夹", roots.len())
+    } else {
+        first.to_string()
+    };
+    if all_failed {
+        #[cfg(target_os = "android")]
+        {
+            format!("没有权限读取所选文件夹（{list}）。请到 系统设置 → 应用 → KDJ → 权限 中允许媒体权限后重试")
+        }
+        #[cfg(target_os = "macos")]
+        {
+            format!("没有权限读取所选文件夹（{list}）。请在 系统设置 → 隐私与安全性 → 文件与文件夹 中允许 KDJ 后重试")
+        }
+        #[cfg(not(any(target_os = "android", target_os = "macos")))]
+        {
+            format!("无法读取所选文件夹（{list}）：没有访问权限，或文件夹已断开")
+        }
+    } else {
+        format!("部分文件夹无法读取：{list}（其余内容已导入）")
+    }
 }
 
 #[derive(Default)]
