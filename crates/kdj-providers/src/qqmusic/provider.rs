@@ -861,9 +861,9 @@ impl MusicProvider for QqMusicProvider {
             SearchKind::Artist => {
                 self.client
                     .call(
-                        "music.musichall.song_list_server",
+                        "musichall.song_list_server",
                         "GetSingerSongList",
-                        json!({ "singerMid": key, "number": limit, "begin": 0 }),
+                        json!({ "singerMid": key, "order": 1, "number": limit.min(30), "begin": 0 }),
                         QqPlatform::Mobile,
                     )
                     .await?
