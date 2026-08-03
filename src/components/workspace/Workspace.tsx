@@ -561,14 +561,26 @@ export function Workspace() {
     if (saved !== null) return saved === "1";
     return false;
   });
+  const previousCompactTreePortraitRef = useRef(portrait);
   useEffect(() => {
-    localStorage.setItem("kd-compact-tree-expanded", compactTreeExpanded ? "1" : "0");
-  }, [compactTreeExpanded]);
-  useEffect(() => {
-    // 离开竖屏必须恢复完整侧栏，不能把手机窄轨状态带到 1:1/横屏。
-    // 进入竖屏沿用已保存的展开宽度，不再强制收起。
-    if (!portrait) setCompactTreeExpanded(true);
-  }, [portrait]);
+    const previousPortrait = previousCompactTreePortraitRef.current;
+    previousCompactTreePortraitRef.current = portrait;
+
+    // 桌面与竖屏共用组件状态，但只有竖屏拥有持久偏好。布局刚切换时先恢复
+    // 目标布局的状态并跳过本轮写入，避免桌面的展开值覆盖手机保存值。
+    if (portrait !== previousPortrait) {
+      if (portrait) {
+        const saved = localStorage.getItem("kd-compact-tree-expanded");
+        setCompactTreeExpanded(saved === null ? false : saved === "1");
+      } else {
+        setCompactTreeExpanded(true);
+      }
+      return;
+    }
+    if (portrait) {
+      localStorage.setItem("kd-compact-tree-expanded", compactTreeExpanded ? "1" : "0");
+    }
+  }, [compactTreeExpanded, portrait]);
   const [searchSplitPercent, setSearchSplitPercent] = useState(50);
   const searchSplitRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -1533,7 +1545,6 @@ export function Workspace() {
               <span {...gripProps("tree")} />
               <NarrowFolderRail
                 expanded={compactTreeExpanded}
-                onExpand={() => setCompactTreeExpanded(true)}
                 onNavigate={onFolderNavigate}
                 onOpenStreamPlaylist={openStreamPlaylist}
                 activeStreamPlaylist={activeStreamPlaylist}

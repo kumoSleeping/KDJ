@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ChevronDown,
@@ -74,6 +74,12 @@ const STREAM_ROOTS: ReadonlyArray<{ id: StreamBrowsePlatform; label: string }> =
   { id: "qqm", label: "Q Music" },
 ];
 
+const NARROW_RAIL_SOURCE_KEY = "kd-narrow-rail-source-v1";
+
+type NarrowRailSource =
+  | { kind: "local"; rootPath: string }
+  | { kind: "stream"; platform: StreamBrowsePlatform };
+
 export interface StreamPlaylistBrowseProps {
   onOpenStreamPlaylist?: (playlist: StreamPlaylist) => void | Promise<void>;
   /** 传 null 可明确清掉远程高亮；省略则沿用内存 store 中最近点开的歌单。 */
@@ -107,6 +113,104 @@ function streamPlaylistSections(playlists: StreamPlaylist[]): StreamPlaylistSect
 
 function accountCanBrowse(state: AccountState | undefined): boolean {
   return state === "valid" || state === "unknown";
+}
+
+function readNarrowRailSource(): NarrowRailSource | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const value: unknown = JSON.parse(
+      window.localStorage.getItem(NARROW_RAIL_SOURCE_KEY) ?? "null",
+    );
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return null;
+    }
+    const record = value as Record<string, unknown>;
+    if (
+      record.kind === "stream" &&
+      (record.platform === "wyy" || record.platform === "qqm")
+    ) {
+      return { kind: "stream", platform: record.platform };
+    }
+    if (
+      record.kind === "local" &&
+      typeof record.rootPath === "string" &&
+      record.rootPath.length <= 4096
+    ) {
+      return { kind: "local", rootPath: record.rootPath };
+    }
+  } catch {
+    // localStorage 受限或旧值损坏时回到本地曲库，不阻断侧栏。
+  }
+  return null;
+}
+
+function writeNarrowRailSource(source: NarrowRailSource): void {
+  try {
+    window.localStorage.setItem(NARROW_RAIL_SOURCE_KEY, JSON.stringify(source));
+  } catch {
+    // 隐私模式下存储不可写也不影响本次会话切换。
+  }
+}
+
+/**
+ * 宽树和手机窄轨互斥挂载，但两者都必须拥有同一套账号绑定、缓存校准和刷新节奏。
+ * enabled=false 时保留 hook 顺序却不注册副作用，展开态交给内部 FolderTree 接管。
+ */
+function useStreamBrowseLifecycle(enabled: boolean) {
+  const accounts = useAppStore((state) => state.accounts);
+  const accountsError = useAppStore((state) => state.accountsError);
+  const appBooting = useAppStore((state) => state.booting);
+  const bindStreamAccount = useStreamBrowseStore((state) => state.bindAccount);
+  const refreshStreamPlaylistsIfStale = useStreamBrowseStore(
+    (state) => state.refreshIfStale,
+  );
+  const wyyAccount = accounts.find((account) => account.platform === "wyy");
+  const qqmAccount = accounts.find((account) => account.platform === "qqm");
+
+  useEffect(() => {
+    if (!enabled) return;
+    const bindings = [
+      ["wyy", wyyAccount],
+      ["qqm", qqmAccount],
+    ] as const;
+    for (const [platform, account] of bindings) {
+      if (account) {
+        // 先同步账号匹配的持久缓存，再由 store 为本次启动强制校准一次。
+        void bindStreamAccount(platform, streamAccountBinding(account));
+      } else if (!appBooting && !accountsError) {
+        // 账号接口明确返回空才按登出处理；接口失败不能误删可用缓存。
+        void bindStreamAccount(platform, null);
+      }
+    }
+  }, [
+    accountsError,
+    appBooting,
+    bindStreamAccount,
+    enabled,
+    qqmAccount,
+    wyyAccount,
+  ]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const refreshVisibleStaleDirectories = () => {
+      if (document.visibilityState !== "visible") return;
+      const currentAccounts = useAppStore.getState().accounts;
+      for (const platform of STREAM_BROWSE_PLATFORMS) {
+        const account = currentAccounts.find((candidate) => candidate.platform === platform);
+        if (!accountCanBrowse(account?.state)) continue;
+        void refreshStreamPlaylistsIfStale(platform);
+      }
+    };
+    window.addEventListener("focus", refreshVisibleStaleDirectories);
+    document.addEventListener("visibilitychange", refreshVisibleStaleDirectories);
+    return () => {
+      window.removeEventListener("focus", refreshVisibleStaleDirectories);
+      document.removeEventListener("visibilitychange", refreshVisibleStaleDirectories);
+    };
+  }, [enabled, refreshStreamPlaylistsIfStale]);
+
+  return { accounts, accountsError };
 }
 
 function trackIdsFromDrop(event: React.DragEvent): number[] {
@@ -199,14 +303,11 @@ function flattenFolders(nodes: FolderNode[]): FolderNode[] {
  */
 export function NarrowFolderRail({
   expanded,
-  onExpand,
   onNavigate,
   onOpenStreamPlaylist,
   activeStreamPlaylist,
 }: {
   expanded: boolean;
-  /** 窄轨里的在线来源入口会展开完整目录；实际宽度状态仍由 Workspace 统一管理。 */
-  onExpand?: () => void;
   /** 点选文件夹 / 临时列表 / 全部曲目等导航项后回调（窄屏收右侧抽屉用）。 */
   onNavigate?: () => void;
 } & StreamPlaylistBrowseProps) {
@@ -217,13 +318,72 @@ export function NarrowFolderRail({
   const setQueueView = useLibraryStore((state) => state.setQueueView);
   const settings = useAppStore((state) => state.settings);
   const applyFolderOp = useLibraryStore((state) => state.applyFolderOp);
+  const streamPlaylists = useStreamBrowseStore((state) => state.playlists);
+  const streamLoading = useStreamBrowseStore((state) => state.loading);
+  const streamErrors = useStreamBrowseStore((state) => state.errors);
+  const streamSectionExpanded = useStreamBrowseStore((state) => state.sectionExpanded);
   const cachedActiveStreamPlaylist = useStreamBrowseStore((state) => state.active);
-  const streamExpanded = useStreamBrowseStore((state) => state.expanded);
-  const setStreamExpanded = useStreamBrowseStore((state) => state.setExpanded);
+  const loadStreamPlaylists = useStreamBrowseStore((state) => state.loadPlaylists);
+  const setStreamSectionExpanded = useStreamBrowseStore(
+    (state) => state.setSectionExpanded,
+  );
+  const setActiveStreamPlaylist = useStreamBrowseStore((state) => state.setActive);
+  const setStreamError = useStreamBrowseStore((state) => state.setError);
+  const { accounts, accountsError } = useStreamBrowseLifecycle(!expanded);
   const [error, setError] = useState("");
   const [narrowDrop, setNarrowDrop] = useState("");
+  const cachedNarrowActiveStreamPlaylist =
+    cachedActiveStreamPlaylist &&
+    (cachedActiveStreamPlaylist.platform === "wyy" ||
+      cachedActiveStreamPlaylist.platform === "qqm")
+      ? {
+          platform: cachedActiveStreamPlaylist.platform,
+          key: cachedActiveStreamPlaylist.key,
+        }
+      : null;
   const effectiveActiveStreamPlaylist =
-    activeStreamPlaylist === undefined ? cachedActiveStreamPlaylist : activeStreamPlaylist;
+    activeStreamPlaylist === undefined
+      ? cachedNarrowActiveStreamPlaylist
+      : activeStreamPlaylist;
+  const [narrowSource, setNarrowSource] = useState<NarrowRailSource>(() => {
+    const storedSource = readNarrowRailSource();
+    if (storedSource) return storedSource;
+    if (effectiveActiveStreamPlaylist) {
+      return { kind: "stream", platform: effectiveActiveStreamPlaylist.platform };
+    }
+    return { kind: "local", rootPath: "" };
+  });
+  const effectiveActiveStreamKey = effectiveActiveStreamPlaylist
+    ? `${effectiveActiveStreamPlaylist.platform}:${effectiveActiveStreamPlaylist.key}`
+    : "";
+  const previousEffectiveActiveStreamKeyRef = useRef(effectiveActiveStreamKey);
+  const roots = folders?.roots ?? [];
+
+  useEffect(() => writeNarrowRailSource(narrowSource), [narrowSource]);
+
+  useEffect(() => {
+    const previousKey = previousEffectiveActiveStreamKeyRef.current;
+    previousEffectiveActiveStreamKeyRef.current = effectiveActiveStreamKey;
+    // 初次挂载优先恢复用户上次停留的来源；只有运行期间真正打开了另一份
+    // 在线歌单，才跟随到对应平台。否则刷新/横竖屏切换会被旧播放状态抢走。
+    if (!effectiveActiveStreamPlaylist || effectiveActiveStreamKey === previousKey) return;
+    setNarrowSource((current) =>
+      current.kind === "stream" &&
+      current.platform === effectiveActiveStreamPlaylist.platform
+        ? current
+        : { kind: "stream", platform: effectiveActiveStreamPlaylist.platform },
+    );
+  }, [effectiveActiveStreamKey, effectiveActiveStreamPlaylist]);
+
+  useEffect(() => {
+    if (narrowSource.kind !== "local") return;
+    if (roots.some((root) => root.path === narrowSource.rootPath)) return;
+    const matching = roots.find((root) =>
+      flattenFolders([root]).some((node) => node.path === filter.folder),
+    );
+    const fallback = matching ?? roots[0];
+    if (fallback) setNarrowSource({ kind: "local", rootPath: fallback.path });
+  }, [filter.folder, folders, narrowSource]);
 
   useEffect(() => {
     const clearDrop = () => setNarrowDrop("");
@@ -245,38 +405,239 @@ export function NarrowFolderRail({
 
   const choose = (folder: string) => {
     setQueueView(false);
+    setActiveStreamPlaylist(null);
     setFilter({ folder, folderDeep: false });
     onNavigate?.();
   };
+
+  const selectedLocalRoot =
+    narrowSource.kind === "local"
+      ? roots.find((root) => root.path === narrowSource.rootPath) ?? null
+      : null;
+
+  const openStreamPlaylist = (
+    platform: StreamBrowsePlatform,
+    playlist: StreamPlaylist,
+  ) => {
+    setActiveStreamPlaylist(playlist);
+    setStreamError(platform, "");
+    try {
+      const opening = onOpenStreamPlaylist?.(playlist);
+      if (opening) {
+        void Promise.resolve(opening).catch((reason: unknown) =>
+          setStreamError(platform, `打开歌单失败：${(reason as Error).message}`),
+        );
+      }
+    } catch (reason) {
+      setStreamError(platform, `打开歌单失败：${(reason as Error).message}`);
+    }
+    onNavigate?.();
+  };
+
+  const renderLocalFolderButton = (node: FolderNode, sourceRoot: boolean) => {
+    const sourceActive =
+      sourceRoot &&
+      narrowSource.kind === "local" &&
+      narrowSource.rootPath === node.path;
+    const folderActive = !sourceRoot && !queueView && filter.folder === node.path;
+    return (
+      <button
+        key={`${sourceRoot ? "narrow-local-root" : "narrow-local-child"}:${node.path}`}
+        type="button"
+        {...{ [FOLDER_DROP_PATH_ATTR]: node.path }}
+        data-active={sourceActive || folderActive || undefined}
+        data-drop={narrowDrop === node.path ? "true" : undefined}
+        title={node.path}
+        onClick={() => {
+          if (sourceRoot) {
+            // 收起态的根目录和 NetEase / Q Music 一样只负责切换下方目录。
+            // 真正打开内容留给下方具体文件夹，避免根目录没有直属曲目时
+            // 把中间列表意外清成“这个文件夹是空的”。
+            setNarrowSource({ kind: "local", rootPath: node.path });
+            return;
+          }
+          choose(node.path);
+        }}
+        onDragOverCapture={(event) => {
+          if (isSearchDownloadDrag(event)) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "copy";
+            setNarrowDrop(node.path);
+            return;
+          }
+          if (!isTrackDrag(event)) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = event.altKey ? "move" : "copy";
+          setNarrowDrop(node.path);
+        }}
+        onDragLeave={() =>
+          setNarrowDrop((current) => (current === node.path ? "" : current))
+        }
+        onDropCapture={(event) => {
+          event.preventDefault();
+          setNarrowDrop("");
+          if (isSearchDownloadDrag(event)) {
+            void enqueueSearchDrop(event, node.path).catch((reason: unknown) =>
+              setError((reason as Error).message),
+            );
+            return;
+          }
+          const ids = trackIdsFromDrop(event);
+          if (ids.length === 0) return;
+          const op = resolveLibraryPasteOp({ forceMove: event.altKey });
+          void applyFolderOp(ids, node.path, op).catch((reason: unknown) =>
+            setError((reason as Error).message),
+          );
+        }}
+      >
+        <span className="kd-narrow-folder-icons">
+          <FolderGlyph
+            path={node.path}
+            audioDir={settings?.download_dir}
+            videoDir={settings?.download_dir}
+            root={node.is_root}
+            open={sourceRoot}
+            size={14}
+          />
+        </span>
+        <small>{node.name}</small>
+      </button>
+    );
+  };
+
+  const renderStreamChildren = (platform: StreamBrowsePlatform) => {
+    const account = accounts.find((candidate) => candidate.platform === platform);
+    const accountState = account?.state;
+    const canBrowse = accountCanBrowse(accountState);
+    const playlists = streamPlaylists[platform];
+    const loading = streamLoading[platform];
+    const platformError = streamErrors[platform];
+    const favoritePlaylists = (playlists ?? []).filter(
+      (playlist) => playlist.is_favorite || playlist.origin === "favorite",
+    );
+    const sections = streamPlaylistSections(playlists ?? []);
+
+    return (
+      <>
+        {!accountState && (
+          <button
+            type="button"
+            title={accountsError || "正在读取账号状态"}
+            disabled={!accountsError}
+            onClick={() => void useAppStore.getState().refreshAccounts()}
+          >
+            {accountsError ? (
+              <AlertTriangle size={14} />
+            ) : (
+              <LoaderCircle className="kd-spin" size={14} />
+            )}
+            <small>{accountsError ? "重试账号" : "读取账号"}</small>
+          </button>
+        )}
+        {(accountState === "missing" || accountState === "expired") && (
+          <button
+            type="button"
+            title="打开设置登录账号"
+            onClick={() => useAppStore.getState().openSettingsPanel()}
+          >
+            <LogIn size={14} />
+            <small>{accountState === "expired" ? "重新登录" : "登录"}</small>
+          </button>
+        )}
+        {canBrowse && loading && playlists === null && (
+          <button type="button" disabled aria-label="正在读取歌单">
+            <LoaderCircle className="kd-spin" size={14} />
+            <small>读取歌单</small>
+          </button>
+        )}
+        {canBrowse && platformError && (
+          <button
+            type="button"
+            title={platformError}
+            disabled={loading}
+            onClick={() => void loadStreamPlaylists(platform, true)}
+          >
+            <AlertTriangle size={14} />
+            <small>重试</small>
+          </button>
+        )}
+        {canBrowse && !loading && !platformError && playlists?.length === 0 && (
+          <button
+            type="button"
+            title="没有读取到歌单，点此刷新"
+            onClick={() => void loadStreamPlaylists(platform, true)}
+          >
+            <RefreshCw size={14} />
+            <small>刷新歌单</small>
+          </button>
+        )}
+        {canBrowse &&
+          favoritePlaylists.map((playlist) => {
+            const active =
+              effectiveActiveStreamPlaylist?.platform === platform &&
+              effectiveActiveStreamPlaylist.key === playlist.key;
+            return (
+              <button
+                key={`narrow-stream-playlist:${platform}:${playlist.key}`}
+                type="button"
+                data-active={active || undefined}
+                data-stream-platform={platform}
+                title={`${playlist.title} · ${playlist.count} 首`}
+                onClick={() => openStreamPlaylist(platform, playlist)}
+              >
+                <Heart size={14} />
+                <small>{playlist.title}</small>
+              </button>
+            );
+          })}
+        {canBrowse &&
+          sections.map((section) => {
+            const sectionOpen = streamSectionExpanded[platform][section.id];
+            return (
+              <div
+                key={`narrow-stream-section:${platform}:${section.id}`}
+                className="kd-narrow-stream-section"
+              >
+                <button
+                  type="button"
+                  aria-expanded={sectionOpen}
+                  title={`${sectionOpen ? "收起" : "展开"}${section.label}`}
+                  onClick={() =>
+                    setStreamSectionExpanded(platform, section.id, !sectionOpen)
+                  }
+                >
+                  {sectionOpen ? <FolderOpen size={14} /> : <Folder size={14} />}
+                  <small>{section.label}</small>
+                </button>
+                {sectionOpen &&
+                  section.playlists.map((playlist) => {
+                    const active =
+                      effectiveActiveStreamPlaylist?.platform === platform &&
+                      effectiveActiveStreamPlaylist.key === playlist.key;
+                    return (
+                      <button
+                        key={`narrow-stream-playlist:${platform}:${playlist.key}`}
+                        type="button"
+                        data-active={active || undefined}
+                        data-stream-platform={platform}
+                        title={`${playlist.title} · ${playlist.count} 首`}
+                        onClick={() => openStreamPlaylist(platform, playlist)}
+                      >
+                        <ListMusic size={14} />
+                        <small>{playlist.title}</small>
+                      </button>
+                    );
+                  })}
+              </div>
+            );
+          })}
+      </>
+    );
+  };
+
   return (
     <aside className="kd-narrow-folder-rail" aria-label="快捷文件夹栏">
-      <div className="kd-narrow-stream-sources" aria-label="在线音乐">
-        {STREAM_ROOTS.map((streamRoot) => (
-          <button
-            key={`narrow-stream-root:${streamRoot.id}`}
-            type="button"
-            data-active={
-              effectiveActiveStreamPlaylist?.platform === streamRoot.id || undefined
-            }
-            data-stream-platform={streamRoot.id}
-            aria-label={`打开 ${streamRoot.label} 歌单`}
-            title={`打开 ${streamRoot.label} 收藏和歌单`}
-            onClick={() => {
-              // 点来源就是要看目录：先恢复该平台根节点，再展开完整侧栏。
-              // 根节点与二级分组的状态仍写回 streamBrowseStore 的持久偏好。
-              if (!streamExpanded[streamRoot.id]) {
-                setStreamExpanded(streamRoot.id, true);
-              }
-              onExpand?.();
-            }}
-          >
-            <PlatformMark id={streamRoot.id} size={15} />
-            <small>{streamRoot.label}</small>
-          </button>
-        ))}
-      </div>
-      <span className="kd-narrow-rail-sep" />
-      <div className="kd-narrow-local-sources kd-scroll" aria-label="本地曲库">
+      <div className="kd-narrow-global-actions" aria-label="曲库操作">
       <button
         type="button"
         title={error || "添加音乐文件夹"}
@@ -295,6 +656,7 @@ export function NarrowFolderRail({
         title="临时列表"
         onClick={() => {
           setQueueView(true);
+          setActiveStreamPlaylist(null);
           onNavigate?.();
         }}
         onDragOverCapture={(event) => {
@@ -342,69 +704,59 @@ export function NarrowFolderRail({
       >
         <Library size={15} /><small>全部曲目</small>
       </button>
+      </div>
       <span className="kd-narrow-rail-sep" />
-      {flattenFolders(folders?.roots ?? []).map((node) => (
-        <button
-          key={node.path}
-          type="button"
-          {...{ [FOLDER_DROP_PATH_ATTR]: node.path }}
-          data-active={!queueView && filter.folder === node.path || undefined}
-          data-drop={narrowDrop === node.path ? "true" : undefined}
-          title={node.path}
-          onClick={() => choose(node.path)}
-          onDragOverCapture={(event) => {
-            if (isSearchDownloadDrag(event)) {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = "copy";
-              setNarrowDrop(node.path);
-              return;
+      <div className="kd-narrow-source-roots kd-scroll" aria-label="媒体来源">
+        {roots.map((root) => renderLocalFolderButton(root, true))}
+        {STREAM_ROOTS.map((streamRoot) => (
+          <button
+            key={`narrow-stream-root:${streamRoot.id}`}
+            type="button"
+            data-active={
+              (narrowSource.kind === "stream" &&
+                narrowSource.platform === streamRoot.id) || undefined
             }
-            if (!isTrackDrag(event)) return;
-            event.preventDefault();
-            event.dataTransfer.dropEffect = event.altKey ? "move" : "copy";
-            setNarrowDrop(node.path);
-          }}
-          onDragLeave={() => setNarrowDrop((current) => (current === node.path ? "" : current))}
-          onDropCapture={(event) => {
-            event.preventDefault();
-            setNarrowDrop("");
-            if (isSearchDownloadDrag(event)) {
-              void enqueueSearchDrop(event, node.path).catch((reason: unknown) =>
-                setError((reason as Error).message),
+            data-stream-platform={streamRoot.id}
+            aria-label={`显示 ${streamRoot.label} 歌单`}
+            title={`在下方显示 ${streamRoot.label} 收藏和歌单`}
+            onClick={() => {
+              setNarrowSource({ kind: "stream", platform: streamRoot.id });
+              const account = accounts.find(
+                (candidate) => candidate.platform === streamRoot.id,
               );
-              return;
-            }
-            const ids = trackIdsFromDrop(event);
-            if (ids.length === 0) return;
-            const op = resolveLibraryPasteOp({ forceMove: event.altKey });
-            void applyFolderOp(ids, node.path, op).catch((reason: unknown) =>
-              setError((reason as Error).message),
-            );
-          }}
-        >
-          <span className="kd-narrow-folder-icons">
-            <FolderGlyph
-              path={node.path}
-              audioDir={settings?.download_dir}
-              videoDir={settings?.download_dir}
-              root={node.is_root}
-              open={false}
-              size={14}
-            />
-          </span>
-          <small>{node.name}</small>
-        </button>
-      ))}
-      {(folders?.outside ?? 0) > 0 && (
-        <button
-          type="button"
-          data-active={!queueView && isOutsideFolder(filter.folder) || undefined}
-          title="不在曲库目录里的曲目"
-          onClick={() => choose(OUTSIDE_FOLDER)}
-        >
-          <Files size={15} /><small>其他</small>
-        </button>
-      )}
+              if (accountCanBrowse(account?.state)) {
+                void loadStreamPlaylists(streamRoot.id);
+              }
+            }}
+          >
+            <PlatformMark id={streamRoot.id} size={15} />
+            <small>{streamRoot.label}</small>
+          </button>
+        ))}
+      </div>
+      <span className="kd-narrow-rail-sep" />
+      <div
+        className="kd-narrow-source-children kd-scroll"
+        aria-label={
+          narrowSource.kind === "stream" ? "在线歌单目录" : "本地文件夹目录"
+        }
+      >
+        {narrowSource.kind === "local" &&
+          flattenFolders(selectedLocalRoot?.children ?? []).map((node) =>
+            renderLocalFolderButton(node, false),
+          )}
+        {narrowSource.kind === "local" && (folders?.outside ?? 0) > 0 && (
+          <button
+            type="button"
+            data-active={!queueView && isOutsideFolder(filter.folder) || undefined}
+            title="不在曲库目录里的曲目"
+            onClick={() => choose(OUTSIDE_FOLDER)}
+          >
+            <Files size={15} /><small>其他</small>
+          </button>
+        )}
+        {narrowSource.kind === "stream" &&
+          renderStreamChildren(narrowSource.platform)}
       </div>
     </aside>
   );
@@ -480,9 +832,7 @@ export function FolderTree({
   const undoError = useLibraryStore((state) => state.undoError);
   const clearUndoError = useLibraryStore((state) => state.clearUndoError);
   const settings = useAppStore((state) => state.settings);
-  const accounts = useAppStore((state) => state.accounts);
-  const accountsError = useAppStore((state) => state.accountsError);
-  const appBooting = useAppStore((state) => state.booting);
+  const { accounts, accountsError } = useStreamBrowseLifecycle(true);
   const saveSettings = useAppStore((state) => state.saveSettings);
   const streamPlaylists = useStreamBrowseStore((state) => state.playlists);
   const streamLoading = useStreamBrowseStore((state) => state.loading);
@@ -490,10 +840,6 @@ export function FolderTree({
   const streamExpanded = useStreamBrowseStore((state) => state.expanded);
   const streamSectionExpanded = useStreamBrowseStore((state) => state.sectionExpanded);
   const cachedActiveStreamPlaylist = useStreamBrowseStore((state) => state.active);
-  const bindStreamAccount = useStreamBrowseStore((state) => state.bindAccount);
-  const refreshStreamPlaylistsIfStale = useStreamBrowseStore(
-    (state) => state.refreshIfStale,
-  );
   const loadStreamPlaylists = useStreamBrowseStore((state) => state.loadPlaylists);
   const setStreamExpanded = useStreamBrowseStore((state) => state.setExpanded);
   const setStreamSectionExpanded = useStreamBrowseStore(
@@ -528,47 +874,6 @@ export function FolderTree({
   const qqmAccountState = qqmAccount?.state;
   const effectiveActiveStreamPlaylist =
     activeStreamPlaylist === undefined ? cachedActiveStreamPlaylist : activeStreamPlaylist;
-
-  useEffect(() => {
-    const bindings = [
-      ["wyy", wyyAccount],
-      ["qqm", qqmAccount],
-    ] as const;
-    for (const [platform, account] of bindings) {
-      if (account) {
-        // bindAccount 会先同步挂载匹配账号的持久缓存，再为本次应用加载强制校准一次。
-        void bindStreamAccount(platform, streamAccountBinding(account));
-      } else if (!appBooting && !accountsError) {
-        // bootstrap 已明确没有该账号才按登出处理；账号接口失败时不能误删一份好缓存。
-        void bindStreamAccount(platform, null);
-      }
-    }
-  }, [
-    accountsError,
-    appBooting,
-    bindStreamAccount,
-    qqmAccount,
-    wyyAccount,
-  ]);
-
-  useEffect(() => {
-    const refreshVisibleStaleDirectories = () => {
-      if (document.visibilityState !== "visible") return;
-      const currentAccounts = useAppStore.getState().accounts;
-      for (const platform of STREAM_BROWSE_PLATFORMS) {
-        const account = currentAccounts.find((candidate) => candidate.platform === platform);
-        if (!accountCanBrowse(account?.state)) continue;
-        // store 内部同时检查十分钟 TTL、五分钟失败防抖和同平台在途请求。
-        void refreshStreamPlaylistsIfStale(platform);
-      }
-    };
-    window.addEventListener("focus", refreshVisibleStaleDirectories);
-    document.addEventListener("visibilitychange", refreshVisibleStaleDirectories);
-    return () => {
-      window.removeEventListener("focus", refreshVisibleStaleDirectories);
-      document.removeEventListener("visibilitychange", refreshVisibleStaleDirectories);
-    };
-  }, [refreshStreamPlaylistsIfStale]);
 
   useEffect(() => {
     const clearDrop = () => {

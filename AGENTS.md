@@ -26,5 +26,7 @@
 - Frontend: `npm run typecheck` and `npm run tauri:web:build`.
 - Rust: use the narrowest relevant `cargo test`/`cargo check`, then workspace validation when appropriate.
 - GUI: launch only through `npm run tauri:dev`.
+- **GUI inspection and automation MUST target the development instance started by the current `npm run tauri:dev` session. Never use `/Applications/KDJ.app`, an installed release, or another KDJ process as evidence for the development build.**
+- If more than one KDJ instance is running, verify the target process by PID and executable path before reading or operating its window. If the UI tool cannot distinguish the dev process from the installed app, stop the UI inspection instead of guessing.
 - Pure frontend changes under `src/` or frontend CSS SHOULD use Vite HMR in the running Tauri dev session; do not fully restart the app for each frontend-only edit.
 - Rust backend, `src-tauri/`, Tauri configuration, native capability, or startup changes MUST be validated by fully stopping and restarting `npm run tauri:dev` before reporting completion.

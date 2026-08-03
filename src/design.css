@@ -727,8 +727,10 @@ textarea {
   background: var(--kd-selected);
   box-shadow: none;
 }
-.kd-narrow-stream-sources,
-.kd-narrow-local-sources {
+.kd-narrow-global-actions,
+.kd-narrow-source-roots,
+.kd-narrow-source-children,
+.kd-narrow-stream-section {
   width: 100%;
   min-height: 0;
   display: flex;
@@ -736,18 +738,33 @@ textarea {
   align-items: center;
   gap: 0.18rem;
 }
-.kd-narrow-stream-sources {
+.kd-narrow-global-actions {
   flex: none;
 }
-.kd-narrow-local-sources {
-  flex: 1 1 auto;
+.kd-narrow-source-roots {
+  /* 来源开关不能被下方超长目录挤扁：否则 NetEase / Q Music 只会露出
+     一截彩色图标，看起来像一条莫名其妙的线。来源多时在自己区域滚动。 */
+  flex: 0 0 auto;
+  max-height: 34%;
   overflow-x: hidden;
   overflow-y: auto;
 }
-.kd-narrow-stream-sources button[data-stream-platform="wyy"] > svg {
+.kd-narrow-source-children {
+  /* 目录吃掉来源区以外的剩余高度；0 basis 避免它按完整列表高度参与
+     flex 收缩，把上面的固定来源按钮重新压扁。 */
+  flex: 1 1 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.kd-narrow-stream-section {
+  flex: none;
+}
+.kd-narrow-source-roots button[data-stream-platform="wyy"] > svg,
+.kd-narrow-source-children button[data-stream-platform="wyy"] > svg {
   color: #e02020;
 }
-.kd-narrow-stream-sources button[data-stream-platform="qqm"] > svg {
+.kd-narrow-source-roots button[data-stream-platform="qqm"] > svg,
+.kd-narrow-source-children button[data-stream-platform="qqm"] > svg {
   color: #31c27c;
 }
 .kd-narrow-rail-sep {
