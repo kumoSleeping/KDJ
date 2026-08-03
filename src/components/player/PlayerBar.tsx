@@ -31,7 +31,9 @@ import {
   previewNext,
   stepBack,
   trackById,
+  type PreferredCandidateGuard,
 } from "../../lib/autoplay";
+import type { PredictionPolicySnapshot } from "../../lib/nextCandidatePolicy";
 import {
   DJ_TRANSITIONS,
   bpmSyncRate,
@@ -100,6 +102,7 @@ import { DETAIL_EVENT } from "../library/TrackTable";
 import { pointPatch, SEEK_EVENT, Waveform, type SeekDetail } from "../library/Waveform";
 import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackDrag";
 import { runtimePlayer, usesNativeMobilePlayer } from "../../lib/unifiedPlayer";
+import { decideNativeLatestIntent, LatestIntentGate } from "../../lib/latestIntentGate";
 import { LyricsHost } from "./LyricsHost";
 
 /** 广播播放位置的节流间隔：节拍网格的播放头不需要每帧更新。 */
@@ -412,6 +415,19 @@ export function PlayerBar() {
   const nativeDjNextRef = useRef<(manual: boolean) => Promise<boolean>>(async () => false);
   /** 本地 Rust 正在出声、下一首却是在线流时，先把当前曲目接入 Web Audio 再开双 Deck。 */
   const hybridDjBusyRef = useRef(false);
+  /**
+   * 手动“下一首”必须单飞。Android 与桌面共用 Rust 双 Deck；第三次连点若在
+   * prepare/handoff 尚未落地时再塞候选，会越过协调器唯一的 deferred 槽。
+   * 后续点击由 latest-intent gate 保留，等当前 Deck 到达安全边沿再兑现。
+   */
+  const manualNextDispatchingRef = useRef(false);
+  const manualNextTargetRef = useRef<number | null>(null);
+  const nativeManualChainDepthRef = useRef(0);
+  /** 每个原生 error episode 只放行一次用户主动“下一首”自救，避免错误态永久 pending。 */
+  const nativeErrorEpisodeRef = useRef(false);
+  const nativeErrorRecoveryAvailableRef = useRef(true);
+  const canRunManualNextRef = useRef<() => boolean>(() => true);
+  const runManualNextRef = useRef<() => Promise<void>>(async () => {});
   /** 每次新的用户播放意图都会递增；异步挑歌完成后必须仍属于同一意图。 */
   const playbackIntentRef = useRef(0);
   /** 浏览器 ended 事件没有原生状态边沿，整段挑歌/起播期间只允许处理一次。 */
@@ -431,6 +447,35 @@ export function PlayerBar() {
   const djGaveUpRef = useRef<number | null>(null);
   /** 右侧空闲唱盘已经预告的候选；真正续播时交回 pickNext，随机模式也不会变卦。 */
   const predictedRef = useRef<Track | null>(null);
+  /**
+   * 预测生成时的策略代数。UI 可以在重算期间保留旧封面防闪烁，但 pickNext 必须
+   * 核对 epoch/mode/scope，绝不能把旧模式下的候选真正送进 Deck。
+   */
+  const predictionEpochRef = useRef(0);
+  const predictedPolicyRef = useRef<PredictionPolicySnapshot | null>(null);
+  const predictionPolicyNow = (
+    baseTrackId: number,
+    epoch = predictionEpochRef.current,
+  ): PredictionPolicySnapshot => {
+    const currentMode = usePlayMode.getState().mode;
+    const currentScope = useHarmonicScope.getState().scope;
+    const filter = useLibraryStore.getState().filter;
+    return {
+      epoch,
+      baseTrackId,
+      mode: currentMode,
+      scope: currentScope,
+      folder: currentScope === "folder" ? filter.folder : "",
+      sort: currentMode === "order" ? filter.sort : "",
+      order: currentMode === "order" ? filter.order : "",
+    };
+  };
+  const preferredPredictionGuard = (current: Track): PreferredCandidateGuard | null => {
+    const generated = predictedPolicyRef.current;
+    return generated
+      ? { generated, current: predictionPolicyNow(current.id) }
+      : null;
+  };
   /**
    * 起手时机=「找器乐段」时，这首歌预先算出的起手点（秒）。
    * null = 没算出来（没波形/判不出人声退场），回退按长度倒推。
@@ -482,8 +527,8 @@ export function PlayerBar() {
   useEffect(() => {
     prefetchWaveform(track);
     prefetchWaveform(predicted);
-    // 在线试听的波形与下一曲流地址都在后台预热；曲末切换只等待浏览器缓冲，
-    // 不再把 provider 的 vkey/transcoding 解析放到交接临界点。
+    // 先把在线后继的 provider 直链解析掉；真正把 cue 位置装进浏览器备用 Deck
+    // 由下方 prepareNext effect 负责，二者缺一都会把网络等待暴露在交接临界点。
     const next = track && isStreamTrack(track) ? streamNextTrack(track) : null;
     if (next) void preloadStreamTrack(next).catch(() => {});
   }, [track?.id, predicted?.id]);
@@ -517,6 +562,17 @@ export function PlayerBar() {
   const positionRef = useRef(0);
   const durationRef = useRef(0);
   const selectedRef = useRef(selected);
+  /** UI 画出来的正主可能来自会话恢复/当前选中项，早于正式 track state。 */
+  const currentAdvanceTrackRef = useRef<Track | null>(track);
+  const currentAdvanceTrack = () => trackRef.current ?? currentAdvanceTrackRef.current;
+  const manualNextGateRef = useRef<LatestIntentGate | null>(null);
+  manualNextGateRef.current ??= new LatestIntentGate(
+    () => canRunManualNextRef.current(),
+    () => runManualNextRef.current(),
+    (error) => {
+      setNotice(`切换下一首失败：${error instanceof Error ? error.message : String(error)}`);
+    },
+  );
   useEffect(() => {
     trackRef.current = track;
     // 右侧歌词也需要知道当前的在线试听；曲库定位按钮会单独过滤负数临时曲目。
@@ -729,6 +785,9 @@ export function PlayerBar() {
             djEngine.releaseDecodedPlayback();
             djEngine.prepareSeek(source);
           }
+          // Web Audio 没有 Rust 状态订阅；过渡真正收尾这一拍就是 pending next
+          // 唯一可靠的重试边沿。
+          manualNextGateRef.current?.wake();
         }
       }),
     [],
@@ -759,6 +818,14 @@ export function PlayerBar() {
         !isStreamTrack(next) &&
         !isStreamTrack(from)
       ) {
+        if (manualNextDispatchingRef.current) {
+          // 一场正在混时只允许再承诺一场 deferred。更多连点留在前端 gate，
+          // 不能把第三候选送进只有两台 Deck 的协调器再靠失败回退硬切。
+          nativeManualChainDepthRef.current = nativePlayer.state().transitioning
+            ? 2
+            : Math.min(2, nativeManualChainDepthRef.current + 1);
+          manualNextTargetRef.current = next.id;
+        }
         // 在途 prepare/handoff 时再切一首：抬 generation 作废旧任务，开跑新候选。
         // 以前 busy 时 return true，调用方以为接歌成功，实际 noop →「切歌失败」。
         nativeDjBusyRef.current = true;
@@ -792,6 +859,9 @@ export function PlayerBar() {
           setTransitionVisual(visual);
           focusLibrary();
           djViaRef.current = next.id;
+          // React effect 要到下一帧才镜像 track；latest-intent gate 可能在同一微任务
+          // 被唤醒，必须先同步正主，避免第二次仍从旧歌挑候选。
+          trackRef.current = next;
           setTrack(next);
           selectTrack(next);
           setPosition(cue);
@@ -800,14 +870,14 @@ export function PlayerBar() {
           setNotice("");
           markPlayed(next.id);
         };
-        const hardCutFallback = (message?: string) => {
+        const hardCutFallback = async (message?: string): Promise<void> => {
           if (!stillCurrent()) return;
           transitionVisualRef.current = null;
           setTransitionVisual(null);
           setDjTransition({ phase: "idle", frontIndex: visualActiveIndexRef.current });
           djViaRef.current = null;
           if (useDjConfig.getState().applyInOutPoints) autoInOutCueRef.current = next.id;
-          void nativePlayer
+          await nativePlayer
             .load({
               src: mediaUrlForTrack(next),
               track: next,
@@ -817,6 +887,7 @@ export function PlayerBar() {
             })
             .then(() => {
               focusLibrary();
+              trackRef.current = next;
               setTrack(next);
               selectTrack(next);
               setPosition(cue);
@@ -826,6 +897,10 @@ export function PlayerBar() {
               setNotice("");
             })
             .catch((fallbackError: unknown) => {
+              if (manualNextTargetRef.current === next.id) {
+                manualNextTargetRef.current = null;
+                manualNextGateRef.current?.cancel();
+              }
               setNotice(
                 message ??
                   `接歌失败，硬切补偿也失败：${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
@@ -851,11 +926,14 @@ export function PlayerBar() {
             commitUi();
           } catch (error: unknown) {
             if (generation !== nativeDjGenerationRef.current) return;
-            hardCutFallback(
+            await hardCutFallback(
               `原生接歌失败：${error instanceof Error ? error.message : String(error)}`,
             );
           } finally {
-            if (generation === nativeDjGenerationRef.current) nativeDjBusyRef.current = false;
+            if (generation === nativeDjGenerationRef.current) {
+              nativeDjBusyRef.current = false;
+              manualNextGateRef.current?.wake();
+            }
           }
         })();
         return true;
@@ -872,6 +950,7 @@ export function PlayerBar() {
         if (isStreamTrack(next) || isStreamTrack(from)) setBrowserDjSession(true);
         djViaRef.current = next.id;
         setFrontEl(djEngine.frontElement());
+        trackRef.current = next;
         setTrack(next);
         if (!isStreamTrack(next)) selectTrack(next);
         setPosition(cue);
@@ -900,25 +979,50 @@ export function PlayerBar() {
         if (desktopNative && nativePlayer && !isStreamTrack(from)) {
           bridgedNative = nativePlayer;
           bridgedVolume = playerVolumeRef.current * deckGain(coplay, fadeX);
-          const position = nativePlayer.state().currentTime;
           try {
-            const browserCurrent = await djEngine.seamlessSeek(
+            // 订阅快照可能落后一个发布周期；交接前读一次权威时钟，再由引擎按
+            // 准备耗时继续外推，避免从旧 position 接入而重复几十毫秒。
+            const nativeState = await nativePlayer.refresh().catch(() => nativePlayer.state());
+            if (!stillCurrent()) return;
+            const position = nativeState.currentTime;
+            // 原生 owner 活跃时音量 effect 只更新 Rust。跨 owner 交接前先把 WebAudio
+            // master 对齐，否则低音量播放时 8% 的重叠上限会按旧的 100% 计算。
+            djEngine.setVolume(bridgedVolume);
+            const browserAdoption = await djEngine.adoptExternalPlayback(
               mediaUrlForTrack(from),
               position,
               true,
+              nativeState.rate,
+              () => {
+                // `setVolume` resolves when the coordinator queues the RT command, not when
+                // the speaker drains it. Do not enqueue a stale mute after a newer play intent;
+                // a mute already accepted before that intent is explicitly superseded by the
+                // normal native-load path below.
+                if (!stillCurrent()) {
+                  return Promise.reject(new Error("本地输出交接已被新播放意图取代"));
+                }
+                return nativePlayer.setVolume(0).then(() => undefined);
+              },
+
             );
             if (!stillCurrent()) {
+              djEngine.discardExternalAdoption(browserAdoption);
               await restoreBridgedNative();
               return;
             }
-            setFrontEl(browserCurrent);
-            await nativePlayer.setVolume(0);
+            setFrontEl(browserAdoption.element);
+            // adoptExternalPlayback 已在低电平重叠窗口内让 Rust 输出归零；这里只
+            // 停 transport，不能再先后各做一次满幅切换。
             await nativePlayer.pause().catch(() => {});
             if (!stillCurrent()) {
+              djEngine.discardExternalAdoption(browserAdoption);
               await restoreBridgedNative();
               return;
             }
           } catch (error: unknown) {
+            // 新播放意图已经接管时，旧 adopt 的 abort 会以 rejection 回来；此时
+            // 绝不能用旧分支的 cancel/hardPause 去停掉刚起的新 owner。
+            if (!stillCurrent()) return;
             await restoreBridgedNative();
             djEngine.cancel();
             djEngine.hardPause(djEngine.frontElement());
@@ -966,6 +1070,7 @@ export function PlayerBar() {
         })
         .finally(() => {
           hybridDjBusyRef.current = false;
+          manualNextGateRef.current?.wake();
         });
       return true;
     },
@@ -980,6 +1085,13 @@ export function PlayerBar() {
       if (!parsed) return;
       const next = parsed.track;
       const autoPlay = parsed.autoPlay !== false;
+      if (!manualNextDispatchingRef.current) {
+        // 双击指定曲目是比“稍后再下一首”更明确的新意图，不能让排队的连点
+        // 在这首刚起播后又把它切走。
+        manualNextGateRef.current?.cancel();
+        manualNextTargetRef.current = null;
+        nativeManualChainDepthRef.current = 0;
+      }
       // 任何新播放请求都作废尚未落地的自动挑歌/在线桥接，避免迟到结果抢回用户刚点的曲目。
       playbackIntentRef.current += 1;
       nativeDjGenerationRef.current += 1;
@@ -1138,6 +1250,11 @@ export function PlayerBar() {
       autoInOutCueRef.current = null;
       const loadGeneration = ++nativeLoadGenerationRef.current;
       nativeLoadInFlightRef.current = true;
+      // A cancelled native→WebAudio bridge may already have queued setVolume(0). Every new
+      // native load therefore reasserts the user-visible volume before it installs/plays media;
+      // DesktopPlayer serializes these commands, so a late old mute cannot strand this new song
+      // at zero gain.
+      void nativePlayer.setVolume(playerVolumeRef.current).catch(() => {});
       void nativePlayer
         .load({
           src: source,
@@ -1550,8 +1667,11 @@ export function PlayerBar() {
       const preferred = isStreamTrack(finished)
         ? streamNextTrack(finished)
         : predictedRef.current;
+      const preferredGuard = isStreamTrack(finished)
+        ? null
+        : preferredPredictionGuard(finished);
       markPlayed(finished.id);
-      void pickNext(finished, false, preferred)
+      void pickNext(finished, false, preferred, preferredGuard)
         .then((next) => {
           if (
             !stillCurrent() ||
@@ -1780,9 +1900,19 @@ export function PlayerBar() {
         }
       }
       if (state.status === "error") {
+        if (!nativeErrorEpisodeRef.current) nativeErrorRecoveryAvailableRef.current = true;
+        nativeErrorEpisodeRef.current = true;
         commitPlaying(false);
         setNotice(state.error || "原生播放器无法播放这个文件");
+        manualNextTargetRef.current = null;
+        nativeManualChainDepthRef.current = 0;
+        manualNextGateRef.current?.cancel();
+      } else {
+        nativeErrorEpisodeRef.current = false;
       }
+      // loading→transitioning 和 transition→stable 都可能让 latest next 获得一个
+      // 安全 Deck 槽；每个权威状态边沿都尝试一次，gate 自己负责单飞。
+      manualNextGateRef.current?.wake();
     });
     const syncAfterResume = () => {
       if (document.visibilityState === "visible") void nativePlayer.refresh();
@@ -1819,6 +1949,9 @@ export function PlayerBar() {
   }, [track?.id]);
 
   const goPrevious = async () => {
+    manualNextGateRef.current?.cancel();
+    manualNextTargetRef.current = null;
+    nativeManualChainDepthRef.current = 0;
     const intent = ++playbackIntentRef.current;
     nativeDjGenerationRef.current += 1;
     nativeDjBusyRef.current = false;
@@ -1848,24 +1981,32 @@ export function PlayerBar() {
    */
   const djNext = useCallback(
     async (manual: boolean): Promise<boolean> => {
-      if (!track || !playing || !djEnabled) return false;
+      const current = trackRef.current;
+      if (!current || !playingRef.current || !djEnabled) return false;
       // 自动 timeupdate 的重复触发要被吞掉；手动下一首也不能和在途挑歌
-      // 叠两次，否则队列会连续消费两项。
-      if (djBusyRef.current) return true;
+      // 叠两次，否则队列会连续消费两项。手动请求不能直接 noop：交还给 gate，
+      // 等自动挑歌退出临界区后再兑现最后一次点击。
+      if (djBusyRef.current) {
+        if (manual) manualNextGateRef.current?.request();
+        return true;
+      }
       const intent = playbackIntentRef.current;
       const stillCurrent = () =>
-        playbackIntentRef.current === intent && trackRef.current?.id === track.id;
+        playbackIntentRef.current === intent && trackRef.current?.id === current.id;
       djBusyRef.current = true;
       try {
-        markPlayed(track.id);
-        const preferred = isStreamTrack(track) ? streamNextTrack(track) : predictedRef.current;
-        const next = await pickNext(track, manual, preferred);
+        markPlayed(current.id);
+        const preferred = isStreamTrack(current) ? streamNextTrack(current) : predictedRef.current;
+        const preferredGuard = isStreamTrack(current)
+          ? null
+          : preferredPredictionGuard(current);
+        const next = await pickNext(current, manual, preferred, preferredGuard);
         if (!stillCurrent()) return true;
-        if (!next || next.id === track.id) {
-          djGaveUpRef.current = track.id;
+        if (!next || next.id === current.id) {
+          djGaveUpRef.current = current.id;
           return true;
         }
-        if (!djSwitchTo(next, track)) {
+        if (!djSwitchTo(next, current)) {
           if (useDjConfig.getState().applyInOutPoints && !isStreamTrack(next)) {
             autoInOutCueRef.current = next.id;
           }
@@ -1878,30 +2019,43 @@ export function PlayerBar() {
                 if (stillCurrent()) commitPlaying(false);
               });
           } else if (stillCurrent()) {
+            if (manual && manualNextDispatchingRef.current && nativePlayer) {
+              manualNextTargetRef.current = next.id;
+            }
             playTrack(next);
           }
         }
         return true;
       } finally {
         djBusyRef.current = false;
+        manualNextGateRef.current?.wake();
       }
     },
-    [track, playing, djEnabled, djSwitchTo, commitPlaying],
+    [nativePlayer, djEnabled, djSwitchTo, commitPlaying],
   );
   nativeDjNextRef.current = djNext;
 
-  /** 「下一首」和放完自动续播走同一条路，只是标成 manual：单曲循环下手动按=想换歌。 */
-  const goNext = async () => {
+  /** 单次推进；重复点击的单飞/保留最新请求由下方 gate 管，不在这里做时间防抖。 */
+  const advanceNextOnce = async () => {
+    const current = currentAdvanceTrack();
+    if (!current) return;
     const intent = ++playbackIntentRef.current;
-    if (!track) return;
     // DJ 预设亮着 → 从当前位置开始接歌。引擎不可用时 djNext 会硬切同一候选，
     // 不会再挑一次导致队列被连续消费。
-    // 过渡进行中再按也成立：正主已是新歌，再开一场就是「再往下接一首」。
+    // 过渡中最多再承诺一场；更多连点由 gate 留到安全状态，不直接碰第三台候选。
     if (djEnabled && (await djNext(true))) return;
-    markPlayed(track.id);
-    const preferred = isStreamTrack(track) ? streamNextTrack(track) : predictedRef.current;
-    const next = await pickNext(track, true, preferred);
-    if (playbackIntentRef.current !== intent || trackRef.current?.id !== track.id) return;
+    markPlayed(current.id);
+    const preferred = isStreamTrack(current) ? streamNextTrack(current) : predictedRef.current;
+    const preferredGuard = isStreamTrack(current)
+      ? null
+      : preferredPredictionGuard(current);
+    const next = await pickNext(current, true, preferred, preferredGuard);
+    if (
+      playbackIntentRef.current !== intent ||
+      (trackRef.current?.id ?? currentAdvanceTrackRef.current?.id) !== current.id
+    ) {
+      return;
+    }
     // 候选池空了就安静停下，不报错——这是锦上添花的功能
     if (!next) return;
     if (useDjConfig.getState().applyInOutPoints && !isStreamTrack(next)) {
@@ -1911,13 +2065,64 @@ export function PlayerBar() {
       try {
         playTrack(await resolvePendingStreamTrack(next));
       } catch {
-        if (playbackIntentRef.current === intent && trackRef.current?.id === track.id) {
+        if (
+          playbackIntentRef.current === intent &&
+          (trackRef.current?.id ?? currentAdvanceTrackRef.current?.id) === current.id
+        ) {
           setNotice("下一首在线试听地址解析失败");
         }
       }
     } else {
+      if (manualNextDispatchingRef.current && nativePlayer) {
+        manualNextTargetRef.current = next.id;
+      }
       playTrack(next);
     }
+  };
+
+  canRunManualNextRef.current = () => {
+    if (djBusyRef.current || nativeDjBusyRef.current || hybridDjBusyRef.current) return false;
+    if (!nativePlayer) {
+      // browserDjSession 退出 Rust 输出后，旧原生目标已不再属于当前播放链。
+      manualNextTargetRef.current = null;
+      // Web Audio 只有两台 Deck，也不能在一场过渡中重入 begin；idle 订阅会 wake。
+      return !djEngine.isTransitioning();
+    }
+
+    const state = nativePlayer.state();
+    const decision = decideNativeLatestIntent({
+      // display/selected fallback 负责提供候选起点，却不能冒充已接管 transport 的 track。
+      // 否则 Rust 残留的旧 trackId 会把首次“下一首”误判成永久失配。
+      hasActiveTrack: trackRef.current !== null,
+      currentTrackId: trackRef.current?.id ?? null,
+      stateTrackId: state.trackId,
+      targetTrackId: manualNextTargetRef.current,
+      buffering: state.buffering,
+      transitioning: state.transitioning,
+      chainDepth: nativeManualChainDepthRef.current,
+      // Android 与桌面共用双 Deck coordinator；iOS 系统播放器没有 deferred 槽。
+      allowsDeferredTransition: desktopNative,
+      errored: state.status === "error",
+      errorRecoveryAvailable: nativeErrorRecoveryAvailableRef.current,
+    });
+    if (decision.targetSettled) {
+      // ACK 只说明命令已登记；这里的权威状态边沿才说明目标真正装盘。
+      manualNextTargetRef.current = null;
+    }
+    nativeManualChainDepthRef.current = decision.chainDepth;
+    if (decision.consumeErrorRecovery) nativeErrorRecoveryAvailableRef.current = false;
+    return decision.canRun;
+  };
+  runManualNextRef.current = async () => {
+    manualNextDispatchingRef.current = true;
+    try {
+      await advanceNextOnce();
+    } finally {
+      manualNextDispatchingRef.current = false;
+    }
+  };
+  const goNext = async () => {
+    manualNextGateRef.current?.request();
   };
   remoteNextRef.current = goNext;
   remotePreviousRef.current = goPrevious;
@@ -1949,6 +2154,9 @@ export function PlayerBar() {
       return;
     }
     // 暂停/恢复也是用户意图：暂停期间完成的异步接播不能把声音擅自拉回来。
+    manualNextGateRef.current?.cancel();
+    manualNextTargetRef.current = null;
+    nativeManualChainDepthRef.current = 0;
     playbackIntentRef.current += 1;
     nativeDjGenerationRef.current += 1;
     nativeDjBusyRef.current = false;
@@ -2454,10 +2662,10 @@ export function PlayerBar() {
     };
   }, [frontEl, track?.id]);
 
-  // 缓存已写到哪，就从同一份临时媒体文件解码到哪。浏览器的 buffered 只能提供
-  // 时间范围，不能读未来 PCM；因此这里仅轮询 token 作用域的本地服务快照，绝不
-  // fetch 原始音频。没有完整缓存设置或后端尚未支持此端点时，继续走上面的 analyser
-  // 已播路径，声音和进度条都不受影响。
+  // 代理实际送到播放器的连续字节写到哪，就从同一份短生命周期前缀解码到哪；若
+  // 用户开启持久缓存则直接复用它的临时文件。浏览器的 buffered 只能提供时间范围，
+  // 不能读未来 PCM，因此这里只轮询 token 作用域的本地快照，绝不再 fetch 原始音频。
+  // 旧后端尚未支持此端点时继续走上面的 analyser 已播路径，声音和进度条不受影响。
   useEffect(() => {
     if (!track || !isStreamTrack(track) || !activeStreamWaveformToken) return;
     const audio = frontEl;
@@ -2531,6 +2739,9 @@ export function PlayerBar() {
     track ??
     retainedCurrentTrack ??
     (retainedDecksLoaded || !hadRememberedDeck ? selected : null);
+  // 按钮启用态和 goNext 必须读同一来源：会话恢复/仅选中时 UI 已有正主，
+  // 不能因为 React 的正式 track 还没提升就把“下一首”画成不可点。
+  currentAdvanceTrackRef.current = displayTrack;
   // 网络视频画中画活跃时，标题区让位给视频会话（音频 track 可能仍挂着被暂停的歌）
   const streaming = isStreamTrack(displayTrack);
   // 小窗/系统 PiP / 网络右栏：底栏信息与进度交给预览会话。
@@ -2624,21 +2835,21 @@ export function PlayerBar() {
   const predictionOrder = mode === "order" ? libraryOrder : "";
 
   // 当前曲、播放模式、有效范围或点歌队列一变，就给空闲 deck 做一次只读预测。
-  // 不在请求起手时清空旧结果：即使后端需要几百毫秒，唱盘也不会先灰再亮。
+  // UI 在请求期间保留旧封面防闪烁，但先清掉可消费 ref 和策略票据：用户若恰好
+  // 此时按下一首，pickNext 会按新模式现场重算，绝不会把旧预告送进 Deck。
   // 依赖只放真正参与算法的值，单击无关文件夹/列表不会重跑，这是“下一首闪动”的根因修复。
   useEffect(() => {
     const base = predictionBase;
+    const epoch = ++predictionEpochRef.current;
+    predictedRef.current = null;
+    predictedPolicyRef.current = null;
     if (!base) {
-      predictedRef.current = null;
       setPredicted(null);
       return;
     }
-    if (isStreamTrack(base)) {
-      const next = streamNextTrack(base);
-      predictedRef.current = next;
-      setPredicted(next);
-      return;
-    }
+    // 策略必须在请求发起这一刻冻结。异步完成时再读 store 会把旧模式挑出的歌
+    // 错贴成新模式票据，恰好绕过下面的 epoch/mode 校验。
+    const generatedPolicy = predictionPolicyNow(base.id, epoch);
     // 首次进入先原样保留上次的另一台唱盘；真正换曲/改模式/改范围后再重新预测。
     const hasQueuedOverride = queueIds.some((id) => id !== base.id);
     if (
@@ -2650,14 +2861,16 @@ export function PlayerBar() {
     ) {
       useRetainedNextOnceRef.current = false;
       predictedRef.current = retainedNextTrack;
+      predictedPolicyRef.current = generatedPolicy;
       setPredicted(retainedNextTrack);
       return;
     }
     useRetainedNextOnceRef.current = false;
     let alive = true;
     void previewNext(base).then((next) => {
-      if (!alive) return;
+      if (!alive || predictionEpochRef.current !== epoch) return;
       predictedRef.current = next;
+      predictedPolicyRef.current = next ? generatedPolicy : null;
       setPredicted(next);
     });
     return () => {
@@ -2682,10 +2895,86 @@ export function PlayerBar() {
     nativePreparedRef.current = null;
   }, [scope, predictionFolder, mode, librarySort, libraryOrder]);
 
+  // 在线曲参与后声音留在 Web Audio 双 Deck；这里补齐与 Rust `prepare` 等价的
+  // 真实媒体预热。只解析 provider URL 并不会让 cue 位置进入浏览器解码缓冲，
+  // begin 若再无条件 src/load 就会在切换临界点清空缓存，造成可闻卡壳。
+  useEffect(() => {
+    if (
+      !desktopNative ||
+      !djEnabled ||
+      !track ||
+      !predicted ||
+      predicted.id === track.id ||
+      djTransition.phase !== "idle"
+    ) {
+      return;
+    }
+    const browserHandoff =
+      browserDjSession || isStreamTrack(track) || isStreamTrack(predicted);
+    if (!browserHandoff) return;
+
+    let alive = true;
+    const fromId = track.id;
+    const predictedId = predicted.id;
+    const intent = playbackIntentRef.current;
+    void (async () => {
+      if (isStreamTrack(predicted)) await resolvePendingStreamTrack(predicted);
+      if (
+        !alive ||
+        playbackIntentRef.current !== intent ||
+        djEngine.isTransitioning() ||
+        trackRef.current?.id !== fromId ||
+        predictedRef.current?.id !== predictedId
+      ) {
+        return;
+      }
+      const config = useDjConfig.getState();
+      const fromRate =
+        !browserDjSession && !isStreamTrack(track)
+          ? playerRuntime.state().rate
+          : djEngine.frontElement().playbackRate;
+      djEngine.prepareNext(
+        predicted,
+        {
+          transitions: config.transitions,
+          effects: config.effects,
+          from: track,
+          bars: config.bars,
+          vocalCut: config.vocalCut,
+          applyInOutPoints: config.applyInOutPoints,
+        },
+        fromRate,
+      );
+    })().catch(() => {
+      // 预测预热是优化路径。流地址过期或浏览器拒绝预载时，begin 仍会保留旧歌
+      // 并走既有 canplay 等待，不能让后台失败打断当前正在出声的曲目。
+    });
+    return () => {
+      alive = false;
+    };
+  }, [
+    desktopNative,
+    djEnabled,
+    browserDjSession,
+    djTransition.phase,
+    track?.id,
+    predicted?.id,
+    playing,
+    djTransitions,
+    djBars,
+    applyInOutPoints,
+  ]);
+
   // 正式桌面播放器在预测结果出来后就让 Rust 流式预读第二台 Deck。普通切歌和
   // DJ 都复用这份有界缓冲；按钮只提交切换命令，不在交互路径整轨解码。
   useEffect(() => {
     if (!desktopNative || !nativePlayer?.supportsRealtimeDj || !track || !predicted) {
+      nativePreparedRef.current = null;
+      return;
+    }
+    // React 仍可能展示上一轮预测的封面；只有策略票据已落地、可消费 ref 与它
+    // 一致时才允许 Rust 预热，避免模式切换瞬间把旧候选重新塞进原生 Deck。
+    if (predictedRef.current?.id !== predicted.id) {
       nativePreparedRef.current = null;
       return;
     }
@@ -2766,15 +3055,26 @@ export function PlayerBar() {
   const refreshPrediction = async () => {
     const base = predictionBase;
     if (!base || refreshingPrediction) return;
+    const previous = predictedRef.current;
+    const epoch = ++predictionEpochRef.current;
+    const generatedPolicy = predictionPolicyNow(base.id, epoch);
+    // 刷新期间旧预告只负责留在画面上，不能被下一首按钮兑现。
+    predictedRef.current = null;
+    predictedPolicyRef.current = null;
     setRefreshingPrediction(true);
     try {
       const excluded = new Set<number>([base.id]);
-      if (predictedRef.current) excluded.add(predictedRef.current.id);
+      if (previous) excluded.add(previous.id);
       const next = await previewNext(base, false, excluded);
+      if (predictionEpochRef.current !== epoch) return;
       // 候选已经没有别首可换时保留眼前这首，不把右唱盘无故清空。
       if (next) {
         predictedRef.current = next;
+        predictedPolicyRef.current = generatedPolicy;
         setPredicted(next);
+      } else if (previous) {
+        predictedRef.current = previous;
+        predictedPolicyRef.current = generatedPolicy;
       }
     } finally {
       setRefreshingPrediction(false);
@@ -3074,7 +3374,7 @@ export function PlayerBar() {
           className="kd-player-step"
           aria-label="下一首"
           title={mode === "harmonic" ? "下一首（按和声推荐接）" : `下一首（${MODE_UI[mode].label}）`}
-          disabled={!track}
+          disabled={!currentAdvanceTrack()}
           onClick={() => void goNext()}
         >
           <SkipForward size={15} fill="currentColor" />

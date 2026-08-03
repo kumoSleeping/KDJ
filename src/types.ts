@@ -547,6 +547,7 @@ export interface Waveform {
 /** 在线缓存已实际解码出的前缀波形。`covered_seconds` 只覆盖从 0 开始的真实 PCM；
  * 前端必须把它投影到整曲的同一段，不能拉伸成完整曲目。 */
 export interface StreamWaveformProgress {
+  /** 后端支持当前 token 的会话波形；不表示用户开启了持久磁盘缓存。 */
   enabled: boolean;
   waveform: Waveform | null;
   covered_seconds: number;

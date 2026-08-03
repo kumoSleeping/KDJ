@@ -15,7 +15,12 @@ import { isOutsideFolder } from "./outsideFolder";
 import { usePlayMode } from "./playMode";
 import { useLibraryStore } from "../stores/libraryStore";
 import { useQueueStore } from "../stores/queueStore";
-import { isStreamTrack, streamTrackById } from "./streamTrack";
+import {
+  nextCandidateRoute,
+  samePredictionPolicy,
+  type PredictionPolicySnapshot,
+} from "./nextCandidatePolicy";
+import { isStreamTrack, streamNextTrack, streamTrackById } from "./streamTrack";
 import type { HarmonicMatch, Track } from "../types";
 
 /** 本次运行放过的曲目。刷新页面即清空——这是有意的，见文件头。 */
@@ -159,12 +164,22 @@ function trackInFolderScope(track: Track, folder: string): boolean {
  * 范围 / 模式一切，旧预告必须作废——否则 pickNext 会硬切到
  * 新文件夹之外的曲目，原生 handoff 也会因 Deck 没预热而失败。
  */
-export function preferredStillValid(preferred: Track, current: Track): boolean {
+export interface PreferredCandidateGuard {
+  generated: PredictionPolicySnapshot;
+  current: PredictionPolicySnapshot;
+}
+
+export function preferredStillValid(
+  preferred: Track,
+  current: Track,
+  guard: PreferredCandidateGuard | null = null,
+): boolean {
   const { scope } = useHarmonicScope.getState();
   const { mode } = usePlayMode.getState();
   const rawFolder = scope === "folder" ? useLibraryStore.getState().filter.folder : "";
   const folder = isOutsideFolder(rawFolder) ? "" : rawFolder;
 
+  if (guard && !samePredictionPolicy(guard.generated, guard.current)) return false;
   if (preferred.id === current.id) return mode === "one";
 
   if (scope === "queue") {
@@ -196,6 +211,7 @@ export async function pickNext(
   current: Track,
   manual = false,
   preferred: Track | null = null,
+  preferredGuard: PreferredCandidateGuard | null = null,
 ): Promise<Track | null> {
   const { mode } = usePlayMode.getState();
   const { scope } = useHarmonicScope.getState();
@@ -212,26 +228,32 @@ export async function pickNext(
   // 范围收在「临时列表」且队列已经放空：安静停下，这正是这一档的意义
   if (scope === "queue") return null;
 
-  if (mode === "one" && !manual) return current;
+  const streamSuccessor = isStreamTrack(current) ? streamNextTrack(current) : null;
+  const route = nextCandidateRoute(
+    isStreamTrack(current),
+    Boolean(streamSuccessor),
+    mode,
+    manual,
+  );
+  if (route === "repeat-current") return current;
+  if (route === "stream-successor") return streamSuccessor;
   // previewNext 已经替右侧唱盘挑好一首时直接兑现预告。队列仍在它前面消费，
   // 所以用户临时插队后，显式点歌永远比旧预告优先。
   if (
     preferred &&
     preferred.id !== current.id &&
     !(mode === "one" && manual) &&
-    preferredStillValid(preferred, current)
+    preferredStillValid(preferred, current, preferredGuard)
   ) {
     return preferred;
   }
   // 在线试听没有曲库分析出来的 BPM / 调号，不能把负 id 交给 harmonic API。
-  // 没有后继试听曲时仍要能回到本地曲库；顺序模式从当前列表第一首开始，
-  // 调性模式也用同一条保守的“曲库起点”兜底，而不是播放条无声停住。
-  if (isStreamTrack(current) && (mode === "harmonic" || mode === "order")) {
-    return firstInOrder(listFolder);
-  }
-  if (mode === "order") return nextInOrder(current, listFolder);
-  if (mode === "shuffle") return randomPick(current, listFolder);
-  return harmonicPick(current, folder);
+  // 在线链耗尽后回到本地范围起点；本地 harmonic 暂时不可用时则按眼前排序兜底，
+  // 不能因为一次推荐请求失败就把已经预热好的第二台 Deck 清成“等待下一首”。
+  if (route === "local-start") return firstInOrder(listFolder);
+  if (route === "order") return nextInOrder(current, listFolder);
+  if (route === "shuffle") return randomPick(current, listFolder);
+  return (await harmonicPick(current, folder)) ?? nextInOrder(current, listFolder);
 }
 
 /**
@@ -264,10 +286,19 @@ export async function previewNext(
   if (queued) return queued;
   if (scope === "queue") return null;
 
-  if (mode === "one" && !manual) return current;
-  if (mode === "order") return nextInOrder(current, listFolder);
-  if (mode === "shuffle") return randomPick(current, listFolder, excludeIds);
-  return harmonicPick(current, folder);
+  const streamSuccessor = isStreamTrack(current) ? streamNextTrack(current) : null;
+  const route = nextCandidateRoute(
+    isStreamTrack(current),
+    Boolean(streamSuccessor),
+    mode,
+    manual,
+  );
+  if (route === "repeat-current") return current;
+  if (route === "stream-successor") return streamSuccessor;
+  if (route === "local-start") return firstInOrder(listFolder);
+  if (route === "order") return nextInOrder(current, listFolder);
+  if (route === "shuffle") return randomPick(current, listFolder, excludeIds);
+  return (await harmonicPick(current, folder)) ?? nextInOrder(current, listFolder);
 }
 
 /**
@@ -284,7 +315,7 @@ async function harmonicPick(current: Track, folder: string): Promise<Track | nul
   try {
     matches = await api.harmonic(current.id, 8, 40, folder);
   } catch {
-    // 推荐拿不到就安静停下：自动续播是锦上添花，不该弹错误打断用户
+    // 交给调用方按当前列表顺序兜底；推荐失败不能弹错，也不能让下一台 Deck 为空。
     return null;
   }
 
@@ -294,6 +325,8 @@ async function harmonicPick(current: Track, folder: string): Promise<Track | nul
       !played.has(match.track.id) &&
       !sameSong(current, match.track),
   );
+  // 不在这里回收已经播放的最佳匹配，否则小候选池会稳定 A↔B。调用方会改走
+  // 当前排序的下一首，既保持“下一首”不空，也不会破坏本次运行的去重历史。
   return fresh?.track ?? null;
 }
 

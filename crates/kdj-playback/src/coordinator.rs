@@ -1467,6 +1467,43 @@ mod tests {
         assert_ne!(actor.state.prepared_track_id, Some(4));
     }
 
+    /// 两台 Deck 的容量边界：第一场已混入、第二场占住 deferred 后，第三个候选
+    /// 只能被明确拒绝，不能覆盖第二场承诺或把 actor 推进错误状态。前端会把这次
+    /// latest intent 留到稳定边沿重试；后端此处仍必须保证三连命令不会 panic。
+    #[test]
+    fn third_handoff_preserves_the_single_committed_deferred_transition() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.0));
+        actor.decks[DeckId::B as usize] = Some(live_runtime(2, 0.0));
+        actor.front = DeckId::A;
+        actor.state.track_id = Some(1);
+        actor.state.desired_playing = true;
+
+        let transition = PendingTransition {
+            position: 0.0,
+            seconds: 8.0,
+            plan: PlaybackTransitionPlan::default(),
+        };
+        actor.handoff(2, transition).expect("第一场接歌");
+        actor.prepare(source(3, 0.0)).expect("第二场进入 deferred");
+        actor.handoff(3, transition).expect("第二场承诺落账");
+
+        actor.prepare(source(4, 0.0)).expect("第三候选必须给已承诺流让路");
+        let before = actor.state.clone();
+        let error = actor.handoff(4, transition).unwrap_err();
+
+        assert!(error.contains("尚未开始准备"));
+        assert_eq!(actor.state, before, "拒绝第三场不能破坏已发布状态");
+        let deferred = actor.deferred_stream.as_ref().expect("第二场承诺必须保留");
+        assert_eq!(deferred.request.track_id, 3);
+        assert!(matches!(
+            deferred.activation,
+            Some(Activation::Transition(committed)) if committed.seconds == 8.0
+        ));
+    }
+
     #[test]
     fn handoff_without_a_prepared_deck_leaves_state_untouched() {
         let knobs = Arc::new(FakeKnobs::default());

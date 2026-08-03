@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, Query, State};
@@ -554,12 +555,14 @@ fn insert_song_preview_ticket(
 
 #[derive(Serialize)]
 struct SongPreviewWaveformResponse {
-    /// 缓存功能关着时，浏览器侧 analyser 仍会继续补已播波形，但不能可靠地读取
-    /// future buffered PCM；前端看到 false 便停止此端点的轮询。
+    /// 当前后端支持代理流旁路分析。它不再等同于“持久缓存设置已开启”：关闭磁盘
+    /// 缓存时，同一份媒体响应也会进入短生命周期临时前缀，不能让前端提前停轮询。
     enabled: bool,
     #[serde(flatten)]
     progress: crate::stream_waveform::StreamWaveformProgress,
 }
+
+const SONG_PREVIEW_SESSION_WAVEFORM_ENABLED: bool = true;
 
 /// 读取当前试听 token 对应的**已落盘/可读**缓存前缀波形。
 ///
@@ -579,8 +582,8 @@ async fn song_preview_waveform(
         .cache_key
         .clone()
         .unwrap_or_else(|| crate::stream_cache::StreamCache::key(&ticket.source, ticket.quality));
-    let enabled = state.config.to_settings().stream_cache_enabled;
-    if enabled {
+    let persistent_cache_enabled = state.config.to_settings().stream_cache_enabled;
+    if persistent_cache_enabled {
         let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
         if let Some(cached) = state
             .stream_cache
@@ -596,14 +599,18 @@ async fn song_preview_waveform(
     }
     let progress = state.stream_waveforms.request(cache_key.clone());
     let progress = crate::stream_waveform::StreamWaveformProgress {
-        active: progress.active || (enabled && state.stream_cache.is_writing(&cache_key)),
+        active: progress.active
+            || (persistent_cache_enabled && state.stream_cache.is_writing(&cache_key)),
         ..progress
     };
     // 这不是静态资源：同一个 token 的覆盖秒数和 revision 会变。明确 no-store，
     // 否则部分 WebView/HTTP 缓存会把第一次的空快照一直复用。
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
-        Json(SongPreviewWaveformResponse { enabled, progress }),
+        Json(SongPreviewWaveformResponse {
+            enabled: SONG_PREVIEW_SESSION_WAVEFORM_ENABLED,
+            progress,
+        }),
     )
         .into_response())
 }
@@ -706,9 +713,12 @@ async fn song_preview_stream(
             .lookup(&cache_root, &cache_key, &ticket.source, ticket.quality)
             .await
         {
-            state
-                .stream_waveforms
-                .observe(cache_key.clone(), cached.path.clone(), cached.bytes, true);
+            state.stream_waveforms.observe(
+                cache_key.clone(),
+                cached.path.clone(),
+                cached.bytes,
+                true,
+            );
             schedule_stream_cache_verification(
                 state.stream_cache.clone(),
                 state.stream_waveforms.clone(),
@@ -766,15 +776,64 @@ async fn song_preview_stream(
     }
     let content_type = content_type
         .ok_or_else(|| ApiError::new(StatusCode::BAD_GATEWAY, "试听源返回的不是音频内容"))?;
-    if state.config.to_settings().stream_cache_enabled {
+    let persistent_cache_enabled = state.config.to_settings().stream_cache_enabled;
+    let response_segment = preview_response_segment(status, &upstream_headers);
+    state.stream_waveforms.media_started(&cache_key);
+    if persistent_cache_enabled {
+        // Android 的播放器和后台整轨 CDN 下载共用一条移动网络与同一块闪存，首播
+        // 400ms 后再拉第二份整曲会直接表现成卡顿/爆音。移动端改为把播放器本来
+        // 就收到的完整 0-based 响应 inline tee 进 StreamCacheWriter，不启动第二 GET。
+        #[cfg(not(target_os = "android"))]
         schedule_song_preview_cache(
             state.clone(),
             token,
             ticket.clone(),
-            cache_key,
+            cache_key.clone(),
+            content_type.clone(),
+        );
+        #[cfg(target_os = "android")]
+        schedule_song_preview_cache_when_session_idle(
+            state.clone(),
+            token.clone(),
+            ticket.clone(),
+            cache_key.clone(),
             content_type.clone(),
         );
     }
+    let capture_plan = if persistent_cache_enabled {
+        #[cfg(target_os = "android")]
+        {
+            let inline = match response_segment {
+                Some(segment)
+                    if segment.start == 0 && segment.end.saturating_add(1) == segment.total =>
+                {
+                    inline_preview_cache_plan(
+                        &state,
+                        &cache_root,
+                        &cache_key,
+                        &ticket,
+                        &content_type,
+                        segment.total,
+                    )
+                    .map(PreviewBodyCapturePlan::Persistent)
+                }
+                _ => None,
+            };
+            if inline.is_some() {
+                inline
+            } else {
+                session_preview_capture_plan(&state, &cache_key, response_segment)
+                    .map(PreviewBodyCapturePlan::Session)
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            None
+        }
+    } else {
+        session_preview_capture_plan(&state, &cache_key, response_segment)
+            .map(PreviewBodyCapturePlan::Session)
+    };
     let mut builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, content_type)
@@ -785,12 +844,294 @@ async fn song_preview_stream(
             builder = builder.header(name, value);
         }
     }
-    let stream = upstream
-        .bytes_stream()
-        .map(|chunk| chunk.map_err(|err| std::io::Error::other(format!("试听流读取失败：{err}"))));
     builder
-        .body(axum::body::Body::from_stream(stream))
+        .body(captured_preview_body(upstream, capture_plan))
         .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
+}
+
+fn session_preview_capture_plan(
+    state: &AppState,
+    cache_key: &str,
+    segment: Option<PreviewCacheSegment>,
+) -> Option<crate::stream_waveform::StreamWaveformCapturePlan> {
+    let segment = segment?;
+    let expected = segment.end.checked_sub(segment.start)?.checked_add(1)?;
+    state.stream_waveforms.capture_plan(
+        state.config.data_dir.join("stream-waveform-session"),
+        cache_key.to_string(),
+        segment.start,
+        expected,
+        segment.total,
+        segment.end.saturating_add(1) == segment.total,
+    )
+}
+
+#[cfg(target_os = "android")]
+const INLINE_CACHE_WAVEFORM_PUBLISH_BYTES: u64 = 512 * 1024;
+
+#[cfg(target_os = "android")]
+struct InlinePreviewCachePlan {
+    cache: crate::stream_cache::StreamCache,
+    source: SongSource,
+    quality: Quality,
+    content_type: String,
+    waveforms: crate::stream_waveform::StreamWaveformCoordinator,
+    cache_key: String,
+    cache_root: PathBuf,
+    total: u64,
+}
+
+#[cfg(target_os = "android")]
+struct InlinePreviewCacheCapture {
+    writer: crate::stream_cache::StreamCacheWriter,
+    waveforms: crate::stream_waveform::StreamWaveformCoordinator,
+    cache_key: String,
+    cache_root: PathBuf,
+    total: u64,
+    published_bytes: u64,
+    response_bytes: u64,
+}
+
+#[cfg(target_os = "android")]
+fn inline_preview_cache_plan(
+    state: &AppState,
+    cache_root: &Path,
+    cache_key: &str,
+    ticket: &SongPreviewTicket,
+    content_type: &str,
+    total: u64,
+) -> Option<InlinePreviewCachePlan> {
+    (total > 0).then(|| InlinePreviewCachePlan {
+        cache: state.stream_cache.clone(),
+        source: ticket.source.clone(),
+        quality: ticket.quality,
+        content_type: content_type.to_string(),
+        waveforms: state.stream_waveforms.clone(),
+        cache_key: cache_key.to_string(),
+        cache_root: cache_root.to_path_buf(),
+        total,
+    })
+}
+
+#[cfg(target_os = "android")]
+impl InlinePreviewCachePlan {
+    async fn begin(self) -> Option<InlinePreviewCacheCapture> {
+        let mut reservation = self.cache.reserve(self.cache_key.clone())?;
+        // worker 内也绝不等待槽位；拿不到就关闭旁路，媒体响应已经在独立前进。
+        if !reservation.try_acquire_slot() {
+            return None;
+        }
+        let writer = reservation
+            .begin_write(
+                &self.cache_root,
+                &self.source,
+                self.quality,
+                self.content_type,
+                Some(self.total),
+            )
+            .await
+            .ok()
+            .flatten()?;
+        Some(InlinePreviewCacheCapture {
+            writer,
+            waveforms: self.waveforms,
+            cache_key: self.cache_key,
+            cache_root: self.cache_root,
+            total: self.total,
+            published_bytes: 0,
+            response_bytes: 0,
+        })
+    }
+}
+
+#[cfg(target_os = "android")]
+impl InlinePreviewCacheCapture {
+    async fn write_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()> {
+        if self.writer.written_bytes() == 0 && looks_like_text_error_payload(chunk) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "试听缓存首包不是音频",
+            ));
+        }
+        let next_response_bytes = self.response_bytes.saturating_add(chunk.len() as u64);
+        if next_response_bytes > self.total {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "媒体响应超过声明的完整资源长度",
+            ));
+        }
+        if !self.writer.write_chunk(chunk).await? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "流媒体缓存已取消",
+            ));
+        }
+        self.response_bytes = next_response_bytes;
+        let written = self.writer.written_bytes();
+        if written.saturating_sub(self.published_bytes) >= INLINE_CACHE_WAVEFORM_PUBLISH_BYTES
+            && self.writer.flush_for_observer().await?
+        {
+            self.waveforms.observe(
+                self.cache_key.clone(),
+                self.writer.partial_path().to_path_buf(),
+                written,
+                false,
+            );
+            self.published_bytes = written;
+        }
+        Ok(())
+    }
+
+    async fn finish(mut self, reached_eof: bool) -> std::io::Result<()> {
+        if !reached_eof || self.response_bytes != self.total {
+            // Drop 删除不完整 partial；不能把有缺口的文件提交成可命中缓存。
+            return Ok(());
+        }
+        let committed = self.writer.finish().await?;
+        if committed {
+            self.waveforms.observe(
+                self.cache_key.clone(),
+                crate::stream_cache::StreamCache::media_path(&self.cache_root, &self.cache_key),
+                self.total,
+                true,
+            );
+        }
+        Ok(())
+    }
+}
+
+enum PreviewBodyCapturePlan {
+    Session(crate::stream_waveform::StreamWaveformCapturePlan),
+    #[cfg(target_os = "android")]
+    Persistent(InlinePreviewCachePlan),
+}
+
+impl PreviewBodyCapturePlan {
+    async fn begin(self) -> Option<PreviewBodyCapture> {
+        match self {
+            Self::Session(plan) => plan
+                .begin()
+                .await
+                .ok()
+                .flatten()
+                .map(PreviewBodyCapture::Session),
+            #[cfg(target_os = "android")]
+            Self::Persistent(plan) => plan.begin().await.map(PreviewBodyCapture::Persistent),
+        }
+    }
+}
+
+enum PreviewBodyCapture {
+    Session(crate::stream_waveform::StreamWaveformCapture),
+    #[cfg(target_os = "android")]
+    Persistent(InlinePreviewCacheCapture),
+}
+
+impl PreviewBodyCapture {
+    async fn write_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Session(capture) => capture.write_chunk(chunk).await,
+            #[cfg(target_os = "android")]
+            Self::Persistent(capture) => capture.write_chunk(chunk).await,
+        }
+    }
+
+    async fn finish(self, reached_eof: bool) -> std::io::Result<()> {
+        match self {
+            Self::Session(capture) => capture.finish(reached_eof).await,
+            #[cfg(target_os = "android")]
+            Self::Persistent(capture) => capture.finish(reached_eof).await,
+        }
+    }
+}
+
+const PREVIEW_CAPTURE_QUEUE_CHUNKS: usize = 8;
+
+fn start_preview_capture_worker(
+    plan: PreviewBodyCapturePlan,
+) -> (
+    tokio::sync::mpsc::Sender<axum::body::Bytes>,
+    Arc<AtomicBool>,
+) {
+    let (sender, mut receiver) =
+        tokio::sync::mpsc::channel::<axum::body::Bytes>(PREVIEW_CAPTURE_QUEUE_CHUNKS);
+    let reached_eof = Arc::new(AtomicBool::new(false));
+    let worker_eof = Arc::clone(&reached_eof);
+    tokio::spawn(async move {
+        // mkdir/open/StreamCacheWriter::begin_write 全在这里；媒体响应构造和 chunk
+        // 转发只面对有界 sender，不会等待初始化。
+        let Some(mut capture) = plan.begin().await else {
+            return;
+        };
+        let mut healthy = true;
+        while let Some(chunk) = receiver.recv().await {
+            if capture.write_chunk(&chunk).await.is_err() {
+                healthy = false;
+                break;
+            }
+        }
+        let complete = healthy && worker_eof.load(Ordering::Acquire);
+        let _ = capture.finish(complete).await;
+    });
+    (sender, reached_eof)
+}
+
+fn enqueue_preview_capture(
+    sender: &mut Option<tokio::sync::mpsc::Sender<axum::body::Bytes>>,
+    chunk: &axum::body::Bytes,
+) {
+    let Some(active) = sender.as_ref() else {
+        return;
+    };
+    // Bytes::clone 只增引用计数。队列满/后台失败就关闭本次旁路并保留连续前缀，
+    // 绝不能 await 写盘或 flush，让可选波形对媒体流施加 backpressure。
+    if active.try_send(chunk.clone()).is_err() {
+        sender.take();
+    }
+}
+
+/// 把代理已经读取到的同一份字节投进有界后台队列。旁路写盘/分析再慢也不会卡住
+/// 音频 chunk；只有上游媒体流本身失败才向播放器报错。
+fn captured_preview_body(
+    upstream: reqwest::Response,
+    capture: Option<PreviewBodyCapturePlan>,
+) -> axum::body::Body {
+    let source = Box::pin(upstream.bytes_stream());
+    let (sender, reached_eof) = capture
+        .map(start_preview_capture_worker)
+        .map(|(sender, reached_eof)| (Some(sender), Some(reached_eof)))
+        .unwrap_or((None, None));
+    let stream = futures_util::stream::unfold(
+        (source, sender, reached_eof, false),
+        |(mut source, mut sender, reached_eof, done)| async move {
+            if done {
+                return None;
+            }
+            match source.next().await {
+                Some(Ok(chunk)) => {
+                    enqueue_preview_capture(&mut sender, &chunk);
+                    Some((Ok(chunk), (source, sender, reached_eof, false)))
+                }
+                Some(Err(error)) => {
+                    sender.take();
+                    Some((
+                        Err(std::io::Error::other(format!("试听流读取失败：{error}"))),
+                        (source, None, reached_eof, true),
+                    ))
+                }
+                None => {
+                    if sender.is_some() {
+                        if let Some(reached_eof) = reached_eof.as_ref() {
+                            reached_eof.store(true, Ordering::Release);
+                        }
+                        sender.take();
+                    }
+                    None
+                }
+            }
+        },
+    );
+    axum::body::Body::from_stream(stream)
 }
 
 async fn refresh_song_preview_ticket(
@@ -835,6 +1176,12 @@ fn schedule_song_preview_cache(
     tokio::spawn(async move {
         // 先让 WebView 的首批缓冲独占链路；缓存是后台完整拉取，不参与首包延迟。
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        #[cfg(target_os = "android")]
+        if !state.stream_waveforms.is_session_idle(&cache_key) {
+            // 延迟任务醒来后用户可能已经重新播放同一首；此时宁可本轮不缓存，也
+            // 不能让第二 GET 再次和 WebView 抢网络/闪存。
+            return;
+        }
         if !reservation.is_valid() || !reservation.acquire_slot().await {
             return;
         }
@@ -864,6 +1211,39 @@ fn schedule_song_preview_cache(
     });
 }
 
+#[cfg(target_os = "android")]
+fn schedule_song_preview_cache_when_session_idle(
+    state: Arc<AppState>,
+    token: String,
+    ticket: SongPreviewTicket,
+    cache_key: String,
+    content_type_hint: String,
+) {
+    let Some(deferred) = state.stream_cache.defer_until_idle(cache_key.clone()) else {
+        return;
+    };
+    tokio::spawn(async move {
+        // media_started 会给当前播放续 5 秒租约；先跨过它，再每 2 秒确认一次。
+        // bounded Range 因而不会丢掉持久缓存功能，但补整轨只会发生在切歌/播放
+        // 结束且前缀分析也退出之后。
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        loop {
+            if !deferred.is_valid() {
+                return;
+            }
+            if state.stream_waveforms.is_session_idle(&cache_key) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        if !deferred.is_valid() {
+            return;
+        }
+        drop(deferred);
+        schedule_song_preview_cache(state, token, ticket, cache_key, content_type_hint);
+    });
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PreviewCacheSegment {
     start: u64,
@@ -876,10 +1256,17 @@ fn preview_cache_segment(
     headers: &HeaderMap,
     requested_start: u64,
 ) -> Option<PreviewCacheSegment> {
+    let segment = preview_response_segment(status, headers)?;
+    (segment.start == requested_start).then_some(segment)
+}
+
+/// 从上游响应本身取出实际字节区间。媒体代理的 Range 可能被 CDN 忽略并退成 200，
+/// 所以波形旁路必须以响应头为准，不能拿浏览器请求头猜写入偏移。
+fn preview_response_segment(
+    status: StatusCode,
+    headers: &HeaderMap,
+) -> Option<PreviewCacheSegment> {
     if status == StatusCode::OK {
-        if requested_start != 0 {
-            return None;
-        }
         let total = headers
             .get(header::CONTENT_LENGTH)?
             .to_str()
@@ -905,7 +1292,7 @@ fn preview_cache_segment(
     let start = start.parse::<u64>().ok()?;
     let end = end.parse::<u64>().ok()?;
     let total = total.parse::<u64>().ok()?;
-    if start != requested_start || start > end || end >= total {
+    if start > end || end >= total {
         return None;
     }
     let declared = end - start + 1;
@@ -1047,7 +1434,11 @@ async fn cache_song_preview_background(
             if !keep_writing {
                 return Ok(());
             }
-            if writer.written_bytes().saturating_sub(last_waveform_observed_bytes) >= 512 * 1024 {
+            if writer
+                .written_bytes()
+                .saturating_sub(last_waveform_observed_bytes)
+                >= 512 * 1024
+            {
                 // writer 仍独占写句柄；协调器只会另开一个普通只读句柄去读已经可见
                 // 的文件前缀。读取失败（例如 MP4 的尾部索引尚未到达）会安静等待下次
                 // 增长或最终文件，绝不影响缓存写入和播放。
@@ -3373,6 +3764,44 @@ mod tests {
             Some((40, 99, 100))
         );
         assert!(preview_cache_segment(StatusCode::PARTIAL_CONTENT, &rest, 0).is_none());
+        assert_eq!(
+            preview_response_segment(StatusCode::PARTIAL_CONTENT, &rest)
+                .map(|segment| segment.start),
+            Some(40),
+            "session tee trusts the actual CDN response offset"
+        );
+    }
+
+    #[test]
+    fn session_waveform_polling_is_not_gated_by_persistent_cache_settings() {
+        // 这是协议语义，不是用户设置值：默认关闭持久缓存时，媒体代理仍会把同一
+        // 响应旁路成会话前缀，因此前端必须在首次空快照后继续 poll。
+        assert!(SONG_PREVIEW_SESSION_WAVEFORM_ENABLED);
+    }
+
+    #[tokio::test]
+    async fn a_slow_or_failed_capture_never_backpressures_audio_chunks() {
+        let (sender, receiver) = tokio::sync::mpsc::channel::<axum::body::Bytes>(1);
+        let mut sender = Some(sender);
+        // 不启动接收者，模拟闪存写入永久卡住。第一次填满有界队列，第二次必须
+        // 同步放弃捕获；enqueue 没有 await，媒体 chunk 可立即继续下发。
+        enqueue_preview_capture(&mut sender, &axum::body::Bytes::from_static(b"first"));
+        assert!(sender.is_some());
+        enqueue_preview_capture(&mut sender, &axum::body::Bytes::from_static(b"second"));
+        assert!(sender.is_none());
+        drop(receiver);
+
+        let (closed_sender, closed_receiver) = tokio::sync::mpsc::channel::<axum::body::Bytes>(1);
+        drop(closed_receiver);
+        let mut closed_sender = Some(closed_sender);
+        enqueue_preview_capture(
+            &mut closed_sender,
+            &axum::body::Bytes::from_static(b"still-audio"),
+        );
+        assert!(
+            closed_sender.is_none(),
+            "failed worker only disables the tee"
+        );
     }
 
     #[test]

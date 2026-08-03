@@ -18,6 +18,28 @@
  */
 
 import { create } from "zustand";
+import {
+  audioContextOptionsForPlatform,
+  effectOutputRoute,
+  setEffectOutputActive,
+  type OptionalEffectOutputRoutes,
+} from "./djAudioPolicy";
+import {
+  canReusePreparedBrowserDeck,
+  ANDROID_EXTERNAL_OUTPUT_LATENCY_FLOOR_S,
+  EXTERNAL_HANDOFF_OVERLAP_GAIN,
+  externalClockAligned,
+  externalHandoffGain,
+  externalHandoffPhysicalDelayMs,
+  externalNativeReleaseSettleMs,
+  needsPreparedCueSeek,
+  ownsExternalAdoption,
+  projectedExternalPosition,
+  shouldPreservePreparedBackDeck,
+  shouldRecalibrateExternalClock,
+  type PreparedBrowserDeck,
+  type ExternalAdoptionKey,
+} from "./browserDeckPreload";
 import { mediaUrlForTrack } from "./streamTrack";
 import type { Track } from "../types";
 
@@ -268,6 +290,12 @@ const TRANSPORT_SETTLE_MS = 24;
  */
 const SEEK_HANDOFF_SEC = 0.012;
 const SEEK_HANDOFF_LEAD_SEC = 0.006;
+/** 跨 Rust/WebAudio owner 只做两段各 6ms 的有界接力，避免长时间双路同源叠加。 */
+const EXTERNAL_HANDOFF_STAGE_SEC = 0.006;
+const EXTERNAL_HANDOFF_SETTLE_MS = 4;
+/** Effect paths get a short zero-slope release before their graph edge is disconnected. */
+const EFFECT_STOP_FADE_SEC = 0.008;
+const EFFECT_STOP_SETTLE_MS = 12;
 const SEEK_READY_TIMEOUT_MS = 1200;
 const SEEK_SETTLE_MS = 32;
 const SEEK_CURVE_N = 32;
@@ -561,12 +589,15 @@ interface Deck {
   echoDelay: DelayNode;
   echoFeedback: GainNode;
   echoWet: GainNode;
-  alarmFilter: BiquadFilterNode;
-  alarmWet: GainNode;
   hydrantDelay: DelayNode;
   hydrantFeedback: GainNode;
   hydrantFilter: BiquadFilterNode;
   hydrantWet: GainNode;
+  /** Last audible edges of expensive effects; disconnected while the effects are idle. */
+  effectOutputs: OptionalEffectOutputRoutes<DynamicsCompressorNode>;
+  /** Makes delayed effect-edge cleanup harmless when a new transition starts immediately. */
+  effectStopGeneration: number;
+  effectStopTimer: number | null;
   fxLimiter: DynamicsCompressorNode;
 }
 
@@ -689,17 +720,16 @@ function buildDeck(ctx: AudioContext, el: HTMLAudioElement): Deck {
   echoDelay.connect(echoFeedback);
   echoFeedback.connect(echoDelay);
   echoDelay.connect(echoWet);
-  echoWet.connect(fxLimiter);
+  // Deliberately do not connect echoWet to the limiter here. Gain=0 is not a CPU boundary in
+  // Chromium; leaving the feedback delay reachable from destination made ordinary Android
+  // streaming render an unused effect on every audio quantum. schedule() opens this edge only
+  // for an echo transition, and neutralize() closes it again.
+  const echoOutput = effectOutputRoute<DynamicsCompressorNode>(echoWet, fxLimiter);
 
-  const alarmFilter = ctx.createBiquadFilter();
-  const alarmWet = ctx.createGain();
-  alarmFilter.type = "bandpass";
-  alarmFilter.frequency.value = 900;
-  alarmFilter.Q.value = 8;
-  alarmWet.gain.value = 0;
-  highpass.connect(alarmFilter);
-  alarmFilter.connect(alarmWet);
-  alarmWet.connect(fxLimiter);
+  // The former alarm path fed the full song through a permanent Q=8 band-pass even though the
+  // current Alarm effect is a separately limited oscillator below. It was both unused and an
+  // easy source of resonant bursts if a stale gain automation escaped, so that dry-signal branch
+  // intentionally stays removed rather than being kept muted.
 
   const hydrantDelay = ctx.createDelay(2);
   const hydrantFeedback = ctx.createGain();
@@ -722,7 +752,9 @@ function buildDeck(ctx: AudioContext, el: HTMLAudioElement): Deck {
   hydrantFeedback.connect(hydrantDelay);
   hydrantFilter.connect(hydrantReverb);
   hydrantReverb.connect(hydrantWet);
-  hydrantWet.connect(fxLimiter);
+  // The convolver is the most expensive branch in this graph. Keep its output detached during
+  // normal playback so Android's realtime renderer can cull the complete delay/reverb chain.
+  const hydrantOutput = effectOutputRoute<DynamicsCompressorNode>(hydrantWet, fxLimiter);
 
   // 效果器是退场唱盘的一部分，必须和干声共用同一个 fader。
   // 如果直接接 destination，旧歌虽然淡出了，回声/滤波尾音却会留在原电平，
@@ -747,14 +779,72 @@ function buildDeck(ctx: AudioContext, el: HTMLAudioElement): Deck {
     echoDelay,
     echoFeedback,
     echoWet,
-    alarmFilter,
-    alarmWet,
     hydrantDelay,
     hydrantFeedback,
     hydrantFilter,
     hydrantWet,
+    effectOutputs: { echo: echoOutput, hydrant: hydrantOutput },
+    effectStopGeneration: 0,
+    effectStopTimer: null,
     fxLimiter,
   };
+}
+
+type OptionalEffect = keyof OptionalEffectOutputRoutes<DynamicsCompressorNode>;
+
+function effectWetGain(deck: Deck, effect: OptionalEffect): AudioParam {
+  return effect === "echo" ? deck.echoWet.gain : deck.hydrantWet.gain;
+}
+
+/**
+ * Release wet delay/reverb paths at zero crossing-friendly gain instead of disconnecting a live
+ * sample. The generation fence prevents an old cancel timer from detaching a newly scheduled FX.
+ */
+function fadeOptionalEffects(
+  ctx: AudioContext,
+  deck: Deck,
+  stopping: readonly OptionalEffect[] = ["echo", "hydrant"],
+): void {
+  const now = ctx.currentTime;
+  const generation = ++deck.effectStopGeneration;
+  if (deck.effectStopTimer !== null) window.clearTimeout(deck.effectStopTimer);
+  for (const effect of stopping) {
+    const wet = effectWetGain(deck, effect);
+    const held = Math.max(0.0001, holdParam(wet, now));
+    wet.setValueAtTime(held, now);
+    wet.exponentialRampToValueAtTime(0.0001, now + EFFECT_STOP_FADE_SEC);
+    wet.setValueAtTime(0, now + EFFECT_STOP_FADE_SEC);
+  }
+  deck.effectStopTimer = window.setTimeout(() => {
+    if (deck.effectStopGeneration !== generation) return;
+    deck.effectStopTimer = null;
+    for (const effect of stopping) {
+      setEffectOutputActive(deck.effectOutputs[effect], false);
+    }
+  }, EFFECT_STOP_SETTLE_MS);
+}
+
+/** A fresh transition owns its selected graph edges without hard-cutting an old wet sample. */
+function activateOptionalEffects(deck: Deck, effects: DjEffect[]): void {
+  deck.effectStopGeneration += 1;
+  if (deck.effectStopTimer !== null) {
+    window.clearTimeout(deck.effectStopTimer);
+    deck.effectStopTimer = null;
+  }
+  const selected = new Set<OptionalEffect>(
+    effects.filter((effect): effect is OptionalEffect => effect === "echo" || effect === "hydrant"),
+  );
+  for (const effect of selected) {
+    // Cancel the old release's future zero before this transition writes its own wet curve.
+    // Clearing only the JS timer is insufficient: AudioParam automation already lives on the
+    // audio timeline and would otherwise mute the newly selected effect a few milliseconds in.
+    if (ctx) holdParam(effectWetGain(deck, effect), ctx.currentTime);
+    setEffectOutputActive(deck.effectOutputs[effect], true);
+  }
+  const stale = (Object.keys(deck.effectOutputs) as OptionalEffect[]).filter(
+    (effect) => !selected.has(effect) && deck.effectOutputs[effect].connected,
+  );
+  if (stale.length && ctx) fadeOptionalEffects(ctx, deck, stale);
 }
 
 /** 把一台 deck 的所有参数掰回直导线状态。 */
@@ -772,15 +862,10 @@ function neutralize(ctx: AudioContext, deck: Deck, faderGain = 1): void {
     deck.fader.gain,
     deck.echoDelay.delayTime,
     deck.echoFeedback.gain,
-    deck.echoWet.gain,
-    deck.alarmFilter.frequency,
-    deck.alarmFilter.Q,
-    deck.alarmWet.gain,
     deck.hydrantDelay.delayTime,
     deck.hydrantFeedback.gain,
     deck.hydrantFilter.frequency,
     deck.hydrantFilter.Q,
-    deck.hydrantWet.gain,
   ]) {
     param.cancelScheduledValues(now);
   }
@@ -795,15 +880,11 @@ function neutralize(ctx: AudioContext, deck: Deck, faderGain = 1): void {
   deck.fader.gain.setValueAtTime(faderGain, now);
   deck.echoDelay.delayTime.setValueAtTime(0.25, now);
   deck.echoFeedback.gain.setValueAtTime(0.25, now);
-  deck.echoWet.gain.setValueAtTime(0, now);
-  deck.alarmFilter.frequency.setValueAtTime(900, now);
-  deck.alarmFilter.Q.setValueAtTime(8, now);
-  deck.alarmWet.gain.setValueAtTime(0, now);
   deck.hydrantDelay.delayTime.setValueAtTime(0.5, now);
   deck.hydrantFeedback.gain.setValueAtTime(0.2, now);
   deck.hydrantFilter.frequency.setValueAtTime(120, now);
   deck.hydrantFilter.Q.setValueAtTime(1, now);
-  deck.hydrantWet.gain.setValueAtTime(0, now);
+  fadeOptionalEffects(ctx, deck);
 }
 
 /* ---------------------------------------------------------------- 引擎 */
@@ -833,6 +914,26 @@ let seekAbort: ((mode: SeekAbortMode) => void) | null = null;
 let seekBusy = false;
 /** seek/过渡操作代数；新操作或 pause/cancel 会让旧异步回调自动失效。 */
 let seekOperationGeneration = 0;
+interface PreparedNextDeck extends PreparedBrowserDeck {
+  cue: number;
+  rate: number;
+  detachCueListener: (() => void) | null;
+}
+/**
+ * 空闲 Web Audio Deck 上已经装好的下一首。仅解析在线 URL 不等于预热：真正决定
+ * 首拍能否立即出来的是这个媒体元素在 cue 位置已有 HAVE_FUTURE_DATA。
+ */
+let preparedNextDeck: PreparedNextDeck | null = null;
+export interface ExternalPlaybackAdoption extends ExternalAdoptionKey {
+  element: HTMLAudioElement;
+}
+/** Ownership fence for async native→WebAudio adoption cleanup. */
+let externalAdoptionGeneration = 0;
+
+function clearPreparedNextDeck(): void {
+  preparedNextDeck?.detachCueListener?.();
+  preparedNextDeck = null;
+}
 
 function abortSeamlessSeek(mode: SeekAbortMode): void {
   const abort = seekAbort;
@@ -868,6 +969,14 @@ function seekHandoffCurve(direction: "out" | "in"): Float32Array {
 
 const seekOutCurve = seekHandoffCurve("out");
 const seekInCurve = seekHandoffCurve("in");
+const externalOverlapCurve = Float32Array.from(
+  { length: SEEK_CURVE_N },
+  (_, index) => externalHandoffGain("overlap", index / (SEEK_CURVE_N - 1)),
+);
+const externalTakeoverCurve = Float32Array.from(
+  { length: SEEK_CURVE_N },
+  (_, index) => externalHandoffGain("takeover", index / (SEEK_CURVE_N - 1)),
+);
 
 interface DecodedTrack {
   source: string;
@@ -1093,6 +1202,12 @@ function schedule(
   if (!ctx) return;
   const now = ctx.currentTime;
 
+  // Optional feedback/convolution branches are physically outside the audible graph during
+  // ordinary streaming. Connect only the effects selected for this transition. Merely keeping a
+  // wet GainNode at zero still made Android WebView render the upstream graph and could underrun
+  // its low-latency output queue.
+  activateOptionalEffects(out, effects);
+
   // 等功率交叉是所有预设共用的底：曲线之上再叠各自的手法
   out.fader.gain.cancelScheduledValues(now);
   input.fader.gain.cancelScheduledValues(now);
@@ -1211,20 +1326,28 @@ function schedule(
     oscillator.connect(alarmGain);
     alarmGain.connect(out.fxLimiter);
     oscillator.start(now);
-    oscillator.stop(now + seconds);
+    // The envelope reaches zero at `seconds`; leave one tiny tail before ending the oscillator so
+    // both normal completion and cancellation retire the node only after silence.
+    oscillator.stop(now + seconds + EFFECT_STOP_FADE_SEC);
     let stopped = false;
-    const stopAlarm = () => {
-      if (stopped) return;
-      stopped = true;
-      try {
-        oscillator.stop();
-      } catch {
-        /* 已按计划停止 */
-      }
+    const cleanupAlarm = () => {
       oscillator.disconnect();
       alarmGain.disconnect();
     };
-    oscillator.onended = stopAlarm;
+    const stopAlarm = () => {
+      if (stopped) return;
+      stopped = true;
+      const stopAt = ctx!.currentTime + EFFECT_STOP_FADE_SEC;
+      const held = Math.max(0.0001, holdParam(alarmGain.gain, ctx!.currentTime));
+      alarmGain.gain.setValueAtTime(held, ctx!.currentTime);
+      alarmGain.gain.exponentialRampToValueAtTime(0.0001, stopAt);
+      try {
+        oscillator.stop(stopAt);
+      } catch {
+        cleanupAlarm();
+      }
+    };
+    oscillator.onended = cleanupAlarm;
     pending?.effectStops.push(stopAlarm);
   }
 
@@ -1460,7 +1583,10 @@ export const djEngine = {
     if (nativeMobilePlaybackOwnsOutput()) return false;
     if (broken) return false;
     try {
-      ctx ??= new AudioContext();
+      if (!ctx) {
+        const options = audioContextOptionsForPlatform(window.kdj?.platform);
+        ctx = options ? new AudioContext(options) : new AudioContext();
+      }
       void ctx.resume();
       return true;
     } catch {
@@ -1575,6 +1701,321 @@ export const djEngine = {
     releaseDecodedPlayback();
   },
 
+  /**
+   * 把预测候选真正装进静音备用 Deck，而不只是提前解析一个 URL。
+   *
+   * 这与 Rust coordinator 的 `prepare` 是同一策略：有限缓冲、后台解码、切换时只
+   * 换角色。尤其本地曲经过一次在线混接后仍由 Web Audio 持有，若没有这一步，
+   * `begin` 会在交接临界点才 `src + load`，表现为标题已换而第一拍卡住。
+   */
+  prepareNext(next: Track, options: DjBeginOptions, fromRate?: number): boolean {
+    if (!djEngine.warmup() || !ctx || !decks || pending || seekBusy) return false;
+    const out = decks[frontIndex];
+    const backIndex: 0 | 1 = frontIndex === 0 ? 1 : 0;
+    const input = decks[backIndex];
+    const source = mediaUrlForTrack(next);
+    const expectedSource = absoluteMediaUrl(source);
+    const cue = Math.max(
+      0,
+      options.applyInOutPoints && next.cue_ms !== null
+        ? next.cue_ms / 1000
+        : (next.first_beat ?? 0),
+    );
+    const outgoingRate = Math.max(0.25, fromRate ?? (out.el.playbackRate || 1));
+    const effectiveFromBpm = options.from.bpm ? options.from.bpm * outgoingRate : null;
+    const rate = bpmSyncRate(effectiveFromBpm, next.bpm);
+    const reusable = canReusePreparedBrowserDeck(preparedNextDeck, {
+      deckIndex: backIndex,
+      trackId: next.id,
+      source: expectedSource,
+    });
+
+    clearPreparedNextDeck();
+    neutralize(ctx, input, 0);
+    input.el.pause();
+    input.el.preload = "auto";
+    input.el.playbackRate = rate;
+    input.mediaGain.gain.cancelScheduledValues(ctx.currentTime);
+    input.mediaGain.gain.setValueAtTime(1, ctx.currentTime);
+    if (!reusable && !hasMediaSource(input.el, source)) {
+      input.el.src = source;
+      input.el.load();
+    }
+
+    const prepared: PreparedNextDeck = {
+      deckIndex: backIndex,
+      trackId: next.id,
+      source: expectedSource,
+      cue,
+      rate,
+      detachCueListener: null,
+    };
+    preparedNextDeck = prepared;
+    const applyCue = () => {
+      if (preparedNextDeck !== prepared) return;
+      if (input.el.readyState < HTMLMediaElement.HAVE_METADATA) return;
+      if (needsPreparedCueSeek(input.el.currentTime, cue)) {
+        try {
+          input.el.currentTime = cue;
+        } catch {
+          return;
+        }
+      }
+      prepared.detachCueListener?.();
+      prepared.detachCueListener = null;
+    };
+    const detach = () => {
+      input.el.removeEventListener("loadedmetadata", applyCue);
+      input.el.removeEventListener("durationchange", applyCue);
+    };
+    prepared.detachCueListener = detach;
+    input.el.addEventListener("loadedmetadata", applyCue);
+    input.el.addEventListener("durationchange", applyCue);
+    applyCue();
+    return true;
+  },
+
+  /**
+   * 把正在由 Rust/CPAL 出声的本地曲目时钟接进 Web Audio。
+   *
+   * 如果备用 Deck 已经缓存了在线候选，必须在当前/front Deck 上接入本地曲；旧的
+   * `seamlessSeek` 会占用备用 Deck，并在收尾时把另一台也改成当前曲，等于亲手丢掉
+   * 刚下载的候选 Range。这里始终在 front 上接外部时钟；没有候选时也无需占两台。
+   */
+  adoptExternalPlayback(
+    source: string,
+    target: number,
+    shouldPlay: boolean,
+    rate: number,
+    releaseExternal: () => Promise<void>,
+  ): Promise<ExternalPlaybackAdoption> {
+    const normalizedRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
+    const expectedSource = absoluteMediaUrl(source);
+    if (!djEngine.warmup() || !ctx || !decks) {
+      return Promise.reject(new Error("在线混音链路不可用"));
+    }
+    const adoptedDeckIndex = frontIndex;
+    elements[adoptedDeckIndex].playbackRate = normalizedRate;
+    if (!shouldPreservePreparedBackDeck(preparedNextDeck, frontIndex, expectedSource)) {
+      // 这不是当前交接要保护的预测（或根本没有预测）。明确作废，避免后续同 URL
+      // 的 metadata 迟到后把普通 shadow 误认成可复用候选。
+      clearPreparedNextDeck();
+    }
+
+    const adoptionGeneration = ++externalAdoptionGeneration;
+    seekOperationGeneration += 1;
+    abortTransport();
+    abortSeamlessSeek("restore");
+    releaseDecodedPlayback();
+    const generation = seekOperationGeneration;
+    const deck = decks[adoptedDeckIndex];
+    const el = deck.el;
+    const outputLatency = (ctx as AudioContext & { outputLatency?: number }).outputLatency;
+    const physicalRampDelayMs = externalHandoffPhysicalDelayMs(
+      ctx.baseLatency,
+      outputLatency,
+      EXTERNAL_HANDOFF_STAGE_SEC,
+      EXTERNAL_HANDOFF_SETTLE_MS,
+      window.kdj?.platform === "android" ? ANDROID_EXTERNAL_OUTPUT_LATENCY_FLOOR_S : 0,
+    );
+    const at = Math.max(0, target);
+    const clockCapturedAt = performance.now();
+    const projectedClock = () => {
+      const projected = projectedExternalPosition(
+        at,
+        performance.now() - clockCapturedAt,
+        normalizedRate,
+      );
+      return Number.isFinite(el.duration) && el.duration > 0
+        ? Math.min(projected, Math.max(0, el.duration - 0.05))
+        : projected;
+    };
+    neutralize(ctx, deck, 0);
+    el.pause();
+    el.preload = "auto";
+    el.playbackRate = normalizedRate;
+    if (!hasMediaSource(el, source)) {
+      el.src = source;
+      el.load();
+    }
+    seekBusy = true;
+
+    return new Promise((resolve, reject) => {
+      let cueApplied = false;
+      let clockCalibrations = 0;
+      let starting = false;
+      let done = false;
+      let timeout: number | null = null;
+      let settleTimer: number | null = null;
+      const cleanup = () => {
+        el.removeEventListener("loadedmetadata", tryStart);
+        el.removeEventListener("durationchange", tryStart);
+        el.removeEventListener("seeked", tryStart);
+        el.removeEventListener("canplay", tryStart);
+        if (timeout !== null) window.clearTimeout(timeout);
+        if (settleTimer !== null) window.clearTimeout(settleTimer);
+        timeout = null;
+        settleTimer = null;
+      };
+      const fail = (reason: Error) => {
+        if (done) return;
+        done = true;
+        cleanup();
+        if (seekAbort === abort) seekAbort = null;
+        if (generation === seekOperationGeneration) seekBusy = false;
+        el.pause();
+        if (ctx && decks) neutralize(ctx, deck, 0);
+        reject(reason);
+      };
+      const abort = () => fail(new Error("本地与在线播放链路交接已取消"));
+      seekAbort = abort;
+
+      function tryStart() {
+        if (done || starting || generation !== seekOperationGeneration) return;
+        if (!cueApplied) {
+          if (el.readyState < HTMLMediaElement.HAVE_METADATA) return;
+          const livePosition = projectedClock();
+          if (needsPreparedCueSeek(el.currentTime, livePosition)) {
+            try {
+              el.currentTime = livePosition;
+              clockCalibrations += 1;
+            } catch {
+              fail(new Error("本地曲目时钟无法接入在线混音链路"));
+              return;
+            }
+          }
+          cueApplied = true;
+        }
+        if (el.seeking || el.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) return;
+        const livePosition = projectedClock();
+        if (!externalClockAligned(el.currentTime, livePosition)) {
+          if (
+            shouldRecalibrateExternalClock(
+              el.currentTime,
+              livePosition,
+              clockCalibrations,
+            )
+          ) {
+            try {
+              // Rust 在本地 media load/Range seek 期间一直继续播放。若仍用最初捕获的
+              // position，接管时会倒退整个准备耗时，听起来就是重复半拍/卡壳。
+              el.currentTime = livePosition;
+              clockCalibrations += 1;
+              return;
+            } catch {
+              fail(new Error("本地曲目时钟二次校准失败"));
+              return;
+            }
+          }
+          // Two seeks are a bounded preparation budget, not permission to take over stale
+          // media. Let the current native owner continue instead of repeating audible audio.
+          fail(new Error("本地曲目时钟追赶超时"));
+          return;
+        }
+        starting = true;
+        if (timeout !== null) window.clearTimeout(timeout);
+        timeout = null;
+        const started = shouldPlay ? el.play() : Promise.resolve();
+        void started
+          .then(() => {
+            if (done || generation !== seekOperationGeneration || !ctx || !decks) return;
+            if (!shouldPlay) el.pause();
+            deck.fader.gain.cancelScheduledValues(ctx.currentTime);
+            deck.fader.gain.setValueAtTime(0, ctx.currentTime);
+            deck.fader.gain.setValueCurveAtTime(
+              externalOverlapCurve,
+              ctx.currentTime,
+              EXTERNAL_HANDOFF_STAGE_SEC,
+            );
+            // Rust 仍满幅时 Web Audio 最多只开到 -21.9dB；即使两个时钟恰好同相，
+            // 总峰值也被限制在 +0.67dB 内，而不是原先两路满幅相加的 +6dB。
+            settleTimer = window.setTimeout(() => {
+              if (done || generation !== seekOperationGeneration || !ctx || !decks) return;
+              settleTimer = null;
+              const handoffContext = ctx;
+              // Schedule the browser's full-gain curve before touching native output. It reaches
+              // the physical speaker one WebAudio queue later; release Rust only near that edge
+              // so its much shorter CPAL/AAudio queue drains into the already scheduled curve.
+              // Reversing this order leaves an audible 80–100ms -21.9dB hole on Android.
+              deck.fader.gain.cancelScheduledValues(handoffContext.currentTime);
+              deck.fader.gain.setValueAtTime(
+                EXTERNAL_HANDOFF_OVERLAP_GAIN,
+                handoffContext.currentTime,
+              );
+              deck.fader.gain.setValueCurveAtTime(
+                externalTakeoverCurve,
+                handoffContext.currentTime,
+                EXTERNAL_HANDOFF_STAGE_SEC,
+              );
+              const nativeReleaseLeadMs = externalNativeReleaseSettleMs(window.kdj?.platform);
+              settleTimer = window.setTimeout(() => {
+                if (done || generation !== seekOperationGeneration || !ctx || !decks) return;
+                void releaseExternal()
+                  .then(() => {
+                    if (done || generation !== seekOperationGeneration || !ctx || !decks) return;
+                    settleTimer = window.setTimeout(() => {
+                      if (done) return;
+                      done = true;
+                      cleanup();
+                      if (seekAbort === abort) seekAbort = null;
+                      seekBusy = false;
+                      if (ctx && decks) neutralize(ctx, deck, 1);
+                      resolve({
+                        element: el,
+                        generation: adoptionGeneration,
+                        deckIndex: adoptedDeckIndex,
+                        source: expectedSource,
+                      });
+                    }, nativeReleaseLeadMs);
+                  })
+                  .catch(() => fail(new Error("原生输出无法让出在线播放链路")));
+              }, Math.max(0, physicalRampDelayMs - nativeReleaseLeadMs));
+            // `setValueCurveAtTime` 已完成调度不代表扬声器已听见。Android 的
+            // playback latencyHint 可让输出队列显著长于 6ms；等低增益曲线越过
+            // baseLatency + outputLatency 后才静音 Rust，避免两边都没声的断口。
+            }, physicalRampDelayMs);
+          })
+          .catch(() => fail(new Error("本地曲目无法在在线混音链路中起播")));
+      }
+
+      el.addEventListener("loadedmetadata", tryStart);
+      el.addEventListener("durationchange", tryStart);
+      el.addEventListener("seeked", tryStart);
+      el.addEventListener("canplay", tryStart);
+      timeout = window.setTimeout(
+        () => fail(new Error("本地曲目混音预读超时")),
+        SEEK_READY_TIMEOUT_MS,
+      );
+      tryStart();
+    });
+  },
+
+  /**
+   * 新意图在 adopt 完成后、begin 之前到达时，精确停掉本次新起的 WebAudio copy。
+   * generation + deck + source 三重核对避免迟到 cleanup 把后来已经接管同一物理 Deck
+   * 的新歌误停。
+   */
+  discardExternalAdoption(adoption: ExternalPlaybackAdoption): boolean {
+    const el = elements[frontIndex];
+    const currentSource = absoluteMediaUrl(el.currentSrc || el.src);
+    if (
+      !ownsExternalAdoption(
+        adoption,
+        externalAdoptionGeneration,
+        frontIndex,
+        currentSource,
+      ) ||
+      adoption.element !== el
+    ) {
+      return false;
+    }
+    externalAdoptionGeneration += 1;
+    clearPreparedNextDeck();
+    if (ctx && decks) neutralize(ctx, decks[frontIndex], 0);
+    el.pause();
+    return true;
+  },
+
   /** PCM seek 后的硬播放：继续从内存采样位置走，不唤醒已静音的 HTMLMedia。 */
   async hardPlay(el: HTMLAudioElement = elements[frontIndex]): Promise<void> {
     const index = elements.indexOf(el);
@@ -1617,6 +2058,7 @@ export const djEngine = {
    */
   prepareSeek(source: string): void {
     if (!djEngine.warmup() || !ctx || !decks || pending || seekBusy) return;
+    clearPreparedNextDeck();
     const backIndex: 0 | 1 = frontIndex === 0 ? 1 : 0;
     const back = decks[backIndex];
     neutralize(ctx, back, 0);
@@ -1634,6 +2076,10 @@ export const djEngine = {
    * 一个渲染量子就从目标位置出声。只有解码未完成/超内存上限时才走流式 shadow。
    */
   seamlessSeek(source: string, target: number, shouldPlay: boolean): Promise<HTMLAudioElement> {
+    externalAdoptionGeneration += 1;
+    // 普通 seek 会借用备用 Deck。先使预测凭据失效，避免 begin 把随后被覆盖的
+    // element 误认为仍然保有下一首的 Range 缓冲。
+    clearPreparedNextDeck();
     const at = Math.max(0, target);
     seekOperationGeneration += 1;
     abortTransport();
@@ -1925,6 +2371,8 @@ export const djEngine = {
    * 返回 false = 引擎不可用，调用方走普通换歌。
    */
   begin(next: Track, options: DjBeginOptions): boolean {
+    // begin 正式接管刚 adopt 的 front；从此旧异步分支不得再把它当临时 copy 清理。
+    externalAdoptionGeneration += 1;
     seekOperationGeneration += 1;
     abortSeamlessSeek("target");
     if (!options.transitions.length || !djEngine.warmup() || !ctx || !decks) return false;
@@ -1960,14 +2408,25 @@ export const djEngine = {
     const tempo = effectiveFromBpm ?? next.bpm ?? FALLBACK_BPM;
     const beatSeconds = 60 / Math.max(1, tempo);
 
+    const requestedSource = absoluteMediaUrl(mediaUrlForTrack(next));
+    const reusePrepared = canReusePreparedBrowserDeck(preparedNextDeck, {
+      deckIndex: backIndex,
+      trackId: next.id,
+      source: requestedSource,
+    });
+    clearPreparedNextDeck();
     input.el.pause();
     neutralize(ctx, input);
     input.fader.gain.setValueAtTime(0, ctx.currentTime); // 静音进场，曲线负责抬
     // 在装载 / 起播之前就配置变速器，避免已经播放后突然切 playbackRate，触发
     // WebKit 的 preservesPitch 时间拉伸器重新初始化。
     input.el.playbackRate = rate;
-    input.el.src = mediaUrlForTrack(next);
-    input.el.load();
+    // 命中预测预热时保留媒体元素已有的 Range/解码缓冲。无条件重写相同 src 再
+    // load 会把 readyState 清零，正是混入在线曲后每次切换都会“顿一下”的根因。
+    if (!reusePrepared || !hasMediaSource(input.el, requestedSource)) {
+      input.el.src = requestedSource;
+      input.el.load();
+    }
 
     frontIndex = backIndex;
 
@@ -1985,10 +2444,13 @@ export const djEngine = {
       // 也达到 HAVE_FUTURE_DATA；否则淡入已开始，解码器却还在处理 Range 跳转。
       if (!cueApplied) {
         if (input.el.readyState < HTMLMediaElement.HAVE_METADATA) return;
-        try {
-          input.el.currentTime = cue;
-        } catch {
-          /* 极少数格式 metadata 到了仍不能 seek；保留从头接歌的回退 */
+        // 对已经预热在 cue 的元素重复赋 currentTime 也会重新发 Range 并丢缓冲。
+        if (needsPreparedCueSeek(input.el.currentTime, cue)) {
+          try {
+            input.el.currentTime = cue;
+          } catch {
+            /* 极少数格式 metadata 到了仍不能 seek；保留从头接歌的回退 */
+          }
         }
         cueApplied = true;
       }
@@ -2106,10 +2568,14 @@ export const djEngine = {
    * 用户硬切歌 / 按停止 / 关掉预设时调。对着一台从没动过的引擎调它是空操作。
    */
   cancel(): void {
+    externalAdoptionGeneration += 1;
     seekOperationGeneration += 1;
     seekBusy = false;
     abortTransport();
     abortSeamlessSeek("target");
+    // hard load / source replacement 都先经过 cancel。预测凭据必须和物理 element
+    // 同生共死；否则旧 metadata 迟到后可能让 begin 跳过新曲真正需要的 load。
+    clearPreparedNextDeck();
     // 先原子地停完两台，再发布 idle。以前 clearPending() 会先通知 PlayerBar，
     // idle 订阅立刻启动静音预热，与这次 pause/cancel 在同一调用栈里互相抢 play/pause。
     const wasTransitioning = transitionPhase !== "idle";
@@ -2218,6 +2684,7 @@ export const djEngine = {
   silenceForExit(): void {
     abortTransport();
     abortSeamlessSeek("target");
+    clearPreparedNextDeck();
     clearPending();
     releaseDecodedPlayback();
     for (const el of elements) {

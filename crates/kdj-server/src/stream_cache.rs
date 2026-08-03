@@ -55,6 +55,9 @@ struct StreamCacheInner {
     /// 本进程已经按 manifest 校验过的文件；重启后会重新逐字节校验一次。
     verified: Mutex<HashSet<String>>,
     verifying: Mutex<HashSet<String>>,
+    /// Android bounded Range 无法直接提交完整 writer 时，只保留一份“播放空闲后再
+    /// 补整轨”的计划；它不算 active write，也不持有网络/磁盘槽位。
+    deferred: Mutex<HashSet<String>>,
     enabled: AtomicBool,
     /// 清理或关闭缓存时递增；旧 writer 下一块数据到达便主动放弃。
     generation: AtomicU64,
@@ -69,6 +72,7 @@ impl Default for StreamCacheInner {
             inflight: Mutex::new(HashMap::new()),
             verified: Mutex::new(HashSet::new()),
             verifying: Mutex::new(HashSet::new()),
+            deferred: Mutex::new(HashSet::new()),
             enabled: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             next_reservation: AtomicU64::new(0),
@@ -121,6 +125,7 @@ impl StreamCache {
         self.inner.inflight.lock().unwrap().clear();
         self.inner.verified.lock().unwrap().clear();
         self.inner.verifying.lock().unwrap().clear();
+        self.inner.deferred.lock().unwrap().clear();
     }
 
     pub fn set_enabled(&self, enabled: bool) {
@@ -132,6 +137,22 @@ impl StreamCache {
 
     pub fn is_writing(&self, key: &str) -> bool {
         self.inner.inflight.lock().unwrap().contains_key(key)
+    }
+
+    /// 预约一份“不与播放争抢”的延迟缓存任务。同 key 已有计划时立即返回 None。
+    pub fn defer_until_idle(&self, key: String) -> Option<DeferredStreamCache> {
+        if !self.inner.enabled.load(Ordering::Acquire) {
+            return None;
+        }
+        let generation = self.inner.generation.load(Ordering::Acquire);
+        if !self.inner.deferred.lock().unwrap().insert(key.clone()) {
+            return None;
+        }
+        Some(DeferredStreamCache {
+            inner: Arc::clone(&self.inner),
+            key,
+            generation,
+        })
     }
 
     /// 在任何 sleep/网络请求前原子预约 key。clear/关闭会使预约 generation 失效，
@@ -361,6 +382,26 @@ impl StreamCache {
     }
 }
 
+pub struct DeferredStreamCache {
+    inner: Arc<StreamCacheInner>,
+    key: String,
+    generation: u64,
+}
+
+impl DeferredStreamCache {
+    pub fn is_valid(&self) -> bool {
+        self.inner.enabled.load(Ordering::Acquire)
+            && self.inner.generation.load(Ordering::Acquire) == self.generation
+            && self.inner.deferred.lock().unwrap().contains(&self.key)
+    }
+}
+
+impl Drop for DeferredStreamCache {
+    fn drop(&mut self) {
+        self.inner.deferred.lock().unwrap().remove(&self.key);
+    }
+}
+
 pub struct StreamCacheReservation {
     inner: Arc<StreamCacheInner>,
     key: String,
@@ -388,6 +429,22 @@ impl StreamCacheReservation {
             return false;
         }
         let Ok(slot) = self.inner.background_slots.clone().acquire_owned().await else {
+            return false;
+        };
+        if !self.is_valid() {
+            return false;
+        }
+        self.slot = Some(slot);
+        true
+    }
+
+    /// 媒体代理的 inline tee 绝不能等后台缓存槽位：等待会延迟首包，等价于让
+    /// 可选缓存反向阻塞声音。拿不到就立即放弃本次持久写入，媒体仍照常播放。
+    pub fn try_acquire_slot(&mut self) -> bool {
+        if !self.is_valid() {
+            return false;
+        }
+        let Ok(slot) = self.inner.background_slots.clone().try_acquire_owned() else {
             return false;
         };
         if !self.is_valid() {
@@ -738,6 +795,23 @@ mod tests {
         );
         drop(second);
         assert!(!cache.is_writing("same"));
+    }
+
+    #[test]
+    fn deferred_cache_is_singleflight_but_never_looks_like_an_active_write() {
+        let cache = StreamCache::default();
+        cache.set_enabled(true);
+        let deferred = cache
+            .defer_until_idle("bounded-range".into())
+            .expect("first idle fallback");
+        assert!(deferred.is_valid());
+        assert!(cache.defer_until_idle("bounded-range".into()).is_none());
+        assert!(
+            !cache.is_writing("bounded-range"),
+            "waiting for playback to become idle must not keep waveform polling active"
+        );
+        drop(deferred);
+        assert!(cache.defer_until_idle("bounded-range".into()).is_some());
     }
 
     #[tokio::test]
