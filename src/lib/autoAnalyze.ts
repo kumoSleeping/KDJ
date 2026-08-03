@@ -25,6 +25,7 @@ import { api } from "./api";
 import { useAppStore } from "../stores/appStore";
 import { useDownloadStore } from "../stores/downloadStore";
 import { selectAnalyzing, useLibraryStore } from "../stores/libraryStore";
+import { isOutsideFolder } from "./outsideFolder";
 import { isStreamTrack } from "./streamTrack";
 import type { Track } from "../types";
 
@@ -335,31 +336,63 @@ async function backfill(): Promise<boolean> {
   // 后端每批各起各的线程组，一起跑就是一起慢，所以"低优先级"只能靠**晚点提交**。
   if (Date.now() - viewportAt < VIEWPORT_YIELD_MS) return false;
   const library = useLibraryStore.getState();
-  const pending = library.stats ? library.stats.total - library.stats.analyzed : 0;
-  if (pending <= 0) return false;
+  const pendingV1 = library.stats ? library.stats.total - library.stats.analyzed : 0;
+  const pendingV2 = library.stats?.bpm_key_v2_pending ?? 0;
+  const activeFolder =
+    library.filter.folder && !isOutsideFolder(library.filter.folder) ? library.filter.folder : "";
+  if (pendingV1 <= 0 && pendingV2 <= 0) return false;
 
   backfillInFlight = true;
   try {
-    // 从最近加进来的开始补：新下的歌最可能是用户下一步要用的
-    const page = await api.tracks({
-      analyzed: "false",
-      sort: "added_at",
-      order: "desc",
-      limit: BACKFILL_BATCH,
-      offset: 0,
-    });
-    const ids = page.items.map((track) => track.id).filter((id) => !queued.has(id));
-    if (ids.length === 0) {
-      // 队头这批全排过却还是没分析上（取消掉了，或者文件没了）。
-      // 再排一遍还是同一批，这一会话就不补了，等用户手动点「分析」。
-      stalled = page.items.length > 0;
-      return false;
+    if (pendingV1 > 0) {
+      // 从最近加进来的开始补：新下的歌最可能是用户下一步要用的
+      let page = await api.tracks({
+        analyzed: "false",
+        folder: activeFolder || undefined,
+        folder_deep: activeFolder ? "true" : undefined,
+        sort: "added_at",
+        order: "desc",
+        limit: BACKFILL_BATCH,
+        offset: 0,
+      });
+      // 当前文件夹的 v1 已补完后，继续全曲库，不让空文件夹把后台回填卡住。
+      if (page.items.length === 0 && activeFolder) {
+        page = await api.tracks({
+          analyzed: "false",
+          sort: "added_at",
+          order: "desc",
+          limit: BACKFILL_BATCH,
+          offset: 0,
+        });
+      }
+      const ids = page.items.map((track) => track.id).filter((id) => !queued.has(id));
+      if (ids.length === 0) {
+        // 队头这批全排过却还是没分析上（取消掉了，或者文件没了）。
+        // 再排一遍还是同一批，这一会话就不补了，等用户手动点「分析」。
+        stalled = page.items.length > 0;
+        return false;
+      }
+      // 这中间隔了一次网络往返，用户可能刚好点了播放或开始下载，再确认一次
+      if (!autoEnabled() || !idle()) return false;
+      for (const id of ids) queued.add(id);
+      const response = await library.startAnalyze(ids, false, false);
+      return response.queued > 0;
     }
-    // 这中间隔了一次网络往返，用户可能刚好点了播放或开始下载，再确认一次
-    if (!autoEnabled() || !idle()) return false;
-    for (const id of ids) queued.add(id);
-    const response = await library.startAnalyze(ids, false, false);
-    return response.queued > 0;
+
+    // v1 已补齐后，后端按当前 revision 挑最近加入的 20 首缺失 v2 曲目重跑。
+    // 不把 id 拉到前端：v2 是否过期由数据库里的修订号判断，避免前端复制版本逻辑。
+    const response = await library.startAnalyze(
+      null,
+      false,
+      false,
+      "v2",
+      BACKFILL_BATCH,
+      activeFolder,
+    );
+    if (response.queued > 0 || !activeFolder) return response.queued > 0;
+    // 当前文件夹已没有待处理 v2 时，回到全曲库继续，不会反复请求一个空范围。
+    const global = await library.startAnalyze(null, false, false, "v2", BACKFILL_BATCH);
+    return global.queued > 0;
   } catch {
     // 后端没起来之类：下一轮再试，不打扰用户
     return false;

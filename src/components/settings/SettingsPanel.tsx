@@ -4,7 +4,7 @@ import type {
   PointerEvent as ReactPointerEvent,
   RefObject,
 } from "react";
-import { Monitor, Moon, Sun } from "lucide-react";
+import { Monitor, Moon, Sun, Trash2 } from "lucide-react";
 import {
   DJ_BARS_OPTIONS,
   DJ_EFFECTS,
@@ -35,14 +35,15 @@ import {
 } from "../../lib/lyricsPrefs";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { useTrackClickPrefs } from "../../lib/trackClickPrefs";
+import { api } from "../../lib/api";
+import { formatBytes } from "../../lib/format";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
-import { libraryPasteMode } from "../../lib/libraryPaste";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
-import type { LibraryPasteMode, Quality, SearchDropMode } from "../../types";
+import type { Quality, StreamCacheStats } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useUpdateStore } from "../../stores/updateStore";
-import { InlineNotice, Panel } from "../common";
+import { Button, InlineNotice, Panel } from "../common";
 import { AccountRow } from "./AccountRow";
 import { UpdateRow } from "./UpdateRow";
 
@@ -486,6 +487,9 @@ export function SettingsPanel() {
   const theme = useAppStore((state) => state.settings?.theme ?? "system");
   const settings = useAppStore((state) => state.settings);
   const saveSettings = useAppStore((state) => state.saveSettings);
+  const [streamCacheStats, setStreamCacheStats] = useState<StreamCacheStats | null>(null);
+  const [streamCacheBusy, setStreamCacheBusy] = useState(false);
+  const [streamCacheError, setStreamCacheError] = useState("");
   const transitions = useDjConfig((state) => state.transitions);
   const effects = useDjConfig((state) => state.effects);
   const bars = useDjConfig((state) => state.bars);
@@ -565,6 +569,59 @@ export function SettingsPanel() {
     void refreshAccounts();
   }, [refreshAccounts]);
 
+  useEffect(() => {
+    let disposed = false;
+    const refresh = () => {
+      void api
+        .streamCacheStats()
+        .then((stats) => {
+          if (!disposed) {
+            setStreamCacheStats(stats);
+            setStreamCacheError("");
+          }
+        })
+        .catch((error: unknown) => {
+          if (!disposed) {
+            setStreamCacheError(error instanceof Error ? error.message : String(error));
+          }
+        });
+    };
+    refresh();
+    // 关闭/清理后仍短轮询：在途 writer 会异步收尾，不能把“缓存中”永久留在 UI。
+    const timer = window.setInterval(refresh, 3_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [settings?.download_dir, settings?.stream_cache_enabled]);
+
+  const toggleStreamCache = async () => {
+    if (!settings || streamCacheBusy) return;
+    setStreamCacheBusy(true);
+    setStreamCacheError("");
+    await saveSettings({ stream_cache_enabled: !settings.stream_cache_enabled });
+    try {
+      setStreamCacheStats(await api.streamCacheStats());
+    } catch (error) {
+      setStreamCacheError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setStreamCacheBusy(false);
+    }
+  };
+
+  const clearStreamCache = async () => {
+    if (streamCacheBusy) return;
+    setStreamCacheBusy(true);
+    setStreamCacheError("");
+    try {
+      setStreamCacheStats(await api.clearStreamCache());
+    } catch (error) {
+      setStreamCacheError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setStreamCacheBusy(false);
+    }
+  };
+
   const selected = useLibraryStore(selectSelectedTrack);
   const bpm = selected?.bpm ?? null;
   const bpmLabel = bpm ? `${Math.round(bpm)} BPM` : "120 BPM（未分析，按默认估）";
@@ -626,36 +683,6 @@ export function SettingsPanel() {
                 <Icon size={16} strokeWidth={2} aria-hidden="true" />
               </button>
             ))}
-          </div>
-        </Panel>
-
-        <Panel heading="曲库粘贴" dense>
-          <div className="kd-djp-switch-list" aria-label="曲库粘贴">
-            <CycleToggle<LibraryPasteMode>
-              label="粘贴快捷键"
-              value={libraryPasteMode(settings)}
-              options={[
-                { id: "link", text: "链接" },
-                { id: "copy", text: "复制文件" },
-              ]}
-              title="Cmd/Ctrl+V 与不按 Option 的拖放：链接（硬链接优先）或真复制一份。移动始终走 Option/Alt+V、剪切，或右键「粘贴」。"
-              onChange={(next) => void saveSettings({ library_paste: next })}
-            />
-          </div>
-        </Panel>
-
-        <Panel heading="搜索结果拖放" dense>
-          <div className="kd-djp-switch-list" aria-label="搜索结果拖放">
-            <CycleToggle<SearchDropMode>
-              label="拖入曲库文件夹"
-              value={settings?.search_drop_mode === "download" ? "download" : "stream"}
-              options={[
-                { id: "stream", text: "添加流媒体" },
-                { id: "download", text: "下载到本地" },
-              ]}
-              title="搜索结果拖入左侧文件夹时的默认动作。默认只加入流媒体来源，不立即下载；视频结果始终下载。"
-              onChange={(next) => void saveSettings({ search_drop_mode: next })}
-            />
           </div>
         </Panel>
 
@@ -727,6 +754,50 @@ export function SettingsPanel() {
               ]}
               title="视频在线播放画质上限；实际画质仍由平台账号和视频本身决定。"
               onChange={(next) => void saveSettings({ video_playback_max_height: Number(next) })}
+            />
+            <Switch
+              checked={settings?.stream_cache_enabled ?? false}
+              disabled={!settings || streamCacheBusy}
+              label="缓存在线播放"
+              title={
+                streamCacheStats?.path
+                  ? `完整音频在后台写入 ${streamCacheStats.path}；命中后直接从本地播放。`
+                  : "完整音频在后台写入下载目录的 .kdj/stream-cache；命中后直接从本地播放。"
+              }
+              onChange={() => void toggleStreamCache()}
+            />
+            <div className="kd-stream-cache-row" title={streamCacheStats?.path}>
+              <span className="kd-muted">
+                {streamCacheStats
+                  ? `${streamCacheStats.files} 首 · ${formatBytes(streamCacheStats.bytes)}`
+                  : "正在读取缓存…"}
+                {streamCacheStats?.active_writes
+                  ? ` · ${streamCacheStats.active_writes} 首缓存中`
+                  : streamCacheStats?.partial_files
+                    ? ` · ${streamCacheStats.partial_files} 个未完成 · ${formatBytes(streamCacheStats.partial_bytes)}`
+                    : ""}
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={
+                  streamCacheBusy ||
+                  !streamCacheStats ||
+                  (streamCacheStats.files === 0 &&
+                    streamCacheStats.partial_files === 0 &&
+                    streamCacheStats.active_writes === 0)
+                }
+                title="清理已完成和未完成的在线播放缓存"
+                onClick={() => void clearStreamCache()}
+              >
+                <Trash2 size={12} aria-hidden="true" />
+                清理
+              </Button>
+            </div>
+            <InlineNotice
+              text={streamCacheError}
+              block
+              onDismiss={() => setStreamCacheError("")}
             />
           </div>
         </Panel>

@@ -2,15 +2,25 @@
 
 use std::sync::Arc;
 
-use kdj_core::models::{LyricsRequest, LyricsResponse, LyricText, Platform, SongSource};
+use kdj_core::models::{LyricText, LyricsRequest, LyricsResponse, Platform, SongSource};
 use kdj_providers::MusicProvider;
 
-use crate::aggregate::{artist_similarity, duration_similarity, title_similarity};
+use crate::aggregate::{
+    artist_similarity, duration_similarity, normalize_artists, title_similarity,
+};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
-/// 本地曲 ↔ 在线候选的匹配门槛；略低于同曲去重阈值，方便本地文件元数据不齐时仍能命中。
-const LYRIC_MATCH_THRESHOLD: f64 = 0.55;
+/// 本地曲 ↔ 在线候选的匹配门槛。歌词一旦命中就会被显示/缓存，不能像普通搜索
+/// 那样只凭“标题相似”放过明显不同的艺人。
+const LYRIC_MATCH_THRESHOLD: f64 = 0.65;
+
+fn artists_compatible(requested: &[String], source: &SongSource) -> bool {
+    let requested = normalize_artists(requested);
+    let source = normalize_artists(&source.artists);
+    // 本地文件没有艺人标签，或平台候选没有艺人时，仍允许标题 + 时长匹配。
+    requested.is_empty() || source.is_empty() || !requested.is_disjoint(&source)
+}
 
 fn match_score(title: &str, artists: &[String], duration: Option<f64>, source: &SongSource) -> f64 {
     0.6 * title_similarity(title, &source.title)
@@ -28,7 +38,14 @@ fn query_of(title: &str, artist: &str) -> String {
     }
 }
 
-fn response_of(text: LyricText, platform: Platform, key: String, title: String, artist: String, score: f64) -> LyricsResponse {
+fn response_of(
+    text: LyricText,
+    platform: Platform,
+    key: String,
+    title: String,
+    artist: String,
+    score: f64,
+) -> LyricsResponse {
     LyricsResponse {
         lrc: text.lrc,
         translated_lrc: text.translated_lrc,
@@ -185,7 +202,7 @@ pub async fn lookup(state: &AppState, req: LyricsRequest) -> ApiResult<LyricsRes
                 }
             }
             let score = match_score(&title, &artists, req.duration, &source);
-            if score >= LYRIC_MATCH_THRESHOLD {
+            if artists_compatible(&artists, &source) && score >= LYRIC_MATCH_THRESHOLD {
                 candidates.push((source, score));
             }
         }
@@ -218,4 +235,54 @@ pub async fn lookup(state: &AppState, req: LyricsRequest) -> ApiResult<LyricsRes
     Err(ApiError::not_found(format!(
         "没找到「{title}」的歌词（已查{engine_label}）"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source(title: &str, artist: &str, duration: Option<f64>) -> SongSource {
+        SongSource {
+            platform: Platform::Wyy,
+            key: "123".into(),
+            title: title.into(),
+            artists: if artist.is_empty() {
+                Vec::new()
+            } else {
+                vec![artist.into()]
+            },
+            album: String::new(),
+            duration,
+            cover: String::new(),
+            max_quality: None,
+            vip: false,
+            payload: Default::default(),
+        }
+    }
+
+    #[test]
+    fn lyric_search_rejects_same_title_from_a_different_artist() {
+        let requested = vec!["EXIT TRANCE".to_string()];
+        let original = source("only my railgun", "fripSide", Some(257.0));
+        assert!(!artists_compatible(&requested, &original));
+        assert!(
+            match_score("only my railgun", &requested, Some(270.0), &original)
+                < LYRIC_MATCH_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn lyric_search_allows_exact_remix_and_missing_artist_metadata() {
+        let requested = vec!["EXIT TRANCE".to_string()];
+        let remix = source("only my railgun", "EXIT TRANCE", Some(270.0));
+        assert!(artists_compatible(&requested, &remix));
+        assert!(
+            match_score("only my railgun", &requested, Some(270.0), &remix)
+                >= LYRIC_MATCH_THRESHOLD
+        );
+
+        let unknown = vec!["Unknown".to_string()];
+        let candidate_without_artist = source("only my railgun", "", Some(270.0));
+        assert!(artists_compatible(&unknown, &candidate_without_artist));
+    }
 }

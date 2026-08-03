@@ -17,6 +17,8 @@ export type {
 } from "./lyricsColor";
 
 const STORAGE_KEY = "kd-lyrics-prefs";
+/** 0.2.27 曾把在线补词默认设成关闭；新默认开启，并迁移旧的未配置状态。 */
+const ONLINE_LYRICS_PREF_VERSION = 1;
 
 export type LyricsEngine = "wyy" | "qqm";
 /** 跟随曲库来源，或强制只用来源平台搜/取词。 */
@@ -97,7 +99,7 @@ const DEFAULTS: LyricsPrefs = {
   autoShow: false,
   engines: ["wyy", "qqm"],
   displaySource: "follow",
-  tryOnlineWhenMissing: false,
+  tryOnlineWhenMissing: true,
   lyricExtra: "meaning",
   asideFace: "detail",
   desktopEnabled: false,
@@ -316,6 +318,7 @@ function load(): LyricsPrefs {
       showTranslation?: boolean;
       showRomaji?: boolean;
       desktopLockConfigured?: boolean;
+      lyricsPrefsVersion?: number;
     };
     // 兼容旧键 floatWindow
     const autoShow =
@@ -335,10 +338,14 @@ function load(): LyricsPrefs {
       autoShow,
       engines: normalizeEngines(data.engines),
       displaySource: normalizeSource(data.displaySource),
+      // 0.2.27 的这个开关默认是 false，且没有版本标记；未明确配置过的旧状态
+      // 统一迁到新的默认行为，避免升级后“无本地歌词”的曲目继续全部空白。
       tryOnlineWhenMissing:
-        typeof data.tryOnlineWhenMissing === "boolean"
-          ? data.tryOnlineWhenMissing
-          : DEFAULTS.tryOnlineWhenMissing,
+        data.lyricsPrefsVersion === ONLINE_LYRICS_PREF_VERSION
+          ? typeof data.tryOnlineWhenMissing === "boolean"
+            ? data.tryOnlineWhenMissing
+            : DEFAULTS.tryOnlineWhenMissing
+          : true,
       lyricExtra,
       asideFace: normalizeAsideFace(data.asideFace),
       desktopEnabled:
@@ -420,7 +427,11 @@ function load(): LyricsPrefs {
 function save(prefs: LyricsPrefs): void {
   localStorage.setItem(
     STORAGE_KEY,
-    JSON.stringify({ ...pickPrefs(prefs), desktopLockConfigured: true }),
+    JSON.stringify({
+      ...pickPrefs(prefs),
+      desktopLockConfigured: true,
+      lyricsPrefsVersion: ONLINE_LYRICS_PREF_VERSION,
+    }),
   );
   // 桌面歌词是独立 WebView：WKWebView 往往不派发跨窗 storage 事件，改用 Tauri 广播。
   notifyPrefsChanged();

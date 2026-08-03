@@ -126,7 +126,11 @@ export function buildOverlayTimeline(options: {
     return { ...base, placeholder: `${title} · 正在搜歌词…`, lines: [] };
   }
   if (entry.status === "error" || entry.status === "empty" || !entry.lines.length) {
-    return { ...base, placeholder: "", lines: [] };
+    return {
+      ...base,
+      placeholder: entry.status === "error" ? "歌词暂时不可用" : "未找到歌词",
+      lines: [],
+    };
   }
 
   const hasMeaning = entry.translated.some((line) => line.text.trim());

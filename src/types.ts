@@ -5,7 +5,7 @@
 
 export type Platform = "wyy" | "qqm" | "soundcloud" | "bilibili" | "local";
 export type Quality = "flac" | "320" | "128";
-export type SearchKind = "song" | "artist" | "album";
+export type SearchKind = "song" | "playlist" | "artist" | "album";
 export type TaskState = "queued" | "running" | "processing" | "done" | "failed" | "canceled";
 export type AccountState = "missing" | "valid" | "expired" | "unknown";
 export type QrStateValue = "waiting" | "scanned" | "done" | "expired" | "refused" | "error";
@@ -27,11 +27,6 @@ export interface Health {
 /** 删除曲目时怎么处置文件：只删记录 / 移到系统回收站 / 直接删掉。 */
 export type FileDisposalMode = "keep" | "trash" | "remove";
 
-/** 粘贴快捷键：链接进文件夹，或真复制一份文件。移动不在此列。 */
-export type LibraryPasteMode = "link" | "copy";
-/** 搜索结果拖入曲库文件夹时默认添加来源，或直接入下载队列。 */
-export type SearchDropMode = "stream" | "download";
-
 export type VideoFormat = "mp4" | "mkv" | "mov";
 
 export interface Settings {
@@ -40,6 +35,8 @@ export interface Settings {
   default_quality: Quality;
   /** 在线流媒体播放请求的起始音质，与下载音质分开。 */
   stream_quality: Quality;
+  /** 播放时把完整在线音频流缓存到下载目录下的 .kdj。 */
+  stream_cache_enabled: boolean;
   /** 视频在线播放的画质上限，与视频下载画质分开。 */
   video_playback_max_height: number;
   filename_template: string;
@@ -71,13 +68,6 @@ export interface Settings {
   /** 播放条使用分析波形；关掉时显示常规进度条。 */
   player_waveform: boolean;
   /**
-   * 曲库 Cmd/Ctrl+V（及不按 Option 的拖放）默认行为。
-   * 移动始终走 Option/Alt+V、剪切，或右键「粘贴」。
-   */
-  library_paste: LibraryPasteMode;
-  /** 搜索结果拖入文件夹的默认语义；默认 stream。 */
-  search_drop_mode: SearchDropMode;
-  /**
    * 只读派生字段（后端 GET/PUT /api/settings 附带）：全新安装的默认下载落点
    * ——系统「下载」目录 + KDJ。「保存到」菜单里的「系统下载」项用它。
    * PUT 回去会被后端忽略，不持久化。
@@ -85,15 +75,29 @@ export interface Settings {
   default_download_dir?: string;
 }
 
+export interface StreamCacheStats {
+  enabled: boolean;
+  path: string;
+  files: number;
+  bytes: number;
+  partial_files: number;
+  partial_bytes: number;
+  active_writes: number;
+}
+
 export interface Account {
   platform: Platform;
   label: string;
   state: AccountState;
+  /** 仅用于本机私人目录缓存隔离的稳定平台账号键，不是登录凭证。 */
+  account_key?: string;
   nickname: string;
   avatar: string;
   detail: string;
-  /** false = 该平台没有扫码登录（SoundCloud 走 yt-dlp），前端不要显示登录按钮。 */
+  /** false = 该平台当前没有可用登录方式，前端不要显示登录入口。 */
   supports_login: boolean;
+  /** qr = 扫码，oauth = 系统浏览器 OAuth。旧后端缺字段时按 qr 处理。 */
+  login_method?: "qr" | "oauth";
 }
 
 /** 同一登录会话下的一张可选二维码（QQ 音乐会同时给 QQ 音乐 / QQ 两张）。 */
@@ -118,6 +122,23 @@ export interface QrState {
   state: QrStateValue;
   message: string;
   account: Account | null;
+}
+
+export interface SoundCloudOAuthStart {
+  state: string;
+  authorization_url: string;
+  expires_in: number;
+}
+
+export interface SoundCloudOAuthStatus {
+  state: string;
+  status: "pending" | "done" | "error" | string;
+  message: string;
+}
+
+export interface SoundCloudOAuthCallback {
+  state: string;
+  code: string;
 }
 
 export interface SongSource {
@@ -217,9 +238,18 @@ export interface CollectionResolveResponse {
   platform: Platform;
   title: string;
   sources: SongSource[];
+  /** 已存在于本地曲库的 `platform:key`，用于避免把远程集合误标成全新。 */
+  in_library_source_keys?: string[];
 }
 
-export type IntakeKind = "search" | "song" | "playlist" | "album" | "unknown" | "error";
+export type IntakeKind =
+  | "search"
+  | "song"
+  | "playlist"
+  | "artist"
+  | "album"
+  | "unknown"
+  | "error";
 
 export interface IntakeRequest {
   text: string;
@@ -339,14 +369,6 @@ export interface VjExportRequest {
   unify_gain: boolean;
 }
 
-export interface StreamLibraryItem {
-  id: number;
-  folder: string;
-  source: SongSource;
-  added_at: string;
-  downloaded: boolean;
-}
-
 export interface StreamPlaylist {
   platform: Exclude<Platform, "local" | "bilibili">;
   key: string;
@@ -354,6 +376,8 @@ export interface StreamPlaylist {
   cover: string;
   count: number;
   is_favorite: boolean;
+  /** favorite / created / collected；旧后端缺字段时按未知处理。 */
+  origin?: "favorite" | "created" | "collected" | string;
 }
 
 export interface StreamPlaylistResponse {
@@ -361,6 +385,7 @@ export interface StreamPlaylistResponse {
   key: string;
   title: string;
   sources: SongSource[];
+  in_library_source_keys?: string[];
 }
 
 export interface Track {
@@ -379,6 +404,8 @@ export interface Track {
   format: string;
   size: number;
   bpm: number | null;
+  /** 当前展示的 BPM 来自现行 V2 分析结果；旧后端缺字段时按 false。 */
+  bpm_v2?: boolean;
   bpm_confidence: number | null;
   first_beat: number | null;
   music_key: string;
@@ -403,8 +430,6 @@ export interface Track {
   tags: string[];
   /** 所在目录（path 的父目录）。文件夹树按它归位。 */
   folder: string;
-  /** ""=普通文件；"hardlink"/"symlink"=和别处共用同一份数据。 */
-  link: string;
 }
 
 export interface FolderNode {
@@ -437,14 +462,31 @@ export interface FolderForgetResult {
   tree: FolderTree;
 }
 
-export type FileOp = "move" | "link" | "copy";
+export type FileOp = "move" | "copy";
+export type FolderUndoOp = "move" | "copy" | "delete";
+
+export interface FolderUndoStatus {
+  available: boolean;
+  op: FolderUndoOp | null;
+  count: number;
+}
 
 export interface FolderOpResult {
-  /** move：被改了路径的曲目；link：新建出来的曲目。 */
+  /** move：被改了路径的曲目；copy：新建出来的曲目。 */
   track_ids: number[];
   op: FileOp;
-  /** 实际用的方式统计，如 {"hardlink": 3, "copy": 1}。 */
+  /** 实际用的方式统计，如 {"copy": 1}。 */
   methods: Record<string, number>;
+  errors: Record<string, string>;
+  /** 操作完成后的最近一次可撤回状态。 */
+  undo: FolderUndoStatus;
+}
+
+export interface FolderUndoResponse {
+  undone: number;
+  track_ids: number[];
+  op: FolderUndoOp;
+  status: FolderUndoStatus;
   errors: Record<string, string>;
 }
 
@@ -521,6 +563,11 @@ export interface HarmonicMatch {
 export interface LibraryStats {
   total: number;
   analyzed: number;
+  /** 当前算法修订已生成 BPM/Key v2 的曲目数。 */
+  bpm_key_v2_analyzed?: number;
+  /** 仍需由后台渐进回填 BPM/Key v2 的曲目数。 */
+  bpm_key_v2_pending?: number;
+  bpm_key_v2_revision?: string;
   total_duration: number;
   total_size: number;
   /** 旧后端可能不返回；前端缺失时退回原始 1–10 能量。 */
@@ -613,6 +660,8 @@ export interface KdjBridge {
   mediaPermissionGranted: () => Promise<boolean>;
   /** 用系统浏览器开外链（Release 页等）。 */
   openExternal?: (url: string) => Promise<void>;
+  /** 桌面独立 OAuth 窗口；同进程拦截回调，开发态无需注册 kdj://。 */
+  openSoundcloudOAuth?: (url: string) => Promise<void>;
   /**
    * 桌面直接问 Tauri Updater 的清单；只有当前安装格式真的存在签名更新包时
    * 才会返回 newer=true。移动端/浏览器没有它，继续走 GitHub Release API。

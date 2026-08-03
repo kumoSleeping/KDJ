@@ -6,7 +6,7 @@
 //!   否则曲库里会混进 30 秒的残次品；
 //! - 短链只有 host 确实是 163cn.tv 时才展开（盲 SSRF）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -15,9 +15,9 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
 use kdj_core::models::{
-    Account, AccountState, CollectionResolveResponse, CollectionResult, LyricText, Platform, Quality,
-    QrSession, QrStateValue, ResolveKind, ResolveResponse, SearchKind, SongSource, StreamPlaylist,
-    StreamPlaylistResponse,
+    Account, AccountState, CollectionResolveResponse, CollectionResult, LyricText, Platform,
+    QrSession, QrStateValue, Quality, ResolveKind, ResolveResponse, SearchKind, SongSource,
+    StreamPlaylist, StreamPlaylistResponse,
 };
 use kdj_core::paths::render_filename;
 use serde_json::{json, Map, Value};
@@ -26,14 +26,19 @@ use tokio::io::AsyncWriteExt as _;
 use super::client::{expect_ok, payload, NeteaseClient, HOST};
 use crate::net::{host_is, AtomicDownload};
 use crate::provider::{
-    effective_limit, first_truthy, is_truthy, loose_int, qr_data_url_from_text, unique_download_path,
-    str_field, Capabilities, DownloadJob, MusicProvider, ProviderContext,
+    effective_limit, first_truthy, is_truthy, loose_int, qr_data_url_from_text, str_field,
+    unique_download_path, Capabilities, DownloadJob, MusicProvider, ProviderContext,
 };
 use crate::tags;
 
 const LABEL: &str = "网易云音乐";
 const QR_SESSION_TTL_SECS: u64 = 15 * 60;
-const SEARCH_KINDS: &[SearchKind] = &[SearchKind::Song, SearchKind::Artist, SearchKind::Album];
+const SEARCH_KINDS: &[SearchKind] = &[
+    SearchKind::Song,
+    SearchKind::Playlist,
+    SearchKind::Artist,
+    SearchKind::Album,
+];
 
 /// 契约音质 → (网易云 level, 期望容器)
 fn level_of(quality: Quality) -> (&'static str, &'static str) {
@@ -71,16 +76,12 @@ impl NeteaseProvider {
         // 只有 host 确实是 163cn.tv 时才展开短链——此前用子串判断，
         // 任意 URL 只要带上 ?ref=163cn.tv 就会让我们去请求它（盲 SSRF）。
         if host_is(&text, "163cn.tv") && !host_is(&text, "music.163.com") {
-            if let Ok(resolved) = crate::net::expand_short_link(
-                self.client.http(),
-                &text,
-                4,
-                &|host| {
+            if let Ok(resolved) =
+                crate::net::expand_short_link(self.client.http(), &text, 4, &|host| {
                     let host = host.to_ascii_lowercase();
                     host == "163cn.tv" || host == "music.163.com" || host.ends_with(".163.com")
-                },
-            )
-            .await
+                })
+                .await
             {
                 if host_is(&resolved, "music.163.com") {
                     text = resolved;
@@ -118,7 +119,11 @@ impl NeteaseProvider {
     ///
     /// 大歌单的 detail 接口只回前若干首完整曲目，但 `trackIds` 永远是完整的，
     /// 所以主路径是"拿 trackIds 分批查详情"。
-    async fn playlist_tracks(&self, playlist_id: &str, limit: usize) -> Result<(String, Vec<Value>)> {
+    async fn playlist_tracks(
+        &self,
+        playlist_id: &str,
+        limit: usize,
+    ) -> Result<(String, Vec<Value>)> {
         let body = self
             .client
             .weapi(
@@ -171,6 +176,118 @@ impl NeteaseProvider {
             .cloned()
             .unwrap_or_default();
         Ok((title, songs.into_iter().take(limit).collect()))
+    }
+
+    /// 专辑详情和链接解析共用这一条，避免搜索集合能展开、分享链接却走另一套接口。
+    async fn album_tracks(&self, album_id: &str, limit: usize) -> Result<(String, Vec<Value>)> {
+        let body: Value = self
+            .client
+            .http()
+            .get(format!("{HOST}/api/v1/album/{album_id}"))
+            .send()
+            .await
+            .context("读取网易云专辑详情失败")?
+            .error_for_status()
+            .context("网易云专辑详情返回错误")?
+            .json()
+            .await
+            .context("解析网易云专辑详情失败")?;
+        if body
+            .get("code")
+            .and_then(Value::as_i64)
+            .is_some_and(|code| code != 200)
+        {
+            bail!("网易云专辑详情返回错误（id={album_id}）");
+        }
+        let title = body
+            .get("album")
+            .and_then(|album| str_field(album, "name"))
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("网易云专辑 {album_id}"));
+        let songs = body
+            .get("songs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(has_netease_song_key)
+            .take(limit)
+            .collect();
+        Ok((title, songs))
+    }
+
+    /// `/api/v1/artist/{id}` 只有热门 50 首；这里使用真正可分页的艺术家歌曲接口。
+    async fn artist_tracks(&self, artist_id: &str, limit: usize) -> Result<(String, Vec<Value>)> {
+        const PAGE_SIZE: usize = 100;
+        const MAX_PAGES: usize = 50;
+
+        let mut songs = Vec::new();
+        let mut seen = HashSet::new();
+        let mut title = String::new();
+        let mut offset = 0usize;
+
+        for _ in 0..MAX_PAGES {
+            let page_size = PAGE_SIZE.min(limit.saturating_sub(songs.len())).max(1);
+            let body = self
+                .client
+                .weapi(
+                    "/weapi/v1/artist/songs",
+                    payload([
+                        ("id", Value::String(artist_id.to_string())),
+                        ("offset", Value::String(offset.to_string())),
+                        ("total", Value::String("true".into())),
+                        ("limit", Value::String(page_size.to_string())),
+                        ("order", Value::String("hot".into())),
+                    ]),
+                )
+                .await?;
+            expect_ok(&body, "读取网易云艺术家歌曲")?;
+
+            let page = body
+                .get("songs")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if title.is_empty() {
+                title = body
+                    .get("artist")
+                    .and_then(|artist| str_field(artist, "name"))
+                    .or_else(|| {
+                        page.iter()
+                            .find_map(|song| netease_song_artist_name(song, artist_id))
+                    })
+                    .or_else(|| page.iter().find_map(netease_song_primary_artist))
+                    .unwrap_or_default()
+                    .to_string();
+            }
+            if page.is_empty() {
+                break;
+            }
+
+            let fetched = page.len();
+            for song in page {
+                let key = song.get("id").map(stringify_id).unwrap_or_default();
+                if !key.is_empty() && seen.insert(key) {
+                    songs.push(song);
+                    if songs.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            if songs.len() >= limit {
+                break;
+            }
+
+            offset = offset.saturating_add(fetched);
+            if netease_page_finished(&body, offset, fetched, page_size) {
+                break;
+            }
+        }
+
+        if title.is_empty() {
+            title = format!("网易云艺术家 {artist_id}");
+        }
+        Ok((title, songs))
     }
 
     /// 拿播放直链。返回 (url, 实际容器扩展名, 文件大小)。
@@ -298,10 +415,13 @@ impl MusicProvider for NeteaseProvider {
             Ok(status) => status,
             Err(err) => {
                 // 网络抖动不能把"已登录"误报成掉线，降级成 unknown 让前端保持原样
-                let mut account =
-                    Account::new(Platform::Wyy, LABEL, AccountState::Unknown, "");
+                let mut account = Account::new(Platform::Wyy, LABEL, AccountState::Unknown, "");
                 account.detail = truncate(&format!("登录态检查失败：{err}"), 160);
-                if let Some(nickname) = cached_nickname(&self.client.profile()) {
+                let cached_profile = self.client.profile();
+                if let Some(account_key) = cached_account_key(&cached_profile) {
+                    account.account_key = account_key;
+                }
+                if let Some(nickname) = cached_nickname(&cached_profile) {
                     account.nickname = nickname;
                 }
                 return account;
@@ -311,7 +431,7 @@ impl MusicProvider for NeteaseProvider {
         let data = status.get("data").unwrap_or(&status);
         let profile = data.get("profile");
         let account_id = data.get("account").and_then(|a| a.get("id"));
-        if let (Some(profile), Some(_)) = (profile, account_id) {
+        if let (Some(profile), Some(account_id)) = (profile, account_id) {
             if !profile.is_null() {
                 self.client.set_profile(Some(status.clone()));
                 let vip_type = profile.get("vipType").and_then(Value::as_i64).unwrap_or(0);
@@ -319,8 +439,13 @@ impl MusicProvider for NeteaseProvider {
                     Platform::Wyy,
                     LABEL,
                     AccountState::Valid,
-                    if vip_type != 0 { "黑胶会员" } else { "普通用户" },
+                    if vip_type != 0 {
+                        "黑胶会员"
+                    } else {
+                        "普通用户"
+                    },
                 );
+                account.account_key = account_key_value(account_id).unwrap_or_default();
                 account.nickname = profile
                     .get("nickname")
                     .and_then(Value::as_str)
@@ -490,10 +615,16 @@ impl MusicProvider for NeteaseProvider {
         limit: usize,
     ) -> Result<Vec<CollectionResult>> {
         let keyword = keyword.trim();
-        if keyword.is_empty() || !matches!(kind, SearchKind::Artist | SearchKind::Album) {
+        if keyword.is_empty()
+            || !matches!(
+                kind,
+                SearchKind::Playlist | SearchKind::Artist | SearchKind::Album
+            )
+        {
             return Ok(Vec::new());
         }
         let kind_code = match kind {
+            SearchKind::Playlist => "1000",
             SearchKind::Album => "10",
             SearchKind::Artist => "100",
             SearchKind::Song => return Ok(Vec::new()),
@@ -512,53 +643,7 @@ impl MusicProvider for NeteaseProvider {
             )
             .await?;
         expect_ok(&body, "网易云集合搜索")?;
-        let result = body.get("result").unwrap_or(&Value::Null);
-        let entries = match kind {
-            SearchKind::Album => result.get("albums").and_then(Value::as_array),
-            SearchKind::Artist => result.get("artists").and_then(Value::as_array),
-            SearchKind::Song => None,
-        }
-        .cloned()
-        .unwrap_or_default();
-        Ok(entries
-            .iter()
-            .take(limit)
-            .filter_map(|entry| {
-                let key = entry.get("id").map(stringify_id).filter(|key| !key.is_empty())?;
-                let title = str_field(entry, "name")?.to_string();
-                let (subtitle, cover, count) = match kind {
-                    SearchKind::Album => (
-                        format!(
-                            "{} 首 · {}",
-                            loose_int(entry.get("size")),
-                            str_field(entry.get("artist").unwrap_or(&Value::Null), "name")
-                                .unwrap_or("未知艺人")
-                        ),
-                        str_field(entry, "picUrl").unwrap_or_default().to_string(),
-                        loose_int(entry.get("size")).max(0) as usize,
-                    ),
-                    SearchKind::Artist => (
-                        format!(
-                            "{} 首 · {} 张专辑",
-                            loose_int(entry.get("musicSize")),
-                            loose_int(entry.get("albumSize"))
-                        ),
-                        str_field(entry, "picUrl").unwrap_or_default().to_string(),
-                        loose_int(entry.get("musicSize")).max(0) as usize,
-                    ),
-                    SearchKind::Song => (String::new(), String::new(), 0),
-                };
-                Some(CollectionResult {
-                    kind,
-                    platform: Platform::Wyy,
-                    key,
-                    title,
-                    subtitle,
-                    cover,
-                    count,
-                })
-            })
-            .collect())
+        Ok(netease_collection_results(&body, kind, limit))
     }
 
     async fn resolve_collection(
@@ -568,45 +653,29 @@ impl MusicProvider for NeteaseProvider {
         limit: usize,
     ) -> Result<Option<CollectionResolveResponse>> {
         let key = key.trim();
-        if key.is_empty() || !matches!(kind, SearchKind::Artist | SearchKind::Album) {
+        if key.is_empty()
+            || !matches!(
+                kind,
+                SearchKind::Playlist | SearchKind::Artist | SearchKind::Album
+            )
+        {
             return Ok(None);
         }
-        let endpoint = match kind {
-            SearchKind::Album => format!("{HOST}/api/v1/album/{key}"),
-            SearchKind::Artist => format!("{HOST}/api/v1/artist/{key}"),
+        let limit = effective_limit(limit, 500);
+        let (title, songs) = match kind {
+            SearchKind::Playlist => self.playlist_tracks(key, limit).await?,
+            SearchKind::Album => self.album_tracks(key, limit).await?,
+            SearchKind::Artist => self.artist_tracks(key, limit).await?,
             SearchKind::Song => return Ok(None),
         };
-        let body: Value = self
-            .client
-            .http()
-            .get(endpoint)
-            .send()
-            .await
-            .context("读取网易云集合详情失败")?
-            .error_for_status()
-            .context("网易云集合详情返回错误")?
-            .json()
-            .await
-            .context("解析网易云集合详情失败")?;
-        let list_key = if kind == SearchKind::Album { "songs" } else { "hotSongs" };
-        let songs = body
-            .get(list_key)
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
         if songs.is_empty() {
             bail!("网易云集合没有可用歌曲（{key}）");
         }
-        let title = body
-            .get(if kind == SearchKind::Album { "album" } else { "artist" })
-            .and_then(|value| str_field(value, "name"))
-            .unwrap_or_else(|| if kind == SearchKind::Album { "网易云专辑" } else { "网易云作者" })
-            .to_string();
         Ok(Some(CollectionResolveResponse {
             kind,
             platform: Platform::Wyy,
             title,
-            sources: songs.iter().take(effective_limit(limit, 500)).map(to_source).collect(),
+            sources: songs.iter().take(limit).map(to_source).collect(),
         }))
     }
 
@@ -628,6 +697,7 @@ impl MusicProvider for NeteaseProvider {
         if uid.is_empty() {
             return Ok(Vec::new());
         }
+        let owner_uid = uid.clone();
         let body = self
             .client
             .weapi(
@@ -647,15 +717,34 @@ impl MusicProvider for NeteaseProvider {
             .into_iter()
             .flatten()
             .filter_map(|entry| {
-                let key = entry.get("id").map(stringify_id).filter(|value| !value.is_empty())?;
+                let key = entry
+                    .get("id")
+                    .map(stringify_id)
+                    .filter(|value| !value.is_empty())?;
                 let title = str_field(entry, "name")?.to_string();
                 Some(StreamPlaylist {
                     platform: Platform::Wyy,
                     key,
                     title,
-                    cover: str_field(entry, "coverImgUrl").unwrap_or_default().to_string(),
+                    cover: str_field(entry, "coverImgUrl")
+                        .unwrap_or_default()
+                        .to_string(),
                     count: loose_int(entry.get("trackCount")).max(0) as usize,
                     is_favorite: loose_int(entry.get("specialType")) == 5,
+                    origin: if loose_int(entry.get("specialType")) == 5 {
+                        "favorite".into()
+                    } else {
+                        let creator_id = entry
+                            .pointer("/creator/userId")
+                            .or_else(|| entry.get("userId"))
+                            .map(stringify_id)
+                            .unwrap_or_default();
+                        if creator_id == owner_uid {
+                            "created".into()
+                        } else {
+                            "collected".into()
+                        }
+                    },
                 })
             })
             .collect();
@@ -690,26 +779,29 @@ impl MusicProvider for NeteaseProvider {
             return Ok(None);
         };
         let limit = effective_limit(limit, 500);
-        if kind == ResolveKind::Song {
-            let songs = self.track_detail(std::slice::from_ref(&key)).await?;
-            let Some(song) = songs.first() else {
-                bail!("没有读取到这首网易云歌曲（id={key}）");
-            };
-            let source = to_source(song);
-            return Ok(Some(ResolveResponse {
-                kind: ResolveKind::Song,
-                platform: Platform::Wyy,
-                title: source.title.clone(),
-                sources: vec![source],
-            }));
-        }
-
-        let (title, songs) = self.playlist_tracks(&key, limit).await?;
+        let (title, songs) = match kind {
+            ResolveKind::Song => {
+                let songs = self.track_detail(std::slice::from_ref(&key)).await?;
+                let Some(song) = songs.first() else {
+                    bail!("没有读取到这首网易云歌曲（id={key}）");
+                };
+                let source = to_source(song);
+                return Ok(Some(ResolveResponse {
+                    kind: ResolveKind::Song,
+                    platform: Platform::Wyy,
+                    title: source.title.clone(),
+                    sources: vec![source],
+                }));
+            }
+            ResolveKind::Playlist => self.playlist_tracks(&key, limit).await?,
+            ResolveKind::Album => self.album_tracks(&key, limit).await?,
+            ResolveKind::Unknown => return Ok(None),
+        };
         if songs.is_empty() {
-            bail!("没有读取到这个网易云歌单（id={key}）");
+            bail!("没有读取到这个网易云集合（id={key}）");
         }
         Ok(Some(ResolveResponse {
-            kind: ResolveKind::Playlist,
+            kind,
             platform: Platform::Wyy,
             title,
             sources: songs.iter().take(limit).map(to_source).collect(),
@@ -848,7 +940,8 @@ impl MusicProvider for NeteaseProvider {
             }
         }
         if cover_url.is_empty() {
-            cover_url = cover_from_detail(&Value::Object(source.payload.clone())).unwrap_or_default();
+            cover_url =
+                cover_from_detail(&Value::Object(source.payload.clone())).unwrap_or_default();
         }
         let cover = self.fetch_cover(&cover_url).await;
         let artists = if source.artists.is_empty() {
@@ -871,7 +964,7 @@ impl MusicProvider for NeteaseProvider {
 
 // ---------------------------------------------------------------- 纯函数
 
-/// `/song?id=1` `/playlist?id=1` `#/song?id=1` 三种形状都要认。
+/// `/song?id=1` `/playlist?id=1` `/album?id=1` 及其 hash/path 形状都要认。
 fn parse_netease_path(text: &str) -> Option<(ResolveKind, String)> {
     let parsed = url::Url::parse(text).ok()?;
     let mut params: HashMap<String, String> = parsed
@@ -908,18 +1001,32 @@ fn parse_netease_path(text: &str) -> Option<(ResolveKind, String)> {
         if path_lower.contains("/playlist") {
             return Some((ResolveKind::Playlist, id.clone()));
         }
+        if path_lower.contains("/album") {
+            return Some((ResolveKind::Album, id.clone()));
+        }
     }
-    for (kind, marker) in [(ResolveKind::Song, "song"), (ResolveKind::Playlist, "playlist")] {
+    for (kind, marker) in [
+        (ResolveKind::Song, "song"),
+        (ResolveKind::Playlist, "playlist"),
+        (ResolveKind::Album, "album"),
+    ] {
         if let Some(id) = digits_after(&path_lower, marker) {
             return Some((kind, id));
         }
     }
     if let Some(id) = params.get("id").filter(|id| !id.is_empty()) {
-        if text.contains("song") && !path_lower.contains("playlist") {
+        let text_lower = text.to_ascii_lowercase();
+        if text_lower.contains("song")
+            && !path_lower.contains("playlist")
+            && !path_lower.contains("album")
+        {
             return Some((ResolveKind::Song, id.clone()));
         }
-        if text.contains("playlist") {
+        if text_lower.contains("playlist") {
             return Some((ResolveKind::Playlist, id.clone()));
+        }
+        if text_lower.contains("album") {
+            return Some((ResolveKind::Album, id.clone()));
         }
     }
     None
@@ -941,6 +1048,143 @@ fn digits_after(haystack: &str, marker: &str) -> Option<String> {
     } else {
         Some(digits)
     }
+}
+
+fn has_netease_song_key(song: &Value) -> bool {
+    song.get("id")
+        .map(stringify_id)
+        .is_some_and(|key| !key.is_empty() && key != "0")
+}
+
+fn netease_song_primary_artist(song: &Value) -> Option<&str> {
+    ["ar", "artists"].into_iter().find_map(|key| {
+        song.get(key)
+            .and_then(Value::as_array)
+            .and_then(|artists| artists.first())
+            .and_then(|artist| str_field(artist, "name"))
+    })
+}
+
+fn netease_song_artist_name<'a>(song: &'a Value, artist_id: &str) -> Option<&'a str> {
+    ["ar", "artists"].into_iter().find_map(|key| {
+        song.get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|artist| {
+                artist
+                    .get("id")
+                    .map(stringify_id)
+                    .is_some_and(|id| id == artist_id)
+            })
+            .and_then(|artist| str_field(artist, "name"))
+    })
+}
+
+fn netease_page_finished(
+    body: &Value,
+    next_offset: usize,
+    fetched: usize,
+    requested: usize,
+) -> bool {
+    let total = loose_int(body.get("total")).max(0) as usize;
+    if total > 0 {
+        next_offset >= total
+    } else if let Some(more) = body.get("more").and_then(|value| {
+        value
+            .as_bool()
+            .or_else(|| value.as_i64().map(|value| value != 0))
+    }) {
+        !more
+    } else {
+        fetched < requested
+    }
+}
+
+fn netease_collection_results(
+    body: &Value,
+    kind: SearchKind,
+    limit: usize,
+) -> Vec<CollectionResult> {
+    let result = body.get("result").unwrap_or(&Value::Null);
+    let entries = match kind {
+        SearchKind::Playlist => result.get("playlists").and_then(Value::as_array),
+        SearchKind::Album => result.get("albums").and_then(Value::as_array),
+        SearchKind::Artist => result.get("artists").and_then(Value::as_array),
+        SearchKind::Song => None,
+    }
+    .into_iter()
+    .flatten();
+
+    entries
+        .take(limit)
+        .filter_map(|entry| {
+            let key = entry
+                .get("id")
+                .map(stringify_id)
+                .filter(|key| !key.is_empty())?;
+            let title = str_field(entry, "name")?.to_string();
+            let (subtitle, cover, count) = match kind {
+                SearchKind::Playlist => {
+                    let count = loose_int(entry.get("trackCount")).max(0) as usize;
+                    let creator = entry
+                        .get("creator")
+                        .and_then(|value| str_field(value, "nickname"))
+                        .unwrap_or("未知创建者");
+                    (
+                        format!("{count} 首 · {creator}"),
+                        str_field(entry, "coverImgUrl")
+                            .unwrap_or_default()
+                            .to_string(),
+                        count,
+                    )
+                }
+                SearchKind::Album => {
+                    let count = loose_int(entry.get("size")).max(0) as usize;
+                    let artist = entry
+                        .get("artist")
+                        .and_then(|value| str_field(value, "name"))
+                        .or_else(|| {
+                            entry
+                                .get("artists")
+                                .and_then(Value::as_array)
+                                .and_then(|artists| artists.first())
+                                .and_then(|artist| str_field(artist, "name"))
+                        })
+                        .unwrap_or("未知艺人");
+                    (
+                        format!("{count} 首 · {artist}"),
+                        str_field(entry, "picUrl").unwrap_or_default().to_string(),
+                        count,
+                    )
+                }
+                SearchKind::Artist => {
+                    let count = loose_int(entry.get("musicSize")).max(0) as usize;
+                    (
+                        format!(
+                            "{count} 首 · {} 张专辑",
+                            loose_int(entry.get("albumSize")).max(0)
+                        ),
+                        str_field(entry, "picUrl")
+                            .or_else(|| str_field(entry, "img1v1Url"))
+                            .unwrap_or_default()
+                            .to_string(),
+                        count,
+                    )
+                }
+                SearchKind::Song => return None,
+            };
+            Some(CollectionResult {
+                kind,
+                platform: Platform::Wyy,
+                key,
+                title,
+                subtitle,
+                cover,
+                count,
+            })
+        })
+        .collect()
 }
 
 /// 要不要为了封面回查一次详情。
@@ -1085,7 +1329,11 @@ fn quality_and_vip(song: &Value) -> (Option<Quality>, bool) {
     };
     // fee 这条**不是**真值链：Python 写的是 `privilege.get("fee", song.get("fee"))`，
     // 带默认值的 get——privilege 里有 fee=0 就用 0，不往顶层退。
-    let fee = loose_int(privilege.and_then(|p| p.get("fee")).or_else(|| song.get("fee")));
+    let fee = loose_int(
+        privilege
+            .and_then(|p| p.get("fee"))
+            .or_else(|| song.get("fee")),
+    );
     // fee: 1=VIP 专享 4=专辑付费 8=低音质免费（非会员只能听低码率）
     (max_quality, fee == 1 || fee == 4)
 }
@@ -1130,6 +1378,22 @@ fn cached_nickname(profile: &Option<Value>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn cached_account_key(profile: &Option<Value>) -> Option<String> {
+    let root = profile.as_ref()?;
+    let data = root.get("data").unwrap_or(root);
+    account_key_value(data.get("account")?.get("id")?)
+}
+
+fn account_key_value(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| value.as_i64().map(|value| value.to_string()))
+        .or_else(|| value.as_u64().map(|value| value.to_string()))
+}
+
 fn new_session_id() -> String {
     // 只用来做本进程内的会话键，不需要密码学强度
     format!("{:032x}", rand::random::<u128>())
@@ -1161,12 +1425,74 @@ mod tests {
             parse_netease_path("https://music.163.com/m/playlist?id=999&userid=1"),
             Some((ResolveKind::Playlist, "999".into()))
         );
+        assert_eq!(
+            parse_netease_path("https://music.163.com/album?id=18915"),
+            Some((ResolveKind::Album, "18915".into()))
+        );
+        assert_eq!(
+            parse_netease_path("https://music.163.com/#/album?id=18915"),
+            Some((ResolveKind::Album, "18915".into()))
+        );
+        assert_eq!(
+            parse_netease_path("https://music.163.com/album/18915"),
+            Some((ResolveKind::Album, "18915".into()))
+        );
     }
 
     #[test]
     fn non_netease_links_are_not_claimed() {
-        assert_eq!(parse_netease_path("https://y.qq.com/n/ryqq/songDetail/x"), None);
+        assert_eq!(
+            parse_netease_path("https://y.qq.com/n/ryqq/songDetail/x"),
+            None
+        );
         assert_eq!(parse_netease_path("not a url"), None);
+    }
+
+    #[test]
+    fn playlist_search_rows_are_normalized_as_collections() {
+        let body = json!({
+            "result": {
+                "playlists": [{
+                    "id": 123,
+                    "name": "夜间 Set",
+                    "trackCount": 42,
+                    "coverImgUrl": "https://p1.music.126.net/cover.jpg",
+                    "creator": {"nickname": "DJ Kumo"}
+                }]
+            }
+        });
+        let rows = netease_collection_results(&body, SearchKind::Playlist, 10);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, SearchKind::Playlist);
+        assert_eq!(rows[0].key, "123");
+        assert_eq!(rows[0].title, "夜间 Set");
+        assert_eq!(rows[0].subtitle, "42 首 · DJ Kumo");
+        assert_eq!(rows[0].count, 42);
+    }
+
+    #[test]
+    fn artist_pagination_prefers_total_then_more_then_short_page() {
+        assert!(!netease_page_finished(
+            &json!({"total": 568}),
+            100,
+            100,
+            100
+        ));
+        assert!(netease_page_finished(&json!({"total": 568}), 568, 68, 100));
+        assert!(!netease_page_finished(&json!({"more": true}), 50, 50, 100));
+        assert!(netease_page_finished(&json!({"more": false}), 50, 50, 100));
+        assert!(netease_page_finished(&json!({}), 50, 50, 100));
+    }
+
+    #[test]
+    fn artist_collection_title_matches_the_requested_artist_id() {
+        let song = json!({
+            "ar": [
+                {"id": 1, "name": "合作者"},
+                {"id": 6452, "name": "周杰伦"}
+            ]
+        });
+        assert_eq!(netease_song_artist_name(&song, "6452"), Some("周杰伦"));
     }
 
     #[test]
@@ -1208,7 +1534,10 @@ mod tests {
         // Python 是 `int(maxbr)`：字符串码率照样能转
         let song = json!({"privilege": {"maxbr": "999000", "fee": "1"}});
         assert_eq!(quality_and_vip(&song), (Some(Quality::Flac), true));
-        assert_eq!(quality_and_vip(&json!({"privilege": {"maxbr": "x"}})).0, None);
+        assert_eq!(
+            quality_and_vip(&json!({"privilege": {"maxbr": "x"}})).0,
+            None
+        );
     }
 
     #[test]
@@ -1351,8 +1680,7 @@ mod tests {
     fn a_thirty_second_preview_is_rejected_even_before_commit() {
         // 这条盯的是真实回归：检测跑在 `.partial` 上，如果时长读不出来
         // 就只剩"小于 100KB"这一个判据，30 秒的 VIP 试听片段（1MB 以上）会直接入库。
-        let dir =
-            std::env::temp_dir().join(format!("kdj-preview-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kdj-preview-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let partial = dir.join("试听.flac.partial");

@@ -106,7 +106,7 @@ export function LibraryWorkRail({
   asideToggle,
 }: {
   showDownloads?: boolean;
-  /** 宽屏右栏开合键，在文件夹内搜索键右侧。 */
+  /** 宽屏右栏开合键，始终位于本栏工具组最右侧。 */
   asideToggle?: ReactNode;
 }) {
   const scan = useLibraryStore((state) => state.scan);
@@ -138,9 +138,11 @@ export function LibraryWorkRail({
     () => null,
   );
   const [locating, setLocating] = useState(false);
+  // 在线试听是负数临时曲目，不能交给曲库定位；歌词仍可使用完整播放快照。
+  const locatableTrack = playingTrack && playingTrack.id > 0 ? playingTrack : null;
 
   const locatePlaying = async () => {
-    if (!playingTrack || locating) return;
+    if (!locatableTrack || locating) return;
     setLocating(true);
     try {
       const waitLoading = async () => {
@@ -155,16 +157,16 @@ export function LibraryWorkRail({
       /** 在当前列表视图里翻页找正在播；找到就选中并滚过去。 */
       const locateInCurrentView = async () => {
         const store = useLibraryStore.getState();
-        store.selectTrack(playingTrack);
-        await store.ensureTrackLoaded(playingTrack.id);
-        if (!useLibraryStore.getState().tracks.some((track) => track.id === playingTrack.id)) {
+        store.selectTrack(locatableTrack);
+        await store.ensureTrackLoaded(locatableTrack.id);
+        if (!useLibraryStore.getState().tracks.some((track) => track.id === locatableTrack.id)) {
           return false;
         }
         // 等虚拟列表吃进新页再滚，否则 rAF 时行还没挂上会看起来像「点了没反应」。
         await afterPaint();
         window.dispatchEvent(
           new CustomEvent(DETAIL_EVENT, {
-            detail: { source: "locate-playing", trackId: playingTrack.id } satisfies DetailEventDetail,
+            detail: { source: "locate-playing", trackId: locatableTrack.id } satisfies DetailEventDetail,
           }),
         );
         return true;
@@ -176,7 +178,7 @@ export function LibraryWorkRail({
         const store = useLibraryStore.getState();
         const folder = store.filter.folder.trim().replaceAll("\\", "/").replace(/\/+$/, "");
         const q = store.filter.q.trim();
-        const path = (playingTrack.path || "").replaceAll("\\", "/");
+        const path = (locatableTrack.path || "").replaceAll("\\", "/");
         const clearlyElsewhere =
           Boolean(folder) &&
           !isOutsideFolder(folder) &&
@@ -266,23 +268,23 @@ export function LibraryWorkRail({
 
   const trailingTools = (
     <span className="kd-activity-trailing-tools">
+      {folderSearchToggle}
       <button
         type="button"
         className="kd-activity-search-toggle"
         aria-label="定位正在播放"
         title={
-          playingTrack
-            ? `定位正在播放：${playingTrack.title || playingTrack.filename}`
-            : "当前没有正在播放的曲目"
+          locatableTrack
+            ? `定位正在播放：${locatableTrack.title || locatableTrack.filename}`
+            : "当前没有可定位的曲目"
         }
-        disabled={!playingTrack || locating}
+        disabled={!locatableTrack || locating}
         onClick={() => {
           void locatePlaying();
         }}
       >
         <LocateFixed size={14} strokeWidth={2.25} />
       </button>
-      {folderSearchToggle}
       {asideToggle}
     </span>
   );
@@ -312,7 +314,7 @@ export function LibraryWorkRail({
                   variant="ghost"
                   size="sm"
                   disabled={selectedIds.length === 0}
-                  onClick={() => copyToClipboard("link")}
+                  onClick={() => copyToClipboard("copy")}
                 >
                   <Copy size={12} /> 复制
                 </Button>
@@ -342,22 +344,6 @@ export function LibraryWorkRail({
         texts={[]}
         trailing={
           <span className="kd-activity-trailing-tools">
-            <button
-              type="button"
-              className="kd-activity-search-toggle"
-              aria-label="定位正在播放"
-              title={
-                playingTrack
-                  ? `定位正在播放：${playingTrack.title || playingTrack.filename}`
-                  : "当前没有正在播放的曲目"
-              }
-              disabled={!playingTrack || locating}
-              onClick={() => {
-                void locatePlaying();
-              }}
-            >
-              <LocateFixed size={14} strokeWidth={2.25} />
-            </button>
             <LibrarySearchField
               inputRef={searchInputRef}
               value={filter.q}
@@ -366,6 +352,22 @@ export function LibraryWorkRail({
               onClear={clearSearch}
               onBlurEmpty={() => setSearchOpen(false)}
             />
+            <button
+              type="button"
+              className="kd-activity-search-toggle"
+              aria-label="定位正在播放"
+              title={
+                locatableTrack
+                  ? `定位正在播放：${locatableTrack.title || locatableTrack.filename}`
+                  : "当前没有可定位的曲目"
+              }
+              disabled={!locatableTrack || locating}
+              onClick={() => {
+                void locatePlaying();
+              }}
+            >
+              <LocateFixed size={14} strokeWidth={2.25} />
+            </button>
             {asideToggle}
           </span>
         }

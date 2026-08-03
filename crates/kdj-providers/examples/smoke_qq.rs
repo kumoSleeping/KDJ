@@ -13,12 +13,16 @@ async fn main() -> anyhow::Result<()> {
             default_quality: Quality::Flac,
             netease_use_download_api: false,
             soundcloud_enabled: false,
+            soundcloud_client_id: String::new(),
+            soundcloud_client_secret: String::new(),
             video_dir: None,
             video_format: "mp4".into(),
         },
     );
     let provider = QqMusicProvider::new(ctx)?;
-    let keyword = std::env::args().nth(1).unwrap_or_else(|| "Supernova".into());
+    let keyword = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "Supernova".into());
 
     println!("== account ==\n{:?}\n", provider.account().await);
 
@@ -27,8 +31,13 @@ async fn main() -> anyhow::Result<()> {
     for item in &results {
         println!(
             "  {} | {} | {} | {:?} | vip={} | {:?}s | cover={}",
-            item.key, item.title, item.artist_text(), item.max_quality, item.vip,
-            item.duration, !item.cover.is_empty()
+            item.key,
+            item.title,
+            item.artist_text(),
+            item.max_quality,
+            item.vip,
+            item.duration,
+            !item.cover.is_empty()
         );
     }
 
@@ -49,7 +58,10 @@ async fn main() -> anyhow::Result<()> {
             Ok(path) => {
                 let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 println!("\n== download OK: {} ({} bytes) ==", path.display(), size);
-                println!("   duration={:?}", kdj_providers::tags::read_duration_secs(&path));
+                println!(
+                    "   duration={:?}",
+                    kdj_providers::tags::read_duration_secs(&path)
+                );
             }
             Err(err) => println!("\n== download 失败：{err:#} =="),
         }

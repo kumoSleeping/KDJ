@@ -3,7 +3,6 @@
  */
 
 import { getBridge } from "./bridge";
-import { notifyStreamLibraryChanged } from "./streamLibrary";
 import type {
   Account,
   AnalyzeResponseLike,
@@ -16,6 +15,8 @@ import type {
   FolderForgetResult,
   FolderOpResult,
   FolderTree,
+  FolderUndoResponse,
+  FolderUndoStatus,
   HarmonicMatch,
   Health,
   IntakeRequest,
@@ -24,12 +25,15 @@ import type {
   UpdateInfo,
   QrSession,
   QrState,
+  SoundCloudOAuthStart,
+  SoundCloudOAuthStatus,
+  SoundCloudOAuthCallback,
   ResolveResponse,
   CollectionResult,
   ScanResponseLike,
-  StreamLibraryItem,
   StreamPlaylist,
   StreamPlaylistResponse,
+  StreamCacheStats,
   LyricsRequest,
   LyricsResponse,
   LocalLyricsResponse,
@@ -88,6 +92,35 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return data as T;
 }
 
+/** 和 request 共用同一套错误语义，但保留图片响应为 Blob。 */
+async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> {
+  const { baseUrl } = bridge();
+  const headers = new Headers(init.headers);
+  if (init.body !== undefined && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/api${path}`, {
+      ...init,
+      headers,
+      cache: "no-store",
+    });
+  } catch (error) {
+    throw new ApiError(`无法连接本地服务：${(error as Error).message}`, 0);
+  }
+  if (!response.ok) {
+    const text = await response.text();
+    const data = text ? safeParse(text) : null;
+    const detail =
+      (data && typeof data === "object" && "detail" in data
+        ? String((data as { detail: unknown }).detail)
+        : "") || response.statusText;
+    throw new ApiError(detail || `HTTP ${response.status}`, response.status, data);
+  }
+  return response.blob();
+}
+
 function safeParse(text: string): unknown {
   try {
     return JSON.parse(text);
@@ -111,6 +144,11 @@ export const api = {
   loginQrState: (platform: string, sessionId: string) =>
     request<QrState>(`/accounts/${platform}/login/qr/${sessionId}`),
   logout: (platform: string) => post<Account>(`/accounts/${platform}/logout`),
+  soundcloudOAuthStart: () => request<SoundCloudOAuthStart>("/accounts/soundcloud/login/oauth"),
+  soundcloudOAuthStatus: (state: string) =>
+    request<SoundCloudOAuthStatus>(`/accounts/soundcloud/login/oauth/${encodeURIComponent(state)}`),
+  soundcloudOAuthCallback: (body: SoundCloudOAuthCallback) =>
+    post<Account>("/accounts/soundcloud/login/oauth/callback", body),
 
   search: (body: SearchRequest) => post<SearchResponse>("/search", body),
   searchCapabilities: () => request<SearchCapabilities>("/search/capabilities"),
@@ -125,14 +163,20 @@ export const api = {
   lyrics: (body: LyricsRequest) => post<LyricsResponse>("/lyrics", body),
   libraryLyrics: (trackId: number) => request<LocalLyricsResponse>(`/library/lyrics/${trackId}`),
   /**
-   * 歌曲试听直链（最低码率，不下载）。整个 SongSource 发过去：
+   * 歌曲试听代理（使用设置中的试听音质，不下载）。整个 SongSource 发过去：
    * QQ 的 media_mid、SoundCloud 的 transcoding_url 都在 payload 里。
    */
-  songPreview: async (source: SongSource) => {
-    const result = await post<{ url: string }>("/song/preview", { source });
+  songPreview: async (source: SongSource, bypassCache = false) => {
+    const result = await post<{ url: string; cached?: boolean }>("/song/preview", {
+      source,
+      bypass_cache: bypassCache,
+    });
     if (!result.url.startsWith("/")) return result;
-    return { url: `${bridge().baseUrl}${result.url}` };
+    return { ...result, url: `${bridge().baseUrl}${result.url}` };
   },
+  streamCacheStats: () => request<StreamCacheStats>("/song/cache"),
+  clearStreamCache: () =>
+    request<StreamCacheStats>("/song/cache", { method: "DELETE" }),
   resolve: (url: string, limit = 500) => post<ResolveResponse>("/resolve", { url, limit }),
   intake: (body: IntakeRequest) => post<IntakeResponse>("/intake", body),
 
@@ -190,6 +234,14 @@ export const api = {
       body: file,
       headers: { "Content-Type": file.type || "application/octet-stream" },
     }),
+  /** 读取另一首曲目的封面，供详情栏的“复用封面”拖放使用。 */
+  coverBlob: (id: number) => requestBlob(`/library/cover/${id}`),
+  /** 通过本地服务代理网易云 / QQ 封面，绕过 Tauri WebView 的跨域限制。 */
+  onlineCover: (platform: Extract<Platform, "wyy" | "qqm">, url: string) =>
+    requestBlob("/search/cover", {
+      method: "POST",
+      body: JSON.stringify({ platform, url }),
+    }),
   /**
    * 按文件里现存的标签刷新库里那条记录。
    *
@@ -198,21 +250,43 @@ export const api = {
    */
   rereadTags: (id: number) => post<Track>(`/library/tracks/${id}/reread-tags`),
   deleteTrack: (id: number, deleteFile = false) =>
-    request<{ ok: boolean }>(`/library/tracks/${id}?delete_file=${deleteFile}`, { method: "DELETE" }),
+    request<{ ok: boolean; undo?: FolderUndoStatus }>(
+      `/library/tracks/${id}?delete_file=${deleteFile}`,
+      { method: "DELETE" },
+    ),
   /**
    * 批量删除。file 决定文件本体的去向（keep/trash/remove）。
    * `errors` 按 track id 报没删成的原因（比如进不了回收站），
    * 那些曲目连库记录都原样留着——半删的状态比报错更难收拾。
    */
   deleteTracks: (ids: number[], file: FileDisposalMode) =>
-    post<{ removed: number; errors: Record<string, string> }>("/library/tracks/delete", {
+    post<{
+      removed: number;
+      errors: Record<string, string>;
+      /** 删除成功后最近一次可撤回状态；旧后端可能不返回。 */
+      undo?: FolderUndoStatus;
+    }>("/library/tracks/delete", {
       track_ids: ids,
       file,
     }),
   scan: (paths: string[], analyze = false) =>
     post<ScanResponseLike>("/library/scan", { paths, recursive: true, analyze }),
-  analyze: (trackIds: number[] | null, force = false, priority = false) =>
-    post<AnalyzeResponseLike>("/library/analyze", { track_ids: trackIds, force, priority }),
+  analyze: (
+    trackIds: number[] | null,
+    force = false,
+    priority = false,
+    version: "v1" | "v2" = "v1",
+    limit?: number,
+    folder = "",
+  ) =>
+    post<AnalyzeResponseLike>("/library/analyze", {
+      track_ids: trackIds,
+      force,
+      priority,
+      version,
+      ...(limit === undefined ? {} : { limit }),
+      ...(folder ? { folder } : {}),
+    }),
   cancelAnalyze: (jobId = "") =>
     post<{ canceled: number; remaining: number }>(
       `/library/analyze/cancel${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`,
@@ -229,17 +303,6 @@ export const api = {
   /** 检查更新走后端：CSP/证书链三个壳一条路，见 routes.rs::update_check。 */
   checkUpdate: () => request<UpdateInfo>("/update/check"),
 
-  streamLibrary: (folder = "") =>
-    request<StreamLibraryItem[]>(
-      `/library/stream${folder ? `?folder=${encodeURIComponent(folder)}` : ""}`,
-    ),
-  addStreamLibrary: async (source: SongSource, folder = "") => {
-    const result = await post<StreamLibraryItem>("/library/stream", { source, folder });
-    notifyStreamLibraryChanged();
-    return result;
-  },
-  removeStreamLibrary: (id: number) =>
-    request<{ removed: boolean }>(`/library/stream/${id}`, { method: "DELETE" }),
   streamPlaylists: (platform: Exclude<Platform, "local" | "bilibili">) =>
     request<StreamPlaylist[]>(`/stream/playlists/${platform}`),
   streamPlaylist: (playlist: StreamPlaylist, limit = 500) =>
@@ -264,6 +327,8 @@ export const api = {
     post<FolderTree>("/library/folders/move", { path, dest_parent: destParent }),
   orderFolder: (path: string, names: string[]) =>
     post<FolderTree>("/library/folders/order", { path, names }),
+  folderUndoStatus: () => request<FolderUndoStatus>("/library/folders/undo"),
+  undoFolderOp: () => post<FolderUndoResponse>("/library/folders/undo"),
   applyFolderOp: (trackIds: number[], dest: string, op: FileOp) =>
     post<FolderOpResult>("/library/folders/apply", { track_ids: trackIds, dest, op }),
 

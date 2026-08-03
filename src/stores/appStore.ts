@@ -7,7 +7,6 @@
 import { create } from "zustand";
 import { api, events } from "../lib/api";
 import type { Account, Health, SearchCapabilities, Settings, WsEvent } from "../types";
-import { notifyStreamLibraryChanged } from "../lib/streamLibrary";
 import { useDownloadStore } from "./downloadStore";
 import { useLibraryStore } from "./libraryStore";
 import { useQueueStore } from "./queueStore";
@@ -363,7 +362,6 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   },
 
   handleEvent(event) {
-    if (event.type === "library.updated") notifyStreamLibraryChanged();
     if (event.type === "account.changed") {
       const account = event.payload;
       const accounts = get().accounts;
@@ -392,6 +390,7 @@ export async function bootAll(): Promise<void> {
     useAppStore.getState().bootstrap(),
     useDownloadStore.getState().refresh(),
     useLibraryStore.getState().refreshStats(),
+    useLibraryStore.getState().refreshUndo(),
   ]);
 }
 

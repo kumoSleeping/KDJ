@@ -1,12 +1,25 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { FolderOpen, Pencil, Play, RotateCcw, Star, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { FolderOpen, Pencil, Play, Plus, RotateCcw, Search, Star, Trash2, Upload } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
 import { DASH, formatBpm, formatBytes, formatDate, formatDuration, isVideoTrack } from "../../lib/format";
+import { isPlatformEnabled } from "../../lib/enabledPlatforms";
+import { normalizePriority, normalizeSearchPlatforms } from "../../lib/searchPlatforms";
+import { useAppStore } from "../../stores/appStore";
 import { useLibraryStore } from "../../stores/libraryStore";
-import type { Track, TrackPatch } from "../../types";
+import {
+  consumeSuppressedCoverClick,
+  dispatchTrackCoverDrop,
+  finishTrackDrop,
+  isTrackDrag,
+  readTrackDragIds,
+  TRACK_COVER_DROP_EVENT,
+  TRACK_COVER_DROP_TARGET_ATTR,
+  type TrackCoverDropDetail,
+} from "../../lib/trackDrag";
+import type { Platform, SongSource, Track, TrackPatch } from "../../types";
 import { Button, Field, InlineNotice, Panel, PanelStack } from "../common";
-import { VinylPlaceholder } from "../common/VinylPlaceholder";
+import { CoverImage, VinylPlaceholder } from "../common/VinylPlaceholder";
 import { CamelotWheel } from "./CamelotWheel";
 import { useVideoPip } from "../../lib/videoPip";
 import { LocalVideoPlayer } from "./LocalVideoPlayer";
@@ -26,6 +39,35 @@ const COVER_MIME = ["image/jpeg", "image/png"];
 
 /** 标签输入框里认的分隔符。中文逗号和顿号是顺手就会打出来的，别让它们变成标签的一部分。 */
 const TAG_SEPARATOR = /[,，、;；\n]/;
+type CoverPlatform = Extract<Platform, "wyy" | "qqm">;
+
+interface CoverCandidate {
+  source: SongSource;
+  platform: CoverPlatform;
+  /** 去掉尺寸参数后的地址，用来判断两家返回的是不是同一张图。 */
+  coverKey: string;
+}
+
+const COVER_PLATFORM_LABEL: Record<CoverPlatform, string> = {
+  wyy: "网易云",
+  qqm: "QQ 音乐",
+};
+
+function coverUrlKey(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return url.trim();
+  }
+}
+
+/** 搜索结果偶尔给出 http 封面；Tauri CSP 只放行 https 图片，预览时升级协议。 */
+function coverPreviewUrl(url: string): string {
+  return url.replace(/^http:/i, "https:");
+}
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -122,6 +164,7 @@ function buildPatch(track: Track, draft: Draft): TrackPatch {
 }
 
 export function TrackDetail({ track }: { track: Track }) {
+  const settings = useAppStore((state) => state.settings);
   const updateTrack = useLibraryStore((state) => state.updateTrack);
   const setCover = useLibraryStore((state) => state.setCover);
   const rereadTags = useLibraryStore((state) => state.rereadTags);
@@ -155,7 +198,23 @@ export function TrackDetail({ track }: { track: Track }) {
    * 不说一声用户只会以为按钮点空了。
    */
   const [notice, setNotice] = useState("");
+  const [coverSearchBusy, setCoverSearchBusy] = useState(false);
+  const [coverCandidates, setCoverCandidates] = useState<CoverCandidate[]>([]);
   const coverInput = useRef<HTMLInputElement>(null);
+  const coverBusyRef = useRef(false);
+  const coverSearchEpochRef = useRef(0);
+
+  const coverPlatforms = useMemo<CoverPlatform[]>(() => {
+    const selected = new Set(
+      normalizeSearchPlatforms(settings?.search_platforms).filter((platform) =>
+        isPlatformEnabled(settings, platform),
+      ),
+    );
+    return normalizePriority(settings?.platform_priority ?? []).filter(
+      (platform): platform is CoverPlatform =>
+        (platform === "wyy" || platform === "qqm") && selected.has(platform),
+    );
+  }, [settings]);
 
   // 切曲目时把编辑态整个丢掉。**不跟着 track 的字段变**：
   // 后台分析、WS 推来的 library.updated 都会换掉这个对象，
@@ -167,6 +226,9 @@ export function TrackDetail({ track }: { track: Track }) {
     setNotice("");
     setCoverKey("");
     setHasCover(true);
+    setCoverSearchBusy(false);
+    setCoverCandidates([]);
+    coverSearchEpochRef.current += 1;
     // eslint 的 exhaustive-deps 会想要整个 track，那正是上面说的不能要的东西
   }, [track.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -191,21 +253,78 @@ export function TrackDetail({ track }: { track: Track }) {
       .finally(() => setBusy(false));
   };
 
+  const closeMetadataEditor = () => {
+    setEditing(false);
+    setCoverCandidates([]);
+    setCoverSearchBusy(false);
+    coverSearchEpochRef.current += 1;
+  };
+
   const save = run("保存", async () => {
     const patch = buildPatch(track, draft);
     // 一个字都没动就别发请求：后端会照着 patch 重写文件标签
     if (Object.keys(patch).length === 0) {
-      setEditing(false);
+      closeMetadataEditor();
       return;
     }
     const result = await updateTrack(track.id, patch);
-    setEditing(false);
+    closeMetadataEditor();
     // 数据库存住了、文件没写进去（只读 / 被 DJ 软件占着）时必须说出来，
     // 否则用户会以为拖进 Rekordbox 的那份也是新的
     if (result.tag_write_error) {
       setNotice(`已存进曲库，但文件标签没写成：${result.tag_write_error}`);
     }
   });
+
+  /** 图片上传和“复用另一首歌的封面”共用一条保存路径，避免两种入口的刷新/报错表现不一致。 */
+  const updateCover = useCallback(
+    async (load: () => Promise<Blob>, label: string): Promise<boolean> => {
+      // 复用封面要先读源图再写目标文件，期间可能跨两个请求；同一目标不能并发写标签。
+      if (busy || coverBusyRef.current) return false;
+      coverBusyRef.current = true;
+      setBusy(true);
+      setNotice("");
+      try {
+        const file = await load();
+        await setCover(track.id, file);
+        setHasCover(true);
+        setCoverKey(String(Date.now()));
+        return true;
+      } catch (error: unknown) {
+        setNotice(`${label}失败：${(error as Error).message}`);
+        return false;
+      } finally {
+        coverBusyRef.current = false;
+        setBusy(false);
+      }
+    },
+    [busy, setCover, track.id],
+  );
+
+  const reuseCover = useCallback(
+    (sourceId: number) => {
+      if (!Number.isFinite(sourceId)) return;
+      if (sourceId === track.id) {
+        setNotice("不能把这首歌的封面拖给自己");
+        return;
+      }
+      void updateCover(() => api.coverBlob(sourceId), "复用封面");
+    },
+    [track.id, updateCover],
+  );
+
+  useEffect(() => {
+    const onTrackCoverDrop = (event: Event) => {
+      const detail = (event as CustomEvent<TrackCoverDropDetail>).detail;
+      if (detail?.targetTrackId !== track.id) return;
+      const sourceId =
+        detail.ids.find((id) => Number.isFinite(id) && id !== track.id) ??
+        detail.ids.find((id) => Number.isFinite(id));
+      if (sourceId !== undefined) reuseCover(sourceId);
+    };
+    window.addEventListener(TRACK_COVER_DROP_EVENT, onTrackCoverDrop);
+    return () => window.removeEventListener(TRACK_COVER_DROP_EVENT, onTrackCoverDrop);
+  }, [reuseCover, track.id]);
 
   const pickCover = (file: File | null | undefined) => {
     if (!file) return;
@@ -215,11 +334,139 @@ export function TrackDetail({ track }: { track: Track }) {
       setNotice(`封面只支持 JPEG / PNG，这张是 ${file.type}`);
       return;
     }
-    run("换封面", async () => {
-      await setCover(track.id, file);
-      setHasCover(true);
-      setCoverKey(String(Date.now()));
-    })();
+    void updateCover(() => Promise.resolve(file), "换封面");
+  };
+
+  const selectCoverCandidate = useCallback(
+    async (candidate: CoverCandidate) => {
+      const ok = await updateCover(
+        () => api.onlineCover(candidate.platform, candidate.source.cover),
+        "在线封面",
+      );
+      if (ok) {
+        setCoverCandidates([]);
+        setNotice(`已采用${COVER_PLATFORM_LABEL[candidate.platform]}封面`);
+      }
+      return ok;
+    },
+    [updateCover],
+  );
+
+  const searchOnlineCovers = useCallback(async () => {
+    if (busy || coverSearchBusy) return;
+    if (coverPlatforms.length === 0) {
+      setNotice("先在顶部搜索栏打开网易云或 QQ 音乐");
+      return;
+    }
+    const query = [track.title || track.filename, track.artist, track.album]
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .join(" ");
+    if (!query) {
+      setNotice("这首歌没有可用于匹配的标题");
+      return;
+    }
+
+    const epoch = ++coverSearchEpochRef.current;
+    setCoverSearchBusy(true);
+    setCoverCandidates([]);
+    setNotice("");
+    try {
+      const result = await api.search({
+        query,
+        platforms: coverPlatforms,
+        limit: 6,
+        merge: false,
+        kind: "song",
+      });
+      if (epoch !== coverSearchEpochRef.current) return;
+
+      const seen = new Set<string>();
+      const candidates: CoverCandidate[] = [];
+      for (const platform of coverPlatforms) {
+        for (const source of result.per_platform[platform] ?? []) {
+          const cover = source.cover.trim();
+          if (!cover || source.platform !== platform) continue;
+          const coverKey = coverUrlKey(cover);
+          if (seen.has(coverKey)) continue;
+          seen.add(coverKey);
+          candidates.push({ source, platform, coverKey });
+          if (candidates.length >= 6) break;
+        }
+        if (candidates.length >= 6) break;
+      }
+
+      if (candidates.length === 0) {
+        const errors = Object.values(result.errors).filter(Boolean);
+        setNotice(errors[0] ? `没有找到封面：${errors[0]}` : "没有找到可用封面");
+        return;
+      }
+      if (candidates.length === 1) {
+        const ok = await selectCoverCandidate(candidates[0]);
+        if (!ok && epoch === coverSearchEpochRef.current) setCoverCandidates(candidates);
+        return;
+      }
+      setCoverCandidates(candidates);
+      setNotice(`找到 ${candidates.length} 个不同封面，请在下面选择`);
+    } catch (error: unknown) {
+      if (epoch === coverSearchEpochRef.current) {
+        setNotice(`在线匹配失败：${(error as Error).message}`);
+      }
+    } finally {
+      if (epoch === coverSearchEpochRef.current) setCoverSearchBusy(false);
+    }
+  }, [busy, coverPlatforms, coverSearchBusy, selectCoverCandidate, track.album, track.artist, track.filename, track.title]);
+
+  const openCoverEditor = () => {
+    if (consumeSuppressedCoverClick() || busy) return;
+    if (!editing) setDraft(toDraft(track));
+    setEditing(true);
+    // [+] 是入口，不让用户还要在右侧往下找 Metadata；面板顺序仍尊重用户自己的排列。
+    requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>(
+          '.kd-panel-slot[data-panel-stack="kd-detail-panels"][data-panel-id="metadata"]',
+        )
+        ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  };
+
+  const coverDragOver = (event: React.DragEvent<HTMLElement>) => {
+    // 图片文件在 WKWebView 的 dragover 阶段不一定暴露 Files MIME；
+    // 保持这个框对所有拖入都可放，drop 时再按文件 / 曲目分流。
+    event.preventDefault();
+    event.stopPropagation();
+    if (busy || coverBusyRef.current || coverSearchBusy) {
+      setDropping(false);
+      return;
+    }
+    event.dataTransfer.dropEffect = "copy";
+    setDropping(true);
+  };
+
+  const coverDragLeave = (event: React.DragEvent<HTMLElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setDropping(false);
+    }
+  };
+
+  const coverDrop = (event: React.DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDropping(false);
+    if (busy || coverBusyRef.current || coverSearchBusy) return;
+    // 文件优先：trackDrag 在 dragend 后会保留一小段时间，不能把下一次
+    // 紧接着拖入的图片误认成曲目。
+    const file = event.dataTransfer.files[0];
+    if (file) {
+      pickCover(file);
+      return;
+    }
+    if (!isTrackDrag(event)) return;
+    const ids = readTrackDragIds(event.dataTransfer);
+    if (ids.length === 0) return;
+    dispatchTrackCoverDrop(ids, track.id);
+    finishTrackDrop();
   };
 
   const coverUrl = api.coverUrl(track.id, coverKey);
@@ -229,47 +476,44 @@ export function TrackDetail({ track }: { track: Track }) {
   return (
     <div className="kd-col" style={{ gap: "0.6rem", padding: "0.7rem" }}>
       <div className="kd-row" style={{ gap: "0.6rem", alignItems: "flex-start" }}>
-        <div
-          className="kd-cover"
+        <div className="kd-cover-edit-stack">
+          <div
+            className="kd-cover kd-cover-edit"
           role="button"
           tabIndex={0}
-          aria-label="换封面"
-          title="点一下选图，也可以直接把图片拖进来（JPEG / PNG）"
+          aria-label="编辑封面"
+          title={hasCover ? "点击进入 Metadata 编辑" : "点击 [+] 进入 Metadata 编辑"}
+          data-cover-empty={!hasCover ? "true" : undefined}
+          data-dropping={dropping ? "true" : undefined}
+          data-kd-track-id={track.id}
+          {...{ [TRACK_COVER_DROP_TARGET_ATTR]: "true" }}
           style={{
-            width: 64,
-            height: 64,
+            width: 76,
+            height: 76,
             cursor: "pointer",
             display: "grid",
             placeItems: "center",
             // 拖到位的提示用中性色描边：红色在这个界面里只给"动作"，不给状态
             borderColor: dropping ? "var(--kd-muted)" : undefined,
           }}
-          onClick={() => coverInput.current?.click()}
+          onClick={openCoverEditor}
           onKeyDown={(event) => {
             if (event.key === "Enter" || event.key === " ") {
               event.preventDefault();
-              coverInput.current?.click();
+              openCoverEditor();
             }
           }}
           // stopPropagation 是必须的：外层有接收音频文件的拖放区，
           // 不拦住的话拖进来的图片会被当成"要入库的曲目"
-          onDragOver={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            setDropping(true);
-          }}
-          onDragLeave={() => setDropping(false)}
-          onDrop={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            setDropping(false);
-            pickCover(event.dataTransfer.files[0]);
-          }}
+          onDragOver={coverDragOver}
+          onDragLeave={coverDragLeave}
+          onDrop={coverDrop}
         >
           {hasCover ? (
             <img
               src={coverUrl}
               alt=""
+              draggable={false}
               style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
               // 没封面时后端返回 404
               onError={() => setHasCover(false)}
@@ -277,6 +521,12 @@ export function TrackDetail({ track }: { track: Track }) {
           ) : (
             <VinylPlaceholder />
           )}
+            {!hasCover && (
+              <span className="kd-cover-plus" aria-hidden="true">
+                <Plus size={14} strokeWidth={2.5} />
+              </span>
+            )}
+          </div>
         </div>
         <input
           ref={coverInput}
@@ -357,7 +607,7 @@ export function TrackDetail({ track }: { track: Track }) {
         actions={
           editing ? (
             <>
-              <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(false)}>
+              <Button size="sm" variant="ghost" disabled={busy} onClick={closeMetadataEditor}>
                 取消
               </Button>
               {/* 不用 primary/danger：这一栏的红色已经被「移出曲库」占了，
@@ -399,6 +649,79 @@ export function TrackDetail({ track }: { track: Track }) {
       >
         {editing ? (
           <div className="kd-col" style={{ gap: "0.4rem" }}>
+            <div className="kd-cover-tools">
+              <div className="kd-cover-tools-head">
+                <span>封面</span>
+                <span className="kd-faint">
+                  {coverPlatforms.length > 0
+                    ? `在线来源：${coverPlatforms.map((platform) => COVER_PLATFORM_LABEL[platform]).join("、")}`
+                    : "顶部未开启网易云或 QQ"}
+                </span>
+              </div>
+              <div className="kd-row" style={{ flexWrap: "wrap", gap: "0.3rem" }}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy || coverSearchBusy}
+                  onClick={() => coverInput.current?.click()}
+                >
+                  <Upload size={12} />
+                  上传图片
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy || coverSearchBusy || coverPlatforms.length === 0}
+                  onClick={() => void searchOnlineCovers()}
+                >
+                  <Search size={12} />
+                  {coverSearchBusy ? "匹配中…" : "在线匹配"}
+                </Button>
+              </div>
+              <div
+                className="kd-cover-drop-panel"
+                aria-label="封面拖放区域"
+                data-dropping={dropping ? "true" : undefined}
+                data-kd-track-id={track.id}
+                {...{ [TRACK_COVER_DROP_TARGET_ATTR]: "true" }}
+                onDragOver={coverDragOver}
+                onDragLeave={coverDragLeave}
+                onDrop={coverDrop}
+              >
+                {coverSearchBusy ? (
+                  <span className="kd-faint">正在从顶部已打开的平台匹配封面…</span>
+                ) : coverCandidates.length > 0 ? (
+                  <div className="kd-cover-candidates">
+                    {coverCandidates.map((candidate) => (
+                      <button
+                        key={`${candidate.platform}:${candidate.coverKey}`}
+                        type="button"
+                        className="kd-cover-candidate"
+                        disabled={busy}
+                        title="采用这张封面"
+                        onClick={() => void selectCoverCandidate(candidate)}
+                      >
+                        <CoverImage
+                          className="kd-cover-candidate-image"
+                          src={coverPreviewUrl(candidate.source.cover)}
+                          alt=""
+                          loading="lazy"
+                        />
+                        <span className="kd-cover-candidate-copy">
+                          <strong>{COVER_PLATFORM_LABEL[candidate.platform]}</strong>
+                          <span className="kd-truncate">{candidate.source.title || DASH}</span>
+                          <span className="kd-faint kd-truncate">
+                            {candidate.source.artists.join(" / ") || DASH}
+                          </span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="kd-faint">把左侧歌曲拖到这里复用封面，或点击上面的在线匹配</span>
+                )}
+              </div>
+            </div>
             <Field label="标题">
               <input
                 className="kd-input"
@@ -527,7 +850,13 @@ export function TrackDetail({ track }: { track: Track }) {
           <div className="kd-analysis-readout" aria-label="节奏与响度">
             <div className="kd-analysis-metric">
               <span className="kd-analysis-metric-label">BPM</span>
-              <span className="kd-analysis-metric-value">{formatBpm(track.bpm)}</span>
+              <span
+                className="kd-analysis-metric-value"
+                data-with-version={track.bpm_v2 || undefined}
+              >
+                {formatBpm(track.bpm)}
+                {track.bpm_v2 ? <small className="kd-analysis-version">V2</small> : null}
+              </span>
               <div
                 className="kd-analysis-meter"
                 style={
@@ -590,7 +919,7 @@ export function TrackDetail({ track }: { track: Track }) {
         )}
       </Panel>
 
-      <Panel key="vj" heading="一键搜索" padded dense>
+      <Panel key="vj" heading="Explore" padded dense>
         <VjSearchPanel track={track} />
       </Panel>
 

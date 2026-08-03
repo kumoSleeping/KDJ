@@ -6,7 +6,6 @@ import {
   Copy,
   Download,
   FolderOpen,
-  Link2,
   ListMusic,
   ListStart,
   ListX,
@@ -14,6 +13,7 @@ import {
   Play,
   RotateCcw,
   Star,
+  Undo2,
   Trash2,
   Video,
 } from "lucide-react";
@@ -28,9 +28,12 @@ import { camelotColor } from "../../lib/camelot";
 import {
   announceTrackDrag,
   claimActiveTrackDragIds,
+  dispatchTrackCoverDrop,
   finishTrackDrop,
   isTrackDrag,
   readTrackDragIds,
+  suppressCoverClickAfterTrackDrop,
+  TRACK_COVER_DROP_TARGET_ATTR,
   TRACK_TRASH_DROP_EVENT,
   type TrackDragDetail,
 } from "../../lib/trackDrag";
@@ -65,6 +68,7 @@ import {
   remStringToPx,
   saveTableColumnPrefs,
   type TableColumnPrefs,
+  type TableColumnPrefsSchema,
 } from "../../lib/tableColumnPrefs";
 import { ContextMenu, EmptyState, InlineNotice } from "../common";
 
@@ -213,17 +217,19 @@ const COLUMN_MIN_WIDTH: Record<string, string> = {
   rating: "3rem",
 };
 
+const COLUMN_MAX_WIDTH = "80rem";
+const COLUMN_PREFS_SCHEMA: TableColumnPrefsSchema = {
+  columnKeys: COLUMNS.map((column) => column.key),
+  // 序号固定在最左侧，不参与换序 / 显隐，但它自己的拖拽宽度也要恢复。
+  widthKeys: [INDEX_COL_KEY, ...COLUMNS.map((column) => column.key)],
+  lockedVisible: ["title"],
+  minWidths: COLUMN_MIN_WIDTH,
+  maxWidth: COLUMN_MAX_WIDTH,
+};
+
 function loadColumnPrefs(): ColumnPrefs {
   // 标题列永远不准藏：它是唯一说明「这行是哪首歌」的列。
-  const prefs = loadTableColumnPrefs(COLUMN_PREFS_KEY, ["title"]);
-  const indexW = prefs.widths.index;
-  if (!indexW) return prefs;
-  const px = remStringToPx(indexW);
-  const cap = remStringToPx("2rem");
-  if (px > cap) {
-    return { ...prefs, widths: { ...prefs.widths, index: INDEX_DEFAULT_WIDTH } };
-  }
-  return prefs;
+  return loadTableColumnPrefs(COLUMN_PREFS_KEY, COLUMN_PREFS_SCHEMA);
 }
 
 export interface TrackTableProps {
@@ -351,18 +357,7 @@ function trackCell(
           {/* lazy：一页 200 行，只在滚到眼前时请求。视频首帧由 TrackCoverThumb
               在服务短暂重启或抽帧排队时重试，不能一次失败就永久变成灰格。 */}
           <TrackCoverThumb track={track} onTrackDragStart={onTrackDragStart} />
-          {/* 同一首歌在两个文件夹里各出现一次时，这个标记回答"为什么"：
-              不是占了两份空间，是同一份数据的两个名字。 */}
-          {track.link && (
-            <span
-              className="kd-link-mark"
-              title={track.link === "symlink" ? "符号链接" : "硬链接：和别处共用同一份文件"}
-            >
-              <Link2 size={11} />
-            </span>
-          )}
-          {/* 媒介类型和链接状态都是这首文件的附属信息：排在封面后、标题前，
-              有多个时并列显示，完整含义由悬停提示说明。 */}
+          {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。 */}
           {isVideoTrack(track.format) && (
             <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
               <Video size={11} aria-hidden="true" />
@@ -544,6 +539,9 @@ export function TrackTable({
   const playClick = playClickForLayout({ widePlay, narrowPlay }, layout);
   const singleAddsNext = clickAddsNext({ widePlay, narrowPlay, clickAddNext }, layout);
   const copyToClipboard = useLibraryStore((state) => state.copyToClipboard);
+  const undo = useLibraryStore((state) => state.undo);
+  const undoLast = useLibraryStore((state) => state.undoLast);
+  const undoName = undo.op === "copy" ? "复制" : undo.op === "delete" ? "删除" : "移动";
   const updateTrack = useLibraryStore((state) => state.updateTrack);
   const selectionMode = useLibraryStore((state) => state.selectionMode);
   const setSelectionMode = useLibraryStore((state) => state.setSelectionMode);
@@ -636,6 +634,11 @@ export function TrackTable({
         trash.setAttribute("data-kd-pointer-track-over", "trash");
         return;
       }
+      const cover = hit?.closest<HTMLElement>(`[${TRACK_COVER_DROP_TARGET_ATTR}]`);
+      if (cover) {
+        cover.setAttribute("data-kd-pointer-track-over", "cover");
+        return;
+      }
       if (!reorderable) return;
       const row = hit?.closest<HTMLElement>("tr[data-kd-track-id]");
       if (!row) return;
@@ -681,8 +684,10 @@ export function TrackTable({
       const folder = folderDropElementAt(up.clientX, up.clientY);
       const hit = hitAt(up.clientX, up.clientY);
       const trash = hit?.closest<HTMLElement>("[data-kd-track-trash-target]");
+      const cover = hit?.closest<HTMLElement>(`[${TRACK_COVER_DROP_TARGET_ATTR}]`);
       const row = reorderable ? hit?.closest<HTMLElement>("tr[data-kd-track-id]") : null;
       const rowEdge = row?.getAttribute("data-kd-pointer-track-over");
+      const coverTrackId = cover ? Number(cover.dataset.kdTrackId) : NaN;
       cleanup();
       if (!dragging) return;
       up.preventDefault();
@@ -691,17 +696,14 @@ export function TrackTable({
         const dest = folder.getAttribute(FOLDER_DROP_PATH_ATTR)?.trim() ?? "";
         const claimed = claimActiveTrackDragIds();
         if (!dest || claimed.length === 0) return;
-        const op = resolveLibraryPasteOp({
-          settings: useAppStore.getState().settings,
-          forceMove: up.altKey,
-        });
+        const op = resolveLibraryPasteOp({ forceMove: up.altKey });
         void useLibraryStore
           .getState()
           .applyFolderOp(claimed, dest, op)
           .then((result) => {
             const failed = Object.keys(result.errors).length;
             if (failed > 0) {
-              const verb = op === "move" ? "移动" : op === "copy" ? "复制" : "链接";
+              const verb = op === "move" ? "移动" : "复制";
               setNotice(`已${verb} ${result.track_ids.length} 首，${failed} 首失败`);
             }
           })
@@ -712,6 +714,13 @@ export function TrackTable({
         window.dispatchEvent(
           new CustomEvent<TrackDragDetail>(TRACK_TRASH_DROP_EVENT, { detail: { ids } }),
         );
+        finishTrackDrop();
+        return;
+      }
+      if (cover && Number.isFinite(coverTrackId)) {
+        // 封面框本身可点击选图；先挡掉拖拽结束后的合成 click，避免误弹文件选择器。
+        suppressCoverClickAfterTrackDrop();
+        dispatchTrackCoverDrop(ids, coverTrackId);
         finishTrackDrop();
         return;
       }
@@ -950,9 +959,23 @@ export function TrackTable({
   colPrefsRef.current = colPrefs;
 
   const saveColPrefs = (next: ColumnPrefs) => {
-    saveTableColumnPrefs(COLUMN_PREFS_KEY, next);
-    setColPrefs(next);
+    const normalized = saveTableColumnPrefs(COLUMN_PREFS_KEY, next, COLUMN_PREFS_SCHEMA);
+    colPrefsRef.current = normalized;
+    setColPrefs(normalized);
   };
+
+  // 普通 pointerup 会即时落盘；pagehide / HMR 卸载再兜底一次，避免开发刷新或
+  // 指针被 WebView 取消时只留下 React state、下次挂载却读到旧宽度。
+  useEffect(() => {
+    const persist = () => {
+      saveTableColumnPrefs(COLUMN_PREFS_KEY, colPrefsRef.current, COLUMN_PREFS_SCHEMA);
+    };
+    window.addEventListener("pagehide", persist);
+    return () => {
+      window.removeEventListener("pagehide", persist);
+      persist();
+    };
+  }, []);
 
   const widthFor = (key: string, fallback: string) => colPrefs.widths[key] ?? fallback;
 
@@ -964,11 +987,14 @@ export function TrackTable({
     const startX = event.clientX;
     const startWidth = th.getBoundingClientRect().width;
     const minPx = remStringToPx(COLUMN_MIN_WIDTH[key] ?? "2.8rem");
+    const maxPx = remStringToPx(COLUMN_MAX_WIDTH);
     setResizingCol(key);
     document.body.dataset.kdColResizing = "true";
 
     const onMove = (moveEvent: PointerEvent) => {
-      const next = pxToRemString(Math.max(minPx, startWidth + (moveEvent.clientX - startX)));
+      const next = pxToRemString(
+        Math.min(maxPx, Math.max(minPx, startWidth + (moveEvent.clientX - startX))),
+      );
       setColPrefs((current) => {
         const updated = {
           ...current,
@@ -979,17 +1005,22 @@ export function TrackTable({
         return updated;
       });
     };
-    const onUp = () => {
+    let finished = false;
+    const onEnd = () => {
+      if (finished) return;
+      finished = true;
       window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
       document.body.removeAttribute("data-kd-col-resizing");
       setResizingCol(null);
       suppressNextSortClick();
       // 松手时把最新宽度落盘；拖动过程只 setState，避免每个像素写 localStorage
-      saveTableColumnPrefs(COLUMN_PREFS_KEY, colPrefsRef.current);
+      saveTableColumnPrefs(COLUMN_PREFS_KEY, colPrefsRef.current, COLUMN_PREFS_SCHEMA);
     };
     window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
   };
 
   const orderedColumns = orderByPrefs(COLUMNS, colPrefs.order);
@@ -1528,7 +1559,9 @@ export function TrackTable({
             type="button"
             onClick={() => {
               localStorage.removeItem(COLUMN_PREFS_KEY);
-              setColPrefs(loadColumnPrefs());
+              const defaults = loadColumnPrefs();
+              colPrefsRef.current = defaults;
+              setColPrefs(defaults);
               setColMenu(null);
             }}
           >
@@ -1556,6 +1589,22 @@ export function TrackTable({
       )}
       {rowMenu && (
         <ContextMenu x={rowMenu.x} y={rowMenu.y} onClose={() => setRowMenu(null)}>
+          <button
+            type="button"
+            disabled={!undo.available}
+            title={
+              undo.available
+                ? `撤回上次${undoName} ${undo.count} 首`
+                : "没有可撤回的曲库操作"
+            }
+            onClick={() => {
+              setRowMenu(null);
+              void undoLast().catch(() => undefined);
+            }}
+          >
+            <Undo2 size={12} />
+            撤回{undo.available ? `上次${undoName}` : ""}
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -1590,7 +1639,7 @@ export function TrackTable({
           <button
             type="button"
             onClick={() => {
-              copyToClipboard("link");
+              copyToClipboard("copy");
               setRowMenu(null);
             }}
           >

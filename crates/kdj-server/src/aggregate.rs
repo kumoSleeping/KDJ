@@ -117,8 +117,10 @@ fn voiced(ch: char) -> Option<char> {
         'ウ' => Some('ヴ'),
         'ワ' => Some('ヷ'),
         'ヲ' => Some('ヺ'),
-        'カ' | 'キ' | 'ク' | 'ケ' | 'コ' | 'サ' | 'シ' | 'ス' | 'セ' | 'ソ' | 'タ' | 'チ' | 'ツ'
-        | 'テ' | 'ト' | 'ハ' | 'ヒ' | 'フ' | 'ヘ' | 'ホ' => char::from_u32(ch as u32 + 1),
+        'カ' | 'キ' | 'ク' | 'ケ' | 'コ' | 'サ' | 'シ' | 'ス' | 'セ' | 'ソ' | 'タ' | 'チ'
+        | 'ツ' | 'テ' | 'ト' | 'ハ' | 'ヒ' | 'フ' | 'ヘ' | 'ホ' => {
+            char::from_u32(ch as u32 + 1)
+        }
         _ => None,
     }
 }
@@ -198,7 +200,10 @@ fn drop_brackets(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut index = 0;
     while index < chars.len() {
-        let Some((open, close)) = PAIRS.iter().find(|(open, _)| *open == chars[index]).copied()
+        let Some((open, close)) = PAIRS
+            .iter()
+            .find(|(open, _)| *open == chars[index])
+            .copied()
         else {
             out.push(chars[index]);
             index += 1;
@@ -461,7 +466,12 @@ fn longest_match(
                     break;
                 }
                 // j == 0 时没有前驱，checked_sub 落到 None → 长度从 1 起算
-                let k = j.checked_sub(1).and_then(|prev| j2len.get(&prev)).copied().unwrap_or(0) + 1;
+                let k = j
+                    .checked_sub(1)
+                    .and_then(|prev| j2len.get(&prev))
+                    .copied()
+                    .unwrap_or(0)
+                    + 1;
                 newj2len.insert(j, k);
                 if k > bestsize {
                     besti = i + 1 - k;
@@ -620,7 +630,9 @@ fn interleave(
 fn best_source_index(sources: &[SongSource], table: &BTreeMap<Platform, f64>) -> usize {
     // 本地来源的职责是提示“已经有了”，不是下载候选。有在线来源时绝不能
     // 因为本地文件是 FLAC 就把它选成 best，前端随后会把 local 送进下载接口。
-    let has_online = sources.iter().any(|source| source.platform != Platform::Local);
+    let has_online = sources
+        .iter()
+        .any(|source| source.platform != Platform::Local);
     sources
         .iter()
         .enumerate()
@@ -845,19 +857,20 @@ pub fn library_source_keys(state: &AppState) -> HashSet<String> {
 /// 给每一组打上「曲库里已经有了」的标记。
 pub fn mark_in_library(groups: &mut [MergedGroup], known: &HashSet<String>) {
     for group in groups {
-        group.in_library = group
-            .sources
-            .iter()
-            .any(|source| {
-                source.platform == Platform::Local
-                    || known.contains(&format!("{}:{}", source.platform, source.key))
-            });
+        group.in_library = group.sources.iter().any(|source| {
+            source.platform == Platform::Local
+                || known.contains(&format!("{}:{}", source.platform, source.key))
+        });
     }
 }
 
 /// 只查已经进入 SQLite 曲库的文件。磁盘上没扫描过的文件不会出现在这里，
 /// 这正是“本地平台”与文件系统全文搜索的边界。
-fn search_local_library(state: &Arc<AppState>, query: &str, limit: usize) -> anyhow::Result<Vec<SongSource>> {
+fn search_local_library(
+    state: &Arc<AppState>,
+    query: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<SongSource>> {
     let page = state.library.list_tracks(&TrackQuery {
         q: query.to_string(),
         sort: "title".into(),
@@ -923,7 +936,11 @@ pub async fn search(state: &Arc<AppState>, payload: &SearchRequest) -> SearchRes
         if !provider.capabilities().search_kinds.contains(&payload.kind) {
             errors.insert(
                 platform.to_string(),
-                format!("{}不支持{}搜索", provider.label(), search_kind_label(payload.kind)),
+                format!(
+                    "{}不支持{}搜索",
+                    provider.label(),
+                    search_kind_label(payload.kind)
+                ),
             );
             continue;
         }
@@ -939,19 +956,19 @@ pub async fn search(state: &Arc<AppState>, payload: &SearchRequest) -> SearchRes
         let search_kind = payload.kind;
         let platform = *platform;
         handles.push(tokio::spawn(async move {
-            let result = tokio::time::timeout(
-                provider_search_timeout(platform),
-                async move {
-                    if search_kind == SearchKind::Song {
-                        provider.search(&keyword, limit).await.map(ProviderSearchRows::Songs)
-                    } else {
-                        provider
-                            .search_collections(&keyword, search_kind, limit)
-                            .await
-                            .map(ProviderSearchRows::Collections)
-                    }
-                },
-            )
+            let result = tokio::time::timeout(provider_search_timeout(platform), async move {
+                if search_kind == SearchKind::Song {
+                    provider
+                        .search(&keyword, limit)
+                        .await
+                        .map(ProviderSearchRows::Songs)
+                } else {
+                    provider
+                        .search_collections(&keyword, search_kind, limit)
+                        .await
+                        .map(ProviderSearchRows::Collections)
+                }
+            })
             .await;
             (platform, result)
         }));
@@ -1038,7 +1055,8 @@ pub async fn search(state: &Arc<AppState>, payload: &SearchRequest) -> SearchRes
 fn search_kind_label(kind: SearchKind) -> &'static str {
     match kind {
         SearchKind::Song => "单曲",
-        SearchKind::Artist => "作者",
+        SearchKind::Playlist => "歌单",
+        SearchKind::Artist => "艺术家",
         SearchKind::Album => "专辑",
     }
 }
@@ -1081,7 +1099,11 @@ mod tests {
     #[test]
     fn halfwidth_katakana_folds_like_python_nfkc() {
         // 期望值是跑 sidecar 的 aggregate.normalize_title 抄回来的
-        assert_eq!(normalize_title("ｱｲﾄﾞﾙ"), "アイドル", "浊点要和前一个假名合成");
+        assert_eq!(
+            normalize_title("ｱｲﾄﾞﾙ"),
+            "アイドル",
+            "浊点要和前一个假名合成"
+        );
         assert_eq!(normalize_title("ﾊﾟﾌﾟﾋﾟﾍﾟﾎﾟ"), "パプピペポ", "半浊点同理");
         assert_eq!(normalize_title("ｳﾞｧﾝﾊﾟｲｱ"), "ヴァンパイア");
         assert_eq!(normalize_title("ﾜﾞ"), "ヷ", "ウ/ワ/ヲ 的浊音不是简单的 +1");
@@ -1261,7 +1283,10 @@ mod tests {
                 source(Platform::Wyy, "w2", &["a"], 100.0),
             ],
         );
-        per_platform.insert(Platform::Qqm, vec![source(Platform::Qqm, "q1", &["a"], 100.0)]);
+        per_platform.insert(
+            Platform::Qqm,
+            vec![source(Platform::Qqm, "q1", &["a"], 100.0)],
+        );
 
         let groups = singleton_groups(&per_platform, &[Platform::Wyy, Platform::Qqm]);
         let titles: Vec<&str> = groups.iter().map(|g| g.title.as_str()).collect();
@@ -1295,7 +1320,10 @@ mod tests {
     fn local_source_is_always_marked_as_in_library() {
         let mut group = singleton_group(source(Platform::Local, "S", &["x"], 100.0));
         mark_in_library(std::slice::from_mut(&mut group), &HashSet::new());
-        assert!(group.in_library, "本地平台只来自曲库数据库，本身就代表已入库");
+        assert!(
+            group.in_library,
+            "本地平台只来自曲库数据库，本身就代表已入库"
+        );
     }
 
     #[test]
@@ -1378,7 +1406,11 @@ mod tests {
         assert_eq!(normalize_title("Deliver Me"), "deliverme", "live ⊂ deliver");
         assert_eq!(normalize_title("Feather"), "feather", "feat ⊂ feather");
         assert_eq!(normalize_title("MVP"), "mvp", "mv ⊂ mvp");
-        assert_eq!(normalize_title("Demolition"), "demolition", "demo ⊂ demolition");
+        assert_eq!(
+            normalize_title("Demolition"),
+            "demolition",
+            "demo ⊂ demolition"
+        );
         assert_eq!(normalize_title("Software"), "software", "ft ⊂ software");
         // 真的独立成词时才该被抹掉
         assert_eq!(normalize_title("Live Forever"), "forever");
@@ -1419,7 +1451,11 @@ mod tests {
         // 分隔符同样要卡词边界，否则艺人名会被拦腰截断
         assert_eq!(split("Daft Punk"), vec!["daftpunk"], "ft ⊂ daft");
         assert_eq!(split("Featherweight"), vec!["featherweight"]);
-        assert_eq!(split("Max Cooper"), vec!["maxcooper"], "x 两侧要带空格才算分隔符");
+        assert_eq!(
+            split("Max Cooper"),
+            vec!["maxcooper"],
+            "x 两侧要带空格才算分隔符"
+        );
     }
 
     #[test]
@@ -1605,8 +1641,7 @@ mod intake_tests {
     #[test]
     fn multiline_input_splits_only_on_newlines() {
         // 艺人名里的逗号非常常见，多行粘贴时再按逗号拆会把这一行毁掉
-        let (entries, skipped) =
-            split_intake_text("曲名 - 艺人A, 艺人B\n另一首 - 艺人C", 50);
+        let (entries, skipped) = split_intake_text("曲名 - 艺人A, 艺人B\n另一首 - 艺人C", 50);
         assert_eq!(entries, vec!["曲名 - 艺人A, 艺人B", "另一首 - 艺人C"]);
         assert_eq!(skipped, 0);
     }
@@ -1644,7 +1679,10 @@ mod intake_tests {
 
     #[test]
     fn entries_beyond_the_cap_are_reported_not_silently_dropped() {
-        let text = (1..=60).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        let text = (1..=60)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         let (entries, skipped) = split_intake_text(&text, 50);
         assert_eq!(entries.len(), 50);
         assert_eq!(skipped, 10);
@@ -1671,7 +1709,10 @@ mod intake_tests {
         // Python 那条正则的 `+` 要求协议后至少有一个字符
         assert!(!is_url("https://"));
         assert!(!is_url("http:// 夜曲"));
-        assert_eq!(split_intake_text("https:// 夜曲", 50).0, vec!["https:// 夜曲"]);
+        assert_eq!(
+            split_intake_text("https:// 夜曲", 50).0,
+            vec!["https:// 夜曲"]
+        );
     }
 
     #[test]

@@ -103,7 +103,11 @@ impl WaveformCoordinator {
         if !queue.active.insert(key) {
             return;
         }
-        let request = WarmRequest { key, path, cache_dir };
+        let request = WarmRequest {
+            key,
+            path,
+            cache_dir,
+        };
         if priority {
             queue.requests.push_front(request);
         } else {
@@ -203,14 +207,8 @@ impl WaveformCoordinator {
         path: PathBuf,
         cache_dir: PathBuf,
     ) -> Result<Waveform> {
-        self.get_or_compute_mode(
-            track_id,
-            path,
-            DEFAULT_WAVEFORM_BUCKETS,
-            cache_dir,
-            false,
-        )
-        .await
+        self.get_or_compute_mode(track_id, path, DEFAULT_WAVEFORM_BUCKETS, cache_dir, false)
+            .await
     }
 
     async fn get_or_compute_mode(
@@ -258,8 +256,7 @@ impl WaveformCoordinator {
         let outcome = tokio::task::spawn_blocking(move || {
             // 只有播放器请求占交互优先权；全库补齐和预热则与 BPM 共用 2 个额度。
             let _yield = interactive.then(jobs::yield_analysis_permits);
-            let _background_permit =
-                (!interactive).then(jobs::acquire_background_analysis_permit);
+            let _background_permit = (!interactive).then(jobs::acquire_background_analysis_permit);
             // 等闸门期间别人可能已经写好缓存（分析预热 / 并发请求）
             if let Some((cached, canonical)) = read_cached(&cache_dir, key) {
                 let outcome = WaveOutcome::Ok(cached);
@@ -317,7 +314,12 @@ impl WaveformCoordinator {
 }
 
 fn publish(coord: &WaveformCoordinator, key: WaveKey, outcome: WaveOutcome) {
-    if let Some(tx) = coord.inflight.lock().expect("waveform inflight").remove(&key) {
+    if let Some(tx) = coord
+        .inflight
+        .lock()
+        .expect("waveform inflight")
+        .remove(&key)
+    {
         let _ = tx.send(outcome);
     }
 }
@@ -326,13 +328,22 @@ fn publish(coord: &WaveformCoordinator, key: WaveKey, outcome: WaveOutcome) {
 /// f32 amp 与三个 u8 色彩通道。长度可以在分配前精确校验，半截文件不会被接受。
 fn encode_cache(wave: &Waveform) -> Result<Vec<u8>> {
     let count = wave.amp.len();
-    anyhow::ensure!(count > 0 && count <= MAX_CACHE_COLUMNS, "波形列数非法：{count}");
+    anyhow::ensure!(
+        count > 0 && count <= MAX_CACHE_COLUMNS,
+        "波形列数非法：{count}"
+    );
     anyhow::ensure!(
         wave.r.len() == count && wave.g.len() == count && wave.b.len() == count,
         "波形通道长度不一致"
     );
-    anyhow::ensure!(wave.duration.is_finite() && wave.duration >= 0.0, "波形时长非法");
-    anyhow::ensure!(wave.amp.iter().all(|value| value.is_finite()), "波形振幅含非法值");
+    anyhow::ensure!(
+        wave.duration.is_finite() && wave.duration >= 0.0,
+        "波形时长非法"
+    );
+    anyhow::ensure!(
+        wave.amp.iter().all(|value| value.is_finite()),
+        "波形振幅含非法值"
+    );
 
     let mut body = Vec::with_capacity(CACHE_HEADER_LEN + count * 7);
     body.extend_from_slice(CACHE_MAGIC);
@@ -384,12 +395,9 @@ fn write_cache(path: &Path, wave: &Waveform) -> Result<()> {
 }
 
 fn compute_waveform(path: &Path, track_id: i64, buckets: usize) -> Result<Waveform> {
-    let decoded = kdj_analysis::decode::decode_audio(
-        path,
-        kdj_analysis::waveform::WAVEFORM_SR,
-        None,
-    )
-    .with_context(|| format!("解码失败：{}", path.display()))?;
+    let decoded =
+        kdj_analysis::decode::decode_audio(path, kdj_analysis::waveform::WAVEFORM_SR, None)
+            .with_context(|| format!("解码失败：{}", path.display()))?;
     let mut wave = kdj_analysis::waveform::band_waveform(
         &decoded.samples,
         decoded.sample_rate as f64,
@@ -475,8 +483,7 @@ fn read_cached(cache_dir: &Path, key: WaveKey) -> Option<(Waveform, bool)> {
     let legacy = legacy_cache_path(cache_dir, key.track_id, key.buckets, key.mtime);
     let wave = read_legacy_cache(&legacy).filter(|wave| wave.track_id == key.track_id)?;
     let canonical = write_cache(&current, &wave).is_ok()
-        && read_cache(&current)
-            .is_some_and(|saved| saved.track_id == key.track_id);
+        && read_cache(&current).is_some_and(|saved| saved.track_id == key.track_id);
     if canonical {
         let _ = std::fs::remove_file(legacy);
     }

@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 /**
- * 一键搜索的预设词（作者另算，不进这张表）。
+ * Explore 的预设词（作者另算，不进这张表）。
  * Remix / Trance / Bootleg 偏改版；ニコカラ / MV / MAD 偏画面素材。
  */
 export const DEFAULT_EXPLORE_KEYWORDS = [
@@ -20,7 +20,7 @@ const KEYWORDS_KEY = "kd-explore-keywords";
 const PICKED_KEY = "kd-explore-picked";
 const ARTIST_KEY = "kd-explore-with-artist";
 
-/** 旧两块面板的默认表：若用户没改过，启动时收成一键搜索精选。 */
+/** 旧两块面板的默认表：若用户没改过，启动时收成 Explore 精选。 */
 const LEGACY_DEFAULTS: readonly (readonly string[])[] = [
   ["Remix", "Bootleg", "Mashup", "Edit", "VIP", "House", "Techno", "Trance"],
   [
@@ -72,7 +72,7 @@ function loadKeywords(): string[] {
     return DEFAULT_EXPLORE_KEYWORDS;
   }
 
-  // 首次迁到一键搜索：旧 SC / VJ 词表若仍是出厂默认，收成精选；用户自改过的保留。
+  // 首次迁到 Explore：旧 SC / VJ 词表若仍是出厂默认，收成精选；用户自改过的保留。
   const sc = loadFrom("kd-sc-keywords", []);
   const vj = loadFrom("kd-vj-keywords", []);
   const scLegacy = LEGACY_DEFAULTS.some((list) => sameList(sc, list)) || sc.length === 0;

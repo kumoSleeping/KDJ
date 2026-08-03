@@ -4,7 +4,13 @@
 //! symphonia 直接解 mp3/flac/m4a/ogg/wav，所以没装 ffmpeg 的用户也能分析
 //! （现状是完全用不了）。
 
+#[cfg(all(
+    feature = "beat-this",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+pub mod beat_this_backend;
 pub mod decode;
+pub mod dj_grid;
 pub mod dsp;
 pub mod engine;
 pub mod key;

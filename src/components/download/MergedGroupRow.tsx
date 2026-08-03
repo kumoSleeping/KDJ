@@ -1,17 +1,15 @@
 import { Fragment, useRef, useState } from "react";
-import { BookPlus, ChevronDown, ChevronRight, Check, Copy, Download, Play } from "lucide-react";
+import { ChevronDown, ChevronRight, Check, Copy, Download, ListStart, Play } from "lucide-react";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { api } from "../../lib/api";
 import { requestSongPreview, type SongPreviewItem } from "../../lib/songPreview";
+import { makePendingSongStreamTrack } from "../../lib/streamTrack";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
-import {
-  playClickForLayout,
-  useTrackClickPrefs,
-} from "../../lib/trackClickPrefs";
-import type { LayoutMode } from "../../lib/useLayoutMode";
 import type { MergedGroup, Platform, SongSource } from "../../types";
 import { copyText } from "../../lib/copyText";
+import { useQueueStore } from "../../stores/queueStore";
 import { ContextMenu } from "../common";
+import { CoverImage } from "../common/VinylPlaceholder";
 import { playTrack } from "../library/TrackTable";
 import { PlatformMark } from "./PlatformMark";
 
@@ -38,8 +36,10 @@ export interface MergedGroupRowProps {
   expanded: boolean;
   /** 可见数据列（顺序已按用户偏好排好；不含勾选/动作列）。 */
   columns: ReadonlyArray<{ key: string; align?: "num" }>;
-  /** 当前布局档位，决定单击/双击播放行为。 */
-  layout: LayoutMode;
+  /** 当前集合（或普通结果列表）中的可见序号。 */
+  rowNumber: number;
+  /** 普通单击选中并展示在线详情；与批量下载勾选状态相互独立。 */
+  inspected: boolean;
   /** 挂在某个"包"（歌单/一次搜索）底下时缩进并画导引线。 */
   indent?: boolean;
   /** 包里的最后一行，竖导引线到此为止。 */
@@ -48,10 +48,9 @@ export interface MergedGroupRowProps {
   onEnterSelection(): void;
   onToggleExpand(): void;
   onPickSource(index: number): void;
+  onInspect(index: number): void;
   /** 把当前选中来源直接丢进下载队列，省掉先勾选再找顶栏。 */
   onDownload(): void;
-  /** 持久化在线来源；它和下载是两个明确动作。 */
-  onAddToLibrary(): void;
   /** 当前搜索结果里排在本行之后的可播放歌曲。 */
   followingSongs?: SongPreviewItem[];
   onDragStart?(event: React.DragEvent<HTMLElement>): void;
@@ -71,15 +70,16 @@ export function MergedGroupRow({
   selectionMode,
   expanded,
   columns,
-  layout,
+  rowNumber,
+  inspected,
   indent = false,
   last = false,
   onToggleSelect,
   onEnterSelection,
   onToggleExpand,
   onPickSource,
+  onInspect,
   onDownload,
-  onAddToLibrary,
   followingSongs = [],
   onDragStart,
   onDragEnd,
@@ -89,8 +89,6 @@ export function MergedGroupRow({
   const pressTimerRef = useRef<number | null>(null);
   const suppressClickRef = useRef(false);
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
-  const { widePlay, narrowPlay } = useTrackClickPrefs();
-  const playClick = playClickForLayout({ widePlay, narrowPlay }, layout);
 
   /**
    * 试听放哪个来源：优先当前选中的；选中的是 B 站就退而求其次找一家音乐
@@ -102,7 +100,6 @@ export function MergedGroupRow({
       : (group.sources.find(
           (source) => source.platform !== "bilibili" && source.platform !== "local",
         ) ?? null);
-  const streamable = Boolean(previewSource);
   const toggleSelection = () => {
     onToggleSelect();
   };
@@ -125,21 +122,39 @@ export function MergedGroupRow({
     if (Number.isFinite(trackId) && trackId > 0) void api.track(trackId).then(playTrack);
   };
 
-  const thumbImg = group.cover && (
-    <img
-      src={thumbUrl(group.cover)}
-      alt=""
-      loading="lazy"
-      draggable={false}
-      referrerPolicy="no-referrer"
-      onError={(event) => {
-        event.currentTarget.style.display = "none";
-      }}
-    />
-  );
+  /** 把搜索结果排进播放队列，供本地曲目曲末自动接入在线流。 */
+  const queueGroup = () => {
+    if (!previewSource) return;
+    useQueueStore.getState().add(
+      [
+        makePendingSongStreamTrack({
+          ...previewSource,
+          title: group.title || previewSource.title,
+          artists: group.artists.length ? group.artists : previewSource.artists,
+          album: group.album || previewSource.album,
+        }),
+      ],
+      true,
+    );
+  };
 
   const titleCell = (
     <>
+      {multi && (
+        <button
+          type="button"
+          className="kd-result-source-toggle"
+          aria-label={expanded ? "收起来源" : "展开来源"}
+          aria-expanded={expanded}
+          title={expanded ? "收起来源" : "展开来源"}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleExpand();
+          }}
+        >
+          {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </button>
+      )}
       {/* 封面只负责识别歌曲，不再叠播放三角。试听统一走整行双击。 */}
       <span
         className="kd-thumb"
@@ -152,7 +167,12 @@ export function MergedGroupRow({
         }}
         onDragEnd={() => onDragEnd?.()}
       >
-        {thumbImg}
+        <CoverImage
+          src={group.cover ? thumbUrl(group.cover) : ""}
+          loading="lazy"
+          draggable={false}
+          referrerPolicy="no-referrer"
+        />
       </span>
       {group.title}
       {group.in_library && (
@@ -314,7 +334,8 @@ export function MergedGroupRow({
   return (
     <Fragment>
       <tr
-        aria-selected={selected}
+        aria-selected={selected || inspected}
+        aria-label={`${group.title}，单击查看详情，双击播放`}
         data-selecting={selectionMode ? "true" : undefined}
         // table-row 在 macOS WKWebView 里不是可靠的原生拖动源；选中后由每个 td 起拖。
         draggable={false}
@@ -330,13 +351,24 @@ export function MergedGroupRow({
             toggleSelection();
             return;
           }
-          // 与曲库表一致：设置成单击播放时直接进播放条；双击播放时单击不顶掉正在播。
-          if (playClick === "single") {
-            playGroup();
-          }
+          if (selectionMode) return;
+          // 在线结果和本地曲库采用同一套“先选中、再查看”的手势：普通单击
+          // 只开详情，不顶掉正在播放的歌曲；播放始终交给双击。
+          onInspect(sourceIndex);
         }}
         onDoubleClick={() => {
-          if (!selectionMode && playClick === "double") playGroup();
+          if (!selectionMode) playGroup();
+        }}
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          if ((event.metaKey || event.ctrlKey) && !selectionMode) {
+            playGroup();
+            return;
+          }
+          if (!selectionMode) onInspect(sourceIndex);
         }}
         onContextMenu={(event) => {
           event.preventDefault();
@@ -383,60 +415,9 @@ export function MergedGroupRow({
           onDragStart={selectable ? onDragStart : undefined}
           onDragEnd={selectable ? onDragEnd : undefined}
           className="kd-result-lead"
+          data-col="index"
         >
-          {/* 下载在前、展开在后：窄屏上这两颗键常被表头 1.6rem + 左右 padding 裁掉，
-              单独给一列够宽的动作格，别再吃通用 td 的 0.6rem 内边距。 */}
-          <span className="kd-result-lead-actions">
-            {streamable ? (
-              <button
-                type="button"
-                className="kd-result-lead-btn"
-                aria-label={`添加 ${group.title} 到曲库`}
-                title="添加到流媒体曲库（不下载）"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onAddToLibrary();
-                }}
-              >
-                <BookPlus size={13} />
-              </button>
-            ) : (
-              <span className="kd-result-lead-spacer" aria-hidden="true" />
-            )}
-            {selectable ? (
-              <button
-                type="button"
-                className="kd-result-lead-btn"
-                aria-label={`下载 ${group.title}`}
-                title="加入下载队列"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onDownload();
-                }}
-              >
-                <Download size={13} />
-              </button>
-            ) : (
-              <span className="kd-result-lead-spacer" aria-hidden="true" />
-            )}
-            {multi ? (
-              <button
-                type="button"
-                className="kd-result-lead-btn"
-                aria-label={expanded ? "收起来源" : "展开来源"}
-                aria-expanded={expanded}
-                title={expanded ? "收起来源" : "展开来源"}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onToggleExpand();
-                }}
-              >
-                {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-              </button>
-            ) : (
-              <span className="kd-result-lead-spacer" aria-hidden="true" />
-            )}
-          </span>
+          <span className="kd-result-index">{rowNumber}</span>
         </td>
         {columns.map((column) => dataCell(column.key))}
         <td className="kd-table-fill" aria-hidden="true" />
@@ -446,11 +427,13 @@ export function MergedGroupRow({
         group.sources.map((source, index) => (
           <tr
             key={`${source.platform}:${source.key}`}
+            aria-label={`${source.title || group.title}，单击查看此来源详情，双击播放`}
             data-local={source.platform === "local" ? "true" : undefined}
             onClick={() => {
               if (source.platform === "local") return;
-              // 单击只选定下载来源，不顶替正在播的
+              // 单击同时选定来源并打开详情，不顶替正在播的歌曲。
               onPickSource(index);
+              onInspect(index);
             }}
             onDoubleClick={() => {
               if (source.platform === "local" || source.platform === "bilibili") return;
@@ -462,6 +445,25 @@ export function MergedGroupRow({
                 autoPlay: true,
                 queue: followingSongs,
               });
+            }}
+            tabIndex={source.platform === "local" ? undefined : 0}
+            onKeyDown={(event) => {
+              if (source.platform === "local") return;
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              onPickSource(index);
+              if (event.metaKey || event.ctrlKey) {
+                if (source.platform === "bilibili") return;
+                requestSongPreview({
+                  source,
+                  title: source.title || group.title,
+                  artist: source.artists.join(", ") || group.artists.join(", "),
+                  autoPlay: true,
+                  queue: followingSongs,
+                });
+                return;
+              }
+              onInspect(index);
             }}
           >
             <td />
@@ -482,6 +484,18 @@ export function MergedGroupRow({
             <Play size={12} />
             播放
           </button>
+          {previewSource && (
+            <button
+              type="button"
+              onClick={() => {
+                queueGroup();
+                setRowMenu(null);
+              }}
+            >
+              <ListStart size={12} />
+              下一首播放
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {
@@ -492,18 +506,6 @@ export function MergedGroupRow({
             <Copy size={12} />
             复制标题
           </button>
-          {streamable && (
-            <button
-              type="button"
-              onClick={() => {
-                onAddToLibrary();
-                setRowMenu(null);
-              }}
-            >
-              <BookPlus size={12} />
-              添加到曲库（不下载）
-            </button>
-          )}
           {selectable && (
             <button
               type="button"

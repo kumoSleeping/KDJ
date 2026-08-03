@@ -45,13 +45,14 @@ export interface AsideToggleButtonProps {
   onToggle(): void;
 }
 
-/** 右栏开合：与定位/搜索键同排，样式一致。 */
+/** 右栏开合：保留统一命中尺寸，但用边栏语义样式与搜索关闭键区分。 */
 export function AsideToggleButton({ open, canOpen, onToggle }: AsideToggleButtonProps) {
   const disabled = !open && !canOpen;
   return (
     <button
       type="button"
       className="kd-activity-search-toggle"
+      data-action="toggle-aside"
       data-open={open ? "true" : undefined}
       aria-label={open ? "收起右侧栏" : "展开右侧栏"}
       title={open ? "收起右侧栏" : "展开右侧栏"}

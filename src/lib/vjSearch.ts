@@ -1,6 +1,6 @@
 import type { Platform } from "../types";
 
-/** 从一键搜索面板跳到工作台搜索，避免挂在 Workspace 组件文件上导致 Fast Refresh 失效。 */
+/** 从 Explore 面板跳到工作台搜索，避免挂在 Workspace 组件文件上导致 Fast Refresh 失效。 */
 
 export type ExploreSearchDetail = {
   query: string;

@@ -42,7 +42,9 @@ fn now_secs() -> f64 {
 /// 单调秒。节流和测速只关心"过了多久"，用挂钟的话改系统时间会把速度算成天文数字。
 fn monotonic() -> f64 {
     static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    BASE.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+    BASE.get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs_f64()
 }
 
 fn new_id() -> String {
@@ -166,7 +168,8 @@ impl DownloadManager {
     }
 
     pub fn release_queued(&self) {
-        self.start_generation.send_modify(|generation| *generation += 1);
+        self.start_generation
+            .send_modify(|generation| *generation += 1);
     }
 
     /// 按创建时间升序列出，前端队列面板要的就是这个顺序。
@@ -322,9 +325,8 @@ impl DownloadManager {
             // DASH 的最后一个字节只代表音/视频流已到齐；之后仍可能要让 FFmpeg
             // 合并（或按设置转码）、原子落盘、移入目标目录并入库。以前 UI 在这段
             // 时间继续写「下载中 100%」，看起来像卡死。总量已知且收齐就立刻切相位。
-            let entered_processing = total > 0
-                && downloaded >= total
-                && entry.task.state == TaskState::Running;
+            let entered_processing =
+                total > 0 && downloaded >= total && entry.task.state == TaskState::Running;
             if entered_processing {
                 entry.task.state = TaskState::Processing;
                 entry.task.speed_bps = 0.0;
@@ -390,7 +392,11 @@ impl DownloadManager {
             .to_ascii_lowercase();
         self.update(id, |task| {
             task.state = state;
-            task.progress = if state == TaskState::Done { 1.0 } else { task.progress };
+            task.progress = if state == TaskState::Done {
+                1.0
+            } else {
+                task.progress
+            };
             // 收尾还挂着最后一次的瞬时速度的话，完成的条目会一直显示 "3.2 MB/s"
             task.speed_bps = 0.0;
             task.path = path.to_string_lossy().into_owned();
@@ -766,19 +772,19 @@ async fn run_audio(
                 }
             }
             // 下载完立刻入库，并把来源信息带上，这样曲库里能看出这首是从哪来的
-            let track_id = match state.library.upsert_file(
-                &path,
-                source.platform.as_str(),
-                &source.key,
-            ) {
-                Ok(id) => id,
-                Err(err) => {
-                    let message = format!("文件已下载，但加入曲库失败：{err:#}");
-                    tracing::error!("{} {}", message, path.display());
-                    manager.fail_after_download(&id, &path, &message);
-                    return;
-                }
-            };
+            let track_id =
+                match state
+                    .library
+                    .upsert_file(&path, source.platform.as_str(), &source.key)
+                {
+                    Ok(id) => id,
+                    Err(err) => {
+                        let message = format!("文件已下载，但加入曲库失败：{err:#}");
+                        tracing::error!("{} {}", message, path.display());
+                        manager.fail_after_download(&id, &path, &message);
+                        return;
+                    }
+                };
             manager.finish(&id, &path, Some(track_id));
             state.hub.publish_library_updated(&[track_id]);
             if analyze {
@@ -831,7 +837,9 @@ struct VjClipPlan {
 /// 文件开头假装 downbeat；整小节就是每 4 拍取一个点。
 fn snap_vj_time(track: &Track, time: f64, whole_bar: bool) -> Option<f64> {
     let bpm = track.bpm.filter(|bpm| bpm.is_finite() && *bpm > 0.0)?;
-    let first_beat = track.first_beat.filter(|beat| beat.is_finite() && *beat >= 0.0)?;
+    let first_beat = track
+        .first_beat
+        .filter(|beat| beat.is_finite() && *beat >= 0.0)?;
     let step = 60.0 / bpm * if whole_bar { 4.0 } else { 1.0 };
     Some(first_beat + ((time - first_beat) / step).round() * step)
 }
@@ -853,7 +861,10 @@ fn vj_interval(
         0.0
     };
     let end = if use_in_out_points {
-        track.end_ms.map(|value| value as f64 / 1000.0).unwrap_or(duration)
+        track
+            .end_ms
+            .map(|value| value as f64 / 1000.0)
+            .unwrap_or(duration)
     } else {
         duration
     }
@@ -921,7 +932,10 @@ fn vj_clip_plans(state: &AppState, req: &VjExportRequest) -> Result<Vec<VjClipPl
 /// 未分析素材按 120 BPM 兜底，保证导出不会因一条缺分析数据而失败。
 fn vj_fade_seconds(req: &VjExportRequest, previous: &Track) -> f64 {
     if req.fade_bars > 0 {
-        let bpm = previous.bpm.filter(|bpm| bpm.is_finite() && *bpm > 0.0).unwrap_or(120.0);
+        let bpm = previous
+            .bpm
+            .filter(|bpm| bpm.is_finite() && *bpm > 0.0)
+            .unwrap_or(120.0);
         f64::from(req.fade_bars) * 4.0 * 60.0 / bpm
     } else {
         req.fade_seconds
@@ -1010,7 +1024,11 @@ async fn run_vj_export(
 ) {
     manager.start(&id);
     if !kdj_providers::ffmpeg::available() {
-        manager.settle(&id, TaskState::Failed, "系统里没有 ffmpeg，无法渲染 VJ 导出");
+        manager.settle(
+            &id,
+            TaskState::Failed,
+            "系统里没有 ffmpeg，无法渲染 VJ 导出",
+        );
         return;
     }
     let result: Result<PathBuf> = async {
@@ -1022,9 +1040,15 @@ async fn run_vj_export(
                 .map(|_| vj_fade_seconds(&req, &plan.track))
                 .unwrap_or(0.0);
             // 不让一次过长的淡化吞掉任一首；ffmpeg 的 xfade 也要求这个约束。
-            let next_duration = plans.get(index + 1).map(|next| next.duration).unwrap_or(0.0);
+            let next_duration = plans
+                .get(index + 1)
+                .map(|next| next.duration)
+                .unwrap_or(0.0);
             let fade_to_next = if next_duration > 0.0 {
-                desired_fade.max(0.0).min(plan.duration * 0.5).min(next_duration * 0.5)
+                desired_fade
+                    .max(0.0)
+                    .min(plan.duration * 0.5)
+                    .min(next_duration * 0.5)
             } else {
                 0.0
             };
@@ -1051,7 +1075,8 @@ async fn run_vj_export(
         if let Err(err) = rendered {
             // FFmpeg 能列出硬件编码器不代表本机驱动 / 会话一定可实际打开；失败后
             // 无需用户改设置，立刻用 libx264 重试同一份临时文件。
-            if encoder != kdj_providers::ffmpeg::VjVideoEncoder::Software && !cancel.is_cancelled() {
+            if encoder != kdj_providers::ffmpeg::VjVideoEncoder::Software && !cancel.is_cancelled()
+            {
                 tracing::warn!(?encoder, "VJ 硬件编码失败，回退到 libx264：{err:#}");
                 let fallback = kdj_providers::ffmpeg::vj_export_args_with_encoder(
                     &clips,
@@ -1067,7 +1092,11 @@ async fn run_vj_export(
                 return Err(err);
             }
         }
-        if std::fs::metadata(&partial).map(|meta| meta.len()).unwrap_or(0) == 0 {
+        if std::fs::metadata(&partial)
+            .map(|meta| meta.len())
+            .unwrap_or(0)
+            == 0
+        {
             bail!("FFmpeg 没有写出 VJ 成品");
         }
         std::fs::rename(&partial, &output).context("提交 VJ 成品失败")?;
@@ -1192,12 +1221,15 @@ pub fn enqueue_video(
         }
         let progress_manager = manager.clone();
         let progress_id = id.clone();
-        let progress: kdj_providers::ProgressSink =
-            Arc::new(move |downloaded: u64, total: u64| {
-                progress_manager.progress(&progress_id, downloaded, total);
-            });
+        let progress: kdj_providers::ProgressSink = Arc::new(move |downloaded: u64, total: u64| {
+            progress_manager.progress(&progress_id, downloaded, total);
+        });
 
-        match state.bilibili.download_video(&req, &cancel, &progress).await {
+        match state
+            .bilibili
+            .download_video(&req, &cancel, &progress)
+            .await
+        {
             // 和音频一路同理：取消撞上"最后一块刚好下完"不能算成功
             Ok(_) if cancel.is_cancelled() => {
                 manager.settle(&id, TaskState::Canceled, "已取消");
@@ -1360,7 +1392,10 @@ mod tests {
             first_beat: None,
             ..track.clone()
         };
-        assert_eq!(vj_interval(&no_grid, true, true, false).unwrap(), (1.1, 4.5));
+        assert_eq!(
+            vj_interval(&no_grid, true, true, false).unwrap(),
+            (1.1, 4.5)
+        );
     }
 
     #[test]
@@ -1430,7 +1465,10 @@ mod tests {
         let returned = manager.cancel("x").unwrap();
         assert_eq!(returned.state, TaskState::Queued);
         assert!(manager.get("x").is_none(), "尚未开始的任务应直接离开队列");
-        assert!(cancel.is_cancelled(), "等待下载闸门的 worker 也必须被唤醒退出");
+        assert!(
+            cancel.is_cancelled(),
+            "等待下载闸门的 worker 也必须被唤醒退出"
+        );
     }
 
     #[test]
@@ -1714,7 +1752,11 @@ mod tests {
 
         let task = manager.get("x").unwrap();
         assert_eq!(task.state, TaskState::Failed, "入库失败不能对用户谎报完成");
-        assert_eq!(task.path, path.to_string_lossy(), "成品路径必须保住，方便定位和补救");
+        assert_eq!(
+            task.path,
+            path.to_string_lossy(),
+            "成品路径必须保住，方便定位和补救"
+        );
         assert_eq!(task.error, "加入曲库失败");
         assert!(task.downloaded_bytes > 0, "已经下完的体积不能清零");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1743,7 +1785,10 @@ mod tests {
         let manager = manager();
         let before = manager.permits();
         manager.set_concurrency(3);
-        assert!(Arc::ptr_eq(&before, &manager.permits()), "值没变就不能换闸门");
+        assert!(
+            Arc::ptr_eq(&before, &manager.permits()),
+            "值没变就不能换闸门"
+        );
 
         manager.set_concurrency(5);
         let after = manager.permits();
@@ -1764,7 +1809,10 @@ mod tests {
             bvid: bvid.into(),
             ..Default::default()
         };
-        assert_eq!(video_placeholder_title(&req("https://b23.tv/x", "BV1")), "BV1");
+        assert_eq!(
+            video_placeholder_title(&req("https://b23.tv/x", "BV1")),
+            "BV1"
+        );
         assert_eq!(
             video_placeholder_title(&req("https://b23.tv/x", "")),
             "https://b23.tv/x"
@@ -1824,9 +1872,9 @@ mod tests {
         let waiter = {
             let manager = manager.clone();
             let cancel = cancel.clone();
-            tokio::spawn(async move {
-                wait_until_started(&manager, &cancel, future_generation).await
-            })
+            tokio::spawn(
+                async move { wait_until_started(&manager, &cancel, future_generation).await },
+            )
         };
         tokio::task::yield_now().await;
         assert!(!waiter.is_finished(), "点击后新加入的任务必须继续排队");

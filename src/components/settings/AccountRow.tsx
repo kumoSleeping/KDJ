@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FolderOpen, LoaderCircle } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
@@ -8,6 +9,11 @@ import { Button, InlineNotice } from "../common";
 import { PLATFORM_BRAND, PlatformMark } from "../download/PlatformMark";
 
 const POLL_INTERVAL_MS = 1500;
+
+interface SoundCloudOAuthWindowResult {
+  status: "done" | "error" | "cancelled";
+  message: string;
+}
 
 const SCAN_WITH: Partial<Record<Platform, string>> = {
   wyy: "用网易云音乐 App 扫码",
@@ -155,6 +161,7 @@ export function AccountRow({ account }: { account: Account }) {
   const openSettingsPanel = useAppStore((state) => state.openSettingsPanel);
   const [busy, setBusy] = useState(false);
   const [qrBusy, setQrBusy] = useState(false);
+  const [oauthBusy, setOauthBusy] = useState(false);
   /** 打开用（安卓可能是 content URI）。 */
   const [savedPath, setSavedPath] = useState("");
   /** 给用户看的路径；没有就退化成 savedPath。 */
@@ -162,6 +169,7 @@ export function AccountRow({ account }: { account: Account }) {
   const [savedHint, setSavedHint] = useState("");
   const [qrState, setQrState] = useState<QrStateValue | null>(null);
   const qrGenerationRef = useRef(0);
+  const oauthUnlistenRef = useRef<UnlistenFn | null>(null);
   /** 退出失败就贴在这一行自己底下：状态还写着"已登录"，得说清楚为什么。 */
   const [notice, setNotice] = useState("");
 
@@ -173,6 +181,8 @@ export function AccountRow({ account }: { account: Account }) {
     () => () => {
       // 关闭设置会卸载账号行：让仍在等待的轮询自然失效。重新打开后按钮恢复原状。
       qrGenerationRef.current += 1;
+      oauthUnlistenRef.current?.();
+      oauthUnlistenRef.current = null;
     },
     [],
   );
@@ -279,6 +289,125 @@ export function AccountRow({ account }: { account: Account }) {
     }
   };
 
+  const oauthLogin = async () => {
+    const generation = ++qrGenerationRef.current;
+    setOauthBusy(true);
+    setNotice("");
+    try {
+      const session = await api.soundcloudOAuthStart();
+      if (generation !== qrGenerationRef.current) return;
+      const bridge = getBridge();
+
+      // 桌面用独立原生窗口：Rust 在同一进程里截住 kdj:// 回调并直接交给本地后端，
+      // 不依赖 macOS dev 的协议注册，也不会在 Win/Linux 被第二实例截走。
+      if (bridge.openSoundcloudOAuth) {
+        const unlisten = await listen<SoundCloudOAuthWindowResult>(
+          "soundcloud-oauth://result",
+          (event) => {
+            if (generation !== qrGenerationRef.current) return;
+            oauthUnlistenRef.current?.();
+            oauthUnlistenRef.current = null;
+            setOauthBusy(false);
+            if (event.payload.status === "done") {
+              void refreshAccounts();
+            } else {
+              setNotice(event.payload.message || "SoundCloud 登录未完成");
+            }
+          },
+        );
+        oauthUnlistenRef.current = unlisten;
+        await bridge.openSoundcloudOAuth(session.authorization_url);
+        return;
+      }
+
+      // 移动端发行包保留系统浏览器 + deep-link 路径。
+      if (!bridge.openExternal) throw new Error("当前壳没有系统浏览器打开能力");
+      const unlisten = await listen<string[]>("deep-link://new-url", (event) => {
+        for (const rawUrl of event.payload) {
+          let url: URL;
+          try {
+            url = new URL(rawUrl);
+          } catch {
+            continue;
+          }
+          if (
+            url.protocol !== "kdj:" ||
+            url.hostname !== "soundcloud" ||
+            url.pathname !== "/callback" ||
+            url.searchParams.get("state") !== session.state
+          ) {
+            continue;
+          }
+          const oauthError =
+            url.searchParams.get("error_description") || url.searchParams.get("error");
+          if (oauthError) {
+            oauthUnlistenRef.current?.();
+            oauthUnlistenRef.current = null;
+            setOauthBusy(false);
+            setNotice(oauthError);
+            return;
+          }
+          const code = url.searchParams.get("code");
+          if (!code) continue;
+          void api.soundcloudOAuthCallback({ state: session.state, code }).catch(
+            (error: unknown) => {
+              if (generation === qrGenerationRef.current) {
+                oauthUnlistenRef.current?.();
+                oauthUnlistenRef.current = null;
+                setOauthBusy(false);
+                setNotice(
+                  `SoundCloud 授权回调处理失败：${error instanceof Error ? error.message : String(error)}`,
+                );
+              }
+            },
+          );
+          break;
+        }
+      });
+      oauthUnlistenRef.current = unlisten;
+      await bridge.openExternal(session.authorization_url);
+      const poll = async () => {
+        if (generation !== qrGenerationRef.current) return;
+        try {
+          const state = await api.soundcloudOAuthStatus(session.state);
+          if (generation !== qrGenerationRef.current) return;
+          if (state.status === "done") {
+            oauthUnlistenRef.current?.();
+            oauthUnlistenRef.current = null;
+            setOauthBusy(false);
+            await refreshAccounts();
+            return;
+          }
+          if (state.status === "error") {
+            oauthUnlistenRef.current?.();
+            oauthUnlistenRef.current = null;
+            setOauthBusy(false);
+            setNotice(state.message || "SoundCloud 登录失败");
+            return;
+          }
+          window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
+        } catch (error) {
+          if (generation === qrGenerationRef.current) {
+            oauthUnlistenRef.current?.();
+            oauthUnlistenRef.current = null;
+            setOauthBusy(false);
+            setNotice(`SoundCloud 登录状态检查失败：${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      };
+      window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
+    } catch (error) {
+      if (generation === qrGenerationRef.current) {
+        oauthUnlistenRef.current?.();
+        oauthUnlistenRef.current = null;
+        setOauthBusy(false);
+        setNotice(`打开 SoundCloud 登录失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  };
+
+  const oauthAccount = account.login_method === "oauth" || account.platform === "soundcloud";
+
   return (
     <div style={settingRow.row}>
       <div style={settingRow.text}>
@@ -341,13 +470,17 @@ export function AccountRow({ account }: { account: Account }) {
       </div>
       <div style={settingRow.control}>
         {!account.supports_login ? (
-          // 不支持登录的平台（SoundCloud）连按钮都不给，点了只会撞上后端的 RuntimeError
           <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>
             无需登录
           </span>
         ) : loggedIn ? (
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => void logout()}>
             退出
+          </Button>
+        ) : oauthAccount ? (
+          <Button size="sm" variant="ghost" disabled={oauthBusy} onClick={() => void oauthLogin()}>
+            {oauthBusy && <LoaderCircle size={13} className="kd-spin" />}
+            {oauthBusy ? "等待授权" : "使用 SoundCloud 登录"}
           </Button>
         ) : savedPath ? (
           <Button

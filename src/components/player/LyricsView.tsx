@@ -12,6 +12,7 @@ import {
   MEDIA_SYNC_EVENT,
   type MediaSyncDetail,
 } from "../../lib/mediaSync";
+import { isStreamTrack, streamCoverUrl } from "../../lib/streamTrack";
 import { SEEK_EVENT, type SeekDetail } from "../library/Waveform";
 import { useLyricsStore } from "../../stores/lyricsStore";
 import type { Track } from "../../types";
@@ -147,7 +148,11 @@ export function LyricsView({ track }: { track: Track | null }) {
           canCycle={false}
           onCycle={() => undefined}
         />
-        <div className="kd-lyrics-stage" />
+        <div className="kd-lyrics-stage">
+          <p className="kd-lyrics-empty">
+            {entry.status === "error" ? "歌词暂时不可用" : "未找到歌词"}
+          </p>
+        </div>
       </div>
     );
   }
@@ -224,7 +229,11 @@ function LyricsHead({
   canCycle: boolean;
   onCycle(): void;
 }) {
-  const cover = api.coverUrl(track.id, track.modified_at);
+  // 在线试听使用负 id，并不在曲库 cover 路由里。继续请求 `/library/cover/-1`
+  // 只会得到一轮必然失败的 HTTP；封面应直接复用试听来源的旁路元数据。
+  const cover = isStreamTrack(track)
+    ? streamCoverUrl(track)
+    : api.coverUrl(track.id, track.modified_at);
   return (
     <header className="kd-lyrics-head" data-toggles={canCycle ? "true" : undefined}>
       <div className="kd-lyrics-cover" aria-hidden="true">

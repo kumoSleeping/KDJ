@@ -14,6 +14,7 @@ import { PlatformMark } from "./PlatformMark";
 import { requestVideoPreview } from "./VideoPreview";
 import { useTrackClickPrefs, playClickForLayout } from "../../lib/trackClickPrefs";
 import type { LayoutMode } from "../../lib/useLayoutMode";
+import { CoverImage } from "../common/VinylPlaceholder";
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -81,13 +82,15 @@ export interface VideoResultRowProps extends VideoSeed {
   totalColumns: number;
   /** 当前布局档位，决定单击/双击预览行为。 */
   layout: LayoutMode;
+  /** 当前结果列表中的序号。 */
+  rowNumber: number;
   /** @deprecated 保留兼容；请用 totalColumns。 */
   colSpan?: number;
 }
 
 /**
  * 搜索结果里的一条视频——外观对齐音频的 MergedGroupRow：
- * 封面 + 标题 / 艺人 / 时长 / 来源图标 / 下载自 / 音质，行首下载键。
+ * 封面 + 标题 / 艺人 / 时长 / 来源图标 / 下载自 / 音质，行首显示序号。
  * 分 P、画质、Offset 等细项挪到「下载队列」里逐条配置。
  */
 export function VideoResultRow({
@@ -100,6 +103,7 @@ export function VideoResultRow({
   columns,
   totalColumns,
   layout,
+  rowNumber,
 }: VideoResultRowProps) {
   const settings = useAppStore((state) => state.settings);
   const openQueuePanel = useAppStore((state) => state.openQueuePanel);
@@ -199,19 +203,6 @@ export function VideoResultRow({
     );
   };
 
-  const thumbImg = cover && (
-    <img
-      src={thumbUrl(cover)}
-      alt=""
-      loading="lazy"
-      draggable={false}
-      referrerPolicy="no-referrer"
-      onError={(event) => {
-        event.currentTarget.style.display = "none";
-      }}
-    />
-  );
-
   const cellDrag = {
     draggable: true as const,
     onDragStart: (event: React.DragEvent) => {
@@ -255,23 +246,8 @@ export function VideoResultRow({
         title="单击/双击预览视频（跟随播放手势设置）；点下载加入队列后可在队列里调分 P / 画质 / Offset"
       >
         <td className="kd-selection-cell" {...cellDrag} />
-        <td className="kd-result-lead" {...cellDrag}>
-          <span className="kd-result-lead-actions">
-            <button
-              type="button"
-              className="kd-result-lead-btn"
-              aria-label={`下载 ${title}`}
-              title="加入下载队列（细项在队列里配）"
-              disabled={sending || !bvid}
-              onClick={(event) => {
-                event.stopPropagation();
-                void download();
-              }}
-            >
-              <Download size={13} />
-            </button>
-            <span className="kd-result-lead-spacer" aria-hidden="true" />
-          </span>
+        <td className="kd-result-lead" data-col="index" {...cellDrag}>
+          <span className="kd-result-index">{rowNumber}</span>
         </td>
         {columns.map((column) => {
           switch (column.key) {
@@ -286,7 +262,12 @@ export function VideoResultRow({
                       bindPointerDrag(event);
                     }}
                   >
-                    {thumbImg}
+                    <CoverImage
+                      src={cover ? thumbUrl(cover) : ""}
+                      loading="lazy"
+                      draggable={false}
+                      referrerPolicy="no-referrer"
+                    />
                   </span>
                   {title}
                 </td>
@@ -347,6 +328,17 @@ export function VideoResultRow({
       ) : null}
       {rowMenu && (
         <ContextMenu x={rowMenu.x} y={rowMenu.y} onClose={() => setRowMenu(null)}>
+          <button
+            type="button"
+            disabled={sending || !bvid}
+            onClick={() => {
+              void download();
+              setRowMenu(null);
+            }}
+          >
+            <Download size={12} />
+            加入下载队列
+          </button>
           <button
             type="button"
             onClick={() => {

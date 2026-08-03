@@ -22,7 +22,12 @@ fn new_job_id() -> String {
 /// "有没有这个字段"去猜，而那正是最容易在下一次改动里悄悄错掉的判断。
 ///
 /// `error` 恒定出现（成功是 `null`），所以新一轮的终局事件总能把上一次的错误盖掉。
-fn scan_done_event(job_id: &str, done: usize, total: usize, error: Option<String>) -> serde_json::Value {
+fn scan_done_event(
+    job_id: &str,
+    done: usize,
+    total: usize,
+    error: Option<String>,
+) -> serde_json::Value {
     json!({
         "job_id": job_id,
         "done": done,
@@ -34,7 +39,12 @@ fn scan_done_event(job_id: &str, done: usize, total: usize, error: Option<String
 }
 
 /// 起一次扫描。立刻返回 job_id，实际工作在后台线程里跑。
-pub fn spawn_scan(state: Arc<AppState>, paths: Vec<String>, recursive: bool, analyze: bool) -> String {
+pub fn spawn_scan(
+    state: Arc<AppState>,
+    paths: Vec<String>,
+    recursive: bool,
+    analyze: bool,
+) -> String {
     let job_id = new_job_id();
     let job = job_id.clone();
     // 扫描是阻塞 IO，放 blocking 线程池，别占着 async 执行器
@@ -76,7 +86,10 @@ pub fn spawn_scan(state: Arc<AppState>, paths: Vec<String>, recursive: bool, ana
         let error = if report.unreadable_roots.is_empty() {
             None
         } else {
-            Some(unreadable_roots_message(&report.unreadable_roots, total == 0))
+            Some(unreadable_roots_message(
+                &report.unreadable_roots,
+                total == 0,
+            ))
         };
         hub.publish("scan.progress", &scan_done_event(&job, total, total, error));
         hub.publish_library_updated(&report.track_ids);
@@ -84,7 +97,10 @@ pub fn spawn_scan(state: Arc<AppState>, paths: Vec<String>, recursive: bool, ana
         // 扫描可能比用户点「暂停自动分析」早开始许久。这里重新读设置，
         // 才不会在暂停后仍把刚导入的一整批曲目塞进分析队列。
         if analyze && state.config.to_settings().auto_analyze && !report.track_ids.is_empty() {
-            match state.library.pending_analysis_ids(Some(&report.track_ids), false) {
+            match state
+                .library
+                .pending_analysis_ids(Some(&report.track_ids), false)
+            {
                 Ok(pending) => {
                     // 扫描顺带跑的批量分析是后台活，「停止分析」应该停得掉
                     spawn_analysis(state.clone(), pending, false);
@@ -306,7 +322,12 @@ pub fn spawn_waveform_backfill(state: Arc<AppState>) -> String {
             Some(format!(
                 "{} 首波形准备失败。{}",
                 errors.len(),
-                errors.iter().take(3).cloned().collect::<Vec<_>>().join("；")
+                errors
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("；")
             ))
         };
         hub.publish(
@@ -380,8 +401,7 @@ pub(crate) fn acquire_background_analysis_permit() -> impl Drop {
 
 /// 交互路径（波形）占用时 > 0。分析线程在**歌与歌之间**看到它就让路，
 /// 不会去抢分析闸门（抢闸门会把自己堵在当前那两首的长解码后面）。
-static INTERACTIVE_YIELD: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static INTERACTIVE_YIELD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// 标记「交互优先」：后台分析暂停接下一首，正在解的那一两首跑完即可。
 pub fn yield_analysis_permits() -> AnalysisYield {
@@ -508,7 +528,27 @@ impl AnalysisRegistry {
 /// 每首歌分析完的那一刻读 `config.write_tags_after_analyze` 的，
 /// 调用方各传各的必然漏——下载完成和扫描顺带的那两条路径就都传成了 false，
 /// 结果是"设置里开了『分析后写回标签』，新下的歌却一个标签都没写"。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AnalysisWriteTarget {
+    V1,
+    BpmKeyV2,
+}
+
 pub fn spawn_analysis(state: Arc<AppState>, track_ids: Vec<i64>, priority: bool) -> String {
+    spawn_analysis_target(state, track_ids, priority, AnalysisWriteTarget::V1)
+}
+
+/// 起一批只写 BPM/Key v2 的重分析任务。v1 数据由存储层按字段成功情况逐步退役。
+pub fn spawn_bpm_key_analysis_v2(state: Arc<AppState>, track_ids: Vec<i64>) -> String {
+    spawn_analysis_target(state, track_ids, false, AnalysisWriteTarget::BpmKeyV2)
+}
+
+fn spawn_analysis_target(
+    state: Arc<AppState>,
+    track_ids: Vec<i64>,
+    priority: bool,
+    target: AnalysisWriteTarget,
+) -> String {
     let job_id = new_job_id();
     if track_ids.is_empty() {
         return job_id;
@@ -571,19 +611,29 @@ pub fn spawn_analysis(state: Arc<AppState>, track_ids: Vec<i64>, priority: bool)
                         };
                         let path = std::path::PathBuf::from(&track.path);
                         let result = analyze_file(&path, duration_limit);
-                        if let Err(err) = state.library.save_analysis(track_id, &result) {
+                        let saved = match target {
+                            AnalysisWriteTarget::V1 => {
+                                state.library.save_analysis(track_id, &result)
+                            }
+                            AnalysisWriteTarget::BpmKeyV2 => {
+                                state.library.save_bpm_key_analysis_v2(track_id, &result)
+                            }
+                        };
+                        if let Err(err) = saved {
                             tracing::warn!("保存分析结果失败 {track_id}：{err:#}");
                             continue;
                         }
                         // 固定单 worker 预热默认波形。忙时排队而不是像旧 BUSY 实现那样
                         // 直接丢掉，批量分析完成后每首歌最终都会有持久缓存。
-                        state.waveforms.enqueue_default(
-                            track_id,
-                            path.clone(),
-                            state.config.data_dir.join("waveform"),
-                            false,
-                        );
-                        if write_tags {
+                        if target == AnalysisWriteTarget::V1 {
+                            state.waveforms.enqueue_default(
+                                track_id,
+                                path.clone(),
+                                state.config.data_dir.join("waveform"),
+                                false,
+                            );
+                        }
+                        if target == AnalysisWriteTarget::V1 && write_tags {
                             let _ = kdj_providers::tags::write_analysis_tags(
                                 &path,
                                 result.bpm,
@@ -602,7 +652,12 @@ pub fn spawn_analysis(state: Arc<AppState>, track_ids: Vec<i64>, priority: bool)
                             "analyze.progress",
                             &json!({
                                 "job_id": job, "done": current, "total": total,
-                                "current": track.filename, "track_id": track_id
+                                "current": track.filename, "track_id": track_id,
+                                "version": if target == AnalysisWriteTarget::V1 {
+                                    "v1"
+                                } else {
+                                    "v2"
+                                }
                             }),
                         );
                     }
@@ -628,7 +683,12 @@ pub fn spawn_analysis(state: Arc<AppState>, track_ids: Vec<i64>, priority: bool)
         // 这里**不发**"分析完成"的提示。前端现在会在空闲时一批 20 首地自动补齐，
         // 一千多首的曲库要跑几十批；每批弹一句就是整夜刷屏。
         // 跑完的证据是列表里的 BPM/调号直接出现了，那比一条会飘走的提示更实在。
-        tracing::info!("分析批次 {job} 结束：{} 首", ids.len());
+        let version = if target == AnalysisWriteTarget::V1 {
+            "v1"
+        } else {
+            "v2"
+        };
+        tracing::info!("分析批次 {job}（{version}）结束：{} 首", ids.len());
     });
     job_id
 }
@@ -640,13 +700,28 @@ mod tests {
     #[test]
     fn maintenance_jobs_are_singleflight_per_kind() {
         let registry = MaintenanceRegistry::default();
-        assert_eq!(registry.claim_folder("folder-a".into()), ("folder-a".into(), true));
-        assert_eq!(registry.claim_folder("folder-b".into()), ("folder-a".into(), false));
-        assert_eq!(registry.claim_waveform("wave-a".into()), ("wave-a".into(), true));
+        assert_eq!(
+            registry.claim_folder("folder-a".into()),
+            ("folder-a".into(), true)
+        );
+        assert_eq!(
+            registry.claim_folder("folder-b".into()),
+            ("folder-a".into(), false)
+        );
+        assert_eq!(
+            registry.claim_waveform("wave-a".into()),
+            ("wave-a".into(), true)
+        );
         registry.finish_folder("wrong-id");
-        assert_eq!(registry.claim_folder("folder-c".into()), ("folder-a".into(), false));
+        assert_eq!(
+            registry.claim_folder("folder-c".into()),
+            ("folder-a".into(), false)
+        );
         registry.finish_folder("folder-a");
-        assert_eq!(registry.claim_folder("folder-c".into()), ("folder-c".into(), true));
+        assert_eq!(
+            registry.claim_folder("folder-c".into()),
+            ("folder-c".into(), true)
+        );
     }
 
     /// 登记一个批次，并把它的 done 计数器一并返回，方便测试里推进进度。
@@ -832,7 +907,11 @@ mod tests {
             handle.join().unwrap();
         }
 
-        assert!(peak.load(Ordering::SeqCst) <= 2, "峰值 {}", peak.load(Ordering::SeqCst));
+        assert!(
+            peak.load(Ordering::SeqCst) <= 2,
+            "峰值 {}",
+            peak.load(Ordering::SeqCst)
+        );
         // 全部归还之后额度要回到满值，不然闸门会越用越窄
         assert_eq!(*gate.permits.lock().unwrap(), 2);
     }

@@ -11,12 +11,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use futures_util::StreamExt as _;
 use base64::Engine as _;
+use futures_util::StreamExt as _;
 use kdj_core::models::{
-    Account, AccountState, CollectionResolveResponse, CollectionResult, LyricText, Platform, Quality,
-    QrSession, QrStateValue, QrVariant, ResolveKind, ResolveResponse, SearchKind, SongSource,
-    StreamPlaylist, StreamPlaylistResponse,
+    Account, AccountState, CollectionResolveResponse, CollectionResult, LyricText, Platform,
+    QrSession, QrStateValue, QrVariant, Quality, ResolveKind, ResolveResponse, SearchKind,
+    SongSource, StreamPlaylist, StreamPlaylistResponse,
 };
 use kdj_core::paths::render_filename;
 use serde_json::{json, Value};
@@ -26,8 +26,8 @@ use super::client::{new_search_id, Credential, QqClient, QqPlatform};
 use super::login;
 use crate::net::{host_is, AtomicDownload};
 use crate::provider::{
-    effective_limit, first_truthy, is_truthy, loose_int, qr_data_url_from_png, unique_download_path,
-    str_field, Capabilities, DownloadJob, MusicProvider, ProviderContext,
+    effective_limit, first_truthy, is_truthy, loose_int, qr_data_url_from_png, str_field,
+    unique_download_path, Capabilities, DownloadJob, MusicProvider, ProviderContext,
 };
 use crate::tags;
 
@@ -37,7 +37,12 @@ const LABEL: &str = "QQ 音乐";
 const CDN_FALLBACK: &str = "https://isure.stream.qqmusic.qq.com/";
 const QR_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const PROFILE_TTL: Duration = Duration::from_secs(300);
-const SEARCH_KINDS: &[SearchKind] = &[SearchKind::Song, SearchKind::Artist, SearchKind::Album];
+const SEARCH_KINDS: &[SearchKind] = &[
+    SearchKind::Song,
+    SearchKind::Playlist,
+    SearchKind::Artist,
+    SearchKind::Album,
+];
 
 fn qq_value_id(value: &Value) -> String {
     value
@@ -49,8 +54,12 @@ fn qq_value_id(value: &Value) -> String {
 }
 
 fn is_qq_audio_url(url: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(url) else { return false };
-    let Some(host) = parsed.host_str() else { return false };
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
     parsed.scheme() == "https"
         && (host == "stream.qqmusic.qq.com" || host.ends_with(".stream.qqmusic.qq.com"))
 }
@@ -79,11 +88,18 @@ fn profile_text(value: Option<&Value>) -> Option<String> {
         return Some(text.to_string());
     }
     let object = value.as_object()?;
-    ["url", "avatar", "avatarUrl", "pic", "headPicUrl", "frontPicUrl"]
-        .iter()
-        .find_map(|key| object.get(*key).and_then(Value::as_str))
-        .filter(|text| !text.is_empty())
-        .map(str::to_string)
+    [
+        "url",
+        "avatar",
+        "avatarUrl",
+        "pic",
+        "headPicUrl",
+        "frontPicUrl",
+    ]
+    .iter()
+    .find_map(|key| object.get(*key).and_then(Value::as_str))
+    .filter(|text| !text.is_empty())
+    .map(str::to_string)
 }
 
 fn profile_path<'a>(data: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -100,7 +116,11 @@ fn homepage_nickname(data: &Value) -> String {
         data.get("nickname"),
     ]
     .into_iter()
-    .find_map(|value| value.and_then(Value::as_str).filter(|text| !text.is_empty()))
+    .find_map(|value| {
+        value
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+    })
     .unwrap_or_default()
     .to_string()
 }
@@ -131,7 +151,11 @@ fn profile_report_nickname(data: &Value) -> String {
         profile_path(data, &["UserInfoCard", "name"]),
     ]
     .into_iter()
-    .find_map(|value| value.and_then(Value::as_str).filter(|text| !text.is_empty()))
+    .find_map(|value| {
+        value
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+    })
     .unwrap_or_default()
     .to_string()
 }
@@ -237,6 +261,38 @@ impl QqMusicProvider {
         Ok(songs.iter().take(limit).map(to_source).collect())
     }
 
+    async fn search_collection_rows(
+        &self,
+        keyword: &str,
+        kind: SearchKind,
+        limit: usize,
+    ) -> Result<Vec<CollectionResult>> {
+        let search_type = match kind {
+            SearchKind::Artist => 1,
+            SearchKind::Album => 2,
+            SearchKind::Playlist => 3,
+            SearchKind::Song => return Ok(Vec::new()),
+        };
+        let data = self
+            .client
+            .call(
+                "music.search.SearchCgiService",
+                "DoSearchForQQMusicMobile",
+                json!({
+                    "searchid": new_search_id(),
+                    "query": keyword,
+                    "search_type": search_type,
+                    "num_per_page": limit,
+                    "page_num": 1,
+                    "highlight": false,
+                    "grp": true
+                }),
+                QqPlatform::Mobile,
+            )
+            .await?;
+        Ok(qq_collection_results(&data, kind, limit))
+    }
+
     async fn query_song(&self, key: &str) -> Result<Value> {
         let param = if key.chars().all(|c| c.is_ascii_digit()) {
             json!({"ctx": 0, "client": 1, "ids": [key.parse::<i64>().unwrap_or(0)],
@@ -263,7 +319,11 @@ impl QqMusicProvider {
     }
 
     /// 歌单分页拉取：hasmore 与 total 双终止条件，任一到头就停。
-    async fn playlist_tracks(&self, playlist_id: &str, limit: usize) -> Result<(String, Vec<Value>)> {
+    async fn playlist_tracks(
+        &self,
+        playlist_id: &str,
+        limit: usize,
+    ) -> Result<(String, Vec<Value>)> {
         let id: i64 = playlist_id.parse().context("QQ 音乐歌单 ID 不是数字")?;
         let mut tracks: Vec<Value> = Vec::new();
         let mut title = format!("QQ 音乐歌单 {playlist_id}");
@@ -333,6 +393,166 @@ impl QqMusicProvider {
             page += 1;
             // 挡住接口一直回 hasmore=1 的病态情况
             if page > 50 {
+                break;
+            }
+        }
+        Ok((title, tracks))
+    }
+
+    async fn album_tracks(&self, album_key: &str, limit: usize) -> Result<(String, Vec<Value>)> {
+        const PAGE_SIZE: usize = 100;
+        const MAX_PAGES: usize = 50;
+
+        let mut tracks = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut title = String::new();
+        let mut begin = 0usize;
+
+        for _ in 0..MAX_PAGES {
+            let page_size = PAGE_SIZE.min(limit.saturating_sub(tracks.len())).max(1);
+            let mut param = serde_json::Map::from_iter([
+                ("begin".into(), json!(begin)),
+                ("num".into(), json!(page_size)),
+            ]);
+            if album_key.chars().all(|ch| ch.is_ascii_digit()) {
+                param.insert(
+                    "albumId".into(),
+                    json!(album_key.parse::<i64>().unwrap_or(0)),
+                );
+            } else {
+                param.insert("albumMid".into(), json!(album_key));
+            }
+            let data = self
+                .client
+                .call(
+                    "music.musichallAlbum.AlbumSongList",
+                    "GetAlbumSongList",
+                    Value::Object(param),
+                    QqPlatform::Mobile,
+                )
+                .await?;
+            let page = qq_song_entries(&data);
+            if page.is_empty() {
+                break;
+            }
+            if title.is_empty() {
+                title = page
+                    .iter()
+                    .find_map(qq_song_album_name)
+                    .unwrap_or_default()
+                    .to_string();
+            }
+            let fetched = page.len();
+            append_unique_qq_songs(&mut tracks, &mut seen, page, limit);
+            begin = begin.saturating_add(fetched);
+            if tracks.len() >= limit || qq_page_finished(&data, begin, fetched, page_size) {
+                break;
+            }
+        }
+
+        if title.is_empty() {
+            title = format!("QQ 音乐专辑 {album_key}");
+        }
+        Ok((title, tracks))
+    }
+
+    async fn artist_tracks(&self, artist_mid: &str, limit: usize) -> Result<(String, Vec<Value>)> {
+        const PAGE_SIZE: usize = 30;
+        const MAX_PAGES: usize = 100;
+
+        let mut tracks = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut title = String::new();
+        let mut begin = 0usize;
+
+        for _ in 0..MAX_PAGES {
+            let page_size = PAGE_SIZE.min(limit.saturating_sub(tracks.len())).max(1);
+            let data = self
+                .client
+                .call(
+                    "musichall.song_list_server",
+                    "GetSingerSongList",
+                    json!({
+                        "singerMid": artist_mid,
+                        "order": 1,
+                        "number": page_size,
+                        "begin": begin
+                    }),
+                    QqPlatform::Mobile,
+                )
+                .await?;
+            let page = qq_song_entries(&data);
+            if page.is_empty() {
+                break;
+            }
+            if title.is_empty() {
+                title = page
+                    .iter()
+                    .find_map(qq_song_primary_artist)
+                    .unwrap_or_default()
+                    .to_string();
+            }
+            let fetched = page.len();
+            append_unique_qq_songs(&mut tracks, &mut seen, page, limit);
+            begin = begin.saturating_add(fetched);
+            if tracks.len() >= limit || qq_page_finished(&data, begin, fetched, page_size) {
+                break;
+            }
+        }
+
+        if title.is_empty() {
+            title = format!("QQ 音乐艺术家 {artist_mid}");
+        }
+        Ok((title, tracks))
+    }
+
+    async fn favorite_tracks(&self, limit: usize) -> Result<(String, Vec<Value>)> {
+        const PAGE_SIZE: usize = 100;
+        const MAX_PAGES: usize = 100;
+
+        let credential = self.client.credential();
+        if !credential.is_present() {
+            return Ok(("我的收藏".into(), Vec::new()));
+        }
+        let mut tracks = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut title = "我的收藏".to_string();
+        let mut begin = 0usize;
+
+        for _ in 0..MAX_PAGES {
+            let page_size = PAGE_SIZE.min(limit.saturating_sub(tracks.len())).max(1);
+            let data = self
+                .client
+                .call(
+                    "music.srfDissInfo.DissInfo",
+                    "CgiGetDiss",
+                    json!({
+                        "disstid": 0,
+                        "dirid": 201,
+                        "tag": true,
+                        "song_begin": begin,
+                        "song_num": page_size,
+                        "userinfo": true,
+                        "orderlist": true,
+                        "onlysonglist": false,
+                        "enc_host_uin": credential.encrypt_uin.clone(),
+                    }),
+                    QqPlatform::Desktop,
+                )
+                .await?;
+            if begin == 0 {
+                if let Some(found) = data.get("dirinfo").and_then(qq_playlist_title) {
+                    title = found.to_string();
+                }
+            }
+            let page = qq_song_entries(&data);
+            if page.is_empty() {
+                break;
+            }
+            let fetched = page.len();
+            append_unique_qq_songs(&mut tracks, &mut seen, page, limit);
+            begin = begin.saturating_add(fetched);
+            if tracks.len() >= limit || qq_page_finished(&data, begin, fetched, page_size) {
                 break;
             }
         }
@@ -497,8 +717,7 @@ impl QqMusicProvider {
         // Cookie 暴露给前端，也能避开 QQ 主页接口的字段漂移。
         if profile.1.is_empty() && !musicid.is_empty() {
             let qlogo_uin = musicid.strip_prefix('o').unwrap_or(&musicid);
-            profile.1 =
-                format!("https://q.qlogo.cn/headimg_dl?dst_uin={qlogo_uin}&spec=100");
+            profile.1 = format!("https://q.qlogo.cn/headimg_dl?dst_uin={qlogo_uin}&spec=100");
         }
         *self.profile.lock().unwrap() = Some((profile.clone(), Instant::now()));
         profile
@@ -580,12 +799,8 @@ impl MusicProvider for QqMusicProvider {
             }
         }
         let (nickname, avatar) = self.fetch_profile().await;
-        let mut account = Account::new(
-            Platform::Qqm,
-            LABEL,
-            AccountState::Valid,
-            "",
-        );
+        let mut account = Account::new(Platform::Qqm, LABEL, AccountState::Valid, "");
+        account.account_key = credential.str_musicid();
         account.nickname = nickname;
         account.avatar = avatar;
         account
@@ -727,123 +942,23 @@ impl MusicProvider for QqMusicProvider {
         limit: usize,
     ) -> Result<Vec<CollectionResult>> {
         let keyword = keyword.trim();
-        if keyword.is_empty() || !matches!(kind, SearchKind::Artist | SearchKind::Album) {
+        if keyword.is_empty()
+            || !matches!(
+                kind,
+                SearchKind::Playlist | SearchKind::Artist | SearchKind::Album
+            )
+        {
             return Ok(Vec::new());
         }
-        let search_type = match kind {
-            SearchKind::Artist => 1,
-            SearchKind::Album => 2,
-            SearchKind::Song => return Ok(Vec::new()),
-        };
         let limit = effective_limit(limit, 20);
-        let data = self
-            .client
-            .call(
-                "music.search.SearchCgiService",
-                "DoSearchForQQMusicMobile",
-                json!({
-                    "searchid": new_search_id(),
-                    "query": keyword,
-                    "search_type": search_type,
-                    "num_per_page": limit,
-                    "page_num": 1,
-                    "highlight": false,
-                    "grp": true
-                }),
-                QqPlatform::Mobile,
-            )
-            .await?;
-        let entries = data
-            .pointer(match kind {
-                SearchKind::Artist => "/body/singer",
-                SearchKind::Album => "/body/item_album",
-                SearchKind::Song => "/body/item_song",
-            })
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        Ok(entries
-            .iter()
-            .take(limit)
-            .filter_map(|entry| {
-                let (key, title, subtitle, cover, count) = match kind {
-                    SearchKind::Artist => {
-                        let key = entry
-                            .get("singerMID")
-                            .or_else(|| entry.get("singer_mid"))
-                            .and_then(Value::as_str)
-                            .filter(|value| !value.is_empty())?
-                            .to_string();
-                        let title = entry
-                            .get("singerName")
-                            .or_else(|| entry.get("name"))
-                            .and_then(Value::as_str)
-                            .filter(|value| !value.is_empty())?
-                            .to_string();
-                        let count = loose_int(entry.get("songNum")).max(0) as usize;
-                        (
-                            key,
-                            title,
-                            format!("{count} 首 · {} 张专辑", loose_int(entry.get("albumNum"))),
-                            entry
-                                .get("singerPic")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .to_string(),
-                            count,
-                        )
-                    }
-                    SearchKind::Album => {
-                        let key = entry
-                            .get("albummid")
-                            .or_else(|| entry.get("albumMid"))
-                            .and_then(Value::as_str)
-                            .filter(|value| !value.is_empty())?
-                            .to_string();
-                        let title = entry
-                            .get("name")
-                            .or_else(|| entry.get("albumname"))
-                            .and_then(Value::as_str)
-                            .filter(|value| !value.is_empty())?
-                            .to_string();
-                        let artist = entry
-                            .get("singer")
-                            .and_then(Value::as_array)
-                            .and_then(|list| list.first())
-                            .and_then(|singer| singer.get("name"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("未知艺人");
-                        let count = loose_int(entry.get("song_num")).max(0) as usize;
-                        (
-                            key.clone(),
-                            title,
-                            format!("{count} 首 · {artist}"),
-                            entry
-                                .get("pic")
-                                .and_then(Value::as_str)
-                                .filter(|value| !value.is_empty())
-                                .map(str::to_string)
-                                .unwrap_or_else(|| {
-                                    format!(
-                                        "https://y.gtimg.cn/music/photo_new/T002R300x300M000{key}.jpg"
-                                    )
-                                }),
-                            count,
-                        )
-                    }
-                    SearchKind::Song => return None,
-                };
-                Some(CollectionResult {
-                    kind,
-                    platform: Platform::Qqm,
-                    key,
-                    title,
-                    subtitle,
-                    cover,
-                    count,
-                })
-            })
-            .collect())
+        let mut rows = self.search_collection_rows(keyword, kind, limit).await?;
+        if rows.is_empty() {
+            let stripped = strip_qq_search_decorations(keyword);
+            if stripped != keyword && !stripped.is_empty() {
+                rows = self.search_collection_rows(&stripped, kind, limit).await?;
+            }
+        }
+        Ok(rows)
     }
 
     async fn stream_playlists(&self) -> Result<Vec<StreamPlaylist>> {
@@ -858,7 +973,9 @@ impl MusicProvider for QqMusicProvider {
             cover: String::new(),
             count: 0,
             is_favorite: true,
+            origin: "favorite".into(),
         }];
+        let mut seen_keys = std::collections::HashSet::new();
         if let Ok(data) = self
             .client
             .call(
@@ -869,22 +986,39 @@ impl MusicProvider for QqMusicProvider {
             )
             .await
         {
-            if let Some(entries) = data.get("v_playlist").and_then(Value::as_array) {
-                playlists.extend(entries.iter().filter_map(|entry| {
-                    let key = entry
+            if let Some(entries) = playlist_entries(&data) {
+                for entry in entries {
+                    let Some(key) = entry
                         .get("tid")
                         .or_else(|| entry.get("dissid"))
                         .or_else(|| entry.get("dirid"))
+                        .or_else(|| entry.get("id"))
                         .map(qq_value_id)
-                        .filter(|value| !value.is_empty() && value != "0")?;
-                    let title = str_field(entry, "dirname")
-                        .or_else(|| str_field(entry, "name"))
-                        .or_else(|| str_field(entry, "title"))
-                        .unwrap_or("QQ 音乐歌单")
+                        .filter(|value| !value.is_empty() && value != "0")
+                    else {
+                        continue;
+                    };
+                    let fallback_title = "QQ 音乐歌单";
+                    let mut title = qq_playlist_title(entry)
+                        .unwrap_or(fallback_title)
                         .to_string();
-                    Some(StreamPlaylist {
+                    // `dirid=201` 就是“我喜欢/我的收藏”。上面已经放了稳定的
+                    // `__qq_favorite__` 虚拟 key，再保留这条会在侧栏出现两个同义节点。
+                    if is_qq_favorite_playlist(entry) || !seen_keys.insert(key.clone()) {
+                        continue;
+                    }
+                    // `GetPlaylistByUin` 的真实桌面回包通常只有 dirid/tid/song_num，
+                    // 名称要到同一歌单的详情接口 `CgiGetDiss.dirinfo` 才拿得到。
+                    if title == fallback_title {
+                        if let Ok((resolved, _)) = self.playlist_tracks(&key, 1).await {
+                            if !resolved.trim().is_empty() {
+                                title = resolved;
+                            }
+                        }
+                    }
+                    playlists.push(StreamPlaylist {
                         platform: Platform::Qqm,
-                        key,
+                        key: key.clone(),
                         title,
                         cover: str_field(entry, "logo")
                             .or_else(|| str_field(entry, "cover"))
@@ -898,8 +1032,9 @@ impl MusicProvider for QqMusicProvider {
                         )
                         .max(0) as usize,
                         is_favorite: false,
-                    })
-                }));
+                        origin: "created".into(),
+                    });
+                }
             }
         }
         Ok(playlists)
@@ -918,43 +1053,9 @@ impl MusicProvider for QqMusicProvider {
         if !credential.is_present() {
             return Ok(None);
         }
-        let limit = effective_limit(limit, 500).min(100);
+        let limit = effective_limit(limit, 500);
         let (title, entries) = if key == "__qq_favorite__" {
-            let data = self
-                .client
-                .call(
-                    "music.srfDissInfo.DissInfo",
-                    "CgiGetDiss",
-                    json!({
-                        "disstid": 0,
-                        "dirid": 201,
-                        "tag": true,
-                        "song_begin": 0,
-                        "song_num": limit,
-                        "userinfo": true,
-                        "orderlist": true,
-                        "onlysonglist": false,
-                        "enc_host_uin": credential.encrypt_uin,
-                    }),
-                    QqPlatform::Desktop,
-                )
-                .await?;
-            let title = data
-                .get("dirinfo")
-                .and_then(|info| {
-                    str_field(info, "title")
-                        .or_else(|| str_field(info, "dirname"))
-                        .or_else(|| str_field(info, "dissname"))
-                })
-                .unwrap_or("我的收藏")
-                .to_string();
-            let entries = data
-                .get("songlist")
-                .or_else(|| data.get("songs"))
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            (title, entries)
+            self.favorite_tracks(limit).await?
         } else {
             self.playlist_tracks(key, limit).await?
         };
@@ -981,52 +1082,28 @@ impl MusicProvider for QqMusicProvider {
         limit: usize,
     ) -> Result<Option<CollectionResolveResponse>> {
         let key = key.trim();
-        if key.is_empty() || !matches!(kind, SearchKind::Artist | SearchKind::Album) {
+        if key.is_empty()
+            || !matches!(
+                kind,
+                SearchKind::Playlist | SearchKind::Artist | SearchKind::Album
+            )
+        {
             return Ok(None);
         }
         let limit = effective_limit(limit, 500);
-        let data = match kind {
-            SearchKind::Album => {
-                self.client
-                    .call(
-                        "music.musichallAlbum.AlbumSongList",
-                        "GetAlbumSongList",
-                        json!({ "albumMid": key, "begin": 0, "num": limit }),
-                        QqPlatform::Mobile,
-                    )
-                    .await?
-            }
-            SearchKind::Artist => {
-                self.client
-                    .call(
-                        "musichall.song_list_server",
-                        "GetSingerSongList",
-                        json!({ "singerMid": key, "order": 1, "number": limit.min(30), "begin": 0 }),
-                        QqPlatform::Mobile,
-                    )
-                    .await?
-            }
+        let (title, entries) = match kind {
+            SearchKind::Playlist => self.playlist_tracks(key, limit).await?,
+            SearchKind::Album => self.album_tracks(key, limit).await?,
+            SearchKind::Artist => self.artist_tracks(key, limit).await?,
             SearchKind::Song => return Ok(None),
         };
-        let entries = data
-            .get("songList")
-            .or_else(|| data.get("songlist"))
-            .and_then(Value::as_array)
-            .map(|list| {
-                list.iter()
-                    .map(|entry| entry.get("songInfo").unwrap_or(entry))
-                    .filter(|entry| has_song_key(entry))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
         if entries.is_empty() {
             bail!("QQ 音乐集合没有可用歌曲（{key}）");
         }
         Ok(Some(CollectionResolveResponse {
             kind,
             platform: Platform::Qqm,
-            title: format!("QQ 音乐{}", if kind == SearchKind::Album { "专辑" } else { "作者" }),
+            title,
             sources: entries.iter().take(limit).map(to_source).collect(),
         }))
     }
@@ -1049,6 +1126,18 @@ impl MusicProvider for QqMusicProvider {
                 platform: Platform::Qqm,
                 title: source.title.clone(),
                 sources: vec![source],
+            }));
+        }
+        if let Some(album_key) = parse_album(&text) {
+            let (title, songs) = self.album_tracks(&album_key, limit).await?;
+            if songs.is_empty() {
+                bail!("没有读取到这个 QQ 音乐专辑（{album_key}）");
+            }
+            return Ok(Some(ResolveResponse {
+                kind: ResolveKind::Album,
+                platform: Platform::Qqm,
+                title,
+                sources: songs.iter().take(limit).map(to_source).collect(),
             }));
         }
         if let Some(playlist_id) = parse_playlist(&text) {
@@ -1084,7 +1173,9 @@ impl MusicProvider for QqMusicProvider {
             let detail = self.query_song(&source.key).await?;
             if !detail.is_null() {
                 media_mid = media_mid_of(&detail, &source.key);
-                resolved = self.resolve_url(&source.key, &media_mid, Quality::Q128).await?;
+                resolved = self
+                    .resolve_url(&source.key, &media_mid, Quality::Q128)
+                    .await?;
             }
         }
         let Some((url, _ext)) = resolved else {
@@ -1115,7 +1206,10 @@ impl MusicProvider for QqMusicProvider {
                 ("platform", "yqq.json"),
                 ("needNewCode", "0"),
             ])
-            .header(reqwest::header::REFERER, "https://y.qq.com/portal/player.html")
+            .header(
+                reqwest::header::REFERER,
+                "https://y.qq.com/portal/player.html",
+            )
             .send()
             .await
             .context("请求 QQ 音乐歌词失败")?;
@@ -1146,7 +1240,9 @@ impl MusicProvider for QqMusicProvider {
         let mut raw = Value::Object(source.payload.clone());
         let mut media_mid = media_mid_of(&raw, &source.key);
         let mut album_mid = album_mid_of(&raw);
-        let mut resolved = self.resolve_url(&source.key, &media_mid, job.quality).await?;
+        let mut resolved = self
+            .resolve_url(&source.key, &media_mid, job.quality)
+            .await?;
         if resolved.is_none() {
             // 搜索结果里的 media_mid 偶尔是空的，回查一次详情再试
             let detail = self.query_song(&source.key).await?;
@@ -1156,7 +1252,9 @@ impl MusicProvider for QqMusicProvider {
                     album_mid = album_mid_of(&detail);
                 }
                 raw = detail;
-                resolved = self.resolve_url(&source.key, &media_mid, job.quality).await?;
+                resolved = self
+                    .resolve_url(&source.key, &media_mid, job.quality)
+                    .await?;
             }
         }
         let _ = &raw;
@@ -1238,6 +1336,298 @@ impl MusicProvider for QqMusicProvider {
 
 // ---------------------------------------------------------------- 纯函数
 
+fn array_value(value: &Value) -> Option<&Vec<Value>> {
+    value.as_array().or_else(|| {
+        ["items", "list", "v_item", "itemlist", "data"]
+            .into_iter()
+            .find_map(|key| value.get(key).and_then(Value::as_array))
+    })
+}
+
+fn qq_collection_entries(data: &Value, kind: SearchKind) -> Option<&Vec<Value>> {
+    let pointers: &[&str] = match kind {
+        SearchKind::Playlist => &[
+            "/body/item_songlist",
+            "/body/songlist",
+            "/item_songlist",
+            "/songlist",
+        ],
+        SearchKind::Artist => &["/body/singer", "/body/item_singer", "/singer"],
+        SearchKind::Album => &["/body/item_album", "/body/album", "/item_album"],
+        SearchKind::Song => return None,
+    };
+    pointers
+        .iter()
+        .find_map(|pointer| data.pointer(pointer).and_then(array_value))
+}
+
+fn qq_alias_text<'a>(entry: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| str_field(entry, key))
+}
+
+fn qq_alias_id(entry: &Value, keys: &[&str]) -> String {
+    keys.iter()
+        .find_map(|key| entry.get(*key).filter(|value| is_truthy(Some(value))))
+        .map(qq_value_id)
+        .unwrap_or_default()
+}
+
+fn qq_alias_count(entry: &Value, keys: &[&str]) -> usize {
+    keys.iter()
+        .find_map(|key| entry.get(*key))
+        .map(|value| loose_int(Some(value)).max(0) as usize)
+        .unwrap_or(0)
+}
+
+fn qq_collection_results(data: &Value, kind: SearchKind, limit: usize) -> Vec<CollectionResult> {
+    qq_collection_entries(data, kind)
+        .into_iter()
+        .flatten()
+        .take(limit)
+        .filter_map(|entry| {
+            let (key, title, subtitle, cover, count) = match kind {
+                SearchKind::Playlist => {
+                    let key = qq_alias_id(entry, &["id", "tid", "dissid", "dirid"]);
+                    if key.is_empty() || key == "0" {
+                        return None;
+                    }
+                    let title = qq_playlist_title(entry)?.to_string();
+                    let count = qq_alias_count(
+                        entry,
+                        &["songnum", "songNum", "song_num", "song_cnt", "song_count"],
+                    );
+                    let creator = qq_alias_text(
+                        entry,
+                        &["nickname", "creatorName", "creator_name", "ownerName"],
+                    )
+                    .unwrap_or("未知创建者");
+                    (
+                        key,
+                        title,
+                        format!("{count} 首 · {creator}"),
+                        qq_alias_text(entry, &["picurl", "picUrl", "cover", "logo"])
+                            .unwrap_or_default()
+                            .to_string(),
+                        count,
+                    )
+                }
+                SearchKind::Artist => {
+                    let key = qq_alias_id(
+                        entry,
+                        &["singerMID", "singerMid", "singer_mid", "singermid", "mid"],
+                    );
+                    if key.is_empty() {
+                        return None;
+                    }
+                    let title =
+                        qq_alias_text(entry, &["singerName", "singer_name", "name"])?.to_string();
+                    let count = qq_alias_count(entry, &["songNum", "song_num", "songnum"]);
+                    let albums = qq_alias_count(entry, &["albumNum", "album_num", "albumnum"]);
+                    (
+                        key,
+                        title,
+                        format!("{count} 首 · {albums} 张专辑"),
+                        qq_alias_text(entry, &["singerPic", "pic", "picUrl", "picurl"])
+                            .unwrap_or_default()
+                            .to_string(),
+                        count,
+                    )
+                }
+                SearchKind::Album => {
+                    let key = qq_alias_id(
+                        entry,
+                        &[
+                            "albummid",
+                            "albumMid",
+                            "album_mid",
+                            "mid",
+                            "albumid",
+                            "albumId",
+                        ],
+                    );
+                    if key.is_empty() {
+                        return None;
+                    }
+                    let title = qq_alias_text(entry, &["name", "albumname", "albumName", "title"])?
+                        .to_string();
+                    let artist = entry
+                        .get("singer")
+                        .and_then(Value::as_array)
+                        .and_then(|list| list.first())
+                        .and_then(|singer| qq_alias_text(singer, &["name", "singerName"]))
+                        .or_else(|| qq_alias_text(entry, &["singerName", "singer_name"]))
+                        .unwrap_or("未知艺人");
+                    let count = qq_alias_count(entry, &["song_num", "songNum", "songnum"]);
+                    let cover = qq_alias_text(entry, &["pic", "picUrl", "picurl", "cover"])
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| {
+                            format!("https://y.gtimg.cn/music/photo_new/T002R300x300M000{key}.jpg")
+                        });
+                    (key, title, format!("{count} 首 · {artist}"), cover, count)
+                }
+                SearchKind::Song => return None,
+            };
+            Some(CollectionResult {
+                kind,
+                platform: Platform::Qqm,
+                key,
+                title,
+                subtitle,
+                cover,
+                count,
+            })
+        })
+        .collect()
+}
+
+fn qq_song_entries(data: &Value) -> Vec<Value> {
+    data.get("songList")
+        .or_else(|| data.get("songlist"))
+        .or_else(|| data.pointer("/body/songList"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|entry| entry.get("songInfo").unwrap_or(entry))
+        .filter(|entry| has_song_key(entry))
+        .cloned()
+        .collect()
+}
+
+fn qq_song_wire_key(song: &Value) -> String {
+    first_truthy(song, &["mid", "songmid", "id"])
+        .map(qq_value_id)
+        .unwrap_or_default()
+}
+
+fn append_unique_qq_songs(
+    target: &mut Vec<Value>,
+    seen: &mut std::collections::HashSet<String>,
+    page: Vec<Value>,
+    limit: usize,
+) {
+    for song in page {
+        let key = qq_song_wire_key(&song);
+        if !key.is_empty() && seen.insert(key) {
+            target.push(song);
+            if target.len() >= limit {
+                break;
+            }
+        }
+    }
+}
+
+fn qq_page_finished(data: &Value, next_begin: usize, fetched: usize, requested: usize) -> bool {
+    let total = ["totalNum", "total_num", "total"]
+        .into_iter()
+        .find_map(|key| data.get(key))
+        .map(|value| loose_int(Some(value)).max(0) as usize)
+        .unwrap_or(0);
+    if total > 0 {
+        next_begin >= total
+    } else if let Some(has_more) = data
+        .get("hasmore")
+        .or_else(|| data.get("hasMore"))
+        .and_then(|value| {
+            value
+                .as_bool()
+                .or_else(|| value.as_i64().map(|value| value != 0))
+        })
+    {
+        !has_more
+    } else {
+        fetched < requested
+    }
+}
+
+fn qq_song_album_name(song: &Value) -> Option<&str> {
+    song.get("album")
+        .and_then(|album| qq_alias_text(album, &["name", "title"]))
+}
+
+fn qq_song_primary_artist(song: &Value) -> Option<&str> {
+    song.get("singer")
+        .and_then(Value::as_array)
+        .and_then(|artists| artists.first())
+        .and_then(|artist| qq_alias_text(artist, &["name", "singerName"]))
+}
+
+fn is_qq_favorite_playlist(entry: &Value) -> bool {
+    loose_int(entry.get("dirid").or_else(|| entry.get("dirId"))) == 201
+}
+
+/// `GetPlaylistByUin` 的返回字段在桌面端和移动端版本间漂移过：有的版本把
+/// 列表放在 `v_playlist`，有的包在 `playlist` / `data` 下。只取最外层会得到
+/// 一个空的“我的歌单”节点，前端看起来就像 QQ 没有返回歌单名称。
+fn playlist_entries(data: &Value) -> Option<&Vec<Value>> {
+    data.get("v_playlist")
+        .or_else(|| data.get("playlist"))
+        .or_else(|| data.get("playlists"))
+        .and_then(Value::as_array)
+        .or_else(|| data.get("data").and_then(|nested| playlist_entries(nested)))
+}
+
+/// QQ 个人歌单名称也有 `dirname` / `dissname` / `title` 等多套命名，且
+/// 部分回包会把名称放进 `dirinfo`。空字符串必须继续向后回退。
+fn qq_playlist_title(entry: &Value) -> Option<&str> {
+    str_field(entry, "dirname")
+        .or_else(|| str_field(entry, "dissname"))
+        .or_else(|| str_field(entry, "diss_name"))
+        .or_else(|| str_field(entry, "name"))
+        .or_else(|| str_field(entry, "title"))
+        .or_else(|| str_field(entry, "playlist_name"))
+        .or_else(|| entry.get("dirinfo").and_then(qq_playlist_title))
+}
+
+fn qq_path_key_after(path: &str, marker: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let index = parts
+        .iter()
+        .position(|part| part.eq_ignore_ascii_case(marker))?;
+    let value = parts.get(index + 1)?.trim_end_matches(".html");
+    if !value.is_empty() && value.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        Some(value.to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_album(text: &str) -> Option<String> {
+    let parsed = url::Url::parse(text).ok()?;
+    let path = parsed.path();
+    let path_lower = path.to_ascii_lowercase();
+    let mut params: HashMap<String, String> = parsed
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let mut fragment_path = String::new();
+    if let Some(fragment) = parsed.fragment() {
+        let (path, query) = fragment.split_once('?').unwrap_or((fragment, ""));
+        fragment_path = path.to_string();
+        for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+            params.entry(key.into_owned()).or_insert(value.into_owned());
+        }
+    }
+
+    for key in ["albummid", "albumMid", "album_mid", "albumid", "albumId"] {
+        if let Some(value) = params.get(key).filter(|value| !value.is_empty()) {
+            return Some(value.clone());
+        }
+    }
+    if path_lower.contains("album") || fragment_path.to_ascii_lowercase().contains("album") {
+        if let Some(value) = params.get("id").filter(|value| !value.is_empty()) {
+            return Some(value.clone());
+        }
+    }
+    let found = [path, fragment_path.as_str()]
+        .into_iter()
+        .find_map(|candidate| {
+            qq_path_key_after(candidate, "albumDetail")
+                .or_else(|| qq_path_key_after(candidate, "album"))
+        });
+    found
+}
+
 fn parse_playlist(text: &str) -> Option<String> {
     let parsed = url::Url::parse(text).ok()?;
     let path = parsed.path().to_string();
@@ -1279,12 +1669,18 @@ fn strip_qq_search_decorations(keyword: &str) -> String {
             !matches!(
                 ch,
                 '「' | '」'
-                    | '『' | '』'
-                    | '《' | '》'
-                    | '〈' | '〉'
-                    | '“' | '”'
-                    | '‘' | '’'
-                    | '"' | '\''
+                    | '『'
+                    | '』'
+                    | '《'
+                    | '》'
+                    | '〈'
+                    | '〉'
+                    | '“'
+                    | '”'
+                    | '‘'
+                    | '’'
+                    | '"'
+                    | '\''
             )
         })
         .collect::<String>()
@@ -1371,7 +1767,7 @@ fn digits_after_separator(haystack: &str, marker: &str) -> Option<String> {
 /// 写成 `song.get("mid").is_some()` 的话 `{"mid": ""}` 这种占位条目会被留下，
 /// 归一化后 `key` 是空串，那首歌在列表里看得见、点下载必然失败。
 fn has_song_key(song: &Value) -> bool {
-    is_truthy(song.get("mid")) || is_truthy(song.get("id"))
+    first_truthy(song, &["mid", "songmid", "id"]).is_some()
 }
 
 fn media_mid_of(raw: &Value, fallback: &str) -> String {
@@ -1498,7 +1894,10 @@ mod tests {
             "https://shj2.stream.qqmusic.qq.com/",
             "https://sjy6.stream.qqmusic.qq.com/"
         ]});
-        assert_eq!(pick_cdn_base(&data), Some("https://shj2.stream.qqmusic.qq.com/".into()));
+        assert_eq!(
+            pick_cdn_base(&data),
+            Some("https://shj2.stream.qqmusic.qq.com/".into())
+        );
     }
 
     #[test]
@@ -1508,8 +1907,12 @@ mod tests {
             "https://stream.qqmusic.qq.com.evil.example/"
         ]});
         assert_eq!(pick_cdn_base(&data), None);
-        assert!(is_qq_audio_url("https://isure.stream.qqmusic.qq.com/file.mp3"));
-        assert!(!is_qq_audio_url("https://stream.qqmusic.qq.com.evil.example/file.mp3"));
+        assert!(is_qq_audio_url(
+            "https://isure.stream.qqmusic.qq.com/file.mp3"
+        ));
+        assert!(!is_qq_audio_url(
+            "https://stream.qqmusic.qq.com.evil.example/file.mp3"
+        ));
     }
 
     #[test]
@@ -1547,7 +1950,10 @@ mod tests {
         assert_eq!(homepage_avatar(&mapped), "https://avatar/new.jpg");
         assert_eq!(homepage_nickname(&legacy), "旧昵称");
         assert_eq!(homepage_avatar(&legacy), "https://avatar/old.jpg");
-        assert_eq!(https_avatar("http://avatar/new.jpg".into()), "https://avatar/new.jpg");
+        assert_eq!(
+            https_avatar("http://avatar/new.jpg".into()),
+            "https://avatar/new.jpg"
+        );
     }
 
     #[test]
@@ -1563,6 +1969,30 @@ mod tests {
         assert_eq!(
             parse_song("https://i.y.qq.com/v8/playsong.html?songid=123456"),
             Some("123456".into())
+        );
+    }
+
+    #[test]
+    fn album_links_of_every_shape_are_parsed() {
+        assert_eq!(
+            parse_album("https://y.qq.com/n/ryqq/albumDetail/0024bjiL2aocxT"),
+            Some("0024bjiL2aocxT".into())
+        );
+        assert_eq!(
+            parse_album("https://y.qq.com/n/yqq/album/0024bjiL2aocxT.html"),
+            Some("0024bjiL2aocxT".into())
+        );
+        assert_eq!(
+            parse_album("https://i.y.qq.com/n2/m/share/details/album.html?albummid=0024bjiL2aocxT"),
+            Some("0024bjiL2aocxT".into())
+        );
+        assert_eq!(
+            parse_album("https://y.qq.com/#/albumDetail/0024bjiL2aocxT"),
+            Some("0024bjiL2aocxT".into())
+        );
+        assert_eq!(
+            parse_album("https://y.qq.com/n/ryqq/songDetail/003Y1vTt3fRAsW"),
+            None
         );
     }
 
@@ -1594,7 +2024,47 @@ mod tests {
             parse_playlist("https://y.qq.com/n/ryqq/playlist_v2/playlist/8674642290"),
             Some("8674642290".into())
         );
-        assert_eq!(digits_after_separator("/n/ryqq/playlist_v2/x", "playlist"), None);
+        assert_eq!(
+            digits_after_separator("/n/ryqq/playlist_v2/x", "playlist"),
+            None
+        );
+    }
+
+    #[test]
+    fn playlist_search_rows_accept_qq_schema_aliases() {
+        let data = json!({
+            "body": {
+                "item_songlist": [{
+                    "tid": 8674642290_u64,
+                    "dissname": "夜间 Set",
+                    "songNum": "42",
+                    "picUrl": "https://qpic.cn/cover.jpg",
+                    "nickname": "DJ Kumo"
+                }]
+            }
+        });
+        let rows = qq_collection_results(&data, SearchKind::Playlist, 10);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, SearchKind::Playlist);
+        assert_eq!(rows[0].key, "8674642290");
+        assert_eq!(rows[0].title, "夜间 Set");
+        assert_eq!(rows[0].subtitle, "42 首 · DJ Kumo");
+        assert_eq!(rows[0].count, 42);
+    }
+
+    #[test]
+    fn collection_pagination_stops_at_total_or_a_short_unknown_page() {
+        assert!(!qq_page_finished(&json!({"totalNum": 250}), 100, 100, 100));
+        assert!(qq_page_finished(&json!({"totalNum": 250}), 250, 50, 100));
+        assert!(!qq_page_finished(&json!({}), 100, 100, 100));
+        assert!(qq_page_finished(&json!({}), 40, 40, 100));
+    }
+
+    #[test]
+    fn favorite_directory_is_not_exposed_as_a_second_real_playlist() {
+        assert!(is_qq_favorite_playlist(&json!({"dirid": 201, "tid": 88})));
+        assert!(is_qq_favorite_playlist(&json!({"dirId": "201"})));
+        assert!(!is_qq_favorite_playlist(&json!({"dirid": 202, "tid": 88})));
     }
 
     #[test]
@@ -1647,7 +2117,10 @@ mod tests {
         assert_eq!(media_mid_of(&with_file, "mid1"), "001abc");
         // 搜索结果里 media_mid 偶尔缺失
         assert_eq!(media_mid_of(&json!({}), "mid1"), "mid1");
-        assert_eq!(media_mid_of(&json!({"file": {"media_mid": ""}}), "mid1"), "mid1");
+        assert_eq!(
+            media_mid_of(&json!({"file": {"media_mid": ""}}), "mid1"),
+            "mid1"
+        );
     }
 
     #[test]

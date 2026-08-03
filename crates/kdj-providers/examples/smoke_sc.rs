@@ -1,8 +1,6 @@
 //! 真机冒烟：cargo run -p kdj-providers --example smoke_sc -- <关键词>
 use kdj_core::models::Quality;
-use kdj_providers::{
-    soundcloud::SoundCloudProvider, DownloadJob, MusicProvider, ProviderContext,
-};
+use kdj_providers::{soundcloud::SoundCloudProvider, DownloadJob, MusicProvider, ProviderContext};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -15,6 +13,8 @@ async fn main() -> anyhow::Result<()> {
             default_quality: Quality::Flac,
             netease_use_download_api: false,
             soundcloud_enabled: true,
+            soundcloud_client_id: String::new(),
+            soundcloud_client_secret: String::new(),
             video_dir: None,
             video_format: "mp4".into(),
         },
@@ -27,8 +27,14 @@ async fn main() -> anyhow::Result<()> {
     let results = provider.search(&keyword, 5).await?;
     println!("== search «{keyword}» -> {} 条 ==", results.len());
     for item in &results {
-        println!("  {} | {} | {} | {:?}s | cover={}",
-            item.key, item.title, item.artist_text(), item.duration, !item.cover.is_empty());
+        println!(
+            "  {} | {} | {} | {:?}s | cover={}",
+            item.key,
+            item.title,
+            item.artist_text(),
+            item.duration,
+            !item.cover.is_empty()
+        );
     }
 
     if let Some(first) = results.first() {
@@ -38,11 +44,17 @@ async fn main() -> anyhow::Result<()> {
             Ok(None) => println!("\n== resolve 没认领 =="),
             Err(err) => println!("\n== resolve 失败：{err:#} =="),
         }
-        match provider.download(DownloadJob::new(first, Quality::Q128)).await {
+        match provider
+            .download(DownloadJob::new(first, Quality::Q128))
+            .await
+        {
             Ok(path) => {
                 let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 println!("\n== download OK: {} ({size} bytes) ==", path.display());
-                println!("   duration={:?}", kdj_providers::tags::read_duration_secs(&path));
+                println!(
+                    "   duration={:?}",
+                    kdj_providers::tags::read_duration_secs(&path)
+                );
             }
             Err(err) => println!("\n== download 失败：{err:#} =="),
         }

@@ -363,21 +363,12 @@ export async function enqueueSearchPayload(
   payload: ActiveSearchDrag,
   destDir: string,
 ): Promise<void> {
-  const settings = useAppStore.getState().settings;
-  const streamMode = payload.kind === "audio" && settings?.search_drop_mode !== "download";
-  const dest = streamMode && destDir === SEARCH_DEFAULT_DOWNLOAD_SENTINEL
-    ? ""
-    : resolveSearchDestDir(destDir);
+  const dest = resolveSearchDestDir(destDir);
   if (payload.kind === "audio" && payload.sources.length === 0) {
-    throw new Error("没有可添加的在线来源");
+    throw new Error("没有可下载的在线来源");
   }
 
-  if (streamMode) {
-    await Promise.all(payload.sources.map((source) => api.addStreamLibrary(source, dest)));
-    useLibraryStore.getState().setFilter({ folder: dest, sort: "custom" });
-    return;
-  }
-
+  // 搜索结果拖进文件夹只会创建本地下载任务，不写入任何流媒体曲库记录。
   // 先切 UI：左表对准这个文件夹，右栏打开下载队列。入队请求可以稍后再回来。
   const lib = useLibraryStore.getState();
   lib.setQueueView(false);

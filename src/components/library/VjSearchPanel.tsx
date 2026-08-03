@@ -17,7 +17,7 @@ function compactTag(value: string, max = 7): string {
 }
 
 /**
- * 一键搜索：顶上独立可拖的提供商条 + 预设词 + 一次提交。
+ * Explore：顶上独立可拖的提供商条 + 预设词 + 一次提交。
  * 提供商勾选/排序与顶栏搜索互不同步。
  */
 export function VjSearchPanel({ track }: { track: Track }) {

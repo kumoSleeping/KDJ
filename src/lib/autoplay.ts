@@ -15,6 +15,7 @@ import { isOutsideFolder } from "./outsideFolder";
 import { usePlayMode } from "./playMode";
 import { useLibraryStore } from "../stores/libraryStore";
 import { useQueueStore } from "../stores/queueStore";
+import { isStreamTrack, streamTrackById } from "./streamTrack";
 import type { HarmonicMatch, Track } from "../types";
 
 /** 本次运行放过的曲目。刷新页面即清空——这是有意的，见文件头。 */
@@ -98,6 +99,8 @@ export function clearPlayHistory(): void {
  * 只在当前页里找的话，翻两页之后上一首就点不动了。
  */
 export async function trackById(id: number): Promise<Track | null> {
+  const stream = streamTrackById(id);
+  if (stream) return stream;
   const inPage = useLibraryStore.getState().tracks.find((track) => track.id === id);
   if (inPage) return inPage;
   try {
@@ -220,6 +223,12 @@ export async function pickNext(
   ) {
     return preferred;
   }
+  // 在线试听没有曲库分析出来的 BPM / 调号，不能把负 id 交给 harmonic API。
+  // 没有后继试听曲时仍要能回到本地曲库；顺序模式从当前列表第一首开始，
+  // 调性模式也用同一条保守的“曲库起点”兜底，而不是播放条无声停住。
+  if (isStreamTrack(current) && (mode === "harmonic" || mode === "order")) {
+    return firstInOrder(listFolder);
+  }
   if (mode === "order") return nextInOrder(current, listFolder);
   if (mode === "shuffle") return randomPick(current, listFolder);
   return harmonicPick(current, folder);
@@ -297,6 +306,17 @@ async function harmonicPick(current: Track, folder: string): Promise<Track | nul
  * 快路径直接读眼前这张列表（范围和当前视图一致时它就是答案，还带着
  * 用户此刻的全部筛选和排序）；人翻去了别的文件夹/搜索页时才去问后端。
  */
+/** 在线曲目没有正数 id，顺序模式只能从当前范围的第一首本地曲目接起。 */
+async function firstInOrder(folder: string): Promise<Track | null> {
+  const { sort, order } = useLibraryStore.getState().filter;
+  try {
+    const page = await api.tracks({ folder, sort, order, limit: 1, offset: 0 });
+    return page.items[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function nextInOrder(current: Track, folder: string): Promise<Track | null> {
   const state = useLibraryStore.getState();
   if (state.filter.folder === folder) {

@@ -103,6 +103,9 @@ async function createTauriBridge(): Promise<KdjBridge> {
             image: options.image,
           }),
     openExternal: (url: string) => tauriInvoke<void>("open_external", { url }),
+    openSoundcloudOAuth: desktop
+      ? (url: string) => tauriInvoke<void>("open_soundcloud_oauth_window", { url })
+      : undefined,
     // 检查也必须走 updater 本身，不能先问 GitHub releases/latest：Release 先建、
     // 三平台包后到的窗口里，后者会谎报"可更新"，真正安装时才发现 latest.json
     // 或当前 bundle 的签名包还不存在。

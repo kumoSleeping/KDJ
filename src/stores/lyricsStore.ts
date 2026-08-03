@@ -171,16 +171,20 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
         if (track.id > 0) {
           try {
             const local = await api.libraryLyrics(track.id);
-            meta = {
-              lrc: local.lrc,
-              translated_lrc: local.translated_lrc,
-              romaji_lrc: local.romaji_lrc,
-              platform: platformOf(track) ?? "local",
-              key: track.source_key || "",
-              title: track.title || track.filename,
-              artist: track.artist || "",
-              score: 1,
-            };
+            // sidecar 只要文件存在不代表里面有可解析的 LRC；损坏/仅元数据时
+            // 继续走在线匹配，避免一个空本地文件把正确歌词永久挡住。
+            if (parseLrc(local.lrc).length) {
+              meta = {
+                lrc: local.lrc,
+                translated_lrc: local.translated_lrc,
+                romaji_lrc: local.romaji_lrc,
+                platform: platformOf(track) ?? "local",
+                key: track.source_key || "",
+                title: track.title || track.filename,
+                artist: track.artist || "",
+                score: 1,
+              };
+            }
           } catch (error) {
             // 404 = 尚未下载本地歌词；其它本地读取异常也只降级到在线兜底，
             // 不把错误文案暴露给歌词面板。
@@ -231,12 +235,15 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
           },
         }));
       } catch (error) {
-        // 歌词匹配失败不打断播放，也不在歌词面板显示网络/匹配错误。
+        // 404 = 没有匹配到歌词；其它错误是暂时不可用。两者都不打断播放，
+        // 但要让右栏和悬浮歌词给用户一个明确状态，而不是渲染空白。
+        const status: LyricsStatus =
+          error instanceof ApiError && error.status === 404 ? "empty" : "error";
         set((state) => ({
           byId: {
             ...state.byId,
             [track.id]: {
-              status: "empty",
+              status,
               lines: [],
               translated: [],
               romaji: [],

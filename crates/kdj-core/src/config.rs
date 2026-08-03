@@ -10,7 +10,7 @@ use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::models::{LibraryPasteMode, Quality, SearchDropMode, Theme, VideoFormat};
+use crate::models::{Quality, Theme, VideoFormat};
 
 pub const SETTINGS_FILENAME: &str = "settings.json";
 // 桌面版历史主库一直叫 kumodeck.db。改名会在同一 data_dir 静默创建一份空库，
@@ -24,6 +24,7 @@ const SETTINGS_FIELDS: &[&str] = &[
     "library_dirs",
     "default_quality",
     "stream_quality",
+    "stream_cache_enabled",
     "video_playback_max_height",
     "filename_template",
     "concurrent_downloads",
@@ -43,8 +44,6 @@ const SETTINGS_FIELDS: &[&str] = &[
     "enabled_platforms",
     "auto_start_downloads",
     "player_waveform",
-    "library_paste",
-    "search_drop_mode",
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -57,6 +56,9 @@ pub struct Settings {
     /// 在线流播放请求的起始音质；下载音质仍由 default_quality 控制。
     #[serde(default = "default_stream_quality")]
     pub stream_quality: Quality,
+    /// 把实际播放完成的在线音频流缓存到下载目录的 `.kdj/stream-cache/`。
+    #[serde(default)]
+    pub stream_cache_enabled: bool,
     /// 视频在线播放的画质上限；下载画质仍由 video_max_height 控制。
     #[serde(default = "default_video_playback_height")]
     pub video_playback_max_height: i64,
@@ -104,13 +106,6 @@ pub struct Settings {
     /// 播放条默认展示分析波形；可切回传统进度条，给偏好简洁界面的用户。
     #[serde(default = "yes")]
     pub player_waveform: bool,
-    /// 曲库 Cmd/Ctrl+V（及不按 Option 的拖放）默认：链接，或真复制一份。
-    /// 移动始终走 Cmd/Ctrl+Option/Alt+V、剪切，或右键「粘贴」。
-    #[serde(default)]
-    pub library_paste: LibraryPasteMode,
-    /// 搜索结果拖进曲库文件夹时默认添加流媒体来源，或直接下载。
-    #[serde(default)]
-    pub search_drop_mode: SearchDropMode,
 }
 
 impl Settings {
@@ -121,6 +116,7 @@ impl Settings {
             library_dirs: Vec::new(),
             default_quality: Quality::Flac,
             stream_quality: Quality::Q128,
+            stream_cache_enabled: false,
             video_playback_max_height: default_video_playback_height(),
             filename_template: default_filename_template(),
             concurrent_downloads: default_concurrent(),
@@ -141,8 +137,6 @@ impl Settings {
             enabled_platforms: default_enabled_platforms(),
             auto_start_downloads: false,
             player_waveform: true,
-            library_paste: LibraryPasteMode::Link,
-            search_drop_mode: SearchDropMode::Stream,
         }
     }
 }
@@ -202,11 +196,7 @@ fn migrate_enabled_platforms(settings: &mut Settings, raw: &Value) {
     }
     let mut enabled = settings.search_platforms.clone();
     if enabled.is_empty() {
-        enabled = vec![
-            "wyy".to_string(),
-            "qqm".to_string(),
-            "bilibili".to_string(),
-        ];
+        enabled = vec!["wyy".to_string(), "qqm".to_string(), "bilibili".to_string()];
     }
     if settings.soundcloud_enabled && !enabled.iter().any(|id| id == "soundcloud") {
         enabled.push("soundcloud".to_string());
@@ -466,7 +456,9 @@ fn merge_field_by_field(base: &Value, raw: &Value) -> Settings {
     let mut current = base.as_object().cloned().unwrap_or_default();
     if let Some(raw) = raw.as_object() {
         for name in SETTINGS_FIELDS {
-            let Some(value) = raw.get(*name) else { continue };
+            let Some(value) = raw.get(*name) else {
+                continue;
+            };
             if value.is_null() {
                 continue;
             }
@@ -514,7 +506,11 @@ mod tests {
 
         let config = AppConfig::create(data, dir.join("dl"), 0);
         let settings = config.to_settings();
-        assert_eq!(settings.default_quality, Quality::Flac, "非法字段回落默认值");
+        assert_eq!(
+            settings.default_quality,
+            Quality::Flac,
+            "非法字段回落默认值"
+        );
         assert_eq!(settings.concurrent_downloads, 7, "合法字段必须留下");
         assert!(!settings.auto_analyze, "合法字段必须留下");
     }
@@ -526,6 +522,7 @@ mod tests {
         let mut settings = config.to_settings();
         settings.filename_template = "{artist} - {title}".into();
         settings.platform_priority = vec!["bilibili".into(), "wyy".into()];
+        settings.stream_cache_enabled = true;
         config.apply_settings(settings.clone());
 
         let reopened = AppConfig::create(dir.join("data"), dir.join("dl"), 0);

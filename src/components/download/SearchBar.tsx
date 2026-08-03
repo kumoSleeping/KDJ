@@ -25,7 +25,7 @@ export interface SearchPlatformProps {
   onTogglePlatform(platform: Platform): void;
   /**
    * 不传则读写 settings.platform_priority（顶栏搜索）。
-   * 一键搜索传入自己的 priority / onReorder，与顶栏互不同步。
+   * Explore 传入自己的 priority / onReorder，与顶栏互不同步。
    */
   priority?: readonly string[];
   onReorder?: (next: Platform[]) => void;
@@ -44,7 +44,7 @@ export interface SearchBarProps extends SearchPlatformProps {
   /** 竖屏/极窄：输入与平台拆成两段。 */
   stacked?: boolean;
   /**
-   * 外部触发扫光（如一键搜索代填提交）。数值变化即重放；
+   * 外部触发扫光（如 Explore 代填提交）。数值变化即重放；
    * burstTone：单平台品牌色 / 多平台彩虹（与手动提交同一规则）。
    */
   burstNonce?: number;
@@ -59,7 +59,8 @@ export interface SearchBarProps extends SearchPlatformProps {
  */
 const SEARCH_KIND_LABEL: Record<SearchKind, string> = {
   song: "单曲",
-  artist: "作者",
+  playlist: "歌单",
+  artist: "艺术家",
   album: "专辑",
 };
 
@@ -88,6 +89,10 @@ export function SearchBar({
   const [burstActive, setBurstActive] = useState(false);
   const lastNonceRef = useRef(burstNonce);
   const canSubmit = query.trim().length > 0 && !busy;
+  const currentKindIndex = searchKinds.indexOf(searchKind);
+  const nextSearchKind = searchKinds.length
+    ? searchKinds[(Math.max(-1, currentKindIndex) + 1) % searchKinds.length]
+    : searchKind;
 
   const playBurst = (tone: SearchBurstTone) => {
     burstPendingRef.current = true;
@@ -119,7 +124,7 @@ export function SearchBar({
 
   const fireSubmit = () => {
     if (!canSubmit) return;
-    // 与一键搜索同一规则：只开一家用品牌色，多家用彩色。
+    // 与 Explore 同一规则：只开一家用品牌色，多家用彩色。
     playBurst(burstToneForPlatforms(platformProps.platforms));
     onSubmit();
   };
@@ -152,19 +157,16 @@ export function SearchBar({
         ) : null}
         <div className="kd-searchbar-tools">
           {searchKinds.length > 1 && (
-            <select
+            <button
+              type="button"
               className="kd-search-kind"
-              aria-label="搜索类型"
-              value={searchKind}
-              onChange={(event) => onSearchKindChange(event.target.value as SearchKind)}
-              title="只查询作者或专辑接口；集合结果需要先载入曲目"
+              data-kind={searchKind}
+              aria-label={`搜索类型：${SEARCH_KIND_LABEL[searchKind]}，点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              title={`${SEARCH_KIND_LABEL[searchKind]}搜索 · 点击切换为${SEARCH_KIND_LABEL[nextSearchKind]}`}
+              onClick={() => onSearchKindChange(nextSearchKind)}
             >
-              {searchKinds.map((kind) => (
-                <option key={kind} value={kind}>
-                  {SEARCH_KIND_LABEL[kind]}
-                </option>
-              ))}
-            </select>
+              {SEARCH_KIND_LABEL[searchKind]}
+            </button>
           )}
           <SearchPlatforms {...platformProps} />
         </div>
@@ -232,7 +234,7 @@ export function SearchPlatforms({
     el: HTMLElement;
   } | null>(null);
 
-  /** 传入 onReorder = 一键搜索独立条：勾选/排序自管，不跟顶栏同步。 */
+  /** 传入 onReorder = Explore 独立条：勾选/排序自管，不跟顶栏同步。 */
   const independent = Boolean(onReorder);
   const orderedIds = normalizePriority(priority);
   const ordered = orderedIds
@@ -284,7 +286,7 @@ export function SearchPlatforms({
       const id = session.from;
       const snap = useAppStore.getState().settings;
       if (independent) {
-        // 一键搜索：勾选独立；若全局未开该源则顺手启用，方便真正发出请求。
+        // Explore：勾选独立；若全局未开该源则顺手启用，方便真正发出请求。
         if (!platforms.includes(id) && snap && !isPlatformEnabled(snap, id)) {
           void saveSettings(patchEnabledPlatform(snap, id, true));
         }
@@ -362,7 +364,7 @@ export function SearchPlatforms({
       role="group"
       aria-label={
         independent
-          ? "一键搜索平台（拖动排序 = 来源优先级，与顶栏搜索独立）"
+          ? "Explore 平台（拖动排序 = 来源优先级，与顶栏搜索独立）"
           : "搜索平台（拖动排序 = 来源优先级）"
       }
     >

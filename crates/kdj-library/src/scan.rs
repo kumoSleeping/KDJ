@@ -77,8 +77,7 @@ pub fn collect_files(paths: &[String], recursive: bool) -> Vec<String> {
             let mut names: Vec<PathBuf> = entries
                 .filter_map(|entry| entry.ok())
                 .map(|entry| entry.path())
-                // is_file() 跟随符号链接：曲库自己会用符号链接把一首歌摆进第二个 set
-                //（硬链接失败时的退路），按链接本身的类型判定会把它们全漏掉
+                // is_file() 会跟随指向文件的符号链接；按链接本身的类型判定会把它们漏掉
                 .filter(|path| path.is_file())
                 .collect();
             names.sort();
@@ -322,7 +321,7 @@ mod tests {
         std::fs::create_dir_all(&real).unwrap();
         std::fs::create_dir_all(&lib).unwrap();
         std::fs::write(real.join("song.mp3"), b"x").unwrap();
-        // 硬链接失败时 link_file 会退到符号链接，这一份也是曲库里的一首歌
+        // 指向本地音频的文件链接仍按用户磁盘上的文件条目收集。
         std::os::unix::fs::symlink(real.join("song.mp3"), lib.join("linked.mp3")).unwrap();
         // 指回上层的目录链接不能展开，否则遍历会绕圈
         std::os::unix::fs::symlink(&base, lib.join("loop")).unwrap();
@@ -377,8 +376,13 @@ mod tests {
         let dir = scratch("empty-ok");
         let service =
             crate::service::LibraryService::new(crate::db::Database::open_in_memory().unwrap());
-        let report = scan_paths(&service, &[dir.to_string_lossy().into_owned()], true, &|_, _, _| {})
-            .unwrap();
+        let report = scan_paths(
+            &service,
+            &[dir.to_string_lossy().into_owned()],
+            true,
+            &|_, _, _| {},
+        )
+        .unwrap();
         assert!(report.track_ids.is_empty());
         assert!(report.unreadable_roots.is_empty(), "真空目录不是故障");
         let _ = std::fs::remove_dir_all(&dir);
@@ -394,8 +398,13 @@ mod tests {
 
         let service =
             crate::service::LibraryService::new(crate::db::Database::open_in_memory().unwrap());
-        let report = scan_paths(&service, &[dir.to_string_lossy().into_owned()], true, &|_, _, _| {})
-            .unwrap();
+        let report = scan_paths(
+            &service,
+            &[dir.to_string_lossy().into_owned()],
+            true,
+            &|_, _, _| {},
+        )
+        .unwrap();
         assert!(report.track_ids.is_empty());
         assert_eq!(
             report.unreadable_roots,

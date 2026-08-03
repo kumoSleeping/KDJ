@@ -1,6 +1,8 @@
 //! SQLite 连接池 + 建表 / 迁移。
 //!
-//! 表结构和 v0.1.x **逐字一致**——用户手上已经有一个 `kdj.db`，
+//! 本地曲库只由 `tracks` 文件记录组成；旧版本的 `stream_library` 表不再读取或创建。
+//!
+//! 核心表结构和 v0.1.x **逐字一致**——用户手上已经有一个 `kdj.db`，
 //! 里面躺着 1379 首歌的分析结果，schema 对不上就等于让人从头再扫一遍。
 
 use std::path::{Path, PathBuf};
@@ -64,18 +66,30 @@ CREATE TABLE IF NOT EXISTS waveform_assets (
   generated_at TEXT NOT NULL,
   error TEXT
 );
-CREATE TABLE IF NOT EXISTS stream_library (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  folder TEXT NOT NULL DEFAULT '',
-  platform TEXT NOT NULL,
-  source_key TEXT NOT NULL,
-  source_json TEXT NOT NULL,
-  added_at TEXT NOT NULL,
-  UNIQUE(folder, platform, source_key)
+CREATE TABLE IF NOT EXISTS track_bpm_key_analysis_v2 (
+  track_id INTEGER PRIMARY KEY,
+  analyzer_revision TEXT NOT NULL,
+  bpm REAL,
+  bpm_raw REAL,
+  bpm_confidence REAL,
+  first_beat REAL,
+  beat_times_json TEXT NOT NULL DEFAULT '[]',
+  music_key TEXT,
+  key_short TEXT,
+  camelot TEXT,
+  open_key TEXT,
+  key_confidence REAL,
+  chroma_json TEXT NOT NULL DEFAULT '[]',
+  analyzed_at TEXT NOT NULL,
+  analysis_error TEXT NOT NULL DEFAULT ''
 );
 CREATE TRIGGER IF NOT EXISTS cleanup_waveform_asset
 AFTER DELETE ON tracks BEGIN
   DELETE FROM waveform_assets WHERE track_id = OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS cleanup_track_bpm_key_analysis_v2
+AFTER DELETE ON tracks BEGIN
+  DELETE FROM track_bpm_key_analysis_v2 WHERE track_id = OLD.id;
 END;
 "#;
 
@@ -91,8 +105,8 @@ CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(path);
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
 CREATE INDEX IF NOT EXISTS idx_waveform_assets_profile ON waveform_assets(profile, revision);
-CREATE INDEX IF NOT EXISTS idx_stream_library_folder ON stream_library(folder, added_at);
-CREATE INDEX IF NOT EXISTS idx_stream_library_source ON stream_library(platform, source_key);
+CREATE INDEX IF NOT EXISTS idx_track_bpm_key_analysis_v2_revision
+  ON track_bpm_key_analysis_v2(analyzer_revision, analyzed_at);
 "#;
 
 /// 老库升级用：只列可空列（NOT NULL 列没法 ALTER ADD，而它们从 v1 起就存在）。
@@ -289,8 +303,11 @@ pub fn merge_legacy_database(canonical: &Path, legacy: &Path) -> Result<Database
     // 先用正常入口把当前库 schema 补齐；旧库只读 attach，不对它做任何改动。
     let database = Database::open(canonical)?;
     let mut conn = database.conn()?;
-    conn.execute("ATTACH DATABASE ? AS legacy", [legacy.to_string_lossy().as_ref()])
-        .with_context(|| format!("挂载旧数据库失败：{}", legacy.display()))?;
+    conn.execute(
+        "ATTACH DATABASE ? AS legacy",
+        [legacy.to_string_lossy().as_ref()],
+    )
+    .with_context(|| format!("挂载旧数据库失败：{}", legacy.display()))?;
 
     let result = (|| -> Result<DatabaseMergeReport> {
         let columns = |schema: &str| -> Result<Vec<String>> {
@@ -308,7 +325,10 @@ pub fn merge_legacy_database(canonical: &Path, legacy: &Path) -> Result<Database
             .filter(|name| legacy_columns.contains(name))
             .collect();
         for required in ["id", "path", "filename", "added_at", "modified_at"] {
-            anyhow::ensure!(common.iter().any(|name| name == required), "旧库缺少 {required} 列");
+            anyhow::ensure!(
+                common.iter().any(|name| name == required),
+                "旧库缺少 {required} 列"
+            );
         }
         let quoted = |names: &[String]| {
             names
@@ -477,8 +497,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("kdj-{tag}-{}-{nonce}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kdj-{tag}-{}-{nonce}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -686,9 +705,17 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(shared, ("New title".into(), 4), "当前库已有编辑绝不能被旧库盖掉");
+        assert_eq!(
+            shared,
+            ("New title".into(), 4),
+            "当前库已有编辑绝不能被旧库盖掉"
+        );
         let legacy_id: i64 = conn
-            .query_row("SELECT id FROM tracks WHERE path = '/legacy-only.mp3'", [], |row| row.get(0))
+            .query_row(
+                "SELECT id FROM tracks WHERE path = '/legacy-only.mp3'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_ne!(legacy_id, 1, "编号撞车时应分配新 id");
         let playlist_paths: Vec<String> = {

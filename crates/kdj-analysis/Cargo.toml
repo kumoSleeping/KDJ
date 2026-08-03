@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Beat This 1.0.0 要求 Rust 1.89，且模型需要单独分发；先作为桌面实验后端，
+# 不进入默认/移动端构建，等回归曲库与资源打包验证完成后再升为主分析器。
+beat-this = ["dep:beat-this"]
+
 [dependencies]
 anyhow = "1.0.104"
 kdj-core = { version = "0.2.28", path = "../kdj-core" }
@@ -14,3 +20,6 @@ serde_json = "1.0.151"
 symphonia = { version = "0.5.4", features = ["aac", "alac", "mp3", "isomp4", "ogg", "vorbis", "flac", "wav", "pcm"] }
 thiserror = "2.0.19"
 tracing = "0.1.44"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+beat-this = { version = "1.0.0", optional = true }

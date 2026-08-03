@@ -11,6 +11,7 @@ pub mod jobs;
 pub mod lyrics;
 pub mod routes;
 pub mod state;
+pub mod stream_cache;
 pub mod waveform;
 pub mod ws;
 

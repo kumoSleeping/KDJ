@@ -1,12 +1,12 @@
-//! 文件夹模式：把曲库映射到真实目录，并在真实目录上做移动 / 链接。
+//! 文件夹模式：把曲库映射到真实目录，并在真实目录上做移动 / 复制。
 //!
 //! 设计前提：**文件夹就是磁盘上的文件夹**，不是数据库里的虚拟分组。
 //! DJ 出场前要把一套歌拷进 U 盘、要用别的软件（Rekordbox / Serato）再读一遍，
 //! 虚拟分组到了那一步就没了。所以这里所有操作都落到文件系统上，
 //! 数据库只是跟着改 path。
 //!
-//! 一首歌要同时出现在两个 set 里时用**硬链接**：同一份数据、两个路径，
-//! 不额外占空间。跨卷或文件系统不支持时依次退到符号链接、真复制。
+//! 文件夹分类只操作真实的本地文件：移动原文件或复制出一份独立文件，
+//! 不创建硬链接、符号链接或其它虚拟条目。
 //!
 //! 安全：dest 一律必须落在已配置的曲库根目录内，否则渲染进程就能借这个接口
 //! 把文件挪到系统任意位置。
@@ -42,7 +42,11 @@ pub struct StoredLyrics {
 }
 
 /// 用平台 + 来源 key 生成稳定文件名；不使用数据库 track id，避免换库后歌词断链。
-fn lyrics_paths(audio_path: &Path, platform: &str, key: &str) -> Option<(PathBuf, PathBuf, PathBuf)> {
+fn lyrics_paths(
+    audio_path: &Path,
+    platform: &str,
+    key: &str,
+) -> Option<(PathBuf, PathBuf, PathBuf)> {
     let parent = audio_path.parent()?;
     let platform = platform.trim();
     let key = key.trim();
@@ -177,12 +181,36 @@ fn transfer_lyrics(
     Ok(())
 }
 
-pub fn move_lyrics(source_audio: &Path, target_audio: &Path, platform: &str, key: &str) -> Result<()> {
+pub fn move_lyrics(
+    source_audio: &Path,
+    target_audio: &Path,
+    platform: &str,
+    key: &str,
+) -> Result<()> {
     transfer_lyrics(source_audio, target_audio, platform, key, true)
 }
 
-pub fn copy_lyrics(source_audio: &Path, target_audio: &Path, platform: &str, key: &str) -> Result<()> {
+pub fn copy_lyrics(
+    source_audio: &Path,
+    target_audio: &Path,
+    platform: &str,
+    key: &str,
+) -> Result<()> {
     transfer_lyrics(source_audio, target_audio, platform, key, false)
+}
+
+/// 删除某个本地音频对应的歌词 sidecar；音频删除/撤回复制时使用。
+pub fn remove_lyrics(audio_path: &Path, platform: &str, key: &str) -> Result<()> {
+    let Some(paths) = lyrics_paths(audio_path, platform, key) else {
+        return Ok(());
+    };
+    for path in [paths.0, paths.1, paths.2] {
+        if path.is_file() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("删除歌词失败：{}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// 扫描目录树的深度上限。DJ 的歌单目录一般 1~2 层，给到 6 层足够，
@@ -440,8 +468,8 @@ fn migrate_legacy_manifest(directory: &Path) -> Result<bool> {
     if !legacy.is_file() {
         return Ok(false);
     }
-    let body = std::fs::read(&legacy)
-        .with_context(|| format!("读取旧清单失败：{}", legacy.display()))?;
+    let body =
+        std::fs::read(&legacy).with_context(|| format!("读取旧清单失败：{}", legacy.display()))?;
     backup_legacy_manifest(directory)?;
     if serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
@@ -466,8 +494,8 @@ pub fn write_manifest(directory: &Path, order: &[String]) -> Result<()> {
     let mut payload = read_manifest(directory);
     payload.insert("version".into(), serde_json::Value::from(MANIFEST_VERSION));
     payload.insert("order".into(), serde_json::json!(order));
-    let body = serde_json::to_vec_pretty(&serde_json::Value::Object(payload))
-        .context("序列化清单失败")?;
+    let body =
+        serde_json::to_vec_pretty(&serde_json::Value::Object(payload)).context("序列化清单失败")?;
     let target = manifest_path(directory);
     atomic_write(&target, &body)?;
     anyhow::ensure!(read_manifest_file(&target).is_some(), "写出的清单校验失败");
@@ -633,10 +661,9 @@ where
             Ok(false) => {}
             Err(err) => {
                 report.failed += 1;
-                report.errors.push((
-                    directory.to_string_lossy().into_owned(),
-                    format!("{err:#}"),
-                ));
+                report
+                    .errors
+                    .push((directory.to_string_lossy().into_owned(), format!("{err:#}")));
             }
         }
         progress(index + 1, total, directory);
@@ -856,8 +883,12 @@ pub fn delete_folder(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if name == LYRICS_DIR_NAME {
-                anyhow::ensure!(entry.file_type()?.is_dir(), "KDJ 歌词目录类型不正确，拒绝删除");
-                for lyric in std::fs::read_dir(entry.path()).context("读 KDJ 歌词目录失败")? {
+                anyhow::ensure!(
+                    entry.file_type()?.is_dir(),
+                    "KDJ 歌词目录类型不正确，拒绝删除"
+                );
+                for lyric in std::fs::read_dir(entry.path()).context("读 KDJ 歌词目录失败")?
+                {
                     let lyric = lyric?;
                     anyhow::ensure!(
                         lyric.file_type()?.is_file()
@@ -944,136 +975,12 @@ pub fn copy_file(source: &Path, directory: &Path) -> Result<PathBuf> {
     Ok(target)
 }
 
-/// 两个路径是不是同一份数据的硬链接（同一 device + inode）。
-/// 符号链接本身不算；要比内容身份请先解析到真实文件。
-pub fn same_hardlink(a: &Path, b: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        let Ok(ma) = std::fs::symlink_metadata(a) else {
-            return false;
-        };
-        let Ok(mb) = std::fs::symlink_metadata(b) else {
-            return false;
-        };
-        if ma.file_type().is_symlink() || mb.file_type().is_symlink() {
-            return false;
-        }
-        ma.dev() == mb.dev() && ma.ino() == mb.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (a, b);
-        false
-    }
-}
-
-/// `link` 是不是指向 `target` 的符号链接（相对路径按 link 所在目录解析）。
-pub fn symlink_points_to(link: &Path, target: &Path) -> bool {
-    let Ok(meta) = std::fs::symlink_metadata(link) else {
-        return false;
-    };
-    if !meta.file_type().is_symlink() {
-        return false;
-    }
-    let Ok(dest) = std::fs::read_link(link) else {
-        return false;
-    };
-    let resolved = if dest.is_absolute() {
-        dest
-    } else {
-        match link.parent() {
-            Some(parent) => parent.join(dest),
-            None => dest,
-        }
-    };
-    let left = std::fs::canonicalize(&resolved).unwrap_or(resolved);
-    let right = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
-    left == right
-}
-
-/// 把已有的符号链接改写到 `new_target`（先删再建，保持 link 路径不变）。
-pub fn retarget_symlink(link: &Path, new_target: &Path) -> Result<()> {
-    let Ok(meta) = std::fs::symlink_metadata(link) else {
-        bail!("不是符号链接：{}", link.display());
-    };
-    if !meta.file_type().is_symlink() {
-        bail!("不是符号链接：{}", link.display());
-    }
-    std::fs::remove_file(link).with_context(|| format!("删除旧符号链接失败：{}", link.display()))?;
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(new_target, link)
-            .with_context(|| format!("重建符号链接失败：{}", link.display()))?;
-    }
-    #[cfg(windows)]
-    {
-        std::os::windows::fs::symlink_file(new_target, link)
-            .with_context(|| format!("重建符号链接失败：{}", link.display()))?;
-    }
-    Ok(())
-}
-
-/// 优先硬链接，退符号链接，再退真复制。返回 `(目标路径, 实际用的方式)`。
-pub fn link_file(source: &Path, directory: &Path) -> Result<(PathBuf, &'static str)> {
-    let name = source
-        .file_name()
-        .context("源文件没有文件名")?
-        .to_string_lossy()
-        .into_owned();
-    let target = unique_target(directory, &name)?;
-
-    #[cfg(unix)]
-    {
-        if std::fs::hard_link(source, &target).is_ok() {
-            return Ok((target, "hardlink"));
-        }
-        if std::os::unix::fs::symlink(source, &target).is_ok() {
-            return Ok((target, "symlink"));
-        }
-    }
-    #[cfg(windows)]
-    {
-        if std::fs::hard_link(source, &target).is_ok() {
-            return Ok((target, "hardlink"));
-        }
-        // Windows 建符号链接要管理员权限或开发者模式，失败很正常，直接退复制
-        if std::os::windows::fs::symlink_file(source, &target).is_ok() {
-            return Ok((target, "symlink"));
-        }
-    }
-    std::fs::copy(source, &target).context("复制失败")?;
-    Ok((target, "copy"))
-}
-
-/// 这个文件是不是某个链接的一端。前端据此在列表里打个链接标记。
-///
-/// `nlink > 1` 只说明"同一份数据有多个名字"，看不出另一个名字在哪，
-/// 但对用户要回答的问题（"这首为什么出现两次？"）已经够了。
-pub fn link_state(path: &Path) -> String {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return String::new();
-    };
-    if meta.file_type().is_symlink() {
-        return "symlink".to_string();
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        if meta.nlink() > 1 {
-            return "hardlink".to_string();
-        }
-    }
-    String::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("kdj-folders-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kdj-folders-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // canonicalize 一次，免得 macOS 上 /var 与 /private/var 的差异干扰包含性判断
@@ -1232,7 +1139,10 @@ mod tests {
 
         assert!(init_manifests(&root, &roots).is_err());
         assert!(legacy.is_file(), "坏旧文件必须原地保留");
-        assert_eq!(std::fs::read_to_string(legacy_backup_path(&root)).unwrap(), "{ broken");
+        assert_eq!(
+            std::fs::read_to_string(legacy_backup_path(&root)).unwrap(),
+            "{ broken"
+        );
         assert!(!manifest_path(&root).exists(), "不能拿空顺序掩盖损坏");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1456,37 +1366,18 @@ mod tests {
         let roots = vec![root];
 
         write_manifest(&empty, &[]).unwrap();
-        assert!(delete_folder(&empty, &roots).is_ok(), "只有 .kdj 元数据仍算空目录");
+        assert!(
+            delete_folder(&empty, &roots).is_ok(),
+            "只有 .kdj 元数据仍算空目录"
+        );
         assert!(!empty.exists());
         assert!(delete_folder(&full, &roots).is_err(), "非空目录不能删");
         assert!(full.join("a.mp3").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn link_file_prefers_a_hard_link_and_reports_it() {
-        let base = scratch("link");
-        let source_dir = base.join("src");
-        let dest_dir = base.join("dst");
-        std::fs::create_dir_all(&source_dir).unwrap();
-        std::fs::create_dir_all(&dest_dir).unwrap();
-        let source = source_dir.join("song.mp3");
-        std::fs::write(&source, b"audio").unwrap();
-
-        let (target, method) = link_file(&source, &dest_dir).unwrap();
-        assert_eq!(method, "hardlink");
-        assert_eq!(std::fs::read(&target).unwrap(), b"audio");
-        // 两端都应当被标记成链接
-        assert_eq!(link_state(&source), "hardlink");
-        assert_eq!(link_state(&target), "hardlink");
-        assert!(same_hardlink(&source, &target));
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn copy_file_does_not_share_inode() {
+    fn copy_file_creates_an_independent_local_file() {
         let base = scratch("copy");
         let source_dir = base.join("src");
         let dest_dir = base.join("dst");
@@ -1496,35 +1387,9 @@ mod tests {
         std::fs::write(&source, b"audio").unwrap();
         let target = copy_file(&source, &dest_dir).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"audio");
-        assert!(!same_hardlink(&source, &target));
+        std::fs::write(&target, b"changed").unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), b"audio");
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn retarget_symlink_rewrites_destination() {
-        let base = scratch("retarget");
-        let a = base.join("a.mp3");
-        let b = base.join("b.mp3");
-        let link = base.join("link.mp3");
-        std::fs::write(&a, b"old").unwrap();
-        std::fs::write(&b, b"new").unwrap();
-        std::os::unix::fs::symlink(&a, &link).unwrap();
-        assert!(symlink_points_to(&link, &a));
-        retarget_symlink(&link, &b).unwrap();
-        assert!(symlink_points_to(&link, &b));
-        assert!(!symlink_points_to(&link, &a));
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn a_plain_file_has_no_link_state() {
-        let dir = scratch("plain");
-        let path = dir.join("a.mp3");
-        std::fs::write(&path, b"x").unwrap();
-        assert_eq!(link_state(&path), "");
-        assert_eq!(link_state(&dir.join("missing.mp3")), "");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

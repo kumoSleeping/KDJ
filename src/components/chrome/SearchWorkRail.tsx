@@ -1,4 +1,4 @@
-import { CheckSquare, Download, PanelRightClose } from "lucide-react";
+import { CheckSquare, Download, ListCollapse } from "lucide-react";
 import type { ReactNode } from "react";
 import type { IntakeItem, Platform } from "../../types";
 import { useDownloadStore } from "../../stores/downloadStore";
@@ -29,6 +29,8 @@ function countSourcesByPlatform(items: IntakeItem[]): Partial<Record<Platform, n
 
 export interface SearchWorkRailProps {
   items: IntakeItem[];
+  /** 查询仍在进行时，零条目不等于最终没有结果。 */
+  loading: boolean;
   selectionCount: number;
   selecting: boolean;
   onSelectAll(): void;
@@ -38,6 +40,8 @@ export interface SearchWorkRailProps {
   queueError: string;
   onDismissQueueError(): void;
   chosenReady: boolean;
+  /** 本地面板不可见时，仍把右侧详情栏开关留在当前工作条。 */
+  asideToggle?: ReactNode;
   onClose(): void;
 }
 
@@ -46,6 +50,7 @@ export interface SearchWorkRailProps {
  */
 export function SearchWorkRail({
   items,
+  loading,
   selectionCount,
   selecting,
   onSelectAll,
@@ -55,6 +60,7 @@ export function SearchWorkRail({
   queueError,
   onDismissQueueError,
   chosenReady,
+  asideToggle,
   onClose,
 }: SearchWorkRailProps) {
   const activeDownloads = useDownloadStore((state) => state.activeCount);
@@ -105,7 +111,7 @@ export function SearchWorkRail({
 
     const counts = countSourcesByPlatform(items);
     const rows = PLATFORM_ORDER.filter((id) => (counts[id] ?? 0) > 0);
-    if (rows.length === 0 && activeDownloads === 0) {
+    if (rows.length === 0 && activeDownloads === 0 && !loading) {
       glyphs.push(
         <span key="empty" className="kd-activity-glyph" aria-hidden="true">
           <Download size={13} strokeWidth={2.25} />
@@ -134,7 +140,7 @@ export function SearchWorkRail({
     }
   }
 
-  const idle = !selecting && activeDownloads === 0;
+  const idle = !selecting && !loading && activeDownloads === 0;
 
   return (
     <WorkRail
@@ -142,17 +148,23 @@ export function SearchWorkRail({
       glyphs={glyphs}
       texts={texts}
       actions={
-        <button
-          type="button"
-          className="kd-chrome-btn"
-          aria-label="收起搜索结果"
-          title="收起搜索结果"
-          onClick={onClose}
-        >
-          <PanelRightClose size={15} />
-        </button>
+        <>
+          <button
+            type="button"
+            className="kd-chrome-btn"
+            data-action="dismiss-results"
+            aria-label="收起在线结果"
+            title="收起在线结果"
+            onClick={onClose}
+          >
+            <ListCollapse size={15} strokeWidth={2.15} />
+          </button>
+          {asideToggle}
+        </>
       }
-      label={selecting ? "搜索多选" : idle ? "搜索结果概况" : "下载任务"}
+      label={
+        selecting ? "搜索多选" : loading ? "正在处理" : idle ? "搜索结果概况" : "下载任务"
+      }
     />
   );
 }

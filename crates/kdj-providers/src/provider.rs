@@ -14,8 +14,9 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use async_trait::async_trait;
 use kdj_core::models::{
-    Account, CollectionResolveResponse, CollectionResult, LyricText, Platform, Quality, QrSession,
-    QrStateValue, ResolveResponse, SearchKind, SongSource, StreamPlaylist, StreamPlaylistResponse,
+    Account, CollectionResolveResponse, CollectionResult, LyricText, Platform, QrSession,
+    QrStateValue, Quality, ResolveResponse, SearchKind, SongSource, StreamPlaylist,
+    StreamPlaylistResponse,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +30,8 @@ pub struct ProviderLiveSettings {
     pub default_quality: Quality,
     pub netease_use_download_api: bool,
     pub soundcloud_enabled: bool,
+    pub soundcloud_client_id: String,
+    pub soundcloud_client_secret: String,
     /// 视频单独的落盘目录。None = 跟随 download_dir。
     pub video_dir: Option<PathBuf>,
     pub video_format: String,
@@ -83,6 +86,14 @@ impl ProviderContext {
 
     pub fn soundcloud_enabled(&self) -> bool {
         self.live().soundcloud_enabled
+    }
+
+    pub fn soundcloud_client_id(&self) -> String {
+        self.live().soundcloud_client_id.clone()
+    }
+
+    pub fn soundcloud_client_secret(&self) -> String {
+        self.live().soundcloud_client_secret.clone()
     }
 
     pub fn video_format(&self) -> String {
@@ -227,7 +238,7 @@ pub trait MusicProvider: Send + Sync {
 
     async fn search(&self, keyword: &str, limit: usize) -> Result<Vec<SongSource>>;
 
-    /// 搜索作者/专辑集合。默认不支持，避免把集合 ID 伪装成歌曲 ID。
+    /// 搜索歌单/艺术家/专辑集合。默认不支持，避免把集合 ID 伪装成歌曲 ID。
     async fn search_collections(
         &self,
         _keyword: &str,
@@ -237,7 +248,7 @@ pub trait MusicProvider: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// 展开一个作者/专辑集合为真实歌曲来源。
+    /// 展开一个歌单/艺术家/专辑集合为真实歌曲来源。
     async fn resolve_collection(
         &self,
         _kind: SearchKind,
@@ -430,7 +441,10 @@ pub fn str_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str>
 ///
 /// 直译成 `get("a").or_else(|| get("b"))` 是错的——`Some(Null)` 会让链条停在第一个键上。
 /// 网易云的 `ar`/`artists`、`dt`/`duration` 两组别名就是这么错位的。
-pub fn first_truthy<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a serde_json::Value> {
+pub fn first_truthy<'a>(
+    value: &'a serde_json::Value,
+    keys: &[&str],
+) -> Option<&'a serde_json::Value> {
     keys.iter()
         .map(|key| value.get(*key))
         .find(|found| is_truthy(*found))
@@ -558,6 +572,8 @@ mod tests {
                 default_quality: Quality::Flac,
                 netease_use_download_api: false,
                 soundcloud_enabled: false,
+                soundcloud_client_id: String::new(),
+                soundcloud_client_secret: String::new(),
                 video_dir: None,
                 video_format: "mp4".into(),
             },

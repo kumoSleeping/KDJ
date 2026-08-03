@@ -40,8 +40,15 @@ function load(): { ids: number[]; byId: Record<number, Track> } {
     if (raw && typeof raw === "object") {
       const { ids, byId } = raw as { ids?: unknown; byId?: unknown };
       if (Array.isArray(ids) && byId && typeof byId === "object") {
-        const cleanIds = ids.filter((id): id is number => typeof id === "number");
-        return { ids: cleanIds, byId: byId as Record<number, Track> };
+        // 在线试听 id 只在当前 WebView 内有效：直链和 SongSource 都不在
+        // Track 快照里，重启后保留负 id 会把无效 URL 喂给原生播放器。
+        const cleanIds = ids.filter((id): id is number => typeof id === "number" && id > 0);
+        const cleanById: Record<number, Track> = {};
+        for (const id of cleanIds) {
+          const track = (byId as Record<number, Track>)[id];
+          if (track) cleanById[id] = track;
+        }
+        return { ids: cleanIds, byId: cleanById };
       }
     }
   } catch {
@@ -51,10 +58,13 @@ function load(): { ids: number[]; byId: Record<number, Track> } {
 }
 
 function save(ids: number[], byId: Record<number, Track>): void {
+  // 在线试听 id / 直链只在本次 WebView 存活；队列持久化只保留本地曲目，
+  // 避免重启后把负 id 当成本地音频 URL 播放。
+  const persistedIds = ids.filter((id) => id > 0);
   // 只留队列里还有的快照，别让退队的曲目在 localStorage 里越攒越多
   const kept: Record<number, Track> = {};
-  for (const id of ids) if (byId[id]) kept[id] = byId[id];
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ ids, byId: kept }));
+  for (const id of persistedIds) if (byId[id]) kept[id] = byId[id];
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ ids: persistedIds, byId: kept }));
 }
 
 export const useQueueStore = create<QueueStore>((set, get) => ({

@@ -13,7 +13,8 @@ use axum::{Json, Router};
 use futures_util::StreamExt;
 use kdj_core::models::*;
 use kdj_core::Settings;
-use kdj_library::service::{FileDisposal, TrackQuery};
+use kdj_library::service::{DeletedTrack, FileDisposal, TrackQuery};
+use kdj_providers::MusicProvider;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -22,7 +23,7 @@ use crate::downloads::{
     DownloadManager,
 };
 use crate::error::{ApiError, ApiResult};
-use crate::state::{AppState, PLATFORMS};
+use crate::state::{AppState, FolderUndoBatch, FolderUndoItem, SongPreviewTicket, PLATFORMS};
 
 #[derive(Clone)]
 pub struct Ctx {
@@ -41,12 +42,29 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
             get(login_qr_state),
         )
         .route("/api/accounts/{platform}/logout", post(logout))
+        .route(
+            "/api/accounts/soundcloud/login/oauth",
+            get(soundcloud_oauth_start),
+        )
+        .route(
+            "/api/accounts/soundcloud/login/oauth/{state}",
+            get(soundcloud_oauth_status),
+        )
+        .route(
+            "/api/accounts/soundcloud/login/oauth/callback",
+            post(soundcloud_oauth_callback),
+        )
         .route("/api/search", post(search))
+        .route("/api/search/cover", post(search_cover))
         .route("/api/search/capabilities", get(search_capabilities))
         .route("/api/search/collection", post(resolve_collection))
         .route("/api/lyrics", post(lyrics))
         .route("/api/song/preview", post(song_preview))
         .route("/api/song/preview/{token}", get(song_preview_stream))
+        .route(
+            "/api/song/cache",
+            get(song_cache_stats).delete(clear_song_cache),
+        )
         .route("/api/resolve", post(resolve))
         .route("/api/intake", post(intake))
         .route("/api/downloads", get(list_downloads).post(enqueue))
@@ -61,11 +79,6 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/video/calibrate", post(video_calibrate))
         .route("/api/vj/export", post(vj_export))
         .route("/api/library/tracks", get(library_tracks))
-        .route(
-            "/api/library/stream",
-            get(list_stream_library).post(add_stream_library),
-        )
-        .route("/api/library/stream/{id}", delete(remove_stream_library))
         .route("/api/stream/playlists/{platform}", get(stream_playlists))
         .route("/api/stream/playlist", post(stream_playlist))
         .route("/api/library/tracks/{id}", get(library_track))
@@ -90,6 +103,10 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/library/waveforms/upgrade", post(waveform_upgrade))
         .route("/api/library/folders/move", post(folder_move))
         .route("/api/library/folders/order", post(folder_order))
+        .route(
+            "/api/library/folders/undo",
+            get(folder_undo_status).post(folder_undo),
+        )
         .route("/api/library/folders/apply", post(folder_apply))
         .route("/api/library/scan", post(library_scan))
         .route("/api/library/analyze", post(library_analyze))
@@ -150,7 +167,16 @@ async fn put_settings(
     axum::Extension(ctx): axum::Extension<Ctx>,
     Json(payload): Json<Settings>,
 ) -> Json<SettingsView> {
+    let previous_download_dir = state.config.download_dir();
     let settings = state.config.apply_settings(payload);
+    if state.config.download_dir() != previous_download_dir {
+        // 已完成的旧目录缓存保留给用户自行处理；但所有 pending/writer 必须失效，
+        // 否则它们会在设置切换后继续写进统计/清理看不到的旧目录。
+        state.stream_cache.cancel_writes();
+    }
+    state
+        .stream_cache
+        .set_enabled(settings.stream_cache_enabled);
     state.sync_provider_context();
     ctx.downloads.set_concurrency(settings.concurrent_downloads);
     // auto_start_downloads 保留在配置契约中兼容旧 settings.json，但下载队列现在
@@ -225,6 +251,59 @@ async fn logout(
     Ok(Json(account))
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct SoundCloudOAuthStart {
+    state: String,
+    authorization_url: String,
+    expires_in: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SoundCloudOAuthFinish {
+    state: String,
+    code: String,
+}
+
+const SOUNDCLOUD_REDIRECT_URI: &str = "kdj://soundcloud/callback";
+
+async fn soundcloud_oauth_start(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<SoundCloudOAuthStart>> {
+    let (oauth_state, authorization_url) = state.soundcloud.begin_oauth(SOUNDCLOUD_REDIRECT_URI)?;
+    Ok(Json(SoundCloudOAuthStart {
+        state: oauth_state,
+        authorization_url,
+        expires_in: 600,
+    }))
+}
+
+async fn soundcloud_oauth_status(
+    State(state): State<Arc<AppState>>,
+    AxumPath(oauth_state): AxumPath<String>,
+) -> Json<kdj_providers::soundcloud::OAuthStatus> {
+    Json(state.soundcloud.oauth_status(&oauth_state))
+}
+
+async fn soundcloud_oauth_callback(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SoundCloudOAuthFinish>,
+) -> ApiResult<Json<Account>> {
+    let oauth_state = payload.state.trim();
+    let code = payload.code.trim();
+    if oauth_state.is_empty() || code.is_empty() {
+        return Err(ApiError::bad_request(
+            "SoundCloud OAuth 回调缺少 state 或 code",
+        ));
+    }
+    state
+        .soundcloud
+        .finish_oauth(oauth_state, code, SOUNDCLOUD_REDIRECT_URI)
+        .await?;
+    let account = state.soundcloud.account().await;
+    state.hub.publish("account.changed", &account);
+    Ok(Json(account))
+}
+
 // ---------------------------------------------------------------- 搜索
 
 async fn search(
@@ -232,6 +311,104 @@ async fn search(
     Json(payload): Json<SearchRequest>,
 ) -> Json<SearchResponse> {
     Json(crate::aggregate::search(&state, &payload).await)
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchCoverRequest {
+    platform: Platform,
+    url: String,
+}
+
+/// 从网易云 / QQ 搜索结果的封面 URL 取回图片字节。
+///
+/// 浏览器里的 `<img>` 可以直接显示跨域图片，但把它再 PUT 回本地音频时，
+/// WebView 的 CORS 会挡住 `fetch`。这条窄代理只接受两个已启用音乐平台的
+/// 图片域名，并在服务端先校验魔数，前端拿到的就是可写入标签的 JPEG / PNG。
+async fn search_cover(Json(payload): Json<SearchCoverRequest>) -> ApiResult<Response> {
+    let url = reqwest::Url::parse(payload.url.trim())
+        .map_err(|_| ApiError::bad_request("封面地址无效"))?;
+    if !matches!(url.scheme(), "http" | "https") || !cover_host_allowed(payload.platform, &url) {
+        return Err(ApiError::bad_request(
+            "封面地址不是允许的网易云 / QQ 图片地址",
+        ));
+    }
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .timeout(std::time::Duration::from_secs(12))
+        .user_agent("KDJ cover matcher")
+        .build()
+        .map_err(|error| ApiError::bad_request(format!("封面代理不可用：{error}")))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| ApiError::bad_request(format!("封面下载失败：{error}")))?;
+    if !response.status().is_success() {
+        return Err(ApiError::bad_request(format!(
+            "封面下载失败：HTTP {}",
+            response.status()
+        )));
+    }
+    if !cover_host_allowed(payload.platform, response.url()) {
+        return Err(ApiError::bad_request("封面重定向到了不允许的地址"));
+    }
+
+    let mut data = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream
+        .next()
+        .await
+        .transpose()
+        .map_err(|error| ApiError::bad_request(format!("封面下载失败：{error}")))?
+    {
+        if data.len().saturating_add(chunk.len()) > COVER_MAX_BYTES {
+            return Err(ApiError::bad_request("封面图片不能超过 16 MB"));
+        }
+        data.extend_from_slice(&chunk);
+    }
+    let mime = sniff_remote_cover(&data)
+        .ok_or_else(|| ApiError::bad_request("在线封面不是 JPEG / PNG 图片"))?;
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, mime.to_string()),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        data,
+    )
+        .into_response())
+}
+
+fn cover_host_allowed(platform: Platform, url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    match platform {
+        Platform::Wyy => {
+            host == "163.com" || host.ends_with(".163.com") || host.ends_with(".126.net")
+        }
+        Platform::Qqm => {
+            host == "qq.com"
+                || host.ends_with(".qq.com")
+                || host == "gtimg.cn"
+                || host.ends_with(".gtimg.cn")
+                || host == "qpic.cn"
+                || host.ends_with(".qpic.cn")
+        }
+        _ => false,
+    }
+}
+
+fn sniff_remote_cover(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if data.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else {
+        None
+    }
 }
 
 async fn search_capabilities(
@@ -249,28 +426,53 @@ async fn search_capabilities(
     Json(result)
 }
 
+fn in_library_source_keys(state: &AppState, sources: &[SongSource]) -> Vec<String> {
+    let known = crate::aggregate::library_source_keys(state);
+    sources
+        .iter()
+        .filter_map(|source| {
+            let token = format!("{}:{}", source.platform, source.key);
+            known.contains(&token).then_some(token)
+        })
+        .collect()
+}
+
+#[derive(Serialize)]
+struct CollectionResolveApiResponse {
+    #[serde(flatten)]
+    response: CollectionResolveResponse,
+    in_library_source_keys: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct StreamPlaylistApiResponse {
+    #[serde(flatten)]
+    response: StreamPlaylistResponse,
+    in_library_source_keys: Vec<String>,
+}
+
 async fn resolve_collection(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CollectionResolveRequest>,
-) -> ApiResult<Json<CollectionResolveResponse>> {
+) -> ApiResult<Json<CollectionResolveApiResponse>> {
     if payload.key.trim().is_empty() || !payload.kind.is_collection() {
         return Err(ApiError::bad_request("集合来源参数不完整"));
     }
     let provider = state
         .provider(payload.platform)
         .ok_or_else(|| ApiError::not_found("平台不可用"))?;
-    if !provider
-        .capabilities()
-        .search_kinds
-        .contains(&payload.kind)
-    {
+    if !provider.capabilities().search_kinds.contains(&payload.kind) {
         return Err(ApiError::bad_request("这个平台不支持该集合搜索"));
     }
-    provider
+    let response = provider
         .resolve_collection(payload.kind, &payload.key, payload.limit)
         .await?
-        .map(Json)
-        .ok_or_else(|| ApiError::bad_request("该集合暂时无法展开"))
+        .ok_or_else(|| ApiError::bad_request("该集合暂时无法展开"))?;
+    let in_library_source_keys = in_library_source_keys(&state, &response.sources);
+    Ok(Json(CollectionResolveApiResponse {
+        response,
+        in_library_source_keys,
+    }))
 }
 
 /// 按曲名 / 艺人自动搜歌词（网易云 + QQ）。有 source_platform/key 时优先直取。
@@ -286,9 +488,55 @@ struct SongPreviewBody {
     source: SongSource,
     #[serde(default)]
     quality: Option<Quality>,
+    /// 播放器解码失败后的重试会主动绕过并清掉旧缓存，再从平台刷新。
+    #[serde(default)]
+    bypass_cache: bool,
 }
 
-/// 搜索结果里的「试听」：拿一条**最低码率**的播放直链，不下载不入库。
+async fn song_cache_stats(
+    State(state): State<Arc<AppState>>,
+) -> Json<crate::stream_cache::StreamCacheStats> {
+    Json(state.stream_cache.stats(&state.config).await)
+}
+
+async fn clear_song_cache(
+    State(state): State<Arc<AppState>>,
+) -> Json<crate::stream_cache::StreamCacheStats> {
+    Json(state.stream_cache.clear(&state.config).await)
+}
+
+fn schedule_stream_cache_verification(
+    cache: crate::stream_cache::StreamCache,
+    root: PathBuf,
+    key: String,
+) {
+    tokio::spawn(async move {
+        let _ = cache.verify(&root, &key).await;
+    });
+}
+
+fn insert_song_preview_ticket(
+    state: &AppState,
+    ticket: SongPreviewTicket,
+) -> Json<serde_json::Value> {
+    let token = format!(
+        "{:016x}{:016x}",
+        rand::random::<u64>(),
+        rand::random::<u64>()
+    );
+    let cached = ticket.cached;
+    state
+        .song_previews
+        .lock()
+        .unwrap()
+        .insert(token.clone(), ticket);
+    Json(json!({
+        "url": format!("/api/song/preview/{token}"),
+        "cached": cached,
+    }))
+}
+
+/// 搜索结果里的「试听」：按设置的试听音质拿播放直链，不下载不入库。
 ///
 /// 前端把整个 SongSource 发过来而不是只发 key：QQ 的 media_mid、SoundCloud
 /// 的 transcoding_url 都躺在 payload 里，只发 key 等于逼着后端把详情再查一遍。
@@ -302,17 +550,49 @@ async fn song_preview(
     let quality = body
         .quality
         .unwrap_or_else(|| state.config.to_settings().stream_quality);
+    let cache_key = crate::stream_cache::StreamCache::key(&body.source, quality);
+    let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
+    if body.bypass_cache {
+        state.stream_cache.invalidate(&cache_root, &cache_key).await;
+    } else if state.config.to_settings().stream_cache_enabled
+        && state
+            .stream_cache
+            .lookup(&cache_root, &cache_key, &body.source, quality)
+            .await
+            .is_some()
+    {
+        schedule_stream_cache_verification(
+            state.stream_cache.clone(),
+            cache_root,
+            cache_key.clone(),
+        );
+        return Ok(insert_song_preview_ticket(
+            &state,
+            SongPreviewTicket {
+                source: body.source,
+                quality,
+                cache_key: Some(cache_key),
+                cached: true,
+                url: String::new(),
+                last_used_at: std::time::Instant::now(),
+            },
+        ));
+    }
     match provider
         .preview_url_at_quality(&body.source, quality)
         .await?
     {
-        Some(url) => {
-            let token = format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>());
-            let mut previews = state.song_previews.lock().unwrap();
-            previews.retain(|_, (_, created)| created.elapsed() < std::time::Duration::from_secs(1800));
-            previews.insert(token.clone(), (url, std::time::Instant::now()));
-            Ok(Json(json!({ "url": format!("/api/song/preview/{token}") })))
-        }
+        Some(url) => Ok(insert_song_preview_ticket(
+            &state,
+            SongPreviewTicket {
+                source: body.source,
+                quality,
+                cache_key: Some(cache_key),
+                cached: false,
+                url,
+                last_used_at: std::time::Instant::now(),
+            },
+        )),
         // B 站等没有"歌曲试听"形状的平台：它们的预览走各自的路
         None => Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -328,36 +608,91 @@ async fn song_preview_stream(
     AxumPath(token): AxumPath<String>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let url = state
-        .song_previews
-        .lock()
-        .unwrap()
-        .get(&token)
-        .map(|(url, _)| url.clone())
-        .ok_or_else(|| ApiError::not_found("试听地址已过期，请重新双击歌曲"))?;
+    let mut ticket = {
+        let mut previews = state.song_previews.lock().unwrap();
+        previews
+            .get_and_touch(&token)
+            .ok_or_else(|| ApiError::not_found("试听地址已过期，请重新双击歌曲"))?
+    };
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let cache_key = ticket
+        .cache_key
+        .clone()
+        .unwrap_or_else(|| crate::stream_cache::StreamCache::key(&ticket.source, ticket.quality));
+    let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
+    if state.config.to_settings().stream_cache_enabled {
+        if let Some(cached) = state
+            .stream_cache
+            .lookup(&cache_root, &cache_key, &ticket.source, ticket.quality)
+            .await
+        {
+            schedule_stream_cache_verification(
+                state.stream_cache.clone(),
+                cache_root.clone(),
+                cache_key.clone(),
+            );
+            match audio_response(&cached.path, cached.bytes, cached.mime, range.as_deref()).await {
+                Ok(response) => return Ok(response),
+                Err(_) => {
+                    // 清理缓存可能恰好发生在 lookup 和 open 之间；这次直接回源。
+                    state.stream_cache.invalidate(&cache_root, &cache_key).await;
+                }
+            }
+        }
+    }
+
+    // 缓存票据故意不解析平台短链；缓存被关闭、清掉或校验失败时才回源。
+    if ticket.cached || ticket.url.is_empty() {
+        refresh_song_preview_ticket(&state, &token, &mut ticket).await?;
+    }
+
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
-    let mut request = client.get(url);
-    if let Some(range) = headers.get(header::RANGE).and_then(|value| value.to_str().ok()) {
-        request = request.header(reqwest::header::RANGE, range);
+    let mut upstream =
+        request_song_preview_upstream(&client, &ticket.url, range.as_deref()).await?;
+    let mut status = preview_upstream_status(&upstream);
+
+    // 网易云 vkey、QQ sip 等短链可能在票据有效期内先过期。只在明确的鉴权/失效
+    // 状态下按原 source + quality 刷新一次，并原样重放 Range；单次请求绝不死循环。
+    if song_preview_url_needs_refresh(status) {
+        refresh_song_preview_ticket(&state, &token, &mut ticket).await?;
+        upstream = request_song_preview_upstream(&client, &ticket.url, range.as_deref()).await?;
+        status = preview_upstream_status(&upstream);
     }
-    let upstream = request
-        .send()
-        .await
-        .map_err(|err| ApiError::new(StatusCode::BAD_GATEWAY, format!("试听源连接失败：{err}")))?;
-    let status = StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::OK);
+
     if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
         return Err(ApiError::new(status, format!("试听源返回 HTTP {status}")));
     }
-    let upstream_headers = upstream.headers().clone();
-    let content_type = upstream_headers
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| value.starts_with("audio/"))
-        .unwrap_or("audio/mpeg")
-        .to_string();
+    let mut upstream_headers = upstream.headers().clone();
+    let mut content_type = preview_audio_mime(&upstream_headers, "audio/mpeg");
+    if content_type.is_none() {
+        // 某些过期短链用 200 + HTML/JSON 错误页伪装成功；刷新一次再判，绝不把
+        // 错误页送进 audio 或缓存成一首“歌曲”。
+        refresh_song_preview_ticket(&state, &token, &mut ticket).await?;
+        upstream = request_song_preview_upstream(&client, &ticket.url, range.as_deref()).await?;
+        status = preview_upstream_status(&upstream);
+        if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
+            return Err(ApiError::new(status, format!("试听源返回 HTTP {status}")));
+        }
+        upstream_headers = upstream.headers().clone();
+        content_type = preview_audio_mime(&upstream_headers, "audio/mpeg");
+    }
+    let content_type = content_type
+        .ok_or_else(|| ApiError::new(StatusCode::BAD_GATEWAY, "试听源返回的不是音频内容"))?;
+    if state.config.to_settings().stream_cache_enabled {
+        schedule_song_preview_cache(
+            state.clone(),
+            token,
+            ticket.clone(),
+            cache_key,
+            content_type.clone(),
+        );
+    }
     let mut builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, content_type)
@@ -368,12 +703,346 @@ async fn song_preview_stream(
             builder = builder.header(name, value);
         }
     }
-    let stream = upstream.bytes_stream().map(|chunk| {
-        chunk.map_err(|err| std::io::Error::other(format!("试听流读取失败：{err}")))
-    });
+    let stream = upstream
+        .bytes_stream()
+        .map(|chunk| chunk.map_err(|err| std::io::Error::other(format!("试听流读取失败：{err}"))));
     builder
         .body(axum::body::Body::from_stream(stream))
         .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
+}
+
+async fn refresh_song_preview_ticket(
+    state: &AppState,
+    token: &str,
+    ticket: &mut SongPreviewTicket,
+) -> ApiResult<()> {
+    let provider = state
+        .provider(ticket.source.platform)
+        .ok_or_else(|| ApiError::bad_request("不认识的平台"))?;
+    let refreshed_url = provider
+        .preview_url_at_quality(&ticket.source, ticket.quality)
+        .await?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "这个平台暂时无法刷新试听地址",
+            )
+        })?;
+    ticket.url = refreshed_url;
+    ticket.cached = false;
+    ticket.last_used_at = std::time::Instant::now();
+    let mut previews = state.song_previews.lock().unwrap();
+    if !previews.update_url(token, ticket.url.clone()) {
+        // 极端并发下票据可能在 provider 请求期间被容量淘汰；当前正在用的票据
+        // 应恢复为最新租约，避免随后 seek 立刻 404。
+        previews.insert(token.to_string(), ticket.clone());
+    }
+    Ok(())
+}
+
+fn schedule_song_preview_cache(
+    state: Arc<AppState>,
+    token: String,
+    ticket: SongPreviewTicket,
+    cache_key: String,
+    content_type_hint: String,
+) {
+    let Some(mut reservation) = state.stream_cache.reserve(cache_key.clone()) else {
+        return;
+    };
+    tokio::spawn(async move {
+        // 先让 WebView 的首批缓冲独占链路；缓存是后台完整拉取，不参与首包延迟。
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        if !reservation.is_valid() || !reservation.acquire_slot().await {
+            return;
+        }
+        let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
+        if state
+            .stream_cache
+            .lookup(&cache_root, &cache_key, &ticket.source, ticket.quality)
+            .await
+            .is_some()
+        {
+            return;
+        }
+        if let Err(error) =
+            cache_song_preview_background(state, token, ticket, content_type_hint, reservation)
+                .await
+        {
+            tracing::debug!(error = %error, "在线音频后台缓存未完成");
+        }
+    });
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreviewCacheSegment {
+    start: u64,
+    end: u64,
+    total: u64,
+}
+
+fn preview_cache_segment(
+    status: StatusCode,
+    headers: &HeaderMap,
+    requested_start: u64,
+) -> Option<PreviewCacheSegment> {
+    if status == StatusCode::OK {
+        if requested_start != 0 {
+            return None;
+        }
+        let total = headers
+            .get(header::CONTENT_LENGTH)?
+            .to_str()
+            .ok()?
+            .parse::<u64>()
+            .ok()?;
+        return (total > 0).then_some(PreviewCacheSegment {
+            start: 0,
+            end: total - 1,
+            total,
+        });
+    }
+    if status != StatusCode::PARTIAL_CONTENT {
+        return None;
+    }
+    let raw = headers.get(header::CONTENT_RANGE)?.to_str().ok()?.trim();
+    let (unit, value) = raw.split_once(' ')?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let (span, total) = value.split_once('/')?;
+    let (start, end) = span.split_once('-')?;
+    let start = start.parse::<u64>().ok()?;
+    let end = end.parse::<u64>().ok()?;
+    let total = total.parse::<u64>().ok()?;
+    if start != requested_start || start > end || end >= total {
+        return None;
+    }
+    let declared = end - start + 1;
+    if let Some(length) = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        if length != declared {
+            return None;
+        }
+    }
+    Some(PreviewCacheSegment { start, end, total })
+}
+
+async fn refresh_background_preview_url(
+    state: &AppState,
+    token: &str,
+    ticket: &SongPreviewTicket,
+) -> Result<String, String> {
+    let provider = state
+        .provider(ticket.source.platform)
+        .ok_or_else(|| "缓存来源平台不可用".to_string())?;
+    let url = provider
+        .preview_url_at_quality(&ticket.source, ticket.quality)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "缓存来源地址无法刷新".to_string())?;
+    let mut previews = state.song_previews.lock().unwrap();
+    let _ = previews.update_url(token, url.clone());
+    Ok(url)
+}
+
+async fn cache_song_preview_background(
+    state: Arc<AppState>,
+    token: String,
+    ticket: SongPreviewTicket,
+    content_type_hint: String,
+    reservation: crate::stream_cache::StreamCacheReservation,
+) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
+    let mut url = ticket.url.clone();
+    let mut offset = 0_u64;
+    let mut expected_total = None;
+    let mut writer: Option<crate::stream_cache::StreamCacheWriter> = None;
+    let mut reservation = Some(reservation);
+    let mut refreshes_left = 1_u8;
+
+    // 绝大多数 CDN 对 bytes=0- 一次返回整首；循环同时兼容主动限制单段大小的源。
+    for _ in 0..2048 {
+        if !state.config.to_settings().stream_cache_enabled
+            || reservation.as_ref().is_some_and(|item| !item.is_valid())
+            || writer.as_ref().is_some_and(|item| !item.is_valid())
+        {
+            return Ok(());
+        }
+        let request = client
+            .get(&url)
+            .header(reqwest::header::RANGE, format!("bytes={offset}-"));
+        let mut response = tokio::time::timeout(std::time::Duration::from_secs(30), request.send())
+            .await
+            .map_err(|_| "缓存源连接超时".to_string())?
+            .map_err(|error| format!("缓存源连接失败：{error}"))?;
+        let status = preview_upstream_status(&response);
+        if song_preview_url_needs_refresh(status) {
+            if offset > 0 {
+                return Err("缓存续传地址失效，已丢弃本次临时文件".into());
+            }
+            if refreshes_left == 0 {
+                return Err(format!("缓存源刷新后仍返回 HTTP {status}"));
+            }
+            refreshes_left -= 1;
+            url = refresh_background_preview_url(&state, &token, &ticket).await?;
+            continue;
+        }
+        let Some(mime) = preview_audio_mime(response.headers(), &content_type_hint) else {
+            if offset > 0 {
+                return Err("缓存续传源变成了非音频内容，已丢弃临时文件".into());
+            }
+            if refreshes_left == 0 {
+                return Err("缓存源刷新后仍返回非音频内容".into());
+            }
+            refreshes_left -= 1;
+            url = refresh_background_preview_url(&state, &token, &ticket).await?;
+            continue;
+        };
+        let segment = preview_cache_segment(status, response.headers(), offset)
+            .ok_or_else(|| format!("缓存源没有返回可续写的完整范围：HTTP {status}"))?;
+        if expected_total.is_some_and(|total| total != segment.total) {
+            return Err("缓存源总长度在续传时发生变化".into());
+        }
+        expected_total = Some(segment.total);
+
+        if writer.is_none() {
+            writer = reservation
+                .take()
+                .expect("reservation is consumed only once")
+                .begin_write(
+                    &cache_root,
+                    &ticket.source,
+                    ticket.quality,
+                    mime,
+                    Some(segment.total),
+                )
+                .await
+                .map_err(|error| format!("创建缓存临时文件失败：{error}"))?;
+            if writer.is_none() {
+                return Ok(());
+            }
+        }
+
+        let mut received = 0_u64;
+        loop {
+            let chunk = tokio::time::timeout(std::time::Duration::from_secs(30), response.chunk())
+                .await
+                .map_err(|_| "缓存源连续 30 秒没有返回数据".to_string())?
+                .map_err(|error| format!("读取缓存源失败：{error}"))?;
+            let Some(chunk) = chunk else {
+                break;
+            };
+            if offset == 0 && received == 0 && looks_like_text_error_payload(&chunk) {
+                return Err("缓存源返回了 HTML/JSON 错误内容".into());
+            }
+            received = received.saturating_add(chunk.len() as u64);
+            let keep_writing = writer
+                .as_mut()
+                .expect("writer created above")
+                .write_chunk(&chunk)
+                .await
+                .map_err(|error| format!("写入缓存失败：{error}"))?;
+            if !keep_writing {
+                return Ok(());
+            }
+        }
+        let declared = segment.end - segment.start + 1;
+        if received != declared {
+            return Err(format!(
+                "缓存分段长度不符：声明 {declared}，收到 {received}"
+            ));
+        }
+        offset = segment.end + 1;
+        if offset == segment.total {
+            let committed = writer
+                .as_mut()
+                .expect("writer created above")
+                .finish()
+                .await
+                .map_err(|error| format!("提交缓存失败：{error}"))?;
+            if committed {
+                tracing::debug!(source = %ticket.source.key, bytes = segment.total, "在线音频已缓存");
+            }
+            return Ok(());
+        }
+    }
+    Err("缓存源分段过多，已停止续传".into())
+}
+
+fn looks_like_text_error_payload(bytes: &[u8]) -> bool {
+    let prefix = bytes
+        .iter()
+        .copied()
+        .take(96)
+        .skip_while(|byte| byte.is_ascii_whitespace())
+        .collect::<Vec<_>>();
+    let lower = String::from_utf8_lossy(&prefix).to_ascii_lowercase();
+    lower.starts_with("<!doctype html")
+        || lower.starts_with("<html")
+        || lower.starts_with("<?xml")
+        || lower.starts_with("#extm3u")
+        || lower.starts_with('{')
+        || lower.starts_with("[{")
+}
+
+fn preview_upstream_status(response: &reqwest::Response) -> StatusCode {
+    StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY)
+}
+
+fn preview_audio_mime(headers: &HeaderMap, fallback: &str) -> Option<String> {
+    let Some(raw) = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Some(fallback.to_string());
+    };
+    let base = raw
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if base.starts_with("audio/") {
+        return Some(raw.to_string());
+    }
+    if matches!(
+        base.as_str(),
+        "application/octet-stream" | "binary/octet-stream"
+    ) {
+        return Some(fallback.to_string());
+    }
+    None
+}
+
+fn song_preview_url_needs_refresh(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND | StatusCode::GONE
+    )
+}
+
+async fn request_song_preview_upstream(
+    client: &reqwest::Client,
+    url: &str,
+    range: Option<&str>,
+) -> ApiResult<reqwest::Response> {
+    let mut request = client.get(url);
+    if let Some(range) = range {
+        request = request.header(reqwest::header::RANGE, range);
+    }
+    request
+        .send()
+        .await
+        .map_err(|err| ApiError::new(StatusCode::BAD_GATEWAY, format!("试听源连接失败：{err}")))
 }
 
 /// 逐个平台试解析。返回 `(结果, 最后一次错误)`，结果为 None 表示没人认得这个链接。
@@ -493,11 +1162,7 @@ async fn intake(
     }))
 }
 
-async fn intake_one(
-    state: &Arc<AppState>,
-    entry: &str,
-    payload: &IntakeRequest,
-) -> IntakeItem {
+async fn intake_one(state: &Arc<AppState>, entry: &str, payload: &IntakeRequest) -> IntakeItem {
     let mut item = IntakeItem {
         entry: entry.to_string(),
         kind: IntakeKind::Search,
@@ -548,6 +1213,12 @@ async fn intake_one(
         },
     )
     .await;
+    item.kind = match payload.kind {
+        SearchKind::Song => IntakeKind::Search,
+        SearchKind::Playlist => IntakeKind::Playlist,
+        SearchKind::Artist => IntakeKind::Artist,
+        SearchKind::Album => IntakeKind::Album,
+    };
     item.title = entry.to_string();
     item.groups = response.groups;
     item.collections = response.collections;
@@ -639,7 +1310,10 @@ async fn remove_download(
         .downloads
         .get(&id)
         .ok_or_else(|| ApiError::not_found("任务不存在"))?;
-    if !matches!(task.state, TaskState::Done | TaskState::Failed | TaskState::Canceled) {
+    if !matches!(
+        task.state,
+        TaskState::Done | TaskState::Failed | TaskState::Canceled
+    ) {
         return Err(ApiError::bad_request("只能移除已结束的任务；请先取消"));
     }
     ctx.downloads
@@ -823,7 +1497,11 @@ fn pcm_envelope(bytes: &[u8]) -> Vec<f64> {
         return values;
     }
     let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / values.len() as f64;
     let scale = variance.sqrt().max(1e-6);
     for value in &mut values {
         *value = (*value - mean) / scale;
@@ -839,7 +1517,9 @@ fn decode_alignment_envelope(input: String, headers: Option<String>) -> Result<V
         command.args(["-headers", &headers]);
     }
     let output = command
-        .args(["-i", &input, "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1"])
+        .args([
+            "-i", &input, "-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1",
+        ])
         .output()
         .map_err(|err| format!("启动 ffmpeg 失败：{err}"))?;
     if !output.status.success() {
@@ -896,14 +1576,25 @@ async fn video_calibrate(
         .bilibili
         .calibration_audio_source(&body.bvid, body.page)
         .await
-        .map_err(|err| ApiError::new(StatusCode::BAD_GATEWAY, format!("获取视频音轨失败：{err:#}")))?;
+        .map_err(|err| {
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                format!("获取视频音轨失败：{err:#}"),
+            )
+        })?;
     let headers = format!(
         "Referer: https://www.bilibili.com/\r\nUser-Agent: Mozilla/5.0\r\n{}",
-        if cookies.is_empty() { String::new() } else { format!("Cookie: {cookies}\r\n") }
+        if cookies.is_empty() {
+            String::new()
+        } else {
+            format!("Cookie: {cookies}\r\n")
+        }
     );
     let local_path = track.path;
-    let local_job = tokio::task::spawn_blocking(move || decode_alignment_envelope(local_path, None));
-    let video_job = tokio::task::spawn_blocking(move || decode_alignment_envelope(video_url, Some(headers)));
+    let local_job =
+        tokio::task::spawn_blocking(move || decode_alignment_envelope(local_path, None));
+    let video_job =
+        tokio::task::spawn_blocking(move || decode_alignment_envelope(video_url, Some(headers)));
     let (local, video) = tokio::join!(local_job, video_job);
     let local = local
         .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?
@@ -950,31 +1641,6 @@ struct TrackQueryParams {
     offset: Option<i64>,
 }
 
-async fn list_stream_library(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<StreamLibraryListRequest>,
-) -> ApiResult<Json<Vec<StreamLibraryItem>>> {
-    Ok(Json(state.library.list_stream_sources(&query.folder)?))
-}
-
-async fn add_stream_library(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<StreamLibraryAddRequest>,
-) -> ApiResult<Json<StreamLibraryItem>> {
-    let folder = normalize_dest_dir(&state, &payload.folder)?;
-    Ok(Json(state.library.add_stream_source(&payload.source, &folder)?))
-}
-
-async fn remove_stream_library(
-    State(state): State<Arc<AppState>>,
-    AxumPath(id): AxumPath<i64>,
-) -> ApiResult<Json<serde_json::Value>> {
-    if !state.library.remove_stream_source(id)? {
-        return Err(ApiError::not_found("流媒体曲目不存在"));
-    }
-    Ok(Json(json!({ "removed": true })))
-}
-
 async fn stream_playlists(
     State(state): State<Arc<AppState>>,
     AxumPath(platform): AxumPath<String>,
@@ -989,18 +1655,22 @@ async fn stream_playlists(
 async fn stream_playlist(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<StreamPlaylistRequest>,
-) -> ApiResult<Json<StreamPlaylistResponse>> {
+) -> ApiResult<Json<StreamPlaylistApiResponse>> {
     if payload.key.trim().is_empty() {
         return Err(ApiError::bad_request("歌单来源缺少 key"));
     }
     let provider = state
         .provider(payload.platform)
         .ok_or_else(|| ApiError::not_found("平台不可用"))?;
-    provider
+    let response = provider
         .stream_playlist_tracks(&payload.key, payload.limit)
         .await?
-        .map(Json)
-        .ok_or_else(|| ApiError::bad_request("该平台暂不支持歌单展开"))
+        .ok_or_else(|| ApiError::bad_request("该平台暂不支持歌单展开"))?;
+    let in_library_source_keys = in_library_source_keys(&state, &response.sources);
+    Ok(Json(StreamPlaylistApiResponse {
+        response,
+        in_library_source_keys,
+    }))
 }
 
 async fn library_tracks(
@@ -1116,6 +1786,33 @@ fn parse_disposal(name: &str) -> ApiResult<FileDisposal> {
     }
 }
 
+fn delete_undo_item(deleted: DeletedTrack) -> FolderUndoItem {
+    let source = PathBuf::from(&deleted.track.path);
+    FolderUndoItem {
+        op: FolderUndoOp::Delete,
+        track_id: deleted.track.id,
+        source: source.clone(),
+        target: PathBuf::new(),
+        created_track_id: None,
+        source_platform: deleted.track.source_platform.clone(),
+        source_key: deleted.track.source_key.clone(),
+        deleted: Some(deleted),
+    }
+}
+
+fn finish_delete_undo(state: &AppState, items: Vec<FolderUndoItem>) -> FolderUndoStatus {
+    if items.is_empty() {
+        // 不可恢复的删除不能让 Cmd+Z 误撤回更早的复制/移动。
+        state.clear_folder_undo();
+        state.folder_undo_status()
+    } else {
+        state.push_folder_undo(FolderUndoBatch {
+            op: FolderUndoOp::Delete,
+            items,
+        })
+    }
+}
+
 async fn library_delete(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<i64>,
@@ -1126,13 +1823,20 @@ async fn library_delete(
         None if params.delete_file => FileDisposal::Remove,
         None => FileDisposal::Keep,
     };
+    let _operations = state.folder_operations.lock().unwrap();
     // 删不存在的曲目要 404：回 200 + {"ok": false} 的话前端会当成删成功，
     // 把那一行从列表里抹掉，刷新之后它又回来了
-    if !state.library.delete(id, disposal)? {
+    let (removed, deleted) = if disposal == FileDisposal::Remove {
+        (state.library.delete(id, disposal)?, None)
+    } else {
+        state.library.delete_for_undo(id, disposal)?
+    };
+    if !removed {
         return Err(ApiError::not_found("曲目不存在"));
     }
+    let undo = finish_delete_undo(&state, deleted.into_iter().map(delete_undo_item).collect());
     state.hub.publish_library_updated(&[id]);
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(json!({ "ok": true, "undo": undo })))
 }
 
 #[derive(Deserialize)]
@@ -1151,20 +1855,45 @@ async fn library_delete_batch(
     Json(payload): Json<BatchDeleteRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let disposal = parse_disposal(&payload.file)?;
+    let _operations = state.folder_operations.lock().unwrap();
     let mut removed: Vec<i64> = Vec::new();
+    let mut undo_items = Vec::new();
+    let mut changed = false;
     let mut errors = serde_json::Map::new();
     for id in payload.track_ids {
-        match state.library.delete(id, disposal) {
-            Ok(_) => removed.push(id), // false=库里本来就没有：目的已达成，不算失败
+        let result = if disposal == FileDisposal::Remove {
+            Ok((state.library.delete(id, disposal)?, None))
+        } else {
+            state.library.delete_for_undo(id, disposal)
+        };
+        match result {
+            Ok((true, deleted)) => {
+                removed.push(id);
+                changed = true;
+                if let Some(deleted) = deleted {
+                    undo_items.push(delete_undo_item(deleted));
+                }
+            }
+            Ok((false, _)) => {
+                // false=库里本来就没有：目的已达成，不算失败，保持旧批量接口语义
+                removed.push(id);
+            }
             Err(err) => {
                 errors.insert(id.to_string(), json!(format!("{err:#}")));
             }
         }
     }
+    let undo = if changed {
+        finish_delete_undo(&state, undo_items)
+    } else {
+        state.folder_undo_status()
+    };
     if !removed.is_empty() {
         state.hub.publish_library_updated(&removed);
     }
-    Ok(Json(json!({ "removed": removed.len(), "errors": errors })))
+    Ok(Json(
+        json!({ "removed": removed.len(), "errors": errors, "undo": undo }),
+    ))
 }
 
 async fn write_tags(
@@ -1510,8 +2239,7 @@ fn merge_manifest_order(existing: &[String], submitted: &[String]) -> Vec<String
         .filter(|name| !name.is_empty())
         .cloned()
         .collect();
-    let touched: std::collections::HashSet<&str> =
-        submitted.iter().map(String::as_str).collect();
+    let touched: std::collections::HashSet<&str> = submitted.iter().map(String::as_str).collect();
     let mut merged: Vec<String> = existing
         .iter()
         .filter(|name| !touched.contains(name.as_str()))
@@ -1525,10 +2253,8 @@ async fn folder_order(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<FolderOrderRequest>,
 ) -> ApiResult<Json<FolderTree>> {
-    let target = kdj_library::folders::ensure_inside(
-        Path::new(&payload.path),
-        &require_roots(&state)?,
-    )?;
+    let target =
+        kdj_library::folders::ensure_inside(Path::new(&payload.path), &require_roots(&state)?)?;
     if !target.is_dir() {
         return Err(ApiError::bad_request("文件夹不存在"));
     }
@@ -1540,6 +2266,146 @@ async fn folder_order(
     Ok(Json(folder_tree(&state)?))
 }
 
+async fn folder_undo_status(State(state): State<Arc<AppState>>) -> Json<FolderUndoStatus> {
+    Json(state.folder_undo_status())
+}
+
+/// 撤回最近一次成功的曲目复制/移动/删除批次。
+///
+/// 每个条目在执行前都校验路径/曲目身份，避免把用户后来放进去的
+/// 同名文件误删。批次允许部分撤回，失败项会留在栈顶等待用户处理。
+async fn folder_undo(State(state): State<Arc<AppState>>) -> ApiResult<Json<FolderUndoResponse>> {
+    let _operations = state.folder_operations.lock().unwrap();
+    let mut stack = state.folder_undo.lock().unwrap();
+    let Some(batch) = stack.back().cloned() else {
+        return Err(ApiError::not_found("没有可撤回的曲库操作"));
+    };
+
+    let mut remaining = Vec::new();
+    let mut changed_ids = Vec::new();
+    let mut errors = BTreeMap::new();
+    let mut undone = 0usize;
+    for (index, item) in batch.items.iter().enumerate().rev() {
+        match undo_folder_item(&state, item) {
+            Ok(ids) => {
+                changed_ids.extend(ids);
+                undone += 1;
+            }
+            Err(err) => {
+                errors.insert(format!("{}:{index}", item.track_id), format!("{err:#}"));
+                remaining.push(item.clone());
+            }
+        }
+    }
+    remaining.reverse();
+
+    if remaining.is_empty() {
+        stack.pop_back();
+    } else if let Some(last) = stack.back_mut() {
+        last.items = remaining;
+    }
+    changed_ids.sort_unstable();
+    changed_ids.dedup();
+    if !changed_ids.is_empty() {
+        state.hub.publish_library_updated(&changed_ids);
+    }
+
+    let status = stack
+        .back()
+        .map(|next| FolderUndoStatus {
+            available: !next.items.is_empty(),
+            op: Some(next.op),
+            count: next.items.len(),
+        })
+        .unwrap_or_default();
+    Ok(Json(FolderUndoResponse {
+        undone,
+        track_ids: changed_ids,
+        op: batch.op,
+        status,
+        errors,
+    }))
+}
+
+fn undo_folder_item(state: &AppState, item: &FolderUndoItem) -> anyhow::Result<Vec<i64>> {
+    match item.op {
+        FolderUndoOp::Delete => {
+            let deleted = item
+                .deleted
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("删除撤回缺少曲目快照：{}", item.track_id))?;
+            state.library.restore_deleted(deleted)?;
+            Ok(vec![item.track_id])
+        }
+        FolderUndoOp::Move => {
+            anyhow::ensure!(
+                item.target.is_file(),
+                "撤回目标文件不存在：{}",
+                item.target.display()
+            );
+            let Some(track) = state.library.get(item.track_id)? else {
+                anyhow::bail!("移动曲目记录不存在：{}", item.track_id);
+            };
+            anyhow::ensure!(
+                kdj_library::service::normalize_path(Path::new(&track.path))
+                    == kdj_library::service::normalize_path(&item.target),
+                "移动曲目路径已变化，拒绝覆盖：{}",
+                item.target.display()
+            );
+            anyhow::ensure!(
+                !item.source.exists(),
+                "原文件位置已有文件，未覆盖：{}",
+                item.source.display()
+            );
+            let parent = item
+                .source
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("原文件没有父目录：{}", item.source.display()))?;
+            anyhow::ensure!(parent.is_dir(), "原文件夹不存在：{}", parent.display());
+            let restored = kdj_library::folders::move_file(&item.target, parent)?;
+            if let Err(err) = kdj_library::folders::move_lyrics(
+                &item.target,
+                &restored,
+                &item.source_platform,
+                &item.source_key,
+            ) {
+                tracing::warn!("撤回移动歌词失败 {}：{err:#}", restored.display());
+            }
+            state.library.relocate(item.track_id, &restored)?;
+            Ok(vec![item.track_id])
+        }
+        FolderUndoOp::Copy => {
+            anyhow::ensure!(
+                item.target.is_file(),
+                "撤回目标文件不存在：{}",
+                item.target.display()
+            );
+            let new_id = item
+                .created_track_id
+                .ok_or_else(|| anyhow::anyhow!("复制操作缺少新曲目记录"))?;
+            let Some(track) = state.library.get(new_id)? else {
+                anyhow::bail!("复制出来的曲目记录不存在：{new_id}");
+            };
+            anyhow::ensure!(
+                kdj_library::service::normalize_path(Path::new(&track.path))
+                    == kdj_library::service::normalize_path(&item.target),
+                "复制目标已被重新登记，拒绝删除：{}",
+                item.target.display()
+            );
+            kdj_library::folders::remove_lyrics(
+                &item.target,
+                &item.source_platform,
+                &item.source_key,
+            )?;
+            anyhow::ensure!(
+                state.library.delete(new_id, FileDisposal::Remove)?,
+                "复制出来的曲目已不存在：{new_id}"
+            );
+            Ok(vec![new_id])
+        }
+    }
+}
+
 async fn folder_apply(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<FolderOpRequest>,
@@ -1549,12 +2415,12 @@ async fn folder_apply(
     if !dest.is_dir() {
         return Err(ApiError::bad_request("目标不是文件夹"));
     }
+    let _operations = state.folder_operations.lock().unwrap();
 
     let mut track_ids = Vec::new();
     let mut methods: BTreeMap<String, i64> = BTreeMap::new();
     let mut errors: BTreeMap<String, String> = BTreeMap::new();
-    // 移动时删掉的目标夹内冗余链接、以及改址的符号链接，也要广播刷新。
-    let mut side_ids = Vec::new();
+    let mut undo_items = Vec::new();
 
     for id in &payload.track_ids {
         let Some(track) = state.library.get(*id)? else {
@@ -1571,8 +2437,8 @@ async fn folder_apply(
             continue;
         }
         match payload.op {
-            FileOp::Move => match move_track_resolving_links(&state, *id, &source, &dest) {
-                Ok((target, touched)) => {
+            FileOp::Move => match kdj_library::folders::move_file(&source, &dest) {
+                Ok(target) => {
                     if let Err(err) = kdj_library::folders::move_lyrics(
                         &source,
                         &target,
@@ -1583,34 +2449,17 @@ async fn folder_apply(
                     }
                     state.library.relocate(*id, &target)?;
                     track_ids.push(*id);
-                    side_ids.extend(touched);
+                    undo_items.push(FolderUndoItem {
+                        op: FolderUndoOp::Move,
+                        track_id: *id,
+                        source: source.clone(),
+                        target: target.clone(),
+                        created_track_id: None,
+                        source_platform: track.source_platform.clone(),
+                        source_key: track.source_key.clone(),
+                        deleted: None,
+                    });
                     *methods.entry("move".into()).or_insert(0) += 1;
-                }
-                Err(err) => {
-                    errors.insert(id.to_string(), format!("{err:#}"));
-                }
-            },
-            FileOp::Link => match kdj_library::folders::link_file(&source, &dest) {
-                Ok((target, method)) => {
-                    if let Err(err) = kdj_library::folders::copy_lyrics(
-                        &source,
-                        &target,
-                        &track.source_platform,
-                        &track.source_key,
-                    ) {
-                        tracing::warn!("复制链接歌词失败 {}：{err:#}", target.display());
-                    }
-                    // 链接出来的那一份是新曲目，把分析结果和人工标记一并带过去
-                    match state.library.upsert_file(&target, &track.source_platform, &track.source_key) {
-                        Ok(new_id) => {
-                            state.library.clone_metadata(*id, new_id)?;
-                            track_ids.push(new_id);
-                            *methods.entry(method.to_string()).or_insert(0) += 1;
-                        }
-                        Err(err) => {
-                            errors.insert(id.to_string(), format!("{err:#}"));
-                        }
-                    }
                 }
                 Err(err) => {
                     errors.insert(id.to_string(), format!("{err:#}"));
@@ -1626,10 +2475,24 @@ async fn folder_apply(
                     ) {
                         tracing::warn!("复制歌词失败 {}：{err:#}", target.display());
                     }
-                    match state.library.upsert_file(&target, &track.source_platform, &track.source_key) {
+                    match state.library.upsert_file(
+                        &target,
+                        &track.source_platform,
+                        &track.source_key,
+                    ) {
                         Ok(new_id) => {
                             state.library.clone_metadata(*id, new_id)?;
                             track_ids.push(new_id);
+                            undo_items.push(FolderUndoItem {
+                                op: FolderUndoOp::Copy,
+                                track_id: *id,
+                                source: source.clone(),
+                                target: target.clone(),
+                                created_track_id: Some(new_id),
+                                source_platform: track.source_platform.clone(),
+                                source_key: track.source_key.clone(),
+                                deleted: None,
+                            });
                             *methods.entry("copy".into()).or_insert(0) += 1;
                         }
                         Err(err) => {
@@ -1645,93 +2508,27 @@ async fn folder_apply(
     }
 
     // 一条都没动时不发事件：白发一条 library.updated 会让前端整表刷一次
-    if !track_ids.is_empty() || !side_ids.is_empty() {
-        let mut all = track_ids.clone();
-        all.extend(side_ids);
-        all.sort_unstable();
-        all.dedup();
-        state.hub.publish_library_updated(&all);
+    if !track_ids.is_empty() {
+        state.hub.publish_library_updated(&track_ids);
     }
+    let undo = if undo_items.is_empty() {
+        state.folder_undo_status()
+    } else {
+        state.push_folder_undo(FolderUndoBatch {
+            op: match payload.op {
+                FileOp::Move => FolderUndoOp::Move,
+                FileOp::Copy => FolderUndoOp::Copy,
+            },
+            items: undo_items,
+        })
+    };
     Ok(Json(FolderOpResult {
         track_ids,
         op: payload.op,
         methods,
         errors,
+        undo,
     }))
-}
-
-/// 移动曲目，并按「链接」语义收拾周边：
-///
-/// 1. 目标夹里已有这份歌的硬链接 / 指向源路径的符号链接 → 删掉那条（腾出名额给真身）
-/// 2. 别处的硬链接 → 不管（rename 后仍指向同一 inode）
-/// 3. 别处指向源路径的符号链接 → 改写到新路径
-///
-/// 返回 `(新路径, 被删/被改址而需要前端刷新的曲目 id)`。
-fn move_track_resolving_links(
-    state: &AppState,
-    moving_id: i64,
-    source: &Path,
-    dest: &Path,
-) -> anyhow::Result<(PathBuf, Vec<i64>)> {
-    use kdj_library::folders::{
-        move_file, retarget_symlink, same_hardlink, symlink_points_to,
-    };
-
-    let mut touched = Vec::new();
-    // dest 可能是 canonicalize 过的；库里的 path 是 normalize 过的——用同一套 normalize 比父目录。
-    let dest_key = kdj_library::service::normalize_path(dest);
-
-    // 先扫库里所有路径，分类：目标夹内冗余链接 vs 别处需改址的符号链接。
-    let paths = state.library.all_paths()?;
-    let mut remove_in_dest: Vec<(i64, PathBuf)> = Vec::new();
-    let mut retarget_elsewhere: Vec<(i64, PathBuf)> = Vec::new();
-
-    for path_str in paths {
-        let path = PathBuf::from(&path_str);
-        if path == source {
-            continue;
-        }
-        let Some(other) = state.library.get_by_path(&path)? else {
-            continue;
-        };
-        if other.id == moving_id {
-            continue;
-        }
-
-        let in_dest = path
-            .parent()
-            .map(|parent| kdj_library::service::normalize_path(parent) == dest_key)
-            .unwrap_or(false);
-        let hard = same_hardlink(source, &path);
-        let soft = symlink_points_to(&path, source);
-
-        if in_dest && (hard || soft) {
-            remove_in_dest.push((other.id, path));
-        } else if !in_dest && soft {
-            // 别处硬链接故意不管；只改符号链接地址。
-            retarget_elsewhere.push((other.id, path));
-        }
-    }
-
-    for (id, path) in remove_in_dest {
-        // Remove：去掉这个目录项（硬链接只减 nlink；符号链接整条删掉），并摘库。
-        state.library.delete(id, FileDisposal::Remove)?;
-        touched.push(id);
-        let _ = path; // 文件已由 delete(Remove) 处理
-    }
-
-    let target = move_file(source, dest)?;
-
-    for (id, path) in retarget_elsewhere {
-        if let Err(err) = retarget_symlink(&path, &target) {
-            // 改址失败不回滚移动：真身已经到位；记下来让前端刷新后用户能看见坏链。
-            tracing::warn!("改写符号链接失败 {}: {err:#}", path.display());
-            continue;
-        }
-        touched.push(id);
-    }
-
-    Ok((target, touched))
 }
 
 // ---------------------------------------------------------------- 扫描 / 分析
@@ -1816,13 +2613,28 @@ async fn library_analyze(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<AnalyzeRequest>,
 ) -> ApiResult<Json<AnalyzeResponse>> {
-    let pending = state
-        .library
-        .pending_analysis_ids(payload.track_ids.as_deref(), payload.force)?;
+    let pending = match payload.version {
+        kdj_core::models::AnalysisVersion::V1 => state
+            .library
+            .pending_analysis_ids(payload.track_ids.as_deref(), payload.force)?,
+        kdj_core::models::AnalysisVersion::V2 => state.library.pending_bpm_key_analysis_v2_ids(
+            payload.track_ids.as_deref(),
+            payload.force,
+            payload.limit,
+            Some(&payload.folder),
+        )?,
+    };
     let queued = pending.len();
     // `priority` 必须透传：前端「放到一首还没分析的歌」就是靠它插队的，
     // 吞掉这个字段的话，那一首会跟着「停止分析」一起被掐掉（见 jobs.rs）
-    let job_id = crate::jobs::spawn_analysis(state.clone(), pending, payload.priority);
+    let job_id = match payload.version {
+        kdj_core::models::AnalysisVersion::V1 => {
+            crate::jobs::spawn_analysis(state.clone(), pending, payload.priority)
+        }
+        kdj_core::models::AnalysisVersion::V2 => {
+            crate::jobs::spawn_bpm_key_analysis_v2(state.clone(), pending)
+        }
+    };
     Ok(Json(AnalyzeResponse { job_id, queued }))
 }
 
@@ -1879,7 +2691,10 @@ fn file_mtime(path: &Path) -> u64 {
 async fn extracted_audio(path: &Path, track_id: i64, cache_dir: &Path) -> ApiResult<PathBuf> {
     let mtime = file_mtime(path);
     let target = cache_dir.join(format!("{track_id}-{mtime}.m4a"));
-    if std::fs::metadata(&target).map(|meta| meta.len() > 0).unwrap_or(false) {
+    if std::fs::metadata(&target)
+        .map(|meta| meta.len() > 0)
+        .unwrap_or(false)
+    {
         return Ok(target);
     }
     if !kdj_providers::ffmpeg::available() {
@@ -1888,16 +2703,24 @@ async fn extracted_audio(path: &Path, track_id: i64, cache_dir: &Path) -> ApiRes
             "系统里没有 ffmpeg，视频音轨播放不了",
         ));
     }
-    std::fs::create_dir_all(cache_dir)
-        .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("建缓存目录失败：{err}")))?;
+    std::fs::create_dir_all(cache_dir).map_err(|err| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("建缓存目录失败：{err}"),
+        )
+    })?;
     let tmp = cache_dir.join(format!("{track_id}-{mtime}.partial.m4a"));
     let log = cache_dir.join(format!("{track_id}-{mtime}.log"));
     let cancel = tokio_util::sync::CancellationToken::new();
     // webm/mkv 里常见 opus/vorbis，塞不进 m4a 容器，copy 会失败 → 第二轮转码
     for copy in [true, false] {
         let args = kdj_providers::ffmpeg::extract_audio_args(path, &tmp, copy, 0);
-        if kdj_providers::ffmpeg::run(&args, &log, &cancel).await.is_ok()
-            && std::fs::metadata(&tmp).map(|meta| meta.len() > 0).unwrap_or(false)
+        if kdj_providers::ffmpeg::run(&args, &log, &cancel)
+            .await
+            .is_ok()
+            && std::fs::metadata(&tmp)
+                .map(|meta| meta.len() > 0)
+                .unwrap_or(false)
         {
             let _ = std::fs::rename(&tmp, &target);
             let _ = std::fs::remove_file(&log);
@@ -2114,8 +2937,7 @@ async fn audio_response(
                 )
             })?;
     }
-    let stream =
-        tokio_util::io::ReaderStream::with_capacity(file.take(length), STREAM_CHUNK);
+    let stream = tokio_util::io::ReaderStream::with_capacity(file.take(length), STREAM_CHUNK);
 
     let mut response = axum::body::Body::from_stream(stream).into_response();
     *response.status_mut() = status;
@@ -2137,11 +2959,7 @@ fn parse_range(value: &str, total: u64) -> Option<(u64, u64)> {
     // RFC 7233 的 range unit 是大小写无关的，裸比 "bytes=" 会把 `Bytes=0-` 判成
     // 不可满足 → 416，表现是"某些播放器一拖进度条就报错"。
     let normalized = value.trim().to_ascii_lowercase();
-    let spec = normalized
-        .strip_prefix("bytes=")?
-        .split(',')
-        .next()?
-        .trim();
+    let spec = normalized.strip_prefix("bytes=")?.split(',').next()?.trim();
     let (start_text, end_text) = spec.split_once('-')?;
     let (start, end) = match (start_text.trim(), end_text.trim()) {
         // 后缀式：最后 N 字节
@@ -2315,10 +3133,7 @@ fn cover_cache_file(cache_dir: &Path, track_id: i64, mtime: u64) -> PathBuf {
 fn cover_headers(mime: String) -> [(header::HeaderName, String); 2] {
     [
         (header::CONTENT_TYPE, mime),
-        (
-            header::CACHE_CONTROL,
-            "private, max-age=3600".to_string(),
-        ),
+        (header::CACHE_CONTROL, "private, max-age=3600".to_string()),
     ]
 }
 
@@ -2380,15 +3195,94 @@ async fn library_waveform(
         .waveforms
         .get_or_compute(id, path, buckets, cache_dir)
         .await
-        .map_err(|err| {
-            ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("{err:#}"))
-        })?;
+        .map_err(|err| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("{err:#}")))?;
     Ok(Json(wave))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_refreshes_only_expired_or_denied_upstream_urls() {
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::GONE,
+        ] {
+            assert!(song_preview_url_needs_refresh(status));
+        }
+        for status in [
+            StatusCode::OK,
+            StatusCode::PARTIAL_CONTENT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            assert!(!song_preview_url_needs_refresh(status));
+        }
+    }
+
+    #[test]
+    fn preview_cache_accepts_whole_and_resumable_ranges() {
+        let mut whole = HeaderMap::new();
+        whole.insert(header::CONTENT_LENGTH, "100".parse().unwrap());
+        assert_eq!(
+            preview_cache_segment(StatusCode::OK, &whole, 0).map(|segment| (
+                segment.start,
+                segment.end,
+                segment.total
+            )),
+            Some((0, 99, 100))
+        );
+
+        let mut first = HeaderMap::new();
+        first.insert(header::CONTENT_RANGE, "bytes 0-39/100".parse().unwrap());
+        first.insert(header::CONTENT_LENGTH, "40".parse().unwrap());
+        assert_eq!(
+            preview_cache_segment(StatusCode::PARTIAL_CONTENT, &first, 0).map(|segment| (
+                segment.start,
+                segment.end,
+                segment.total
+            )),
+            Some((0, 39, 100))
+        );
+
+        let mut rest = HeaderMap::new();
+        rest.insert(header::CONTENT_RANGE, "bytes 40-99/100".parse().unwrap());
+        rest.insert(header::CONTENT_LENGTH, "60".parse().unwrap());
+        assert_eq!(
+            preview_cache_segment(StatusCode::PARTIAL_CONTENT, &rest, 40).map(|segment| (
+                segment.start,
+                segment.end,
+                segment.total
+            )),
+            Some((40, 99, 100))
+        );
+        assert!(preview_cache_segment(StatusCode::PARTIAL_CONTENT, &rest, 0).is_none());
+    }
+
+    #[test]
+    fn preview_cache_rejects_explicit_non_audio_content() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            "text/html; charset=utf-8".parse().unwrap(),
+        );
+        assert!(preview_audio_mime(&headers, "audio/mpeg").is_none());
+        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        assert!(preview_audio_mime(&headers, "audio/mpeg").is_none());
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/octet-stream".parse().unwrap(),
+        );
+        assert_eq!(
+            preview_audio_mime(&headers, "audio/mpeg").as_deref(),
+            Some("audio/mpeg")
+        );
+        assert!(looks_like_text_error_payload(b"  <!doctype html><html>"));
+        assert!(!looks_like_text_error_payload(b"ID3\x04\0\0\0"));
+    }
 
     #[test]
     fn range_parsing_covers_the_three_forms() {
@@ -2530,6 +3424,28 @@ mod tests {
     }
 
     #[test]
+    fn online_cover_proxy_accepts_only_the_two_search_platforms() {
+        let wyy = reqwest::Url::parse("https://p1.music.126.net/a.jpg").unwrap();
+        let qqm = reqwest::Url::parse("https://y.qq.com/music/photo/a.jpg").unwrap();
+        let other = reqwest::Url::parse("https://example.com/a.jpg").unwrap();
+        assert!(cover_host_allowed(Platform::Wyy, &wyy));
+        assert!(cover_host_allowed(Platform::Qqm, &qqm));
+        assert!(!cover_host_allowed(Platform::Wyy, &qqm));
+        assert!(!cover_host_allowed(Platform::Qqm, &other));
+        assert!(!cover_host_allowed(Platform::Soundcloud, &other));
+    }
+
+    #[test]
+    fn online_cover_proxy_checks_image_magic_bytes() {
+        assert_eq!(
+            sniff_remote_cover(b"\x89PNG\r\n\x1a\nrest"),
+            Some("image/png")
+        );
+        assert_eq!(sniff_remote_cover(b"\xff\xd8\xffrest"), Some("image/jpeg"));
+        assert_eq!(sniff_remote_cover(b"not an image"), None);
+    }
+
+    #[test]
     fn video_containers_go_through_the_audio_extraction_path() {
         // mkv/webm 直接塞给 <audio> 是放不出来的，必须先抽音轨
         assert!(is_video_container(Path::new("a.mkv")));
@@ -2650,13 +3566,10 @@ mod tests {
         ]
         .map(str::to_string);
         let log = path.with_extension("log");
-        let ok = kdj_providers::ffmpeg::run(
-            &args,
-            &log,
-            &tokio_util::sync::CancellationToken::new(),
-        )
-        .await
-        .is_ok();
+        let ok =
+            kdj_providers::ffmpeg::run(&args, &log, &tokio_util::sync::CancellationToken::new())
+                .await
+                .is_ok();
         let _ = std::fs::remove_file(&log);
         ok
     }
@@ -2748,6 +3661,138 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
         std::fs::canonicalize(&dir).unwrap()
     }
 
+    fn undo_test_state(base: &Path) -> Arc<AppState> {
+        let config = Arc::new(kdj_core::AppConfig::create(
+            base.join("data"),
+            base.join("downloads"),
+            0,
+        ));
+        AppState::new(config).unwrap()
+    }
+
+    fn insert_undo_track(state: &AppState, path: &Path) -> i64 {
+        let path_text = path.to_string_lossy().into_owned();
+        let filename = path.file_name().unwrap().to_string_lossy().into_owned();
+        let conn = state.library.db().conn().unwrap();
+        conn.execute(
+            "INSERT INTO tracks (path, filename, title, format, added_at, modified_at) \
+             VALUES (?, ?, '', 'mp3', 'now', 'now')",
+            [path_text.as_str(), filename.as_str()],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn undo_move_restores_the_file_and_track_path() {
+        let base = scratch("undo-move");
+        let state = undo_test_state(&base);
+        let source_dir = base.join("library").join("source");
+        let target_dir = base.join("library").join("target");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let source = source_dir.join("song.mp3");
+        let target = target_dir.join("song.mp3");
+        std::fs::write(&source, b"audio").unwrap();
+        let id = insert_undo_track(&state, &source);
+        std::fs::rename(&source, &target).unwrap();
+        state.library.relocate(id, &target).unwrap();
+
+        let item = FolderUndoItem {
+            op: FolderUndoOp::Move,
+            track_id: id,
+            source: source.clone(),
+            target: target.clone(),
+            created_track_id: None,
+            source_platform: String::new(),
+            source_key: String::new(),
+            deleted: None,
+        };
+        assert_eq!(undo_folder_item(&state, &item).unwrap(), vec![id]);
+        assert!(source.is_file());
+        assert!(!target.exists());
+        assert_eq!(
+            state.library.get(id).unwrap().unwrap().path,
+            source.to_string_lossy()
+        );
+        drop(state);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn undo_copy_removes_the_new_file_and_track() {
+        let base = scratch("undo-copy");
+        let state = undo_test_state(&base);
+        let source_dir = base.join("library").join("source");
+        let target_dir = base.join("library").join("target");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let source = source_dir.join("song.mp3");
+        let target = target_dir.join("song.mp3");
+        std::fs::write(&source, b"audio").unwrap();
+        std::fs::copy(&source, &target).unwrap();
+        let source_id = insert_undo_track(&state, &source);
+        let copy_id = insert_undo_track(&state, &target);
+
+        let item = FolderUndoItem {
+            op: FolderUndoOp::Copy,
+            track_id: source_id,
+            source: source.clone(),
+            target: target.clone(),
+            created_track_id: Some(copy_id),
+            source_platform: String::new(),
+            source_key: String::new(),
+            deleted: None,
+        };
+        assert_eq!(undo_folder_item(&state, &item).unwrap(), vec![copy_id]);
+        assert!(source.is_file());
+        assert!(!target.exists());
+        assert!(state.library.get(copy_id).unwrap().is_none());
+        drop(state);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn undo_delete_restores_the_file_and_library_record() {
+        let base = scratch("undo-delete");
+        let state = undo_test_state(&base);
+        let library_dir = base.join("library");
+        std::fs::create_dir_all(&library_dir).unwrap();
+        let source = library_dir.join("song.mp3");
+        std::fs::write(&source, b"audio").unwrap();
+        let id = insert_undo_track(&state, &source);
+        let (removed, deleted) = state
+            .library
+            .delete_for_undo(id, FileDisposal::Keep)
+            .unwrap();
+        assert!(removed);
+        let item = FolderUndoItem {
+            op: FolderUndoOp::Delete,
+            track_id: id,
+            source: source.clone(),
+            target: PathBuf::new(),
+            created_track_id: None,
+            source_platform: String::new(),
+            source_key: String::new(),
+            deleted,
+        };
+        assert_eq!(undo_folder_item(&state, &item).unwrap(), vec![id]);
+        assert!(source.is_file());
+        assert!(state.library.get(id).unwrap().is_some());
+        drop(state);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn empty_undo_status_is_not_available() {
+        let base = scratch("undo-status");
+        let state = undo_test_state(&base);
+        assert!(!state.folder_undo_status().available);
+        assert_eq!(state.folder_undo_status().count, 0);
+        drop(state);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn adding_a_folder_registers_it_as_a_library_root() {
         // 「添加文件夹」必须一步到位：不登记的话加进来的歌在文件夹树里一个都看不见
@@ -2822,7 +3867,10 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
         let path = music.to_string_lossy().into_owned();
         let merged = merge_library_roots(
             &[path.clone()],
-            &[path.clone(), base.join("不存在").to_string_lossy().into_owned()],
+            &[
+                path.clone(),
+                base.join("不存在").to_string_lossy().into_owned(),
+            ],
         );
         assert_eq!(merged, vec![path], "重复的和不存在的都不该进去");
         let _ = std::fs::remove_dir_all(&base);

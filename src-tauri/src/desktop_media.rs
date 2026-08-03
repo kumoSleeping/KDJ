@@ -142,9 +142,17 @@ fn handle_remote_event(
     coordinator: Option<Arc<PlaybackCoordinator>>,
     event: MediaControlEvent,
 ) {
+    // Play/pause must cross the same frontend policy boundary as the transport button. Local
+    // tracks will come straight back through `playback_command`; online tracks are owned by the
+    // Web Audio deck and apply their configured gain envelope there. Sending these commands
+    // directly to the Rust coordinator used to control a stale local deck while an online track
+    // was active, and it also bypassed the browser transport fade entirely.
+    if let Some(action) = frontend_action(&event) {
+        emit_frontend(app, action);
+        return;
+    }
+
     match event {
-        MediaControlEvent::Next => emit_frontend(app, "next"),
-        MediaControlEvent::Previous => emit_frontend(app, "previous"),
         MediaControlEvent::Raise => {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
@@ -164,24 +172,22 @@ fn handle_remote_event(
     }
 }
 
+fn frontend_action(event: &MediaControlEvent) -> Option<&'static str> {
+    match event {
+        MediaControlEvent::Play => Some("play"),
+        MediaControlEvent::Pause | MediaControlEvent::Stop => Some("pause"),
+        MediaControlEvent::Toggle => Some("toggle"),
+        MediaControlEvent::Next => Some("next"),
+        MediaControlEvent::Previous => Some("previous"),
+        _ => None,
+    }
+}
+
 fn submit_remote(
     coordinator: &PlaybackCoordinator,
     event: MediaControlEvent,
 ) -> Result<(), String> {
     let command = match event {
-        MediaControlEvent::Play => PlaybackCommand::Play,
-        MediaControlEvent::Pause => PlaybackCommand::Pause,
-        MediaControlEvent::Toggle => {
-            if coordinator.snapshot()?.desired_playing {
-                PlaybackCommand::Pause
-            } else {
-                PlaybackCommand::Play
-            }
-        }
-        MediaControlEvent::Stop => {
-            coordinator.submit_platform(PlaybackCommand::Pause)?;
-            PlaybackCommand::Seek { position: 0.0 }
-        }
         MediaControlEvent::SetPosition(position) => PlaybackCommand::Seek {
             position: position.0.as_secs_f64(),
         },
@@ -218,7 +224,7 @@ fn relative_seek(
 
 fn emit_frontend(app: &AppHandle, action: &'static str) {
     if let Err(error) = app.emit(REMOTE_EVENT, action) {
-        tracing::warn!("发送系统媒体切歌事件失败：{error}");
+        tracing::warn!("发送系统媒体命令失败：{error}");
     }
 }
 
@@ -470,6 +476,25 @@ mod tests {
         assert!(same_artwork(&base, &later));
         later.artwork_url = Some("http://127.0.0.1/other".into());
         assert!(!same_artwork(&base, &later));
+    }
+
+    #[test]
+    fn transport_and_skip_commands_cross_the_frontend_owner_boundary() {
+        assert_eq!(frontend_action(&MediaControlEvent::Play), Some("play"));
+        assert_eq!(frontend_action(&MediaControlEvent::Pause), Some("pause"));
+        assert_eq!(frontend_action(&MediaControlEvent::Stop), Some("pause"));
+        assert_eq!(frontend_action(&MediaControlEvent::Toggle), Some("toggle"));
+        assert_eq!(frontend_action(&MediaControlEvent::Next), Some("next"));
+        assert_eq!(
+            frontend_action(&MediaControlEvent::Previous),
+            Some("previous")
+        );
+        assert_eq!(
+            frontend_action(&MediaControlEvent::SetPosition(MediaPosition(
+                Duration::from_secs(1)
+            ))),
+            None
+        );
     }
 
     #[test]

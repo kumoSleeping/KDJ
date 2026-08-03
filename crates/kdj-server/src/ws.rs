@@ -9,10 +9,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::state::AppState;
 
-pub async fn handler(
-    State(state): State<Arc<AppState>>,
-    upgrade: WebSocketUpgrade,
-) -> Response {
+pub async fn handler(State(state): State<Arc<AppState>>, upgrade: WebSocketUpgrade) -> Response {
     upgrade.on_upgrade(move |socket| pump(socket, state))
 }
 

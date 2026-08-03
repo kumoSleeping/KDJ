@@ -61,9 +61,12 @@ handoff keeps callback-timed transition effects and uses the prepared stream at 
 Shared Rust owns commands, queue/prewarm, Deck lifecycle, decode, resampling, clocks and DSP.
 
 - macOS/Windows/Linux: CPAL selects CoreAudio, WASAPI or the available Linux host. The Tauri
-  adapter mirrors coordinator snapshots into MPNowPlaying/SMTC/MPRIS and sends remote commands
-  back through the coordinator's platform-command lane. Artwork is downloaded off the playback
-  thread and exposed to all three system APIs as a local `file://` cache URL.
+  adapter mirrors coordinator snapshots into MPNowPlaying/SMTC/MPRIS. Position/volume commands
+  use the coordinator's platform-command lane; play/pause/skip cross the frontend owner
+  multiplexer first, because an online Web Audio deck may be current. Local transport then returns
+  through the normal sequenced command lane, so the toolbar, media keys and configured fade share
+  one policy path. Artwork is downloaded off the playback thread and exposed to all three system
+  APIs as a local `file://` cache URL.
 - Android: transport shares the desktop coordinator + CPAL/AAudio (`playback_*` commands).
   `android_media` mirrors snapshots into Kotlin (`applyPlaybackSnapshot`) for MediaSession,
   foreground service, audio focus and lyrics-overlay clock; remote keys return through JNI

@@ -13,7 +13,7 @@ import { useQueueStore } from "../stores/queueStore";
  * 曲目表 / 搜索结果表的复制 · 剪切 · 粘贴 · 全选快捷键。
  *
  * Mac 用 Cmd、其它平台用 Ctrl，两个都认（`metaKey || ctrlKey`）。
- * Cmd+V：按设置「链接」或「复制文件」；Cmd+Option+V / Ctrl+Alt+V：移动。
+ * Cmd+V：复制一份独立的本地文件；Cmd+Option+V / Ctrl+Alt+V：移动；Cmd/Ctrl+Z 撤回最近的复制、移动或删除批次。
  * 剪切（X）后再 V 也是移动。
  *
  * 正在输入时一律不接管：搜索框里按 Cmd+C 要复制的是选中文字。
@@ -58,11 +58,22 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
       const isC = isModKey(event, "c");
       const isX = isModKey(event, "x");
       const isV = isModKey(event, "v");
-      if (!isA && !isC && !isX && !isV) return;
+      const isZ = isModKey(event, "z");
+      if (!isA && !isC && !isX && !isV && !isZ) return;
 
       const withAlt = event.altKey;
       // Option/Alt 只给 V 用（强制移动）；其它键带 Option 不接管。
       if (withAlt && !isV) return;
+
+      if (isZ) {
+        // Shift+Cmd/Ctrl+Z 是重做，当前只实现单向撤回，不拦截系统快捷键。
+        if (event.shiftKey) return;
+        const store = useLibraryStore.getState();
+        if (!store.undo.available) return;
+        event.preventDefault();
+        void store.undoLast().catch(() => undefined);
+        return;
+      }
 
       const search = searchRef.current;
       const target = event.target as HTMLElement | null;
@@ -112,7 +123,7 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
         const store = useLibraryStore.getState();
         if (store.selectedIds.length === 0) return;
         event.preventDefault();
-        store.copyToClipboard(isX ? "move" : "link");
+        store.copyToClipboard(isX ? "move" : "copy");
         return;
       }
 
@@ -167,7 +178,6 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
       if (!store.clipboard || !dest || isOutsideFolder(dest)) return;
       event.preventDefault();
       const op = resolveLibraryPasteOp({
-        settings: useAppStore.getState().settings,
         forceMove: withAlt,
         clipboardOp: store.clipboard.op,
       });

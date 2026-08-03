@@ -13,10 +13,10 @@
 //! 这里实现的 6 条命令是 `electron/preload.ts` 的一比一替代品，
 //! 名字和参数由 `src/lib/bridge.ts` 固定，改名等于把前端按钮变哑巴。
 
-#[cfg(desktop)]
-mod desktop_media;
 #[cfg(target_os = "android")]
 mod android_media;
+#[cfg(desktop)]
+mod desktop_media;
 /// 桌面 + Android 共用 playback_* 命令；iOS 仍走 native-audio 插件。
 #[cfg(any(desktop, target_os = "android"))]
 mod desktop_player;
@@ -71,7 +71,10 @@ impl UpdateProgressState {
     fn replace(&self, progress: UpdateProgress) {
         // 更新进度不是值得让整个应用 panic 的状态；上次持锁线程若异常退出，
         // 仍取回 inner 继续写，最多丢一帧进度。
-        *self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = progress;
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = progress;
     }
 
     fn get(&self) -> UpdateProgress {
@@ -234,6 +237,144 @@ fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
+#[cfg(desktop)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SoundCloudOAuthWindowResult {
+    status: &'static str,
+    message: String,
+}
+
+#[cfg(desktop)]
+fn is_soundcloud_callback(url: &tauri::Url) -> bool {
+    url.scheme() == "kdj" && url.host_str() == Some("soundcloud") && url.path() == "/callback"
+}
+
+/// 在独立原生窗口里完成 SoundCloud OAuth，并在导航发生前截住自定义协议回调。
+///
+/// 这条路径不依赖操作系统注册 `kdj://`：macOS 的裸 `tauri dev`、Windows/Linux
+/// 的第二实例问题都不会再截走回调。远端页面没有 Tauri capability，只承担登录页。
+#[cfg(desktop)]
+#[tauri::command]
+fn open_soundcloud_oauth_window(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let authorization_url = tauri::Url::parse(&url).map_err(|err| err.to_string())?;
+    if authorization_url.scheme() != "https"
+        || authorization_url.host_str() != Some("secure.soundcloud.com")
+        || authorization_url.path() != "/authorize"
+    {
+        return Err("拒绝打开非 SoundCloud OAuth 地址".into());
+    }
+
+    if let Some(existing) = app.get_webview_window("soundcloud-oauth") {
+        let _ = existing.close();
+    }
+
+    let base_url = app.state::<Bridge>().base_url.clone();
+    let completed = Arc::new(AtomicBool::new(false));
+    let completed_on_navigation = completed.clone();
+    let app_on_navigation = app.clone();
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        "soundcloud-oauth",
+        tauri::WebviewUrl::External(authorization_url),
+    )
+    .title("SoundCloud 登录")
+    .inner_size(520.0, 720.0)
+    .min_inner_size(360.0, 520.0)
+    .center()
+    .resizable(true)
+    .on_navigation(move |callback_url| {
+        if !is_soundcloud_callback(callback_url) {
+            return true;
+        }
+
+        // 只认本窗口第一次回调，避免重复导航导致 authorization code 被交换两次。
+        if completed_on_navigation.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+
+        let state = callback_url
+            .query_pairs()
+            .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
+            .unwrap_or_default();
+        let code = callback_url
+            .query_pairs()
+            .find_map(|(key, value)| (key == "code").then(|| value.into_owned()))
+            .unwrap_or_default();
+        let oauth_error = callback_url
+            .query_pairs()
+            .find_map(|(key, value)| {
+                (key == "error_description" || key == "error").then(|| value.into_owned())
+            })
+            .unwrap_or_default();
+        let app = app_on_navigation.clone();
+        let endpoint = format!("{base_url}/api/accounts/soundcloud/login/oauth/callback");
+
+        tauri::async_runtime::spawn(async move {
+            let result = if !oauth_error.is_empty() {
+                Err(oauth_error)
+            } else if state.is_empty() || code.is_empty() {
+                Err("SoundCloud 授权回调不完整".into())
+            } else {
+                match reqwest::Client::new()
+                    .post(endpoint)
+                    .json(&serde_json::json!({ "state": state, "code": code }))
+                    .send()
+                    .await
+                {
+                    Ok(response) if response.status().is_success() => Ok(()),
+                    Ok(response) => {
+                        let status = response.status();
+                        let detail = response.text().await.unwrap_or_default();
+                        Err(if detail.trim().is_empty() {
+                            format!("SoundCloud 登录失败：{status}")
+                        } else {
+                            format!("SoundCloud 登录失败：{detail}")
+                        })
+                    }
+                    Err(error) => Err(format!("处理 SoundCloud 授权失败：{error}")),
+                }
+            };
+
+            let payload = match result {
+                Ok(()) => SoundCloudOAuthWindowResult {
+                    status: "done",
+                    message: String::new(),
+                },
+                Err(message) => SoundCloudOAuthWindowResult {
+                    status: "error",
+                    message,
+                },
+            };
+            let _ = app.emit("soundcloud-oauth://result", payload);
+            if let Some(window) = app.get_webview_window("soundcloud-oauth") {
+                let _ = window.close();
+            }
+        });
+        false
+    })
+    .build()
+    .map_err(|err| format!("打开 SoundCloud 登录窗口失败：{err}"))?;
+
+    let app_on_close = app.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::CloseRequested { .. })
+            && !completed.swap(true, Ordering::SeqCst)
+        {
+            let _ = app_on_close.emit(
+                "soundcloud-oauth://result",
+                SoundCloudOAuthWindowResult {
+                    status: "cancelled",
+                    message: "已取消 SoundCloud 登录".into(),
+                },
+            );
+        }
+    });
+    Ok(())
+}
+
 /// 桌面检查必须直接问 updater 清单，而不是只问 GitHub 最新 Release。
 /// Release 是先建空壳、各平台包后上传的；只有 updater.check() 找得到当前
 /// OS/架构/安装格式对应的签名包，按钮才应该告诉用户「可以更新」。
@@ -320,22 +461,26 @@ async fn apply_update(app: tauri::AppHandle) -> Result<(), String> {
         .download_and_install(
             move |chunk, total| {
                 downloaded_bytes = downloaded_bytes.saturating_add(chunk as u64);
-                progress_app.state::<UpdateProgressState>().replace(UpdateProgress {
-                    stage: "downloading",
-                    downloaded: downloaded_bytes,
-                    total,
-                    message: "正在下载并校验更新包".into(),
-                });
+                progress_app
+                    .state::<UpdateProgressState>()
+                    .replace(UpdateProgress {
+                        stage: "downloading",
+                        downloaded: downloaded_bytes,
+                        total,
+                        message: "正在下载并校验更新包".into(),
+                    });
                 tracing::info!("更新下载中：{downloaded_bytes}/{total:?}");
             },
             move || {
                 let current = install_app.state::<UpdateProgressState>().get();
-                install_app.state::<UpdateProgressState>().replace(UpdateProgress {
-                    stage: "installing",
-                    downloaded: current.downloaded,
-                    total: current.total.or(Some(current.downloaded)),
-                    message: "签名校验通过，正在安装".into(),
-                });
+                install_app
+                    .state::<UpdateProgressState>()
+                    .replace(UpdateProgress {
+                        stage: "installing",
+                        downloaded: current.downloaded,
+                        total: current.total.or(Some(current.downloaded)),
+                        message: "签名校验通过，正在安装".into(),
+                    });
                 tracing::info!("更新下载完成，开始安装");
             },
         )
@@ -725,7 +870,9 @@ fn set_desktop_lyrics(
 /// Tauri 的 `app_config_dir()` 是同样的三个基目录（只是拼的是 identifier），
 /// 所以这里取它的父目录再拼死 `kdj`，就等价于 Electron 的落点。
 fn has_file_bytes(path: &Path) -> bool {
-    std::fs::metadata(path).map(|meta| meta.len() > 0).unwrap_or(false)
+    std::fs::metadata(path)
+        .map(|meta| meta.len() > 0)
+        .unwrap_or(false)
 }
 
 /// 把旧应用数据逐项迁移到新的 KDJ 数据目录。
@@ -768,13 +915,21 @@ fn migrate_legacy_data(current: &Path, legacy: &Path, force: bool) -> anyhow::Re
                 continue;
             }
             let source_size = std::fs::metadata(&source_path)?.len();
-            let target_size = std::fs::metadata(&target_path).map(|meta| meta.len()).unwrap_or(0);
+            let target_size = std::fs::metadata(&target_path)
+                .map(|meta| meta.len())
+                .unwrap_or(0);
             // 目标已经有更新的数据时不覆盖；首次启动的空数据库/默认设置则由旧数据补齐。
             if force || !target_path.exists() || source_size > target_size {
                 // 错误版本可能已在新目录写过少量数据。旧数据优先恢复，但覆盖前
                 // 给每个现有文件留一份副本，任何迁移判断失误都能人工找回。
                 if force && target_path.exists() {
-                    let backup_name = format!("{}.before-legacy-migration", target_path.file_name().unwrap_or_default().to_string_lossy());
+                    let backup_name = format!(
+                        "{}.before-legacy-migration",
+                        target_path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                    );
                     let backup = target_path.with_file_name(backup_name);
                     if !backup.exists() {
                         std::fs::copy(&target_path, backup)?;
@@ -850,8 +1005,10 @@ fn default_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
 
         // 旧版本实际使用过 kumodeck，也有一版迁移代码预期 kdj；两处都认，
         // 但不会把当前 com.kdj.app/data 当成旧目录再次拷贝。
-        let legacy_candidates =
-            [base.join("kumodeck").join("data"), base.join("kdj").join("data")];
+        let legacy_candidates = [
+            base.join("kumodeck").join("data"),
+            base.join("kdj").join("data"),
+        ];
         let current_has_sessions = current.join("sessions").exists();
         let marker = current.join(".legacy-data-migrated");
         for legacy in legacy_candidates {
@@ -947,7 +1104,8 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
 /// 而播放器线程 / IPC 线程都要拿它调 JNI（cpal AAudio、权限检查），
 /// 所以必须转全局引用并保活——直接存局部引用会导致 CheckJNI SIGABRT。
 #[cfg(target_os = "android")]
-static ANDROID_ACTIVITY_GLOBAL: std::sync::OnceLock<jni::objects::GlobalRef> = std::sync::OnceLock::new();
+static ANDROID_ACTIVITY_GLOBAL: std::sync::OnceLock<jni::objects::GlobalRef> =
+    std::sync::OnceLock::new();
 
 /// 安卓 JNI 入口：Tauri 的 `mobile_entry_point` 不会初始化 `ndk-context`，
 /// 而 cpal 的 AAudio host 在第一次打开输出时就要用 JNI 上下文（
@@ -1020,7 +1178,11 @@ fn media_permission_granted() -> bool {
             // 查不了就当作已授予，避免误报。
             return true;
         };
-        if result.i().map(|code| code == 0 /* PERMISSION_GRANTED */).unwrap_or(false) {
+        if result
+            .i()
+            .map(|code| code == 0 /* PERMISSION_GRANTED */)
+            .unwrap_or(false)
+        {
             return true;
         }
     }
@@ -1035,6 +1197,7 @@ pub fn run() {
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init());
     // Android：出声已切共享 coordinator（CPAL/AAudio）；native-audio 插件仍入包，
     // 负责前台保活、歌词 overlay、相册等。iOS 仍由插件内 AVPlayer 出声。
@@ -1091,6 +1254,7 @@ pub fn run() {
         reveal_path,
         save_login_qr,
         open_external,
+        open_soundcloud_oauth_window,
         check_desktop_update,
         get_update_progress,
         apply_update,

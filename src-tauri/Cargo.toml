@@ -31,6 +31,7 @@ serde_json = "1.0"
 # macOS 的透明 WebView 构建器受该 feature 保护；桌面歌词窗口需要真透明背景。
 tauri = { version = "2.11", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2.7"
+tauri-plugin-deep-link = "2.4.9"
 tauri-plugin-opener = "2.5"
 tokio = { version = "1.53.1", features = ["sync"] }
 tracing = "0.1.44"

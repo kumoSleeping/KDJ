@@ -28,6 +28,7 @@ import {
   remStringToPx,
   saveTableColumnPrefs,
   type TableColumnPrefs,
+  type TableColumnPrefsSchema,
 } from "../../lib/tableColumnPrefs";
 import { ContextMenu, EmptyState } from "../common";
 import { MergedGroupRow, PLATFORM_LABEL } from "./MergedGroupRow";
@@ -52,6 +53,7 @@ const KIND_LABEL: Record<IntakeKind, string> = {
   search: "搜索",
   song: "单曲",
   playlist: "歌单",
+  artist: "艺术家",
   album: "专辑",
   unknown: "链接",
   error: "失败",
@@ -69,11 +71,15 @@ export function selectionKey(itemIndex: number, groupId: string): string {
  * （`/download` 收的是 `SongSource`）带不上这些参数。两条路并存的话，
  * 用户在行里调完画质再去按底下那颗「加入队列」，调的东西会被无声丢掉。
  * 所以视频行没有勾选框，只有它自己那颗「下载」。
+ * 已入库歌曲也不进入“全选/全部下载”，避免整张歌单重复排队；它自己的行菜单
+ * 仍保留下载动作，需要覆盖或补文件时可以显式重下。
  */
 export function selectableGroups(item: IntakeItem): MergedGroup[] {
   return item.groups.filter(
     (group) =>
-      !isVideoGroup(group) && group.sources.some((source) => source.platform !== "local"),
+      !isVideoGroup(group) &&
+      !group.in_library &&
+      group.sources.some((source) => source.platform !== "local"),
   );
 }
 
@@ -81,8 +87,11 @@ function collectionToken(collection: CollectionResult): string {
   return `${collection.platform}:${collection.kind}:${collection.key}`;
 }
 
-function collectionKindLabel(collection: CollectionResult): string {
-  return collection.kind === "artist" ? "作者" : "专辑";
+function isResolvedCollectionItem(item: IntakeItem): boolean {
+  return (
+    item.groups.length > 0 &&
+    (item.kind === "playlist" || item.kind === "artist" || item.kind === "album")
+  );
 }
 
 function previewItem(group: MergedGroup, preferredIndex: number): SongPreviewItem | null {
@@ -126,17 +135,27 @@ export interface ResultTableProps {
   onToggleItemAll(index: number): void;
   onToggleAll(): void;
   onDownloadItem(index: number): void;
-  /** 单首直接入队（行首下载键）。 */
+  /** 单曲显式下载入口（右键菜单等；序号列本身不再放下载键）。 */
   onDownloadGroup(group: MergedGroup): void;
-  /** 把在线来源持久化到指定曲库文件夹，不下载。 */
-  onAddToLibrary(group: MergedGroup): void;
+  /** 普通单击在线曲目时选中来源并打开右侧详情。 */
+  onInspectGroup(group: MergedGroup, sourceIndex: number): void;
   /** 作者/专辑集合必须先展开为歌曲，不能直接入队。 */
   onLoadCollection(collection: CollectionResult): void;
   loadingCollections: Set<string>;
 }
 
+const RESULT_COLUMN_MAX_WIDTH = "80rem";
+const RESULT_COLUMN_PREFS_SCHEMA: TableColumnPrefsSchema = {
+  columnKeys: RESULT_COLUMNS.map((column) => column.key),
+  // lead 是固定在左侧的序号列：只保存宽度，不参与数据列换序和显隐。
+  widthKeys: ["lead", ...RESULT_COLUMNS.map((column) => column.key)],
+  lockedVisible: ["title"],
+  minWidths: RESULT_COLUMN_MIN_WIDTH,
+  maxWidth: RESULT_COLUMN_MAX_WIDTH,
+};
+
 function loadPrefs(): TableColumnPrefs {
-  return loadTableColumnPrefs(RESULT_COLUMN_PREFS_KEY, ["title"]);
+  return loadTableColumnPrefs(RESULT_COLUMN_PREFS_KEY, RESULT_COLUMN_PREFS_SCHEMA);
 }
 
 export function ResultTable({
@@ -159,10 +178,11 @@ export function ResultTable({
   onToggleAll,
   onDownloadItem,
   onDownloadGroup,
-  onAddToLibrary,
+  onInspectGroup,
   onLoadCollection,
   loadingCollections,
 }: ResultTableProps) {
+  const [inspectedGroup, setInspectedGroup] = useState<string | null>(null);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
   const toggleSelectRef = useRef(onToggleSelect);
@@ -180,9 +200,31 @@ export function ResultTable({
   const [colMenu, setColMenu] = useState<{ x: number; y: number } | null>(null);
 
   const saveColPrefs = (next: TableColumnPrefs) => {
-    saveTableColumnPrefs(RESULT_COLUMN_PREFS_KEY, next);
-    setColPrefs(next);
+    const normalized = saveTableColumnPrefs(
+      RESULT_COLUMN_PREFS_KEY,
+      next,
+      RESULT_COLUMN_PREFS_SCHEMA,
+    );
+    colPrefsRef.current = normalized;
+    setColPrefs(normalized);
   };
+
+  // 在线结果可能因收起面板或 Vite HMR 直接卸载；卸载 / pagehide 时兜底保存
+  // 当前 ref，确保最后一次拖动不会只停留在组件 state 中。
+  useEffect(() => {
+    const persist = () => {
+      saveTableColumnPrefs(
+        RESULT_COLUMN_PREFS_KEY,
+        colPrefsRef.current,
+        RESULT_COLUMN_PREFS_SCHEMA,
+      );
+    };
+    window.addEventListener("pagehide", persist);
+    return () => {
+      window.removeEventListener("pagehide", persist);
+      persist();
+    };
+  }, []);
 
   const widthFor = (key: string, fallback: string) => colPrefs.widths[key] ?? fallback;
   const orderedColumns = orderByPrefs(RESULT_COLUMNS, colPrefs.order);
@@ -209,11 +251,14 @@ export function ResultTable({
     const startX = event.clientX;
     const startWidth = th.getBoundingClientRect().width;
     const minPx = remStringToPx(RESULT_COLUMN_MIN_WIDTH[key] ?? "2.8rem");
+    const maxPx = remStringToPx(RESULT_COLUMN_MAX_WIDTH);
     setResizingCol(key);
     document.body.dataset.kdColResizing = "true";
 
     const onMove = (moveEvent: PointerEvent) => {
-      const next = pxToRemString(Math.max(minPx, startWidth + (moveEvent.clientX - startX)));
+      const next = pxToRemString(
+        Math.min(maxPx, Math.max(minPx, startWidth + (moveEvent.clientX - startX))),
+      );
       setColPrefs((current) => {
         const updated = {
           ...current,
@@ -223,15 +268,24 @@ export function ResultTable({
         return updated;
       });
     };
-    const onUp = () => {
+    let finished = false;
+    const onEnd = () => {
+      if (finished) return;
+      finished = true;
       window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
       document.body.removeAttribute("data-kd-col-resizing");
       setResizingCol(null);
-      saveTableColumnPrefs(RESULT_COLUMN_PREFS_KEY, colPrefsRef.current);
+      saveTableColumnPrefs(
+        RESULT_COLUMN_PREFS_KEY,
+        colPrefsRef.current,
+        RESULT_COLUMN_PREFS_SCHEMA,
+      );
     };
     window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
   };
 
   const moveColumn = (from: string, to: string) => {
@@ -253,13 +307,21 @@ export function ResultTable({
     return () => window.removeEventListener("keydown", onKey);
   }, [selectionMode, selected.size, onSelectionModeChange]);
 
+  // 新一轮查询沿用相同 group_id 的概率并不为零；结果整体替换时清掉旧高亮，
+  // 避免右栏仍是上一轮曲目、列表却误把新一轮同 id 行标成已选中。
+  useEffect(() => setInspectedGroup(null), [items]);
+
   if (loading && totalGroups === 0 && !video) {
     return (
-      <EmptyState
-        icon={<LoaderCircle className="kd-spin" size={22} />}
-        title="正在处理"
-        hint="并发打各个平台；批量时每条独立跑，先出结果的先显示。"
-      />
+      <div
+        className="kd-empty kd-search-loading"
+        role="status"
+        aria-live="polite"
+        aria-busy="true"
+        aria-label="正在处理"
+      >
+        <LoaderCircle className="kd-spin" size={22} aria-hidden="true" />
+      </div>
     );
   }
 
@@ -301,9 +363,6 @@ export function ResultTable({
           <td colSpan={Math.max(1, visibleColumns.length + 1)}>
             <span className="kd-row" style={{ gap: "0.45rem", minWidth: 0 }}>
               <PlatformMark id={collection.platform} size={13} />
-              <span className="kd-chip" data-tone="theme">
-                {collectionKindLabel(collection)}
-              </span>
               <strong className="kd-truncate" title={collection.title}>
                 {collection.title}
               </strong>
@@ -402,7 +461,8 @@ export function ResultTable({
                   />
                 )}
               </th>
-              <th data-col="lead" style={{ width: leadWidth }} title="下载 / 展开">
+              <th data-col="index" style={{ width: leadWidth }} title="当前列表中的序号">
+                序号
                 <span
                   className="kd-col-resize"
                   data-active={resizingCol === "lead" ? "true" : undefined}
@@ -426,9 +486,19 @@ export function ResultTable({
               columns={visibleColumns}
               totalColumns={totalColumns}
               layout={layout}
+              rowNumber={1}
             />
           )}
           {items.map((item, index) => {
+            const directCollection = isResolvedCollectionItem(item);
+            const itemFlat = flat || directCollection;
+            const flatRowOffset = itemFlat
+              ? (video ? 1 : 0) +
+                items
+                  .slice(0, index)
+                  .filter(isResolvedCollectionItem)
+                  .reduce((sum, previous) => sum + previous.groups.length, 0)
+              : 0;
             const collapsed = collapsedItems.has(index);
             const pickable = selectableGroups(item);
             const itemSelected =
@@ -445,14 +515,17 @@ export function ResultTable({
                       columns={visibleColumns}
                       totalColumns={totalColumns}
                       layout={layout}
+                      rowNumber={flatRowOffset + position + 1}
                     />
                   ) : (
                     <MergedGroupRow
                       key={group.group_id}
                       group={group}
                       columns={visibleColumns}
-                      indent={!flat}
+                      indent={!itemFlat}
                       last={position === item.groups.length - 1}
+                      rowNumber={flatRowOffset + position + 1}
+                      inspected={inspectedGroup === selectionKey(index, group.group_id)}
                       sourceIndex={sourceIndex[group.group_id] ?? group.best_source_index}
                       selected={selected.has(selectionKey(index, group.group_id))}
                       selectable={group.sources.some((source) => source.platform !== "local")}
@@ -471,9 +544,11 @@ export function ResultTable({
                       onEnterSelection={() => onSelectionModeChange(true)}
                       onToggleExpand={() => onToggleExpand(group.group_id)}
                       onPickSource={(sourceIdx) => onPickSource(group.group_id, sourceIdx)}
+                      onInspect={(sourceIdx) => {
+                        setInspectedGroup(selectionKey(index, group.group_id));
+                        onInspectGroup(group, sourceIdx);
+                      }}
                       onDownload={() => onDownloadGroup(group)}
-                      onAddToLibrary={() => onAddToLibrary(group)}
-                      layout={layout}
                       onDragStart={(event) => {
                         const currentKey = selectionKey(index, group.group_id);
                         const draggingSelection = selected.has(currentKey);
@@ -512,9 +587,11 @@ export function ResultTable({
                     />
                   ),
                 );
-            const rows = collapsed ? null : <>{renderCollectionRows(item)}{groupRows}</>;
+            // 已经解析成真实曲目的远程歌单/艺术家/专辑就是普通曲目列表：
+            // 不再额外套“歌单 + 标题 + N 首 + 全部下载”的父行，也不画树枝。
+            const rows = directCollection || !collapsed ? <>{renderCollectionRows(item)}{groupRows}</> : null;
 
-            if (flat) return <Fragment key={item.entry}>{rows}</Fragment>;
+            if (itemFlat) return <Fragment key={item.entry}>{rows}</Fragment>;
 
             return (
               <Fragment key={`${index}:${item.entry}`}>
@@ -566,9 +643,19 @@ export function ResultTable({
                     {(item.groups.length > 0 || item.collections.length > 0) && (
                       <span className="kd-result-lead-actions">
                         <span className="kd-result-lead-spacer" aria-hidden="true" />
-                        <span className="kd-result-lead-btn" aria-hidden="true">
+                        <button
+                          type="button"
+                          className="kd-result-lead-btn"
+                          aria-label={collapsed ? `展开「${item.title || item.entry}」` : `收起「${item.title || item.entry}」`}
+                          aria-expanded={!collapsed}
+                          title={collapsed ? "展开" : "收起"}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onToggleItem(index);
+                          }}
+                        >
                           {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-                        </span>
+                        </button>
                       </span>
                     )}
                   </td>
@@ -580,7 +667,7 @@ export function ResultTable({
                       >
                         {KIND_LABEL[item.kind]}
                       </span>
-                      {item.kind === "playlist" || item.kind === "album" ? (
+                      {item.kind === "playlist" || item.kind === "artist" || item.kind === "album" ? (
                         <ListMusic size={13} className="kd-muted" />
                       ) : null}
                       <strong className="kd-truncate" title={item.title || item.entry}>
@@ -610,7 +697,7 @@ export function ResultTable({
                       <span className="kd-result-package-actions" style={{ marginLeft: "auto" }}>
                         {item.collections.length > 0 ? `${item.collections.length} 个集合` : ""}
                         {item.groups.length > 0 ? `${item.collections.length > 0 ? " · " : ""}${item.groups.length} 首` : ""}
-                        {(item.kind === "playlist" || item.kind === "album") &&
+                        {(item.kind === "playlist" || item.kind === "artist" || item.kind === "album") &&
                           pickable.length > 0 && (
                             <button
                               type="button"
@@ -663,7 +750,9 @@ export function ResultTable({
             type="button"
             onClick={() => {
               localStorage.removeItem(RESULT_COLUMN_PREFS_KEY);
-              setColPrefs(loadPrefs());
+              const defaults = loadPrefs();
+              colPrefsRef.current = defaults;
+              setColPrefs(defaults);
               setColMenu(null);
             }}
           >

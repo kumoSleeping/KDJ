@@ -5,7 +5,7 @@ export type SearchBurstTone = "rainbow" | "pink" | "orange" | "red" | "green";
 
 /**
  * 按勾选平台数决定扫光色：只开一家用品牌色，多家用彩色。
- * 顶栏手动搜与一键搜索共用同一套规则。
+ * 顶栏手动搜与 Explore 共用同一套规则。
  */
 export function burstToneForPlatforms(platforms: readonly Platform[]): SearchBurstTone {
   if (platforms.length !== 1) return "rainbow";

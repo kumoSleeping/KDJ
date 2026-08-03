@@ -541,6 +541,10 @@ interface Deck {
   input: GainNode;
   /** 只控制流式媒体源；PCM seek 启动后把它关掉，不动整台 Deck 的 fader。 */
   mediaGain: GainNode;
+  /** 在线流的渐进波形只采当前已解码输出，不触发第二次整轨下载。 */
+  analyser: AnalyserNode;
+  waveformTimeData: Uint8Array<ArrayBuffer>;
+  waveformFrequencyData: Float32Array<ArrayBuffer>;
   dry: GainNode;
   wet: GainNode;
   vocalMakeup: GainNode;
@@ -597,6 +601,11 @@ function buildDeck(ctx: AudioContext, el: HTMLAudioElement): Deck {
   input.gain.value = 1;
   source.connect(mediaGain);
   mediaGain.connect(input);
+
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  analyser.smoothingTimeConstant = 0.72;
+  input.connect(analyser);
 
   const dry = ctx.createGain();
   dry.gain.value = 1;
@@ -720,6 +729,9 @@ function buildDeck(ctx: AudioContext, el: HTMLAudioElement): Deck {
     el,
     input,
     mediaGain,
+    analyser,
+    waveformTimeData: new Uint8Array(analyser.fftSize),
+    waveformFrequencyData: new Float32Array(analyser.frequencyBinCount),
     dry,
     wet,
     vocalMakeup,
@@ -1323,6 +1335,55 @@ export const djEngine = {
   /** 当前正主元素。PlayerBar 的监听、seek、play/pause 全打在它身上。 */
   frontElement(): HTMLAudioElement {
     return elements[frontIndex];
+  },
+
+  /**
+   * 读取当前已被媒体元素解码出来的一小帧，用于在线渐进波形。
+   * 这里只读 Web Audio 图里的 AnalyserNode，不 fetch、不 decodeAudioData，
+   * 因而波形的网络开销与正常播放完全相同。
+   */
+  waveformSample(
+    el: HTMLAudioElement = elements[frontIndex],
+  ): { amp: number; low: number; middle: number; high: number } | null {
+    if (!ctx || !decks || ctx.state !== "running") return null;
+    const deck = decks.find((candidate) => candidate.el === el);
+    if (!deck) return null;
+    deck.analyser.getByteTimeDomainData(deck.waveformTimeData);
+    deck.analyser.getFloatFrequencyData(deck.waveformFrequencyData);
+
+    let square = 0;
+    for (const value of deck.waveformTimeData) {
+      const normalized = (value - 128) / 128;
+      square += normalized * normalized;
+    }
+    const amp = Math.min(1, Math.sqrt(square / Math.max(1, deck.waveformTimeData.length)) * 2.8);
+
+    const nyquist = ctx.sampleRate / 2;
+    let low = 0;
+    let middle = 0;
+    let high = 0;
+    for (let index = 0; index < deck.waveformFrequencyData.length; index += 1) {
+      const hz = (index / deck.waveformFrequencyData.length) * nyquist;
+      // getFloatFrequencyData 给出 dB；还原为线性幅度后累加平方，最后开根号，
+      // 与本地 Rust STFT 的“分频段功率求和 → 幅度”保持同一套量纲。
+      const db = deck.waveformFrequencyData[index];
+      const magnitude = Number.isFinite(db) ? Math.pow(10, db / 20) : 0;
+      const power = magnitude * magnitude;
+      // 与 Rust 本地波形使用相同的 200 Hz / 1.5 kHz 三段交叉点。
+      if (hz < 200) {
+        low += power;
+      } else if (hz < 1_500) {
+        middle += power;
+      } else {
+        high += power;
+      }
+    }
+    low = Math.sqrt(low);
+    middle = Math.sqrt(middle);
+    high = Math.sqrt(high);
+    // 这里只返回真实三段幅度。颜色必须在 waveformCache 里相对于当前曲目
+    // 已经听到的常态重新计算；逐帧直接除最大值会让绝大多数流媒体整片发黄。
+    return { amp, low, middle, high };
   },
 
   /** 播放条的左右唱盘与真实双 deck 共用同一个编号。 */

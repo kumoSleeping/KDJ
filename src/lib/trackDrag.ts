@@ -1,5 +1,14 @@
 export const TRACK_DRAG_STATE_EVENT = "kd:track-drag-state";
 export const TRACK_TRASH_DROP_EVENT = "kd:track-trash-drop";
+/** 详情栏封面框接收曲目拖放时的跨组件事件。 */
+export const TRACK_COVER_DROP_EVENT = "kd:track-cover-drop";
+/** 不用字符串散落在 TrackTable 和 TrackDetail 两处，避免拖放目标漂移。 */
+export const TRACK_COVER_DROP_TARGET_ATTR = "data-kd-track-cover-drop";
+
+export interface TrackCoverDropDetail {
+  ids: number[];
+  targetTrackId: number;
+}
 
 /** 与 FolderTree 里的 MIME 保持一致；WebKit 有时在 dragover 不暴露它。 */
 export const TRACK_DND_TYPE = "application/x-kdj-tracks";
@@ -9,6 +18,32 @@ const TRACK_DRAG_END_GRACE_MS = 1800;
 
 export interface TrackDragDetail {
   ids: number[];
+}
+
+/** pointer 拖放结束后，挡住封面框上的合成 click，避免误打开文件选择器。 */
+let suppressCoverClickUntil = 0;
+
+export function suppressCoverClickAfterTrackDrop(): void {
+  suppressCoverClickUntil = Date.now() + 700;
+}
+
+export function consumeSuppressedCoverClick(): boolean {
+  if (Date.now() > suppressCoverClickUntil) {
+    suppressCoverClickUntil = 0;
+    return false;
+  }
+  suppressCoverClickUntil = 0;
+  return true;
+}
+
+/** 统一发出“把这些曲目的封面给目标曲目复用”事件。 */
+export function dispatchTrackCoverDrop(ids: number[], targetTrackId: number): void {
+  if (ids.length === 0 || !Number.isFinite(targetTrackId)) return;
+  window.dispatchEvent(
+    new CustomEvent<TrackCoverDropDetail>(TRACK_COVER_DROP_EVENT, {
+      detail: { ids: [...ids], targetTrackId },
+    }),
+  );
 }
 
 /** 进程内当前正在拖的曲目。drop 目标在 MIME 读不到时靠它认人。 */

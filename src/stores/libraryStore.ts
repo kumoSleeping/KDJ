@@ -8,7 +8,6 @@ import { api } from "../lib/api";
 import { continueDataUpgrade } from "../lib/dataUpgrade";
 import { resolveLibraryPasteOp } from "../lib/libraryPaste";
 import { isOutsideFolder } from "../lib/outsideFolder";
-import { useAppStore } from "./appStore";
 import { useQueueStore } from "./queueStore";
 import type {
   AnalyzeProgress,
@@ -17,6 +16,8 @@ import type {
   FileOp,
   FolderOpResult,
   FolderTree,
+  FolderUndoResponse,
+  FolderUndoStatus,
   LibraryStats,
   MaintenanceProgress,
   ScanProgress,
@@ -200,6 +201,8 @@ export interface LibraryStore {
   clipboard: LibraryClipboard | null;
   folders: FolderTree | null;
   stats: LibraryStats | null;
+  undo: FolderUndoStatus;
+  undoError: string;
   scan: ScanProgress | null;
   analyze: AnalyzeProgress | null;
   /** 旧数据升级与缓存维护共用活动栏；不同任务可顺序接力，失败项会保留。 */
@@ -223,6 +226,7 @@ export interface LibraryStore {
   loadMore(): Promise<void>;
   refreshStats(): Promise<void>;
   refreshFolders(): Promise<void>;
+  refreshUndo(): Promise<void>;
   setFilter(patch: Partial<LibraryFilter>): void;
   /**
    * 点一次排序列。三段式，和用户的描述逐条对应：
@@ -244,13 +248,22 @@ export interface LibraryStore {
   /** `op` 覆盖剪贴板里记的操作：Cmd+Option+V 强制按移动粘贴。 */
   paste(dest: string, op?: FileOp): Promise<FolderOpResult | null>;
   applyFolderOp(ids: number[], dest: string, op: FileOp): Promise<FolderOpResult>;
+  undoLast(): Promise<FolderUndoResponse>;
+  clearUndoError(): void;
   /**
    * 「添加文件夹」背后的一整套后台动作：把目录登记成曲库根、遍历入库、
    * （analyze 时）把新曲目排进分析队列。调用方只负责把目录交出去，
    * 不用再引导用户点第二个按钮。
    */
   startScan(paths: string[], analyze?: boolean): Promise<ScanResponseLike>;
-  startAnalyze(trackIds: number[] | null, force?: boolean, priority?: boolean): Promise<AnalyzeResponseLike>;
+  startAnalyze(
+    trackIds: number[] | null,
+    force?: boolean,
+    priority?: boolean,
+    version?: "v1" | "v2",
+    limit?: number,
+    folder?: string,
+  ): Promise<AnalyzeResponseLike>;
   cancelAnalyze(): Promise<void>;
   setAutoAnalyzeSuspended(value: boolean): void;
   /**
@@ -302,6 +315,8 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   clipboard: null,
   folders: null,
   stats: null,
+  undo: { available: false, op: null, count: 0 },
+  undoError: "",
   scan: null,
   analyze: null,
   maintenance: [],
@@ -515,6 +530,14 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     }
   },
 
+  async refreshUndo() {
+    try {
+      set({ undo: await api.folderUndoStatus() });
+    } catch {
+      // 旧后端没有撤回接口时保持默认不可用，不阻塞曲库加载。
+    }
+  },
+
   select(id, mode = "replace") {
     // 按 id 选中都发生在当前页里，页外暂存到这里就过期了
     set({ selectedTrack: null });
@@ -567,13 +590,8 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   async paste(dest, op) {
     const clip = get().clipboard;
     if (!clip || !dest) return null;
-    // 未显式指定时：剪切仍移动；否则跟设置里的「链接 / 复制文件」。
-    const used =
-      op ??
-      resolveLibraryPasteOp({
-        settings: useAppStore.getState().settings,
-        clipboardOp: clip.op,
-      });
+    // 未显式指定时：剪切仍移动；普通粘贴复制一份真实本地文件。
+    const used = op ?? resolveLibraryPasteOp({ clipboardOp: clip.op });
     const result = await get().applyFolderOp(clip.ids, dest, used);
     // 剪切、或 Option 强制移动：粘一次就清空；普通复制可连粘
     if (used === "move") set({ clipboard: null });
@@ -582,14 +600,63 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   async applyFolderOp(ids, dest, op) {
     const result = await api.applyFolderOp(ids, dest, op);
+    set({ undo: result.undo, undoError: "" });
     await get().refresh();
     void get().refreshFolders();
     void get().refreshStats();
-    // 移动后选中项还在（id 没变）；链接 / 复制出来的是新 id，选中它们更符合预期
-    if ((op === "link" || op === "copy") && result.track_ids.length > 0) {
+    // 移动后选中项还在（id 没变）；复制出来的是新 id，选中它们更符合预期
+    if (op === "copy" && result.track_ids.length > 0) {
       set({ selectedIds: result.track_ids, selectedId: result.track_ids[0] });
     }
     return result;
+  },
+
+  async undoLast() {
+    set({ undoError: "" });
+    try {
+      const result = await api.undoFolderOp();
+      const affected = new Set(result.track_ids);
+      const current = get();
+      const isDelete = result.op === "delete";
+      const restoredIds = isDelete && result.track_ids.length > 0 ? result.track_ids : null;
+      set({
+        undo: result.status,
+        selectedIds:
+          result.op === "copy"
+            ? current.selectedIds.filter((id) => !affected.has(id))
+            : restoredIds ?? current.selectedIds,
+        selectedId:
+          result.op === "copy"
+            ? current.selectedId !== null && affected.has(current.selectedId)
+              ? null
+              : current.selectedId
+            : restoredIds?.[0] ?? current.selectedId,
+        selectedTrack:
+          isDelete
+            ? null
+            : current.selectedTrack && affected.has(current.selectedTrack.id)
+              ? null
+              : current.selectedTrack,
+      });
+      await Promise.all([get().refresh(), get().refreshFolders(), get().refreshStats()]);
+      if (restoredIds && restoredIds.length > 0) {
+        const restoredTrack = get().tracks.find((track) => track.id === restoredIds[0]) ?? null;
+        set({ selectedTrack: restoredTrack });
+      }
+      const failures = Object.values(result.errors);
+      if (failures.length > 0) {
+        set({ undoError: `已撤回 ${result.undone} 首，${failures.length} 首失败：${failures[0]}` });
+      }
+      return result;
+    } catch (error) {
+      set({ undoError: errorText(error) });
+      void get().refreshUndo();
+      throw error;
+    }
+  },
+
+  clearUndoError() {
+    set({ undoError: "" });
   },
 
   async startScan(paths, analyze = false) {
@@ -598,8 +665,8 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     return response;
   },
 
-  async startAnalyze(trackIds, force = false, priority = false) {
-    const response = await api.analyze(trackIds, force, priority);
+  async startAnalyze(trackIds, force = false, priority = false, version = "v1", limit, folder = "") {
+    const response = await api.analyze(trackIds, force, priority, version, limit, folder);
     if (priority) {
       // 插队分析（正在放的那首）不占用进度条：它只有一首，
       // 把工具栏那条几百首的进度覆盖掉会让人以为批量被重置了。
@@ -682,6 +749,12 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   async removeTracks(ids, file) {
     const result = await api.deleteTracks(ids, file);
+    if (result.undo) {
+      set({ undo: result.undo, undoError: "" });
+    } else {
+      // 兼容旧后端：至少把删除后的撤回状态重新拉一次，避免沿用过期栈。
+      void get().refreshUndo();
+    }
     // 失败的留在列表里：它们的库记录还在（后端删文件失败时连记录一起保留）
     const failed = new Set(Object.keys(result.errors).map(Number));
     const gone = new Set(ids.filter((id) => !failed.has(id)));

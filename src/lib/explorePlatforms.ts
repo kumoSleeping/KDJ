@@ -7,7 +7,7 @@ import {
 } from "./searchPlatforms";
 
 /**
- * 一键搜索自己的平台勾选 / 排序。
+ * Explore 自己的平台勾选 / 排序。
  * 和顶栏搜索的 search_platforms / platform_priority 完全独立，互不同步。
  */
 const PLATFORMS_KEY = "kd-explore-platforms";
@@ -69,7 +69,7 @@ export const useExplorePlatforms = create<ExplorePlatformState>((set, get) => ({
   },
 }));
 
-/** 按一键搜索自己的优先级排出勾选源。 */
+/** 按 Explore 自己的优先级排出勾选源。 */
 export function orderedExplorePlatforms(
   platforms: readonly Platform[],
   priority: readonly Platform[],

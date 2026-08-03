@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { cachedWaveform, loadWaveform } from "../../lib/waveformCache";
+import {
+  cachedWaveform,
+  loadWaveformById,
+  streamWaveformSnapshot,
+  subscribeStreamWaveform,
+  updateStreamWaveform,
+  type StreamWaveformSnapshot,
+} from "../../lib/waveformCache";
 import type { Waveform as WaveformData } from "../../types";
 import { ContextMenu } from "../common";
 
@@ -52,7 +59,13 @@ export interface WaveformProps {
   className?: string;
 }
 
-function draw(canvas: HTMLCanvasElement, wave: WaveformData, cssWidth: number, cssHeight: number) {
+function draw(
+  canvas: HTMLCanvasElement,
+  wave: WaveformData,
+  cssWidth: number,
+  cssHeight: number,
+  known?: readonly boolean[],
+) {
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.max(1, Math.round(cssWidth * dpr));
   canvas.height = Math.max(1, Math.round(cssHeight * dpr));
@@ -76,7 +89,10 @@ function draw(canvas: HTMLCanvasElement, wave: WaveformData, cssWidth: number, c
     let g = 0;
     let b = 0;
     let weight = 0;
+    let hasKnownSample = known === undefined;
     for (let i = from; i < to && i < n; i += 1) {
+      if (known && !known[i]) continue;
+      hasKnownSample = true;
       const value = wave.amp[i];
       if (value > amp) amp = value;
       // 颜色按幅度加权平均：安静帧的颜色本来就不可靠，不该和强拍平起平坐
@@ -86,7 +102,10 @@ function draw(canvas: HTMLCanvasElement, wave: WaveformData, cssWidth: number, c
       b += wave.b[i] * w;
       weight += w;
     }
-    if (weight <= 0) continue;
+    if (!hasKnownSample || weight <= 0) {
+      // 未采样部分由 DOM 下层的流媒体渐变轨道表达，不拿灰柱或随机柱冒充波形。
+      continue;
+    }
     ctx.fillStyle = `rgb(${Math.round(r / weight)},${Math.round(g / weight)},${Math.round(b / weight)})`;
     // 最小 1px：静音段也留一条中线，否则波形会断成几截看着像坏了
     const half = Math.max(0.5, amp * (mid - 1));
@@ -128,6 +147,9 @@ export function Waveform({
   className,
 }: WaveformProps) {
   const [wave, setWave] = useState<WaveformData | null>(() => cachedWaveform(trackId));
+  const [streamSnapshot, setStreamSnapshot] = useState<StreamWaveformSnapshot | null>(() =>
+    trackId < 0 ? streamWaveformSnapshot(trackId) : null,
+  );
   const [error, setError] = useState("");
   // 右键设点永远取当时正在播放的位置，不能让鼠标点到波形哪里就误落到哪里。
   const [menu, setMenu] = useState<{ x: number; y: number; position: number } | null>(null);
@@ -198,12 +220,18 @@ export function Waveform({
   };
 
   useEffect(() => {
+    if (trackId < 0) {
+      // 在线曲的波形只由当前媒体的 buffered + analyser 渐进生成，不能从这里另拉整首。
+      setWave(null);
+      setError("");
+      return;
+    }
     let alive = true;
     const cached = cachedWaveform(trackId);
     setWave(cached);
     setError("");
     if (cached) return;
-    loadWaveform(trackId)
+    loadWaveformById(trackId)
       .then((result) => {
         if (alive) setWave(result);
       })
@@ -216,6 +244,32 @@ export function Waveform({
     };
   }, [trackId]);
 
+  useEffect(() => {
+    if (trackId >= 0) {
+      setStreamSnapshot(null);
+      return;
+    }
+    const sync = () => setStreamSnapshot(streamWaveformSnapshot(trackId));
+    const unsubscribe = subscribeStreamWaveform(trackId, sync);
+    // 首帧也建固定桶：即使媒体还没触发 progress，底栏仍有“未缓存”基线。
+    if (!streamWaveformSnapshot(trackId)) {
+      updateStreamWaveform(trackId, 0, duration, null, []);
+    }
+    sync();
+    return unsubscribe;
+  }, [trackId]);
+
+  useEffect(() => {
+    if (trackId < 0 && duration > 0) {
+      // loadedmetadata 可能晚于首帧；只补时长，不清掉 PlayerBar 已喂入的缓存区间。
+      updateStreamWaveform(trackId, 0, duration, null);
+    }
+  }, [trackId, duration]);
+
+  const activeStreamSnapshot =
+    streamSnapshot?.waveform.track_id === trackId ? streamSnapshot : null;
+  const displayWave = trackId < 0 ? activeStreamSnapshot?.waveform ?? null : wave;
+
   // 只在数据/尺寸变化时重画。播放头和已播遮罩都是 DOM 层，
   // 位置每 200ms 变一次也不会触发 canvas 重绘。
   // clientWidth===0 时跳过：flex 首帧常为 0，硬画会留下空白 canvas，
@@ -223,25 +277,31 @@ export function Waveform({
   useEffect(() => {
     const host = hostRef.current;
     const canvas = canvasRef.current;
-    if (!host || !canvas || !wave) return;
+    if (!host || !canvas || !displayWave) return;
     const render = () => {
       const width = host.clientWidth;
       if (width <= 0) return;
-      draw(canvas, wave, width, height);
+      draw(
+        canvas,
+        displayWave,
+        width,
+        height,
+        activeStreamSnapshot?.known,
+      );
     };
     render();
     const observer = new ResizeObserver(render);
     observer.observe(host);
     return () => observer.disconnect();
-  }, [wave, height]);
+  }, [displayWave, activeStreamSnapshot, height]);
 
   // 波形计算可能要几秒；期间直接使用曲库/媒体元数据里的时长，让用户可以立刻拖动跳转。
-  const waveDuration = wave?.duration ?? 0;
+  const waveDuration = displayWave?.duration ?? 0;
   const total = waveDuration > 0 ? waveDuration : duration;
   const ratio = total > 0 && position !== null ? Math.min(1, Math.max(0, position / total)) : null;
   const cueRatio = markerRatio(cueMs, total);
   const endRatio = markerRatio(endMs, total);
-  const ready = wave !== null && wave.amp.length > 0;
+  const ready = displayWave !== null && displayWave.amp.length > 0;
 
   const applyPoint = async (kind: "start" | "end") => {
     if (!menu || !onSetPoint) return;
@@ -265,7 +325,7 @@ export function Waveform({
       style={{
         position: "relative",
         height,
-        background: "var(--kd-panel-inset)",
+        background: trackId < 0 ? "transparent" : "var(--kd-panel-inset)",
         cursor: seekable && total > 0 ? "pointer" : "default",
         overflow: "hidden",
       }}
@@ -294,13 +354,36 @@ export function Waveform({
             : undefined
       }
     >
+      {trackId < 0 && (
+        <span className="kd-wave-stream-bed" aria-hidden="true">
+          {(activeStreamSnapshot?.bufferedRanges ?? []).map((range, index) => {
+            if (total <= 0) return null;
+            const left = clampRatio(range.start / total) * 100;
+            const right = clampRatio(range.end / total) * 100;
+            return (
+              <i
+                key={`${index}:${range.start}:${range.end}`}
+                style={{ left: `${left}%`, width: `${Math.max(0, right - left)}%` }}
+              />
+            );
+          })}
+        </span>
+      )}
       <canvas
         ref={canvasRef}
-        style={{ display: ready ? "block" : "none", width: "100%", height }}
+        style={{
+          display: ready ? "block" : "none",
+          position: "relative",
+          zIndex: 1,
+          width: "100%",
+          height,
+        }}
         role="img"
         aria-label="频谱波形"
       />
-      {!ready && (
+      {/* 在线流即使还没有第一帧 analyser 数据，也始终显示上面的渐变缓存轨；
+          不能让通用的灰色 fallback 在首帧或媒体等待期间盖住它。 */}
+      {!ready && trackId >= 0 && (
         <div
           className="kd-wave-fallback"
           aria-hidden="true"
@@ -458,4 +541,8 @@ export function Waveform({
       )}
     </div>
   );
+}
+
+function clampRatio(value: number): number {
+  return Math.min(1, Math.max(0, Number.isFinite(value) ? value : 0));
 }

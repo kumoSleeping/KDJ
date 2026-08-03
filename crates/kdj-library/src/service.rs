@@ -3,23 +3,30 @@
 //! 所有 SQL 都收在这一层，上面的 server 只跟契约模型打交道。
 
 use std::collections::{BTreeMap, HashMap};
+#[cfg(not(any(target_os = "macos", target_os = "android", target_os = "ios")))]
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use kdj_analysis::engine::AnalysisResult;
 use kdj_core::models::{
-    HarmonicMatch, HarmonicRelation, LibraryStats, SongSource, StreamLibraryItem, Track, TrackPage,
-    TrackPatch,
+    HarmonicMatch, HarmonicRelation, LibraryStats, Track, TrackPage, TrackPatch,
 };
 use kdj_providers::tags::{read_tags, write_cover, write_metadata, MetadataEdit};
 use rusqlite::types::Value as SqlValue;
-use rusqlite::Row;
+use rusqlite::{OptionalExtension, Row};
 
 use crate::camelot::{
     best_tempo, bpm_bucket, camelot_relations, parse_key_filter, relation_distance, relation_label,
     BPM_BUCKET_ORDER, CAMELOT_TO_KEY,
 };
 use crate::db::{Conn, Database};
+
+/// BPM/Key 第二代元数据当前使用的算法修订。
+///
+/// v2 表与旧 tracks 分析列物理隔离；以后更换算法时只需提升这个值，所有旧修订
+/// 就会重新进入渐进回填队列，同时 v1 仍可作为读取兜底。
+pub const BPM_KEY_V2_REVISION: &str = "kdj-rust-bpm-key-v2.0.0";
 
 /// 平台路径分隔符。曲库过滤按前缀匹配要用。
 const SEP: char = std::path::MAIN_SEPARATOR;
@@ -35,43 +42,173 @@ pub enum FileDisposal {
     Remove,
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn move_to_trash(path: &Path) -> Result<()> {
-    trash::delete(path).map_err(|err| anyhow::anyhow!("移入回收站失败：{err}"))
+/// 删除后用于应用内撤回的文件定位信息。
+///
+/// 回收站里的文件可能被系统改名，不能只靠原文件名找；桌面平台分别保存
+/// macOS 返回的实际目标路径，或 Linux/Windows 回收站条目的稳定 id。
+#[derive(Debug, Clone)]
+pub enum TrashHandle {
+    #[cfg(target_os = "macos")]
+    Mac(PathBuf),
+    #[cfg(not(any(target_os = "macos", target_os = "android", target_os = "ios")))]
+    Os(OsString),
+}
+
+/// 删除后保留的曲库快照。撤回时按原 id/路径写回，避免重新扫描丢掉分析结果和人工标记。
+#[derive(Debug, Clone)]
+pub struct DeletedTrack {
+    pub track: Track,
+    pub playlist_items: Vec<(i64, i64)>,
+    pub trash: Option<TrashHandle>,
+}
+
+#[cfg(target_os = "macos")]
+fn move_to_trash(path: &Path) -> Result<Option<TrashHandle>> {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+
+    let path_text = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("文件路径不是有效的 UTF-8：{}", path.display()))?;
+    let path_string = NSString::from_str(path_text);
+    let url = NSURL::fileURLWithPath(&path_string);
+    let file_manager = NSFileManager::defaultManager();
+    let mut resulting_url = None;
+    file_manager
+        .trashItemAtURL_resultingItemURL_error(&url, Some(&mut resulting_url))
+        .map_err(|err| anyhow::anyhow!("移入回收站失败：{err}"))?;
+    let resulting_path = resulting_url
+        .and_then(|url| url.path())
+        .map(|path| path.to_string())
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("移入回收站后拿不到文件位置"))?;
+    Ok(Some(TrashHandle::Mac(PathBuf::from(resulting_path))))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "android", target_os = "ios")))]
+fn move_to_trash(path: &Path) -> Result<Option<TrashHandle>> {
+    // 先记住已有条目，避免回收站里恰好有一个同原路径的旧文件时误认它。
+    let before = trash::os_limited::list().ok();
+    trash::delete(path).map_err(|err| anyhow::anyhow!("移入回收站失败：{err}"))?;
+    let Some(before) = before else {
+        tracing::warn!(
+            "文件已移入回收站，但无法读取删除前的回收站清单，撤回不可用：{}",
+            path.display()
+        );
+        return Ok(None);
+    };
+    let after = match trash::os_limited::list() {
+        Ok(items) => items,
+        Err(err) => {
+            tracing::warn!("文件已移入回收站，但无法读取删除后的回收站清单，撤回不可用：{err}");
+            return Ok(None);
+        }
+    };
+    let original = normalize_path(path);
+    let item = after
+        .into_iter()
+        .filter(|item| !before.contains(item) && normalize_path(&item.original_path()) == original)
+        .max_by_key(|item| item.time_deleted);
+    Ok(item.map(|item| TrashHandle::Os(item.id)))
 }
 
 /// 见 Cargo.toml：这两个平台没有系统回收站，trash crate 压根没编进来。
 /// 正常流程走不到这儿（前端按 health.platform 改用「直接删除+确认」），
 /// 留这个桩是防旧客户端/手写请求打进来时静默丢文件。
 #[cfg(any(target_os = "android", target_os = "ios"))]
-fn move_to_trash(_path: &Path) -> Result<()> {
+fn move_to_trash(_path: &Path) -> Result<Option<TrashHandle>> {
     anyhow::bail!("这个平台没有系统回收站，请改用直接删除")
+}
+
+fn restore_from_trash(handle: &TrashHandle, original: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !original.exists(),
+        "恢复目标位置已有文件：{}",
+        original.display()
+    );
+    if let Some(parent) = original.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("创建原文件夹失败：{}", parent.display()))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_foundation::{NSFileManager, NSString, NSURL};
+
+        let TrashHandle::Mac(trash_path) = handle;
+        let trash_text = trash_path.to_str().ok_or_else(|| {
+            anyhow::anyhow!("回收站路径不是有效的 UTF-8：{}", trash_path.display())
+        })?;
+        let original_text = original
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("原文件路径不是有效的 UTF-8：{}", original.display()))?;
+        let trash_url = NSURL::fileURLWithPath(&NSString::from_str(trash_text));
+        let original_url = NSURL::fileURLWithPath(&NSString::from_str(original_text));
+        NSFileManager::defaultManager()
+            .moveItemAtURL_toURL_error(&trash_url, &original_url)
+            .map_err(|err| anyhow::anyhow!("从回收站恢复失败：{err}"))?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "android", target_os = "ios")))]
+    {
+        let TrashHandle::Os(id) = handle;
+        let item = trash::os_limited::list()
+            .map_err(|err| anyhow::anyhow!("读取回收站失败：{err}"))?
+            .into_iter()
+            .find(|item| item.id == *id)
+            .with_context(|| format!("回收站里找不到待恢复的文件：{}", original.display()))?;
+        anyhow::ensure!(
+            normalize_path(&item.original_path()) == normalize_path(original),
+            "回收站文件原路径已变化，拒绝恢复：{}",
+            original.display()
+        );
+        trash::os_limited::restore_all([item])
+            .map_err(|err| anyhow::anyhow!("从回收站恢复失败：{err}"))?;
+        return Ok(());
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = (handle, original);
+        anyhow::bail!("这个平台没有系统回收站")
+    }
 }
 
 /// sort 白名单：绝对不能把 query string 直接拼进 ORDER BY（SQL 注入），
 /// 也不能只做转义——SQLite 的标识符引用规则太松，白名单映射是唯一安全的做法。
-fn sort_column(key: &str) -> &'static str {
+fn effective_bpm_key_column(column: &str) -> String {
+    format!(
+        "COALESCE((SELECT v2.{column} FROM track_bpm_key_analysis_v2 v2 \
+         WHERE v2.track_id = tracks.id AND v2.analyzer_revision = '{}'), tracks.{column})",
+        BPM_KEY_V2_REVISION
+    )
+}
+
+fn sort_column(key: &str) -> String {
     match key {
-        "modified_at" => "modified_at",
-        "analyzed_at" => "analyzed_at",
-        "title" => "title",
-        "artist" => "artist",
-        "album" => "album",
-        "genre" => "genre",
-        "year" => "year",
-        "filename" => "filename",
-        "duration" => "duration",
-        "bpm" => "bpm",
-        "energy" => "energy",
-        "rating" => "rating",
-        "size" => "size",
+        "modified_at" => "tracks.modified_at".into(),
+        "analyzed_at" => "tracks.analyzed_at".into(),
+        "title" => "tracks.title".into(),
+        "artist" => "tracks.artist".into(),
+        "album" => "tracks.album".into(),
+        "genre" => "tracks.genre".into(),
+        "year" => "tracks.year".into(),
+        "filename" => "tracks.filename".into(),
+        "duration" => "tracks.duration".into(),
+        "bpm" => effective_bpm_key_column("bpm"),
+        "energy" => "tracks.energy".into(),
+        "rating" => "tracks.rating".into(),
+        "size" => "tracks.size".into(),
         // Camelot 直接按字符串排会得到 "10A" < "8A"，必须拆成 数字*2 + 字母
         "camelot" | "key" => {
-            "(CASE WHEN camelot IS NULL OR camelot = '' THEN NULL ELSE \
-             CAST(SUBSTR(camelot, 1, LENGTH(camelot) - 1) AS INTEGER) * 2 \
-             + (CASE WHEN UPPER(SUBSTR(camelot, -1)) = 'B' THEN 1 ELSE 0 END) END)"
+            let camelot = effective_bpm_key_column("camelot");
+            format!(
+                "(CASE WHEN ({camelot}) IS NULL OR ({camelot}) = '' THEN NULL ELSE \
+                 CAST(SUBSTR(({camelot}), 1, LENGTH(({camelot})) - 1) AS INTEGER) * 2 \
+                 + (CASE WHEN UPPER(SUBSTR(({camelot}), -1)) = 'B' THEN 1 ELSE 0 END) END)"
+            )
         }
-        _ => "added_at",
+        _ => "tracks.added_at".into(),
     }
 }
 
@@ -142,10 +279,6 @@ pub struct TrackQuery {
     pub offset: i64,
 }
 
-fn stream_library_row(row: &Row<'_>) -> rusqlite::Result<(i64, String, String, String)> {
-    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-}
-
 pub struct LibraryService {
     db: Database,
 }
@@ -214,19 +347,27 @@ impl LibraryService {
 
         let (camelot, raw_key) = parse_key_filter(&query.key);
         if !camelot.is_empty() {
-            where_parts.push("UPPER(COALESCE(camelot, '')) = ?".into());
+            where_parts.push(format!(
+                "UPPER(COALESCE({}, '')) = ?",
+                effective_bpm_key_column("camelot")
+            ));
             params.push(SqlValue::Text(camelot));
         } else if !raw_key.is_empty() {
-            where_parts.push("LOWER(COALESCE(music_key, '')) LIKE ? ESCAPE '\\'".into());
+            where_parts.push(format!(
+                "LOWER(COALESCE({}, '')) LIKE ? ESCAPE '\\'",
+                effective_bpm_key_column("music_key")
+            ));
             params.push(SqlValue::Text(like_contains(&raw_key)));
         }
 
         if let Some(bpm_min) = query.bpm_min {
-            where_parts.push("bpm IS NOT NULL AND bpm >= ?".into());
+            let bpm = effective_bpm_key_column("bpm");
+            where_parts.push(format!("({bpm}) IS NOT NULL AND ({bpm}) >= ?"));
             params.push(SqlValue::Real(bpm_min));
         }
         if let Some(bpm_max) = query.bpm_max {
-            where_parts.push("bpm IS NOT NULL AND bpm <= ?".into());
+            let bpm = effective_bpm_key_column("bpm");
+            where_parts.push(format!("({bpm}) IS NOT NULL AND ({bpm}) <= ?"));
             params.push(SqlValue::Real(bpm_max));
         }
         if let Some(energy_min) = query.energy_min {
@@ -299,7 +440,7 @@ impl LibraryService {
                 .take(limit as usize)
                 .collect();
             return Ok(TrackPage {
-                items: self.attach_tags(&conn, page)?,
+                items: self.attach_tags(&conn, self.apply_bpm_key_v2(&conn, page)?)?,
                 total,
                 offset,
                 limit,
@@ -341,7 +482,7 @@ impl LibraryService {
             .collect::<std::result::Result<_, _>>()?;
 
         Ok(TrackPage {
-            items: self.attach_tags(&conn, rows)?,
+            items: self.attach_tags(&conn, self.apply_bpm_key_v2(&conn, rows)?)?,
             total,
             offset,
             limit,
@@ -355,7 +496,10 @@ impl LibraryService {
         let Some(track) = rows.next().transpose()? else {
             return Ok(None);
         };
-        Ok(self.attach_tags(&conn, vec![track])?.into_iter().next())
+        Ok(self
+            .attach_tags(&conn, self.apply_bpm_key_v2(&conn, vec![track])?)?
+            .into_iter()
+            .next())
     }
 
     pub fn get_by_path(&self, path: &Path) -> Result<Option<Track>> {
@@ -366,103 +510,82 @@ impl LibraryService {
         let Some(track) = rows.next().transpose()? else {
             return Ok(None);
         };
-        Ok(self.attach_tags(&conn, vec![track])?.into_iter().next())
+        Ok(self
+            .attach_tags(&conn, self.apply_bpm_key_v2(&conn, vec![track])?)?
+            .into_iter()
+            .next())
     }
 
-    /// 保存一个远程来源。它只进入独立的 stream_library 表，不制造虚假的本地 Track。
-    pub fn add_stream_source(&self, source: &SongSource, folder: &str) -> Result<StreamLibraryItem> {
-        anyhow::ensure!(
-            !source.key.trim().is_empty(),
-            "流媒体来源缺少歌曲 key"
-        );
-        anyhow::ensure!(
-            !matches!(source.platform, kdj_core::models::Platform::Local),
-            "本地文件不能作为流媒体来源保存"
-        );
-        let folder = folder.trim().to_string();
-        let source_json = serde_json::to_string(source).context("序列化流媒体来源失败")?;
-        let added_at = now_iso();
-        let conn = self.db.conn()?;
-        conn.execute(
-            "INSERT INTO stream_library (folder, platform, source_key, source_json, added_at) \
-             VALUES (?, ?, ?, ?, ?) \
-             ON CONFLICT(folder, platform, source_key) DO UPDATE SET \
-             source_json = excluded.source_json",
-            rusqlite::params![
-                folder.as_str(),
-                source.platform.as_str(),
-                source.key.trim(),
-                source_json,
-                added_at,
-            ],
-        )?;
-        let (id, stored, added_at): (i64, String, String) = conn.query_row(
-            "SELECT id, source_json, added_at FROM stream_library \
-             WHERE folder = ? AND platform = ? AND source_key = ?",
-            rusqlite::params![folder.as_str(), source.platform.as_str(), source.key.trim()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        let source: SongSource = serde_json::from_str(&stored).context("读取已保存流媒体来源失败")?;
-        let downloaded = self.stream_source_downloaded(&conn, &source)?;
-        Ok(StreamLibraryItem {
-            id,
-            folder,
-            source,
-            added_at,
-            downloaded,
-        })
-    }
-
-    /// 按目标文件夹列出远程来源；空文件夹表示整个流媒体曲库。
-    pub fn list_stream_sources(&self, folder: &str) -> Result<Vec<StreamLibraryItem>> {
-        let conn = self.db.conn()?;
-        let folder = folder.trim();
-        let mut stmt = if folder.is_empty() {
-            conn.prepare(
-                "SELECT id, folder, source_json, added_at \
-                 FROM stream_library ORDER BY added_at DESC, id DESC",
-            )?
-        } else {
-            conn.prepare(
-                "SELECT id, folder, source_json, added_at FROM stream_library \
-                 WHERE folder = ? ORDER BY added_at DESC, id DESC",
-            )?
-        };
-        let rows: Vec<(i64, String, String, String)> = if folder.is_empty() {
-            stmt.query_map([], stream_library_row)?
-                .collect::<std::result::Result<_, _>>()?
-        } else {
-            stmt.query_map([folder], stream_library_row)?
-                .collect::<std::result::Result<_, _>>()?
-        };
-        drop(stmt);
-        let mut result = Vec::new();
-        for (id, stored_folder, source_json, added_at) in rows {
-            let source: SongSource =
-                serde_json::from_str(&source_json).context("解析流媒体曲目失败")?;
-            let downloaded = self.stream_source_downloaded(&conn, &source)?;
-            result.push(StreamLibraryItem {
-                id,
-                folder: stored_folder,
-                source,
-                added_at,
-                downloaded,
-            });
+    /// 把当前修订的 v2 BPM/Key 覆盖到 API 返回对象上，但不改 tracks 里的 v1。
+    ///
+    /// 每个字段独立回退：例如 v2 只算出了 Key，BPM 仍沿用 v1；解码失败产生的
+    /// 空 v2 行也不会把一条原本完整的 v1 曲目显示成空白。
+    fn apply_bpm_key_v2(&self, conn: &Conn, mut tracks: Vec<Track>) -> Result<Vec<Track>> {
+        if tracks.is_empty() {
+            return Ok(tracks);
         }
-        Ok(result)
-    }
-
-    pub fn remove_stream_source(&self, id: i64) -> Result<bool> {
-        let conn = self.db.conn()?;
-        Ok(conn.execute("DELETE FROM stream_library WHERE id = ?", [id])? > 0)
-    }
-
-    fn stream_source_downloaded(&self, conn: &Conn, source: &SongSource) -> Result<bool> {
-        Ok(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tracks WHERE source_platform = ? AND source_key = ?)",
-            rusqlite::params![source.platform.as_str(), source.key.trim()],
-            |row| row.get::<_, i64>(0),
-        )? != 0)
+        let mut by_id: HashMap<
+            i64,
+            (
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+                String,
+                String,
+                String,
+                Option<f64>,
+            ),
+        > = HashMap::new();
+        for chunk in tracks.chunks(900) {
+            let ids: Vec<i64> = chunk.iter().map(|track| track.id).collect();
+            let placeholders = vec!["?"; ids.len()].join(",");
+            let sql = format!(
+                "SELECT track_id, bpm, bpm_confidence, first_beat, music_key, camelot, open_key, \
+                 key_confidence FROM track_bpm_key_analysis_v2 \
+                 WHERE analyzer_revision = ? AND track_id IN ({placeholders})"
+            );
+            let mut params = Vec::with_capacity(ids.len() + 1);
+            params.push(SqlValue::Text(BPM_KEY_V2_REVISION.to_string()));
+            params.extend(ids.into_iter().map(SqlValue::Integer));
+            let mut stmt = conn.prepare(&sql)?;
+            for row in stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    (
+                        row.get::<_, Option<f64>>(1)?,
+                        row.get::<_, Option<f64>>(2)?,
+                        row.get::<_, Option<f64>>(3)?,
+                        row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                        row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                        row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                        row.get::<_, Option<f64>>(7)?,
+                    ),
+                ))
+            })? {
+                let (id, values) = row?;
+                by_id.insert(id, values);
+            }
+        }
+        for track in &mut tracks {
+            let Some((bpm, bpm_confidence, first_beat, key, camelot, open_key, key_confidence)) =
+                by_id.remove(&track.id)
+            else {
+                continue;
+            };
+            if bpm.is_some() {
+                track.bpm = bpm;
+                track.bpm_v2 = true;
+                track.bpm_confidence = bpm_confidence;
+                track.first_beat = first_beat;
+            }
+            if !key.is_empty() {
+                track.music_key = key;
+                track.camelot = camelot.to_uppercase();
+                track.open_key = open_key;
+                track.key_confidence = key_confidence;
+            }
+        }
+        Ok(tracks)
     }
 
     /// 一次查完整页的 tags，避免 N+1。
@@ -658,19 +781,22 @@ impl LibraryService {
     /// 写文件之后一律同步一次 stat，**哪怕写失败**：
     /// lofty 是"改完再落盘"，失败点可能在落盘之后，那时 mtime 已经变了。
     /// 只在成功路径上同步的话，这条失败会留下一个错的 mtime 埋在库里。
+    ///
+    /// 成功写入还要更新时间戳：列表封面 URL 用 `modified_at` 做缓存破坏值，
+    /// 否则事件虽然会触发列表重拉，WebView 仍会命中旧的缩略图缓存。
     fn after_file_write(&self, track_id: i64, outcome: Result<()>) -> Result<()> {
         let synced = self.sync_file_stat(track_id);
-        outcome.and(synced)
+        outcome.and(synced)?;
+        let conn = self.db.conn()?;
+        conn.execute(
+            "UPDATE tracks SET modified_at = ? WHERE id = ?",
+            rusqlite::params![now_iso(), track_id],
+        )?;
+        Ok(())
     }
 
     pub fn delete(&self, track_id: i64, disposal: FileDisposal) -> Result<bool> {
-        let conn = self.db.conn()?;
-        let path: Option<String> = conn
-            .query_row("SELECT path FROM tracks WHERE id = ?", [track_id], |row| {
-                row.get(0)
-            })
-            .ok();
-        let Some(path) = path else {
+        let Some(track) = self.get(track_id)? else {
             return Ok(false);
         };
         // 回收站失败必须发生在删库记录**之前**：trash 挂了（比如文件在
@@ -678,20 +804,183 @@ impl LibraryService {
         // "没删成"而不是"库里没了文件还在"的半截状态。
         // 文件已经不在原地则视作无事可做——记录照删，这正是清理死条目的场景。
         if disposal == FileDisposal::Trash {
-            let file = Path::new(&path);
+            let file = Path::new(&track.path);
             if file.exists() {
-                move_to_trash(file)?;
+                let _ = move_to_trash(file)?;
             }
         }
-        conn.execute("DELETE FROM tracks WHERE id = ?", [track_id])?;
-        conn.execute("DELETE FROM tags WHERE track_id = ?", [track_id])?;
-        conn.execute("DELETE FROM playlist_items WHERE track_id = ?", [track_id])?;
+        self.delete_rows(&track, disposal)
+    }
+
+    /// 删除并保留一份可撤回快照。
+    ///
+    /// `Keep` 和 `Trash` 都能进入撤回栈；`Remove` 明确不可恢复，返回的快照为 None。
+    /// 回收站条目定位失败不会把已经成功的删除伪装成失败，只是这次删除没有应用内撤回。
+    pub fn delete_for_undo(
+        &self,
+        track_id: i64,
+        disposal: FileDisposal,
+    ) -> Result<(bool, Option<DeletedTrack>)> {
+        let Some(track) = self.get(track_id)? else {
+            return Ok((false, None));
+        };
+        let playlist_items = self.playlist_items(track_id)?;
+        let trash = if disposal == FileDisposal::Trash && Path::new(&track.path).exists() {
+            move_to_trash(Path::new(&track.path))?
+        } else {
+            None
+        };
+        self.delete_rows(&track, disposal)?;
+
+        let undo = if disposal != FileDisposal::Remove
+            && (trash.is_some() || Path::new(&track.path).is_file())
+        {
+            Some(DeletedTrack {
+                track,
+                playlist_items,
+                trash,
+            })
+        } else {
+            None
+        };
+        Ok((true, undo))
+    }
+
+    fn playlist_items(&self, track_id: i64) -> Result<Vec<(i64, i64)>> {
+        let conn = self.db.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT playlist_id, position FROM playlist_items WHERE track_id = ? ORDER BY playlist_id",
+        )?;
+        let rows = stmt.query_map([track_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn delete_rows(&self, track: &Track, disposal: FileDisposal) -> Result<bool> {
+        let conn = self.db.conn()?;
+        conn.execute("DELETE FROM tracks WHERE id = ?", [track.id])?;
+        conn.execute("DELETE FROM tags WHERE track_id = ?", [track.id])?;
+        conn.execute("DELETE FROM playlist_items WHERE track_id = ?", [track.id])?;
         if disposal == FileDisposal::Remove {
             // 直接删除维持宽容语义：文件删不掉（权限/已被移走）不该让接口失败，
             // 记录已从库里移除即可
-            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(&track.path);
         }
         Ok(true)
+    }
+
+    /// 把删除快照和文件一起恢复。数据库里的 id、分析结果、人工标记、标签及歌单位置
+    /// 都按删除前写回，不走重新扫描，避免一次撤回变成一首"新导入"的歌。
+    pub fn restore_deleted(&self, deleted: &DeletedTrack) -> Result<Track> {
+        let track = &deleted.track;
+        let original = Path::new(&track.path);
+        anyhow::ensure!(
+            self.get(track.id)?.is_none(),
+            "恢复曲目 id 已被重新占用：{}",
+            track.id
+        );
+        let key_path = normalize_path(original);
+        {
+            let conn = self.db.conn()?;
+            let existing: Option<i64> = conn
+                .query_row("SELECT id FROM tracks WHERE path = ?", [&key_path], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            anyhow::ensure!(
+                existing.is_none(),
+                "恢复目标路径已被重新登记：{}",
+                original.display()
+            );
+        }
+
+        if let Some(handle) = &deleted.trash {
+            restore_from_trash(handle, original)?;
+        } else {
+            anyhow::ensure!(original.is_file(), "恢复文件不存在：{}", original.display());
+        }
+
+        let insert_result = (|| -> Result<()> {
+            let mut conn = self.db.conn()?;
+            let tx = conn.transaction()?;
+            tx.execute(
+                "INSERT INTO tracks (
+                    id, path, filename, title, artist, album, genre, year, duration,
+                    bitrate, samplerate, channels, format, size, bpm, bpm_confidence,
+                    first_beat, music_key, camelot, open_key, key_confidence, energy,
+                    rms_db, peak_db, rating, color, comment, cue_ms, end_ms,
+                    source_platform, source_key, analyzed_at, added_at, modified_at,
+                    analysis_error
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )",
+                rusqlite::params![
+                    track.id,
+                    key_path,
+                    track.filename,
+                    track.title,
+                    track.artist,
+                    track.album,
+                    track.genre,
+                    track.year,
+                    track.duration,
+                    track.bitrate,
+                    track.samplerate,
+                    track.channels,
+                    track.format,
+                    track.size,
+                    track.bpm,
+                    track.bpm_confidence,
+                    track.first_beat,
+                    track.music_key,
+                    track.camelot,
+                    track.open_key,
+                    track.key_confidence,
+                    track.energy,
+                    track.rms_db,
+                    track.peak_db,
+                    track.rating,
+                    track.color,
+                    track.comment,
+                    track.cue_ms,
+                    track.end_ms,
+                    track.source_platform,
+                    track.source_key,
+                    track.analyzed_at,
+                    track.added_at,
+                    track.modified_at,
+                    track.analysis_error,
+                ],
+            )?;
+            for tag in &track.tags {
+                tx.execute(
+                    "INSERT OR IGNORE INTO tags (track_id, tag) VALUES (?, ?)",
+                    rusqlite::params![track.id, tag],
+                )?;
+            }
+            for (playlist_id, position) in &deleted.playlist_items {
+                tx.execute(
+                    "INSERT OR IGNORE INTO playlist_items (playlist_id, track_id, position) VALUES (?, ?, ?)",
+                    rusqlite::params![playlist_id, track.id, position],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        if let Err(error) = insert_result {
+            // 数据库写回失败时尽量把文件放回回收站，保留这条撤回操作的可重试性。
+            if deleted.trash.is_some() && original.is_file() {
+                if let Err(rollback) = move_to_trash(original) {
+                    tracing::warn!(
+                        "撤回曲目数据库写回失败，且无法回滚回收站文件 {}：{rollback:#}",
+                        original.display()
+                    );
+                }
+            }
+            return Err(error);
+        }
+        self.get(track.id)?.context("撤回后查不到曲目记录")
     }
 
     /// 把某个目录（含子目录）下的曲目从库里摘掉，**不动磁盘文件**。
@@ -971,6 +1260,70 @@ impl LibraryService {
         Ok(())
     }
 
+    /// 保存 BPM/Key v2，并在对应字段成功产出后退役 tracks 中的 v1 副本。
+    pub fn save_bpm_key_analysis_v2(&self, track_id: i64, result: &AnalysisResult) -> Result<()> {
+        let mut conn = self.db.conn()?;
+        let beat_times = serde_json::to_string(&result.beat_times).context("序列化 v2 拍点失败")?;
+        let chroma = serde_json::to_string(&result.chroma).context("序列化 v2 chroma 失败")?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO track_bpm_key_analysis_v2 (
+               track_id, analyzer_revision, bpm, bpm_raw, bpm_confidence, first_beat,
+               beat_times_json, music_key, key_short, camelot, open_key, key_confidence,
+               chroma_json, analyzed_at, analysis_error
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(track_id) DO UPDATE SET
+               analyzer_revision = excluded.analyzer_revision,
+               bpm = excluded.bpm,
+               bpm_raw = excluded.bpm_raw,
+               bpm_confidence = excluded.bpm_confidence,
+               first_beat = excluded.first_beat,
+               beat_times_json = excluded.beat_times_json,
+               music_key = excluded.music_key,
+               key_short = excluded.key_short,
+               camelot = excluded.camelot,
+               open_key = excluded.open_key,
+               key_confidence = excluded.key_confidence,
+               chroma_json = excluded.chroma_json,
+               analyzed_at = excluded.analyzed_at,
+               analysis_error = excluded.analysis_error",
+            rusqlite::params![
+                track_id,
+                BPM_KEY_V2_REVISION,
+                result.bpm,
+                result.bpm_raw,
+                result.bpm_confidence,
+                result.first_beat,
+                beat_times,
+                result.key,
+                result.key_short,
+                result.camelot.to_uppercase(),
+                result.open_key,
+                result.key_confidence,
+                chroma,
+                now_iso(),
+                result.errors.join("; "),
+            ],
+        )?;
+        // v1 只是迁移兜底。v2 某一类结果成功产出后，清掉对应旧列，避免永久保存两份。
+        // BPM 与 Key 分开判断，部分分析成功时仍保留另一类的 v1 兜底。
+        if result.bpm.is_some() {
+            tx.execute(
+                "UPDATE tracks SET bpm = NULL, bpm_confidence = NULL, first_beat = NULL WHERE id = ?",
+                [track_id],
+            )?;
+        }
+        if !result.key.is_empty() {
+            tx.execute(
+                "UPDATE tracks SET music_key = NULL, camelot = NULL, open_key = NULL, \
+                 key_confidence = NULL WHERE id = ?",
+                [track_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// 返回需要分析的 track id。
     ///
     /// **默认只挑 `analyzed_at IS NULL` 的**——这条是硬约束：Rust 版和 Python 版的
@@ -1020,6 +1373,88 @@ impl LibraryService {
             .iter()
             .copied()
             .filter(|id| found.contains(id) && seen.insert(*id))
+            .collect())
+    }
+
+    /// 返回需要生成当前 BPM/Key v2 修订的曲目 id。
+    ///
+    /// 和 v1 队列完全独立：已有 analyzed_at 的旧曲也会进入这里；成功写入当前修订
+    /// 后才退出。没传 id 时可限量，并从最近加入的曲目开始渐进回填。
+    pub fn pending_bpm_key_analysis_v2_ids(
+        &self,
+        track_ids: Option<&[i64]>,
+        force: bool,
+        limit: Option<usize>,
+        folder: Option<&str>,
+    ) -> Result<Vec<i64>> {
+        let conn = self.db.conn()?;
+        let needs_v2 = if force {
+            ""
+        } else {
+            " AND (v2.track_id IS NULL OR v2.analyzer_revision != ?)"
+        };
+
+        let Some(wanted) = track_ids else {
+            let folder = folder.map(str::trim).filter(|value| !value.is_empty());
+            let folder_clause = if folder.is_some() {
+                " AND tracks.path LIKE ? ESCAPE '\\'"
+            } else {
+                ""
+            };
+            let sql = format!(
+                "SELECT tracks.id FROM tracks
+                 LEFT JOIN track_bpm_key_analysis_v2 v2 ON v2.track_id = tracks.id
+                 WHERE 1 = 1{needs_v2}{folder_clause}
+                 ORDER BY tracks.added_at DESC, tracks.id DESC{}",
+                if limit.is_some() { " LIMIT ?" } else { "" }
+            );
+            let mut params: Vec<SqlValue> = Vec::new();
+            if !force {
+                params.push(SqlValue::Text(BPM_KEY_V2_REVISION.to_string()));
+            }
+            if let Some(folder) = folder {
+                let prefix = format!("{}{SEP}", normalize_path(Path::new(folder)));
+                params.push(SqlValue::Text(format!("{}%", escape_like(&prefix))));
+            }
+            if let Some(limit) = limit {
+                params.push(SqlValue::Integer(limit.clamp(1, 2000) as i64));
+            }
+            let mut stmt = conn.prepare(&sql)?;
+            return stmt
+                .query_map(rusqlite::params_from_iter(params.iter()), |row| row.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into);
+        };
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut found: std::collections::HashSet<i64> = Default::default();
+        for chunk in wanted.chunks(899) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT tracks.id FROM tracks
+                 LEFT JOIN track_bpm_key_analysis_v2 v2 ON v2.track_id = tracks.id
+                 WHERE tracks.id IN ({placeholders}){needs_v2}"
+            );
+            let mut params: Vec<SqlValue> = chunk.iter().copied().map(SqlValue::Integer).collect();
+            if !force {
+                params.push(SqlValue::Text(BPM_KEY_V2_REVISION.to_string()));
+            }
+            let mut stmt = conn.prepare(&sql)?;
+            for row in
+                stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| row.get(0))?
+            {
+                found.insert(row?);
+            }
+        }
+        let max = limit.unwrap_or(usize::MAX);
+        let mut seen: std::collections::HashSet<i64> = Default::default();
+        Ok(wanted
+            .iter()
+            .copied()
+            .filter(|id| found.contains(id) && seen.insert(*id))
+            .take(max)
             .collect())
     }
 
@@ -1077,9 +1512,10 @@ impl LibraryService {
                 (low * 2.0, high * 2.0),
                 (low / 2.0, high / 2.0),
             ];
+            let candidate_bpm = effective_bpm_key_column("bpm");
             bpm_clause = format!(
                 " AND ({})",
-                vec!["bpm BETWEEN ? AND ?"; ranges.len()].join(" OR ")
+                vec![format!("({candidate_bpm}) BETWEEN ? AND ?"); ranges.len()].join(" OR ")
             );
             for (lo, hi) in ranges {
                 params.push(SqlValue::Real(lo));
@@ -1096,8 +1532,9 @@ impl LibraryService {
             params.push(SqlValue::Text(format!("{}%", escape_like(&prefix))));
         }
 
+        let effective_camelot = effective_bpm_key_column("camelot");
         let mut stmt = conn.prepare(&format!(
-            "SELECT * FROM tracks WHERE UPPER(COALESCE(camelot, '')) IN ({placeholders}) \
+            "SELECT * FROM tracks WHERE UPPER(COALESCE(({effective_camelot}), '')) IN ({placeholders}) \
              AND id != ?{bpm_clause}{folder_clause}"
         ))?;
         let candidates: Vec<Track> = stmt
@@ -1105,7 +1542,7 @@ impl LibraryService {
                 Ok(row_to_track(row))
             })?
             .collect::<std::result::Result<_, _>>()?;
-        let candidates = self.attach_tags(&conn, candidates)?;
+        let candidates = self.attach_tags(&conn, self.apply_bpm_key_v2(&conn, candidates)?)?;
 
         let relation_of: HashMap<&str, HarmonicRelation> = relations
             .iter()
@@ -1154,7 +1591,7 @@ impl LibraryService {
                 })
         });
 
-        // 同一首歌常常在好几个 set 文件夹里各有一份（硬链接/拷贝），
+        // 同一首歌常常在好几个 set 文件夹里各有一份复制文件，
         // 不去重的话推荐列表会连着四行同一首。按 标题+艺人 归一后只留分数最高的；
         // 没有标题的退回文件名，免得一堆未打标签的被并成一条。
         let mut seen: std::collections::HashSet<(String, String)> = Default::default();
@@ -1183,16 +1620,25 @@ impl LibraryService {
 
     pub fn stats(&self) -> Result<LibraryStats> {
         let conn = self.db.conn()?;
-        let (total, analyzed, total_duration, total_size): (i64, i64, f64, i64) = conn.query_row(
-            "SELECT COUNT(*), SUM(CASE WHEN analyzed_at IS NOT NULL THEN 1 ELSE 0 END), \
-             COALESCE(SUM(duration), 0), COALESCE(SUM(size), 0) FROM tracks",
-            [],
+        let (total, analyzed, bpm_key_v2_analyzed, total_duration, total_size): (
+            i64,
+            i64,
+            i64,
+            f64,
+            i64,
+        ) = conn.query_row(
+            "SELECT COUNT(*), SUM(CASE WHEN tracks.analyzed_at IS NOT NULL THEN 1 ELSE 0 END),
+             SUM(CASE WHEN v2.analyzer_revision = ? THEN 1 ELSE 0 END),
+             COALESCE(SUM(tracks.duration), 0), COALESCE(SUM(tracks.size), 0)
+             FROM tracks LEFT JOIN track_bpm_key_analysis_v2 v2 ON v2.track_id = tracks.id",
+            [BPM_KEY_V2_REVISION],
             |row| {
                 Ok((
                     row.get(0)?,
                     row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                    row.get(2)?,
+                    row.get::<_, Option<i64>>(2)?.unwrap_or(0),
                     row.get(3)?,
+                    row.get(4)?,
                 ))
             },
         )?;
@@ -1243,10 +1689,11 @@ impl LibraryService {
 
         let mut raw_camelot: HashMap<String, i64> = HashMap::new();
         {
-            let mut stmt = conn.prepare(
-                "SELECT UPPER(camelot), COUNT(*) FROM tracks \
-                 WHERE camelot IS NOT NULL AND camelot != '' GROUP BY UPPER(camelot)",
-            )?;
+            let camelot = effective_bpm_key_column("camelot");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT UPPER({camelot}), COUNT(*) FROM tracks \
+                 WHERE ({camelot}) IS NOT NULL AND ({camelot}) != '' GROUP BY UPPER({camelot})"
+            ))?;
             for row in stmt.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })? {
@@ -1268,8 +1715,10 @@ impl LibraryService {
 
         let mut buckets: HashMap<String, i64> = HashMap::new();
         {
-            let mut stmt =
-                conn.prepare("SELECT bpm FROM tracks WHERE bpm IS NOT NULL AND bpm > 0")?;
+            let bpm = effective_bpm_key_column("bpm");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {bpm} FROM tracks WHERE ({bpm}) IS NOT NULL AND ({bpm}) > 0"
+            ))?;
             for row in stmt.query_map([], |row| row.get::<_, f64>(0))? {
                 *buckets.entry(bpm_bucket(row?)).or_insert(0) += 1;
             }
@@ -1300,6 +1749,9 @@ impl LibraryService {
         Ok(LibraryStats {
             total,
             analyzed,
+            bpm_key_v2_analyzed,
+            bpm_key_v2_pending: total.saturating_sub(bpm_key_v2_analyzed),
+            bpm_key_v2_revision: BPM_KEY_V2_REVISION.to_string(),
             total_duration,
             total_size,
             energy_median,
@@ -1325,11 +1777,7 @@ impl LibraryService {
 
     /// 只返回没有当前 canonical 波形、生成失败或源文件已变动的已分析曲目。
     /// 第一轮升级会为旧 JSON 缓存补状态；之后启动不再遍历整个缓存目录。
-    pub fn waveform_candidates(
-        &self,
-        profile: &str,
-        revision: i64,
-    ) -> Result<Vec<(i64, String)>> {
+    pub fn waveform_candidates(&self, profile: &str, revision: i64) -> Result<Vec<(i64, String)>> {
         let conn = self.db.conn()?;
         let mut stmt = conn.prepare(
             "SELECT tracks.id, tracks.path FROM tracks \
@@ -1424,11 +1872,10 @@ impl LibraryService {
         Ok(rows.into_iter().map(|(id, _)| id).collect())
     }
 
-    /// 把分析结果和人工标记复制到链接出来的那一份上。
+    /// 把分析结果和人工标记复制到复制出来的本地文件上。
     ///
-    /// 链接的两端是同一份音频，重新分析必然得到同样的 BPM / 调号，
-    /// 让用户为了一个链接再等一次分析没有道理。评分和备注一并带过去，
-    /// 因为在 DJ 眼里那就是"同一首歌"。
+    /// 复制文件的音频内容相同，重新分析没有必要；评分和备注也一并带过去，
+    /// 让文件夹分类不会丢失用户已经整理好的信息。
     pub fn clone_metadata(&self, source_id: i64, target_id: i64) -> Result<()> {
         const COLUMNS: &str = "title, artist, album, genre, year, duration, bitrate, \
              samplerate, channels, format, bpm, bpm_confidence, first_beat, music_key, camelot, \
@@ -1460,6 +1907,27 @@ impl LibraryService {
                 assignments.join(", ")
             ),
             rusqlite::params_from_iter(params.iter()),
+        )?;
+        conn.execute(
+            "INSERT INTO track_bpm_key_analysis_v2 (
+               track_id, analyzer_revision, bpm, bpm_raw, bpm_confidence, first_beat,
+               beat_times_json, music_key, key_short, camelot, open_key, key_confidence,
+               chroma_json, analyzed_at, analysis_error
+             )
+             SELECT ?, analyzer_revision, bpm, bpm_raw, bpm_confidence, first_beat,
+               beat_times_json, music_key, key_short, camelot, open_key, key_confidence,
+               chroma_json, analyzed_at, analysis_error
+             FROM track_bpm_key_analysis_v2 WHERE track_id = ?
+             ON CONFLICT(track_id) DO UPDATE SET
+               analyzer_revision = excluded.analyzer_revision,
+               bpm = excluded.bpm, bpm_raw = excluded.bpm_raw,
+               bpm_confidence = excluded.bpm_confidence, first_beat = excluded.first_beat,
+               beat_times_json = excluded.beat_times_json, music_key = excluded.music_key,
+               key_short = excluded.key_short, camelot = excluded.camelot,
+               open_key = excluded.open_key, key_confidence = excluded.key_confidence,
+               chroma_json = excluded.chroma_json, analyzed_at = excluded.analyzed_at,
+               analysis_error = excluded.analysis_error",
+            rusqlite::params![target_id, source_id],
         )?;
         conn.execute("DELETE FROM tags WHERE track_id = ?", [target_id])?;
         conn.execute(
@@ -1514,7 +1982,6 @@ fn row_to_track(row: &Row) -> Track {
             .parent()
             .map(|parent| parent.to_string_lossy().into_owned())
             .unwrap_or_default(),
-        link: crate::folders::link_state(Path::new(&path)),
         filename: text(row, "filename"),
         title: text(row, "title"),
         artist: text(row, "artist"),
@@ -1532,6 +1999,7 @@ fn row_to_track(row: &Row) -> Track {
             .flatten()
             .unwrap_or(0),
         bpm: row.get("bpm").ok().flatten(),
+        bpm_v2: false,
         bpm_confidence: row.get("bpm_confidence").ok().flatten(),
         first_beat: row.get("first_beat").ok().flatten(),
         music_key: text(row, "music_key"),
@@ -1611,53 +2079,6 @@ mod tests {
         LibraryService::new(Database::open_in_memory().unwrap())
     }
 
-    fn stream_source(key: &str) -> SongSource {
-        SongSource {
-            platform: kdj_core::models::Platform::Wyy,
-            key: key.into(),
-            title: "测试流".into(),
-            artists: vec!["测试作者".into()],
-            album: "测试专辑".into(),
-            duration: Some(120.0),
-            cover: String::new(),
-            max_quality: Some(kdj_core::models::Quality::Q128),
-            vip: false,
-            payload: Default::default(),
-        }
-    }
-
-    #[test]
-    fn stream_library_keeps_remote_sources_out_of_tracks_and_marks_downloads() {
-        let service = service();
-        let source = stream_source("stream-1");
-        let saved = service.add_stream_source(&source, ROOT).unwrap();
-        assert_eq!(saved.folder, ROOT);
-        assert!(!saved.downloaded);
-
-        let listed = service.list_stream_sources(ROOT).unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].source.key, "stream-1");
-        assert!(service.list_tracks(&TrackQuery::default()).unwrap().items.is_empty());
-
-        insert(
-            &service,
-            Row {
-                path: "/lib/stream-1.mp3",
-                ..Default::default()
-            },
-        );
-        let conn = service.db().conn().unwrap();
-        conn.execute(
-            "UPDATE tracks SET source_platform = 'wyy', source_key = 'stream-1' WHERE path = '/lib/stream-1.mp3'",
-            [],
-        )
-        .unwrap();
-        drop(conn);
-        assert!(service.list_stream_sources(ROOT).unwrap()[0].downloaded);
-        assert!(service.remove_stream_source(saved.id).unwrap());
-        assert!(service.list_stream_sources(ROOT).unwrap().is_empty());
-    }
-
     fn insert(service: &LibraryService, row: Row<'_>) -> i64 {
         let conn = service.db().conn().unwrap();
         let filename = Path::new(row.path)
@@ -1695,6 +2116,94 @@ mod tests {
 
     fn paths(page: &TrackPage) -> Vec<String> {
         page.items.iter().map(|t| t.path.clone()).collect()
+    }
+
+    #[test]
+    fn delete_undo_restores_the_file_metadata_tags_and_playlist_position() {
+        let base = std::env::temp_dir().join(format!("kdj-delete-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("song.mp3");
+        std::fs::write(&path, b"audio").unwrap();
+        let path_text = path.to_string_lossy().into_owned();
+        let service = service();
+        let id = insert(
+            &service,
+            Row {
+                path: &path_text,
+                title: "撤回测试",
+                camelot: "8A",
+                bpm: Some(128.0),
+                analyzed: true,
+            },
+        );
+        let conn = service.db().conn().unwrap();
+        conn.execute(
+            "INSERT INTO tags (track_id, tag) VALUES (?, ?)",
+            rusqlite::params![id, "favorite"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO playlist_items (playlist_id, track_id, position) VALUES (?, ?, ?)",
+            rusqlite::params![7, id, 3],
+        )
+        .unwrap();
+        drop(conn);
+
+        let (removed, snapshot) = service.delete_for_undo(id, FileDisposal::Keep).unwrap();
+        assert!(removed);
+        assert!(path.is_file(), "只移出曲库不应动文件");
+        assert!(service.get(id).unwrap().is_none());
+
+        let restored = service.restore_deleted(&snapshot.unwrap()).unwrap();
+        assert_eq!(restored.id, id);
+        assert_eq!(restored.title, "撤回测试");
+        assert_eq!(restored.camelot, "8A");
+        assert_eq!(restored.tags, vec!["favorite"]);
+        let position: i64 = service
+            .db()
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT position FROM playlist_items WHERE playlist_id = ? AND track_id = ?",
+                rusqlite::params![7, id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(position, 3);
+        assert!(path.is_file());
+        drop(service);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn trash_delete_undo_restores_the_original_file() {
+        let base = std::env::temp_dir().join(format!("kdj-trash-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("song.mp3");
+        std::fs::write(&path, b"audio").unwrap();
+        let path_text = path.to_string_lossy().into_owned();
+        let service = service();
+        let id = insert(
+            &service,
+            Row {
+                path: &path_text,
+                title: "回收站撤回测试",
+                ..Default::default()
+            },
+        );
+
+        let (removed, snapshot) = service.delete_for_undo(id, FileDisposal::Trash).unwrap();
+        assert!(removed);
+        assert!(!path.exists());
+        let snapshot = snapshot.expect("macOS 回收站应返回实际文件位置");
+        service.restore_deleted(&snapshot).unwrap();
+        assert!(path.is_file());
+        assert_eq!(service.get(id).unwrap().unwrap().title, "回收站撤回测试");
+        drop(service);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1927,9 +2436,27 @@ mod tests {
         let keep = format!("{ROOT}{SEP}keep.mp3");
         let gone_a = format!("{ROOT}{SEP}set{SEP}a.mp3");
         let gone_b = format!("{ROOT}{SEP}set{SEP}nested{SEP}b.mp3");
-        insert(&service, Row { path: &keep, ..Default::default() });
-        insert(&service, Row { path: &gone_a, ..Default::default() });
-        insert(&service, Row { path: &gone_b, ..Default::default() });
+        insert(
+            &service,
+            Row {
+                path: &keep,
+                ..Default::default()
+            },
+        );
+        insert(
+            &service,
+            Row {
+                path: &gone_a,
+                ..Default::default()
+            },
+        );
+        insert(
+            &service,
+            Row {
+                path: &gone_b,
+                ..Default::default()
+            },
+        );
 
         let folder = format!("{ROOT}{SEP}set");
         let removed = service.forget_under(Path::new(&folder)).unwrap();
@@ -2009,7 +2536,10 @@ mod tests {
         let titles: Vec<&str> = page.items.iter().map(|t| t.title.as_str()).collect();
         // 128 的三首排在前面（bpm desc），它们内部按 camelot 升序：1A < 8A < 10A。
         // 注意 10A 排在 8A **后面**——camelot 是拆成数字排的，不是字符串排的
-        assert_eq!(titles, vec!["c-128-1A", "b-128-8A", "a-128-10A", "d-120-5A"]);
+        assert_eq!(
+            titles,
+            vec!["c-128-1A", "b-128-8A", "a-128-10A", "d-120-5A"]
+        );
 
         // 副键和主键相同要被忽略，而不是拼出一条重复的 ORDER BY
         let same = service
@@ -2326,8 +2856,18 @@ mod tests {
     }
 
     #[test]
-    fn changing_the_cover_also_syncs_the_stored_mtime() {
+    fn changing_the_cover_also_syncs_the_stored_mtime_and_cache_version() {
         let (service, id, path) = scratch_track("cover");
+        service
+            .db()
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE tracks SET modified_at = ? WHERE id = ?",
+                rusqlite::params!["2000-01-01T00:00:00Z", id],
+            )
+            .unwrap();
+        let before_modified = service.get(id).unwrap().unwrap().modified_at;
         let before = stored_mtime(&service, &path);
 
         let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -2345,11 +2885,21 @@ mod tests {
         );
         let after = stored_mtime(&service, &path);
         assert!(after > before && (after - disk_mtime(&path)).abs() < 1e-6);
+        let after_modified = service.get(id).unwrap().unwrap().modified_at;
+        assert_ne!(
+            after_modified, before_modified,
+            "换封面要让列表缩略图 URL 失效"
+        );
 
-        // 认不出格式的图要挡在写之前；此时文件没动过，mtime 也不该变
+        // 认不出格式的图要挡在写之前；此时文件没动过，mtime 和缓存版本也不该变
         let steady = stored_mtime(&service, &path);
+        let steady_modified = service.get(id).unwrap().unwrap().modified_at;
         assert!(service.write_cover_to_file(id, b"GIF89a").is_err());
         assert!((stored_mtime(&service, &path) - steady).abs() < 1e-6);
+        assert_eq!(
+            service.get(id).unwrap().unwrap().modified_at,
+            steady_modified
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -2412,6 +2962,181 @@ mod tests {
         assert_eq!(all, vec![a, c], "不传 id 时按 id 排");
         assert!(service
             .pending_analysis_ids(Some(&[]), false)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn bpm_key_v2_backfill_is_versioned_preferred_and_retires_matching_v1_fields() {
+        let service = service();
+        let a = insert(
+            &service,
+            Row {
+                path: "/lib/v2-a.mp3",
+                camelot: "8A",
+                bpm: Some(120.0),
+                analyzed: true,
+                ..Default::default()
+            },
+        );
+        let b = insert(
+            &service,
+            Row {
+                path: "/lib/focus/v2-b.mp3",
+                camelot: "8A",
+                bpm: Some(121.0),
+                analyzed: true,
+                ..Default::default()
+            },
+        );
+        let conn = service.db().conn().unwrap();
+        conn.execute(
+            "UPDATE tracks SET music_key = 'A minor', energy = 7 WHERE id IN (?, ?)",
+            rusqlite::params![a, b],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            service
+                .pending_bpm_key_analysis_v2_ids(None, false, Some(1), None)
+                .unwrap(),
+            vec![b],
+            "全库回填应限量并优先最近加入的曲目"
+        );
+        assert_eq!(
+            service
+                .pending_bpm_key_analysis_v2_ids(None, false, Some(20), Some("/lib/focus"))
+                .unwrap(),
+            vec![b],
+            "打开文件夹时应先只挑该目录子树里的 v2 待处理项"
+        );
+
+        let result = AnalysisResult {
+            bpm: Some(126.25),
+            bpm_raw: Some(126.247),
+            bpm_confidence: Some(0.91),
+            first_beat: Some(0.125),
+            beat_times: vec![0.125, 0.6004],
+            key: "E minor".into(),
+            key_short: "Em".into(),
+            camelot: "9A".into(),
+            open_key: "4m".into(),
+            key_confidence: Some(0.88),
+            chroma: vec![0.1, 0.2, 0.3],
+            ..Default::default()
+        };
+        service.save_bpm_key_analysis_v2(b, &result).unwrap();
+
+        let conn = service.db().conn().unwrap();
+        let raw_v1: (Option<f64>, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT bpm, music_key, energy FROM tracks WHERE id = ?",
+                [b],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            raw_v1,
+            (None, None, Some(7)),
+            "只退役旧 BPM/Key，不删响度能量"
+        );
+        let stored: (String, String, String) = conn
+            .query_row(
+                "SELECT analyzer_revision, beat_times_json, chroma_json
+                 FROM track_bpm_key_analysis_v2 WHERE track_id = ?",
+                [b],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(stored.0, BPM_KEY_V2_REVISION);
+        assert_eq!(stored.1, "[0.125,0.6004]");
+        assert_eq!(stored.2, "[0.1,0.2,0.3]");
+        drop(conn);
+
+        let effective = service.get(b).unwrap().unwrap();
+        assert_eq!(effective.bpm, Some(126.25));
+        assert!(effective.bpm_v2, "当前修订的 V2 BPM 覆盖后要显式标记来源");
+        assert_eq!(effective.music_key, "E minor");
+        assert_eq!(effective.camelot, "9A");
+        assert_eq!(effective.energy, Some(7));
+
+        let filtered = service
+            .list_tracks(&TrackQuery {
+                key: "9A".into(),
+                bpm_min: Some(126.0),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            filtered
+                .items
+                .iter()
+                .map(|track| track.id)
+                .collect::<Vec<_>>(),
+            vec![b]
+        );
+
+        let stats = service.stats().unwrap();
+        assert_eq!(stats.bpm_key_v2_analyzed, 1);
+        assert_eq!(stats.bpm_key_v2_pending, 1);
+        assert_eq!(stats.bpm_key_v2_revision, BPM_KEY_V2_REVISION);
+        assert_eq!(stats.by_camelot.get("9A"), Some(&1));
+        assert_eq!(stats.by_bpm_bucket.get("120-129"), Some(&2));
+        assert_eq!(
+            service
+                .pending_bpm_key_analysis_v2_ids(Some(&[b, a, b]), false, None, None)
+                .unwrap(),
+            vec![a],
+            "当前修订已经完成的曲目不能重复排队"
+        );
+
+        service
+            .db()
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE track_bpm_key_analysis_v2 SET analyzer_revision = 'old' WHERE track_id = ?",
+                [b],
+            )
+            .unwrap();
+        assert_eq!(
+            service
+                .pending_bpm_key_analysis_v2_ids(Some(&[a, b]), false, None, None)
+                .unwrap(),
+            vec![a, b],
+            "算法修订变化后旧 v2 行必须重新进入回填"
+        );
+    }
+
+    #[test]
+    fn empty_v2_result_marks_completion_but_keeps_v1_fallback() {
+        let service = service();
+        let id = insert(
+            &service,
+            Row {
+                path: "/lib/v2-error.mp3",
+                camelot: "7B",
+                bpm: Some(110.0),
+                analyzed: true,
+                ..Default::default()
+            },
+        );
+        service
+            .save_bpm_key_analysis_v2(
+                id,
+                &AnalysisResult {
+                    errors: vec!["decode: broken".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let track = service.get(id).unwrap().unwrap();
+        assert_eq!(track.bpm, Some(110.0));
+        assert_eq!(track.camelot, "7B");
+        assert!(service
+            .pending_bpm_key_analysis_v2_ids(Some(&[id]), false, None, None)
             .unwrap()
             .is_empty());
     }
@@ -2515,7 +3240,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        // 同一首歌在两个 set 里各一份（硬链接），推荐列表里只该出现一次
+        // 同一首歌在两个 set 里各一份复制文件，推荐列表里只该出现一次
         insert(
             &service,
             Row {
@@ -2558,7 +3283,9 @@ mod tests {
             },
         );
 
-        let matches = service.harmonic_matches(source, 6.0, 50, false, "").unwrap();
+        let matches = service
+            .harmonic_matches(source, 6.0, 50, false, "")
+            .unwrap();
         let titles: Vec<&str> = matches.iter().map(|m| m.track.title.as_str()).collect();
         assert_eq!(titles, vec!["EMOTION"]);
         assert_eq!(matches[0].relation, HarmonicRelation::EnergyUp);
@@ -2574,7 +3301,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        let matches = service.harmonic_matches(source, 6.0, 50, false, "").unwrap();
+        let matches = service
+            .harmonic_matches(source, 6.0, 50, false, "")
+            .unwrap();
         let half = matches.iter().find(|m| m.track.title == "half").unwrap();
         assert_eq!(half.tempo_ratio, 2.0);
         assert_eq!(half.bpm_delta, 0.0);

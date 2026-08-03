@@ -78,6 +78,21 @@
   --kd-pop-ease: cubic-bezier(0.2, 0.9, 0.3, 1);
 }
 
+/* 在线详情沿用本地详情的紧凑顶部，只补充外链封面的填充与来源事实换行。 */
+.kd-stream-detail-cover {
+  display: grid;
+  place-items: center;
+}
+.kd-stream-detail-cover-image {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+.kd-stream-detail-facts {
+  flex-wrap: wrap;
+}
+
 :root[data-theme="light"] {
   color-scheme: light;
   --kd-text: #1c1c1e;
@@ -672,11 +687,11 @@ textarea {
   border-right: 1px solid var(--kd-line);
   background: var(--kd-panel);
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: hidden;
 }
 /* Mac 红绿灯安全区改由 .kd-tree-chrome（--kd-chrome-top）统一占位，
    这里不再额外垫高，否则「添加」会比中/右栏正文矮一截。 */
-.kd-narrow-folder-rail > button {
+.kd-narrow-folder-rail button {
   appearance: none;
   flex: none;
   width: 3.2rem;
@@ -693,7 +708,7 @@ textarea {
   color: var(--kd-muted);
   cursor: pointer;
 }
-.kd-narrow-folder-rail > button small {
+.kd-narrow-folder-rail button small {
   display: block;
   max-width: 2.9rem;
   overflow: hidden;
@@ -703,14 +718,37 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.kd-narrow-folder-rail > button:hover {
+.kd-narrow-folder-rail button:hover {
   color: var(--kd-text);
   background: var(--kd-hover);
 }
-.kd-narrow-folder-rail > button[data-active="true"] {
+.kd-narrow-folder-rail button[data-active="true"] {
   color: var(--kd-text);
   background: var(--kd-selected);
   box-shadow: none;
+}
+.kd-narrow-stream-sources,
+.kd-narrow-local-sources {
+  width: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.18rem;
+}
+.kd-narrow-stream-sources {
+  flex: none;
+}
+.kd-narrow-local-sources {
+  flex: 1 1 auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.kd-narrow-stream-sources button[data-stream-platform="wyy"] > svg {
+  color: #e02020;
+}
+.kd-narrow-stream-sources button[data-stream-platform="qqm"] > svg {
+  color: #31c27c;
 }
 .kd-narrow-rail-sep {
   flex: none;
@@ -1233,6 +1271,17 @@ textarea {
   letter-spacing: -0.03em;
   line-height: 1.05;
 }
+.kd-analysis-metric-value[data-with-version="true"] {
+  display: flex;
+  align-items: baseline;
+  gap: 0.3rem;
+}
+.kd-analysis-version {
+  color: var(--kd-faint);
+  font-size: 0.58rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+}
 .kd-analysis-metric-value .kd-loudness-number {
   min-width: 0;
   font-size: inherit;
@@ -1249,6 +1298,7 @@ textarea {
 .kd-analysis-meter {
   --kd-meter: 0%;
   position: relative;
+  width: clamp(3.25rem, 38%, 5.5rem);
   height: 3px;
   margin-top: 0.2rem;
   background: color-mix(in oklab, var(--kd-line) 70%, transparent);
@@ -1382,7 +1432,7 @@ textarea {
   min-height: 0;
 }
 
-/* 中间栏对半：平时一整块曲库；搜歌时左半本地、右半结果。 */
+/* 中间主区：分屏时本地与在线并排；单屏时当前面独占。 */
 .kd-middle-split {
   flex: 1;
   min-height: 0;
@@ -1390,8 +1440,22 @@ textarea {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
 }
-.kd-middle-split[data-search="true"] {
+.kd-middle-split[data-view="split"] {
   grid-template-columns: minmax(3rem, var(--kd-local-share, 50%)) 1px minmax(8rem, 1fr);
+}
+/* 关闭分屏后只留当前面板。另一面只在视觉上隐藏，搜索结果与勾选现场不卸载。 */
+.kd-middle-split[data-view="local"],
+.kd-middle-split[data-view="search"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+.kd-middle-split[data-view="local"] > .kd-middle-search,
+.kd-middle-split[data-view="local"] > .kd-middle-divider,
+.kd-middle-split[data-view="search"] > .kd-middle-local,
+.kd-middle-split[data-view="search"] > .kd-middle-divider {
+  display: none;
+}
+.kd-middle-split[data-view="search"] > .kd-middle-search {
+  grid-column: 1;
 }
 .kd-middle-local,
 .kd-middle-search {
@@ -1406,6 +1470,16 @@ textarea {
 .kd-middle-local > .kd-scroll,
 .kd-middle-search > .kd-scroll {
   background: var(--kd-panel);
+}
+.kd-middle-search > .kd-scroll {
+  position: relative;
+}
+.kd-search-loading {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  min-height: 0;
+  padding: 0;
 }
 .kd-local-search-drop-overlay {
   position: absolute;
@@ -1606,7 +1680,9 @@ textarea {
   border-bottom: 1px solid var(--kd-line);
 }
 .kd-search-band > .kd-search-command {
-  width: 100%;
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
   margin: 0;
   padding: 0;
 }
@@ -2679,12 +2755,6 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   max-width: 14rem;
 }
 
-.kd-link-mark {
-  display: inline-flex;
-  vertical-align: -1px;
-  margin-right: 0.3rem;
-  color: var(--kd-muted);
-}
 /* 批量结果的包含关系：父行是一个"包"（歌单 / 专辑 / 一次关键词搜索），
    子行缩进并挂一条肘形导引线。用绝对定位的伪元素画线而不是 border-left，
    线才只出现在缩进区里，不会把整行的下边框切断。 */
@@ -2701,20 +2771,49 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   justify-content: flex-end;
   gap: 0.65rem;
 }
-/* 结果行首：下载 + 展开。宽度跟 col/表头拖动走，不在 tbody 上写死。 */
+/* 在线结果行首与本地曲库一致只显示序号。下载仍保留在右键菜单、详情和批量动作中。 */
 .kd-table tbody td.kd-result-lead {
-  padding: 0 0.15rem;
+  padding: 0 0.35rem;
   overflow: visible;
   vertical-align: middle;
+  color: var(--kd-faint);
+  text-align: right;
 }
-.kd-result-lead-actions {
+.kd-table[data-kind="results"] [data-col="index"] {
+  padding-left: 0.35rem;
+  padding-right: 0.35rem;
+}
+.kd-result-index {
+  font-variant-numeric: tabular-nums;
+}
+/* 多来源展开属于歌曲标题，不再占用（或伪装成）独立下载列。 */
+.kd-result-source-toggle {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  margin: 0 0.2rem 0 -0.2rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+  vertical-align: -0.25rem;
+}
+.kd-result-source-toggle:hover {
+  color: var(--kd-theme);
+}
+/* 批量关键词结果仍有一行包头，它的唯一行首动作是展开/收起；限定作用域，
+   防止这套动作格重新渗回普通在线曲目的序号列。 */
+.kd-table tr[data-tree="parent"] .kd-result-lead-actions {
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
   gap: 0.05rem;
   min-width: 0;
 }
-.kd-result-lead-btn {
+.kd-table tr[data-tree="parent"] .kd-result-lead-btn {
   appearance: none;
   flex: none;
   width: 1.55rem;
@@ -2727,10 +2826,10 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   color: var(--kd-muted);
   cursor: pointer;
 }
-button.kd-result-lead-btn:hover {
+.kd-table tr[data-tree="parent"] .kd-result-lead-btn:hover {
   color: var(--kd-theme);
 }
-.kd-result-lead-spacer {
+.kd-table tr[data-tree="parent"] .kd-result-lead-spacer {
   flex: none;
   width: 1.55rem;
   height: 1.55rem;
@@ -3234,10 +3333,6 @@ button.kd-result-lead-btn:hover {
   grid-template-columns: minmax(0, 1fr) 4.75rem;
   text-align: right;
 }
-/* 左盘在线试听：曲名列旁再挤一列「加入列表」键。 */
-.kd-player-deck[data-side="left"][data-enqueue="true"] {
-  grid-template-columns: 4.75rem minmax(0, 1fr) 1.7rem;
-}
 .kd-player-deck[data-side="left"] .kd-player-disc {
   grid-column: 1;
   grid-row: 1 / 3;
@@ -3245,12 +3340,6 @@ button.kd-result-lead-btn:hover {
 .kd-player-deck[data-side="left"] .kd-player-deck-copy {
   grid-column: 2;
   grid-row: 1;
-}
-.kd-player-deck[data-side="left"] .kd-player-enqueue {
-  grid-column: 3;
-  /* 与中间走带键同一水平中线；别贴在文案块底边往下掉。 */
-  grid-row: 1;
-  align-self: center;
 }
 .kd-player-deck[data-side="right"] .kd-player-disc {
   grid-column: 2;
@@ -3534,6 +3623,46 @@ button.kd-result-lead-btn:hover {
 .kd-wave-fallback-fill[data-error="true"] {
   background: var(--kd-warn);
 }
+/* 在线波形的未知区域仍应是一条可读的流媒体进度轨，而不是一根死灰线。
+   已缓冲段稍亮；真实 analyser 柱由 canvas 叠在上面。 */
+.kd-wave-stream-bed {
+  position: absolute;
+  inset: 0 0.15rem;
+  display: block;
+  pointer-events: none;
+}
+.kd-wave-stream-bed::before,
+.kd-wave-stream-bed > i {
+  position: absolute;
+  top: 50%;
+  height: 5px;
+  border-radius: 999px;
+  transform: translateY(-50%);
+}
+.kd-wave-stream-bed::before {
+  content: "";
+  left: 0;
+  right: 0;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--kd-theme) 18%, var(--kd-panel-raised)),
+    color-mix(in srgb, #6788ff 22%, var(--kd-panel-raised)),
+    color-mix(in srgb, #a36dff 18%, var(--kd-panel-raised))
+  );
+  box-shadow: inset 0 1px color-mix(in srgb, white 42%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--kd-theme) 7%, transparent);
+}
+.kd-wave-stream-bed > i {
+  z-index: 1;
+  min-width: 2px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--kd-theme) 46%, #79a8ff),
+    color-mix(in srgb, #7c6fff 48%, var(--kd-theme))
+  );
+  box-shadow: 0 0 7px color-mix(in srgb, var(--kd-theme) 18%, transparent);
+  opacity: 0.72;
+}
 /* 在线试听没有分析波形：一条可点击进度条顶上。 */
 .kd-player-wave-stream {
   flex: 1 1 auto;
@@ -3542,41 +3671,28 @@ button.kd-result-lead-btn:hover {
   height: 6px;
   align-self: center;
   border-radius: 999px;
-  background: var(--kd-line);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--kd-theme) 18%, var(--kd-panel-raised)),
+    color-mix(in srgb, #6788ff 22%, var(--kd-panel-raised)),
+    color-mix(in srgb, #a36dff 18%, var(--kd-panel-raised))
+  );
+  box-shadow: inset 0 1px color-mix(in srgb, white 42%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--kd-theme) 7%, transparent);
   cursor: pointer;
   overflow: hidden;
 }
 .kd-player-wave-stream-fill {
   display: block;
   height: 100%;
-  background: var(--kd-theme);
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--kd-theme) 66%, #8ac7ff),
+    color-mix(in srgb, #7c6fff 52%, var(--kd-theme))
+  );
+  box-shadow: 0 0 7px color-mix(in srgb, var(--kd-theme) 24%, transparent);
 }
-/* 左盘曲名旁：只入队，不立刻下载；尺寸与走带键对齐。 */
-.kd-player-enqueue {
-  appearance: none;
-  display: grid;
-  place-items: center;
-  width: 1.7rem;
-  height: 1.7rem;
-  padding: 0;
-  border: none;
-  border-radius: 0;
-  background: transparent;
-  color: var(--kd-muted);
-  cursor: pointer;
-  transition: color 0.12s;
-}
-.kd-player-enqueue:hover:not(:disabled) {
-  color: var(--kd-text);
-}
-.kd-player-enqueue:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-.kd-player-enqueue > svg {
-  color: inherit;
-}
-
 /* 网络视频画中画 / 自研浮动小窗 */
 .kd-pip-host[data-idle="true"] .kd-pip-shell,
 .kd-pip-host:not([data-floating="true"]) .kd-pip-shell {
@@ -4330,6 +4446,21 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   opacity: 0.4;
   cursor: default;
 }
+/* 右侧详情只靠图标形态表达开合，不再画主题色竖边或包裹轮廓。 */
+.kd-activity-search-toggle[data-action="toggle-aside"] {
+  color: var(--kd-text-body);
+  background: transparent;
+  box-shadow: none;
+}
+.kd-activity-search-toggle[data-action="toggle-aside"][data-open="true"] {
+  color: var(--kd-text-body);
+  background: transparent;
+  box-shadow: none;
+}
+.kd-activity-search-toggle[data-action="toggle-aside"]:hover:not(:disabled) {
+  color: var(--kd-text);
+  background: transparent;
+}
 /* 展开态：整条就是搜索，不再另套加深色块或描边。 */
 .kd-activity-search {
   flex: 1 1 auto;
@@ -4414,6 +4545,15 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   min-width: 1.75rem;
   height: 1.75rem;
   padding: 0;
+}
+/* 收起结果使用中性的列表折叠图标，不伪装成侧栏开合键。 */
+.kd-activity-actions .kd-chrome-btn[data-action="dismiss-results"] {
+  border-radius: 0.25rem !important;
+  color: var(--kd-muted);
+}
+.kd-activity-actions .kd-chrome-btn[data-action="dismiss-results"]:hover {
+  background: var(--kd-hover);
+  color: var(--kd-text);
 }
 .kd-activity-text {
   min-width: 0;
@@ -4844,6 +4984,119 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   overflow: hidden;
 }
 
+/* 详情里的封面是一个明确的 [+] 投放框：图片上传和曲目复用共用同一落点。 */
+.kd-cover-edit-stack {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  width: 76px;
+}
+.kd-cover-edit {
+  position: relative;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.kd-cover-edit[data-dropping="true"],
+.kd-cover-edit[data-kd-pointer-track-over="cover"] {
+  border-color: var(--kd-theme) !important;
+  box-shadow: 0 0 0 2px var(--kd-theme-soft);
+}
+.kd-cover-edit[data-cover-empty="true"] {
+  overflow: hidden;
+  border-style: dashed;
+  border-color: var(--kd-line);
+  background: var(--kd-panel-inset);
+  box-shadow: var(--kd-shadow);
+}
+.kd-cover-edit[data-cover-empty="true"] > .kd-vinyl-placeholder {
+  opacity: 0.42;
+}
+.kd-cover-plus {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  display: grid;
+  place-items: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  color: var(--kd-text);
+  background: color-mix(in srgb, var(--kd-panel) 88%, transparent);
+  border: 1px solid var(--kd-line);
+  box-shadow: var(--kd-shadow);
+  pointer-events: none;
+}
+.kd-cover-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--kd-line-soft);
+}
+.kd-cover-tools-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: var(--kd-size-sm);
+}
+.kd-cover-drop-panel {
+  min-height: 2.35rem;
+  padding: 0.4rem;
+  border: 1px dashed var(--kd-line);
+  background: var(--kd-panel-inset);
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.kd-cover-drop-panel[data-dropping="true"],
+.kd-cover-drop-panel[data-kd-pointer-track-over="cover"] {
+  border-color: var(--kd-theme);
+  box-shadow: 0 0 0 2px var(--kd-theme-soft);
+}
+.kd-cover-candidates {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.35rem;
+}
+.kd-cover-candidate {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 0.45rem;
+  padding: 0.3rem;
+  color: var(--kd-text-body);
+  text-align: left;
+  background: var(--kd-panel);
+  border: 1px solid var(--kd-line);
+  cursor: pointer;
+}
+.kd-cover-candidate:hover:not(:disabled),
+.kd-cover-candidate:focus-visible {
+  border-color: var(--kd-theme);
+  background: var(--kd-hover);
+}
+.kd-cover-candidate:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+.kd-cover-candidate-image {
+  width: 2.8rem;
+  height: 2.8rem;
+  flex: none;
+  object-fit: cover;
+}
+.kd-cover-candidate-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.1rem;
+  font-size: var(--kd-size-xs);
+}
+.kd-cover-candidate-copy strong {
+  color: var(--kd-theme);
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
 /* 播放条的双唱盘：圆形封面是唱片标签，黑色外圈保留黑胶纹。没有中心孔——
    这里表达的是两台 deck 的状态，不再用方封面做“换歌”位移动画。 */
 .kd-player-disc {
@@ -5133,11 +5386,11 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   background: var(--kd-theme);
   color: #fff;
 }
-.kd-narrow-folder-rail > button[data-drop="true"] {
+.kd-narrow-folder-rail button[data-drop="true"] {
   background: var(--kd-selected);
   color: var(--kd-text);
 }
-.kd-narrow-folder-rail > button[data-kd-pointer-track-over="folder"] {
+.kd-narrow-folder-rail button[data-kd-pointer-track-over="folder"] {
   background: var(--kd-selected);
   color: var(--kd-text);
 }
@@ -5263,7 +5516,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .kd-nowrap { white-space: nowrap; }
 
-/* 视频和硬链接都是文件属性：用同尺寸图标并列在封面后、标题前。 */
+/* 视频标记是本地文件的属性：用同尺寸图标放在封面后、标题前。 */
 .kd-video-mark {
   display: inline-flex;
   align-items: center;
@@ -5355,7 +5608,7 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   background: var(--kd-hover);
 }
 
-/* 一键搜索：提供商条 + 预设词 + 一次提交。关键词走 .kd-opts/.kd-opt。 */
+/* Explore：提供商条 + 预设词 + 一次提交。关键词走 .kd-opts/.kd-opt。 */
 .kd-explore {
   display: flex;
   flex-direction: column;
@@ -5830,21 +6083,25 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 }
 .kd-search-kind {
   appearance: none;
-  height: 1.75rem;
-  max-width: 3.6rem;
-  padding: 0 0.18rem;
+  flex: none;
+  width: auto;
+  min-width: 0;
+  height: 1.5rem;
+  padding: 0 0.08rem;
   border: none;
-  border-bottom: 1px solid var(--kd-line);
   background: transparent;
   color: var(--kd-muted);
-  font-size: 0.72rem;
+  font-family: inherit;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
   outline: none;
 }
 .kd-search-kind:hover,
 .kd-search-kind:focus-visible {
   color: var(--kd-text-body);
-  border-bottom-color: var(--kd-theme);
 }
 .kd-searchbar-sep {
   grid-column: 2;
@@ -5901,6 +6158,12 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 }
 .kd-chrome-btn[data-open="true"]:hover {
   color: var(--kd-text-body);
+}
+.kd-chrome-btn[data-action="middle-split"][data-active="true"] {
+  color: var(--kd-theme);
+}
+.kd-chrome-btn[data-action="middle-split"][data-active="true"]:hover {
+  color: var(--kd-theme-strong);
 }
 .kd-chrome-actions > .kd-chrome-btn[data-update="true"] {
   /* 图标色跟旁边一致；有更新只靠角点提示。 */
@@ -6166,15 +6429,8 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   column-gap: 0.45rem;
   align-items: center;
 }
-.kd-app[data-portrait="true"] .kd-player-deck[data-side="left"][data-enqueue="true"] {
-  grid-template-columns: 3.15rem minmax(0, 1fr) 1.7rem;
-}
 .kd-app[data-portrait="true"] .kd-player-deck[data-side="right"] {
   grid-template-columns: minmax(0, 1fr) 3.15rem;
-}
-.kd-app[data-portrait="true"] .kd-player-deck[data-side="left"] .kd-player-enqueue {
-  grid-row: 1;
-  align-self: center;
 }
 /* 桌面唱盘 disc 跨两行给波形留空；竖屏只有一行，再写 1 / 3 会撑出隐式行，
    三行字（状态 / 标题 / 艺人）就被裁成一团。 */
@@ -6560,6 +6816,25 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   display: flex;
   flex-direction: column;
   gap: 0.05rem;
+}
+.kd-stream-cache-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  min-width: 0;
+  padding: 0.12rem 0 0.18rem;
+  font-size: var(--kd-size-xs);
+}
+.kd-stream-cache-row > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-stream-cache-row .kd-btn {
+  flex: none;
+  gap: 0.25rem;
 }
 /* 整行可点：左侧名称，右侧「开/关」字态，不走滑钮形态。 */
 .kd-djp-toggle {
@@ -7023,4 +7298,92 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   color: var(--kd-lyrics-soft);
   font-size: 0.9rem;
   letter-spacing: 0.02em;
+}
+
+/* 远程歌单只借用文件夹树的行高/选中态；这些类不影响真实磁盘目录。 */
+.kd-stream-root,
+.kd-stream-section {
+  min-width: 0;
+}
+.kd-folder-stream-root {
+  cursor: pointer;
+}
+.kd-folder-stream-root:focus-visible {
+  outline: 1px solid var(--kd-theme);
+  outline-offset: -1px;
+}
+.kd-folder-stream-root > svg,
+.kd-folder-stream-playlist > svg,
+.kd-stream-status > svg {
+  flex: none;
+}
+.kd-folder-stream-root[data-stream-platform="wyy"] > svg {
+  color: #e02020;
+}
+.kd-folder-stream-root[data-stream-platform="qqm"] > svg {
+  color: #31c27c;
+}
+.kd-folder-stream-root:focus-within .kd-folder-more {
+  display: inline-flex;
+}
+.kd-stream-refresh:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+.kd-stream-section-label {
+  padding-left: 1.15rem;
+  color: var(--kd-text-body);
+  font-size: var(--kd-size-sm);
+  font-weight: 400;
+  letter-spacing: normal;
+}
+.kd-stream-section-label .kd-folder-caret {
+  width: 0.9rem;
+}
+.kd-stream-section-label > svg {
+  flex: none;
+  color: var(--kd-muted);
+}
+.kd-folder-stream-playlist {
+  padding-left: 2.05rem;
+  cursor: pointer;
+}
+.kd-folder-stream-playlist-direct {
+  padding-left: 1.15rem;
+}
+.kd-folder-stream-playlist[data-stream-platform="wyy"] > svg {
+  color: color-mix(in srgb, #e02020 68%, var(--kd-muted));
+}
+.kd-folder-stream-playlist[data-stream-platform="qqm"] > svg {
+  color: color-mix(in srgb, #31c27c 68%, var(--kd-muted));
+}
+.kd-stream-status {
+  padding-left: 1.2rem;
+  color: var(--kd-muted);
+  cursor: default;
+}
+button.kd-stream-status {
+  cursor: pointer;
+}
+.kd-stream-error {
+  color: var(--kd-warn);
+}
+.kd-stream-inline-action {
+  flex: none;
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+  cursor: pointer;
+}
+.kd-stream-inline-action:hover:not(:disabled) {
+  text-decoration: underline;
+}
+.kd-stream-inline-action:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }

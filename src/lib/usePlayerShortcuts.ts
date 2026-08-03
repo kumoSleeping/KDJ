@@ -9,7 +9,7 @@ const SEEK_STEP_LARGE = 15;
 const VOLUME_STEP = 0.05;
 
 export interface PlayerShortcutHandlers {
-  togglePlay(): void;
+  togglePlay(source?: "media-key"): void;
   /** 相对当前位置跳转；正数快进，负数快退。 */
   seekBy(delta: number): void;
   nudgeVolume(delta: number): void;
@@ -49,7 +49,7 @@ export function usePlayerShortcuts(handlers: PlayerShortcutHandlers): void {
 
       if (key === " " || key === "MediaPlayPause") {
         event.preventDefault();
-        api.togglePlay();
+        api.togglePlay(key === "MediaPlayPause" ? "media-key" : undefined);
         return;
       }
 

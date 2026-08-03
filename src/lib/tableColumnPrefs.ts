@@ -10,6 +10,24 @@ export interface TableColumnPrefs {
   widths: Record<string, string>;
 }
 
+/**
+ * 一张表自己的列 schema。
+ *
+ * `columnKeys` 只包含可换序 / 显隐的数据列；固定在左侧的序号列等只放进
+ * `widthKeys`。这样曲库表与在线结果表即使都有 title / artist，也只会在各自
+ * storage key 和各自 schema 内恢复，旧存档里已经删除或来自别张表的 key 会被丢掉。
+ */
+export interface TableColumnPrefsSchema {
+  columnKeys: readonly string[];
+  widthKeys?: readonly string[];
+  /** 永远不准藏的数据列。 */
+  lockedVisible?: readonly string[];
+  /** 每列允许的最小宽度；没写时只要求大于 0。 */
+  minWidths?: Readonly<Record<string, string>>;
+  /** 防止损坏的存档把表格撑到不可操作；正常拖拽远达不到这个上限。 */
+  maxWidth?: string;
+}
+
 export const EMPTY_COLUMN_PREFS: TableColumnPrefs = {
   order: [],
   hidden: [],
@@ -31,38 +49,84 @@ export function pxToRemString(px: number): string {
   return `${Math.round((px / rootFontPx()) * 100) / 100}rem`;
 }
 
+function storedWidthToPx(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  // 只接受本模块会写出的两种 CSS 长度。parseFloat("12garbage") 也会得到 12，
+  // 不能让这种损坏值进入 <col style>。
+  const match = value.trim().match(/^(\d+(?:\.\d+)?|\.\d+)(rem|px)$/);
+  if (!match) return null;
+  const number = Number(match[1]);
+  if (!Number.isFinite(number) || number <= 0) return null;
+  return match[2] === "px" ? number : number * rootFontPx();
+}
+
+function uniqueKnownStrings(value: unknown, allowed: ReadonlySet<string>): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string" || !allowed.has(item) || seen.has(item)) continue;
+    seen.add(item);
+    result.push(item);
+  }
+  return result;
+}
+
+/** 把旧版本、缺列、重复 key 和损坏/越界宽度归一化到当前表 schema。 */
+export function normalizeTableColumnPrefs(
+  raw: unknown,
+  schema: TableColumnPrefsSchema,
+): TableColumnPrefs {
+  const columnKeys = new Set(schema.columnKeys);
+  const widthKeys = new Set(schema.widthKeys ?? schema.columnKeys);
+  const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const locked = new Set(schema.lockedVisible ?? ["title"]);
+  const maxPx = storedWidthToPx(schema.maxWidth ?? "80rem") ?? 80 * rootFontPx();
+  const widths: Record<string, string> = {};
+
+  const rawWidths = record.widths;
+  if (rawWidths && typeof rawWidths === "object" && !Array.isArray(rawWidths)) {
+    for (const [key, value] of Object.entries(rawWidths as Record<string, unknown>)) {
+      if (!widthKeys.has(key)) continue;
+      const widthPx = storedWidthToPx(value);
+      if (widthPx === null) continue;
+      const minPx = storedWidthToPx(schema.minWidths?.[key]) ?? 1;
+      widths[key] = pxToRemString(Math.min(maxPx, Math.max(minPx, widthPx)));
+    }
+  }
+
+  return {
+    order: uniqueKnownStrings(record.order, columnKeys),
+    hidden: uniqueKnownStrings(record.hidden, columnKeys).filter((key) => !locked.has(key)),
+    widths,
+  };
+}
+
 export function loadTableColumnPrefs(
   storageKey: string,
-  /** 永远不准藏的列（读档时就滤掉）。 */
-  lockedVisible: readonly string[] = ["title"],
+  schema: TableColumnPrefsSchema,
 ): TableColumnPrefs {
   try {
     const raw: unknown = JSON.parse(localStorage.getItem(storageKey) ?? "null");
-    if (raw && typeof raw === "object") {
-      const { order, hidden, widths } = raw as Record<string, unknown>;
-      const strings = (value: unknown) =>
-        Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : [];
-      const widthMap: Record<string, string> = {};
-      if (widths && typeof widths === "object") {
-        for (const [key, value] of Object.entries(widths as Record<string, unknown>)) {
-          if (typeof value === "string" && remStringToPx(value) > 0) widthMap[key] = value;
-        }
-      }
-      const locked = new Set(lockedVisible);
-      return {
-        order: strings(order),
-        hidden: strings(hidden).filter((key) => !locked.has(key)),
-        widths: widthMap,
-      };
-    }
+    return normalizeTableColumnPrefs(raw, schema);
   } catch {
     // 存档坏了就用默认
   }
   return { ...EMPTY_COLUMN_PREFS, widths: {} };
 }
 
-export function saveTableColumnPrefs(storageKey: string, prefs: TableColumnPrefs): void {
-  localStorage.setItem(storageKey, JSON.stringify(prefs));
+export function saveTableColumnPrefs(
+  storageKey: string,
+  prefs: TableColumnPrefs,
+  schema: TableColumnPrefsSchema,
+): TableColumnPrefs {
+  const normalized = normalizeTableColumnPrefs(prefs, schema);
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(normalized));
+  } catch {
+    // 存储不可用时不该让拖拽本身失效；本次会话仍由 React state 保留。
+  }
+  return normalized;
 }
 
 /** 按用户顺序排；没记过的列保持默认相对次序排在后面。 */

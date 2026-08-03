@@ -23,11 +23,11 @@ export const RESULT_COLUMNS: ResultColumn[] = [
   { key: "vip", label: "VIP", width: "3rem" },
 ];
 
-export const RESULT_LEAD_WIDTH = "2.1rem";
+export const RESULT_LEAD_WIDTH = "2.5rem";
 export const RESULT_COLUMN_PREFS_KEY = "kd-download-columns";
 
 export const RESULT_COLUMN_MIN_WIDTH: Record<string, string> = {
-  lead: "1.75rem",
+  lead: "2.25rem",
   title: "8rem",
   artist: "3rem",
   album: "3rem",

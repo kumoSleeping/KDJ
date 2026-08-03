@@ -5,8 +5,8 @@
 //! 曲目的 `media.transcodings[]` 里挑 progressive（MP3 直链），
 //! 拿授权地址换到真正的 CDN URL 就能直接流式下载。
 //!
-//! SoundCloud 没有扫码登录，账号态只反映"设置里有没有打开这个开关"。
+//! SoundCloud 使用 OAuth 2.1 + PKCE 登录，公开搜索仍可在未登录时使用。
 
 pub mod provider;
 
-pub use provider::SoundCloudProvider;
+pub use provider::{OAuthStatus, SoundCloudProvider};

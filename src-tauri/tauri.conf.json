@@ -38,6 +38,11 @@
     }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["kdj"]
+      }
+    },
     "updater": {
       "endpoints": [
         "https://github.com/kumoSleeping/KDJ/releases/latest/download/latest.json"

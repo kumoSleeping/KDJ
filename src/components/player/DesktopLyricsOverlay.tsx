@@ -19,7 +19,12 @@ import {
   strokePaint,
   useLyricsPrefs,
 } from "../../lib/lyricsPrefs";
-import { readPublishedStreamTrack } from "../../lib/streamTrack";
+import {
+  readPublishedStreamPlayback,
+  readPublishedStreamTrack,
+  type PublishedStreamPlayback,
+  type PublishedStreamPlaybackEvent,
+} from "../../lib/streamTrack";
 import { runtimePlayer, type UnifiedPlayerState } from "../../lib/unifiedPlayer";
 import { ensureLyrics, useLyricsStore } from "../../stores/lyricsStore";
 import type { Track } from "../../types";
@@ -66,6 +71,34 @@ function useSmoothPlaybackTime(playback: UnifiedPlayerState): number {
   }, [playback.playing, playback.trackId]);
 
   return playback.playing ? time : playback.currentTime;
+}
+
+function publishedStreamState(value: PublishedStreamPlayback): UnifiedPlayerState {
+  return {
+    trackId: value.trackId,
+    preparedTrackId: null,
+    status: value.playing ? "playing" : "paused",
+    currentTime: value.position,
+    duration: value.duration,
+    playing: value.playing,
+    buffering: false,
+    transitioning: false,
+    rate: value.rate,
+    error: "",
+  };
+}
+
+function initialPublishedStreamPlayback(track: Track): PublishedStreamPlayback {
+  return {
+    trackId: track.id,
+    position: 0,
+    duration:
+      typeof track.duration === "number" && Number.isFinite(track.duration)
+        ? Math.max(0, track.duration)
+        : 0,
+    playing: false,
+    rate: 1,
+  };
 }
 
 function overflowShift(textWidth: number, available: number, fill: number): number {
@@ -159,8 +192,24 @@ function DesktopLyricsLine({
 export function DesktopLyricsOverlay() {
   const player = runtimePlayer();
   const [playback, setPlayback] = useState<UnifiedPlayerState>(() => player.state());
-  const [track, setTrack] = useState<Track | null>(null);
+  const [streamPlayback, setStreamPlayback] = useState<PublishedStreamPlayback | null>(() =>
+    readPublishedStreamPlayback(),
+  );
+  const [track, setTrack] = useState<Track | null>(() => readPublishedStreamTrack());
   const [trackError, setTrackError] = useState("");
+  // Tauri 桌面上的在线试听由主窗 BrowserPreviewPlayer 持有，不能读 Rust 播放器的旧时钟。
+  // 没有来得及收到播放状态时也先按曲目快照显示歌词；下一条时钟事件到达后再接上精确进度。
+  const activeStreamPlayback =
+    track?.id != null && track.id >= 0
+      ? null
+      : streamPlayback && (track == null || streamPlayback.trackId === track.id)
+        ? streamPlayback
+        : track && track.id < 0
+          ? initialPublishedStreamPlayback(track)
+          : null;
+  const activePlayback = activeStreamPlayback
+    ? publishedStreamState(activeStreamPlayback)
+    : playback;
   const prefs = useLyricsPrefs();
   const lyricExtra = prefs.lyricExtra;
   const prefsEpoch = prefs.prefsEpoch;
@@ -168,39 +217,87 @@ export function DesktopLyricsOverlay() {
   const fontScale = prefs.desktopFontScale;
   const opacity = prefs.desktopOpacity;
   const setDesktopCoordinates = useLyricsPrefs((state) => state.setDesktopCoordinates);
-  const smoothTime = useSmoothPlaybackTime(playback);
+  const smoothTime = useSmoothPlaybackTime(activePlayback);
   const entry = useSyncExternalStore(
     useLyricsStore.subscribe,
-    () => useLyricsStore.getState().get(playback.trackId),
-    () => useLyricsStore.getState().get(playback.trackId),
+    () => useLyricsStore.getState().get(activePlayback.trackId),
+    () => useLyricsStore.getState().get(activePlayback.trackId),
   );
 
   useEffect(() => {
-    const sync = () => useLyricsPrefs.getState().syncFromStorage();
+    const requestStreamSnapshot = () => {
+      void import("@tauri-apps/api/event")
+        .then(({ emitTo }) => emitTo("main", "stream-state-request"))
+        .catch(() => {});
+    };
+    requestStreamSnapshot();
+    const retry = window.setTimeout(requestStreamSnapshot, 120);
+    return () => window.clearTimeout(retry);
+  }, []);
+
+  useEffect(() => {
+    const applyPublishedStream = (
+      published: Track | null,
+      streamState: PublishedStreamPlayback | null,
+    ) => {
+      const nextTrack = published && published.id < 0 ? published : null;
+      if (nextTrack) {
+        setTrack(nextTrack);
+      } else {
+        setTrack((current) => (current?.id != null && current.id < 0 ? null : current));
+      }
+      setStreamPlayback(
+        nextTrack && streamState && streamState.trackId === nextTrack.id ? streamState : null,
+      );
+    };
+    const syncPublishedStream = () => {
+      applyPublishedStream(readPublishedStreamTrack(), readPublishedStreamPlayback());
+    };
+    const sync = () => {
+      useLyricsPrefs.getState().syncFromStorage();
+      // 主窗可能在悬浮窗挂载前已经发布过曲目；storage 事件也是流状态的恢复通道。
+      syncPublishedStream();
+    };
     window.addEventListener("storage", sync);
     let unlistenPrefs: UnlistenFn | null = null;
-    let unlistenStream: UnlistenFn | null = null;
+    let unlistenStreamTrack: UnlistenFn | null = null;
+    let unlistenStreamPlayback: UnlistenFn | null = null;
     void listen("lyrics-prefs-changed", sync).then((dispose) => {
       unlistenPrefs = dispose;
     });
-    void listen("stream-track-changed", () => {
-      const id = runtimePlayer().state().trackId;
-      if (id != null && id < 0) {
-        const published = readPublishedStreamTrack(id);
-        if (published) {
-          setTrack(published);
-          void ensureLyrics(published);
-        }
-      }
+    void listen<Track | null>("stream-track-changed", (event) => {
+      // The event carries the snapshot so a separate WKWebView does not depend on
+      // cross-window localStorage sharing. The storage read remains the startup fallback.
+      const published = event.payload === undefined ? readPublishedStreamTrack() : event.payload;
+      applyPublishedStream(published, readPublishedStreamPlayback());
     }).then((dispose) => {
-      unlistenStream = dispose;
+      unlistenStreamTrack = dispose;
+    });
+    void listen<PublishedStreamPlaybackEvent | PublishedStreamPlayback>(
+      "stream-playback-state",
+      (event) => {
+        const payload = event.payload;
+        if (payload && "playback" in payload && payload.track) {
+          applyPublishedStream(payload.track, payload.playback);
+          return;
+        }
+        const published = readPublishedStreamTrack();
+        applyPublishedStream(
+          published,
+          payload && "trackId" in payload ? payload : null,
+        );
+      },
+    ).then((dispose) => {
+      unlistenStreamPlayback = dispose;
     });
     // 打开时再读一次，避免主窗先写入、本窗后挂上监听的竞态。
     sync();
+    syncPublishedStream();
     return () => {
       window.removeEventListener("storage", sync);
       unlistenPrefs?.();
-      unlistenStream?.();
+      unlistenStreamTrack?.();
+      unlistenStreamPlayback?.();
     };
   }, []);
 
@@ -239,7 +336,7 @@ export function DesktopLyricsOverlay() {
 
   useEffect(() => {
     let alive = true;
-    const trackId = playback.trackId;
+    const trackId = activePlayback.trackId;
     setTrackError("");
     if (trackId == null) {
       setTrack(null);
@@ -249,7 +346,7 @@ export function DesktopLyricsOverlay() {
     }
     // 未下载试听是负数 id，不在曲库；走主窗广播的 SongSource 快照，直取平台歌词。
     if (trackId < 0) {
-      const published = readPublishedStreamTrack(trackId);
+      const published = track?.id === trackId ? track : readPublishedStreamTrack(trackId);
       if (published) {
         setTrack(published);
         void ensureLyrics(published);
@@ -274,10 +371,10 @@ export function DesktopLyricsOverlay() {
     return () => {
       alive = false;
     };
-  }, [playback.trackId, prefsEpoch]);
+  }, [playback.trackId, streamPlayback?.trackId, track?.id, prefsEpoch]);
 
   // 窗口通常会由主界面同步隐藏；这里再兜底，避免启动竞态闪出占位文案。
-  if (playback.trackId == null) return null;
+  if (activePlayback.trackId == null) return null;
 
   const active = activeLrcIndex(entry.lines, smoothTime);
   const currentIndex = active < 0 ? 0 : active;
@@ -301,7 +398,7 @@ export function DesktopLyricsOverlay() {
   else if (track && (entry.status === "idle" || entry.status === "loading")) {
     primary = `${track.title || track.filename} · 正在搜歌词…`;
   } else if (entry.status === "error" || entry.status === "empty") {
-    primary = "";
+    primary = entry.status === "error" ? "歌词暂时不可用" : "未找到歌词";
   } else if (current) {
     primary = current.text;
     secondary = extra || next?.text || "";
@@ -309,7 +406,7 @@ export function DesktopLyricsOverlay() {
   }
 
   const fill = karaoke
-    ? lineFillProgress(entry.lines, currentIndex, smoothTime, playback.duration)
+    ? lineFillProgress(entry.lines, currentIndex, smoothTime, activePlayback.duration)
     : 1;
 
   const accent = paintCss(accentPaint(prefs));

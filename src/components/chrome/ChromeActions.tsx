@@ -1,4 +1,5 @@
 import {
+  Columns2,
   Download,
   Settings,
   Upload,
@@ -8,6 +9,8 @@ import { useUpdateStore } from "../../stores/updateStore";
 export type AsideToggleState = "open" | "closed" | "locked";
 
 export interface ChromeActionsProps {
+  middleSplitEnabled: boolean;
+  onMiddleSplit(): void;
   settingsOpen: boolean;
   onSettings(): void;
   queueOpen: boolean;
@@ -19,6 +22,8 @@ export interface ChromeActionsProps {
 
 /** 主栏顶部右侧的设置、下载入口。右栏收起按钮已移到右栏头部。 */
 export function ChromeActions({
+  middleSplitEnabled,
+  onMiddleSplit,
   settingsOpen,
   onSettings,
   queueOpen,
@@ -48,6 +53,22 @@ export function ChromeActions({
           <span className="kd-chrome-dot" aria-hidden="true" />
         </button>
       ) : null}
+      <button
+        type="button"
+        className="kd-chrome-btn"
+        data-action="middle-split"
+        data-active={middleSplitEnabled ? "true" : undefined}
+        aria-pressed={middleSplitEnabled}
+        aria-label={middleSplitEnabled ? "关闭中间分屏模式" : "打开中间分屏模式"}
+        title={
+          middleSplitEnabled
+            ? "分屏模式已开启：本地与在线内容同时显示"
+            : "分屏模式已关闭：只显示当前使用的内容"
+        }
+        onClick={onMiddleSplit}
+      >
+        <Columns2 size={16} />
+      </button>
       <button
         type="button"
         className="kd-chrome-btn"

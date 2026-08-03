@@ -83,7 +83,11 @@ impl Quality {
 
     /// 宽松解析。未知值一律退回 flac —— 和 Python 版 `normalize_quality_start` 一致。
     pub fn normalize(value: Option<&str>) -> Quality {
-        let key = value.unwrap_or("").trim().to_ascii_lowercase().replace('-', "_");
+        let key = value
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+            .replace('-', "_");
         match key.as_str() {
             "max" | "lossless" | "hires" | "sq" | "flac" => Quality::Flac,
             "320" | "320k" | "exhigh" | "mp3_320" => Quality::Q320,
@@ -187,6 +191,9 @@ pub struct Account {
     pub platform: Platform,
     pub label: String,
     pub state: AccountState,
+    /// 平台账号的稳定本地绑定键。只用于隔离客户端私人目录缓存，不是登录凭证。
+    #[serde(default)]
+    pub account_key: String,
     #[serde(default)]
     pub nickname: String,
     #[serde(default)]
@@ -196,6 +203,9 @@ pub struct Account {
     /// false = 该平台没有扫码登录，前端不显示登录按钮。
     #[serde(default = "default_true")]
     pub supports_login: bool,
+    /// 登录交互：`qr` 走平台二维码，`oauth` 走浏览器 OAuth 回调。
+    #[serde(default = "default_login_method")]
+    pub login_method: String,
 }
 
 impl Account {
@@ -204,10 +214,12 @@ impl Account {
             platform,
             label: label.to_string(),
             state,
+            account_key: String::new(),
             nickname: String::new(),
             avatar: String::new(),
             detail: detail.to_string(),
             supports_login: true,
+            login_method: "qr".into(),
         }
     }
 }
@@ -379,6 +391,7 @@ pub struct MergedGroup {
 #[serde(rename_all = "lowercase")]
 pub enum SearchKind {
     Song,
+    Playlist,
     Artist,
     Album,
 }
@@ -395,7 +408,7 @@ impl Default for SearchKind {
     }
 }
 
-/// 搜索结果中的作者/专辑集合。集合 ID 不是歌曲 ID，不能直接送进下载队列。
+/// 搜索结果中的歌单/艺术家/专辑集合。集合 ID 不是歌曲 ID，不能直接送进下载队列。
 #[derive(Debug, Clone, Serialize)]
 pub struct CollectionResult {
     pub kind: SearchKind,
@@ -467,6 +480,7 @@ pub enum IntakeKind {
     Search,
     Song,
     Playlist,
+    Artist,
     Album,
     Unknown,
     Error,
@@ -509,7 +523,7 @@ pub struct IntakeResponse {
     pub elapsed_ms: f64,
 }
 
-/// 展开作者/专辑集合时使用的稳定请求。
+/// 展开歌单/艺术家/专辑集合时使用的稳定请求。
 #[derive(Debug, Clone, Deserialize)]
 pub struct CollectionResolveRequest {
     pub platform: Platform,
@@ -712,6 +726,9 @@ pub struct Track {
     pub size: i64,
     #[serde(default)]
     pub bpm: Option<f64>,
+    /// 当前 API 返回的 BPM 是否由现行 V2 分析结果覆盖。
+    #[serde(default)]
+    pub bpm_v2: bool,
     #[serde(default)]
     pub bpm_confidence: Option<f64>,
     #[serde(default)]
@@ -758,32 +775,6 @@ pub struct Track {
     /// 所在目录（= path 的父目录）。前端文件夹树按它归位。
     #[serde(default)]
     pub folder: String,
-    /// ""=普通文件，"hardlink"/"symlink"=和别处共用同一份数据
-    #[serde(default)]
-    pub link: String,
-}
-
-/// 持久化的流媒体曲目来源。它不是 `Track`：没有本地 path，不能被文件扫描器当成文件。
-#[derive(Debug, Clone, Serialize)]
-pub struct StreamLibraryItem {
-    pub id: i64,
-    pub folder: String,
-    pub source: SongSource,
-    pub added_at: String,
-    pub downloaded: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct StreamLibraryAddRequest {
-    pub source: SongSource,
-    #[serde(default)]
-    pub folder: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct StreamLibraryListRequest {
-    #[serde(default)]
-    pub folder: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -797,6 +788,9 @@ pub struct StreamPlaylist {
     pub count: usize,
     #[serde(default)]
     pub is_favorite: bool,
+    /// 歌单来源：`favorite` / `created` / `collected`。
+    #[serde(default)]
+    pub origin: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -873,6 +867,14 @@ pub struct ScanResponse {
     pub found: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnalysisVersion {
+    #[default]
+    V1,
+    V2,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AnalyzeRequest {
     #[serde(default)]
@@ -882,6 +884,15 @@ pub struct AnalyzeRequest {
     /// 走插队通道，给"正在放的这首"用
     #[serde(default)]
     pub priority: bool,
+    /// 元数据代际。v1 写旧 tracks 列；v2 写独立的 BPM/Key v2 存储。
+    #[serde(default)]
+    pub version: AnalysisVersion,
+    /// 仅在 track_ids 为空时限制后端挑选的数量，供渐进回填使用。
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// v2 渐进回填优先范围；空串表示全曲库。
+    #[serde(default)]
+    pub folder: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -943,29 +954,20 @@ pub struct FolderTree {
 #[serde(rename_all = "lowercase")]
 pub enum FileOp {
     Move,
-    Link,
-    /// 真复制一份文件（不共享 inode）。
+    /// 真复制一份本地文件（不共享 inode）。
     Copy,
 }
 
-/// Cmd/Ctrl+V 默认怎么进目标文件夹（Option/Alt+V 始终移动）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// 曲库最近一次可撤回操作的类型。
+///
+/// `FileOp` 只描述文件夹里的复制/移动请求；删除是另一条入口，
+/// 但它们共用同一条撤回栈，所以单独用这个枚举表示栈里的操作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum LibraryPasteMode {
-    /// 优先硬链接，退符号链接 / 复制（见 `link_file`）。
-    #[default]
-    Link,
-    /// 始终真复制一份。
+pub enum FolderUndoOp {
+    Move,
     Copy,
-}
-
-/// 搜索结果拖入曲库文件夹时的默认动作。视频结果始终走下载。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum SearchDropMode {
-    #[default]
-    Stream,
-    Download,
+    Delete,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -977,13 +979,37 @@ pub struct FolderOpRequest {
     pub op: FileOp,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct FolderUndoStatus {
+    /// 是否存在可撤回的复制/移动/删除批次。
+    pub available: bool,
+    /// 最近一次批次的操作类型；没有可撤回操作时为 null。
+    pub op: Option<FolderUndoOp>,
+    /// 最近一次批次中仍可撤回的曲目数。
+    pub count: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FolderOpResult {
-    /// move：被改了路径的曲目 id；link：新建出来的曲目 id
+    /// move：被改了路径的曲目 id；copy：新建出来的曲目 id
     pub track_ids: Vec<i64>,
     pub op: FileOp,
-    /// 实际用的链接方式统计，例如 {"hardlink": 3, "copy": 1}
+    /// 实际用的文件操作统计，例如 {"copy": 1}
     pub methods: std::collections::BTreeMap<String, i64>,
+    pub errors: std::collections::BTreeMap<String, String>,
+    /// 操作完成后可撤回状态。部分成功时只记录真正完成的项目。
+    pub undo: FolderUndoStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderUndoResponse {
+    /// 本次实际撤回的曲目数；部分失败时可能小于最近批次的总数。
+    pub undone: usize,
+    /// 本次成功撤回而受影响的曲目 id；复制撤回的是被删除的新 id。
+    pub track_ids: Vec<i64>,
+    /// 本次撤回的批次类型。
+    pub op: FolderUndoOp,
+    pub status: FolderUndoStatus,
     pub errors: std::collections::BTreeMap<String, String>,
 }
 
@@ -1043,6 +1069,12 @@ pub struct FolderInitRequest {
 pub struct LibraryStats {
     pub total: i64,
     pub analyzed: i64,
+    /// 当前 BPM/Key v2 算法修订下已经完成的曲目数。
+    pub bpm_key_v2_analyzed: i64,
+    /// 当前 BPM/Key v2 算法修订下仍需回填的曲目数。
+    pub bpm_key_v2_pending: i64,
+    /// v2 行里的算法修订号；修订号变化会自然产生一轮新的待回填任务。
+    pub bpm_key_v2_revision: String,
     pub total_duration: f64,
     pub total_size: i64,
     /// 已分析曲目的全库中位数。前端用它把响度显示成相对 100%，不拿当前分页假算。
@@ -1069,6 +1101,10 @@ pub struct Waveform {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_login_method() -> String {
+    "qr".into()
 }
 fn default_limit() -> usize {
     20
@@ -1107,9 +1143,27 @@ mod tests {
         // 前端发来的就是这些字面量，改了就是契约破坏
         for name in ["wyy", "qqm", "soundcloud", "bilibili", "local"] {
             let parsed: Platform = serde_json::from_str(&format!("\"{name}\"")).unwrap();
-            assert_eq!(serde_json::to_string(&parsed).unwrap(), format!("\"{name}\""));
+            assert_eq!(
+                serde_json::to_string(&parsed).unwrap(),
+                format!("\"{name}\"")
+            );
             assert_eq!(parsed.as_str(), name);
         }
+    }
+
+    #[test]
+    fn search_kind_roundtrips_all_supported_wire_names() {
+        for name in ["song", "playlist", "artist", "album"] {
+            let parsed: SearchKind = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert_eq!(
+                serde_json::to_string(&parsed).unwrap(),
+                format!("\"{name}\"")
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&IntakeKind::Artist).unwrap(),
+            "\"artist\""
+        );
     }
 
     #[test]
@@ -1120,7 +1174,10 @@ mod tests {
 
     #[test]
     fn quality_gradient_matches_python_downgrade_order() {
-        assert_eq!(Quality::Flac.gradient(), &[Quality::Flac, Quality::Q320, Quality::Q128]);
+        assert_eq!(
+            Quality::Flac.gradient(),
+            &[Quality::Flac, Quality::Q320, Quality::Q128]
+        );
         assert_eq!(Quality::Q320.gradient(), &[Quality::Q320, Quality::Q128]);
         assert_eq!(Quality::Q128.gradient(), &[Quality::Q128]);
     }
@@ -1158,5 +1215,20 @@ mod tests {
             serde_json::to_string(&HarmonicRelation::EnergyUp).unwrap(),
             "\"energy_up\""
         );
+    }
+
+    #[test]
+    fn analyze_request_defaults_to_v1_and_accepts_a_limited_v2_backfill() {
+        let legacy: AnalyzeRequest = serde_json::from_str(r#"{"track_ids":[1]}"#).unwrap();
+        assert_eq!(legacy.version, AnalysisVersion::V1);
+        assert_eq!(legacy.limit, None);
+
+        let v2: AnalyzeRequest = serde_json::from_str(
+            r#"{"version":"v2","limit":20,"folder":"/Music/set"}"#,
+        )
+        .unwrap();
+        assert_eq!(v2.version, AnalysisVersion::V2);
+        assert_eq!(v2.limit, Some(20));
+        assert_eq!(v2.folder, "/Music/set");
     }
 }
