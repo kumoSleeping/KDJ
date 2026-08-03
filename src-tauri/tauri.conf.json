@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "KDJ",
-  "version": "0.2.28",
+  "version": "0.2.29",
   "identifier": "com.kdj.app",
   "build": {
     "beforeDevCommand": "npm run tauri:web",
@@ -40,7 +40,9 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["kdj"]
+        "schemes": [
+          "kdj"
+        ]
       }
     },
     "updater": {
