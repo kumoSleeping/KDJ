@@ -5,6 +5,7 @@ import { api } from "../../lib/api";
 import { requestSongPreview, type SongPreviewItem } from "../../lib/songPreview";
 import { makePendingSongStreamTrack } from "../../lib/streamTrack";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
+import type { LayoutMode } from "../../lib/useLayoutMode";
 import type { MergedGroup, Platform, SongSource } from "../../types";
 import { copyText } from "../../lib/copyText";
 import { useQueueStore } from "../../stores/queueStore";
@@ -38,6 +39,8 @@ export interface MergedGroupRowProps {
   columns: ReadonlyArray<{ key: string; align?: "num" }>;
   /** 当前集合（或普通结果列表）中的可见序号。 */
   rowNumber: number;
+  /** 竖屏列表固定单击播放；横屏仍保留单击查看详情。 */
+  layout: LayoutMode;
   /** 普通单击选中并展示在线详情；与批量下载勾选状态相互独立。 */
   inspected: boolean;
   /** 挂在某个"包"（歌单/一次搜索）底下时缩进并画导引线。 */
@@ -71,6 +74,7 @@ export function MergedGroupRow({
   expanded,
   columns,
   rowNumber,
+  layout,
   inspected,
   indent = false,
   last = false,
@@ -114,12 +118,30 @@ export function MergedGroupRow({
         autoPlay: true,
         queue: followingSongs,
       });
-      if (multi && !expanded) onToggleExpand();
+      // 移动端轻点是直接播放，不能又自动展开一大串来源把用户刚看的列表挤走。
+      if (layout !== "narrow" && multi && !expanded) onToggleExpand();
       return;
     }
     const local = group.sources.find((source) => source.platform === "local");
     const trackId = Number(local?.payload?.track_id);
     if (Number.isFinite(trackId) && trackId > 0) void api.track(trackId).then(playTrack);
+  };
+
+  /** 展开的某个来源直接播放；移动端不能先用详情抽屉来确认来源。 */
+  const playSource = (source: SongSource) => {
+    if (source.platform === "local") {
+      const trackId = Number(source.payload?.track_id);
+      if (Number.isFinite(trackId) && trackId > 0) void api.track(trackId).then(playTrack);
+      return;
+    }
+    if (source.platform === "bilibili") return;
+    requestSongPreview({
+      source,
+      title: source.title || group.title,
+      artist: source.artists.join(", ") || group.artists.join(", "),
+      autoPlay: true,
+      queue: followingSongs,
+    });
   };
 
   /** 把搜索结果排进播放队列，供本地曲目曲末自动接入在线流。 */
@@ -155,7 +177,7 @@ export function MergedGroupRow({
           {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         </button>
       )}
-      {/* 封面只负责识别歌曲，不再叠播放三角。试听统一走整行双击。 */}
+      {/* 封面只负责识别歌曲，不再叠播放三角；横屏双击、竖屏单击试听。 */}
       <span
         className="kd-thumb"
         draggable={selectable}
@@ -335,7 +357,11 @@ export function MergedGroupRow({
     <Fragment>
       <tr
         aria-selected={selected || inspected}
-        aria-label={`${group.title}，单击查看详情，双击播放`}
+        aria-label={
+          layout === "narrow"
+            ? `${group.title}，单击播放`
+            : `${group.title}，单击查看详情，双击播放`
+        }
         data-selecting={selectionMode ? "true" : undefined}
         // table-row 在 macOS WKWebView 里不是可靠的原生拖动源；选中后由每个 td 起拖。
         draggable={false}
@@ -347,23 +373,30 @@ export function MergedGroupRow({
           }
           // 控件自己消费点击（展开、勾选），和视频行同一条 closest 规则
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+          // touch 双点会发两次 click；竖屏首下已经直接播放，第二下不能再重启。
+          if (layout === "narrow" && event.detail > 1) return;
           if (selectable && (selectionMode || event.metaKey || event.ctrlKey)) {
             toggleSelection();
             return;
           }
           if (selectionMode) return;
-          // 在线结果和本地曲库采用同一套“先选中、再查看”的手势：普通单击
-          // 只开详情，不顶掉正在播放的歌曲；播放始终交给双击。
-          onInspect(sourceIndex);
+          // 移动端详情抽屉会盖住整个列表，轻点歌曲必须直接起播；详情只由
+          // 底部“正在播放”唱盘显式打开。横屏继续保留查看/播放两级手势。
+          if (layout === "narrow") playGroup();
+          else onInspect(sourceIndex);
         }}
         onDoubleClick={() => {
-          if (!selectionMode) playGroup();
+          if (!selectionMode && layout !== "narrow") playGroup();
         }}
         tabIndex={0}
         onKeyDown={(event) => {
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault();
+          if (layout === "narrow" && !selectionMode) {
+            playGroup();
+            return;
+          }
           if ((event.metaKey || event.ctrlKey) && !selectionMode) {
             playGroup();
             return;
@@ -427,40 +460,42 @@ export function MergedGroupRow({
         group.sources.map((source, index) => (
           <tr
             key={`${source.platform}:${source.key}`}
-            aria-label={`${source.title || group.title}，单击查看此来源详情，双击播放`}
+            aria-label={
+              layout === "narrow"
+                ? `${source.title || group.title}，单击播放此来源`
+                : `${source.title || group.title}，单击查看此来源详情，双击播放`
+            }
             data-local={source.platform === "local" ? "true" : undefined}
-            onClick={() => {
-              if (source.platform === "local") return;
-              // 单击同时选定来源并打开详情，不顶替正在播的歌曲。
+            onClick={(event) => {
+              if (layout === "narrow" && event.detail > 1) return;
+              if (source.platform === "local") {
+                if (layout === "narrow") playSource(source);
+                return;
+              }
+              // 移动端选源后立刻播放，不能用全屏详情抽屉拦住结果列表。
               onPickSource(index);
-              onInspect(index);
+              if (layout === "narrow") playSource(source);
+              else onInspect(index);
             }}
             onDoubleClick={() => {
-              if (source.platform === "local" || source.platform === "bilibili") return;
-              onPickSource(index);
-              requestSongPreview({
-                source,
-                title: source.title || group.title,
-                artist: source.artists.join(", ") || group.artists.join(", "),
-                autoPlay: true,
-                queue: followingSongs,
-              });
-            }}
-            tabIndex={source.platform === "local" ? undefined : 0}
-            onKeyDown={(event) => {
+              if (layout === "narrow") return;
               if (source.platform === "local") return;
+              onPickSource(index);
+              playSource(source);
+            }}
+            // 宽屏本地来源仍只是“已在库中”的提示，保持原来的不可聚焦；竖屏把它
+            // 变成可直接播放的行，才需要纳入键盘 Tab 顺序。
+            tabIndex={source.platform === "local" && layout !== "narrow" ? undefined : 0}
+            onKeyDown={(event) => {
               if (event.key !== "Enter" && event.key !== " ") return;
               event.preventDefault();
+              if (source.platform === "local") {
+                if (layout === "narrow") playSource(source);
+                return;
+              }
               onPickSource(index);
-              if (event.metaKey || event.ctrlKey) {
-                if (source.platform === "bilibili") return;
-                requestSongPreview({
-                  source,
-                  title: source.title || group.title,
-                  artist: source.artists.join(", ") || group.artists.join(", "),
-                  autoPlay: true,
-                  queue: followingSongs,
-                });
+              if (layout === "narrow" || event.metaKey || event.ctrlKey) {
+                playSource(source);
                 return;
               }
               onInspect(index);

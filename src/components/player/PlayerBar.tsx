@@ -46,6 +46,7 @@ import { useCrossfade, deckGain } from "../../lib/crossfade";
 import { useHarmonicScope } from "../../lib/harmonicScope";
 import { useLyricsPrefs } from "../../lib/lyricsPrefs";
 import { ensureOverlayPermission } from "../../lib/lyricsOverlay";
+import { useLayoutSignals } from "../../lib/useLayoutMode";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { usePlayMode, type PlayMode } from "../../lib/playMode";
 import {
@@ -70,6 +71,7 @@ import {
   streamCoverUrl,
   streamMeta,
   streamNextTrack,
+  streamWaveformToken,
 } from "../../lib/streamTrack";
 import { playSongPreview } from "../../lib/songPreview";
 import { useDownloadStore } from "../../stores/downloadStore";
@@ -83,6 +85,7 @@ import { PLAY_EVENT, parsePlayRequest, playTrack } from "../../lib/playTrack";
 import { getPlayingTrack, setPlayingTrack } from "../../lib/playingTrack";
 import { usePlayerShortcuts } from "../../lib/usePlayerShortcuts";
 import {
+  mergeCachedStreamWaveform,
   mediaBufferedRanges,
   prefetchWaveform,
   updateStreamWaveform,
@@ -104,6 +107,10 @@ const POSITION_BROADCAST_MS = 200;
 /** 在线波形前台约 15fps；窗口后台只保留 4fps 的真实 analyser 采样。 */
 const STREAM_WAVEFORM_FOREGROUND_MS = 66;
 const STREAM_WAVEFORM_BACKGROUND_MS = 250;
+/** 后端缓存波形只在当前在线曲目上短轮询；它不触发第二个媒体下载。 */
+const STREAM_CACHE_WAVEFORM_POLL_MS = 750;
+/** 缓存尚未预约/暂时失败时保持低频观察；切歌或媒体结束后自然收掉。 */
+const STREAM_CACHE_WAVEFORM_IDLE_POLL_MS = 3_000;
 /** macOS/Windows 可能同时从原生媒体会话和 WebView 报告同一次媒体键。 */
 const SYSTEM_MEDIA_DEDUPE_MS = 180;
 
@@ -252,6 +259,7 @@ function PlayerDeck({
   spinning,
   transitioning,
   dropActive,
+  detailEnabled,
   onOpen,
   onDragOver,
   onDragLeave,
@@ -263,6 +271,8 @@ function PlayerDeck({
   spinning: boolean;
   transitioning: boolean;
   dropActive: boolean;
+  /** 竖屏时“下一首”只是预告，不能打开会盖住列表的详情 Sheet。 */
+  detailEnabled: boolean;
   onOpen(): void;
   onDragOver(event: React.DragEvent<HTMLElement>): void;
   onDragLeave(event: React.DragEvent<HTMLElement>): void;
@@ -288,8 +298,22 @@ function PlayerDeck({
       <button
         type="button"
         className="kd-player-deck-main"
-        aria-label={view ? `${stateLabel}：${view.title}` : side === "left" ? "左唱盘空闲" : "右唱盘空闲"}
-        title={view ? `${stateLabel}：${view.title}` : "等待曲目"}
+        aria-label={
+          view
+            ? `${stateLabel}：${view.title}${detailEnabled ? "" : "（移动端详情不可打开）"}`
+            : side === "left"
+              ? "左唱盘空闲"
+              : "右唱盘空闲"
+        }
+        aria-disabled={!detailEnabled || !view}
+        disabled={!detailEnabled || !view}
+        title={
+          view
+            ? detailEnabled
+              ? `${stateLabel}：${view.title}`
+              : `${stateLabel}：${view.title}（移动端请点正在播放的歌曲）`
+            : "等待曲目"
+        }
         onClick={onOpen}
       >
         <span className="kd-player-disc" aria-hidden="true">
@@ -327,6 +351,7 @@ function PlayerDeck({
 }
 
 export function PlayerBar() {
+  const { portrait } = useLayoutSignals();
   const mobileNative = usesNativeMobilePlayer();
   const playerRuntime = runtimePlayer();
   const desktopNative = playerRuntime.kind === "desktop-native";
@@ -420,6 +445,8 @@ export function PlayerBar() {
   // PlayerBar 因 HMR/连接态切换重挂载时，模块级主唱盘仍持有本地或在线曲目；
   // 从它起步可以避免先画出旧标题、真正 transport 却还是空的中间态。
   const [track, setTrack] = useState<Track | null>(() => getPlayingTrack());
+  const activeStreamWaveformToken =
+    track && isStreamTrack(track) ? streamWaveformToken(track) : "";
   /** 一旦在线曲目参与桌面 DJ 混接，后续本地曲目也留在同一套 Web Audio 双 Deck。 */
   const [browserDjSession, setBrowserDjSession] = useState(() => isStreamTrack(track));
   // 在线试听仍需要 browser-preview；混接会话里的本地曲目也必须沿用同一套双 Deck，
@@ -2427,6 +2454,72 @@ export function PlayerBar() {
     };
   }, [frontEl, track?.id]);
 
+  // 缓存已写到哪，就从同一份临时媒体文件解码到哪。浏览器的 buffered 只能提供
+  // 时间范围，不能读未来 PCM；因此这里仅轮询 token 作用域的本地服务快照，绝不
+  // fetch 原始音频。没有完整缓存设置或后端尚未支持此端点时，继续走上面的 analyser
+  // 已播路径，声音和进度条都不受影响。
+  useEffect(() => {
+    if (!track || !isStreamTrack(track) || !activeStreamWaveformToken) return;
+    const audio = frontEl;
+    const trackId = track.id;
+    const token = activeStreamWaveformToken;
+    let disposed = false;
+    let timer = 0;
+    let lastRevision = -1;
+
+    const totalDuration = () => {
+      const mediaDuration = audio.duration;
+      if (Number.isFinite(mediaDuration) && mediaDuration > 0) return mediaDuration;
+      return durationRef.current || track.duration || 0;
+    };
+    const schedule = (delay: number) => {
+      if (!disposed) timer = window.setTimeout(poll, delay);
+    };
+    const poll = () => {
+      void api
+        .songPreviewWaveform(token)
+        .then((progress) => {
+          if (disposed) return;
+          if (progress.waveform && progress.revision > lastRevision) {
+            const total = totalDuration();
+            // `covered_seconds` 是 prefix 的真实 PCM 时长；merge 函数会只投影到
+            // 这段对应的整曲桶，绝不会把前缀波形拉伸成全曲。
+            mergeCachedStreamWaveform(
+              trackId,
+              total,
+              progress.covered_seconds,
+              progress.waveform,
+              progress.revision,
+              mediaBufferedRanges(audio, total),
+            );
+            lastRevision = progress.revision;
+          }
+          // 缓存预约可能晚于首个媒体 GET 很久（弱网、重试、短暂服务忙）；不能因
+          // 固定 4 秒窗口提前放弃。空闲时退到低频，仍只在当前曲目且尚未结束时续租。
+          if (
+            progress.enabled &&
+            !(progress.complete && !progress.active) &&
+            !(audio.ended && !progress.active)
+          ) {
+            schedule(
+              progress.active
+                ? STREAM_CACHE_WAVEFORM_POLL_MS
+                : STREAM_CACHE_WAVEFORM_IDLE_POLL_MS,
+            );
+          }
+        })
+        .catch(() => {
+          // 波形是纯展示；票据过期、旧后端 404 或缓存服务短暂不可达都不能让
+          // 当前试听变成报错。上面的 analyser 仍会继续填已播部分。
+        });
+    };
+    poll();
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [frontEl, track?.id, activeStreamWaveformToken]);
+
   // 跳转统一由 Waveform 发 kd:seek 事件，上面那个监听负责落到 <audio> 上
 
   // 在放的优先；重新打开软件时先恢复上次留在正主 deck 的曲目。只有没有可恢复
@@ -2708,9 +2801,12 @@ export function PlayerBar() {
     visualActiveIndex,
   ]);
 
-  const openDeck = (view: PlayerDeckView | null) => {
+  const openDeck = (view: PlayerDeckView | null, active: boolean) => {
     const deckTrack = view?.track;
     if (!deckTrack) return;
+    // 竖屏时右栏是整屏 Sheet。只有正在播放的那张唱盘才是详情入口；下一首
+    // 只能作为预告，点它不能把当前列表整个遮住。
+    if (portrait && !active) return;
     if (!isStreamTrack(deckTrack)) selectTrack(deckTrack);
     window.dispatchEvent(
       new CustomEvent(DETAIL_EVENT, { detail: { source: "player-deck" } }),
@@ -2786,7 +2882,8 @@ export function PlayerBar() {
           spinning={Boolean(leftDeckView) && (transitionShowing || (visualActiveIndex === 0 && deckPlaying))}
           transitioning={transitionShowing}
           dropActive={deckDropSide === "left"}
-          onOpen={() => openDeck(leftDeckView)}
+          detailEnabled={!portrait || visualActiveIndex === 0}
+          onOpen={() => openDeck(leftDeckView, visualActiveIndex === 0)}
           onDragOver={(event) => deckDragOver(event, "left")}
           onDragLeave={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDeckDropSide(null);
@@ -3056,7 +3153,8 @@ export function PlayerBar() {
           spinning={Boolean(rightDeckView) && (transitionShowing || (visualActiveIndex === 1 && deckPlaying))}
           transitioning={transitionShowing}
           dropActive={deckDropSide === "right"}
-          onOpen={() => openDeck(rightDeckView)}
+          detailEnabled={!portrait || visualActiveIndex === 1}
+          onOpen={() => openDeck(rightDeckView, visualActiveIndex === 1)}
           onDragOver={(event) => deckDragOver(event, "right")}
           onDragLeave={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDeckDropSide(null);

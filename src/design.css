@@ -6517,6 +6517,113 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   grid-column: 1 / -1;
 }
 
+/* 接近方形的窗口仍保留桌面工作区：三栏和表格在这里比抽屉更有用。但播放器
+   的“左右唱盘跨波形行”只适合真正宽的底栏；在平板横竖切换、中等宽桌面窗里，
+   文案会被压进波形行，看起来像底部没有歌名。播放器单独收成三行，信息层级与
+   竖屏一致，不把整个工作区误切成手机布局。 */
+@media (max-width: 940px), (max-aspect-ratio: 1 / 1) {
+  .kd-app:not([data-portrait="true"]) .kd-player {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+      "controls controls"
+      "now next"
+      "wave wave";
+    align-items: center;
+    gap: 0.35rem 0.7rem;
+    min-height: 0;
+    height: auto;
+    padding: 0.45rem 0.7rem calc(0.45rem + 4px);
+  }
+  .kd-app[data-mobile="true"]:not([data-portrait="true"]) .kd-player {
+    padding-bottom: calc(0.45rem + var(--kd-safe-bottom));
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-transport {
+    grid-area: controls;
+    justify-self: center;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-transport::-webkit-scrollbar {
+    display: none;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-leading,
+  .kd-app:not([data-portrait="true"]) .kd-player-trailing {
+    position: relative;
+    inset: auto;
+    width: auto;
+    height: auto;
+    min-height: 2.85rem;
+    min-width: 0;
+    align-self: auto;
+    grid-row: auto;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-leading {
+    grid-area: now;
+    grid-column: auto;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-trailing {
+    grid-area: next;
+    grid-column: auto;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-deck {
+    grid-template-columns: 3.15rem minmax(0, 1fr);
+    grid-template-rows: 1fr;
+    column-gap: 0.45rem;
+    align-items: center;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-deck[data-side="right"] {
+    grid-template-columns: minmax(0, 1fr) 3.15rem;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-deck[data-side="left"] .kd-player-disc,
+  .kd-app:not([data-portrait="true"]) .kd-player-deck[data-side="right"] .kd-player-disc,
+  .kd-app:not([data-portrait="true"]) .kd-player-deck[data-side="left"] .kd-player-deck-copy,
+  .kd-app:not([data-portrait="true"]) .kd-player-deck[data-side="right"] .kd-player-deck-copy {
+    grid-row: 1;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-deck-copy {
+    align-self: center;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 0.4rem;
+    row-gap: 0.08rem;
+    padding-bottom: 0;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-deck-state {
+    flex: 1 0 100%;
+    margin-bottom: 0;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: block;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-artist {
+    flex: 0 1 auto;
+    max-width: 42%;
+    display: block;
+    min-height: 0;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-disc {
+    width: 3.05rem;
+    height: 3.05rem;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-disc-record {
+    width: 2.75rem;
+    height: 2.75rem;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player-scrub {
+    grid-area: wave;
+    margin-left: 0;
+    margin-right: 0;
+  }
+  .kd-app:not([data-portrait="true"]) .kd-player > .kd-notice {
+    grid-column: 1 / -1;
+  }
+}
+
 /* 「正在播」那一块的三层都必须是块级。
    它们在 JSX 里是 <span>，而**行内元素不吃 overflow/width/text-overflow**——
    长曲名不会被裁掉，而是直接铺出去、盖在右边那颗圆形播放键上面。

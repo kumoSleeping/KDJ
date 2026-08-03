@@ -22,8 +22,9 @@ export const clearProgressCheckpoint = async () => await call('clear_progress_ch
 export const dispose = async () => await call('dispose');
 export const addStateListener = async (handler) => await addPluginListener(PLUGIN_NAME, STATE_EVENT, handler);
 
-// 歌词悬浮窗：时间轴只在换歌或切附加层时推一次，之后由原生侧读 ExoPlayer 位置自己滚。
+// 歌词悬浮窗：时间轴只在换歌或切附加层时推一次；本地读 coordinator，流媒体另走外部时钟。
 export const setLyricsTimeline = async (payload) => await call('set_lyrics_timeline', payload);
+export const setLyricsPlaybackClock = async (payload) => await call('set_lyrics_playback_clock', payload);
 export const setLyricsOverlay = async (payload) => await call('set_lyrics_overlay', payload);
 export const checkOverlayPermission = async () => await call('check_overlay_permission');
 export const requestOverlayPermission = async () => await call('request_overlay_permission');

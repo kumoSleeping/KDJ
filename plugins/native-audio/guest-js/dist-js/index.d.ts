@@ -57,6 +57,15 @@ export type NativeLyricsTimelinePayload = {
   lines: NativeLyricsLine[];
 };
 
+/** 浏览器试听的外部时钟；仅接受负 ID，null 用于清除旧流。 */
+export type NativeLyricsPlaybackClockPayload = {
+  trackId?: number | null;
+  position?: number;
+  duration?: number;
+  playing?: boolean;
+  rate?: number;
+};
+
 export type NativeLyricsColorMode = 'black' | 'white' | 'gray' | 'solid' | 'gradient' | 'none' | 'follow';
 
 export type NativeLyricsOverlayPayload = {
@@ -96,6 +105,9 @@ export type NativeLyricsOverlayMoved = {
 };
 
 export declare const setLyricsTimeline: (payload: NativeLyricsTimelinePayload) => Promise<void>;
+export declare const setLyricsPlaybackClock: (
+  payload: NativeLyricsPlaybackClockPayload,
+) => Promise<void>;
 export declare const setLyricsOverlay: (
   payload: NativeLyricsOverlayPayload,
 ) => Promise<NativeLyricsOverlayResult>;

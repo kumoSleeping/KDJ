@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.result.ActivityResult
 import androidx.core.app.ActivityCompat
@@ -119,6 +120,16 @@ class SetLyricsTimelineArgs {
     /** 搜词中 / 没有歌词时显示的兜底文案。 */
     var placeholder: String? = null
     var lines: Array<LyricsLineArgs>? = null
+}
+
+/** 浏览器试听的限频时钟镜像；只有负 ID 临时流允许走这条旁路。 */
+@InvokeArg
+class SetLyricsPlaybackClockArgs {
+    var trackId: Long? = null
+    var position: Double? = null
+    var duration: Double? = null
+    var playing: Boolean? = null
+    var rate: Double? = null
 }
 
 @InvokeArg
@@ -399,7 +410,9 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
             LyricsOverlayRuntime.setTimeline(
                 activity.applicationContext,
                 LyricsOverlayTimeline(
-                    trackId = args.trackId?.takeIf { it > 0 },
+                    // 正 ID 是曲库，本地 coordinator 用；负 ID 是浏览器在线试听。
+                    // 这里仅保留身份用于防串词，不让它进入 NativeAudioRuntime。
+                    trackId = args.trackId?.takeIf { it != 0L },
                     durationSec = args.duration?.takeIf { it.isFinite() && it > 0 } ?: 0.0,
                     placeholder = args.placeholder?.trim().orEmpty(),
                     lines = lines,
@@ -409,6 +422,38 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve()
         }.onFailure {
             invoke.reject(it.message ?: "setLyricsTimeline failed")
+        }
+    }
+
+    /**
+     * 浏览器试听不经过 Rust coordinator，Android 原生悬浮歌词需要它的独立时钟。
+     * 正 ID 一律清空：本地曲目必须继续由 [NativeAudioRuntime.clock] 胜出。
+     */
+    @Command
+    fun setLyricsPlaybackClock(invoke: Invoke) {
+        val args = invoke.parseArgs(SetLyricsPlaybackClockArgs::class.java)
+        val trackId = args.trackId?.takeIf { it < 0L }
+        val position = args.position?.takeIf { it.isFinite() }?.coerceAtLeast(0.0) ?: 0.0
+        val duration = args.duration?.takeIf { it.isFinite() }?.coerceAtLeast(0.0) ?: 0.0
+        val rate = args.rate?.takeIf { it.isFinite() && it > 0.0 } ?: 1.0
+
+        runCatching {
+            LyricsOverlayRuntime.setStreamPlaybackClock(
+                trackId?.let {
+                    StreamLyricsPlaybackClock(
+                        trackId = it,
+                        positionSec = position,
+                        durationSec = duration,
+                        isPlaying = args.playing == true,
+                        rate = rate,
+                        stampedElapsedMs = SystemClock.elapsedRealtime(),
+                    )
+                },
+            )
+        }.onSuccess {
+            invoke.resolve()
+        }.onFailure {
+            invoke.reject(it.message ?: "setLyricsPlaybackClock failed")
         }
     }
 

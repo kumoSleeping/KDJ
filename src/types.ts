@@ -544,6 +544,17 @@ export interface Waveform {
   b: number[];
 }
 
+/** 在线缓存已实际解码出的前缀波形。`covered_seconds` 只覆盖从 0 开始的真实 PCM；
+ * 前端必须把它投影到整曲的同一段，不能拉伸成完整曲目。 */
+export interface StreamWaveformProgress {
+  enabled: boolean;
+  waveform: Waveform | null;
+  covered_seconds: number;
+  revision: number;
+  complete: boolean;
+  active: boolean;
+}
+
 export interface HarmonicMatch {
   track: Track;
   relation:
@@ -709,10 +720,10 @@ export interface KdjBridge {
   /**
    * 把整首歌的歌词时间轴交给原生侧，只在换歌或切附加层时调用。
    *
-   * 只有 Android 有：那边浮层是原生 View，时间轴必须由持有 ExoPlayer 的
-   * 原生侧驱动——WebView 一进后台就会被冻结，靠 JS 定时器推歌词会卡住，
-   * 而息屏/切走恰好是悬浮歌词唯一的使用场景。桌面的歌词窗口是另一个
-   * WebView，自己订阅 store，不需要这条通道。
+   * 只有 Android 有：那边浮层是原生 View，本地曲目由 Rust coordinator 镜像
+   * 驱动；WebView 一进后台就会被冻结，靠 JS 定时器推歌词会卡住。浏览器试听
+   * 另走下面的限频时钟镜像。桌面的歌词窗口是另一个 WebView，自己订阅 store，
+   * 不需要这条通道。
    */
   lyricsTimeline?: null | ((payload: {
     trackId: number | null;
@@ -720,6 +731,18 @@ export interface KdjBridge {
     /** 搜词中 / 没有歌词时的兜底文案。 */
     placeholder: string;
     lines: { time: number; text: string; secondary?: string }[];
+  }) => Promise<void>);
+  /**
+   * Android 浏览器试听的时钟镜像。流媒体临时曲目用负 ID，不能误进本地 Rust
+   * coordinator；原生浮层据此在两次限频更新之间外推歌词位置。
+   */
+  lyricsPlaybackClock?: null | ((payload: {
+    /** 负数 = 在线试听；null 清除上一首的浏览器时钟。 */
+    trackId: number | null;
+    position: number;
+    duration: number;
+    playing: boolean;
+    rate: number;
   }) => Promise<void>);
   /**
    * 「显示在其他应用上层」权限。只有 Android 有：这是用户必须去系统设置里

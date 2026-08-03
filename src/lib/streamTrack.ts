@@ -11,6 +11,8 @@ export type StreamKind = "song" | "video";
 
 interface StreamMeta {
   url: string;
+  /** 与试听代理 URL 同一份随机 ticket，用于读取已解码缓存前缀的波形。 */
+  waveformToken: string;
   cover: string;
   kind: StreamKind;
   sourceKey: string;
@@ -32,6 +34,17 @@ const trackById = new Map<number, Track>();
 let nextId = -1;
 let publishedStreamTrackId: number | null = null;
 
+/**
+ * Android 的流媒体由浏览器媒体元素出声，不能拿 Rust coordinator 的本地曲目时钟。
+ * 悬浮歌词开启时才把这条浏览器时钟限频镜像给原生侧；原生会在两次镜像间自行外推，
+ * 因而不能在每个 animation frame / timeupdate 都跨 WebView IPC 一次。
+ */
+let nativeStreamLyricsClockEnabled = false;
+let latestStreamPlayback: PublishedStreamPlayback | null = null;
+let lastNativeStreamLyricsClock: (PublishedStreamPlayback & { sentAt: number }) | null = null;
+const NATIVE_LYRICS_CLOCK_MIN_INTERVAL_MS = 250;
+const NATIVE_LYRICS_CLOCK_SEEK_EPSILON_SEC = 0.75;
+
 /** 给独立歌词 WebView 读：主窗写入当前试听曲目快照。 */
 const PUBLISHED_STREAM_KEY = "kd-active-stream-track";
 const PUBLISHED_STREAM_PLAYBACK_KEY = "kd-active-stream-playback";
@@ -49,6 +62,79 @@ export interface PublishedStreamPlaybackEvent {
   playback: PublishedStreamPlayback;
 }
 
+function monotonicNow(): number {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+/** 清除 Android 原生侧持有的浏览器流时钟，避免换回本地曲目后串词。 */
+function clearNativeStreamLyricsClock(): void {
+  lastNativeStreamLyricsClock = null;
+  const push = window.kdj?.lyricsPlaybackClock;
+  if (!push) return;
+  void push({
+    trackId: null,
+    position: 0,
+    duration: 0,
+    playing: false,
+    rate: 1,
+  }).catch(() => {});
+}
+
+/**
+ * 仅给 Android 原生浮层同步浏览器试听时钟。
+ *
+ * 不限速会把部分 Android WebView 的高频 timeupdate 变成大量 IPC；250ms 一次
+ * 足以校准，而 seek、播放/暂停、换曲、倍速变化都会绕过限速立即送达。
+ */
+function publishNativeStreamLyricsClock(
+  state: PublishedStreamPlayback,
+  force = false,
+): void {
+  if (!nativeStreamLyricsClockEnabled) return;
+  const push = window.kdj?.lyricsPlaybackClock;
+  if (!push) return;
+
+  const now = monotonicNow();
+  const previous = lastNativeStreamLyricsClock;
+  const predicted = previous
+    ? previous.position +
+      (previous.playing ? ((now - previous.sentAt) / 1000) * previous.rate : 0)
+    : 0;
+  const significantSeek = Boolean(
+    previous && Math.abs(state.position - predicted) >= NATIVE_LYRICS_CLOCK_SEEK_EPSILON_SEC,
+  );
+  const shouldSend =
+    force ||
+    !previous ||
+    previous.trackId !== state.trackId ||
+    previous.playing !== state.playing ||
+    previous.rate !== state.rate ||
+    previous.duration !== state.duration ||
+    significantSeek ||
+    now - previous.sentAt >= NATIVE_LYRICS_CLOCK_MIN_INTERVAL_MS;
+  if (!shouldSend) return;
+
+  const sent = { ...state, sentAt: now };
+  lastNativeStreamLyricsClock = sent;
+  void push(state).catch(() => {
+    // IPC 短暂失败时不要把限频窗口锁死；下一次 timeupdate 会重试。
+    if (lastNativeStreamLyricsClock === sent) lastNativeStreamLyricsClock = null;
+  });
+}
+
+/**
+ * Android 悬浮歌词显隐时调用。关闭即清空原生缓存；重新打开时用最近一次已有的
+ * PlayerBar 状态立即补一拍，不另起定时器或第二条高频 effect。
+ */
+export function setNativeStreamLyricsClockEnabled(enabled: boolean): void {
+  nativeStreamLyricsClockEnabled = enabled;
+  if (!enabled) {
+    clearNativeStreamLyricsClock();
+    return;
+  }
+  if (latestStreamPlayback) publishNativeStreamLyricsClock(latestStreamPlayback, true);
+}
+
 function notifyStreamTrackChanged(track: Track | null): void {
   void import("@tauri-apps/api/event")
     .then(({ emitTo }) => emitTo("lyrics-overlay", "stream-track-changed", track))
@@ -57,7 +143,14 @@ function notifyStreamTrackChanged(track: Track | null): void {
 
 /** 主窗播放 / 切换在线试听时调用，供桌面歌词窗直取平台歌词。 */
 export function publishStreamTrack(track: Track | null): void {
-  publishedStreamTrackId = track && track.id < 0 ? track.id : null;
+  const nextStreamTrackId = track && track.id < 0 ? track.id : null;
+  const changed = publishedStreamTrackId !== nextStreamTrackId;
+  publishedStreamTrackId = nextStreamTrackId;
+  if (changed) {
+    // 换流 / 切回本地曲目时先清掉旧时钟。新曲的下一次既有状态发布会立即补入。
+    latestStreamPlayback = null;
+    clearNativeStreamLyricsClock();
+  }
   if (publishedStreamTrackId !== null) touchStreamTrack(publishedStreamTrackId);
   pruneStreamTracks();
   try {
@@ -88,6 +181,8 @@ export function publishStreamTrackState(
     playing,
     rate: Number.isFinite(rate) && rate > 0 ? rate : 1,
   };
+  latestStreamPlayback = state;
+  publishNativeStreamLyricsClock(state);
   try {
     localStorage.setItem(PUBLISHED_STREAM_PLAYBACK_KEY, JSON.stringify(state));
   } catch {
@@ -164,6 +259,10 @@ export function streamMediaUrl(track: Track): string | null {
   return streamMeta(track)?.url || null;
 }
 
+export function streamWaveformToken(track: Track | null | undefined): string {
+  return streamMeta(track)?.waveformToken || "";
+}
+
 export function streamCoverUrl(track: Track): string {
   const cover = streamMeta(track)?.cover ?? "";
   return cover ? thumbUrl(cover, 96) : "";
@@ -178,12 +277,14 @@ export function makeSongStreamTrack(
   source: SongSource,
   url: string,
   cacheRetryUsed = false,
+  waveformToken = "",
 ): Track {
   const id = nextId--;
   const title = source.title || "在线试听";
   const artist = source.artists.join(", ");
   metaById.set(id, {
     url,
+    waveformToken,
     cover: source.cover || "",
     kind: "song",
     sourceKey: `${source.platform}:${source.key}`,
@@ -276,13 +377,14 @@ export function preloadStreamTrack(track: Track): Promise<void> {
   let request: Promise<void>;
   request = api
     .songPreview(source)
-    .then(({ url }) => {
+    .then(({ url, waveform_token: waveformToken }) => {
       // 解析期间条目受 prune 保护；这里仍核对身份，避免将迟到结果写进复用上下文。
       if (metaById.get(track.id) !== meta) {
         throw new Error("在线试听上下文已经失效");
       }
       if (!url) throw new Error("平台没有返回可播放地址");
       meta.url = url;
+      meta.waveformToken = waveformToken || "";
     })
     .finally(() => {
       if (meta.preload === request) meta.preload = null;

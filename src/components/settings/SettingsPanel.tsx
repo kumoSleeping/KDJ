@@ -502,12 +502,10 @@ export function SettingsPanel() {
   const setApplyInOutPoints = useDjConfig((state) => state.setApplyInOutPoints);
 
   const widePlay = useTrackClickPrefs((state) => state.widePlay);
-  const narrowPlay = useTrackClickPrefs((state) => state.narrowPlay);
   const clickAddNext = useTrackClickPrefs((state) => state.clickAddNext);
   const setWidePlay = useTrackClickPrefs((state) => state.setWidePlay);
-  const setNarrowPlay = useTrackClickPrefs((state) => state.setNarrowPlay);
   const setClickAddNext = useTrackClickPrefs((state) => state.setClickAddNext);
-  const addNextAvailable = widePlay === "double" || narrowPlay === "double";
+  const addNextAvailable = widePlay === "double";
   const transportFade = usePlaybackPrefs((state) => state.transportFade);
   const setTransportFade = usePlaybackPrefs((state) => state.setTransportFade);
   const lyricsEngines = useLyricsPrefs((state) => state.engines);
@@ -697,12 +695,13 @@ export function SettingsPanel() {
               onChange={() => setWidePlay(widePlay === "double" ? "single" : "double")}
             />
             <Switch
-              checked={narrowPlay === "single"}
+              checked
+              disabled
               label="竖屏播放"
               onState="单击"
-              offState="双击"
-              title="竖屏下列表点播放的手势：默认单击即播，也可改成双击。"
-              onChange={() => setNarrowPlay(narrowPlay === "single" ? "double" : "single")}
+              offState="单击"
+              title="移动端歌曲列表固定单击播放；详情请点底部正在播放的歌曲。"
+              onChange={() => undefined}
             />
             <Switch
               checked={clickAddNext}
@@ -711,7 +710,7 @@ export function SettingsPanel() {
               title={
                 addNextAvailable
                   ? "播放设为双击时：单击把歌插到临时列表队头（下一首待播），双击仍负责播放。"
-                  : "需要先把横屏或竖屏的播放手势设为双击，单击才有空档留给「插入下一首待播」。"
+                  : "需要先把横屏播放手势设为双击，单击才有空档留给「插入下一首待播」。"
               }
               onChange={() => setClickAddNext(!clickAddNext)}
             />

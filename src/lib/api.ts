@@ -34,6 +34,7 @@ import type {
   StreamPlaylist,
   StreamPlaylistResponse,
   StreamCacheStats,
+  StreamWaveformProgress,
   LyricsRequest,
   LyricsResponse,
   LocalLyricsResponse,
@@ -167,13 +168,18 @@ export const api = {
    * QQ 的 media_mid、SoundCloud 的 transcoding_url 都在 payload 里。
    */
   songPreview: async (source: SongSource, bypassCache = false) => {
-    const result = await post<{ url: string; cached?: boolean }>("/song/preview", {
+    const result = await post<{ url: string; cached?: boolean; waveform_token?: string }>("/song/preview", {
       source,
       bypass_cache: bypassCache,
     });
     if (!result.url.startsWith("/")) return result;
     return { ...result, url: `${bridge().baseUrl}${result.url}` };
   },
+  /** token 只由 songPreview 返回；服务端据此查当前会话，绝不让前端传缓存路径/key。 */
+  songPreviewWaveform: (token: string) =>
+    request<StreamWaveformProgress>(`/song/preview/${encodeURIComponent(token)}/waveform`, {
+      cache: "no-store",
+    }),
   streamCacheStats: () => request<StreamCacheStats>("/song/cache"),
   clearStreamCache: () =>
     request<StreamCacheStats>("/song/cache", { method: "DELETE" }),

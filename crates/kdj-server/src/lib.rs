@@ -12,6 +12,7 @@ pub mod lyrics;
 pub mod routes;
 pub mod state;
 pub mod stream_cache;
+pub mod stream_waveform;
 pub mod waveform;
 pub mod ws;
 

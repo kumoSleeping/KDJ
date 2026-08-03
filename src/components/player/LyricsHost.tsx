@@ -15,6 +15,7 @@ import {
   useLyricsPrefs,
 } from "../../lib/lyricsPrefs";
 import { buildOverlayTimeline } from "../../lib/lyricsOverlay";
+import { setNativeStreamLyricsClockEnabled } from "../../lib/streamTrack";
 import { ensureLyrics, useLyricsStore } from "../../stores/lyricsStore";
 import { useAppStore } from "../../stores/appStore";
 import type { Track } from "../../types";
@@ -49,6 +50,13 @@ export function LyricsHost({
   const secondary = resolvedSecondaryPaint(prefs);
   const dim = dimPaint(prefs);
   const stroke = strokePaint(prefs);
+
+  // 只有 Android 原生浮层可见时才同步浏览器在线试听的时钟。关闭时必须清掉，
+  // 否则下一首本地曲目的歌词有机会读到上一首流媒体的外推位置。
+  useEffect(() => {
+    setNativeStreamLyricsClockEnabled(overlayOn);
+    return () => setNativeStreamLyricsClockEnabled(false);
+  }, [overlayOn]);
 
   // 右栏或独立悬浮歌词任一路径正在使用时搜词并预取。
   // prefsEpoch：引擎偏好变更后清缓存再重搜。
@@ -129,9 +137,9 @@ export function LyricsHost({
   ]);
 
   /**
-   * Android：把整首歌的时间轴交给原生侧，之后由它读 ExoPlayer 位置自己滚。
-   * 换歌、词搜到、切附加层各推一次，中间不再有前端参与——WebView 进后台会被
-   * 冻结，而息屏看歌词恰恰是这个功能存在的理由。
+   * Android：把整首歌的时间轴交给原生侧；本地曲目读 coordinator，浏览器试听
+   * 读上面的限频时钟镜像。换歌、词搜到、切附加层各推一次，中间不再有逐行
+   * 前端参与——WebView 进后台会被冻结，而息屏看歌词恰恰是这个功能存在的理由。
    */
   useEffect(() => {
     const push = window.kdj?.lyricsTimeline;

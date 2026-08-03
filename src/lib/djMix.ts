@@ -225,12 +225,16 @@ export function bpmSyncRate(fromBpm: number | null, toBpm: number | null): numbe
   return best > SYNC_MAX_RATIO || best < 1 / SYNC_MAX_RATIO ? 1 : best;
 }
 
-/** preservesPitch 还没进所有 TS lib 的 HTMLMediaElement，包一层。 */
-/** 移动壳的长期播放由系统播放器持有，不能再让 WebView 建第二条音频图。 */
+/**
+ * 只有 iOS 仍由插件内 AVPlayer 独占输出。Android 的本地文件虽由共享 Rust
+ * coordinator 出声，但在线试听会明确切到本模块的 WebAudio 双 Deck；不能只因
+ * UA 是 Android 就拒绝 warmup，否则流媒体接歌永远退化为失败/硬切。
+ */
 function nativeMobilePlaybackOwnsOutput(): boolean {
-  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  return window.kdj?.platform === "ios";
 }
 
+/** preservesPitch 还没进所有 TS lib 的 HTMLMediaElement，包一层。 */
 function setPreservesPitch(el: HTMLAudioElement, value: boolean): void {
   const media = el as HTMLAudioElement & {
     preservesPitch?: boolean;

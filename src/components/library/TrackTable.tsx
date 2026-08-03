@@ -1404,9 +1404,15 @@ export function TrackTable({
                   return;
                 }
                 if (selectionMode) {
+                  // 双点会依次送 detail=1 / 2 两次 click。竖屏的单击就是播放，
+                  // 第二下既不该重复起播，也不该把选择状态又翻回去。
+                  if (playClick === "single" && event.detail > 1) return;
                   onSelect(track.id, "toggle");
                   return;
                 }
+                // 同上：先让第一下立即播放，第二下只被吞掉；不要等双击超时，
+                // 否则移动端会感觉点歌迟钝。键盘触发的 detail=0 不受影响。
+                if (playClick === "single" && event.detail > 1) return;
                 const mode = selectMode(event);
                 onSelect(track.id, mode, event.detail);
                 // 带修饰键的多选不算——那是在攒选区。

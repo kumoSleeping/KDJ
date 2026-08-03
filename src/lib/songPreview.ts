@@ -105,7 +105,10 @@ export async function playSongPreview(request: SongPreviewRequest): Promise<void
     canRetry: false,
   });
   try {
-    const { url } = await api.songPreview(request.source, request.bypassCache === true);
+    const { url, waveform_token: waveformToken } = await api.songPreview(
+      request.source,
+      request.bypassCache === true,
+    );
     if (seq !== mySeq) return;
     const normalize = (item: SongPreviewItem): SongSource => ({
       ...item.source,
@@ -118,6 +121,7 @@ export async function playSongPreview(request: SongPreviewRequest): Promise<void
       normalize(request),
       url,
       request.bypassCache === true,
+      waveformToken || "",
     );
     const following = (request.queue ?? []).map((item) =>
       makePendingSongStreamTrack(normalize(item)),

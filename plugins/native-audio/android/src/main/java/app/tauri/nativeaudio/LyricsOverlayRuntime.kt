@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import java.util.concurrent.Callable
 import java.util.concurrent.FutureTask
 import kotlin.math.max
@@ -29,6 +30,38 @@ data class LyricsOverlayTimeline(
 ) {
     companion object {
         val EMPTY = LyricsOverlayTimeline(null, 0.0, "", emptyList())
+    }
+}
+
+/**
+ * 浏览器在线试听的外部时钟。流媒体不进 Rust coordinator，故不能复用本地曲目的
+ * [NativeAudioRuntime] 镜像；每次前端校准后由这里按 elapsedRealtime 外推，WebView
+ * 被降频时歌词也不会停在上一次 timeupdate。
+ *
+ * 只允许负 ID（临时流曲目）。本地曲目仍始终由 coordinator 时钟驱动。
+ */
+data class StreamLyricsPlaybackClock(
+    val trackId: Long,
+    val positionSec: Double,
+    val durationSec: Double,
+    val isPlaying: Boolean,
+    val rate: Double,
+    val stampedElapsedMs: Long,
+) {
+    fun snapshotNow(nowElapsedMs: Long = SystemClock.elapsedRealtime()): NativeAudioClock {
+        val elapsedSec = (nowElapsedMs - stampedElapsedMs).coerceAtLeast(0L) / 1000.0
+        val projected = if (isPlaying) positionSec + elapsedSec * rate else positionSec
+        val position = if (durationSec > 0.0) {
+            projected.coerceIn(0.0, durationSec)
+        } else {
+            projected.coerceAtLeast(0.0)
+        }
+        return NativeAudioClock(
+            trackId = trackId,
+            positionSec = position,
+            durationSec = durationSec,
+            isPlaying = isPlaying,
+        )
     }
 }
 
@@ -98,11 +131,11 @@ data class LyricsOverlayConfig(
  * **时间轴由这里驱动，而不是由前端每帧推一行文字过来**，这是整个功能能用的前提：
  * 息屏或切到别的应用之后 WebView 会被冻结/降频，靠 JS 定时器推歌词会直接卡住，
  * 而那正是悬浮歌词唯一的使用场景。所以前端只在换歌或切附加层时推一次时间轴，
- * 之后由这里读 [NativeAudioRuntime] 的播放时钟自己选行。
+ * 之后由这里读 [NativeAudioRuntime] 的本地播放时钟；浏览器试听则读单独的、
+ * 限频校准后可外推的 [StreamLyricsPlaybackClock]，自己选行。
  *
- * 注意：Android 出声已切共享 Rust coordinator（CPAL/AAudio），ExoPlayer 不再是
- * transport owner。悬浮歌词时钟需要后续接到 coordinator / 插件侧镜像进度，
- * 否则息屏歌词会停在旧 Exo 时钟上。
+ * Android 出声已切共享 Rust coordinator（CPAL/AAudio），本地曲目的时间镜像由
+ * [NativeAudioRuntime] 提供；浏览器流不进 coordinator，改由外部流时钟提供。
  */
 object LyricsOverlayRuntime {
 
@@ -112,6 +145,8 @@ object LyricsOverlayRuntime {
     private var window: LyricsOverlayWindow? = null
     private var appContext: Context? = null
     private var timeline = LyricsOverlayTimeline.EMPTY
+    /** 只服务负 ID 在线流；正 ID 时间线一定读 NativeAudioRuntime.coordinator 时钟。 */
+    private var streamPlaybackClock: StreamLyricsPlaybackClock? = null
     private var config = LyricsOverlayConfig.DEFAULT
     private var tickScheduled = false
 
@@ -136,10 +171,32 @@ object LyricsOverlayRuntime {
         synchronized(lock) { config.visible } && ensureWindow(context).isAttached()
 
     fun setTimeline(context: Context, next: LyricsOverlayTimeline) {
-        synchronized(lock) { timeline = next }
+        synchronized(lock) {
+            timeline = next
+            // 切曲（含流 → 流）时不能留下上一首外部时钟。本地 / 空时间线也绝不
+            // 应带着浏览器流时钟。
+            val previousStreamTrackId = streamPlaybackClock?.trackId
+            if (next.trackId == null || next.trackId >= 0L ||
+                previousStreamTrackId != null && previousStreamTrackId != next.trackId
+            ) {
+                streamPlaybackClock = null
+            }
+        }
         val reserve = next.lines.isNotEmpty()
         runOnMain {
             ensureWindow(context).setReserveSecondary(reserve)
+            renderOnce()
+            scheduleTick()
+        }
+    }
+
+    /** 前端限频推入浏览器试听的校准点；null 代表换曲或浮层隐藏时清空。 */
+    fun setStreamPlaybackClock(next: StreamLyricsPlaybackClock?) {
+        synchronized(lock) {
+            // 防御性再限制一次：正 ID 只能属于 coordinator，不能走这条旁路。
+            streamPlaybackClock = next?.takeIf { it.trackId < 0L }
+        }
+        runOnMain {
             renderOnce()
             scheduleTick()
         }
@@ -153,7 +210,11 @@ object LyricsOverlayRuntime {
      * 否则每次改锁定或字号都会把用户拖出来的位置弹回默认吸附点。
      */
     fun setConfig(context: Context, next: LyricsOverlayConfig, repositionY: Int?): Boolean {
-        synchronized(lock) { config = next }
+        synchronized(lock) {
+            config = next
+            // 显式隐藏也清理，避免前端被销毁时下一次打开还拿着旧流的外推位置。
+            if (!next.visible) streamPlaybackClock = null
+        }
         val overlay = ensureWindow(context)
         if (!next.visible) {
             runOnMain {
@@ -198,6 +259,7 @@ object LyricsOverlayRuntime {
     fun dispose(context: Context) {
         synchronized(lock) {
             timeline = LyricsOverlayTimeline.EMPTY
+            streamPlaybackClock = null
             config = LyricsOverlayConfig.DEFAULT
         }
         runOnMain {
@@ -238,17 +300,26 @@ object LyricsOverlayRuntime {
      */
     private fun renderOnce(): Long {
         val snapshotTimeline: LyricsOverlayTimeline
+        val snapshotStreamPlaybackClock: StreamLyricsPlaybackClock?
         val snapshotConfig: LyricsOverlayConfig
         val overlay: LyricsOverlayWindow?
         synchronized(lock) {
             snapshotTimeline = timeline
+            snapshotStreamPlaybackClock = streamPlaybackClock
             snapshotConfig = config
             overlay = window
         }
         if (overlay == null || !snapshotConfig.visible || !overlay.isAttached()) return 0L
 
-        // 读 coordinator 镜像（含播放中外推），不碰 WebView / ExoPlayer。
-        val clock = NativeAudioRuntime.clock()
+        // 正 ID 本地曲目只读 coordinator 镜像；负 ID 浏览器试听只接外部流时钟。
+        // 流时钟暂未到时宁可显示占位，绝不回退到上一首本地曲目的位置串词。
+        val clock = if (snapshotTimeline.trackId != null && snapshotTimeline.trackId < 0L) {
+            snapshotStreamPlaybackClock
+                ?.takeIf { it.trackId == snapshotTimeline.trackId }
+                ?.snapshotNow()
+        } else {
+            NativeAudioRuntime.clock()
+        }
         val lines = snapshotTimeline.lines
         val stale = snapshotTimeline.trackId != null &&
             clock?.trackId != null &&

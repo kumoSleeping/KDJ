@@ -33,7 +33,7 @@ export interface StreamBufferedRange {
 
 export interface StreamWaveformSnapshot {
   waveform: Waveform;
-  /** 与 waveform.amp 等长；false 表示该桶尚未取得真实 analyser 采样。 */
+  /** 与 waveform.amp 等长；false 表示该桶还没有真实 analyser 或缓存 PCM 分析。 */
   known: readonly boolean[];
   /** 媒体元素当前实际缓存的秒区间，用来画“缓存到哪里”的低透明占位。 */
   bufferedRanges: readonly StreamBufferedRange[];
@@ -42,12 +42,20 @@ export interface StreamWaveformSnapshot {
 
 interface StreamWaveformEntry {
   snapshot: StreamWaveformSnapshot;
-  /** 同一时间桶会收到多帧采样；频段做稳定均值，幅度保留峰值。 */
+  /** 同一时间桶会收到多帧 analyser 采样；频段做稳定均值，幅度保留峰值。 */
   counts: number[];
   rawAmp: number[];
   low: number[];
   middle: number[];
   high: number[];
+  /** analyser 只会看见已经播放到的 PCM；缓存前缀则由 server 波形单独覆盖。 */
+  analyserKnown: boolean[];
+  /** 后端已从顺序缓存文件解出的真实前缀，按整曲时长投影时才标记 known。 */
+  cachedPrefix: {
+    waveform: Waveform;
+    coveredSeconds: number;
+    revision: number;
+  } | null;
 }
 
 const streamCache = new Map<number, StreamWaveformEntry>();
@@ -77,6 +85,8 @@ function emptyStreamEntry(trackId: number, duration: number): StreamWaveformEntr
     low: Array(STREAM_BUCKETS).fill(0),
     middle: Array(STREAM_BUCKETS).fill(0),
     high: Array(STREAM_BUCKETS).fill(0),
+    analyserKnown: Array(STREAM_BUCKETS).fill(false),
+    cachedPrefix: null,
   };
 }
 
@@ -157,6 +167,90 @@ function normalizeKnownStreamBuckets(
     g[index] = channels[1] ?? 0;
     b[index] = channels[2] ?? 0;
   }
+}
+
+/**
+ * 把后端的“从 0 开始、已解码 N 秒”的波形投影到整曲固定 640 桶。
+ *
+ * 不能直接把 prefix 的 640 列拉满画布：那会把前 20 秒错误拉伸成整首歌。每个
+ * 目标桶按自己的整曲时间窗口反查 prefix 中相交的列，只有真正覆盖到的桶才置 true。
+ */
+function overlayCachedPrefix(
+  entry: StreamWaveformEntry,
+  total: number,
+  amp: number[],
+  r: number[],
+  g: number[],
+  b: number[],
+  cacheKnown: boolean[],
+): void {
+  const prefix = entry.cachedPrefix;
+  if (!prefix || total <= 0) return;
+  const source = prefix.waveform;
+  const n = source.amp.length;
+  if (
+    n === 0 ||
+    source.r.length !== n ||
+    source.g.length !== n ||
+    source.b.length !== n
+  ) {
+    return;
+  }
+  const covered = clamp(prefix.coveredSeconds, 0, total);
+  if (covered <= 0) return;
+  const endBucket = Math.min(STREAM_BUCKETS, Math.ceil((covered / total) * STREAM_BUCKETS));
+  for (let bucket = 0; bucket < endBucket; bucket += 1) {
+    const start = (bucket / STREAM_BUCKETS) * total;
+    if (start >= covered) break;
+    const end = Math.min(covered, ((bucket + 1) / STREAM_BUCKETS) * total);
+    const from = Math.min(n - 1, Math.max(0, Math.floor((start / covered) * n)));
+    const to = Math.min(n, Math.max(from + 1, Math.ceil((end / covered) * n)));
+    let peak = 0;
+    let red = 0;
+    let green = 0;
+    let blue = 0;
+    let weight = 0;
+    for (let index = from; index < to; index += 1) {
+      const value = clamp(source.amp[index] ?? 0, 0, 1);
+      peak = Math.max(peak, value);
+      const colorWeight = value + 0.001;
+      red += (source.r[index] ?? 0) * colorWeight;
+      green += (source.g[index] ?? 0) * colorWeight;
+      blue += (source.b[index] ?? 0) * colorWeight;
+      weight += colorWeight;
+    }
+    if (weight <= 0) continue;
+    amp[bucket] = peak;
+    r[bucket] = Math.round(red / weight);
+    g[bucket] = Math.round(green / weight);
+    b[bucket] = Math.round(blue / weight);
+    cacheKnown[bucket] = true;
+  }
+}
+
+function buildStreamSnapshot(
+  entry: StreamWaveformEntry,
+  trackId: number,
+  total: number,
+  bufferedRanges: readonly StreamBufferedRange[],
+  revision: number,
+): StreamWaveformSnapshot {
+  const amp = Array(STREAM_BUCKETS).fill(0) as number[];
+  const r = Array(STREAM_BUCKETS).fill(0) as number[];
+  const g = Array(STREAM_BUCKETS).fill(0) as number[];
+  const b = Array(STREAM_BUCKETS).fill(0) as number[];
+  // analyser 值和服务端波形的归一策略不同；先画已播 analyser，再由缓存前缀
+  // 覆盖同一区间，避免缓存更新时把播放头之后的真实 analyser 样本清空。
+  normalizeKnownStreamBuckets(entry, entry.analyserKnown, amp, r, g, b);
+  const cacheKnown = Array(STREAM_BUCKETS).fill(false) as boolean[];
+  overlayCachedPrefix(entry, total, amp, r, g, b, cacheKnown);
+  const known = entry.analyserKnown.map((value, index) => value || cacheKnown[index]);
+  return {
+    waveform: { track_id: trackId, duration: total, amp, r, g, b },
+    known,
+    bufferedRanges,
+    revision,
+  };
 }
 
 function touchStreamEntry(trackId: number, entry: StreamWaveformEntry): void {
@@ -264,11 +358,6 @@ export function updateStreamWaveform(
     return previous;
   }
 
-  const amp = [...previous.waveform.amp];
-  const r = [...previous.waveform.r];
-  const g = [...previous.waveform.g];
-  const b = [...previous.waveform.b];
-  const known = [...previous.known];
   if (bucket >= 0 && sample) {
     const count = entry.counts[bucket] ?? 0;
     const nextCount = Math.min(65535, count + 1);
@@ -277,24 +366,75 @@ export function updateStreamWaveform(
     entry.low[bucket] = (entry.low[bucket] ?? 0) * colorWeight + clamp(sample.low, 0, 1) / nextCount;
     entry.middle[bucket] = (entry.middle[bucket] ?? 0) * colorWeight + clamp(sample.middle, 0, 1) / nextCount;
     entry.high[bucket] = (entry.high[bucket] ?? 0) * colorWeight + clamp(sample.high, 0, 1) / nextCount;
-    known[bucket] = true;
+    entry.analyserKnown[bucket] = true;
     entry.counts[bucket] = nextCount;
   }
-  normalizeKnownStreamBuckets(entry, known, amp, r, g, b);
+  entry.snapshot = buildStreamSnapshot(
+    entry,
+    trackId,
+    total,
+    nextRanges,
+    previous.revision + 1,
+  );
+  touchStreamEntry(trackId, entry);
+  trimStreamCache();
+  notifyStreamWaveform(trackId);
+  return entry.snapshot;
+}
 
-  entry.snapshot = {
-    waveform: {
-      track_id: trackId,
-      duration: total,
-      amp,
-      r,
-      g,
-      b,
-    },
-    known,
-    bufferedRanges: nextRanges,
-    revision: previous.revision + 1,
+/**
+ * 合并服务端从 stream-cache 临时文件解出的真实前缀。
+ *
+ * `coveredSeconds` 是已经得到 PCM 的时长，而 `duration` 是整曲长度。两者不可混用：
+ * 这里的 `buildStreamSnapshot` 会只覆盖前者对应的固定桶，保留其他区域已有的 analyser
+ * 样本和 `buffered` 占位。
+ */
+export function mergeCachedStreamWaveform(
+  trackId: number,
+  duration: number,
+  coveredSeconds: number,
+  waveform: Waveform,
+  sourceRevision: number,
+  bufferedRanges?: readonly StreamBufferedRange[],
+): StreamWaveformSnapshot {
+  if (trackId >= 0) throw new Error("渐进在线波形只接受负 track id");
+  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
+  const entry = streamCache.get(trackId) ?? emptyStreamEntry(trackId, safeDuration);
+  const previous = entry.snapshot;
+  const total = safeDuration || previous.waveform.duration;
+  const nextRanges =
+    bufferedRanges === undefined
+      ? previous.bufferedRanges
+      : normalizeBufferedRanges(bufferedRanges, total);
+  const previousPrefix = entry.cachedPrefix;
+  // HTTP 轮询可能乱序返回；旧快照不能把已缓存得更远的波形缩回去。
+  if (previousPrefix && sourceRevision < previousPrefix.revision) {
+    touchStreamEntry(trackId, entry);
+    return previous;
+  }
+  const validWaveform =
+    waveform.amp.length > 0 &&
+    waveform.r.length === waveform.amp.length &&
+    waveform.g.length === waveform.amp.length &&
+    waveform.b.length === waveform.amp.length &&
+    Number.isFinite(coveredSeconds) &&
+    coveredSeconds > 0;
+  if (!validWaveform) {
+    touchStreamEntry(trackId, entry);
+    return previous;
+  }
+  entry.cachedPrefix = {
+    waveform,
+    coveredSeconds,
+    revision: sourceRevision,
   };
+  entry.snapshot = buildStreamSnapshot(
+    entry,
+    trackId,
+    total,
+    nextRanges,
+    previous.revision + 1,
+  );
   touchStreamEntry(trackId, entry);
   trimStreamCache();
   notifyStreamWaveform(trackId);

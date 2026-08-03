@@ -678,14 +678,15 @@ export function Workspace() {
   );
 
   // 在线试听起播后自动打开右侧歌词；设置/下载队列等显式面板正在使用右栏时不抢占，
-  // 等它们关闭后此 effect 会再次尝试。详情极仍可切到只含基础信息的在线详情。
+  // 等它们关闭后此 effect 会再次尝试。移动端的抽屉会盖住整个列表，起播绝不能
+  // 自动拉它开；详情只保留给底部正在播放唱盘的显式入口。
   useEffect(() => {
+    if (layout === "narrow") return;
     if (!playingTrack || !isStreamTrack(playingTrack)) return;
     if (asideLockedRef.current) return;
     if (showSettings || showFolders || showVjExport || showQueue) return;
     setAsideTrackId(playingTrack.id);
     pinTrackAside("lyrics", playingTrack.id);
-    if (layout === "narrow") setSheet("aside");
   }, [
     playingTrack?.id,
     layout,
@@ -732,6 +733,8 @@ export function Workspace() {
    */
   const inspectOnlineGroup = useCallback(
     (group: MergedGroup, requestedSourceIndex: number) => {
+      // 防御性兜底：移动端任何列表入口都不准通过详情抽屉遮住结果。
+      if (layout === "narrow") return;
       setActiveMiddlePane("search");
       const requested = group.sources[requestedSourceIndex] ?? group.sources[0];
       const source =
@@ -752,7 +755,6 @@ export function Workspace() {
       });
       setAsideLocked(false);
       pinTrackAside("detail", track.id);
-      if (layout === "narrow") setSheet("aside");
     },
     [layout, pinTrackAside],
   );

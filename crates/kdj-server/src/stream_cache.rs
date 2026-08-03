@@ -87,6 +87,12 @@ impl StreamCache {
         config.download_dir().join(".kdj").join("stream-cache")
     }
 
+    /// 已提交媒体的确定性路径。只供同进程的渐进波形在 `finish` 后打开；外部
+    /// HTTP 一律通过 preview token，不能把这个磁盘路径暴露给前端。
+    pub fn media_path(root: &Path, key: &str) -> PathBuf {
+        CachePaths::new(root, key).media
+    }
+
     pub fn key(source: &SongSource, quality: Quality) -> String {
         // FNV-1a 足够做本机文件名；manifest 还会核对平台/来源/音质，极端碰撞只会
         // 被判为 miss，不会把另一首歌当成当前歌曲播放。
@@ -490,6 +496,29 @@ impl StreamCacheWriter {
                 .unwrap()
                 .get(&self.key)
                 .is_some_and(|reservation_id| *reservation_id == self.reservation_id)
+    }
+
+    /// 当前临时文件的路径。调用方只能另开只读句柄做可选分析，不能移动、删除或
+    /// 复用 writer 持有的文件句柄；写入和提交的所有权仍完全留在这里。
+    pub(crate) fn partial_path(&self) -> &Path {
+        &self.partial
+    }
+
+    pub(crate) fn written_bytes(&self) -> u64 {
+        self.written
+    }
+
+    /// 把 Tokio 的用户态写缓冲交给内核，供只读分析句柄看见稳定前缀。不是 fsync：
+    /// 渐进波形随时可重算，不能为了展示把每个网络 chunk 都变成落盘同步。
+    pub(crate) async fn flush_for_observer(&mut self) -> std::io::Result<bool> {
+        if !self.is_valid() {
+            return Ok(false);
+        }
+        let Some(file) = self.file.as_mut() else {
+            return Ok(false);
+        };
+        file.flush().await?;
+        Ok(self.is_valid())
     }
 
     pub async fn write_chunk(&mut self, bytes: &[u8]) -> std::io::Result<bool> {

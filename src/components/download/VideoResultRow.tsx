@@ -241,9 +241,15 @@ export function VideoResultRow({
           }
           if (!bvid) return;
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+          // 窄屏单击即播，双点的第二个 click 必须吞掉，避免视频重新装载两次。
+          if (playClick === "single" && event.detail > 1) return;
           if (playClick === "single") requestVideoPreview({ bvid, title, author, page: 0, cover });
         }}
-        title="单击/双击预览视频（跟随播放手势设置）；点下载加入队列后可在队列里调分 P / 画质 / Offset"
+        title={
+          playClick === "single"
+            ? "单击预览视频；点下载加入队列后可在队列里调分 P / 画质 / Offset"
+            : "双击预览视频；点下载加入队列后可在队列里调分 P / 画质 / Offset"
+        }
       >
         <td className="kd-selection-cell" {...cellDrag} />
         <td className="kd-result-lead" data-col="index" {...cellDrag}>

@@ -19,6 +19,7 @@ Default permissions for the plugin
 - `allow-get-progress-checkpoint`
 - `allow-clear-progress-checkpoint`
 - `allow-set-lyrics-timeline`
+- `allow-set-lyrics-playback-clock`
 - `allow-set-lyrics-overlay`
 - `allow-check-overlay-permission`
 - `allow-request-overlay-permission`
@@ -474,6 +475,32 @@ Enables the set_lyrics_overlay command without any pre-configured scope.
 <td>
 
 Denies the set_lyrics_overlay command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:allow-set-lyrics-playback-clock`
+
+</td>
+<td>
+
+Enables the set_lyrics_playback_clock command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-set-lyrics-playback-clock`
+
+</td>
+<td>
+
+Denies the set_lyrics_playback_clock command without any pre-configured scope.
 
 </td>
 </tr>

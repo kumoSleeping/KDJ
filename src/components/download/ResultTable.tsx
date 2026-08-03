@@ -522,6 +522,7 @@ export function ResultTable({
                       key={group.group_id}
                       group={group}
                       columns={visibleColumns}
+                      layout={layout}
                       indent={!itemFlat}
                       last={position === item.groups.length - 1}
                       rowNumber={flatRowOffset + position + 1}

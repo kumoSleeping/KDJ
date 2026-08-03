@@ -181,6 +181,8 @@ pub struct AppState {
     pub song_previews: Mutex<SongPreviewTickets>,
     /// 在线音频的旁路磁盘缓存；共享 generation 用于关闭/清理时取消在途写入。
     pub stream_cache: crate::stream_cache::StreamCache,
+    /// 复用在线缓存临时文件的渐进波形；只在前端实际请求时才开始解码。
+    pub stream_waveforms: crate::stream_waveform::StreamWaveformCoordinator,
     /// 正在跑的分析批次，供「停止分析」用。挂在这里而不是做成模块级 static：
     /// static 会被同进程里的多个 AppState（测试、将来的多实例）串在一起。
     pub analysis: crate::jobs::AnalysisRegistry,
@@ -224,6 +226,7 @@ impl AppState {
             provider_ctx: ctx,
             song_previews: Mutex::new(SongPreviewTickets::default()),
             stream_cache,
+            stream_waveforms: Default::default(),
             analysis: Default::default(),
             waveforms,
             maintenance: Default::default(),

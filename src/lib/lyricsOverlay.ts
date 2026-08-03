@@ -1,8 +1,9 @@
 /**
  * 系统级歌词悬浮窗的前端侧逻辑：权限引导 + 把歌词缓存摊平成原生要的时间轴。
  *
- * Android 的浮层是原生 View，滚动由持有 ExoPlayer 的原生侧驱动，所以前端只在
- * 换歌或切附加层时推一次整首歌的时间轴（见 `KdjBridge.lyricsTimeline`）。
+ * Android 的浮层是原生 View：本地曲目由 Rust coordinator 镜像驱动，浏览器试听
+ * 由限频外部时钟驱动，所以前端只在换歌或切附加层时推一次整首歌的时间轴
+ * （见 `KdjBridge.lyricsTimeline`）。
  * 桌面的歌词窗口是另一个 WebView，自己订阅 store，不走这条路。
  */
 

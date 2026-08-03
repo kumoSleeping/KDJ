@@ -60,6 +60,10 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/search/collection", post(resolve_collection))
         .route("/api/lyrics", post(lyrics))
         .route("/api/song/preview", post(song_preview))
+        .route(
+            "/api/song/preview/{token}/waveform",
+            get(song_preview_waveform),
+        )
         .route("/api/song/preview/{token}", get(song_preview_stream))
         .route(
             "/api/song/cache",
@@ -173,10 +177,14 @@ async fn put_settings(
         // 已完成的旧目录缓存保留给用户自行处理；但所有 pending/writer 必须失效，
         // 否则它们会在设置切换后继续写进统计/清理看不到的旧目录。
         state.stream_cache.cancel_writes();
+        state.stream_waveforms.clear();
     }
     state
         .stream_cache
         .set_enabled(settings.stream_cache_enabled);
+    if !settings.stream_cache_enabled {
+        state.stream_waveforms.clear();
+    }
     state.sync_provider_context();
     ctx.downloads.set_concurrency(settings.concurrent_downloads);
     // auto_start_downloads 保留在配置契约中兼容旧 settings.json，但下载队列现在
@@ -502,16 +510,21 @@ async fn song_cache_stats(
 async fn clear_song_cache(
     State(state): State<Arc<AppState>>,
 ) -> Json<crate::stream_cache::StreamCacheStats> {
+    state.stream_waveforms.clear();
     Json(state.stream_cache.clear(&state.config).await)
 }
 
 fn schedule_stream_cache_verification(
     cache: crate::stream_cache::StreamCache,
+    waveforms: crate::stream_waveform::StreamWaveformCoordinator,
     root: PathBuf,
     key: String,
 ) {
     tokio::spawn(async move {
-        let _ = cache.verify(&root, &key).await;
+        if !cache.verify(&root, &key).await {
+            // 校验淘汰的 media 不能继续拿旧的完整波形冒充当前缓存。
+            waveforms.remove(&key);
+        }
     });
 }
 
@@ -533,7 +546,66 @@ fn insert_song_preview_ticket(
     Json(json!({
         "url": format!("/api/song/preview/{token}"),
         "cached": cached,
+        // 前端只拿到随机 ticket，波形端点在服务端据此查缓存键；绝不把磁盘
+        // 路径或可推断来源的缓存键暴露给 WebView。
+        "waveform_token": token,
     }))
+}
+
+#[derive(Serialize)]
+struct SongPreviewWaveformResponse {
+    /// 缓存功能关着时，浏览器侧 analyser 仍会继续补已播波形，但不能可靠地读取
+    /// future buffered PCM；前端看到 false 便停止此端点的轮询。
+    enabled: bool,
+    #[serde(flatten)]
+    progress: crate::stream_waveform::StreamWaveformProgress,
+}
+
+/// 读取当前试听 token 对应的**已落盘/可读**缓存前缀波形。
+///
+/// 路由不接受 cache key / 文件路径，随机 ticket 也会照常续租；这样本机 WebView
+/// 只拥有正在播放的会话能力，不能枚举用户的缓存目录。
+async fn song_preview_waveform(
+    State(state): State<Arc<AppState>>,
+    AxumPath(token): AxumPath<String>,
+) -> ApiResult<Response> {
+    let ticket = {
+        let mut previews = state.song_previews.lock().unwrap();
+        previews
+            .get_and_touch(&token)
+            .ok_or_else(|| ApiError::not_found("试听地址已过期，请重新播放"))?
+    };
+    let cache_key = ticket
+        .cache_key
+        .clone()
+        .unwrap_or_else(|| crate::stream_cache::StreamCache::key(&ticket.source, ticket.quality));
+    let enabled = state.config.to_settings().stream_cache_enabled;
+    if enabled {
+        let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
+        if let Some(cached) = state
+            .stream_cache
+            .lookup(&cache_root, &cache_key, &ticket.source, ticket.quality)
+            .await
+        {
+            // 进程刚重启或本曲一开始就命中完整缓存时，这里首次把 final media
+            // 交给渐进波形协调器；它仍要等前端真正轮询后才解码。
+            state
+                .stream_waveforms
+                .observe(cache_key.clone(), cached.path, cached.bytes, true);
+        }
+    }
+    let progress = state.stream_waveforms.request(cache_key.clone());
+    let progress = crate::stream_waveform::StreamWaveformProgress {
+        active: progress.active || (enabled && state.stream_cache.is_writing(&cache_key)),
+        ..progress
+    };
+    // 这不是静态资源：同一个 token 的覆盖秒数和 revision 会变。明确 no-store，
+    // 否则部分 WebView/HTTP 缓存会把第一次的空快照一直复用。
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(SongPreviewWaveformResponse { enabled, progress }),
+    )
+        .into_response())
 }
 
 /// 搜索结果里的「试听」：按设置的试听音质拿播放直链，不下载不入库。
@@ -554,29 +626,34 @@ async fn song_preview(
     let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
     if body.bypass_cache {
         state.stream_cache.invalidate(&cache_root, &cache_key).await;
-    } else if state.config.to_settings().stream_cache_enabled
-        && state
+        state.stream_waveforms.remove(&cache_key);
+    } else if state.config.to_settings().stream_cache_enabled {
+        if let Some(cached) = state
             .stream_cache
             .lookup(&cache_root, &cache_key, &body.source, quality)
             .await
-            .is_some()
-    {
-        schedule_stream_cache_verification(
-            state.stream_cache.clone(),
-            cache_root,
-            cache_key.clone(),
-        );
-        return Ok(insert_song_preview_ticket(
-            &state,
-            SongPreviewTicket {
-                source: body.source,
-                quality,
-                cache_key: Some(cache_key),
-                cached: true,
-                url: String::new(),
-                last_used_at: std::time::Instant::now(),
-            },
-        ));
+        {
+            state
+                .stream_waveforms
+                .observe(cache_key.clone(), cached.path, cached.bytes, true);
+            schedule_stream_cache_verification(
+                state.stream_cache.clone(),
+                state.stream_waveforms.clone(),
+                cache_root,
+                cache_key.clone(),
+            );
+            return Ok(insert_song_preview_ticket(
+                &state,
+                SongPreviewTicket {
+                    source: body.source,
+                    quality,
+                    cache_key: Some(cache_key),
+                    cached: true,
+                    url: String::new(),
+                    last_used_at: std::time::Instant::now(),
+                },
+            ));
+        }
     }
     match provider
         .preview_url_at_quality(&body.source, quality)
@@ -629,8 +706,12 @@ async fn song_preview_stream(
             .lookup(&cache_root, &cache_key, &ticket.source, ticket.quality)
             .await
         {
+            state
+                .stream_waveforms
+                .observe(cache_key.clone(), cached.path.clone(), cached.bytes, true);
             schedule_stream_cache_verification(
                 state.stream_cache.clone(),
+                state.stream_waveforms.clone(),
                 cache_root.clone(),
                 cache_key.clone(),
             );
@@ -639,6 +720,7 @@ async fn song_preview_stream(
                 Err(_) => {
                     // 清理缓存可能恰好发生在 lookup 和 open 之间；这次直接回源。
                     state.stream_cache.invalidate(&cache_root, &cache_key).await;
+                    state.stream_waveforms.remove(&cache_key);
                 }
             }
         }
@@ -757,17 +839,25 @@ fn schedule_song_preview_cache(
             return;
         }
         let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
-        if state
+        if let Some(cached) = state
             .stream_cache
             .lookup(&cache_root, &cache_key, &ticket.source, ticket.quality)
             .await
-            .is_some()
         {
+            state
+                .stream_waveforms
+                .observe(cache_key, cached.path, cached.bytes, true);
             return;
         }
-        if let Err(error) =
-            cache_song_preview_background(state, token, ticket, content_type_hint, reservation)
-                .await
+        if let Err(error) = cache_song_preview_background(
+            state,
+            token,
+            ticket,
+            cache_key,
+            content_type_hint,
+            reservation,
+        )
+        .await
         {
             tracing::debug!(error = %error, "在线音频后台缓存未完成");
         }
@@ -853,6 +943,7 @@ async fn cache_song_preview_background(
     state: Arc<AppState>,
     token: String,
     ticket: SongPreviewTicket,
+    cache_key: String,
     content_type_hint: String,
     reservation: crate::stream_cache::StreamCacheReservation,
 ) -> Result<(), String> {
@@ -868,6 +959,9 @@ async fn cache_song_preview_background(
     let mut writer: Option<crate::stream_cache::StreamCacheWriter> = None;
     let mut reservation = Some(reservation);
     let mut refreshes_left = 1_u8;
+    // 只在累计跨过一个有意义的增长量时 publish 给只读波形任务。每个网络 chunk
+    // 都 flush 会把纯展示需求放大成大量 IO；最终提交会无条件再 publish 一次。
+    let mut last_waveform_observed_bytes = 0_u64;
 
     // 绝大多数 CDN 对 bytes=0- 一次返回整首；循环同时兼容主动限制单段大小的源。
     for _ in 0..2048 {
@@ -945,14 +1039,27 @@ async fn cache_song_preview_background(
                 return Err("缓存源返回了 HTML/JSON 错误内容".into());
             }
             received = received.saturating_add(chunk.len() as u64);
+            let writer = writer.as_mut().expect("writer created above");
             let keep_writing = writer
-                .as_mut()
-                .expect("writer created above")
                 .write_chunk(&chunk)
                 .await
                 .map_err(|error| format!("写入缓存失败：{error}"))?;
             if !keep_writing {
                 return Ok(());
+            }
+            if writer.written_bytes().saturating_sub(last_waveform_observed_bytes) >= 512 * 1024 {
+                // writer 仍独占写句柄；协调器只会另开一个普通只读句柄去读已经可见
+                // 的文件前缀。读取失败（例如 MP4 的尾部索引尚未到达）会安静等待下次
+                // 增长或最终文件，绝不影响缓存写入和播放。
+                if writer.flush_for_observer().await.unwrap_or(false) {
+                    last_waveform_observed_bytes = writer.written_bytes();
+                    state.stream_waveforms.observe(
+                        cache_key.clone(),
+                        writer.partial_path().to_path_buf(),
+                        last_waveform_observed_bytes,
+                        false,
+                    );
+                }
             }
         }
         let declared = segment.end - segment.start + 1;
@@ -970,6 +1077,12 @@ async fn cache_song_preview_background(
                 .await
                 .map_err(|error| format!("提交缓存失败：{error}"))?;
             if committed {
+                state.stream_waveforms.observe(
+                    cache_key.clone(),
+                    crate::stream_cache::StreamCache::media_path(&cache_root, &cache_key),
+                    segment.total,
+                    true,
+                );
                 tracing::debug!(source = %ticket.source.key, bytes = segment.total, "在线音频已缓存");
             }
             return Ok(());

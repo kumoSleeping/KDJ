@@ -11,6 +11,7 @@ import {
   requestOverlayPermission,
   savePngToGallery,
   setLyricsOverlay,
+  setLyricsPlaybackClock,
   setLyricsTimeline,
 } from "tauri-plugin-native-audio-api";
 import type { KdjBridge, SavedLoginQr, UpdateInfo, UpdateProgress } from "../types";
@@ -219,6 +220,9 @@ async function createTauriBridge(): Promise<KdjBridge> {
           }
         : null,
     lyricsTimeline: android ? (payload) => setLyricsTimeline(payload) : null,
+    // 在线试听走浏览器媒体元素，不会有 Rust coordinator 时钟；仅 Android 原生
+    // 悬浮歌词需要这条限频外部时钟通道，桌面独立 WebView 已自行订阅流状态。
+    lyricsPlaybackClock: android ? (payload) => setLyricsPlaybackClock(payload) : null,
     overlayPermission: android
       ? {
           check: async () => (await checkOverlayPermission()).granted,
