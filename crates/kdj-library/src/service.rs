@@ -2969,10 +2969,15 @@ mod tests {
     #[test]
     fn bpm_key_v2_backfill_is_versioned_preferred_and_retires_matching_v1_fields() {
         let service = service();
+        // `pending_bpm_key_analysis_v2_ids` normalizes folder paths with the
+        // native separator, so rows written directly into this SQL-level test
+        // must use the same platform-native form as production rows.
+        let a_path = format!("{ROOT}{SEP}v2-a.mp3");
+        let b_path = format!("{ROOT}{SEP}focus{SEP}v2-b.mp3");
         let a = insert(
             &service,
             Row {
-                path: "/lib/v2-a.mp3",
+                path: &a_path,
                 camelot: "8A",
                 bpm: Some(120.0),
                 analyzed: true,
@@ -2982,7 +2987,7 @@ mod tests {
         let b = insert(
             &service,
             Row {
-                path: "/lib/focus/v2-b.mp3",
+                path: &b_path,
                 camelot: "8A",
                 bpm: Some(121.0),
                 analyzed: true,
@@ -3006,7 +3011,12 @@ mod tests {
         );
         assert_eq!(
             service
-                .pending_bpm_key_analysis_v2_ids(None, false, Some(20), Some("/lib/focus"))
+                .pending_bpm_key_analysis_v2_ids(
+                    None,
+                    false,
+                    Some(20),
+                    Some(&format!("{ROOT}{SEP}focus")),
+                )
                 .unwrap(),
             vec![b],
             "打开文件夹时应先只挑该目录子树里的 v2 待处理项"
