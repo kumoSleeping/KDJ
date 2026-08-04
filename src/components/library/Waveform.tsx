@@ -8,6 +8,7 @@ import {
   type StreamWaveformSnapshot,
 } from "../../lib/waveformCache";
 import type { Waveform as WaveformData } from "../../types";
+import { waveformEdgeScales } from "../../lib/waveformRenderPolicy";
 import { ContextMenu } from "../common";
 
 /** 点波形跳转：PlayerBar 监听它，和 kd:play / kd:position 一套约定。 */
@@ -79,6 +80,14 @@ function draw(
   const mid = cssHeight / 2;
   const width = Math.max(1, Math.floor(cssWidth));
 
+  interface PixelColumn {
+    amp: number;
+    r: number;
+    g: number;
+    b: number;
+    known: boolean;
+  }
+  const columns: PixelColumn[] = [];
   // 按**像素列**遍历而不是按数据列：数据比像素多时取区间最大值（不会漏掉瞬态），
   // 少时同一根柱子铺满几个像素。两种缩放都不会出现摩尔纹或空隙。
   for (let x = 0; x < width; x += 1) {
@@ -102,13 +111,32 @@ function draw(
       b += wave.b[i] * w;
       weight += w;
     }
-    if (!hasKnownSample || weight <= 0) {
+    columns.push({
+      amp,
+      r: weight > 0 ? Math.round(r / weight) : 0,
+      g: weight > 0 ? Math.round(g / weight) : 0,
+      b: weight > 0 ? Math.round(b / weight) : 0,
+      known: hasKnownSample && weight > 0,
+    });
+  }
+
+  // 在线渐进波形的首/尾真实桶可能从静音基线一步跳到满高，视觉上会变成截图里
+  // 那种整高竖墙。只给最外侧几列做屏幕空间包络；内部瞬态和 unknown 掩码不动。
+  const edgeScales = known
+    ? waveformEdgeScales(
+        columns.map((column) => column.amp),
+        columns.map((column) => column.known),
+      )
+    : null;
+  for (let x = 0; x < columns.length; x += 1) {
+    const column = columns[x];
+    if (!column.known) {
       // 未采样部分由 DOM 下层的流媒体渐变轨道表达，不拿灰柱或随机柱冒充波形。
       continue;
     }
-    ctx.fillStyle = `rgb(${Math.round(r / weight)},${Math.round(g / weight)},${Math.round(b / weight)})`;
+    ctx.fillStyle = `rgb(${column.r},${column.g},${column.b})`;
     // 最小 1px：静音段也留一条中线，否则波形会断成几截看着像坏了
-    const half = Math.max(0.5, amp * (mid - 1));
+    const half = Math.max(0.5, column.amp * (edgeScales?.[x] ?? 1) * (mid - 1));
     ctx.fillRect(x, mid - half, 1, half * 2);
   }
 }

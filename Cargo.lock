@@ -2938,7 +2938,9 @@ dependencies = [
 name = "kdj-playback"
 version = "0.2.33"
 dependencies = [
+ "anyhow",
  "kdj-player",
+ "reqwest 0.12.28",
  "serde",
 ]
 

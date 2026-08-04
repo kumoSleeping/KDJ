@@ -5,15 +5,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kdj_player::{
-    decode_file_streaming, DeckId, PlayerMode, RtCommand, StreamMetadata, StreamSource,
-    TransitionPlan, DEFAULT_STREAM_BUFFER_SECONDS,
+    decode_file_streaming, decode_source_streaming, DeckId, PlayerMode, RtCommand, StreamMetadata,
+    StreamSource, TransitionPlan, DEFAULT_STREAM_BUFFER_SECONDS,
 };
 
 use crate::contract::{
     CommandAck, PlaybackCommand, PlaybackPhase, PlaybackSnapshot, PlaybackSource,
-    PlaybackTransitionPlan,
+    PlaybackSourceKind, PlaybackTransitionPlan,
 };
 use crate::platform::{CpalOutputFactory, PlaybackOutput, PlaybackOutputFactory};
+use crate::remote_source::{is_loopback_http_url, HttpRangeSource};
 
 const ACTOR_TICK: Duration = Duration::from_millis(10);
 /// Seeking 时加密轮询，尽快提权已就绪的 shadow Deck（不降低预缓冲）。
@@ -36,9 +37,7 @@ pub struct PlaybackCoordinator {
 }
 
 impl PlaybackCoordinator {
-    pub fn spawn(
-        emit: impl Fn(PlaybackSnapshot) + Send + Sync + 'static,
-    ) -> Result<Self, String> {
+    pub fn spawn(emit: impl Fn(PlaybackSnapshot) + Send + Sync + 'static) -> Result<Self, String> {
         Self::spawn_with_factory(emit, Arc::new(CpalOutputFactory))
     }
 
@@ -266,9 +265,11 @@ impl Actor {
 
     fn awaiting_seek_promotion(&self) -> bool {
         self.state.phase == PlaybackPhase::Seeking
-            || self.pending.iter().flatten().any(|pending| {
-                matches!(pending.activation, Some(Activation::Seek))
-            })
+            || self
+                .pending
+                .iter()
+                .flatten()
+                .any(|pending| matches!(pending.activation, Some(Activation::Seek)))
     }
 
     fn handle(&mut self, request: Request) {
@@ -352,11 +353,7 @@ impl Actor {
         }
     }
 
-    fn apply_command(
-        &mut self,
-        command_id: u64,
-        command: PlaybackCommand,
-    ) -> Result<(), String> {
+    fn apply_command(&mut self, command_id: u64, command: PlaybackCommand) -> Result<(), String> {
         self.state.last_command_id = command_id;
         self.state.error.clear();
         match command {
@@ -511,7 +508,10 @@ impl Actor {
     fn set_playing(&mut self, playing: bool) -> Result<(), String> {
         self.state.desired_playing = playing;
         self.send_playing(playing)?;
-        if !matches!(self.state.phase, PlaybackPhase::Loading | PlaybackPhase::Seeking) {
+        if !matches!(
+            self.state.phase,
+            PlaybackPhase::Loading | PlaybackPhase::Seeking
+        ) {
             self.state.phase = if self.state.track_id.is_none() {
                 PlaybackPhase::Idle
             } else if playing {
@@ -581,8 +581,7 @@ impl Actor {
             self.state.phase = PlaybackPhase::Loading;
             self.state.buffering = true;
             let deck = if index == 0 { DeckId::A } else { DeckId::B };
-            let result =
-                self.start_stream(deck, request, Some(Activation::Transition(transition)));
+            let result = self.start_stream(deck, request, Some(Activation::Transition(transition)));
             if result.is_err() {
                 self.state = checkpoint;
             }
@@ -629,12 +628,8 @@ impl Actor {
         result
     }
 
-    fn handoff(
-        &mut self,
-        expected: i64,
-        transition: PendingTransition,
-    ) -> Result<(), String> {
-        if expected <= 0 {
+    fn handoff(&mut self, expected: i64, transition: PendingTransition) -> Result<(), String> {
+        if expected == 0 {
             return Err("接歌目标 id 无效".into());
         }
         let target = self.front.other();
@@ -642,7 +637,11 @@ impl Actor {
             .as_ref()
             .is_some_and(|runtime| runtime.request.track_id == expected)
         {
-            return self.activate(target, Activation::Transition(transition), transition.position);
+            return self.activate(
+                target,
+                Activation::Transition(transition),
+                transition.position,
+            );
         }
         if let Some(pending) = self.pending[target as usize]
             .as_mut()
@@ -785,17 +784,32 @@ impl Actor {
         });
         let sender = self.sender.clone();
         let fence = Arc::clone(&self.revision_fences[deck as usize]);
-        let path = PathBuf::from(&request.path);
         std::thread::Builder::new()
             .name(format!("kdj-stream-{}-{revision}", request.track_id))
             .spawn(move || {
-                let result = decode_file_streaming(
-                    &path,
-                    request.position,
-                    output_rate,
-                    writer,
-                    || fence.load(Ordering::Acquire) != revision,
-                )
+                let result = match request.source_kind {
+                    PlaybackSourceKind::Local => {
+                        let path = PathBuf::from(&request.path);
+                        decode_file_streaming(&path, request.position, output_rate, writer, || {
+                            fence.load(Ordering::Acquire) != revision
+                        })
+                    }
+                    PlaybackSourceKind::Remote => {
+                        let opened =
+                            HttpRangeSource::open(&request.path, Arc::clone(&fence), revision);
+                        opened.map_err(anyhow::Error::new).and_then(|opened| {
+                            decode_source_streaming(
+                                Box::new(opened.source),
+                                opened.hint_extension.as_deref(),
+                                &request.path,
+                                request.position,
+                                output_rate,
+                                writer,
+                                || fence.load(Ordering::Acquire) != revision,
+                            )
+                        })
+                    }
+                }
                 .map_err(|error| format!("流式解码失败：{error:#}"));
                 let _ = sender.send(Request::WorkerFinished {
                     deck,
@@ -828,9 +842,8 @@ impl Actor {
             if self.revisions[deck as usize] != pending.revision {
                 continue;
             }
-            let start_frame = (pending.request.position
-                * f64::from(pending.output_sample_rate))
-            .round() as u64;
+            let start_frame =
+                (pending.request.position * f64::from(pending.output_sample_rate)).round() as u64;
             let installed = self
                 .player
                 .as_mut()
@@ -893,11 +906,13 @@ impl Actor {
         let old = self.front;
         let (transition_frames, plan) = match activation {
             Activation::Transition(transition) => {
-                let frames = (transition.seconds.max(0.0)
-                    * f64::from(runtime.output_sample_rate))
-                .round()
-                .min(f64::from(u32::MAX)) as u32;
-                (frames, realtime_plan(transition.plan, runtime.output_sample_rate))
+                let frames = (transition.seconds.max(0.0) * f64::from(runtime.output_sample_rate))
+                    .round()
+                    .min(f64::from(u32::MAX)) as u32;
+                (
+                    frames,
+                    realtime_plan(transition.plan, runtime.output_sample_rate),
+                )
             }
             Activation::Seek if self.state.desired_playing => (
                 (u64::from(runtime.output_sample_rate) * SEEK_HANDOFF_MS / 1_000) as u32,
@@ -962,12 +977,13 @@ impl Actor {
             self.state.is_playing = audio.playing;
             return;
         }
-        let transition_reached_target = self.decks[self.front as usize]
-            .as_ref()
-            .is_some_and(|runtime| {
-                audio.active_deck == self.front
-                    && audio.deck_source_ids[self.front as usize] == runtime.source_id
-            });
+        let transition_reached_target =
+            self.decks[self.front as usize]
+                .as_ref()
+                .is_some_and(|runtime| {
+                    audio.active_deck == self.front
+                        && audio.deck_source_ids[self.front as usize] == runtime.source_id
+                });
         if audio.transitioning {
             self.state.transitioning = true;
             self.state.phase = PlaybackPhase::Transitioning;
@@ -978,11 +994,9 @@ impl Actor {
                 self.retire_deck(deck);
                 if let Some(deferred) = self.deferred_stream.take() {
                     let has_activation = deferred.activation.is_some();
-                    if let Err(error) = self.start_stream(
-                        deck,
-                        deferred.request,
-                        deferred.activation,
-                    ) {
+                    if let Err(error) =
+                        self.start_stream(deck, deferred.request, deferred.activation)
+                    {
                         self.fail(error);
                     } else {
                         awaiting_deferred_activation = has_activation;
@@ -1012,10 +1026,17 @@ impl Actor {
             let front_is_current = Some(runtime.request.track_id) == self.state.track_id;
             if front_is_current {
                 if audio.deck_source_ids[self.front as usize] == runtime.source_id {
-                    self.state.current_time = runtime
-                        .seconds_for_frame(audio.deck_frames[self.front as usize]);
+                    self.state.current_time =
+                        runtime.seconds_for_frame(audio.deck_frames[self.front as usize]);
                 }
                 self.state.duration = runtime.duration();
+                // The callback freezes its media clock when a bounded stream temporarily runs
+                // dry. Expose that as buffering (for local disk pressure and online jitter alike)
+                // instead of claiming uninterrupted playback while the speaker is in a gap.
+                self.state.buffering = self.state.desired_playing
+                    && !self.state.transitioning
+                    && runtime.source.buffered_frames() == 0
+                    && !runtime.source.ended();
             }
             if front_is_current
                 && !audio.playing
@@ -1157,8 +1178,17 @@ impl Actor {
 }
 
 fn validate_source(source: &PlaybackSource) -> Result<(), String> {
-    if source.track_id <= 0 {
+    if source.track_id == 0 {
         return Err("曲目 id 无效".into());
+    }
+    match source.source_kind {
+        PlaybackSourceKind::Local if source.track_id < 0 => {
+            return Err("本地曲目 id 无效".into());
+        }
+        PlaybackSourceKind::Remote if !is_loopback_http_url(&source.path) => {
+            return Err("在线音频必须使用应用内回环代理".into());
+        }
+        _ => {}
     }
     if !source.position.is_finite() || source.position < 0.0 {
         return Err("播放位置无效".into());
@@ -1174,6 +1204,7 @@ fn validate_source(source: &PlaybackSource) -> Result<(), String> {
 
 fn same_source(left: &PlaybackSource, right: &PlaybackSource) -> bool {
     left.track_id == right.track_id
+        && left.source_kind == right.source_kind
         && left.path == right.path
         && (left.position - right.position).abs() < 0.02
 }
@@ -1337,6 +1368,7 @@ mod tests {
         PlaybackSource {
             track_id,
             path: format!("/nonexistent/{track_id}.flac"),
+            source_kind: PlaybackSourceKind::Local,
             title: format!("曲目 {track_id}"),
             artist: String::new(),
             album: String::new(),
@@ -1490,7 +1522,9 @@ mod tests {
         actor.prepare(source(3, 0.0)).expect("第二场进入 deferred");
         actor.handoff(3, transition).expect("第二场承诺落账");
 
-        actor.prepare(source(4, 0.0)).expect("第三候选必须给已承诺流让路");
+        actor
+            .prepare(source(4, 0.0))
+            .expect("第三候选必须给已承诺流让路");
         let before = actor.state.clone();
         let error = actor.handoff(4, transition).unwrap_err();
 
@@ -1809,13 +1843,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .any(|command| matches!(
-                command,
-                RtCommand::SetPlaying {
-                    playing: false,
-                    ..
-                }
-            )));
+            .any(|command| matches!(command, RtCommand::SetPlaying { playing: false, .. })));
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub use output::{
 };
 pub use state::TransportSnapshot;
 pub use stream::{
-    decode_file_streaming, StreamMetadata, StreamSource, StreamWriter,
-    DEFAULT_STREAM_BUFFER_SECONDS,
+    decode_file_streaming, decode_source_streaming, StreamMetadata, StreamSource, StreamWriter,
+    StreamingMediaSource, DEFAULT_STREAM_BUFFER_SECONDS,
 };
 pub use stretch::{stretch_preserving_pitch, stretch_preserving_pitch_with_cancel};

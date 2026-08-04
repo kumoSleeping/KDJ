@@ -7,12 +7,11 @@
 mod contract;
 mod coordinator;
 mod platform;
+mod remote_source;
 
 pub use contract::{
     CommandAck, PlaybackCommand, PlaybackPhase, PlaybackSnapshot, PlaybackSource,
-    PlaybackTransitionPlan,
+    PlaybackSourceKind, PlaybackTransitionPlan,
 };
 pub use coordinator::PlaybackCoordinator;
-pub use platform::{
-    CpalOutputFactory, PlaybackOutput, PlaybackOutputFactory, PlaybackOutputSpec,
-};
+pub use platform::{CpalOutputFactory, PlaybackOutput, PlaybackOutputFactory, PlaybackOutputSpec};

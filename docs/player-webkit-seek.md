@@ -74,7 +74,7 @@ PlayerBar
 - callback 不锁、不分配、不解码、不做 IO；
 - 本地视频仍由 WebView 显示，但正式声音来自 Rust；视频按 Rust 状态校时。
 
-浏览器开发和临时在线流仍有 Web Audio preview adapter。它不是本地桌面播放的权威实现，也不能再用“Chrome 正常”证明 App 音频正常。
+只有独立浏览器开发模式仍有 Web Audio preview adapter。桌面与 Android 壳中的临时在线流也走同一个 Rust coordinator：播放器通过应用内回环代理做 HTTP Range 读取，最终 PCM、seek、渐变 transport 和声卡时钟不再换 owner。浏览器 adapter 不能用来证明 App 音频正常。
 
 ## 代码位置
 
@@ -85,8 +85,9 @@ PlayerBar
 - `crates/kdj-player/src/dsp.rs`：EQ、filter、vocal cut、echo/alarm/hydrant。
 - `crates/kdj-player/src/output.rs`：动态 source 生命周期和 CPAL 输出。
 - `src-tauri/src/desktop_player.rs`：薄 Tauri commands/events 适配器。
-- `src/lib/unifiedPlayer.ts`：desktop-native、mobile-native、browser-preview adapters。
-- `src/components/player/PlayerBar.tsx`：UI 编排和自动选歌策略；本地桌面 transport 走 UnifiedPlayer。
+- `src/lib/unifiedPlayer.ts`：desktop-native、mobile-native、browser-preview adapters；在线代理 URL 在 desktop-native 边界显式标成 remote source。
+- `crates/kdj-playback/src/remote_source.rs`：只允许回环代理的 seekable HTTP Range 输入。
+- `src/components/player/PlayerBar.tsx`：UI 编排和自动选歌策略；桌面/Android 的本地与在线 transport 都走 UnifiedPlayer。
 
 ## 回归清单
 

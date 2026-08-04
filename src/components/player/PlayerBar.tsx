@@ -413,7 +413,7 @@ export function PlayerBar() {
   const nativeDjBusyRef = useRef(false);
   const nativeDjGenerationRef = useRef(0);
   const nativeDjNextRef = useRef<(manual: boolean) => Promise<boolean>>(async () => false);
-  /** 本地 Rust 正在出声、下一首却是在线流时，先把当前曲目接入 Web Audio 再开双 Deck。 */
+  /** 纯浏览器双 Deck 的异步解析/起播必须单飞。正式壳不走这条 owner。 */
   const hybridDjBusyRef = useRef(false);
   /**
    * 手动“下一首”必须单飞。Android 与桌面共用 Rust 双 Deck；第三次连点若在
@@ -492,15 +492,13 @@ export function PlayerBar() {
   const [track, setTrack] = useState<Track | null>(() => getPlayingTrack());
   const activeStreamWaveformToken =
     track && isStreamTrack(track) ? streamWaveformToken(track) : "";
-  /** 一旦在线曲目参与桌面 DJ 混接，后续本地曲目也留在同一套 Web Audio 双 Deck。 */
-  const [browserDjSession, setBrowserDjSession] = useState(() => isStreamTrack(track));
-  // 在线试听仍需要 browser-preview；混接会话里的本地曲目也必须沿用同一套双 Deck，
-  // 否则从 Rust 输出切回 Web Audio 时无法做连续的淡入淡出。
-  const nativePlayer =
-    playerRuntime.kind === "browser-preview" ||
-    (desktopNative && (isStreamTrack(track) || browserDjSession))
-      ? null
-      : playerRuntime;
+  /** 纯浏览器开发预览仍由 Web Audio 双 Deck 持有；正式 Tauri 壳不再切换 owner。 */
+  const [browserDjSession, setBrowserDjSession] = useState(
+    () => playerRuntime.kind === "browser-preview" && isStreamTrack(track),
+  );
+  // 桌面与 Android 的本地/在线音频始终由同一个 Rust coordinator 持有。跨
+  // Rust→WebAudio 接管曾同时造成交接爆音、在线 seek 冷启动和渐变 transport 分叉。
+  const nativePlayer = playerRuntime.kind === "browser-preview" ? null : playerRuntime;
   const [playing, setPlaying] = useState(false);
   const [playerVolume, setPlayerVolume] = useState(() => {
     const raw = localStorage.getItem("kd-player-volume");
@@ -812,12 +810,7 @@ export function PlayerBar() {
       const stillCurrent = () =>
         playbackIntentRef.current === intent && trackRef.current?.id === from.id;
 
-      if (
-        desktopNative &&
-        nativePlayer?.supportsRealtimeDj &&
-        !isStreamTrack(next) &&
-        !isStreamTrack(from)
-      ) {
+      if (desktopNative && nativePlayer?.supportsRealtimeDj) {
         if (manualNextDispatchingRef.current) {
           // 一场正在混时只允许再承诺一场 deferred。更多连点留在前端 gate，
           // 不能把第三候选送进只有两台 Deck 的协调器再靠失败回退硬切。
@@ -863,7 +856,7 @@ export function PlayerBar() {
           // 被唤醒，必须先同步正主，避免第二次仍从旧歌挑候选。
           trackRef.current = next;
           setTrack(next);
-          selectTrack(next);
+          if (!isStreamTrack(next)) selectTrack(next);
           setPosition(cue);
           setDuration(next.duration ?? 0);
           commitPlaying(true);
@@ -888,8 +881,9 @@ export function PlayerBar() {
             .then(() => {
               focusLibrary();
               trackRef.current = next;
+              djViaRef.current = next.id;
               setTrack(next);
-              selectTrack(next);
+              if (!isStreamTrack(next)) selectTrack(next);
               setPosition(cue);
               setDuration(next.duration ?? 0);
               commitPlaying(true);
@@ -910,6 +904,11 @@ export function PlayerBar() {
         void (async () => {
           try {
             if (generation !== nativeDjGenerationRef.current) return;
+            // 在线搜索结果的后继项可能还只是元数据占位。先解析应用内代理 URL，
+            // 旧 Rust Deck 在整个网络等待期继续出声；解析成功后仍由同一 coordinator
+            // 预读/接歌，不再跨到 Web Audio。
+            if (isStreamTrack(next)) await resolvePendingStreamTrack(next);
+            if (generation !== nativeDjGenerationRef.current || !stillCurrent()) return;
             // 后台预热 ACK 只代表“命令已登记”，其 Deck 仍可能被随后到达的队列预热
             // 换成另一首。接歌前必须用最终候选再确认一次；prepare 对命中项幂等，
             // 对陈旧项则会重定向 Deck。跳过这步会让 handoff 找不到目标后走硬切，
@@ -964,79 +963,9 @@ export function PlayerBar() {
         if (isStreamTrack(next)) await resolvePendingStreamTrack(next);
         if (!stillCurrent()) return;
 
-        let bridgedNative: typeof nativePlayer = null;
-        let bridgedVolume = 0;
-        const restoreBridgedNative = async () => {
-          if (!bridgedNative) return;
-          await bridgedNative.setVolume(bridgedVolume).catch(() => {});
-          if (trackRef.current?.id === from.id && playingRef.current) {
-            await bridgedNative.play().catch(() => {});
-          }
-        };
-        // Tauri 桌面本地曲目平时由 Rust 播放。在线曲目要进入同一套 Web Audio
-        // 双 Deck，先把当前 Rust 曲目从当前位置接入静音 shadow Deck，再开始
-        // 过渡；这样本地 → 在线也不会把两条输出链硬拼在换歌瞬间。
-        if (desktopNative && nativePlayer && !isStreamTrack(from)) {
-          bridgedNative = nativePlayer;
-          bridgedVolume = playerVolumeRef.current * deckGain(coplay, fadeX);
-          try {
-            // 订阅快照可能落后一个发布周期；交接前读一次权威时钟，再由引擎按
-            // 准备耗时继续外推，避免从旧 position 接入而重复几十毫秒。
-            const nativeState = await nativePlayer.refresh().catch(() => nativePlayer.state());
-            if (!stillCurrent()) return;
-            const position = nativeState.currentTime;
-            // 原生 owner 活跃时音量 effect 只更新 Rust。跨 owner 交接前先把 WebAudio
-            // master 对齐，否则低音量播放时 8% 的重叠上限会按旧的 100% 计算。
-            djEngine.setVolume(bridgedVolume);
-            const browserAdoption = await djEngine.adoptExternalPlayback(
-              mediaUrlForTrack(from),
-              position,
-              true,
-              nativeState.rate,
-              () => {
-                // `setVolume` resolves when the coordinator queues the RT command, not when
-                // the speaker drains it. Do not enqueue a stale mute after a newer play intent;
-                // a mute already accepted before that intent is explicitly superseded by the
-                // normal native-load path below.
-                if (!stillCurrent()) {
-                  return Promise.reject(new Error("本地输出交接已被新播放意图取代"));
-                }
-                return nativePlayer.setVolume(0).then(() => undefined);
-              },
-
-            );
-            if (!stillCurrent()) {
-              djEngine.discardExternalAdoption(browserAdoption);
-              await restoreBridgedNative();
-              return;
-            }
-            setFrontEl(browserAdoption.element);
-            // adoptExternalPlayback 已在低电平重叠窗口内让 Rust 输出归零；这里只
-            // 停 transport，不能再先后各做一次满幅切换。
-            await nativePlayer.pause().catch(() => {});
-            if (!stillCurrent()) {
-              djEngine.discardExternalAdoption(browserAdoption);
-              await restoreBridgedNative();
-              return;
-            }
-          } catch (error: unknown) {
-            // 新播放意图已经接管时，旧 adopt 的 abort 会以 rejection 回来；此时
-            // 绝不能用旧分支的 cancel/hardPause 去停掉刚起的新 owner。
-            if (!stillCurrent()) return;
-            await restoreBridgedNative();
-            djEngine.cancel();
-            djEngine.hardPause(djEngine.frontElement());
-            setBrowserDjSession(false);
-            setNotice(`在线接歌准备失败：${error instanceof Error ? error.message : String(error)}`);
-            return;
-          }
-        }
-
-        if (!stillCurrent()) {
-          await restoreBridgedNative();
-          return;
-        }
-
+        // This branch is the standalone browser adapter only. Native desktop/Android returned
+        // through the coordinator branch above and can never fall back to a second audio owner.
+        if (!stillCurrent()) return;
         const started = djEngine.begin(next, {
           transitions,
           effects,
@@ -1046,8 +975,6 @@ export function PlayerBar() {
           applyInOutPoints,
         });
         if (!started) {
-          await restoreBridgedNative();
-          if (bridgedNative) setBrowserDjSession(false);
           djEngine.cancel();
           djEngine.hardPause(djEngine.frontElement());
           setNotice("接歌引擎暂不可用，保留当前播放");
@@ -1098,9 +1025,10 @@ export function PlayerBar() {
       nativeDjBusyRef.current = false;
       // PLAY_EVENT 通常由双击/右键等用户手势同步发出。趁手势仍有效唤醒
       // 刷新后 suspended 的 Web Audio 图，否则 audio 在走、扬声器却是静音。
-      const webPreview = !desktopNative || isStreamTrack(next) || browserDjSession;
+      const webPreview = nativePlayer === null;
       if (autoPlay && webPreview) djEngine.resume();
-      // 普通桌面本地音频走 Rust；在线混接会话里的本地曲目与在线流共用 Web Audio。
+      // 只有纯浏览器调试 adapter 使用 Web Audio；Tauri 桌面与 Android 的在线流
+      // 和本地文件一样留在 Rust 输出，不再为一次点播切换音频 owner。
       if (webPreview && !useCrossfade.getState().coplay) {
         djEngine.setVolume(playerVolumeRef.current);
       }
@@ -1136,12 +1064,7 @@ export function PlayerBar() {
         if (autoPlay) markPlayed(next.id);
         return;
       }
-      if (isStreamTrack(next)) {
-        // DJ 关闭或引擎不可用时，硬切到在线流前先停掉桌面 Rust 输出，
-        // 不能让旧本地曲目在 Web Audio 新流起播后继续叠响。
-        if (nativePlayer && current && current.id !== next.id) {
-          void nativePlayer.pause().catch(() => {});
-        }
+      if (isStreamTrack(next) && !nativePlayer) {
         setBrowserDjSession(true);
       }
       // 同一用户手势里的后续 transport/seek 读 ref；不能等下一轮 effect 才同步，
@@ -1159,7 +1082,7 @@ export function PlayerBar() {
     };
     window.addEventListener(PLAY_EVENT, onPlay);
     return () => window.removeEventListener(PLAY_EVENT, onPlay);
-  }, [selectTrack, focusLibrary, djSwitchTo, commitPlaying, browserDjSession]);
+  }, [selectTrack, focusLibrary, djSwitchTo, commitPlaying, nativePlayer]);
 
   // 本地视频会话只能属于正在走带的那首。自动续播 / DJ 过渡直接在 PlayerBar
   // 内部 setTrack，不一定经过 playTrack（后者原本才会清视频会话）；因此旧视频会在
@@ -1463,7 +1386,12 @@ export function PlayerBar() {
       position,
     });
     if (isStreamTrack(track)) {
-      publishStreamTrackState(track, position, playing, frontEl.playbackRate);
+      publishStreamTrackState(
+        track,
+        position,
+        playing,
+        nativePlayer?.state().rate ?? frontEl.playbackRate,
+      );
     }
   }, [playing, track?.id, frontEl, nativePlayer]);
 
@@ -1803,6 +1731,20 @@ export function PlayerBar() {
           trackId: current.id,
           position: shownTime,
         });
+        if (isStreamTrack(current)) {
+          const streamStatus: PlayerSessionStatus =
+            state.status === "error"
+              ? "error"
+              : state.status === "ended"
+                ? "ended"
+                : state.buffering || state.status === "loading"
+                  ? "buffering"
+                  : state.playing
+                    ? "playing"
+                    : "paused";
+          setBrowserMediaStatus(streamStatus);
+          publishStreamTrackState(current, shownTime, state.playing, state.rate);
+        }
         if (
           desktopNative &&
           state.playing &&
@@ -1902,8 +1844,31 @@ export function PlayerBar() {
       if (state.status === "error") {
         if (!nativeErrorEpisodeRef.current) nativeErrorRecoveryAvailableRef.current = true;
         nativeErrorEpisodeRef.current = true;
+        const retrySource =
+          current && isStreamTrack(current) && playingRef.current
+            ? claimStreamCacheRetry(current)
+            : null;
         commitPlaying(false);
-        setNotice(state.error || "原生播放器无法播放这个文件");
+        if (retrySource && current) {
+          setBrowserMediaStatus("loading");
+          setNotice("本地缓存或在线地址异常，正在重新连接…");
+          void playSongPreview({
+            source: retrySource,
+            title: current.title,
+            artist: current.artist,
+            autoPlay: true,
+            bypassCache: true,
+          }).catch((reason: unknown) => {
+            if (trackRef.current?.id === current.id) {
+              setBrowserMediaStatus("error");
+              setNotice(
+                `在线试听重试失败：${reason instanceof Error ? reason.message : String(reason)}`,
+              );
+            }
+          });
+        } else {
+          setNotice(state.error || "原生播放器无法播放这个文件");
+        }
         manualNextTargetRef.current = null;
         nativeManualChainDepthRef.current = 0;
         manualNextGateRef.current?.cancel();
@@ -2083,7 +2048,7 @@ export function PlayerBar() {
   canRunManualNextRef.current = () => {
     if (djBusyRef.current || nativeDjBusyRef.current || hybridDjBusyRef.current) return false;
     if (!nativePlayer) {
-      // browserDjSession 退出 Rust 输出后，旧原生目标已不再属于当前播放链。
+      // Standalone browser adapter has no native target/command acknowledgement.
       manualNextTargetRef.current = null;
       // Web Audio 只有两台 Deck，也不能在一场过渡中重入 begin；idle 订阅会 wake。
       return !djEngine.isTransitioning();
@@ -2235,9 +2200,8 @@ export function PlayerBar() {
   );
   systemMediaActionRef.current = handleSystemMediaAction;
 
-  // 在线流由 Web Audio 持有。显式接管 Web Media Session，避免 WebKit/WebView2
-  // 默认直接 pause HTMLMediaElement（那条默认路径不会经过我们的淡出包络）。原生
-  // souvlaki 仍可能收到同一按键，两路最终都进入上面的去重入口。
+  // 仅 standalone browser adapter 由 Web Audio 持有。显式接管 Web Media Session，
+  // 避免浏览器默认 pause HTMLMediaElement 绕过淡出包络；Tauri 壳的在线流不会进入这里。
   useEffect(() => {
     if (!track || nativePlayer || !("mediaSession" in navigator)) return;
     const session = navigator.mediaSession;
@@ -2379,6 +2343,9 @@ export function PlayerBar() {
    * ended 不会再打进 UI。这也是不再用 JSX 渲染 <audio> 的代价与回报。
    */
   useEffect(() => {
+    // HTMLMediaElement events belong only to the browser preview owner. Native desktop/Android
+    // snapshots are authoritative for local and online tracks alike.
+    if (nativePlayer) return;
     const audio = frontEl;
     const onTime = () => {
       // 主按钮进入“暂停”状态后，媒体还会继续运行半秒来完成淡出。播放头必须
@@ -2531,7 +2498,9 @@ export function PlayerBar() {
   // 低频 interval，并让媒体自己的 timeupdate/playing/seeked 补采样。所有入口共用
   // lastSampleAt/lastPosition，事件和定时器撞在一起时不会重复复制 640 桶快照。
   useEffect(() => {
-    if (!track || !isStreamTrack(track)) return;
+    // 正式桌面/Android 在线流不再经过 HTMLMediaElement；真实波形由下面同一份
+    // 回环代理缓存前缀生成。Analyser 只保留给纯浏览器 preview adapter。
+    if (!track || !isStreamTrack(track) || nativePlayer) return;
     const audio = frontEl;
     const trackId = track.id;
     let frame = 0;
@@ -2660,7 +2629,7 @@ export function PlayerBar() {
       window.removeEventListener("focus", onVisibilityOrFocus);
       window.removeEventListener("blur", onVisibilityOrFocus);
     };
-  }, [frontEl, track?.id]);
+  }, [frontEl, track?.id, nativePlayer]);
 
   // 代理实际送到播放器的连续字节写到哪，就从同一份短生命周期前缀解码到哪；若
   // 用户开启持久缓存则直接复用它的临时文件。浏览器的 buffered 只能提供时间范围，
@@ -2692,13 +2661,14 @@ export function PlayerBar() {
             const total = totalDuration();
             // `covered_seconds` 是 prefix 的真实 PCM 时长；merge 函数会只投影到
             // 这段对应的整曲桶，绝不会把前缀波形拉伸成全曲。
+            const covered = Math.min(total, Math.max(0, progress.covered_seconds));
             mergeCachedStreamWaveform(
               trackId,
               total,
               progress.covered_seconds,
               progress.waveform,
               progress.revision,
-              mediaBufferedRanges(audio, total),
+              covered > 0 ? [{ start: 0, end: covered }] : [],
             );
             lastRevision = progress.revision;
           }
@@ -2707,7 +2677,7 @@ export function PlayerBar() {
           if (
             progress.enabled &&
             !(progress.complete && !progress.active) &&
-            !(audio.ended && !progress.active)
+            !((nativePlayer ? nativePlayer.state().status === "ended" : audio.ended) && !progress.active)
           ) {
             schedule(
               progress.active
@@ -2726,7 +2696,7 @@ export function PlayerBar() {
       disposed = true;
       if (timer) clearTimeout(timer);
     };
-  }, [frontEl, track?.id, activeStreamWaveformToken]);
+  }, [frontEl, track?.id, activeStreamWaveformToken, nativePlayer]);
 
   // 跳转统一由 Waveform 发 kd:seek 事件，上面那个监听负责落到 <audio> 上
 
@@ -2895,12 +2865,11 @@ export function PlayerBar() {
     nativePreparedRef.current = null;
   }, [scope, predictionFolder, mode, librarySort, libraryOrder]);
 
-  // 在线曲参与后声音留在 Web Audio 双 Deck；这里补齐与 Rust `prepare` 等价的
-  // 真实媒体预热。只解析 provider URL 并不会让 cue 位置进入浏览器解码缓冲，
-  // begin 若再无条件 src/load 就会在切换临界点清空缓存，造成可闻卡壳。
+  // 纯浏览器开发 adapter 仍用 Web Audio 双 Deck；正式 Tauri 壳由下面的 Rust
+  // prepare 路径统一预热，本 effect 不得再创建第二条正式输出链。
   useEffect(() => {
     if (
-      !desktopNative ||
+      nativePlayer ||
       !djEnabled ||
       !track ||
       !predicted ||
@@ -2953,7 +2922,7 @@ export function PlayerBar() {
       alive = false;
     };
   }, [
-    desktopNative,
+    nativePlayer,
     djEnabled,
     browserDjSession,
     djTransition.phase,
@@ -2978,7 +2947,7 @@ export function PlayerBar() {
       nativePreparedRef.current = null;
       return;
     }
-    if (isStreamTrack(track) || isStreamTrack(predicted) || predicted.id === track.id) return;
+    if (predicted.id === track.id) return;
     const currentRate = nativePlayer.state().rate || 1;
     const effectiveFromBpm = track.bpm ? track.bpm * currentRate : null;
     const rate = djEnabled ? bpmSyncRate(effectiveFromBpm, predicted.bpm) : 1;
@@ -2991,20 +2960,20 @@ export function PlayerBar() {
         : 0;
     const generation = ++nativePrepareGenerationRef.current;
     nativePreparedRef.current = null;
-    void nativePlayer
-      .prepare({
+    void (async () => {
+      if (isStreamTrack(predicted)) await resolvePendingStreamTrack(predicted);
+      if (generation !== nativePrepareGenerationRef.current) return;
+      await nativePlayer.prepare({
         src: mediaUrlForTrack(predicted),
         track: predicted,
         position: cue,
         rate,
-      })
-      .then(() => {
-        if (generation !== nativePrepareGenerationRef.current) return;
-        nativePreparedRef.current = { fromId: track.id, trackId: predicted.id, rate, cue };
-      })
-      .catch(() => {
-        if (generation === nativePrepareGenerationRef.current) nativePreparedRef.current = null;
       });
+      if (generation !== nativePrepareGenerationRef.current) return;
+      nativePreparedRef.current = { fromId: track.id, trackId: predicted.id, rate, cue };
+    })().catch(() => {
+      if (generation === nativePrepareGenerationRef.current) nativePreparedRef.current = null;
+    });
     return () => {
       if (generation === nativePrepareGenerationRef.current) {
         nativePrepareGenerationRef.current += 1;

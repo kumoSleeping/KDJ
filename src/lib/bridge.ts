@@ -220,8 +220,8 @@ async function createTauriBridge(): Promise<KdjBridge> {
           }
         : null,
     lyricsTimeline: android ? (payload) => setLyricsTimeline(payload) : null,
-    // 在线试听走浏览器媒体元素，不会有 Rust coordinator 时钟；仅 Android 原生
-    // 悬浮歌词需要这条限频外部时钟通道，桌面独立 WebView 已自行订阅流状态。
+    // 兼容旧浏览器在线 owner 的外部时钟入口。当前 Android 正式在线播放已进入
+    // Rust coordinator，streamTrack 会拒绝重复镜像；保留命令只用于旧会话清理。
     lyricsPlaybackClock: android ? (payload) => setLyricsPlaybackClock(payload) : null,
     overlayPermission: android
       ? {

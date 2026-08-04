@@ -379,9 +379,13 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 
   private source(source: UnifiedPlayerSource): Record<string, unknown> {
+    const remote = source.track.id < 0;
     return {
       trackId: source.track.id,
-      path: source.track.path,
+      // Online previews stay behind the loopback proxy; Rust owns the final PCM/output path on
+      // desktop and Android just as it does for local files.
+      path: remote ? source.src : source.track.path,
+      sourceKind: remote ? "remote" : "local",
       title: source.track.title || source.track.filename,
       artist: source.track.artist || "",
       album: source.track.album || "",

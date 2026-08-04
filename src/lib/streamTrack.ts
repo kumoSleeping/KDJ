@@ -35,9 +35,9 @@ let nextId = -1;
 let publishedStreamTrackId: number | null = null;
 
 /**
- * Android 的流媒体由浏览器媒体元素出声，不能拿 Rust coordinator 的本地曲目时钟。
- * 悬浮歌词开启时才把这条浏览器时钟限频镜像给原生侧；原生会在两次镜像间自行外推，
- * 因而不能在每个 animation frame / timeupdate 都跨 WebView IPC 一次。
+ * 纯浏览器 preview 没有 Rust coordinator 时钟。旧 Android 在线链路曾把这条浏览器
+ * 时钟限频镜像给原生浮层；正式桌面/Android 在线音频现已由 coordinator 持有，下面
+ * 的兼容通道只允许真正没有共享原生 owner 的运行时使用，避免两套时钟互相覆盖。
  */
 let nativeStreamLyricsClockEnabled = false;
 let latestStreamPlayback: PublishedStreamPlayback | null = null;
@@ -91,6 +91,9 @@ function publishNativeStreamLyricsClock(
   force = false,
 ): void {
   if (!nativeStreamLyricsClockEnabled) return;
+  // Android Tauri 的在线音频与本地音频共用 Rust coordinator；MediaSession 快照已经
+  // 带权威时钟，再推浏览器外部时钟会造成暂停/seek 后歌词被旧时间线拉回。
+  if (window.__TAURI_INTERNALS__ && window.kdj?.platform === "android") return;
   const push = window.kdj?.lyricsPlaybackClock;
   if (!push) return;
 

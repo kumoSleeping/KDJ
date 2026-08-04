@@ -46,6 +46,9 @@ worker to the active output rate. Memory is bounded by read-ahead seconds, not t
 The callback is the only consumer and never allocates, locks, decodes or performs IO.
 
 - Load prepares the inactive Deck while the old Deck remains valid.
+- Local files and online previews use the same bounded PCM Deck. Online encoded bytes come only
+  through the app's loopback proxy via a seekable HTTP Range adapter; provider/CDN credentials stay
+  in `kdj-server`.
 - Predicted/queued tracks pre-read into the inactive Deck without consuming frames.
 - Seek creates a new generation at the target position and switches only after startup buffering.
 - A later request invalidates the worker fence; its late result is ignored.
@@ -61,12 +64,13 @@ handoff keeps callback-timed transition effects and uses the prepared stream at 
 Shared Rust owns commands, queue/prewarm, Deck lifecycle, decode, resampling, clocks and DSP.
 
 - macOS/Windows/Linux: CPAL selects CoreAudio, WASAPI or the available Linux host. The Tauri
-  adapter mirrors coordinator snapshots into MPNowPlaying/SMTC/MPRIS. Position/volume commands
-  use the coordinator's platform-command lane; play/pause/skip cross the frontend owner
-  multiplexer first, because an online Web Audio deck may be current. Local transport then returns
-  through the normal sequenced command lane, so the toolbar, media keys and configured fade share
-  one policy path. Artwork is downloaded off the playback thread and exposed to all three system
-  APIs as a local `file://` cache URL.
+  adapter mirrors coordinator snapshots into MPNowPlaying/SMTC/MPRIS. Position, volume and
+  play/pause commands use the coordinator; next/previous still cross the frontend once for its
+  candidate-selection policy and return through the sequenced command lane. The toolbar, media
+  keys and configured fade therefore share one transport path. Artwork is downloaded off the
+  playback thread and exposed to all three system APIs as a local `file://` cache URL. Local and
+  online tracks share this owner; system controls no longer choose between native and Web Audio
+  clocks.
 - Android: transport shares the desktop coordinator + CPAL/AAudio (`playback_*` commands).
   `android_media` mirrors snapshots into Kotlin (`applyPlaybackSnapshot`) for MediaSession,
   foreground service, audio focus and lyrics-overlay clock; remote keys return through JNI
@@ -82,7 +86,7 @@ coordinator state machine in Kotlin or Swift. Android currently reuses `CpalOutp
 1. Replace the decode-blocking desktop actor with the coordinator and sequenced contract.
 2. Put ordinary load, prewarm and seek on bounded streaming Decks.
 3. Route the Tauri desktop adapter and `DesktopNativePlayer` through one command endpoint.
-4. Stop eager Web Audio initialization in a native shell; keep it only for explicit previews.
+4. Stop Web Audio from owning formal playback in a native shell; keep it only for the standalone browser-development adapter.
 5. Move recommendation/ended policy into the Rust application service when the library service is
    exposed in-process, then delete the remaining PlayerBar policy continuations.
 6. Add block-based pitch-preserving tempo processing before restoring BPM-rate changes in DJ mode.
@@ -94,9 +98,9 @@ fallbacks to the old WebView owner.
 
 ## Frontend boundary
 
-Local desktop playback must go through `UnifiedPlayer`'s `DesktopNativePlayer`. Browser/Web Audio
-is an explicit online-preview/development adapter only. A local-file failure is visible; it must not
-silently create a second WebView audio owner.
+Desktop and Android playback—local files and online previews alike—must go through `UnifiedPlayer`'s
+`DesktopNativePlayer`. Browser/Web Audio is only the standalone browser-development adapter. A
+native decode/network failure is visible; it must not silently create a second WebView audio owner.
 
 The remaining PlayerBar cleanup is policy migration: automatic recommendation selection and ended
 handling still originate in shared UI code. They should move behind coordinator queue commands once

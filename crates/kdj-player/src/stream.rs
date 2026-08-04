@@ -1,5 +1,6 @@
 use std::cell::UnsafeCell;
 use std::fs::File;
+use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -56,7 +57,10 @@ impl std::fmt::Debug for StreamSource {
 impl StreamSource {
     /// Creates a bounded source and its single decode-writer half.
     pub fn bounded(capacity_frames: usize) -> (Arc<Self>, StreamWriter) {
-        assert!(capacity_frames > 1, "stream capacity must contain multiple frames");
+        assert!(
+            capacity_frames > 1,
+            "stream capacity must contain multiple frames"
+        );
         let (producer, consumer) = RingBuffer::new(capacity_frames);
         let counters = Arc::new(StreamCounters {
             produced: AtomicU64::new(0),
@@ -81,7 +85,8 @@ impl StreamSource {
     }
 
     pub fn buffered_frames(&self) -> u64 {
-        self.produced_frames().saturating_sub(self.consumed_frames())
+        self.produced_frames()
+            .saturating_sub(self.consumed_frames())
     }
 
     pub fn ended(&self) -> bool {
@@ -147,10 +152,55 @@ pub struct StreamMetadata {
     pub output_sample_rate: u32,
 }
 
-/// Decodes from `position` into a bounded stereo ring and resamples off the realtime thread.
-/// The function deliberately runs until EOF/backpressure/cancellation; callers own its worker.
-pub fn decode_file_streaming<F>(
-    path: &Path,
+/// Seekable encoded-media input owned by a decode worker.
+///
+/// Files and HTTP Range adapters both implement this boundary. It deliberately exposes only the
+/// capabilities Symphonia needs; network clients and retries remain outside the realtime player.
+pub trait StreamingMediaSource: Read + Seek + Send + Sync {
+    fn is_seekable(&self) -> bool;
+    fn byte_len(&self) -> Option<u64>;
+}
+
+impl StreamingMediaSource for File {
+    fn is_seekable(&self) -> bool {
+        self.metadata().is_ok_and(|metadata| metadata.is_file())
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.metadata().ok().map(|metadata| metadata.len())
+    }
+}
+
+struct SymphoniaMediaSource(Box<dyn StreamingMediaSource>);
+
+impl Read for SymphoniaMediaSource {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buffer)
+    }
+}
+
+impl Seek for SymphoniaMediaSource {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(position)
+    }
+}
+
+impl symphonia::core::io::MediaSource for SymphoniaMediaSource {
+    fn is_seekable(&self) -> bool {
+        self.0.is_seekable()
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.0.byte_len()
+    }
+}
+
+/// Decodes from an arbitrary seekable media source into a bounded stereo ring and resamples off
+/// the realtime thread. Callers own network/file IO, cancellation and the worker lifecycle.
+pub fn decode_source_streaming<F>(
+    source: Box<dyn StreamingMediaSource>,
+    hint_extension: Option<&str>,
+    source_label: &str,
     position: f64,
     output_sample_rate: u32,
     mut writer: StreamWriter,
@@ -162,10 +212,9 @@ where
     if output_sample_rate == 0 {
         bail!("output sample rate must be non-zero");
     }
-    let file = File::open(path).with_context(|| format!("open audio: {}", path.display()))?;
-    let source = MediaSourceStream::new(Box::new(file), Default::default());
+    let source = MediaSourceStream::new(Box::new(SymphoniaMediaSource(source)), Default::default());
     let mut hint = Hint::new();
-    if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
+    if let Some(extension) = hint_extension.filter(|extension| !extension.is_empty()) {
         hint.with_extension(extension);
     }
     let probed = symphonia::default::get_probe()
@@ -178,7 +227,7 @@ where
             },
             &MetadataOptions::default(),
         )
-        .with_context(|| format!("unsupported audio format: {}", path.display()))?;
+        .with_context(|| format!("unsupported audio format: {source_label}"))?;
     let mut format = probed.format;
     let track = format
         .tracks()
@@ -199,7 +248,8 @@ where
     // 收敛，再对仍失败的边界（VBR 时长虚高等）逐级提前 1s 重试，让“跳到末尾”
     // 退化为从接近末尾处起播，而不是整次跳转以 end of stream 报错。
     let mut position = position;
-    if let Some(limit) = duration.filter(|value| value.is_finite() && *value > SEEK_END_MARGIN_SECONDS)
+    if let Some(limit) =
+        duration.filter(|value| value.is_finite() && *value > SEEK_END_MARGIN_SECONDS)
     {
         position = position.min(limit - SEEK_END_MARGIN_SECONDS);
     }
@@ -217,8 +267,7 @@ where
                 Err(error) => {
                     let next = (attempt - SEEK_RETRY_STEP_SECONDS).max(0.0);
                     if next >= attempt {
-                        return Err(error)
-                            .with_context(|| format!("seek audio to {position:.3}s"));
+                        return Err(error).with_context(|| format!("seek audio to {position:.3}s"));
                     }
                     attempt = next;
                 }
@@ -239,7 +288,9 @@ where
         }
         let packet = match format.next_packet() {
             Ok(packet) => packet,
-            Err(Error::IoError(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(Error::IoError(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                break
+            }
             Err(Error::ResetRequired) => {
                 decoder.reset();
                 continue;
@@ -292,8 +343,8 @@ where
             };
             if let Some(before) = previous {
                 while next_output_position <= source_index as f64 {
-                    let fraction = (next_output_position - (source_index - 1) as f64)
-                        .clamp(0.0, 1.0) as f32;
+                    let fraction =
+                        (next_output_position - (source_index - 1) as f64).clamp(0.0, 1.0) as f32;
                     writer.push(
                         [
                             before[0] + (current[0] - before[0]) * fraction,
@@ -320,6 +371,34 @@ where
     })
 }
 
+/// File adapter retained for local-library callers and compatibility tests.
+pub fn decode_file_streaming<F>(
+    path: &Path,
+    position: f64,
+    output_sample_rate: u32,
+    writer: StreamWriter,
+    cancelled: F,
+) -> Result<StreamMetadata>
+where
+    F: Fn() -> bool + Copy,
+{
+    let file = File::open(path).with_context(|| format!("open audio: {}", path.display()))?;
+    let extension = path.extension().and_then(|value| value.to_str());
+    decode_source_streaming(
+        Box::new(file),
+        extension,
+        &path.display().to_string(),
+        position,
+        output_sample_rate,
+        writer,
+        cancelled,
+    )
+}
+
 fn finite(sample: f32) -> f32 {
-    if sample.is_finite() { sample } else { 0.0 }
+    if sample.is_finite() {
+        sample
+    } else {
+        0.0
+    }
 }

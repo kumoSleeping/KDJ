@@ -1,10 +1,20 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum PlaybackSourceKind {
+    #[default]
+    Local,
+    Remote,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackSource {
     pub track_id: i64,
     pub path: String,
+    #[serde(default)]
+    pub source_kind: PlaybackSourceKind,
     #[serde(default)]
     pub title: String,
     #[serde(default)]
@@ -49,12 +59,20 @@ pub struct PlaybackTransitionPlan {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum PlaybackCommand {
-    Load { source: PlaybackSource },
-    Prepare { source: PlaybackSource },
-    SetQueue { sources: Vec<PlaybackSource> },
+    Load {
+        source: PlaybackSource,
+    },
+    Prepare {
+        source: PlaybackSource,
+    },
+    SetQueue {
+        sources: Vec<PlaybackSource>,
+    },
     Play,
     Pause,
-    Seek { position: f64 },
+    Seek {
+        position: f64,
+    },
     Handoff {
         #[serde(rename = "trackId")]
         track_id: i64,
@@ -63,8 +81,12 @@ pub enum PlaybackCommand {
         #[serde(default)]
         plan: PlaybackTransitionPlan,
     },
-    SetVolume { volume: f32 },
-    SetTransportFade { enabled: bool },
+    SetVolume {
+        volume: f32,
+    },
+    SetTransportFade {
+        enabled: bool,
+    },
     SetEq {
         #[serde(rename = "lowDb")]
         low_db: f32,

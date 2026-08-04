@@ -107,6 +107,10 @@ pub struct AudioRenderer {
     deck_gains: [f32; 2],
     deck_rates: [f64; 2],
     source_rate_ratios: [f64; 2],
+    /// Encoded network streams may briefly starve. Hold the last sample and ramp its edge instead
+    /// of hard-switching between an arbitrary sample and zero, which is perceived as crackle.
+    stream_edge_gains: [f32; 2],
+    stream_last_frames: [[f32; 2]; 2],
     output_sample_rate: u32,
     deck_eq: [DeckEq; 2],
     transition_fx: TransitionFx,
@@ -159,6 +163,8 @@ fn make_channels(
             deck_gains: [1.0; 2],
             deck_rates: [1.0; 2],
             source_rate_ratios: [1.0; 2],
+            stream_edge_gains: [0.0; 2],
+            stream_last_frames: [[0.0; 2]; 2],
             output_sample_rate: 48_000,
             deck_eq: [DeckEq::default(); 2],
             transition_fx: TransitionFx::new(),
@@ -353,11 +359,13 @@ impl AudioRenderer {
             } else {
                 ([0.0; 2], false)
             };
+            let raw_a = self.smooth_stream_edge(0, sources[0], raw_a, advance_a);
             let (raw_b, advance_b) = if self.playing && required[1] {
                 callback_source_frame(sources[1], self.deck_positions[1])
             } else {
                 ([0.0; 2], false)
             };
+            let raw_b = self.smooth_stream_edge(1, sources[1], raw_b, advance_b);
             let transition_can_advance = self.transition.is_none()
                 || (!required[0] || advance_a) && (!required[1] || advance_b);
             let (transition_a, transition_b) = self.transition_gains();
@@ -409,6 +417,40 @@ impl AudioRenderer {
         self.publish();
     }
 
+    fn smooth_stream_edge(
+        &mut self,
+        index: usize,
+        source: Option<CallbackSource>,
+        frame: [f32; 2],
+        advanced: bool,
+    ) -> [f32; 2] {
+        if !matches!(source, Some(CallbackSource::Stream(_))) {
+            self.stream_edge_gains[index] = 1.0;
+            self.stream_last_frames[index] = frame;
+            return frame;
+        }
+        // Five milliseconds spans many callback samples but remains far below transport latency.
+        // It removes the discontinuity at both sides of a starvation gap without advancing the
+        // source clock or allocating/locking on the realtime thread.
+        let ramp_frames = (self.output_sample_rate / 200).max(1) as f32;
+        let step = 1.0 / ramp_frames;
+        if advanced {
+            self.stream_last_frames[index] = frame;
+            self.stream_edge_gains[index] = (self.stream_edge_gains[index] + step).min(1.0);
+        } else {
+            self.stream_edge_gains[index] = (self.stream_edge_gains[index] - step).max(0.0);
+        }
+        let held = if advanced {
+            frame
+        } else {
+            self.stream_last_frames[index]
+        };
+        [
+            held[0] * self.stream_edge_gains[index],
+            held[1] * self.stream_edge_gains[index],
+        ]
+    }
+
     fn drain_commands(&mut self) {
         while let Ok(command) = self.consumer.pop() {
             match command {
@@ -455,6 +497,12 @@ impl AudioRenderer {
         );
         self.deck_positions[index] = start_frame as f64;
         self.deck_rates[index] = 1.0;
+        self.stream_edge_gains[index] = if source_kind == SourceKind::Stream {
+            0.0
+        } else {
+            1.0
+        };
+        self.stream_last_frames[index] = [0.0; 2];
         self.deck_eq[index].reset();
         self.retire(previous);
     }
@@ -463,6 +511,8 @@ impl AudioRenderer {
         let index = deck as usize;
         let previous = std::mem::take(&mut self.deck_sources[index]);
         self.deck_positions[index] = 0.0;
+        self.stream_edge_gains[index] = 0.0;
+        self.stream_last_frames[index] = [0.0; 2];
         if deck == self.active_deck {
             self.stop_transport();
             self.transition = None;
@@ -715,7 +765,10 @@ fn callback_source_ratio(source: Option<CallbackSource>, output_sample_rate: u32
 fn callback_source_frame(source: Option<CallbackSource>, position: f64) -> ([f32; 2], bool) {
     match source {
         Some(CallbackSource::Decoded(track)) if position < track.frames() as f64 => (
-            [track_sample(track, position, 0), track_sample(track, position, 1)],
+            [
+                track_sample(track, position, 0),
+                track_sample(track, position, 1),
+            ],
             true,
         ),
         Some(CallbackSource::Stream(stream)) => stream
@@ -955,6 +1008,51 @@ mod tests {
             }),
             Err(CommandError::Full)
         );
+    }
+
+    #[test]
+    fn a_starved_stream_fades_its_last_sample_instead_of_hard_clicking_to_zero() {
+        let (stream, mut writer) = StreamSource::bounded(512);
+        for _ in 0..240 {
+            writer.push([1.0, 1.0], || false).unwrap();
+        }
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared(
+                DeckId::A,
+                10,
+                SourceKind::Stream,
+                Arc::as_ptr(&stream) as usize,
+                0,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
+
+        let mut primed = [0.0; 240];
+        renderer.render_prepared(&mut primed, 48_000, 1);
+        assert!(
+            primed[239] > 0.99,
+            "startup edge should reach unity within 5ms"
+        );
+
+        let mut starved = [0.0; 3];
+        renderer.render_prepared(&mut starved, 48_000, 1);
+        assert!(
+            starved[0] > 0.99,
+            "first missing frame must not hard-cut to zero"
+        );
+        assert!(starved[0] > starved[1] && starved[1] > starved[2]);
+        assert_eq!(
+            controller.snapshot().deck_frames[0],
+            240,
+            "starvation freezes media time"
+        );
+        drop(writer);
     }
 
     #[test]
