@@ -337,6 +337,14 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private nextCommandId = 1;
   /** Tauri invoke 可以并发越序到达；播放命令必须和 commandId 保持同一顺序。 */
   private commandTail: Promise<void> = Promise.resolve();
+  /** 队列更新是可丢弃的后台意图；只合并尚未进入 IPC 的旧队列更新。 */
+  private queueRevision = 0;
+  /** 预测预热同样只保留最后一个尚未进入 IPC 的候选。 */
+  private prepareRevision = 0;
+  /** 播放/暂停和音量是可合并意图；快速触摸只保留尚未进入 IPC 的最后状态。 */
+  private transportRevision = 0;
+  private volumeRevision = 0;
+  private loadRevision = 0;
 
   initialize(): Promise<UnifiedPlayerState> {
     if (this.initPromise) return this.initPromise;
@@ -363,8 +371,13 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     return this.publish(normalizedDesktop(raw));
   }
 
-  private command(command: Record<string, unknown>): Promise<UnifiedPlayerState> {
+  private command(
+    command: Record<string, unknown>,
+    isCurrent: () => boolean = () => true,
+  ): Promise<UnifiedPlayerState> {
     const operation = this.commandTail.then(async () => {
+      // 只在真正进入 IPC 前检查；旧的后台预热因此不会占用 Rust actor 的命令槽。
+      if (!isCurrent()) return this.snapshot;
       await this.initialize();
       const commandId = this.nextCommandId++;
       const ack = await invoke<DesktopCommandAckRaw>("playback_command", { commandId, command });
@@ -398,11 +411,21 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 
   load(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
-    return this.command({ type: "load", source: this.source(source) });
+    this.prepareRevision += 1;
+    this.transportRevision += 1;
+    const revision = ++this.loadRevision;
+    return this.command(
+      { type: "load", source: this.source(source) },
+      () => revision === this.loadRevision,
+    );
   }
 
   prepare(source: UnifiedPlayerSource): Promise<UnifiedPlayerState> {
-    return this.command({ type: "prepare", source: this.source(source) });
+    const revision = ++this.prepareRevision;
+    return this.command(
+      { type: "prepare", source: this.source(source) },
+      () => revision === this.prepareRevision,
+    );
   }
 
   handoff(
@@ -411,6 +434,9 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     seconds: number,
     plan?: UnifiedTransitionPlan,
   ): Promise<UnifiedPlayerState> {
+    this.prepareRevision += 1;
+    this.transportRevision += 1;
+    this.loadRevision += 1;
     return this.command({
       type: "handoff",
       trackId,
@@ -429,15 +455,21 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 
   setQueue(sources: UnifiedPlayerSource[]): Promise<UnifiedPlayerState> {
-    return this.command({ type: "setQueue", sources: sources.map((source) => this.source(source)) });
+    const revision = ++this.queueRevision;
+    return this.command(
+      { type: "setQueue", sources: sources.map((source) => this.source(source)) },
+      () => revision === this.queueRevision,
+    );
   }
 
   play(): Promise<UnifiedPlayerState> {
-    return this.command({ type: "play" });
+    const revision = ++this.transportRevision;
+    return this.command({ type: "play" }, () => revision === this.transportRevision);
   }
 
   pause(): Promise<UnifiedPlayerState> {
-    return this.command({ type: "pause" });
+    const revision = ++this.transportRevision;
+    return this.command({ type: "pause" }, () => revision === this.transportRevision);
   }
 
   seek(seconds: number): Promise<UnifiedPlayerState> {
@@ -450,7 +482,11 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 
   setVolume(volume: number): Promise<UnifiedPlayerState> {
-    return this.command({ type: "setVolume", volume: Math.min(1, Math.max(0, volume)) });
+    const revision = ++this.volumeRevision;
+    return this.command(
+      { type: "setVolume", volume: Math.min(1, Math.max(0, volume)) },
+      () => revision === this.volumeRevision,
+    );
   }
 
   setEq(lowDb: number, highDb: number): Promise<UnifiedPlayerState> {
@@ -468,6 +504,11 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 
   async dispose(): Promise<void> {
+    this.queueRevision += 1;
+    this.prepareRevision += 1;
+    this.transportRevision += 1;
+    this.volumeRevision += 1;
+    this.loadRevision += 1;
     if (this.initPromise) await this.command({ type: "dispose" }).catch(() => undefined);
     this.unlisten?.();
     this.unlisten = null;

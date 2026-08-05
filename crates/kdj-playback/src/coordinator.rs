@@ -1245,11 +1245,16 @@ fn realtime_plan(plan: PlaybackTransitionPlan, sample_rate: u32) -> TransitionPl
     if plan.hydrant {
         flags |= TransitionPlan::HYDRANT;
     }
+    let beat_seconds = if plan.beat_seconds.is_finite() {
+        plan.beat_seconds.max(0.01)
+    } else {
+        0.5
+    };
     TransitionPlan {
         flags,
-        beat_frames: (plan.beat_seconds.max(0.01) * f64::from(sample_rate))
+        beat_frames: (beat_seconds * f64::from(sample_rate))
             .round()
-            .min(f64::from(u32::MAX)) as u32,
+            .clamp(1.0, f64::from(u32::MAX)) as u32,
     }
 }
 

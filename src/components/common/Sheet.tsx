@@ -1,5 +1,5 @@
 import { PanelRightClose } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 export interface SheetProps {
   open: boolean;
@@ -20,25 +20,52 @@ export interface SheetProps {
 export function Sheet({ open, title, heading, onClose, children }: SheetProps) {
   /** 拖动时的即时位移（px，向右为正）。松手时要么归零、要么关掉。 */
   const [drag, setDrag] = useState(0);
+  const dragRef = useRef(0);
   const startX = useRef(0);
+  /** Android 可能在同一触摸序列里补发 click；关闭动作必须幂等。 */
+  const closeRequestedRef = useRef(false);
+  const requestClose = useCallback(() => {
+    if (closeRequestedRef.current) return;
+    closeRequestedRef.current = true;
+    onClose();
+  }, [onClose]);
+  const resetDrag = useCallback(() => {
+    dragRef.current = 0;
+    setDrag(0);
+  }, []);
+  const ownsPointer = (element: HTMLDivElement, pointerId: number): boolean => {
+    try {
+      return element.hasPointerCapture(pointerId);
+    } catch {
+      return false;
+    }
+  };
+  const releasePointer = (element: HTMLDivElement, pointerId: number) => {
+    try {
+      if (ownsPointer(element, pointerId)) element.releasePointerCapture(pointerId);
+    } catch {
+      // Android WebView can deliver a late pointercancel after the panel has begun unmounting.
+    }
+  };
+
+  useEffect(() => {
+    closeRequestedRef.current = false;
+    if (!open) resetDrag();
+  }, [open, resetDrag]);
 
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") requestClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
-  useEffect(() => {
-    if (!open) setDrag(0);
-  }, [open]);
+  }, [open, requestClose]);
 
   if (!open) return null;
 
   return (
-    <div className="kd-sheet-scrim kd-pop-scrim" onClick={onClose}>
+    <div className="kd-sheet-scrim kd-pop-scrim" onClick={requestClose}>
       <div
         className="kd-sheet kd-pop-panel"
         role="dialog"
@@ -51,18 +78,28 @@ export function Sheet({ open, title, heading, onClose, children }: SheetProps) {
           className="kd-sheet-head"
           onPointerDown={(event) => {
             startX.current = event.clientX;
-            event.currentTarget.setPointerCapture(event.pointerId);
+            try {
+              event.currentTarget.setPointerCapture(event.pointerId);
+            } catch {
+              // A cancelled Android pointer may no longer be capturable.
+            }
           }}
           onPointerMove={(event) => {
-            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+            if (!ownsPointer(event.currentTarget, event.pointerId)) return;
             // 只认往右拖：往左拖不该把面板拉得比屏还宽
-            setDrag(Math.max(0, event.clientX - startX.current));
+            const next = Math.max(0, event.clientX - startX.current);
+            dragRef.current = next;
+            setDrag(next);
           }}
           onPointerUp={(event) => {
-            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-            event.currentTarget.releasePointerCapture(event.pointerId);
-            if (drag > 110) onClose();
-            setDrag(0);
+            releasePointer(event.currentTarget, event.pointerId);
+            const moved = dragRef.current;
+            resetDrag();
+            if (moved > 110) requestClose();
+          }}
+          onPointerCancel={(event) => {
+            releasePointer(event.currentTarget, event.pointerId);
+            resetDrag();
           }}
         >
           {heading ?? <span className="kd-sheet-title">{title}</span>}
@@ -72,7 +109,7 @@ export function Sheet({ open, title, heading, onClose, children }: SheetProps) {
             aria-label="收起右侧栏"
             title="收起右侧栏"
             onPointerDown={(event) => event.stopPropagation()}
-            onClick={onClose}
+            onClick={requestClose}
           >
             <PanelRightClose size={14} />
           </button>

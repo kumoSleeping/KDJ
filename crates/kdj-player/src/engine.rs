@@ -180,12 +180,15 @@ impl AudioRenderer {
     /// Inputs must already be decoded, resampled and aligned to each deck's prepared cursor.
     /// Missing samples are treated as silence. Commands are applied before the first frame.
     pub fn render(&mut self, deck_a: &[f32], deck_b: &[f32], output: &mut [f32], channels: usize) {
-        assert!(channels > 0, "channel count must be non-zero");
-        assert_eq!(output.len() % channels, 0, "partial output frame");
+        if channels == 0 {
+            output.fill(0.0);
+            return;
+        }
         self.ensure_eq_sample_rate();
         self.drain_commands();
 
-        let frame_count = output.len() / channels;
+        let complete_len = output.len() - output.len() % channels;
+        let frame_count = complete_len / channels;
         for frame in 0..frame_count {
             let (transition_a, transition_b) = self.transition_gains();
             let index = frame * channels;
@@ -225,6 +228,7 @@ impl AudioRenderer {
             self.advance_frame([true, true], true);
             self.advance_transport_ramp();
         }
+        output[complete_len..].fill(0.0);
         self.publish();
     }
 
@@ -238,12 +242,10 @@ impl AudioRenderer {
         output_sample_rate: u32,
         output_channels: usize,
     ) {
-        assert!(
-            output_sample_rate > 0,
-            "output sample rate must be non-zero"
-        );
-        assert!(output_channels > 0, "channel count must be non-zero");
-        assert_eq!(output.len() % output_channels, 0, "partial output frame");
+        if output_sample_rate == 0 || output_channels == 0 {
+            output.fill(0.0);
+            return;
+        }
         self.output_sample_rate = output_sample_rate;
         self.source_rate_ratios = [
             f64::from(deck_a.sample_rate()) / f64::from(output_sample_rate),
@@ -252,7 +254,8 @@ impl AudioRenderer {
         self.ensure_eq_sample_rate();
         self.drain_commands();
 
-        for frame in output.chunks_mut(output_channels) {
+        let complete_len = output.len() - output.len() % output_channels;
+        for frame in output[..complete_len].chunks_mut(output_channels) {
             let (transition_a, transition_b) = self.transition_gains();
             let (a, b) = if self.playing {
                 (
@@ -282,6 +285,7 @@ impl AudioRenderer {
             self.advance_frame([true, true], true);
             self.advance_transport_ramp();
         }
+        output[complete_len..].fill(0.0);
         self.publish();
     }
 
@@ -328,12 +332,12 @@ impl AudioRenderer {
     ) where
         F: Fn(f32) -> T,
     {
-        assert!(
-            output_sample_rate > 0,
-            "output sample rate must be non-zero"
-        );
-        assert!(output_channels > 0, "channel count must be non-zero");
-        assert_eq!(output.len() % output_channels, 0, "partial output frame");
+        if output_sample_rate == 0 || output_channels == 0 {
+            for sample in output.iter_mut() {
+                *sample = convert(0.0);
+            }
+            return;
+        }
         self.output_sample_rate = output_sample_rate;
         self.drain_commands();
 
@@ -352,7 +356,8 @@ impl AudioRenderer {
         ];
         self.ensure_eq_sample_rate();
 
-        for frame in output.chunks_mut(output_channels) {
+        let complete_len = output.len() - output.len() % output_channels;
+        for frame in output[..complete_len].chunks_mut(output_channels) {
             let required = self.required_decks();
             let (raw_a, advance_a) = if self.playing && required[0] {
                 callback_source_frame(sources[0], self.deck_positions[0])
@@ -405,6 +410,9 @@ impl AudioRenderer {
             }
             self.advance_frame([advance_a, advance_b], transition_can_advance);
             self.advance_transport_ramp();
+        }
+        for sample in &mut output[complete_len..] {
+            *sample = convert(0.0);
         }
         if self.transition.is_none() {
             if callback_source_ended(
@@ -663,7 +671,8 @@ impl AudioRenderer {
                 DeckId::B => (0.0, 1.0),
             };
         };
-        let progress = (transition.elapsed_frames + 1) as f32 / transition.total_frames as f32;
+        let progress =
+            (transition.elapsed_frames + 1) as f32 / transition.total_frames.max(1) as f32;
         let (outgoing, incoming) = if transition.plan.contains(TransitionPlan::SEEK_DUCK) {
             // seek 两端通常是毫不相关的采样点。新位置若从第一帧就满幅叠上来，
             // 会制造一次幅度阶跃/削波，听起来正是“点了以后顿一下”。用零斜率的
@@ -681,7 +690,12 @@ impl AudioRenderer {
         match (transition.from, transition.to) {
             (DeckId::A, DeckId::B) => (outgoing, incoming),
             (DeckId::B, DeckId::A) => (incoming, outgoing),
-            _ => unreachable!("handoff always changes decks"),
+            // A malformed realtime command must silence/continue rather than panic on the
+            // platform audio callback. The coordinator normally only sends opposite decks.
+            _ => match self.active_deck {
+                DeckId::A => (1.0, 0.0),
+                DeckId::B => (0.0, 1.0),
+            },
         }
     }
 
@@ -824,6 +838,18 @@ mod tests {
         assert_eq!(output, [0.0; 4]);
         assert_eq!(controller.snapshot().output_frames, 2);
         assert_eq!(controller.snapshot().deck_frames, [0, 0]);
+    }
+
+    #[test]
+    fn malformed_output_shape_is_silenced_instead_of_panicking() {
+        let (_controller, mut renderer) = command_channel(4);
+        let mut partial = [9.0; 3];
+        renderer.render(&[1.0; 4], &[1.0; 4], &mut partial, 2);
+        assert_eq!(partial, [0.0; 3]);
+
+        let mut no_channels = [9.0; 2];
+        renderer.render(&[1.0; 2], &[1.0; 2], &mut no_channels, 0);
+        assert_eq!(no_channels, [0.0; 2]);
     }
 
     #[test]

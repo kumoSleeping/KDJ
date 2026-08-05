@@ -485,12 +485,23 @@ export function Waveform({
             event.stopPropagation();
             draggingRef.current = true;
             gestureCommitPositionRef.current = null;
-            event.currentTarget.setPointerCapture(event.pointerId);
+            try {
+              event.currentTarget.setPointerCapture(event.pointerId);
+            } catch {
+              // Android WebView may report a pointer after its native gesture was cancelled.
+            }
             // scrub 开始：告诉 PlayerBar 压制权威时钟，别顶回播放头。
             dispatchSeek(Number(event.currentTarget.value), true, true);
           }}
           onPointerUp={(event) => {
             event.stopPropagation();
+            try {
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+              }
+            } catch {
+              // A late pointerup after unmount is harmless; the scrub cleanup below still runs.
+            }
             draggingRef.current = false;
             if (previewFrameRef.current !== null) {
               cancelAnimationFrame(previewFrameRef.current);
@@ -508,7 +519,19 @@ export function Waveform({
             }
           }}
           onPointerCancel={(event) => {
+            event.stopPropagation();
+            try {
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+              }
+            } catch {
+              // The pointer may already have been released by the WebView gesture dispatcher.
+            }
             draggingRef.current = false;
+            if (previewFrameRef.current !== null) {
+              cancelAnimationFrame(previewFrameRef.current);
+              previewFrameRef.current = null;
+            }
             gestureCommitPositionRef.current = null;
             // scrub 中止：不发正式跳转，只松开时钟压制。
             dispatchSeek(Number(event.currentTarget.value), true, false);
