@@ -33,6 +33,7 @@ import {
   SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR,
   SEARCH_DEFAULT_DOWNLOAD_SENTINEL,
 } from "../../lib/folderDrop";
+import { expandNewRootPaths } from "../../lib/folderExpansion";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder, OUTSIDE_FOLDER } from "../../lib/outsideFolder";
 import {
@@ -791,17 +792,15 @@ function reorder(names: string[], from: string, to: string, after: boolean): str
 /** 展开状态存在组件里：刷新树（新建/改名/移动之后）不该把用户展开的分支收回去。 */
 function useExpanded(roots: FolderNode[]) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const seenRootPaths = useRef<Set<string>>(new Set());
   useEffect(() => {
-    // 根目录默认展开一层，否则第一眼是一排收起来的目录，等于什么都没有。
-    // 必须在"确实有新东西要加"时才换 Set：否则每次渲染都产生新状态，
-    // 而 roots 每次渲染又是新数组，两下一凑就是死循环。
-    setExpanded((prev) => {
-      const missing = roots.filter((root) => !prev.has(root.path));
-      if (missing.length === 0) return prev;
-      const next = new Set(prev);
-      missing.forEach((root) => next.add(root.path));
-      return next;
-    });
+    const rootPaths = roots.map((root) => root.path);
+    const previouslySeen = seenRootPaths.current;
+    // 记住“见过哪些根”和“当前展开哪些节点”是两回事。歌曲更新会换一棵新的
+    // roots 数据树；若只检查 expanded，用户主动收起的根会被误判成新根并弹开。
+    // 真正第一次出现的根仍默认展开一层，普通刷新则原样保留所有分支状态。
+    seenRootPaths.current = new Set(rootPaths);
+    setExpanded((prev) => expandNewRootPaths(prev, previouslySeen, rootPaths));
   }, [roots]);
   return [expanded, setExpanded] as const;
 }

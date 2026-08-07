@@ -3640,6 +3640,10 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
 .kd-wave-fallback-fill[data-error="true"] {
   background: var(--kd-warn);
 }
+/* Canvas 波形有自己的 z-index；已播遮罩必须明确压在 canvas 上，否则会被彩色柱子盖掉。 */
+.kd-wave-dim {
+  z-index: 2;
+}
 /* 在线波形的未知区域仍应是一条可读的流媒体进度轨，而不是一根死灰线。
    已缓冲段稍亮；真实 analyser 柱由 canvas 叠在上面。 */
 .kd-wave-stream-bed {

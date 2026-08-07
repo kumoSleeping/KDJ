@@ -429,6 +429,7 @@ export function Waveform({
           遮罩色跟主题走：深色主题盖黑、浅色主题盖白，白天才不会糊成一团黑 */}
       {dimPlayed && ratio !== null && ratio > 0 && (
         <span
+          className="kd-wave-dim"
           style={{
             position: "absolute",
             left: 0,

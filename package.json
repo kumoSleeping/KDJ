@@ -21,7 +21,8 @@
     "test:player-handoff": "esbuild tests/playerHandoffPolicy.test.ts --bundle --platform=node --format=esm --outfile=target/playerHandoffPolicy.test.mjs && node --test target/playerHandoffPolicy.test.mjs",
     "test:latest-intent-gate": "esbuild tests/latestIntentGate.test.ts --bundle --platform=node --format=esm --outfile=target/latestIntentGate.test.mjs && node --test target/latestIntentGate.test.mjs",
     "test:waveform-render": "esbuild tests/waveformRenderPolicy.test.ts --bundle --platform=node --format=esm --outfile=target/waveformRenderPolicy.test.mjs && node --test target/waveformRenderPolicy.test.mjs",
-    "test:frontend-logic": "npm run test:dj-audio-policy && npm run test:latest-intent-gate && npm run test:player-handoff && npm run test:waveform-render",
+    "test:folder-expansion": "esbuild tests/folderExpansion.test.ts --bundle --platform=node --format=esm --outfile=target/folderExpansion.test.mjs && node --test target/folderExpansion.test.mjs",
+    "test:frontend-logic": "npm run test:dj-audio-policy && npm run test:latest-intent-gate && npm run test:player-handoff && npm run test:waveform-render && npm run test:folder-expansion",
     "release": "bash scripts/release.sh"
   },
   "dependencies": {
