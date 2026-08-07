@@ -7,6 +7,6 @@ license.workspace = true
 
 [dependencies]
 anyhow = "=1.0.104"
-kdj-player = { version = "0.2.35", path = "../kdj-player" }
+kdj-player = { version = "0.2.36", path = "../kdj-player" }
 reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1.0.229", features = ["derive"] }
