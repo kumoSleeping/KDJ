@@ -147,6 +147,11 @@ jobs:
       # 脚本名以 package.json 为准：有 tauri:build 就用它（能带上项目自己的
       # 前置步骤），没有就直接调 CLI。`npx tauri` 会去装 npm 上那个 v1 时代的
       # 同名废弃包，所以必须写全 `@tauri-apps/cli@^2`。
+      #
+      # Windows 首次打 NSIS 时还会从 GitHub 下载工具包，偶发的 CDN 断连会在
+      # 应用、MSI 都已编好后报 `io: Peer disconnected`。Windows runner 对整个
+      # Tauri 打包最多重试两次；Cargo 增量产物仍在，重试主要补齐 bundler 下载，
+      # 永久性编译/配置错误则会在三次都失败后照常打红。其他平台不额外重跑。
       - name: Tauri 打包
         if: steps.shell.outputs.present == 'true'
         shell: bash
@@ -171,11 +176,29 @@ jobs:
             jq 'del(.bundle.createUpdaterArtifacts)' src-tauri/tauri.conf.json > /tmp/conf.json
             mv /tmp/conf.json src-tauri/tauri.conf.json
           fi
-          if node -e "process.exit((require('./package.json').scripts||{})['tauri:build']?0:1)"; then
-            npm run tauri:build -- ${{ matrix.tauri_args }}
-          else
-            npx --yes @tauri-apps/cli@^2 build ${{ matrix.tauri_args }}
-          fi
+          run_tauri_build() {
+            if node -e "process.exit((require('./package.json').scripts||{})['tauri:build']?0:1)"; then
+              npm run tauri:build -- ${{ matrix.tauri_args }}
+            else
+              npx --yes @tauri-apps/cli@^2 build ${{ matrix.tauri_args }}
+            fi
+          }
+
+          max_attempts=1
+          [[ "${RUNNER_OS:-}" == "Windows" ]] && max_attempts=3
+          for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+            if run_tauri_build; then
+              break
+            else
+              status=$?
+            fi
+            if (( attempt == max_attempts )); then
+              echo "::error::Tauri 打包连续 ${max_attempts} 次失败（最后退出码：${status}）"
+              exit "$status"
+            fi
+            echo "::warning::Windows Tauri 打包失败（退出码：${status}），20 秒后进行第 $((attempt + 1))/${max_attempts} 次尝试"
+            sleep 20
+          done
 
       # 产物路径用宽松的 `**` 通配：src-tauri 是不是 workspace 成员会决定
       # 产物落在 `target/` 还是 `src-tauri/target/`，加上 --target 又会多一层
