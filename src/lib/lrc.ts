@@ -17,10 +17,27 @@ function parseStamp(min: string, sec: string, frac: string | undefined): number 
   return minutes * 60 + seconds + millis / 1000;
 }
 
+export interface ParseLrcOptions {
+  /** 应用 `[offset:±毫秒]`；QQ 时间轴需要，其他来源维持现有行为。 */
+  honorOffset?: boolean;
+}
+
 /** 把 LRC 文本拆成按时间排序的行；纯元数据行（空正文）丢掉。 */
-export function parseLrc(raw: string): LrcLine[] {
+export function parseLrc(raw: string, options: ParseLrcOptions = {}): LrcLine[] {
   const lines: LrcLine[] = [];
-  for (const row of raw.split(/\r?\n/)) {
+  const rows = raw.split(/\r?\n/);
+  // LRC 的全局 offset 单位是毫秒：正数让歌词更早出现，负数让歌词更晚出现。
+  // 目前只为 QQ 开启；忽略它时整首词会保持一个固定的提前/延后量。
+  let offsetMs = 0;
+  if (options.honorOffset) {
+    for (const row of rows) {
+      const match = row.trim().match(/^\[offset:\s*([+-]?\d+)\s*\]$/i);
+      if (match) offsetMs = Number(match[1]);
+    }
+  }
+  const offsetSec = Number.isFinite(offsetMs) ? offsetMs / 1000 : 0;
+
+  for (const row of rows) {
     const trimmed = row.trim();
     if (!trimmed.startsWith("[")) continue;
     const stamps = [...trimmed.matchAll(/\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g)];
@@ -29,7 +46,7 @@ export function parseLrc(raw: string): LrcLine[] {
     if (!text) continue;
     for (const stamp of stamps) {
       const time = parseStamp(stamp[1]!, stamp[2]!, stamp[3]);
-      if (Number.isFinite(time)) lines.push({ time, text });
+      if (Number.isFinite(time)) lines.push({ time: time - offsetSec, text });
     }
   }
   lines.sort((a, b) => a.time - b.time);

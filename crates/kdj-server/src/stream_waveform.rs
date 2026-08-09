@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use kdj_analysis::engine::AnalysisResult;
 use kdj_core::models::Waveform;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
@@ -39,6 +40,8 @@ const CAPTURE_PUBLISH_BYTES: u64 = 512 * 1024;
 /// PlayerBar 每 750ms 续一次这份租约；切歌/卸载后不会再续，已排队的后续前缀
 /// 分析自然停止，不需要让浏览器额外发一个带竞态的 DELETE。
 const REQUEST_LEASE: Duration = Duration::from_secs(5);
+/// 流媒体完整分析沿用曲库的默认窗口；路由每次轮询会用当前设置覆盖它。
+const DEFAULT_STREAM_ANALYSIS_DURATION_SECONDS: f64 = 240.0;
 /// Android 起播后的最初几秒只收集连续字节，不立刻做第一次完整前缀解码，避免
 /// 768 KiB 门槛恰好和解码器/AudioTrack 建链撞在一起。
 #[cfg(target_os = "android")]
@@ -71,6 +74,19 @@ pub struct StreamWaveformProgress {
     pub complete: bool,
     /// 当前有一次波形解码在跑。路由层还会把 stream-cache 的网络写入状态合进来。
     pub active: bool,
+    /// 完整音频分析与渐进波形共用同一份文件，但只在文件确认完整后启动。
+    pub analysis_status: StreamAnalysisStatus,
+    pub analysis: Option<AnalysisResult>,
+    pub analysis_error: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamAnalysisStatus {
+    Waiting,
+    Analyzing,
+    Ready,
+    Failed,
 }
 
 #[derive(Default)]
@@ -92,6 +108,10 @@ struct StreamWaveformEntry {
     complete: bool,
     inflight: bool,
     complete_analyzed: bool,
+    analysis_complete: bool,
+    analysis: Option<AnalysisResult>,
+    analysis_error: String,
+    analysis_duration: f64,
     /// true 表示媒体代理正在把已经送给播放器的连续字节旁路进临时文件。它与持久
     /// stream-cache 的后台下载无关，关闭缓存设置时也能提前画真实波形。
     capture_open: bool,
@@ -122,6 +142,10 @@ impl Default for StreamWaveformEntry {
             complete: false,
             inflight: false,
             complete_analyzed: false,
+            analysis_complete: false,
+            analysis: None,
+            analysis_error: String::new(),
+            analysis_duration: DEFAULT_STREAM_ANALYSIS_DURATION_SECONDS,
             capture_open: false,
             capture_file_bytes: 0,
             capture_continuable: false,
@@ -162,8 +186,15 @@ struct AnalyzeJob {
     path: PathBuf,
     epoch: u64,
     complete: bool,
+    analysis_duration: f64,
     /// 防止 entry 被清理后，正在排队的临时文件在真正开始解码前先被删除。
     _ephemeral_file: Option<Arc<EphemeralFile>>,
+}
+
+struct AnalyzeJobResult {
+    waveform: Option<(Waveform, f64)>,
+    analysis: Option<AnalysisResult>,
+    analysis_error: String,
 }
 
 #[derive(Debug)]
@@ -220,10 +251,23 @@ impl StreamWaveformCoordinator {
     /// 标记当前试听确实需要缓存波形，并返回现有快照。没有写入路径时只记请求：
     /// 首个媒体 GET 建起后台缓存后 `observe` 会接着启动分析。
     pub fn request(&self, key: String) -> StreamWaveformProgress {
+        self.request_with_analysis_duration(key, DEFAULT_STREAM_ANALYSIS_DURATION_SECONDS)
+    }
+
+    /// 当前设置中的分析窗口由路由传入；只改变尚未开始的完整分析，不重跑已经完成
+    /// 的结果。波形轮询因此也是完整分析的短生命周期租约，不需要第二个端点。
+    pub fn request_with_analysis_duration(
+        &self,
+        key: String,
+        analysis_duration: f64,
+    ) -> StreamWaveformProgress {
         let (snapshot, job, schedule_cleanup) = {
             let mut inner = self.inner.lock().expect("stream waveform state");
             ensure_entry(&mut inner, &key);
             let entry = inner.entries.get_mut(&key).expect("stream waveform entry");
+            if analysis_duration.is_finite() && analysis_duration > 0.0 {
+                entry.analysis_duration = analysis_duration;
+            }
             entry.requested_until = Some(Instant::now() + REQUEST_LEASE);
             entry.last_access = Instant::now();
             let schedule_cleanup = !entry.cleanup_scheduled;
@@ -332,6 +376,9 @@ impl StreamWaveformCoordinator {
                 entry.complete = false;
                 entry.inflight = false;
                 entry.complete_analyzed = false;
+                entry.analysis_complete = false;
+                entry.analysis = None;
+                entry.analysis_error.clear();
                 entry.capture_open = true;
                 entry.capture_file_bytes = 0;
                 entry.capture_continuable = false;
@@ -440,6 +487,9 @@ impl StreamWaveformCoordinator {
         entry.inflight = false;
         entry.complete = false;
         entry.complete_analyzed = false;
+        entry.analysis_complete = false;
+        entry.analysis = None;
+        entry.analysis_error.clear();
         entry.last_requested_path = None;
         entry.last_requested_bytes = 0;
     }
@@ -466,6 +516,9 @@ impl StreamWaveformCoordinator {
             entry.complete |= complete;
             if complete {
                 entry.complete_analyzed = false;
+                entry.analysis_complete = false;
+                entry.analysis = None;
+                entry.analysis_error.clear();
             }
             if closed {
                 entry.capture_open = false;
@@ -638,9 +691,12 @@ impl StreamWaveformCoordinator {
                 entry.covered_seconds = 0.0;
                 entry.revision = 0;
                 entry.last_analysis_started_at = None;
+                entry.analysis = None;
+                entry.analysis_error.clear();
             }
             if path_changed || became_complete {
                 entry.complete_analyzed = false;
+                entry.analysis_complete = false;
             }
             // partial 原子改名为最终 media（或用户重试时换了一份 partial）后，旧
             // 读取任务无法再代表当前路径。放开新任务即可；旧任务结束时会因路径
@@ -679,12 +735,22 @@ impl StreamWaveformCoordinator {
         tokio::task::spawn_blocking(move || {
             // 渐进波形属于后台分析，不得绕过整库分析的并发上限。
             let _permit = crate::jobs::acquire_background_analysis_permit();
-            let result = decode_cached_prefix(&job.path);
+            let waveform = decode_cached_prefix(&job.path);
+            let (analysis, analysis_error) = if job.complete {
+                analyze_complete_stream(&job.path, job.analysis_duration)
+            } else {
+                (None, String::new())
+            };
+            let result = AnalyzeJobResult {
+                waveform,
+                analysis,
+                analysis_error,
+            };
             coordinator.finish_job(job, result);
         });
     }
 
-    fn finish_job(&self, job: AnalyzeJob, result: Option<(Waveform, f64)>) {
+    fn finish_job(&self, job: AnalyzeJob, result: AnalyzeJobResult) {
         let next = {
             let mut inner = self.inner.lock().expect("stream waveform state");
             let Some(current) = inner.entries.get(&job.key) else {
@@ -695,9 +761,12 @@ impl StreamWaveformCoordinator {
             if current.epoch != job.epoch || current.path.as_ref() != Some(&job.path) {
                 return;
             }
-            let should_update = result.as_ref().is_some_and(|(_, covered_seconds)| {
-                *covered_seconds + 0.02 >= current.covered_seconds
-            });
+            let should_update = result
+                .waveform
+                .as_ref()
+                .is_some_and(|(_, covered_seconds)| {
+                    *covered_seconds + 0.02 >= current.covered_seconds
+                });
             let update_revision = should_update.then(|| allocate_revision(&mut inner));
             let entry = inner
                 .entries
@@ -705,7 +774,9 @@ impl StreamWaveformCoordinator {
                 .expect("stream waveform entry was just validated");
             entry.inflight = false;
             entry.last_access = Instant::now();
-            if let (Some((waveform, covered_seconds)), Some(revision)) = (result, update_revision) {
+            if let (Some((waveform, covered_seconds)), Some(revision)) =
+                (result.waveform, update_revision)
+            {
                 entry.waveform = Some(waveform);
                 entry.covered_seconds = covered_seconds;
                 entry.revision = revision;
@@ -714,6 +785,9 @@ impl StreamWaveformCoordinator {
                 // 即便格式不支持，完整文件也只尝试一次；否则前端每轮轮询都可能再开一
                 // 条昂贵的解码任务。
                 entry.complete_analyzed = true;
+                entry.analysis_complete = true;
+                entry.analysis = result.analysis;
+                entry.analysis_error = result.analysis_error;
             }
             let next = plan_job(&job.key, entry);
             let protect_current = next.is_some()
@@ -898,6 +972,17 @@ impl Drop for StreamWaveformCapture {
 }
 
 fn snapshot(entry: &StreamWaveformEntry) -> StreamWaveformProgress {
+    let analysis_status = if entry.analysis_complete {
+        if entry.analysis.is_some() {
+            StreamAnalysisStatus::Ready
+        } else {
+            StreamAnalysisStatus::Failed
+        }
+    } else if entry.complete {
+        StreamAnalysisStatus::Analyzing
+    } else {
+        StreamAnalysisStatus::Waiting
+    };
     StreamWaveformProgress {
         waveform: entry.waveform.clone(),
         covered_seconds: entry.covered_seconds,
@@ -908,7 +993,10 @@ fn snapshot(entry: &StreamWaveformEntry) -> StreamWaveformProgress {
         // complete && !active 提前停止，永远只留在 90% 的旧波形。
         active: entry.inflight
             || entry.capture_open
-            || (entry.complete && !entry.complete_analyzed),
+            || (entry.complete && (!entry.complete_analyzed || !entry.analysis_complete)),
+        analysis_status,
+        analysis: entry.analysis.clone(),
+        analysis_error: entry.analysis_error.clone(),
     }
 }
 
@@ -937,7 +1025,8 @@ fn plan_job(key: &str, entry: &mut StreamWaveformEntry) -> Option<AnalyzeJob> {
         return None;
     }
     let path_changed = entry.last_requested_path.as_ref() != Some(&path);
-    let needs_complete_pass = entry.complete && !entry.complete_analyzed;
+    let needs_complete_pass =
+        entry.complete && (!entry.complete_analyzed || !entry.analysis_complete);
     let enough_growth = entry.bytes >= next_analysis_bytes(entry.last_requested_bytes);
     if !path_changed && !needs_complete_pass && !enough_growth {
         return None;
@@ -970,6 +1059,7 @@ fn plan_job(key: &str, entry: &mut StreamWaveformEntry) -> Option<AnalyzeJob> {
         path,
         epoch: entry.epoch,
         complete: entry.complete,
+        analysis_duration: entry.analysis_duration,
         _ephemeral_file: entry.ephemeral_file.as_ref().cloned(),
     })
 }
@@ -1036,6 +1126,29 @@ fn decode_cached_prefix(path: &Path) -> Option<(Waveform, f64)> {
     // header 里的整曲时长，否则未下载尾部会被错误标成“已分析”。
     waveform.duration = covered_seconds;
     Some((waveform, covered_seconds))
+}
+
+fn analyze_complete_stream(path: &Path, duration_limit: f64) -> (Option<AnalysisResult>, String) {
+    let result = kdj_analysis::engine::analyze_file(path, duration_limit);
+    let has_result = result.bpm.is_some()
+        || !result.key.is_empty()
+        || !result.camelot.is_empty()
+        || result.energy.is_some()
+        || result.rms_db.is_some()
+        || result.peak_db.is_some();
+    let error = result.errors.join("；");
+    if has_result {
+        (Some(result), error)
+    } else {
+        (
+            None,
+            if error.is_empty() {
+                "完整音频未能生成可用的分析结果".to_string()
+            } else {
+                error
+            },
+        )
+    }
 }
 
 fn trim_entries(
@@ -1147,6 +1260,14 @@ mod tests {
         }
     }
 
+    fn test_job_result() -> AnalyzeJobResult {
+        AnalyzeJobResult {
+            waveform: Some((test_waveform(), 1.0)),
+            analysis: None,
+            analysis_error: "test analysis omitted".to_string(),
+        }
+    }
+
     fn capture_plan(
         coordinator: &StreamWaveformCoordinator,
         root: &Path,
@@ -1211,6 +1332,7 @@ mod tests {
         );
         entry.inflight = false;
         entry.complete_analyzed = true;
+        entry.analysis_complete = true;
         assert!(
             !snapshot(&entry).active,
             "a finished final pass lets PlayerBar stop polling"
@@ -1528,9 +1650,10 @@ mod tests {
                 path,
                 epoch: old_epoch,
                 complete: true,
+                analysis_duration: DEFAULT_STREAM_ANALYSIS_DURATION_SECONDS,
                 _ephemeral_file: None,
             },
-            Some((test_waveform(), 1.0)),
+            test_job_result(),
         );
         let inner = coordinator.inner.lock().expect("state");
         let entry = inner.entries.get(&key).expect("new entry");
@@ -1559,9 +1682,10 @@ mod tests {
                 path: path.clone(),
                 epoch: first_epoch,
                 complete: true,
+                analysis_duration: DEFAULT_STREAM_ANALYSIS_DURATION_SECONDS,
                 _ephemeral_file: None,
             },
-            Some((test_waveform(), 1.0)),
+            test_job_result(),
         );
         let first_revision = coordinator
             .inner
@@ -1589,9 +1713,10 @@ mod tests {
                 path,
                 epoch: second_epoch,
                 complete: true,
+                analysis_duration: DEFAULT_STREAM_ANALYSIS_DURATION_SECONDS,
                 _ephemeral_file: None,
             },
-            Some((test_waveform(), 1.0)),
+            test_job_result(),
         );
         let second_revision = coordinator
             .inner
@@ -1693,6 +1818,14 @@ mod tests {
         assert!(progress.complete);
         assert!(progress.covered_seconds > 2.5);
         assert!(progress.waveform.is_some());
+        assert_eq!(progress.analysis_status, StreamAnalysisStatus::Ready);
+        assert!(
+            progress
+                .analysis
+                .as_ref()
+                .is_some_and(|analysis| analysis.energy.is_some() && analysis.rms_db.is_some()),
+            "the same complete session file must also produce full analysis"
+        );
         assert!(
             capture_path.is_file(),
             "coordinator keeps its session file alive"
@@ -1703,6 +1836,41 @@ mod tests {
             !capture_path.exists(),
             "clearing the session removes the short-lived media prefix"
         );
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn an_already_complete_cache_hit_is_analyzed_on_request() {
+        let coordinator = StreamWaveformCoordinator::default();
+        let key = "complete-cache-hit".to_string();
+        let root = scratch("complete-cache-analysis");
+        let path = root.join("complete.media");
+        let bytes = pcm_wav(3);
+        tokio::fs::write(&path, &bytes)
+            .await
+            .expect("write complete cached media");
+
+        // 进程重启后的缓存命中会先 observe，直到当前 PlayerBar 带 token 轮询后才
+        // 真正占分析额度；这条路径不经过会话 capture。
+        coordinator.observe(key.clone(), path.clone(), bytes.len() as u64, true);
+        let progress = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let progress = coordinator.request_with_analysis_duration(key.clone(), 120.0);
+                if progress.analysis_status == StreamAnalysisStatus::Ready && !progress.active {
+                    break progress;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("complete cache analysis must finish");
+
+        assert!(progress.analysis.is_some());
+        assert!(
+            path.exists(),
+            "analysis never consumes or removes persistent media"
+        );
+        coordinator.clear();
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 }

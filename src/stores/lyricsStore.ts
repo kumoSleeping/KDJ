@@ -173,7 +173,9 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
             const local = await api.libraryLyrics(track.id);
             // sidecar 只要文件存在不代表里面有可解析的 LRC；损坏/仅元数据时
             // 继续走在线匹配，避免一个空本地文件把正确歌词永久挡住。
-            if (parseLrc(local.lrc).length) {
+            if (
+              parseLrc(local.lrc, { honorOffset: platformOf(track) === "qqm" }).length
+            ) {
               meta = {
                 lrc: local.lrc,
                 translated_lrc: local.translated_lrc,
@@ -191,6 +193,31 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
             if (!(error instanceof ApiError && error.status === 404)) {
               console.warn("读取本地歌词失败", error);
             }
+          }
+        }
+
+        // 旧版本通过 QQ 的公开 LRC 接口落盘时只能拿到主歌词，已经下载过的歌会
+        // 一直命中这个本地文件，从而永远没有翻译。在线补词开启时，给这种 QQ
+        // 本地缓存补取一次附加层；主歌词仍保留本地版本（包括用户手调的时间轴）。
+        if (
+          meta &&
+          platformOf(track) === "qqm" &&
+          prefs.tryOnlineWhenMissing &&
+          prefs.displaySource !== "wyy" &&
+          prefs.engines.includes("qqm") &&
+          !parseLrc(meta.translated_lrc || "", { honorOffset: true }).length
+        ) {
+          try {
+            const online = await api.lyrics(requestOf(track));
+            if (online?.platform === "qqm") {
+              meta = {
+                ...meta,
+                translated_lrc: online.translated_lrc,
+                romaji_lrc: meta.romaji_lrc || online.romaji_lrc,
+              };
+            }
+          } catch {
+            // 附加翻译失败不影响已经可用的本地主歌词，离线时照常显示原词。
           }
         }
 
@@ -216,9 +243,10 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
           }));
           return;
         }
-        const lines = parseLrc(meta.lrc);
-        const translated = parseLrc(meta.translated_lrc || "");
-        const romaji = parseLrc(meta.romaji_lrc || "");
+        const lrcOptions = { honorOffset: meta.platform === "qqm" };
+        const lines = parseLrc(meta.lrc, lrcOptions);
+        const translated = parseLrc(meta.translated_lrc || "", lrcOptions);
+        const romaji = parseLrc(meta.romaji_lrc || "", lrcOptions);
         set((state) => ({
           byId: {
             ...state.byId,

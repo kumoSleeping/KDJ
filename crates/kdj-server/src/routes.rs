@@ -597,7 +597,10 @@ async fn song_preview_waveform(
                 .observe(cache_key.clone(), cached.path, cached.bytes, true);
         }
     }
-    let progress = state.stream_waveforms.request(cache_key.clone());
+    let progress = state.stream_waveforms.request_with_analysis_duration(
+        cache_key.clone(),
+        state.config.to_settings().analysis_duration,
+    );
     let progress = crate::stream_waveform::StreamWaveformProgress {
         active: progress.active
             || (persistent_cache_enabled && state.stream_cache.is_writing(&cache_key)),

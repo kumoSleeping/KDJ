@@ -63,6 +63,14 @@ import {
   type MediaSyncDetail,
 } from "../../lib/mediaSync";
 import {
+  cancelLocalVideoSeekPreview,
+  hasLocalVideoSeekPresenter,
+  holdLocalVideoSeekPosition,
+  prepareLocalVideoSeek,
+  previewLocalVideoSeek,
+} from "../../lib/localVideoSeekBridge";
+import { coordinateLocalVideoSeek } from "../../lib/localVideoSeekTiming";
+import {
   claimStreamCacheRetry,
   isStreamTrack,
   mediaUrlForTrack,
@@ -77,7 +85,12 @@ import {
 } from "../../lib/streamTrack";
 import { playSongPreview } from "../../lib/songPreview";
 import { useDownloadStore } from "../../stores/downloadStore";
-import { seekVideoPip, toggleVideoPip, useVideoPip } from "../../lib/videoPip";
+import {
+  requestLocalVideo,
+  seekVideoPip,
+  toggleVideoPip,
+  useVideoPip,
+} from "../../lib/videoPip";
 import type { Track } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useQueueStore } from "../../stores/queueStore";
@@ -86,6 +99,7 @@ import { POSITION_EVENT, type PositionDetail } from "../library/TrackDetail";
 import { PLAY_EVENT, parsePlayRequest, playTrack } from "../../lib/playTrack";
 import { getPlayingTrack, setPlayingTrack } from "../../lib/playingTrack";
 import { usePlayerShortcuts } from "../../lib/usePlayerShortcuts";
+import { recordStreamAnalysisProgress } from "../../lib/streamAnalysis";
 import {
   mergeCachedStreamWaveform,
   mediaBufferedRanges,
@@ -1140,17 +1154,26 @@ export function PlayerBar() {
         focusLibrary();
       }
       // DJ 亮着且正在放别的歌：**所有**播放入口（双击、右键播放、自动续播
-      // 挑的下一首）都从当前位置接歌，不硬切。视频预览不走这条事件，不受影响。
+      // 挑的下一首）都从当前位置接歌，不硬切。网络视频预览不走 PLAY_EVENT；
+      // 曲库里的本地视频则和音频一样由 Rust Deck 发声，必须允许进入这条过渡。
       const current = trackRef.current;
-      if (
+      const wantsDjTransition =
         autoPlay &&
         current &&
         playingRef.current &&
-        next.id !== current.id &&
-        !isLocalVideo &&
-        djSwitchTo(next, current)
-      ) {
-        return;
+        next.id !== current.id;
+      if (wantsDjTransition) {
+        if (isLocalVideo) {
+          // playTrack 已同步建立视频 session。先在同一事件循环把它改为“装画面但
+          // 暂不走带”，否则 Rust 还在准备淡入 Deck 时，静音视频会先从 0 独自跑。
+          // handoff 落地后 track/play 广播会从同一 cue 启动画面。
+          requestLocalVideo(next, false);
+        }
+        if (djSwitchTo(next, current)) return;
+        if (isLocalVideo) {
+          // 引擎没有接手（例如当前原生平台不支持实时 DJ）：恢复普通硬切的自动播放。
+          requestLocalVideo(next, true);
+        }
       }
       // 详情视频控件再点播放：同一首只需恢复播放，绝不能把进度打回 0。
       if (current && next.id === current.id) {
@@ -1542,6 +1565,7 @@ export function PlayerBar() {
   useEffect(() => {
     if (!track) return;
     const position = nativePlayer?.state().currentTime ?? djEngine.currentTime(frontEl);
+    const rate = nativePlayer?.state().rate ?? frontEl.playbackRate;
     broadcastMediaSync({
       owner: "player",
       action: playing ? "play" : "pause",
@@ -1549,13 +1573,14 @@ export function PlayerBar() {
       // 视频恢复播放时必须从当前唱盘位置继续。省略 position 会被当成 0，
       // 暂停后再播放就会把视频错误拉回 Offset 起点。
       position,
+      rate,
     });
     if (isStreamTrack(track)) {
       publishStreamTrackState(
         track,
         position,
         playing,
-        nativePlayer?.state().rate ?? frontEl.playbackRate,
+        rate,
       );
     }
   }, [playing, track?.id, frontEl, nativePlayer]);
@@ -1620,6 +1645,17 @@ export function PlayerBar() {
       // 都会重建 shadow deck / 发 Range 请求，越拖积压越多，看起来像整条波形黏住。
       if (detail.preview) {
         setPosition(target);
+        if (isVideoTrack(track.format)) {
+          if (detail.scrubbing === false) {
+            cancelLocalVideoSeekPreview(track.id);
+          } else {
+            previewLocalVideoSeek(track.id, target);
+            const pip = useVideoPip.getState();
+            if (pip.session?.source === "local" && pip.session.trackId === track.id) {
+              pip.setPosition(target);
+            }
+          }
+        }
         return;
       }
       // 第一次 input 会在指针仍按着时立刻正式跳转，并携带 scrubbing=true；
@@ -1636,25 +1672,88 @@ export function PlayerBar() {
       }
       if (!shouldCommitSeek(track.id, target, detail.forceCommit)) return;
       const generation = ++seekGenerationRef.current;
-      broadcastMediaSync({
-        owner: "player",
-        action: "seek",
-        trackId: track.id,
-        position: target,
-      });
-      if (nativePlayer) {
-        // 后端会把换曲/接歌装载期的跳转折进待激活流；先按住用户点下的位置，
-        // 等状态事件落到目标附近再交回跟随。请求槽只保留最后一个目标，避免
-        // Android 快速点波形时把旧 seek 一层层排进原生命令队列。
-        requestNativeSeek(track.id, target);
-      } else {
-        void djEngine
-          .seamlessSeek(mediaUrlForTrack(track), target, playingRef.current)
-          .then((element) => {
-            if (generation !== seekGenerationRef.current) return;
-            setFrontEl(element);
-          });
+      const publishVideoSeek = () => {
+        if (generation !== seekGenerationRef.current) return;
+        broadcastMediaSync({
+          owner: "player",
+          action: "seek",
+          trackId: track.id,
+          position: target,
+        });
+      };
+      const commitAudioTransport = (): Promise<void> | void => {
+        if (generation !== seekGenerationRef.current) return;
+        if (nativePlayer) {
+          // 后端会把换曲/接歌装载期的跳转折进待激活流；先按住用户点下的位置，
+          // 等状态事件落到目标附近再交回跟随。请求槽只保留最后一个目标，避免
+          // Android 快速点波形时把旧 seek 一层层排进原生命令队列。
+          requestNativeSeek(track.id, target);
+          // Give the Tauri/Rust command lane one short uncontended head start. Waiting for the
+          // playback-state landing here pinned the progress/video for seconds on large MP4s;
+          // 120ms is enough for IPC dispatch while keeping the visual catch-up prompt.
+          return new Promise<void>((resolve) => window.setTimeout(resolve, 120));
+        } else {
+          return djEngine
+            .seamlessSeek(mediaUrlForTrack(track), target, playingRef.current)
+            .then((element) => {
+              if (generation !== seekGenerationRef.current) return;
+              setFrontEl(element);
+            });
+        }
+      };
+      const commitTransport = () => {
+        publishVideoSeek();
+        commitAudioTransport();
+      };
+
+      const dualVideo = isVideoTrack(track.format) && hasLocalVideoSeekPresenter(track.id);
+      if (!dualVideo) {
+        commitTransport();
+        return;
       }
+
+      holdLocalVideoSeekPosition(track.id);
+      const pip = useVideoPip.getState();
+      if (pip.session?.source === "local" && pip.session.trackId === track.id) {
+        pip.setPosition(target);
+      }
+      // 音频 seek 是最高优先级：绝不能再等备用视频的 seeked/rVFC。目标画面若已在
+      // 拖动预览中备好会紧跟着换手；否则旧画面继续运动，解码完成后再追上。
+      // 画面准备期间仍压住受控 range，避免旧槽 timeupdate / 100ms 状态快照把
+      // 用户选择的目标从进度条上顶回去。新手势会抬 generation 作废旧准备。
+      scrubbingRef.current = true;
+      void coordinateLocalVideoSeek(
+        () => {
+          const preparation = prepareLocalVideoSeek(track.id, target);
+          if (!preparation) return Promise.resolve(null);
+          return new Promise((resolve) => {
+            let settled = false;
+            const finish = (prepared: Awaited<typeof preparation>) => {
+              if (settled) {
+                prepared?.cancel();
+                return;
+              }
+              settled = true;
+              window.clearTimeout(timer);
+              resolve(prepared);
+            };
+            const timer = window.setTimeout(() => {
+              cancelLocalVideoSeekPreview(track.id);
+              finish(null);
+            }, 1_200);
+            void preparation.then(finish, () => finish(null));
+          });
+        },
+        {
+          commitAudio: commitAudioTransport,
+          publishVideoSeek,
+          isCurrent: () => generation === seekGenerationRef.current,
+        },
+      ).then((result) => {
+        if (result !== "stale" && generation === seekGenerationRef.current) {
+          scrubbingRef.current = false;
+        }
+      });
     };
     window.addEventListener(SEEK_EVENT, onSeek);
     return () => window.removeEventListener(SEEK_EVENT, onSeek);
@@ -1886,6 +1985,7 @@ export function PlayerBar() {
           action: "position",
           trackId: current.id,
           position: shownTime,
+          rate: state.rate,
         });
         if (isStreamTrack(current)) {
           const streamStatus: PlayerSessionStatus =
@@ -2524,6 +2624,7 @@ export function PlayerBar() {
         action: "position",
         trackId: track?.id,
         position: seconds,
+        rate: audio.playbackRate,
       });
       if (isStreamTrack(track)) {
         publishStreamTrackState(track, seconds, playing, audio.playbackRate);
@@ -2817,6 +2918,9 @@ export function PlayerBar() {
         .songPreviewWaveform(token)
         .then((progress) => {
           if (disposed) return;
+          // 完整流媒体分析复用这条既有 token 轮询；右侧详情订阅本地快照，
+          // 不会为了 BPM/调号再开一条定时器或再请求音频。
+          recordStreamAnalysisProgress(trackId, progress);
           if (progress.waveform && progress.revision > lastRevision) {
             const total = totalDuration();
             // `covered_seconds` 是 prefix 的真实 PCM 时长；merge 函数会只投影到

@@ -1189,47 +1189,20 @@ impl MusicProvider for QqMusicProvider {
         if key.is_empty() {
             return Ok(None);
         }
-        // 公开 LRC 接口：比 GetPlayLyricInfo 的 QRC 简单，匿名可用。
-        let response = self
+        // 老的 fcg_query_lyric_new 只回主歌词，即使歌曲明明有 trans 也始终是空串。
+        // 现行播放歌词接口在 qrc=0、crypt=0 时回 Base64 LRC：仍是前端需要的
+        // 逐行时间轴，不必引入 QRC 的私有 3DES 解码，同时可以一并请求翻译。
+        let body = self
             .client
-            .http()
-            .get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg")
-            .query(&[
-                ("songmid", key),
-                ("format", "json"),
-                ("nobase64", "1"),
-                ("g_tk", "5381"),
-                ("loginUin", "0"),
-                ("hostUin", "0"),
-                ("inCharset", "utf8"),
-                ("outCharset", "utf-8"),
-                ("platform", "yqq.json"),
-                ("needNewCode", "0"),
-            ])
-            .header(
-                reqwest::header::REFERER,
-                "https://y.qq.com/portal/player.html",
+            .call(
+                "music.musichallSong.PlayLyricInfo",
+                "GetPlayLyricInfo",
+                qq_lyric_param(key),
+                QqPlatform::Desktop,
             )
-            .send()
             .await
             .context("请求 QQ 音乐歌词失败")?;
-        let body: Value = response.json().await.context("解析 QQ 音乐歌词失败")?;
-        let code = body.get("code").and_then(Value::as_i64).unwrap_or(-1);
-        if code != 0 {
-            return Ok(None);
-        }
-        let lrc = decode_qq_lyric_field(body.get("lyric"));
-        if lrc.trim().is_empty() {
-            return Ok(None);
-        }
-        let translated_lrc = decode_qq_lyric_field(body.get("trans"));
-        // 公开接口偶发带回 roma；没有就空串，面板不显示「音」开关。
-        let romaji_lrc = decode_qq_lyric_field(body.get("roma"));
-        Ok(Some(LyricText {
-            lrc,
-            translated_lrc,
-            romaji_lrc,
-        }))
+        Ok(qq_lyric_text(&body))
     }
 
     async fn download(&self, job: DownloadJob<'_>) -> Result<PathBuf> {
@@ -1690,7 +1663,28 @@ fn strip_qq_search_decorations(keyword: &str) -> String {
         .join(" ")
 }
 
-/// `fcg_query_lyric_new` 在 `nobase64=1` 时回明文，否则回 base64；两种都认。
+fn qq_lyric_param(key: &str) -> Value {
+    let mut param = serde_json::Map::from_iter([
+        ("crypt".into(), json!(0)),
+        ("lrc_t".into(), json!(0)),
+        // 这里明确取逐行 LRC。QRC 是逐字密文；展示层目前只消费逐行时间轴。
+        ("qrc".into(), json!(0)),
+        ("qrc_t".into(), json!(0)),
+        ("trans".into(), json!(1)),
+        ("trans_t".into(), json!(0)),
+        ("roma".into(), json!(1)),
+        ("roma_t".into(), json!(0)),
+    ]);
+    if let Ok(song_id) = key.parse::<u64>() {
+        param.insert("songID".into(), json!(song_id));
+    } else {
+        param.insert("songMid".into(), json!(key));
+    }
+    Value::Object(param)
+}
+
+/// QQ 的两个歌词接口分别可能回明文 LRC 或 Base64 LRC。QRC/罗马音还可能是
+/// 十六进制密文；不能把那串密文当歌词落盘，所以只接收确实含 LRC 标签的文本。
 fn decode_qq_lyric_field(value: Option<&Value>) -> String {
     let raw = value.and_then(Value::as_str).unwrap_or("").trim();
     if raw.is_empty() {
@@ -1699,10 +1693,53 @@ fn decode_qq_lyric_field(value: Option<&Value>) -> String {
     if raw.contains('[') {
         return raw.to_string();
     }
-    match base64::engine::general_purpose::STANDARD.decode(raw) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(_) => raw.to_string(),
+    for engine in [
+        &base64::engine::general_purpose::STANDARD,
+        &base64::engine::general_purpose::STANDARD_NO_PAD,
+    ] {
+        let Ok(bytes) = engine.decode(raw) else {
+            continue;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        if text.contains('[') {
+            return text.trim().to_string();
+        }
     }
+    String::new()
+}
+
+/// QQ 用 `//` 表示“这一行没有译文”。保留它会让面板显示一排斜杠，且让只有
+/// 占位符的歌曲误判为“有翻译”；只移除这些带时间戳的占位行，元数据照常保留。
+fn clean_qq_translation(lrc: String) -> String {
+    lrc.lines()
+        .filter(|line| {
+            let mut text = line.trim();
+            while let Some(rest) = text.strip_prefix('[') {
+                let Some(end) = rest.find(']') else {
+                    break;
+                };
+                text = rest[end + 1..].trim_start();
+            }
+            text.trim() != "//"
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn qq_lyric_text(body: &Value) -> Option<LyricText> {
+    let lrc = decode_qq_lyric_field(body.get("lyric"));
+    if lrc.trim().is_empty() {
+        return None;
+    }
+    Some(LyricText {
+        lrc,
+        translated_lrc: clean_qq_translation(decode_qq_lyric_field(body.get("trans"))),
+        // crypt=0 下主词/翻译是 Base64 LRC；QQ 偶尔仍把 roma 作为 QRC 密文回传。
+        // decode_qq_lyric_field 会拒绝密文，避免生成一个不可解析的 .roma.lrc。
+        romaji_lrc: decode_qq_lyric_field(body.get("roma")),
+    })
 }
 
 fn parse_song(text: &str) -> Option<String> {
@@ -1994,6 +2031,48 @@ mod tests {
             parse_album("https://y.qq.com/n/ryqq/songDetail/003Y1vTt3fRAsW"),
             None
         );
+    }
+
+    #[test]
+    fn lyric_request_uses_current_line_synced_api_contract() {
+        let by_mid = qq_lyric_param("000akynZ2Rbro5");
+        assert_eq!(by_mid.get("songMid"), Some(&json!("000akynZ2Rbro5")));
+        assert_eq!(by_mid.get("songID"), None);
+        assert_eq!(by_mid.get("qrc"), Some(&json!(0)));
+        assert_eq!(by_mid.get("crypt"), Some(&json!(0)));
+        assert_eq!(by_mid.get("trans"), Some(&json!(1)));
+
+        let by_id = qq_lyric_param("213086592");
+        assert_eq!(by_id.get("songID"), Some(&json!(213086592_u64)));
+        assert_eq!(by_id.get("songMid"), None);
+    }
+
+    #[test]
+    fn current_qq_response_decodes_main_and_translated_lrc() {
+        let main = "[offset:+250]\n[00:01.00]夢ならば";
+        let trans = "[offset:+250]\n[00:01.00]如果这一切都是梦境\n[00:02.00]//";
+        let body = json!({
+            "lyric": base64::engine::general_purpose::STANDARD.encode(main),
+            "trans": base64::engine::general_purpose::STANDARD.encode(trans),
+            // 现行接口即使 crypt=0，也可能把 roma 作为十六进制 QRC 密文返回。
+            "roma": "7A4CB1F38D775BE3042ABC5228FC7240"
+        });
+        let lyric = qq_lyric_text(&body).expect("主歌词应可解码");
+        assert_eq!(lyric.lrc, main);
+        assert_eq!(
+            lyric.translated_lrc,
+            "[offset:+250]\n[00:01.00]如果这一切都是梦境"
+        );
+        assert_eq!(lyric.romaji_lrc, "", "不能把 QRC 密文当成罗马音 LRC");
+    }
+
+    #[test]
+    fn qq_lyric_decoder_accepts_plain_text_and_rejects_unparseable_payloads() {
+        let plain = json!("[00:01.00]明文歌词");
+        assert_eq!(decode_qq_lyric_field(Some(&plain)), plain.as_str().unwrap());
+        let encrypted = json!("CD5392CF38FCA9531CBA64A1D6E159DE");
+        assert_eq!(decode_qq_lyric_field(Some(&encrypted)), "");
+        assert!(qq_lyric_text(&json!({"lyric": ""})).is_none());
     }
 
     #[test]

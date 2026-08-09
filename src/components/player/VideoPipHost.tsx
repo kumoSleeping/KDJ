@@ -12,8 +12,15 @@
  * 本地视频会出现「有声音、没小窗」。
  */
 
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Pause, PictureInPicture2, Play, X } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Maximize2, Minimize2, Pause, PictureInPicture2, Play, X } from "lucide-react";
 import { api } from "../../lib/api";
 import {
   AUDIO_FOCUS_EVENT,
@@ -21,6 +28,13 @@ import {
   type AudioFocusDetail,
 } from "../../lib/audioFocus";
 import { formatDuration } from "../../lib/format";
+import { LocalVideoSynchronizer } from "../../lib/localVideoSync";
+import { useLocalVideoSwap } from "../../lib/useLocalVideoSwap";
+import {
+  clampVideoFloatBox,
+  clampVideoFloatWidth,
+  videoFloatHeight,
+} from "../../lib/videoFloatBox";
 import {
   APPLY_VIDEO_MODE_EVENT,
   LOCAL_VIDEO_EVENT,
@@ -44,34 +58,13 @@ import {
   VIDEO_PREVIEW_EVENT,
   type VideoPreviewRequest,
 } from "../download/VideoPreview";
+import { SEEK_EVENT, type SeekDetail } from "../library/Waveform";
 
-const FLOAT_MIN_W = 240;
-const FLOAT_MAX_W = 720;
 const FLOAT_DEFAULT_W = 352;
 
 type ResizeEdge = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 
 const RESIZE_EDGES: ResizeEdge[] = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
-
-function floatHeight(width: number): number {
-  return (width * 9) / 16;
-}
-
-function clampFloatBox(
-  x: number,
-  y: number,
-  w: number,
-): { x: number; y: number; w: number } {
-  const width = Math.min(FLOAT_MAX_W, Math.max(FLOAT_MIN_W, w));
-  const height = floatHeight(width);
-  const maxX = Math.max(8, window.innerWidth - width - 8);
-  const maxY = Math.max(8, window.innerHeight - height - 8);
-  return {
-    w: width,
-    x: Math.min(maxX, Math.max(8, x)),
-    y: Math.min(maxY, Math.max(8, y)),
-  };
-}
 
 type WebKitPresentationMode = "inline" | "picture-in-picture" | "fullscreen";
 type WebKitPipVideo = HTMLVideoElement & {
@@ -189,12 +182,20 @@ function applyPanelChrome(session: VideoPipSession, mode: VideoPreviewMode): voi
 }
 
 export function VideoPipHost() {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
   const floatRef = useRef<HTMLDivElement | null>(null);
+  const pipCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const pipVideoRef = useRef<HTMLVideoElement | null>(null);
   const loadedKeyRef = useRef<string | null>(null);
   const compatRetryKeyRef = useRef<string | null>(null);
   const desiredPlayingRef = useRef(false);
   const pendingScrubRef = useRef<number | null>(null);
+  const localSynchronizerRef = useRef<LocalVideoSynchronizer | null>(null);
+  if (!localSynchronizerRef.current) {
+    localSynchronizerRef.current = new LocalVideoSynchronizer();
+  }
+  const fullscreenRef = useRef(false);
+  const fullscreenTransitionRef = useRef(false);
+  const fullscreenRequestRef = useRef(0);
   const dragRef = useRef<{
     pointerId: number;
     startX: number;
@@ -220,8 +221,37 @@ export function VideoPipHost() {
   const duration = useVideoPip((state) => state.duration);
   const error = useVideoPip((state) => state.error);
   const session = useVideoPip((state) => state.session);
-  const [size, setSize] = useState({ w: FLOAT_DEFAULT_W });
-  const [pos, setPos] = useState(() => defaultFloatPos(FLOAT_DEFAULT_W));
+  const [floatBox, setFloatBox] = useState(() => ({
+    ...defaultFloatPos(FLOAT_DEFAULT_W),
+    w: FLOAT_DEFAULT_W,
+  }));
+  const [videoFullscreen, setVideoFullscreen] = useState(false);
+
+  const applyVideoFullscreen = useCallback(async (next: boolean): Promise<void> => {
+    const previous = fullscreenRef.current;
+    if (previous === next) return;
+    const request = ++fullscreenRequestRef.current;
+    fullscreenRef.current = next;
+    // 进入前先让视频铺满窗口；退出时则等原生窗口离开全屏后再还原浮窗，
+    // 避免 macOS 动画过程中突然露出一块小视频。
+    if (next) setVideoFullscreen(true);
+    fullscreenTransitionRef.current = true;
+    try {
+      await getCurrentWindow().setFullscreen(next);
+      if (fullscreenRequestRef.current === request && !next) {
+        setVideoFullscreen(false);
+      }
+    } catch {
+      if (fullscreenRequestRef.current === request) {
+        fullscreenRef.current = previous;
+        setVideoFullscreen(previous);
+      }
+    } finally {
+      if (fullscreenRequestRef.current === request) {
+        fullscreenTransitionRef.current = false;
+      }
+    }
+  }, []);
 
   // 网络搜索结果始终浮动预览；保存的 panel/float 偏好只决定本地视频呈现。
   const effectiveMode: VideoPreviewMode = session?.source === "network" ? "float" : mode;
@@ -230,15 +260,155 @@ export function VideoPipHost() {
   const showFloating = Boolean(hostActive && !systemPip);
   const isLocal = session?.source === "local";
   const key = session ? sessionKey(session) : "";
+  const localSwap = useLocalVideoSwap({
+    // WebKit PiP is bound to the concrete source <video>. While it is open, keep that element
+    // stable and use the single-video seek fallback instead of swapping it out from underneath PiP.
+    enabled: Boolean(isLocal && hostActive && !systemPip),
+    trackId: session?.source === "local" ? session.trackId : null,
+    desiredPlayingRef,
+    getRate: () => {
+      const current = useVideoPip.getState().session;
+      return current?.source === "local" ? (getLatestPlayerSync(current.trackId)?.rate ?? 1) : 1;
+    },
+    onActivate: (video, target) => {
+      localSynchronizerRef.current?.reset(video);
+      useVideoPip.getState().setPosition(target);
+    },
+  });
+  const activeVideo = localSwap.activeVideo;
+  const systemPipTarget = useCallback(() => {
+    const source = activeVideo();
+    const webkitEnvironment =
+      typeof HTMLVideoElement !== "undefined" &&
+      "webkitSetPresentationMode" in HTMLVideoElement.prototype;
+    // The current macOS WKWebView exposes MediaStream PiP but renders it as a black square.
+    // Prefer the real source element there; the dual-video presenter is disabled while PiP is open.
+    if (isLocal && source && webkitEnvironment) return source;
+    const composite = pipVideoRef.current;
+    if (isLocal && composite?.srcObject && canSystemPip(composite)) return composite;
+    return source;
+  }, [activeVideo, isLocal]);
+
+  // A stable canvas-backed video remains bound to macOS PiP while the two source videos swap.
+  // Safari 18+ supports MediaStream PiP; older WebKit falls back to the active source element.
+  useEffect(() => {
+    const canvas = pipCanvasRef.current;
+    const output = pipVideoRef.current;
+    if (!isLocal || !hostActive || !canvas || !output || typeof canvas.captureStream !== "function") {
+      return;
+    }
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) return;
+    canvas.width = 1280;
+    canvas.height = 720;
+    const stream = canvas.captureStream(30);
+    output.srcObject = stream;
+    output.muted = true;
+    output.controls = true;
+    void output.play().catch(() => undefined);
+    let disposed = false;
+    let frame = 0;
+    const draw = () => {
+      if (disposed) return;
+      const source = activeVideo();
+      context.fillStyle = "#000";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      if (source && source.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && source.videoWidth > 0) {
+        try {
+          const scale = Math.min(canvas.width / source.videoWidth, canvas.height / source.videoHeight);
+          const width = source.videoWidth * scale;
+          const height = source.videoHeight * scale;
+          context.drawImage(source, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+        } catch {
+          // A server/CORS regression must not turn PiP black; dropping srcObject makes the entry
+          // path fall back to the active source video and preserves the existing feature.
+          disposed = true;
+          for (const track of stream.getTracks()) track.stop();
+          output.srcObject = null;
+          return;
+        }
+      }
+      frame = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => {
+      disposed = true;
+      cancelAnimationFrame(frame);
+      void exitSystemPip(output);
+      for (const track of stream.getTracks()) track.stop();
+      output.pause();
+      output.srcObject = null;
+    };
+  }, [activeVideo, hostActive, isLocal]);
+
+  // 浮窗可以放到当前视口所能容纳的最大 16:9 尺寸；应用窗口缩小时再自动收回。
+  // 同一个 resize 事件也用于识别用户从 macOS 原生全屏手势 / Esc 退出的情况。
+  useEffect(() => {
+    let syncFrame = 0;
+    const onWindowResize = () => {
+      setFloatBox((previous) =>
+        clampVideoFloatBox(previous, window.innerWidth, window.innerHeight),
+      );
+      if (!fullscreenRef.current || fullscreenTransitionRef.current) return;
+      cancelAnimationFrame(syncFrame);
+      syncFrame = requestAnimationFrame(() => {
+        void getCurrentWindow()
+          .isFullscreen()
+          .then((nativeFullscreen) => {
+            if (nativeFullscreen || !fullscreenRef.current || fullscreenTransitionRef.current) {
+              return;
+            }
+            fullscreenRef.current = false;
+            setVideoFullscreen(false);
+            setFloatBox((previous) =>
+              clampVideoFloatBox(previous, window.innerWidth, window.innerHeight),
+            );
+          })
+          .catch(() => undefined);
+      });
+    };
+    window.addEventListener("resize", onWindowResize);
+    return () => {
+      cancelAnimationFrame(syncFrame);
+      window.removeEventListener("resize", onWindowResize);
+    };
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || !fullscreenRef.current) return;
+      event.preventDefault();
+      void applyVideoFullscreen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [applyVideoFullscreen]);
+
+  useEffect(() => {
+    if ((hostActive && !systemPip) || !fullscreenRef.current) return;
+    void applyVideoFullscreen(false);
+  }, [applyVideoFullscreen, hostActive, systemPip]);
+
+  useEffect(
+    () => () => {
+      if (fullscreenRef.current) void getCurrentWindow().setFullscreen(false);
+      localSynchronizerRef.current?.dispose();
+    },
+    [],
+  );
 
   const stopHost = () => {
-    const video = videoRef.current;
-    void exitSystemPip(video);
-    if (!video) return;
-    video.pause();
-    if (video.src) {
-      video.removeAttribute("src");
-      video.load();
+    const video = activeVideo();
+    localSynchronizerRef.current?.reset(video);
+    void exitSystemPip(systemPipTarget());
+    localSwap.cancelPending();
+    for (const item of localSwap.videoRefs.current) {
+      if (!item) continue;
+      item.pause();
+      if (item.src) {
+        item.removeAttribute("src");
+        item.load();
+      }
     }
     loadedKeyRef.current = null;
     compatRetryKeyRef.current = null;
@@ -247,7 +417,7 @@ export function VideoPipHost() {
   };
 
   const ensureHostPlaying = (next: VideoPipSession) => {
-    const video = videoRef.current;
+    let video = activeVideo();
     if (!video) return;
     const nextKey = sessionKey(next);
     const shouldPlay =
@@ -256,10 +426,22 @@ export function VideoPipHost() {
     useVideoPip.getState().setError("");
     video.muted = next.source === "local";
     if (loadedKeyRef.current !== nextKey) {
+      localSynchronizerRef.current?.reset(video);
       compatRetryKeyRef.current = null;
-      video.src = mediaUrl(next);
-      video.load();
+      if (next.source === "local") {
+        localSwap.load(nextKey, mediaUrl(next));
+      } else {
+        localSwap.cancelPending();
+        video.src = mediaUrl(next);
+        video.load();
+        const standby = localSwap.standbyVideo();
+        standby?.pause();
+        standby?.removeAttribute("src");
+        standby?.load();
+      }
       loadedKeyRef.current = nextKey;
+      video = activeVideo();
+      if (!video) return;
     }
     if (!shouldPlay) {
       video.pause();
@@ -267,22 +449,25 @@ export function VideoPipHost() {
       return;
     }
     if (next.source === "network") announceAudioFocus("preview");
-    void video.play().catch((reason: unknown) => {
+    const playingVideo = video;
+    void playingVideo.play().catch((reason: unknown) => {
       if (!desiredPlayingRef.current) return;
       const unsupported =
         (reason instanceof DOMException && reason.name === "NotSupportedError") ||
-        video.error?.code === 4; // MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
+        playingVideo.error?.code === 4; // MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
       if (next.source === "local" && unsupported && compatRetryKeyRef.current !== nextKey) {
         compatRetryKeyRef.current = nextKey;
         loadedKeyRef.current = `${nextKey}:compat`;
         useVideoPip.getState().setError("正在转换为系统播放器兼容格式…");
-        video.src = api.videoUrl(next.trackId, true);
-        video.load();
-        void video
+        localSwap.load(`${nextKey}:compat`, api.videoUrl(next.trackId, true));
+        video = activeVideo();
+        if (!video) return;
+        const compatVideo = video;
+        void compatVideo
           .play()
           .then(() => {
             if (!desiredPlayingRef.current) {
-              video.pause();
+              compatVideo.pause();
               return;
             }
             useVideoPip.getState().setError("");
@@ -392,16 +577,10 @@ export function VideoPipHost() {
       stopHost();
       return;
     }
-    // 窗口尺寸可能在首次挂载后变了，出小窗时把位置夹回可视区
-    setPos((prev) => {
-      const height = (size.w * 9) / 16;
-      const maxX = Math.max(8, window.innerWidth - size.w - 8);
-      const maxY = Math.max(8, window.innerHeight - height - 8);
-      return {
-        x: Math.min(maxX, Math.max(8, prev.x)),
-        y: Math.min(maxY, Math.max(8, prev.y)),
-      };
-    });
+    // 窗口尺寸可能在首次挂载后变了，出小窗时把尺寸和位置一起夹回可视区。
+    setFloatBox((previous) =>
+      clampVideoFloatBox(previous, window.innerWidth, window.innerHeight),
+    );
     let cancelled = false;
     const frame = requestAnimationFrame(() => {
       if (cancelled) return;
@@ -420,10 +599,19 @@ export function VideoPipHost() {
     const maybeAutoPip = () => {
       const pip = useVideoPip.getState();
       const floats = pip.session?.source === "network" || pip.mode === "float";
-      if (!pip.active || !floats || pip.systemPip || !pip.playing) return;
-      const video = videoRef.current;
-      if (!video || video.paused || !canSystemPip(video)) return;
-      void enterSystemPip(video);
+      if (
+        !pip.active ||
+        !floats ||
+        pip.systemPip ||
+        !pip.playing ||
+        fullscreenRef.current
+      ) {
+        return;
+      }
+      const video = activeVideo();
+      const target = systemPipTarget();
+      if (!video || video.paused || !target || !canSystemPip(target)) return;
+      void enterSystemPip(target);
     };
     const scheduleAutoPip = () => {
       window.clearTimeout(hideTimer);
@@ -449,18 +637,31 @@ export function VideoPipHost() {
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("focus", onFocus);
     };
-  }, []);
+  }, [activeVideo, systemPipTarget]);
 
   useEffect(() => {
     const onSeek = (event: Event) => {
       const at = (event as CustomEvent<VideoPipSeekDetail>).detail?.position;
-      const video = videoRef.current;
+      const video = activeVideo();
       if (!video || !Number.isFinite(at)) return;
+      const current = useVideoPip.getState().session;
+      if (current?.source === "local") {
+        window.dispatchEvent(
+          new CustomEvent<SeekDetail>(SEEK_EVENT, {
+            detail: {
+              trackId: current.trackId,
+              position: Math.max(0, at as number),
+              forceCommit: true,
+            },
+          }),
+        );
+        return;
+      }
       video.currentTime = Math.max(0, at as number);
       useVideoPip.getState().setPosition(video.currentTime);
     };
     const onToggle = () => {
-      const video = videoRef.current;
+      const video = activeVideo();
       const current = useVideoPip.getState().session;
       if (!video || !current || !useVideoPip.getState().active) return;
       if (video.paused) {
@@ -501,24 +702,38 @@ export function VideoPipHost() {
     const trackId = session.trackId;
     const applySync = (detail: MediaSyncDetail) => {
       if (detail.owner !== "player" || detail.trackId !== trackId) return;
-      const video = videoRef.current;
+      const video = activeVideo();
       if (!video) return;
+      const synchronizer = localSynchronizerRef.current;
+      const rate = detail.rate ?? 1;
       if (detail.action === "play") {
         desiredPlayingRef.current = true;
         const target = detail.position;
-        if (Number.isFinite(target) && Math.abs(video.currentTime - (target as number)) > 0.35) {
-          video.currentTime = Math.max(0, target as number);
+        if (synchronizer && Number.isFinite(target)) {
+          synchronizer.sync(video, target as number, "explicit", rate);
+        } else {
+          synchronizer?.setBaseRate(video, rate);
         }
         void video.play().catch(() => undefined);
+        if (useVideoPip.getState().systemPip && pipVideoRef.current?.srcObject) {
+          void pipVideoRef.current.play().catch(() => undefined);
+        }
       } else if (detail.action === "pause") {
         desiredPlayingRef.current = false;
+        synchronizer?.setBaseRate(video, rate);
         video.pause();
+        if (useVideoPip.getState().systemPip && pipVideoRef.current?.srcObject) {
+          pipVideoRef.current.pause();
+        }
       } else if (detail.action === "seek" || detail.action === "position") {
         const target = detail.position ?? 0;
-        if (!Number.isFinite(target)) return;
-        if (Math.abs(video.currentTime - target) > 0.35) {
-          video.currentTime = Math.max(0, target);
-        }
+        if (!Number.isFinite(target) || !synchronizer) return;
+        synchronizer.sync(
+          video,
+          target,
+          detail.action === "seek" ? "explicit" : "heartbeat",
+          rate,
+        );
         // position 只校时，绝不能改变走带状态。播放器软停期间仍可能再发出
         // 一两个 timeupdate；若在这里看到 paused 就 play，会把刚暂停的小窗拉起，
         // onPlay 又反向通知 PlayerBar 播放，最终表现成视频怎样都暂停不了。
@@ -540,7 +755,7 @@ export function VideoPipHost() {
         const current = getLatestPlayerSync(trackId);
         if (current) applySync(current);
       };
-      const video = videoRef.current;
+      const video = activeVideo();
       if (video && video.readyState >= HTMLMediaElement.HAVE_METADATA) boot();
       else {
         video?.addEventListener("loadedmetadata", boot, { once: true });
@@ -550,7 +765,7 @@ export function VideoPipHost() {
     }
     return () => {
       window.removeEventListener(MEDIA_SYNC_EVENT, onSync);
-      if (boot) videoRef.current?.removeEventListener("loadedmetadata", boot);
+      if (boot) activeVideo()?.removeEventListener("loadedmetadata", boot);
       if (bootFrame) cancelAnimationFrame(bootFrame);
     };
   }, [isLocal, session]);
@@ -562,24 +777,31 @@ export function VideoPipHost() {
       // 本地小窗静音跟时钟，主播放条开声不该把它掐掉
       if (useVideoPip.getState().session?.source === "local") return;
       desiredPlayingRef.current = false;
-      videoRef.current?.pause();
+      activeVideo()?.pause();
     };
     window.addEventListener(AUDIO_FOCUS_EVENT, onFocus);
     return () => window.removeEventListener(AUDIO_FOCUS_EVENT, onFocus);
   }, []);
 
   useEffect(() => {
-    const video = videoRef.current;
+    const video = activeVideo();
     if (!video) return;
-    const onEnter = () => useVideoPip.getState().setSystemPip(true);
-    const onLeave = () => useVideoPip.getState().setSystemPip(false);
+    const stillActive = () => localSwap.isActiveVideo(video);
+    const onEnter = () => {
+      if (stillActive()) useVideoPip.getState().setSystemPip(true);
+    };
+    const onLeave = () => {
+      if (stillActive()) useVideoPip.getState().setSystemPip(false);
+    };
     const onWebKitPresentation = () => {
+      if (!stillActive()) return;
       const webkit = video as WebKitPipVideo;
       useVideoPip
         .getState()
         .setSystemPip(webkit.webkitPresentationMode === "picture-in-picture");
     };
     const onPlay = () => {
+      if (!stillActive()) return;
       const pip = useVideoPip.getState();
       if (pip.session?.source === "network") announceAudioFocus("preview");
       // 普通 play 多数来自 PlayerBar 同步或首次装载，不得反向再控制播放器。
@@ -598,6 +820,7 @@ export function VideoPipHost() {
       pip.setPlaying(true);
     };
     const onPause = () => {
+      if (!stillActive()) return;
       const pip = useVideoPip.getState();
       pip.setPlaying(false);
       if (pip.systemPip) {
@@ -617,6 +840,7 @@ export function VideoPipHost() {
       // WKWebView 在应用失焦时偶尔主动 pause。走带意图仍是播放时立即转系统
       // 小窗并恢复；backgroundThrottling=disabled 负责不支持 PiP 平台的时钟降级。
       if (desiredPlayingRef.current &&
+          !fullscreenRef.current &&
           (document.visibilityState === "hidden" || !document.hasFocus())) {
         void enterSystemPip(video).then(() => {
           if (desiredPlayingRef.current && video.paused) {
@@ -625,13 +849,23 @@ export function VideoPipHost() {
         });
       }
     };
-    const onTime = () => useVideoPip.getState().setPosition(video.currentTime);
-    const onMeta = () =>
-      useVideoPip
-        .getState()
-        .setDuration(Number.isFinite(video.duration) ? video.duration : 0);
-    const onEnded = () => useVideoPip.getState().setPlaying(false);
+    const onTime = () => {
+      if (stillActive() && !localSwap.isHoldingPosition()) {
+        useVideoPip.getState().setPosition(video.currentTime);
+      }
+    };
+    const onMeta = () => {
+      if (stillActive()) {
+        useVideoPip
+          .getState()
+          .setDuration(Number.isFinite(video.duration) ? video.duration : 0);
+      }
+    };
+    const onEnded = () => {
+      if (stillActive()) useVideoPip.getState().setPlaying(false);
+    };
     const onError = () => {
+      if (!stillActive()) return;
       useVideoPip.getState().setPlaying(false);
       useVideoPip.getState().setError("视频预览加载失败");
     };
@@ -655,9 +889,61 @@ export function VideoPipHost() {
       video.removeEventListener("ended", onEnded);
       video.removeEventListener("error", onError);
     };
-  }, []);
+  }, [activeVideo, localSwap.activeSlot, localSwap.isActiveVideo]);
+
+  useEffect(() => {
+    const output = pipVideoRef.current;
+    if (!output) return;
+    const onEnter = () => useVideoPip.getState().setSystemPip(true);
+    const onLeave = () => useVideoPip.getState().setSystemPip(false);
+    const onWebKitPresentation = () => {
+      const webkit = output as WebKitPipVideo;
+      useVideoPip
+        .getState()
+        .setSystemPip(webkit.webkitPresentationMode === "picture-in-picture");
+    };
+    const onPlay = () => {
+      const pip = useVideoPip.getState();
+      if (!pip.systemPip || pip.session?.source !== "local" || desiredPlayingRef.current) return;
+      const source = activeVideo();
+      desiredPlayingRef.current = true;
+      if (source) void source.play().catch(() => undefined);
+      broadcastMediaSync({
+        owner: "local-video",
+        action: "play",
+        trackId: pip.session.trackId,
+        position: source?.currentTime ?? pip.position,
+      });
+    };
+    const onPause = () => {
+      const pip = useVideoPip.getState();
+      if (!pip.systemPip || pip.session?.source !== "local" || !desiredPlayingRef.current) return;
+      const source = activeVideo();
+      desiredPlayingRef.current = false;
+      source?.pause();
+      broadcastMediaSync({
+        owner: "local-video",
+        action: "pause",
+        trackId: pip.session.trackId,
+        position: source?.currentTime ?? pip.position,
+      });
+    };
+    output.addEventListener("enterpictureinpicture", onEnter);
+    output.addEventListener("leavepictureinpicture", onLeave);
+    output.addEventListener("webkitpresentationmodechanged", onWebKitPresentation);
+    output.addEventListener("play", onPlay);
+    output.addEventListener("pause", onPause);
+    return () => {
+      output.removeEventListener("enterpictureinpicture", onEnter);
+      output.removeEventListener("leavepictureinpicture", onLeave);
+      output.removeEventListener("webkitpresentationmodechanged", onWebKitPresentation);
+      output.removeEventListener("play", onPlay);
+      output.removeEventListener("pause", onPause);
+    };
+  }, [activeVideo]);
 
   const close = () => {
+    if (fullscreenRef.current) void applyVideoFullscreen(false);
     stopHost();
     useVideoPip.getState().clear();
     if (useAppStore.getState().showPreview) useAppStore.getState().dismissOverlay();
@@ -668,21 +954,28 @@ export function VideoPipHost() {
   };
 
   const seekTo = (at: number, syncPlayer = true) => {
-    const video = videoRef.current;
+    const video = activeVideo();
     const current = useVideoPip.getState().session;
     if (!video || !current || !Number.isFinite(at)) return;
     const next = Math.max(0, duration > 0 ? Math.min(duration, at) : at);
-    video.currentTime = next;
-    useVideoPip.getState().setPosition(next);
-    if (current.source === "local" && syncPlayer) {
-      // 小窗是静音跟时钟：提交拖动时拽主条音轨，画面预览阶段不反复重建 Deck。
-      broadcastMediaSync({
-        owner: "local-video",
-        action: "seek",
-        trackId: current.trackId,
-        position: next,
-      });
+    if (current.source === "local") {
+      useVideoPip.getState().setPosition(next);
+      window.dispatchEvent(
+        new CustomEvent<SeekDetail>(SEEK_EVENT, {
+          detail: {
+            trackId: current.trackId,
+            position: next,
+            preview: !syncPlayer,
+            scrubbing: !syncPlayer,
+            forceCommit: syncPlayer,
+          },
+        }),
+      );
+      return;
+    } else {
+      video.currentTime = next;
     }
+    useVideoPip.getState().setPosition(next);
   };
 
   const scrubFromPointer = (event: ReactPointerEvent<HTMLElement>) => {
@@ -699,7 +992,7 @@ export function VideoPipHost() {
   };
 
   const onDragPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || videoFullscreen) return;
     if (
       (event.target as HTMLElement).closest(
         "button, a, input, .kd-pip-resize, .kd-pip-float-scrub",
@@ -713,8 +1006,8 @@ export function VideoPipHost() {
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      originX: pos.x,
-      originY: pos.y,
+      originX: floatBox.x,
+      originY: floatBox.y,
     };
     node.setPointerCapture(event.pointerId);
   };
@@ -724,7 +1017,7 @@ export function VideoPipHost() {
     if (resize && resize.pointerId === event.pointerId) {
       const dx = event.clientX - resize.startX;
       const dy = event.clientY - resize.startY;
-      const startH = floatHeight(resize.startW);
+      const startH = videoFloatHeight(resize.startW);
       const edge = resize.edge;
       // 宽高锁 16:9：横边按 dx 改宽，竖边按 dy 换算成宽，角取变化更大的一侧
       let nextW = resize.startW;
@@ -742,24 +1035,37 @@ export function VideoPipHost() {
 
       let nextX = resize.originX;
       let nextY = resize.originY;
-      const clampedW = Math.min(FLOAT_MAX_W, Math.max(FLOAT_MIN_W, nextW));
+      const clampedW = clampVideoFloatWidth(
+        nextW,
+        window.innerWidth,
+        window.innerHeight,
+      );
       if (edge === "w" || edge === "nw" || edge === "sw") {
         nextX = resize.originX + (resize.startW - clampedW);
       }
       if (edge === "n" || edge === "ne" || edge === "nw") {
-        nextY = resize.originY + (startH - floatHeight(clampedW));
+        nextY = resize.originY + (startH - videoFloatHeight(clampedW));
       }
-      const box = clampFloatBox(nextX, nextY, clampedW);
-      setSize({ w: box.w });
-      setPos({ x: box.x, y: box.y });
+      setFloatBox(
+        clampVideoFloatBox(
+          { x: nextX, y: nextY, w: clampedW },
+          window.innerWidth,
+          window.innerHeight,
+        ),
+      );
       return;
     }
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     const dx = event.clientX - drag.startX;
     const dy = event.clientY - drag.startY;
-    const box = clampFloatBox(drag.originX + dx, drag.originY + dy, size.w);
-    setPos({ x: box.x, y: box.y });
+    setFloatBox(
+      clampVideoFloatBox(
+        { x: drag.originX + dx, y: drag.originY + dy, w: floatBox.w },
+        window.innerWidth,
+        window.innerHeight,
+      ),
+    );
   };
 
   const onDragPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -774,7 +1080,7 @@ export function VideoPipHost() {
 
   const onResizePointerDown = (edge: ResizeEdge) => (event: ReactPointerEvent<HTMLSpanElement>) => {
     event.stopPropagation();
-    if (event.button !== 0) return;
+    if (event.button !== 0 || videoFullscreen) return;
     const node = floatRef.current;
     if (!node) return;
     resizeRef.current = {
@@ -782,9 +1088,9 @@ export function VideoPipHost() {
       edge,
       startX: event.clientX,
       startY: event.clientY,
-      startW: size.w,
-      originX: pos.x,
-      originY: pos.y,
+      startW: floatBox.w,
+      originX: floatBox.x,
+      originY: floatBox.y,
     };
     node.setPointerCapture(event.pointerId);
   };
@@ -800,9 +1106,10 @@ export function VideoPipHost() {
       <div
         ref={showFloating ? floatRef : undefined}
         className={showFloating ? "kd-pip-float" : "kd-pip-shell"}
+        data-fullscreen={showFloating && videoFullscreen ? "true" : undefined}
         style={
           showFloating
-            ? { left: pos.x, top: pos.y, width: size.w }
+            ? { left: floatBox.x, top: floatBox.y, width: floatBox.w }
             : undefined
         }
         onPointerDown={showFloating ? onDragPointerDown : undefined}
@@ -811,7 +1118,35 @@ export function VideoPipHost() {
         onPointerCancel={showFloating ? onDragPointerUp : undefined}
       >
         <div className="kd-pip-float-stage">
-          <video ref={videoRef} className="kd-pip-video" playsInline preload="auto" muted={isLocal} />
+          <video
+            ref={localSwap.bindVideo(0)}
+            className="kd-pip-video"
+            data-swap-slot="true"
+            data-active={localSwap.activeSlot === 0 ? "true" : undefined}
+            crossOrigin="anonymous"
+            playsInline
+            preload="auto"
+            muted={isLocal}
+          />
+          <video
+            ref={localSwap.bindVideo(1)}
+            className="kd-pip-video"
+            data-swap-slot="true"
+            data-active={localSwap.activeSlot === 1 ? "true" : undefined}
+            crossOrigin="anonymous"
+            playsInline
+            preload="auto"
+            muted
+          />
+          <canvas ref={pipCanvasRef} className="kd-pip-compositor" aria-hidden="true" />
+          <video
+            ref={pipVideoRef}
+            className="kd-pip-compositor"
+            controls
+            muted
+            playsInline
+            aria-hidden="true"
+          />
           {showFloating && (
             <div className="kd-pip-float-chrome" title={title}>
               <div className="kd-pip-float-top">
@@ -842,15 +1177,31 @@ export function VideoPipHost() {
                 <span className="kd-mono">
                   {formatDuration(position)} / {formatDuration(duration)}
                 </span>
+                <button
+                  type="button"
+                  aria-label={videoFullscreen ? "退出全屏" : "全屏播放"}
+                  aria-pressed={videoFullscreen}
+                  title={videoFullscreen ? "退出全屏（Esc）" : "全屏播放"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void applyVideoFullscreen(!videoFullscreen);
+                  }}
+                >
+                  {videoFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+                </button>
                 {canSystemPip() && (
                   <button
                     type="button"
                     aria-label="系统画中画"
                     title="系统画中画（切走应用时也会自动打开）"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      const video = videoRef.current;
-                      if (video) void enterSystemPip(video);
+                  onClick={(event) => {
+                    event.stopPropagation();
+                      const video = systemPipTarget();
+                      if (!video) return;
+                      void (async () => {
+                        if (fullscreenRef.current) await applyVideoFullscreen(false);
+                        await enterSystemPip(video);
+                      })();
                     }}
                   >
                     <PictureInPicture2 size={13} />
@@ -890,6 +1241,20 @@ export function VideoPipHost() {
               }}
               onPointerCancel={() => {
                 pendingScrubRef.current = null;
+                const current = useVideoPip.getState().session;
+                const video = activeVideo();
+                if (current?.source === "local" && video) {
+                  window.dispatchEvent(
+                    new CustomEvent<SeekDetail>(SEEK_EVENT, {
+                      detail: {
+                        trackId: current.trackId,
+                        position: video.currentTime,
+                        preview: true,
+                        scrubbing: false,
+                      },
+                    }),
+                  );
+                }
               }}
             >
               <span

@@ -17,6 +17,8 @@ export interface MediaSyncDetail {
   trackId?: number;
   /** position 对 player 是音频时间，对视频是修正后的目标时间。 */
   position?: number;
+  /** Rust / WebAudio 权威走带速度；本地静音视频以它为中心做轻微漂移修正。 */
+  rate?: number;
 }
 
 // 详情面板可能在播放器开始播放之后才挂载。保留最后一次播放器状态，

@@ -21,8 +21,15 @@
     "test:player-handoff": "esbuild tests/playerHandoffPolicy.test.ts --bundle --platform=node --format=esm --outfile=target/playerHandoffPolicy.test.mjs && node --test target/playerHandoffPolicy.test.mjs",
     "test:latest-intent-gate": "esbuild tests/latestIntentGate.test.ts --bundle --platform=node --format=esm --outfile=target/latestIntentGate.test.mjs && node --test target/latestIntentGate.test.mjs",
     "test:waveform-render": "esbuild tests/waveformRenderPolicy.test.ts --bundle --platform=node --format=esm --outfile=target/waveformRenderPolicy.test.mjs && node --test target/waveformRenderPolicy.test.mjs",
+    "test:lrc": "esbuild tests/lrc.test.ts --bundle --platform=node --format=esm --outfile=target/lrc.test.mjs && node --test target/lrc.test.mjs",
     "test:folder-expansion": "esbuild tests/folderExpansion.test.ts --bundle --platform=node --format=esm --outfile=target/folderExpansion.test.mjs && node --test target/folderExpansion.test.mjs",
-    "test:frontend-logic": "npm run test:dj-audio-policy && npm run test:latest-intent-gate && npm run test:player-handoff && npm run test:waveform-render && npm run test:folder-expansion",
+    "test:video-float-box": "esbuild tests/videoFloatBox.test.ts --bundle --platform=node --format=esm --outfile=target/videoFloatBox.test.mjs && node --test target/videoFloatBox.test.mjs",
+    "test:local-video-sync": "esbuild tests/localVideoSync.test.ts --bundle --platform=node --format=esm --outfile=target/localVideoSync.test.mjs && node --test target/localVideoSync.test.mjs",
+    "test:local-video-seek-bridge": "esbuild tests/localVideoSeekBridge.test.ts --bundle --platform=node --format=esm --outfile=target/localVideoSeekBridge.test.mjs && node --test target/localVideoSeekBridge.test.mjs",
+    "test:local-video-seek-timing": "esbuild tests/localVideoSeekTiming.test.ts --bundle --platform=node --format=esm --outfile=target/localVideoSeekTiming.test.mjs && node --test target/localVideoSeekTiming.test.mjs",
+    "test:waveform-scrub": "esbuild tests/waveformScrub.test.ts --bundle --platform=node --format=esm --outfile=target/waveformScrub.test.mjs && node --test target/waveformScrub.test.mjs",
+    "test:stream-analysis": "esbuild tests/streamAnalysis.test.ts --bundle --platform=node --format=esm --outfile=target/streamAnalysis.test.mjs && node --test target/streamAnalysis.test.mjs",
+    "test:frontend-logic": "npm run test:dj-audio-policy && npm run test:latest-intent-gate && npm run test:player-handoff && npm run test:waveform-render && npm run test:lrc && npm run test:waveform-scrub && npm run test:stream-analysis && npm run test:folder-expansion && npm run test:video-float-box && npm run test:local-video-sync && npm run test:local-video-seek-bridge && npm run test:local-video-seek-timing",
     "release": "bash scripts/release.sh"
   },
   "dependencies": {

@@ -92,6 +92,44 @@
 .kd-stream-detail-facts {
   flex-wrap: wrap;
 }
+.kd-stream-analysis-status {
+  min-height: 3.1rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.65rem;
+  border: 1px solid var(--kd-line-soft);
+  background: var(--kd-panel-inset);
+}
+.kd-stream-analysis-status > svg {
+  flex: none;
+  margin-top: 0.1rem;
+  color: var(--kd-theme);
+}
+.kd-stream-analysis-status strong,
+.kd-stream-analysis-status span {
+  display: block;
+}
+.kd-stream-analysis-status strong {
+  color: var(--kd-text-body);
+  font-size: var(--kd-size-sm);
+  line-height: 1.35;
+}
+.kd-stream-analysis-status span {
+  margin-top: 0.18rem;
+  color: var(--kd-faint);
+  font-size: var(--kd-size-xs);
+  line-height: 1.4;
+}
+.kd-stream-analysis-warning,
+.kd-stream-analysis-note {
+  margin: 0.35rem 0 0;
+  font-size: var(--kd-size-xs);
+  line-height: 1.4;
+}
+.kd-stream-analysis-warning {
+  color: var(--kd-warn);
+}
 
 :root[data-theme="light"] {
   color-scheme: light;
@@ -1239,6 +1277,10 @@ textarea {
 }
 
 /* Analysis：圆图 + 读数共处一面（仪表盘），波形另占底行。 */
+.kd-track-detail {
+  /* 详情栏宽度可拖，响应式仪表盘必须看这一栏本身，不能看整个窗口。 */
+  container-type: inline-size;
+}
 .kd-analysis-deck {
   display: flex;
   flex-wrap: wrap;
@@ -1341,6 +1383,33 @@ textarea {
   font-size: var(--kd-size-xs);
   flex-wrap: wrap;
   row-gap: 0.15rem;
+}
+
+/* 右栏稍窄时，128px 调号轮会刚好把读数挤到下一行，留下半行空白。
+   先把圆图收小并保持并排；只有真正窄到放不下时才改成居中的上下布局。 */
+@container (max-width: 20rem) {
+  .kd-analysis-deck {
+    flex-wrap: nowrap;
+    gap: 0.55rem;
+  }
+  .kd-analysis-wheel > svg {
+    width: 6.5rem;
+    height: 6.5rem;
+  }
+  .kd-analysis-readout {
+    flex: 1 1 0;
+    padding-right: 0;
+  }
+}
+
+@container (max-width: 15rem) {
+  .kd-analysis-deck {
+    flex-wrap: wrap;
+  }
+  .kd-analysis-wheel,
+  .kd-analysis-readout {
+    flex-basis: 100%;
+  }
 }
 
 .kd-field {
@@ -2263,7 +2332,7 @@ textarea {
   top: -5px;
   bottom: -5px;
   width: 1px;
-  z-index: 3;
+  z-index: 2;
   background: var(--kd-theme);
   box-shadow: 0 0 3px rgba(0, 0, 0, 0.7);
   pointer-events: none;
@@ -3740,6 +3809,17 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   touch-action: none;
   user-select: none;
 }
+.kd-pip-float[data-fullscreen="true"] {
+  z-index: 1000;
+  left: 0 !important;
+  top: 0 !important;
+  width: 100vw !important;
+  height: 100vh;
+  max-width: none;
+  border-radius: 0;
+  box-shadow: none;
+  cursor: default;
+}
 .kd-pip-float:active {
   cursor: grabbing;
 }
@@ -3750,6 +3830,10 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   overflow: hidden;
   background: #000;
 }
+.kd-pip-float[data-fullscreen="true"] .kd-pip-float-stage {
+  height: 100%;
+  aspect-ratio: auto;
+}
 .kd-pip-video {
   display: block;
   width: 100%;
@@ -3758,9 +3842,30 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   background: #000;
   pointer-events: none;
 }
+.kd-pip-video[data-swap-slot="true"] {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  opacity: 0;
+}
+.kd-pip-video[data-swap-slot="true"][data-active="true"] {
+  z-index: 1;
+  opacity: 1;
+}
+.kd-pip-compositor {
+  position: fixed;
+  left: -2px;
+  top: -2px;
+  width: 1px;
+  height: 1px;
+  opacity: 0.001;
+  pointer-events: none;
+}
 .kd-pip-float-chrome {
   position: absolute;
   inset: 0;
+  /* 双视频槽的活跃画面使用 z-index: 1；控制层必须稳定盖在它上面。 */
+  z-index: 3;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -3806,7 +3911,8 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   left: 0.45rem;
   right: 0.45rem;
   bottom: 0.35rem;
-  z-index: 2;
+  /* Above the hover chrome so drag/click reaches the scrubber in float and app fullscreen. */
+  z-index: 3;
   height: 0.22rem;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.28);
@@ -3861,6 +3967,9 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   z-index: 4;
   pointer-events: auto;
   background: transparent;
+}
+.kd-pip-float[data-fullscreen="true"] .kd-pip-resize {
+  display: none;
 }
 .kd-pip-resize[data-edge="n"],
 .kd-pip-resize[data-edge="s"] {
@@ -4061,6 +4170,18 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   width: 100%;
   height: 100%;
   cursor: pointer;
+}
+.kd-preview-frame > .kd-local-video-swap {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.kd-preview-frame > .kd-local-video-swap[data-active="true"] {
+  z-index: 1;
+  opacity: 1;
+  pointer-events: auto;
 }
 .kd-local-video {
   padding: 0.65rem 0;

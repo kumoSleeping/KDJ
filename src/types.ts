@@ -554,6 +554,31 @@ export interface StreamWaveformProgress {
   revision: number;
   complete: boolean;
   active: boolean;
+  /** 完整音频分析；旧后端缺字段时前端按尚未提供处理。 */
+  analysis_status?: "waiting" | "analyzing" | "ready" | "failed";
+  analysis?: StreamAnalysisResult | null;
+  analysis_error?: string;
+}
+
+/** 在线曲只在完整媒体已由播放器/缓存落盘后返回这份临时分析，不写入曲库。 */
+export interface StreamAnalysisResult {
+  duration: number;
+  bpm: number | null;
+  bpm_raw: number | null;
+  bpm_confidence: number | null;
+  first_beat: number | null;
+  beat_times: number[];
+  key: string;
+  key_short: string;
+  camelot: string;
+  open_key: string;
+  key_confidence: number | null;
+  chroma: number[];
+  rms_db: number | null;
+  peak_db: number | null;
+  crest_db: number | null;
+  energy: number | null;
+  errors: string[];
 }
 
 export interface HarmonicMatch {

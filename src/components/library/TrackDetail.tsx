@@ -21,6 +21,7 @@ import type { Platform, SongSource, Track, TrackPatch } from "../../types";
 import { Button, Field, InlineNotice, Panel, PanelStack } from "../common";
 import { CoverImage, VinylPlaceholder } from "../common/VinylPlaceholder";
 import { CamelotWheel } from "./CamelotWheel";
+import { HarmonicList } from "./HarmonicList";
 import { useVideoPip } from "../../lib/videoPip";
 import { LocalVideoPlayer } from "./LocalVideoPlayer";
 import { VjSearchPanel } from "./VjSearchPanel";
@@ -169,6 +170,7 @@ export function TrackDetail({ track }: { track: Track }) {
   const setCover = useLibraryStore((state) => state.setCover);
   const rereadTags = useLibraryStore((state) => state.rereadTags);
   const removeTrack = useLibraryStore((state) => state.removeTrack);
+  const selectTrack = useLibraryStore((state) => state.selectTrack);
   const setFilter = useLibraryStore((state) => state.setFilter);
   const keyFilter = useLibraryStore((state) => state.filter.key);
   // 小窗/系统 PiP 已接管这支本地视频时，详情里不再挂第二路解码
@@ -474,7 +476,7 @@ export function TrackDetail({ track }: { track: Track }) {
     track.bpm_confidence !== null ? Math.round(track.bpm_confidence * 100) : null;
 
   return (
-    <div className="kd-col" style={{ gap: "0.6rem", padding: "0.7rem" }}>
+    <div className="kd-col kd-track-detail" style={{ gap: "0.6rem", padding: "0.7rem" }}>
       <div className="kd-row" style={{ gap: "0.6rem", alignItems: "flex-start" }}>
         <div className="kd-cover-edit-stack">
           <div
@@ -917,6 +919,13 @@ export function TrackDetail({ track }: { track: Track }) {
         {track.analysis_error && (
           <p style={{ color: "var(--kd-warn)" }}>{track.analysis_error}</p>
         )}
+      </Panel>
+
+      <Panel key="harmonic" heading="Next" padded dense>
+        {/* 推荐可能有几十首：留在详情栏内滚动，不把后面的面板挤出视野。 */}
+        <div className="kd-scroll" style={{ maxHeight: "13rem" }}>
+          <HarmonicList track={track} onSelect={selectTrack} />
+        </div>
       </Panel>
 
       <Panel key="vj" heading="Explore" padded dense>
