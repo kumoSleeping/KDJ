@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws", "macros"] }
+chrono = "0.4.45"
 futures-util = "0.3.33"
 kdj-analysis = { version = "0.2.38", path = "../kdj-analysis" }
 kdj-core = { version = "0.2.38", path = "../kdj-core" }
@@ -23,3 +24,10 @@ tokio-util = { version = "0.7.19", features = ["io"] }
 tower-http = { version = "0.7.0", features = ["cors", "fs"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+# 必须精确钉在最后一个 MIT/Apache 版本；0.1.6 起改为 GPL-3.0-only，不能让 Cargo
+# 按 ^0.1.5 自动升级后把 KDJ 的 MIT 分发边界悄悄改掉。
+rbox = { version = "=0.1.5", path = "../../vendor/rbox", default-features = false, features = ["one-library", "bundled-vendored-openssl"] }
+diesel = { version = "2.3", default-features = false, features = ["sqlite"] }
+sysinfo = "0.37"

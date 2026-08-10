@@ -22,6 +22,12 @@ import type {
   IntakeRequest,
   IntakeResponse,
   LibraryStats,
+  OneLibraryCapacityPlan,
+  OneLibraryImportResult,
+  OneLibraryPlaylist,
+  OneLibraryTrack,
+  PlaylistExportResult,
+  RemovableDevice,
   UpdateInfo,
   QrSession,
   QrState,
@@ -222,6 +228,114 @@ export const api = {
     const suffix = query.toString();
     return request<TrackPage>(`/library/tracks${suffix ? `?${suffix}` : ""}`);
   },
+  removableDevices: () => request<RemovableDevice[]>("/library/devices"),
+  authorizeRemovableDevice: (path: string) =>
+    post<RemovableDevice>("/library/devices/authorize", { path }),
+  oneLibraryPlaylists: (devicePath: string) => {
+    const query = new URLSearchParams({ device_path: devicePath });
+    return request<OneLibraryPlaylist[]>(`/library/onelibrary/playlists?${query}`);
+  },
+  oneLibraryPlaylistTracks: (devicePath: string, id: number) => {
+    const query = new URLSearchParams({ device_path: devicePath });
+    return request<OneLibraryTrack[]>(`/library/onelibrary/playlists/${id}/tracks?${query}`);
+  },
+  reorderOneLibraryPlaylistTracks: (devicePath: string, id: number, contentIds: number[]) =>
+    request<OneLibraryTrack[]>(`/library/onelibrary/playlists/${id}/tracks`, {
+      method: "PUT",
+      body: JSON.stringify({ device_path: devicePath, content_ids: contentIds }),
+    }),
+  removeOneLibraryPlaylistTracks: (devicePath: string, id: number, contentIds: number[]) =>
+    post<OneLibraryTrack[]>(`/library/onelibrary/playlists/${id}/tracks/remove`, {
+      device_path: devicePath,
+      content_ids: contentIds,
+    }),
+  copyOneLibraryPlaylistTracks: (
+    sourceDevicePath: string,
+    sourcePlaylistId: number,
+    targetDevicePath: string,
+    targetPlaylistId: number,
+    contentIds: number[],
+  ) =>
+    post<OneLibraryTrack[]>("/library/onelibrary/tracks/copy", {
+      source_device_path: sourceDevicePath,
+      source_playlist_id: sourcePlaylistId,
+      target_device_path: targetDevicePath,
+      target_playlist_id: targetPlaylistId,
+      content_ids: contentIds,
+    }),
+  setOneLibraryRating: (devicePath: string, contentId: number, rating: number) =>
+    request<{ ok: boolean }>(`/library/onelibrary/tracks/${contentId}/rating`, {
+      method: "PATCH",
+      body: JSON.stringify({ device_path: devicePath, rating }),
+    }),
+  createOneLibraryPlaylist: (
+    devicePath: string,
+    name: string,
+    parentId: number | null = null,
+    folder = false,
+  ) =>
+    post<OneLibraryPlaylist>("/library/onelibrary/playlists", {
+      device_path: devicePath,
+      name,
+      parent_id: parentId,
+      folder,
+    }),
+  renameOneLibraryPlaylist: (devicePath: string, id: number, name: string) =>
+    request<{ ok: boolean }>(`/library/onelibrary/playlists/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ device_path: devicePath, name }),
+    }),
+  moveOneLibraryPlaylist: (
+    devicePath: string,
+    id: number,
+    parentId: number,
+    sequence: number | null,
+  ) =>
+    post<OneLibraryPlaylist[]>(`/library/onelibrary/playlists/${id}/move`, {
+      device_path: devicePath,
+      parent_id: parentId,
+      sequence,
+    }),
+  deleteOneLibraryPlaylist: (devicePath: string, id: number) =>
+    request<{ ok: boolean }>(`/library/onelibrary/playlists/${id}`, {
+      method: "DELETE",
+      body: JSON.stringify({ device_path: devicePath }),
+    }),
+  addOneLibraryPlaylistTracks: (devicePath: string, id: number, trackIds: number[]) =>
+    post<PlaylistExportResult>(`/library/onelibrary/playlists/${id}/tracks/add`, {
+      device_path: devicePath,
+      track_ids: trackIds,
+    }),
+  oneLibraryCapacity: (devicePath: string, trackIds: number[]) =>
+    post<OneLibraryCapacityPlan>("/library/onelibrary/capacity", {
+      device_path: devicePath,
+      track_ids: trackIds,
+    }),
+  importOneLibraryTracks: (
+    devicePath: string,
+    playlistId: number,
+    contentIds: number[],
+    dest: string,
+  ) =>
+    post<OneLibraryImportResult>("/library/onelibrary/import", {
+      device_path: devicePath,
+      playlist_id: playlistId,
+      content_ids: contentIds,
+      dest,
+    }),
+  oneLibraryCoverBlob: (devicePath: string, contentId: number) =>
+    requestBlob(
+      `/library/onelibrary/cover?device_path=${encodeURIComponent(devicePath)}&content_id=${contentId}`,
+    ),
+  setOneLibraryCover: (devicePath: string, contentId: number, file: Blob) =>
+    request<{ ok: boolean }>(
+      `/library/onelibrary/cover?device_path=${encodeURIComponent(devicePath)}&content_id=${contentId}`,
+      {
+        method: "PUT",
+        body: file,
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+      },
+    ),
   track: (id: number) => request<Track>(`/library/tracks/${id}`),
   patchTrack: (id: number, patch: TrackPatch) =>
     request<TrackPatchResult>(`/library/tracks/${id}`, {
@@ -300,6 +414,20 @@ export const api = {
   writeTags: (id: number) => post<Track>(`/library/tracks/${id}/write-tags`),
   waveform: (id: number, buckets = 640) =>
     request<Waveform>(`/library/waveform/${id}?buckets=${buckets}`),
+  oneLibraryWaveform: (
+    devicePath: string,
+    contentId: number,
+    playbackId: number,
+    buckets = 640,
+  ) => {
+    const query = new URLSearchParams({
+      device_path: devicePath,
+      content_id: String(contentId),
+      playback_id: String(playbackId),
+      buckets: String(buckets),
+    });
+    return request<Waveform>(`/library/onelibrary/waveform?${query}`);
+  },
   harmonic: (id: number, tolerance = 12, limit = 60, folder = "") =>
     request<HarmonicMatch[]>(
       `/library/harmonic/${id}?bpm_tolerance=${tolerance}&limit=${limit}` +
@@ -356,6 +484,15 @@ export const api = {
     const { baseUrl } = bridge();
     const suffix = version === undefined || version === "" ? "" : `?v=${encodeURIComponent(version)}`;
     return `${baseUrl}/api/library/cover/${id}${suffix}`;
+  },
+  oneLibraryCoverUrl: (devicePath: string, contentId: number, version?: number | string) => {
+    const { baseUrl } = bridge();
+    const query = new URLSearchParams({
+      device_path: devicePath,
+      content_id: String(contentId),
+    });
+    if (version !== undefined && version !== "") query.set("v", String(version));
+    return `${baseUrl}/api/library/onelibrary/cover?${query}`;
   },
 };
 

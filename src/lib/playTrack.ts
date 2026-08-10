@@ -21,7 +21,9 @@ export interface PlayRequest {
 
 export function playTrack(track: Track, autoPlay = true): void {
   // 请求先于 React 换曲渲染发出；已有磁盘缓存时，波形通常能在组件挂载前进内存。
-  prefetchWaveform(track);
+  // OneLibrary 曲目直接来自外置卷，不在 KDJ tracks 表里；拿它的临时负 id 请求
+  // 本地波形接口只会制造一次 404。音频播放本身仍直接使用真实挂载路径。
+  if (track.source_platform !== "onelibrary") prefetchWaveform(track);
   if (isVideoTrack(track.format)) {
     requestLocalVideo(track, autoPlay);
   } else if (useVideoPip.getState().active) {

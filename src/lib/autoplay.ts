@@ -14,13 +14,14 @@ import { useHarmonicScope } from "./harmonicScope";
 import { isOutsideFolder } from "./outsideFolder";
 import { usePlayMode } from "./playMode";
 import { useLibraryStore } from "../stores/libraryStore";
-import { useQueueStore } from "../stores/queueStore";
 import {
   nextCandidateRoute,
   samePredictionPolicy,
   type PredictionPolicySnapshot,
 } from "./nextCandidatePolicy";
 import { isStreamTrack, streamNextTrack, streamTrackById } from "./streamTrack";
+import { isOneLibraryPlaybackTrack } from "./playbackTrackSource";
+import { oneLibraryTrackByPlaybackId } from "./oneLibraryTrack";
 import type { HarmonicMatch, Track } from "../types";
 
 /** 本次运行放过的曲目。刷新页面即清空——这是有意的，见文件头。 */
@@ -106,6 +107,10 @@ export function clearPlayHistory(): void {
 export async function trackById(id: number): Promise<Track | null> {
   const stream = streamTrackById(id);
   if (stream) return stream;
+  const oneLibrary = oneLibraryTrackByPlaybackId(id);
+  if (oneLibrary) return oneLibrary;
+  // OneLibrary 的负数稳定 id 若不在本次运行快照里，不能拿去请求本地 tracks API。
+  if (id < 0) return null;
   const inPage = useLibraryStore.getState().tracks.find((track) => track.id === id);
   if (inPage) return inPage;
   try {
@@ -182,14 +187,6 @@ export function preferredStillValid(
   if (guard && !samePredictionPolicy(guard.generated, guard.current)) return false;
   if (preferred.id === current.id) return mode === "one";
 
-  if (scope === "queue") {
-    const queued = useQueueStore
-      .getState()
-      .list()
-      .find((candidate) => candidate.id !== current.id);
-    return queued?.id === preferred.id;
-  }
-
   if (scope === "folder" && folder && !trackInFolderScope(preferred, folder)) {
     return false;
   }
@@ -220,25 +217,13 @@ export async function pickNext(
   const folder = isOutsideFolder(rawFolder) ? "" : rawFolder;
   const listFolder = rawFolder;
 
-  // 点歌队列优先（KTV 语义）：排了歌就先放排的，什么模式都一样——
-  // 队列是用户显式排的"接下来放这个"，意图比模式的通用规则强。
-  // 播放即消耗：弹出去的那首从队列里划掉。
-  const queued = useQueueStore.getState().shift(current.id);
-  if (queued) return queued;
-  // 范围收在「临时列表」且队列已经放空：安静停下，这正是这一档的意义
-  if (scope === "queue") return null;
-
-  const streamSuccessor = isStreamTrack(current) ? streamNextTrack(current) : null;
-  const route = nextCandidateRoute(
-    isStreamTrack(current),
-    Boolean(streamSuccessor),
-    mode,
-    manual,
-  );
+  const streaming = isStreamTrack(current);
+  const external = streaming || isOneLibraryPlaybackTrack(current);
+  const streamSuccessor = streaming ? streamNextTrack(current) : null;
+  const route = nextCandidateRoute(external, Boolean(streamSuccessor), mode, manual);
   if (route === "repeat-current") return current;
   if (route === "stream-successor") return streamSuccessor;
-  // previewNext 已经替右侧唱盘挑好一首时直接兑现预告。队列仍在它前面消费，
-  // 所以用户临时插队后，显式点歌永远比旧预告优先。
+  // previewNext 已经替右侧唱盘挑好一首时直接兑现预告。
   if (
     preferred &&
     preferred.id !== current.id &&
@@ -257,7 +242,7 @@ export async function pickNext(
 }
 
 /**
- * 只看「下一首会是谁」，不消费点歌队列。
+ * 只看「下一首会是谁」。
  *
  * 播放条右侧唱盘会提前展示候选，因此不能直接复用 pickNext：pickNext 的队列
  * 语义是 KTV 式“取走队头”，只为画一张封面就调用会让歌还没播便从队列消失。
@@ -269,7 +254,7 @@ export async function previewNext(
   manual = false,
   /**
    * 只用于"换一首候选"这类预览动作。它不改变播放历史，也绝不能影响
-   * 点歌队列；队列仍然是明确指定的下一首，不能被随机按钮跳过。
+   * 播放历史。
    */
   excludeIds: ReadonlySet<number> = new Set(),
 ): Promise<Track | null> {
@@ -279,20 +264,10 @@ export async function previewNext(
   const folder = isOutsideFolder(rawFolder) ? "" : rawFolder;
   const listFolder = rawFolder;
 
-  const queued = useQueueStore
-    .getState()
-    .list()
-    .find((candidate) => candidate.id !== current.id);
-  if (queued) return queued;
-  if (scope === "queue") return null;
-
-  const streamSuccessor = isStreamTrack(current) ? streamNextTrack(current) : null;
-  const route = nextCandidateRoute(
-    isStreamTrack(current),
-    Boolean(streamSuccessor),
-    mode,
-    manual,
-  );
+  const streaming = isStreamTrack(current);
+  const external = streaming || isOneLibraryPlaybackTrack(current);
+  const streamSuccessor = streaming ? streamNextTrack(current) : null;
+  const route = nextCandidateRoute(external, Boolean(streamSuccessor), mode, manual);
   if (route === "repeat-current") return current;
   if (route === "stream-successor") return streamSuccessor;
   if (route === "local-start") return firstInOrder(listFolder);

@@ -30,6 +30,8 @@ import {
 import { api } from "../../lib/api";
 import {
   FOLDER_DROP_PATH_ATTR,
+  PLAYLIST_DROP_DEVICE_ATTR,
+  PLAYLIST_DROP_ID_ATTR,
   SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR,
   SEARCH_DEFAULT_DOWNLOAD_SENTINEL,
 } from "../../lib/folderDrop";
@@ -38,6 +40,7 @@ import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder, OUTSIDE_FOLDER } from "../../lib/outsideFolder";
 import {
   enqueueSearchDrop,
+  enqueueSearchOneLibraryDrop,
   isSearchDownloadDrag,
 } from "../../lib/searchDrag";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
@@ -49,7 +52,7 @@ import {
 } from "../../lib/trackDrag";
 import { useAppStore } from "../../stores/appStore";
 import { useLibraryStore } from "../../stores/libraryStore";
-import { useQueueStore } from "../../stores/queueStore";
+import { usePlaylistStore } from "../../stores/playlistStore";
 import {
   STREAM_BROWSE_PLATFORMS,
   streamAccountBinding,
@@ -62,12 +65,12 @@ import { useVjExportStore } from "../../stores/vjExportStore";
 import type { AccountState, FolderNode, StreamPlaylist } from "../../types";
 import { ContextMenu, InlineNotice } from "../common";
 import { PlatformMark } from "../download/PlatformMark";
+import { PlaylistSection } from "./PlaylistSection";
 
 /** @deprecated 请从 `lib/trackDrag` 引用；保留 re-export 以免旧 import 断掉。 */
 export { TRACK_DND_TYPE };
 /** 拖文件夹换顺序用的 MIME，和上面分开，dragover 时才好区别对待。 */
 const FOLDER_DND_TYPE = "application/x-kdj-folder";
-const QUEUE_DROP_TARGET = "__kd_queue__";
 const ALL_TRACKS_DROP_TARGET = "__kd_all_tracks__";
 
 const STREAM_ROOTS: ReadonlyArray<{ id: StreamBrowsePlatform; label: string }> = [
@@ -79,7 +82,8 @@ const NARROW_RAIL_SOURCE_KEY = "kd-narrow-rail-source-v1";
 
 type NarrowRailSource =
   | { kind: "local"; rootPath: string }
-  | { kind: "stream"; platform: StreamBrowsePlatform };
+  | { kind: "stream"; platform: StreamBrowsePlatform }
+  | { kind: "onelibrary" };
 
 export interface StreamPlaylistBrowseProps {
   onOpenStreamPlaylist?: (playlist: StreamPlaylist) => void | Promise<void>;
@@ -132,6 +136,7 @@ function readNarrowRailSource(): NarrowRailSource | null {
     ) {
       return { kind: "stream", platform: record.platform };
     }
+    if (record.kind === "onelibrary") return { kind: "onelibrary" };
     if (
       record.kind === "local" &&
       typeof record.rootPath === "string" &&
@@ -220,14 +225,6 @@ function trackIdsFromDrop(event: React.DragEvent): number[] {
   return ids;
 }
 
-async function enqueueTrackIds(ids: number[]): Promise<{ added: number; failed: number }> {
-  const unique = [...new Set(ids)];
-  const loaded = await Promise.allSettled(unique.map((id) => api.track(id)));
-  const tracks = loaded.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
-  if (tracks.length > 0) useQueueStore.getState().add(tracks);
-  return { added: tracks.length, failed: unique.length - tracks.length };
-}
-
 const cleanPath = (path: string | undefined) => (path ?? "").replace(/\/+$/, "");
 
 function folderPurpose(path: string, audioDir?: string, videoDir?: string) {
@@ -299,7 +296,7 @@ function flattenFolders(nodes: FolderNode[]): FolderNode[] {
 }
 
 /**
- * 窄屏常驻文件夹栏。收起时也能直接切换添加/临时列表/全库/任意文件夹；
+ * 窄屏常驻文件夹栏。收起时也能直接切换添加/全库/任意文件夹；
  * 展开时是占据布局宽度的真正侧栏，不覆盖列表，也不再退化成抽屉。
  */
 export function NarrowFolderRail({
@@ -309,16 +306,20 @@ export function NarrowFolderRail({
   activeStreamPlaylist,
 }: {
   expanded: boolean;
-  /** 点选文件夹 / 临时列表 / 全部曲目等导航项后回调（窄屏收右侧抽屉用）。 */
-  onNavigate?: () => void;
+  /** 点选文件夹 / 全部曲目等导航项后回调（窄屏收右侧抽屉用）。 */
+  onNavigate?: (kind?: "onelibrary") => void;
 } & StreamPlaylistBrowseProps) {
   const folders = useLibraryStore((state) => state.folders);
   const filter = useLibraryStore((state) => state.filter);
-  const queueView = useLibraryStore((state) => state.queueView);
   const setFilter = useLibraryStore((state) => state.setFilter);
-  const setQueueView = useLibraryStore((state) => state.setQueueView);
   const settings = useAppStore((state) => state.settings);
   const applyFolderOp = useLibraryStore((state) => state.applyFolderOp);
+  const oneLibraryDevices = usePlaylistStore((state) => state.devices);
+  const oneLibraryPlaylists = usePlaylistStore((state) => state.playlistsByDevice);
+  const selectedOneLibrary = usePlaylistStore((state) => state.selectedTarget);
+  const refreshOneLibrary = usePlaylistStore((state) => state.refreshDevices);
+  const openOneLibrary = usePlaylistStore((state) => state.openPlaylist);
+  const addOneLibraryTracks = usePlaylistStore((state) => state.addTracks);
   const streamPlaylists = useStreamBrowseStore((state) => state.playlists);
   const streamLoading = useStreamBrowseStore((state) => state.loading);
   const streamErrors = useStreamBrowseStore((state) => state.errors);
@@ -363,6 +364,14 @@ export function NarrowFolderRail({
   useEffect(() => writeNarrowRailSource(narrowSource), [narrowSource]);
 
   useEffect(() => {
+    if (!expanded) void refreshOneLibrary();
+  }, [expanded, refreshOneLibrary]);
+
+  useEffect(() => {
+    if (selectedOneLibrary) setNarrowSource({ kind: "onelibrary" });
+  }, [selectedOneLibrary?.device_path, selectedOneLibrary?.playlist_id]);
+
+  useEffect(() => {
     const previousKey = previousEffectiveActiveStreamKeyRef.current;
     previousEffectiveActiveStreamKeyRef.current = effectiveActiveStreamKey;
     // 初次挂载优先恢复用户上次停留的来源；只有运行期间真正打开了另一份
@@ -405,7 +414,6 @@ export function NarrowFolderRail({
   }
 
   const choose = (folder: string) => {
-    setQueueView(false);
     setActiveStreamPlaylist(null);
     setFilter({ folder, folderDeep: false });
     onNavigate?.();
@@ -440,7 +448,7 @@ export function NarrowFolderRail({
       sourceRoot &&
       narrowSource.kind === "local" &&
       narrowSource.rootPath === node.path;
-    const folderActive = !sourceRoot && !queueView && filter.folder === node.path;
+    const folderActive = !sourceRoot && filter.folder === node.path;
     return (
       <button
         key={`${sourceRoot ? "narrow-local-root" : "narrow-local-child"}:${node.path}`}
@@ -652,36 +660,8 @@ export function NarrowFolderRail({
       </button>
       <button
         type="button"
-        data-active={queueView || undefined}
-        data-drop={narrowDrop === QUEUE_DROP_TARGET ? "true" : undefined}
-        title="临时列表"
-        onClick={() => {
-          setQueueView(true);
-          setActiveStreamPlaylist(null);
-          onNavigate?.();
-        }}
-        onDragOverCapture={(event) => {
-          if (!isTrackDrag(event)) return;
-          event.preventDefault();
-          event.dataTransfer.dropEffect = "copy";
-          setNarrowDrop(QUEUE_DROP_TARGET);
-        }}
-        onDragLeave={() => setNarrowDrop("")}
-        onDropCapture={(event) => {
-          event.preventDefault();
-          const ids = trackIdsFromDrop(event);
-          setNarrowDrop("");
-          void enqueueTrackIds(ids).then(({ failed }) => {
-            if (failed > 0) setError(`${failed} 首未能加入临时列表`);
-          });
-        }}
-      >
-        <ListMusic size={15} /><small>临时列表</small>
-      </button>
-      <button
-        type="button"
         {...{ [SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR]: "" }}
-        data-active={!queueView && filter.folder === "" || undefined}
+        data-active={filter.folder === "" || undefined}
         data-drop={narrowDrop === ALL_TRACKS_DROP_TARGET ? "true" : undefined}
         title="全部曲目（拖入下载会落到默认下载文件夹）"
         onClick={() => choose("")}
@@ -709,6 +689,16 @@ export function NarrowFolderRail({
       <span className="kd-narrow-rail-sep" />
       <div className="kd-narrow-source-roots kd-scroll" aria-label="媒体来源">
         {roots.map((root) => renderLocalFolderButton(root, true))}
+        <button
+          type="button"
+          data-active={narrowSource.kind === "onelibrary" || undefined}
+          aria-label="显示 OneLibrary 列表"
+          title="在下方显示 OneLibrary 列表"
+          onClick={() => setNarrowSource({ kind: "onelibrary" })}
+        >
+          <ListMusic size={15} />
+          <small>OneLibrary</small>
+        </button>
         {STREAM_ROOTS.map((streamRoot) => (
           <button
             key={`narrow-stream-root:${streamRoot.id}`}
@@ -739,7 +729,11 @@ export function NarrowFolderRail({
       <div
         className="kd-narrow-source-children kd-scroll"
         aria-label={
-          narrowSource.kind === "stream" ? "在线歌单目录" : "本地文件夹目录"
+          narrowSource.kind === "stream"
+            ? "在线歌单目录"
+            : narrowSource.kind === "onelibrary"
+              ? "OneLibrary 列表目录"
+              : "本地文件夹目录"
         }
       >
         {narrowSource.kind === "local" &&
@@ -749,7 +743,7 @@ export function NarrowFolderRail({
         {narrowSource.kind === "local" && (folders?.outside ?? 0) > 0 && (
           <button
             type="button"
-            data-active={!queueView && isOutsideFolder(filter.folder) || undefined}
+            data-active={isOutsideFolder(filter.folder) || undefined}
             title="不在曲库目录里的曲目"
             onClick={() => choose(OUTSIDE_FOLDER)}
           >
@@ -758,6 +752,77 @@ export function NarrowFolderRail({
         )}
         {narrowSource.kind === "stream" &&
           renderStreamChildren(narrowSource.platform)}
+        {narrowSource.kind === "onelibrary" &&
+          oneLibraryDevices.flatMap((device) =>
+            (oneLibraryPlaylists[device.path] ?? [])
+              .filter((playlist) => playlist.attribute === 0)
+              .sort((left, right) => left.parent_id - right.parent_id || left.seq - right.seq)
+              .map((playlist) => {
+                const target = {
+                  device_path: device.path,
+                  device_name: device.name,
+                  is_virtual: device.is_virtual,
+                  playlist_id: playlist.id,
+                  playlist_name: playlist.name,
+                };
+                const active =
+                  selectedOneLibrary?.device_path === device.path &&
+                  selectedOneLibrary.playlist_id === playlist.id;
+                const writable = !device.read_only && device.one_library_file_system;
+                const dropKey = `one:${device.path}:${playlist.id}`;
+                return (
+                  <button
+                    key={`narrow-onelibrary:${device.path}:${playlist.id}`}
+                    type="button"
+                    {...(writable
+                      ? {
+                          [PLAYLIST_DROP_ID_ATTR]: String(playlist.id),
+                          [PLAYLIST_DROP_DEVICE_ATTR]: device.path,
+                        }
+                      : {})}
+                    data-active={active || undefined}
+                    data-drop={narrowDrop === dropKey || undefined}
+                    title={`${device.name} · ${playlist.name} · ${playlist.track_count} 首`}
+                    onClick={() => {
+                      useAppStore.getState().focusLibrary();
+                      onNavigate?.("onelibrary");
+                      void openOneLibrary(target).catch((reason: unknown) =>
+                        setError((reason as Error).message),
+                      );
+                    }}
+                    onDragOverCapture={(event) => {
+                      if (!writable || (!isTrackDrag(event) && !isSearchDownloadDrag(event))) return;
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = "copy";
+                      setNarrowDrop(dropKey);
+                    }}
+                    onDragLeave={() =>
+                      setNarrowDrop((current) => current === dropKey ? "" : current)
+                    }
+                    onDropCapture={(event) => {
+                      if (!writable) return;
+                      setNarrowDrop("");
+                      if (isSearchDownloadDrag(event)) {
+                        event.preventDefault();
+                        void enqueueSearchOneLibraryDrop(event, target).catch((reason: unknown) =>
+                          setError((reason as Error).message),
+                        );
+                        return;
+                      }
+                      const ids = trackIdsFromDrop(event);
+                      if (ids.length === 0) return;
+                      event.preventDefault();
+                      void addOneLibraryTracks(device.path, playlist.id, ids).catch(
+                        (reason: unknown) => setError((reason as Error).message),
+                      );
+                    }}
+                  >
+                    {device.is_virtual ? <HardDrive size={14} /> : <ListMusic size={14} />}
+                    <small>{playlist.name}</small>
+                  </button>
+                );
+              }),
+          )}
       </div>
     </aside>
   );
@@ -810,15 +875,13 @@ export function FolderTree({
   onOpenStreamPlaylist,
   activeStreamPlaylist,
 }: {
-  /** 点选文件夹 / 临时列表 / 全部曲目等导航项后回调（窄屏收右侧抽屉用）。 */
-  onNavigate?: () => void;
+  /** 点选文件夹 / 全部曲目等导航项后回调（窄屏收右侧抽屉用）。 */
+  onNavigate?: (kind?: "onelibrary") => void;
 } & StreamPlaylistBrowseProps = {}) {
   const folders = useLibraryStore((state) => state.folders);
   const filter = useLibraryStore((state) => state.filter);
   const clipboard = useLibraryStore((state) => state.clipboard);
-  const queueView = useLibraryStore((state) => state.queueView);
   const setFilter = useLibraryStore((state) => state.setFilter);
-  const setQueueView = useLibraryStore((state) => state.setQueueView);
   const refreshFolders = useLibraryStore((state) => state.refreshFolders);
   const applyFolderOp = useLibraryStore((state) => state.applyFolderOp);
   const paste = useLibraryStore((state) => state.paste);
@@ -846,7 +909,6 @@ export function FolderTree({
   );
   const setActiveStreamPlaylist = useStreamBrowseStore((state) => state.setActive);
   const setStreamError = useStreamBrowseStore((state) => state.setError);
-  const queueCount = useQueueStore((state) => state.ids.length);
   const statsTotal = useLibraryStore((state) => state.stats?.total);
   /** 移出曲库的二次确认：第一次上膛，第二次才执行（和曲目表删文件同套路）。 */
   const [forgetArmed, setForgetArmed] = useState("");
@@ -1278,8 +1340,7 @@ export function FolderTree({
 
   const render = (node: FolderNode, depth: number) => {
     const open = expanded.has(node.path);
-    // 临时列表视图开着时没有任何文件夹算"当前"——中列显示的不是文件夹内容
-    const active = filter.folder === node.path && !queueView;
+    const active = filter.folder === node.path;
     return (
       <div key={node.path}>
         <div
@@ -1501,7 +1562,7 @@ export function FolderTree({
             默认就该是"含"。做成开关只是把一个没人会关的选项摆在最显眼的位置。
       `folderDeep` 字段保留在 store 里（后端 API 仍然收它），默认恒为 true。 */}
       <div className="kd-scroll kd-folder-list">
-        {/* 添加是曲库入口，不是底部工具：和「临时列表」「全部曲目」并列放在
+        {/* 添加是曲库入口，不是底部工具：和「全部曲目」并列放在
             列表最上面，点它直接选择磁盘目录并开始后台扫描。 */}
         <button
           type="button"
@@ -1516,41 +1577,8 @@ export function FolderTree({
         </button>
         <div
           className="kd-folder"
-          data-active={queueView}
-          data-drop={dropTarget === QUEUE_DROP_TARGET}
-          style={{ paddingLeft: "0.35rem" }}
-          onClick={() => {
-            setQueueView(true);
-            onNavigate?.();
-          }}
-          onDragOverCapture={(event) => {
-            if (!isTrackDrag(event)) return;
-            event.preventDefault();
-            event.dataTransfer.dropEffect = "copy";
-            setDropTarget(QUEUE_DROP_TARGET);
-            setDropEdge("");
-          }}
-          onDragLeave={() =>
-            setDropTarget((current) => (current === QUEUE_DROP_TARGET ? "" : current))
-          }
-          onDropCapture={(event) => {
-            event.preventDefault();
-            const ids = trackIdsFromDrop(event);
-            setDropTarget("");
-            void enqueueTrackIds(ids).then(({ added, failed }) => {
-              if (failed > 0) setNotice(`已加入 ${added} 首，${failed} 首读取失败`);
-            });
-          }}
-        >
-          <span className="kd-folder-caret" />
-          <ListMusic size={13} />
-          <span className="kd-truncate">临时列表</span>
-          <span className="kd-folder-count">{queueCount}</span>
-        </div>
-        <div
-          className="kd-folder"
           {...{ [SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR]: "" }}
-          data-active={filter.folder === "" && !queueView}
+          data-active={filter.folder === ""}
           data-drop={dropTarget === ALL_TRACKS_DROP_TARGET ? "true" : undefined}
           style={{ paddingLeft: "0.35rem" }}
           title="拖入下载会落到默认下载文件夹"
@@ -1587,6 +1615,7 @@ export function FolderTree({
           <span className="kd-truncate">全部曲目</span>
           <span className="kd-folder-count">{allTrackCount}</span>
         </div>
+        <PlaylistSection onNavigate={onNavigate} onNotice={setNotice} />
         {STREAM_ROOTS.map(renderStreamRoot)}
         {roots.map((root) => render(root, 0))}
         {roots.length === 0 && (
@@ -1597,7 +1626,7 @@ export function FolderTree({
         {(folders?.outside ?? 0) > 0 && (
           <div
             className="kd-folder"
-            data-active={isOutsideFolder(filter.folder) && !queueView}
+            data-active={isOutsideFolder(filter.folder)}
             style={{ paddingLeft: "0.35rem" }}
             title="不在曲库目录里的曲目"
             onClick={() => {

@@ -24,7 +24,7 @@ use serde_json::{json, Map, Value};
 use tokio::io::AsyncWriteExt as _;
 
 use super::client::{expect_ok, payload, NeteaseClient, HOST};
-use crate::net::{host_is, AtomicDownload};
+use crate::net::{create_download_writer, host_is, AtomicDownload};
 use crate::provider::{
     effective_limit, first_truthy, is_truthy, loose_int, qr_data_url_from_text, str_field,
     unique_download_path, Capabilities, DownloadJob, MusicProvider, ProviderContext,
@@ -906,7 +906,7 @@ impl MusicProvider for NeteaseProvider {
         let total = response.content_length().unwrap_or(declared_size);
         job.report(0, total);
 
-        let mut file = tokio::fs::File::create(guard.partial())
+        let mut file = create_download_writer(guard.partial())
             .await
             .context("创建下载临时文件失败")?;
         let mut downloaded = 0u64;
@@ -918,7 +918,7 @@ impl MusicProvider for NeteaseProvider {
             downloaded += chunk.len() as u64;
             job.report(downloaded, total.max(downloaded));
         }
-        file.flush().await.ok();
+        file.flush().await.context("提交下载缓冲失败")?;
         drop(file);
 
         // 试听片段检测必须在 commit 之前：半成品一旦落到最终路径，

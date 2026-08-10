@@ -1,14 +1,12 @@
 import { Fragment, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Check, Copy, Download, ListStart, Play } from "lucide-react";
+import { ChevronDown, ChevronRight, Check, Copy, Download, Play } from "lucide-react";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { api } from "../../lib/api";
 import { requestSongPreview, type SongPreviewItem } from "../../lib/songPreview";
-import { makePendingSongStreamTrack } from "../../lib/streamTrack";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import type { MergedGroup, Platform, SongSource } from "../../types";
 import { copyText } from "../../lib/copyText";
-import { useQueueStore } from "../../stores/queueStore";
 import { ContextMenu } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { playTrack } from "../library/TrackTable";
@@ -144,22 +142,6 @@ export function MergedGroupRow({
     });
   };
 
-  /** 把搜索结果排进播放队列，供本地曲目曲末自动接入在线流。 */
-  const queueGroup = () => {
-    if (!previewSource) return;
-    useQueueStore.getState().add(
-      [
-        makePendingSongStreamTrack({
-          ...previewSource,
-          title: group.title || previewSource.title,
-          artists: group.artists.length ? group.artists : previewSource.artists,
-          album: group.album || previewSource.album,
-        }),
-      ],
-      true,
-    );
-  };
-
   const titleCell = (
     <>
       {multi && (
@@ -196,7 +178,7 @@ export function MergedGroupRow({
           referrerPolicy="no-referrer"
         />
       </span>
-      {group.title}
+      <span className="kd-result-title-text">{group.title}</span>
       {group.in_library && (
         <span className="kd-chip" data-tone="ok" style={{ marginLeft: "0.4rem" }}>
           已入库
@@ -229,13 +211,12 @@ export function MergedGroupRow({
       case "title":
         return (
           <td key={key} className="kd-td-strong" data-col="title" title={group.title} {...cellDrag}>
-            {indent ? (
-              <span className="kd-tree-indent kd-truncate" data-last={last ? "true" : undefined}>
-                {titleCell}
-              </span>
-            ) : (
-              titleCell
-            )}
+            <span
+              className={`kd-result-title${indent ? " kd-tree-indent" : ""}`}
+              data-last={indent && last ? "true" : undefined}
+            >
+              {titleCell}
+            </span>
           </td>
         );
       case "artist":
@@ -519,18 +500,6 @@ export function MergedGroupRow({
             <Play size={12} />
             播放
           </button>
-          {previewSource && (
-            <button
-              type="button"
-              onClick={() => {
-                queueGroup();
-                setRowMenu(null);
-              }}
-            >
-              <ListStart size={12} />
-              下一首播放
-            </button>
-          )}
           <button
             type="button"
             onClick={() => {

@@ -16,6 +16,7 @@ import {
 } from "tauri-plugin-native-audio-api";
 import type { Track } from "../types";
 import { djEngine } from "./djMix";
+import { usesRemotePlaybackSource } from "./playbackTrackSource";
 
 export type UnifiedPlayerStatus = "idle" | "loading" | "paused" | "playing" | "ended" | "error";
 export type UnifiedPlayerKind = "desktop-native" | "mobile-native" | "browser-preview";
@@ -392,7 +393,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   }
 
   private source(source: UnifiedPlayerSource): Record<string, unknown> {
-    const remote = source.track.id < 0;
+    const remote = usesRemotePlaybackSource(source.track);
     return {
       trackId: source.track.id,
       // Online previews stay behind the loopback proxy; Rust owns the final PCM/output path on

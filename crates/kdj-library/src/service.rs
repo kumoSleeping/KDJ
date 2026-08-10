@@ -2,7 +2,7 @@
 //!
 //! 所有 SQL 都收在这一层，上面的 server 只跟契约模型打交道。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(not(any(target_os = "macos", target_os = "android", target_os = "ios")))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -10,11 +10,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use kdj_analysis::engine::AnalysisResult;
 use kdj_core::models::{
-    HarmonicMatch, HarmonicRelation, LibraryStats, Track, TrackPage, TrackPatch,
+    HarmonicMatch, HarmonicRelation, LibraryStats, LocalPlaylist, LocalPlaylistPatch, Track,
+    TrackPage, TrackPatch,
 };
-use kdj_providers::tags::{read_tags, write_cover, write_metadata, MetadataEdit};
+use kdj_providers::tags::{read_tags, write_cover, write_metadata, MetadataEdit, TrackTags};
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{OptionalExtension, Row};
+use rusqlite::{Connection, OptionalExtension, Row};
 
 use crate::camelot::{
     best_tempo, bpm_bucket, camelot_relations, parse_key_filter, relation_distance, relation_label,
@@ -279,6 +280,143 @@ pub struct TrackQuery {
     pub offset: i64,
 }
 
+#[derive(Debug)]
+struct FileSnapshot {
+    key_path: String,
+    file_path: PathBuf,
+    mtime: f64,
+    size: i64,
+}
+
+impl FileSnapshot {
+    fn read(path: &Path) -> Result<Self> {
+        let key_path = normalize_path(path);
+        let file_path = PathBuf::from(&key_path);
+        let meta =
+            std::fs::metadata(&file_path).with_context(|| format!("无法读取文件: {key_path}"))?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs_f64())
+            .unwrap_or(0.0);
+        Ok(Self {
+            key_path,
+            file_path,
+            mtime,
+            size: meta.len() as i64,
+        })
+    }
+}
+
+struct PreparedFile {
+    snapshot: FileSnapshot,
+    tags: TrackTags,
+    title: String,
+    filename: String,
+    now: String,
+}
+
+impl PreparedFile {
+    /// 标签读取必须发生在 SQLite 写事务之外。慢 U 盘读一批文件时不应长期占着
+    /// 全库唯一写锁；准备完成后，事务内只执行短 SQL。
+    fn from_snapshot(snapshot: FileSnapshot) -> Self {
+        let tags = read_tags(&snapshot.file_path);
+        let title = if tags.title.is_empty() {
+            snapshot
+                .file_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            tags.title.clone()
+        };
+        let filename = snapshot
+            .file_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Self {
+            snapshot,
+            tags,
+            title,
+            filename,
+            now: now_iso(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ExistingFile {
+    id: i64,
+    mtime: Option<f64>,
+    size: i64,
+    source_platform: String,
+    source_key: String,
+    tags_missing: bool,
+}
+
+impl ExistingFile {
+    fn unchanged(&self, snapshot: &FileSnapshot) -> bool {
+        self.mtime
+            .is_some_and(|mtime| (mtime - snapshot.mtime).abs() < 1e-6)
+            && self.size == snapshot.size
+            && !self.tags_missing
+    }
+}
+
+fn existing_file(conn: &Connection, key_path: &str) -> Result<Option<ExistingFile>> {
+    conn.query_row(
+        "SELECT id, file_mtime, COALESCE(size, 0), COALESCE(source_platform, ''), \
+         COALESCE(source_key, ''), \
+         (COALESCE(artist, '') = '' AND COALESCE(album, '') = '') \
+         FROM tracks WHERE path = ?",
+        [key_path],
+        |row| {
+            Ok(ExistingFile {
+                id: row.get(0)?,
+                mtime: row.get(1)?,
+                size: row.get(2)?,
+                source_platform: row.get(3)?,
+                source_key: row.get(4)?,
+                tags_missing: row.get(5)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn touch_source(
+    conn: &Connection,
+    track_id: i64,
+    old_platform: &str,
+    old_key: &str,
+    source_platform: &str,
+    source_key: &str,
+) -> Result<()> {
+    let mut assignments: Vec<&str> = Vec::new();
+    let mut values: Vec<SqlValue> = Vec::new();
+    if !source_platform.is_empty() && source_platform != "local" && old_platform != source_platform
+    {
+        assignments.push("source_platform = ?");
+        values.push(SqlValue::Text(source_platform.to_string()));
+    }
+    if !source_key.is_empty() && old_key != source_key {
+        assignments.push("source_key = ?");
+        values.push(SqlValue::Text(source_key.to_string()));
+    }
+    if assignments.is_empty() {
+        return Ok(());
+    }
+    values.push(SqlValue::Integer(track_id));
+    conn.execute(
+        &format!("UPDATE tracks SET {} WHERE id = ?", assignments.join(", ")),
+        rusqlite::params_from_iter(values.iter()),
+    )?;
+    Ok(())
+}
+
 pub struct LibraryService {
     db: Database,
 }
@@ -514,6 +652,371 @@ impl LibraryService {
             .attach_tags(&conn, self.apply_bpm_key_v2(&conn, vec![track])?)?
             .into_iter()
             .next())
+    }
+
+    // ------------------------------------------------------------ 本地播放列表
+
+    pub fn list_playlists(&self) -> Result<Vec<LocalPlaylist>> {
+        let conn = self.db.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT playlists.id, playlists.name, COALESCE(playlists.note, ''), \
+                    playlists.created_at, COUNT(playlist_items.track_id) \
+             FROM playlists \
+             LEFT JOIN playlist_items ON playlist_items.playlist_id = playlists.id \
+             GROUP BY playlists.id \
+             ORDER BY playlists.id ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(LocalPlaylist {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    note: row.get(2)?,
+                    created_at: row.get(3)?,
+                    track_count: row.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_playlist(&self, playlist_id: i64) -> Result<Option<LocalPlaylist>> {
+        let conn = self.db.conn()?;
+        conn.query_row(
+            "SELECT playlists.id, playlists.name, COALESCE(playlists.note, ''), \
+                    playlists.created_at, COUNT(playlist_items.track_id) \
+             FROM playlists \
+             LEFT JOIN playlist_items ON playlist_items.playlist_id = playlists.id \
+             WHERE playlists.id = ? GROUP BY playlists.id",
+            [playlist_id],
+            |row| {
+                Ok(LocalPlaylist {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    note: row.get(2)?,
+                    created_at: row.get(3)?,
+                    track_count: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .context("读取播放列表失败")
+    }
+
+    fn checked_playlist_name(
+        conn: &rusqlite::Connection,
+        name: &str,
+        except_id: Option<i64>,
+    ) -> Result<String> {
+        let name = name.trim();
+        anyhow::ensure!(!name.is_empty(), "播放列表名称不能为空");
+        anyhow::ensure!(
+            name.chars().count() <= 120,
+            "播放列表名称不能超过 120 个字符"
+        );
+        anyhow::ensure!(
+            !name.chars().any(char::is_control),
+            "播放列表名称不能包含控制字符"
+        );
+        let duplicate: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM playlists WHERE name = ? COLLATE NOCASE AND (? IS NULL OR id != ?) LIMIT 1",
+                rusqlite::params![name, except_id, except_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        anyhow::ensure!(duplicate.is_none(), "已经有同名播放列表");
+        Ok(name.to_owned())
+    }
+
+    pub fn create_playlist(&self, name: &str, note: &str) -> Result<LocalPlaylist> {
+        let conn = self.db.conn()?;
+        let name = Self::checked_playlist_name(&conn, name, None)?;
+        let note = note.trim();
+        anyhow::ensure!(
+            note.chars().count() <= 1000,
+            "播放列表备注不能超过 1000 个字符"
+        );
+        conn.execute(
+            "INSERT INTO playlists (name, note, created_at) VALUES (?, ?, ?)",
+            rusqlite::params![name, note, now_iso()],
+        )?;
+        let id = conn.last_insert_rowid();
+        drop(conn);
+        self.get_playlist(id)?.context("创建播放列表后读取失败")
+    }
+
+    pub fn patch_playlist(
+        &self,
+        playlist_id: i64,
+        patch: LocalPlaylistPatch,
+    ) -> Result<LocalPlaylist> {
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction()?;
+        anyhow::ensure!(
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM playlists WHERE id = ?)",
+                [playlist_id],
+                |row| row.get::<_, i64>(0),
+            )? != 0,
+            "播放列表不存在"
+        );
+        if let Some(name) = patch.name {
+            let name = Self::checked_playlist_name(&tx, &name, Some(playlist_id))?;
+            tx.execute(
+                "UPDATE playlists SET name = ? WHERE id = ?",
+                rusqlite::params![name, playlist_id],
+            )?;
+        }
+        if let Some(note) = patch.note {
+            let note = note.trim();
+            anyhow::ensure!(
+                note.chars().count() <= 1000,
+                "播放列表备注不能超过 1000 个字符"
+            );
+            tx.execute(
+                "UPDATE playlists SET note = ? WHERE id = ?",
+                rusqlite::params![note, playlist_id],
+            )?;
+        }
+        tx.commit()?;
+        drop(conn);
+        self.get_playlist(playlist_id)?.context("播放列表不存在")
+    }
+
+    pub fn delete_playlist(&self, playlist_id: i64) -> Result<()> {
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM playlist_items WHERE playlist_id = ?",
+            [playlist_id],
+        )?;
+        let removed = tx.execute("DELETE FROM playlists WHERE id = ?", [playlist_id])?;
+        anyhow::ensure!(removed > 0, "播放列表不存在");
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 增加的是引用，不触碰曲目文件。返回 `(新增数, 当前总数)`。
+    pub fn add_playlist_tracks(&self, playlist_id: i64, track_ids: &[i64]) -> Result<(usize, i64)> {
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction()?;
+        anyhow::ensure!(
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM playlists WHERE id = ?)",
+                [playlist_id],
+                |row| row.get::<_, i64>(0),
+            )? != 0,
+            "播放列表不存在"
+        );
+        let mut position: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(position), 0) FROM playlist_items WHERE playlist_id = ?",
+            [playlist_id],
+            |row| row.get(0),
+        )?;
+        let mut seen = HashSet::new();
+        let mut added = 0usize;
+        for &track_id in track_ids {
+            if track_id <= 0 || !seen.insert(track_id) {
+                continue;
+            }
+            let exists: i64 = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tracks WHERE id = ?)",
+                [track_id],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(exists != 0, "曲目不存在：{track_id}");
+            position += 1;
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO playlist_items (playlist_id, track_id, position) VALUES (?, ?, ?)",
+                rusqlite::params![playlist_id, track_id, position],
+            )?;
+            if inserted > 0 {
+                added += 1;
+            } else {
+                position -= 1;
+            }
+        }
+        let total = Self::compact_playlist_positions(&tx, playlist_id)?;
+        tx.commit()?;
+        Ok((added, total))
+    }
+
+    /// 删除的同样只是引用。返回 `(移除数, 当前总数)`。
+    pub fn remove_playlist_tracks(
+        &self,
+        playlist_id: i64,
+        track_ids: &[i64],
+    ) -> Result<(usize, i64)> {
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction()?;
+        anyhow::ensure!(
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM playlists WHERE id = ?)",
+                [playlist_id],
+                |row| row.get::<_, i64>(0),
+            )? != 0,
+            "播放列表不存在"
+        );
+        let mut removed = 0usize;
+        let mut seen = HashSet::new();
+        for &track_id in track_ids {
+            if track_id <= 0 || !seen.insert(track_id) {
+                continue;
+            }
+            removed += tx.execute(
+                "DELETE FROM playlist_items WHERE playlist_id = ? AND track_id = ?",
+                rusqlite::params![playlist_id, track_id],
+            )?;
+        }
+        let total = Self::compact_playlist_positions(&tx, playlist_id)?;
+        tx.commit()?;
+        Ok((removed, total))
+    }
+
+    fn compact_playlist_positions(
+        conn: &rusqlite::Transaction<'_>,
+        playlist_id: i64,
+    ) -> Result<i64> {
+        let ids: Vec<i64> = {
+            let mut stmt = conn.prepare(
+                "SELECT track_id FROM playlist_items WHERE playlist_id = ? ORDER BY position, track_id",
+            )?;
+            let rows = stmt
+                .query_map([playlist_id], |row| row.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        for (index, track_id) in ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE playlist_items SET position = ? WHERE playlist_id = ? AND track_id = ?",
+                rusqlite::params![index as i64 + 1, playlist_id, track_id],
+            )?;
+        }
+        Ok(ids.len() as i64)
+    }
+
+    pub fn reorder_playlist_tracks(
+        &self,
+        playlist_id: i64,
+        moving_ids: &[i64],
+        target_id: i64,
+        before: bool,
+    ) -> Result<()> {
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction()?;
+        anyhow::ensure!(
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM playlists WHERE id = ?)",
+                [playlist_id],
+                |row| row.get::<_, i64>(0),
+            )? != 0,
+            "播放列表不存在"
+        );
+        let current: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "SELECT track_id FROM playlist_items WHERE playlist_id = ? ORDER BY position, track_id",
+            )?;
+            let rows = stmt
+                .query_map([playlist_id], |row| row.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        let wanted: HashSet<i64> = moving_ids.iter().copied().collect();
+        let moving: Vec<i64> = current
+            .iter()
+            .copied()
+            .filter(|id| wanted.contains(id) && *id != target_id)
+            .collect();
+        anyhow::ensure!(!moving.is_empty(), "没有可移动的播放列表曲目");
+        let mut rest: Vec<i64> = current
+            .into_iter()
+            .filter(|id| !wanted.contains(id) || *id == target_id)
+            .collect();
+        let target = rest
+            .iter()
+            .position(|id| *id == target_id)
+            .context("排序目标不在这个播放列表里")?;
+        let insert_at = if before { target } else { target + 1 };
+        rest.splice(insert_at..insert_at, moving);
+        for (index, track_id) in rest.iter().enumerate() {
+            tx.execute(
+                "UPDATE playlist_items SET position = ? WHERE playlist_id = ? AND track_id = ?",
+                rusqlite::params![index as i64 + 1, playlist_id, track_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_playlist_tracks(&self, playlist_id: i64, query: &TrackQuery) -> Result<TrackPage> {
+        let conn = self.db.conn()?;
+        let (filter_clause, filter_params) = self.build_where(query);
+        let extra = filter_clause
+            .strip_prefix(" WHERE ")
+            .map(|value| format!(" AND {value}"))
+            .unwrap_or_default();
+        let mut params = vec![SqlValue::Integer(playlist_id)];
+        params.extend(filter_params);
+        let total: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM playlist_items pi JOIN tracks ON tracks.id = pi.track_id \
+                 WHERE pi.playlist_id = ?{extra}"
+            ),
+            rusqlite::params_from_iter(params.iter()),
+            |row| row.get(0),
+        )?;
+        let limit = if query.limit == 0 {
+            200
+        } else {
+            query.limit.clamp(1, 2000)
+        };
+        let offset = query.offset.max(0);
+        let order_sql = if query.sort.trim().eq_ignore_ascii_case("custom") {
+            "pi.position ASC, tracks.id ASC".to_owned()
+        } else {
+            let column = sort_column(query.sort.trim());
+            let direction = order_direction(&query.order);
+            let secondary = if query.sort2.trim().is_empty() || query.sort2 == query.sort {
+                String::new()
+            } else {
+                let column2 = sort_column(query.sort2.trim());
+                let direction2 = order_direction(&query.order2);
+                format!(" ({column2}) IS NULL, ({column2}) {direction2},")
+            };
+            format!("({column}) IS NULL, ({column}) {direction},{secondary} tracks.id DESC")
+        };
+        let sql = format!(
+            "SELECT tracks.* FROM playlist_items pi JOIN tracks ON tracks.id = pi.track_id \
+             WHERE pi.playlist_id = ?{extra} ORDER BY {order_sql} LIMIT ? OFFSET ?"
+        );
+        params.push(SqlValue::Integer(limit));
+        params.push(SqlValue::Integer(offset));
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok(row_to_track(row))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(TrackPage {
+            items: self.attach_tags(&conn, self.apply_bpm_key_v2(&conn, rows)?)?,
+            total,
+            offset,
+            limit,
+        })
+    }
+
+    /// OneLibrary 导出必须拿到完整顺序，不能受 HTTP 单页上限影响。
+    pub fn playlist_tracks(&self, playlist_id: i64) -> Result<Vec<Track>> {
+        let conn = self.db.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT tracks.* FROM playlist_items pi JOIN tracks ON tracks.id = pi.track_id \
+             WHERE pi.playlist_id = ? ORDER BY pi.position, tracks.id",
+        )?;
+        let rows = stmt
+            .query_map([playlist_id], |row| Ok(row_to_track(row)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(self.attach_tags(&conn, self.apply_bpm_key_v2(&conn, rows)?)?)
     }
 
     /// 把当前修订的 v2 BPM/Key 覆盖到 API 返回对象上，但不改 tracks 里的 v1。
@@ -1015,80 +1518,100 @@ impl LibraryService {
 
     /// 把一个音频文件写进库，返回 track id。同一路径重复调用是幂等的。
     pub fn upsert_file(&self, path: &Path, source_platform: &str, source_key: &str) -> Result<i64> {
-        let key_path = normalize_path(path);
-        let file_path = PathBuf::from(&key_path);
-        let meta =
-            std::fs::metadata(&file_path).with_context(|| format!("无法读取文件: {key_path}"))?;
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
-        let size = meta.len() as i64;
-
+        let snapshot = FileSnapshot::read(path)?;
         let conn = self.db.conn()?;
-        let existing: Option<(i64, Option<f64>, i64, String, String, bool)> = conn
-            .query_row(
-                "SELECT id, file_mtime, COALESCE(size, 0), COALESCE(source_platform, ''), \
-                 COALESCE(source_key, ''), \
-                 (COALESCE(artist, '') = '' AND COALESCE(album, '') = '') \
-                 FROM tracks WHERE path = ?",
-                [&key_path],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                    ))
-                },
-            )
-            .ok();
-
-        if let Some((id, old_mtime, old_size, old_platform, old_key, tags_missing)) = &existing {
+        let existing = existing_file(&conn, &snapshot.key_path)?;
+        if let Some(existing) = existing.as_ref() {
             // 增量：mtime + size 都没变就直接返回，省掉读标签（扫描里最贵的一步）。
             // 例外：库里艺人+专辑双空的行不许走快路径（`file_index` 的注释有全文），
             // 逼它落到下面的重读分支——覆盖规则"只在读到非空值时才盖"在那边，
             // 所以真没标签的文件重读之后也只是原地踏步，不会被清掉别的字段。
-            let unchanged = old_mtime
-                .map(|value| (value - mtime).abs() < 1e-6)
-                .unwrap_or(false)
-                && *old_size == size
-                && !*tags_missing;
-            if unchanged {
+            if existing.unchanged(&snapshot) {
                 // 唯一例外：来源信息是调用方带进来的（下载完成时补登记），
                 // 文件没变也要认，否则重复下载的曲目会一直挂着 local
-                self.touch_source(
+                touch_source(
                     &conn,
-                    *id,
-                    old_platform,
-                    old_key,
+                    existing.id,
+                    &existing.source_platform,
+                    &existing.source_key,
                     source_platform,
                     source_key,
                 )?;
-                return Ok(*id);
+                return Ok(existing.id);
             }
         }
+        let prepared = PreparedFile::from_snapshot(snapshot);
+        Self::persist_prepared(&conn, prepared, existing, source_platform, source_key)
+    }
 
-        let tags = read_tags(&file_path);
-        let title = if tags.title.is_empty() {
-            file_path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        } else {
-            tags.title.clone()
-        };
-        let now = now_iso();
-        let filename = file_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
+    /// 扫描专用批量入口：文件 stat/标签在事务外顺序读取，随后整批用一个事务提交。
+    /// 返回值与 paths 对齐；扫描期间消失或暂时读不了的单个文件是 None。
+    pub fn upsert_files_batched(
+        &self,
+        paths: &[PathBuf],
+        source_platform: &str,
+        source_key: &str,
+    ) -> Result<Vec<Option<i64>>> {
+        let prepared: Vec<Option<PreparedFile>> = paths
+            .iter()
+            .map(|path| match FileSnapshot::read(path) {
+                Ok(snapshot) => Some(PreparedFile::from_snapshot(snapshot)),
+                Err(error) => {
+                    tracing::debug!("跳过 {}：{error:#}", path.display());
+                    None
+                }
+            })
+            .collect();
+        if prepared.iter().all(Option::is_none) {
+            return Ok(vec![None; paths.len()]);
+        }
 
-        let Some((track_id, ..)) = existing else {
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction().context("开始批量入库事务失败")?;
+        let mut ids = Vec::with_capacity(paths.len());
+        for item in prepared {
+            let Some(item) = item else {
+                ids.push(None);
+                continue;
+            };
+            let existing = existing_file(&tx, &item.snapshot.key_path)?;
+            ids.push(Some(Self::persist_prepared(
+                &tx,
+                item,
+                existing,
+                source_platform,
+                source_key,
+            )?));
+        }
+        tx.commit().context("提交批量入库事务失败")?;
+        Ok(ids)
+    }
+
+    fn persist_prepared(
+        conn: &Connection,
+        prepared: PreparedFile,
+        existing: Option<ExistingFile>,
+        source_platform: &str,
+        source_key: &str,
+    ) -> Result<i64> {
+        if let Some(existing) = existing
+            .as_ref()
+            .filter(|row| row.unchanged(&prepared.snapshot))
+        {
+            touch_source(
+                conn,
+                existing.id,
+                &existing.source_platform,
+                &existing.source_key,
+                source_platform,
+                source_key,
+            )?;
+            return Ok(existing.id);
+        }
+
+        let snapshot = &prepared.snapshot;
+        let tags = &prepared.tags;
+        let Some(existing) = existing else {
             let inserted = conn.execute(
                 "INSERT INTO tracks (path, filename, title, artist, album, genre, year,\
                  duration, bitrate, samplerate, channels, format, size,\
@@ -1096,9 +1619,9 @@ impl LibraryService {
                  rating, analysis_error)\
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '')",
                 rusqlite::params![
-                    key_path,
-                    filename,
-                    title,
+                    snapshot.key_path,
+                    prepared.filename,
+                    prepared.title,
                     tags.artist,
                     tags.album,
                     tags.genre,
@@ -1108,28 +1631,31 @@ impl LibraryService {
                     tags.samplerate,
                     tags.channels,
                     tags.format,
-                    size,
+                    snapshot.size,
                     if source_platform.is_empty() {
                         "local"
                     } else {
                         source_platform
                     },
                     source_key,
-                    now,
-                    now,
-                    mtime,
+                    prepared.now,
+                    prepared.now,
+                    snapshot.mtime,
                 ],
             );
             return match inserted {
                 Ok(_) => Ok(conn.last_insert_rowid()),
                 // 两个扫描线程同时撞到同一个文件：UNIQUE(path) 拦下后回读即可
                 Err(_) => conn
-                    .query_row("SELECT id FROM tracks WHERE path = ?", [&key_path], |row| {
-                        row.get(0)
-                    })
+                    .query_row(
+                        "SELECT id FROM tracks WHERE path = ?",
+                        [&snapshot.key_path],
+                        |row| row.get(0),
+                    )
                     .context("并发插入后回读失败"),
             };
         };
+        let track_id = existing.id;
 
         // 文件内容变了：技术字段一定更新；文本标签只在**读到非空值**时覆盖，
         // 避免标签被清空或读失败时把库里已有的信息（含用户手改过的）抹掉。
@@ -1140,10 +1666,10 @@ impl LibraryService {
             "modified_at = ?",
         ];
         let mut values: Vec<SqlValue> = vec![
-            SqlValue::Text(filename),
-            SqlValue::Integer(size),
-            SqlValue::Real(mtime),
-            SqlValue::Text(now),
+            SqlValue::Text(prepared.filename),
+            SqlValue::Integer(snapshot.size),
+            SqlValue::Real(snapshot.mtime),
+            SqlValue::Text(prepared.now),
         ];
         for (assignment, value) in [
             ("artist = ?", &tags.artist),
@@ -1189,39 +1715,6 @@ impl LibraryService {
             rusqlite::params_from_iter(values.iter()),
         )?;
         Ok(track_id)
-    }
-
-    fn touch_source(
-        &self,
-        conn: &Conn,
-        track_id: i64,
-        old_platform: &str,
-        old_key: &str,
-        source_platform: &str,
-        source_key: &str,
-    ) -> Result<()> {
-        let mut assignments: Vec<&str> = Vec::new();
-        let mut values: Vec<SqlValue> = Vec::new();
-        if !source_platform.is_empty()
-            && source_platform != "local"
-            && old_platform != source_platform
-        {
-            assignments.push("source_platform = ?");
-            values.push(SqlValue::Text(source_platform.to_string()));
-        }
-        if !source_key.is_empty() && old_key != source_key {
-            assignments.push("source_key = ?");
-            values.push(SqlValue::Text(source_key.to_string()));
-        }
-        if assignments.is_empty() {
-            return Ok(());
-        }
-        values.push(SqlValue::Integer(track_id));
-        conn.execute(
-            &format!("UPDATE tracks SET {} WHERE id = ?", assignments.join(", ")),
-            rusqlite::params_from_iter(values.iter()),
-        )?;
-        Ok(())
     }
 
     pub fn save_analysis(&self, track_id: i64, result: &AnalysisResult) -> Result<()> {
@@ -2119,6 +2612,87 @@ mod tests {
     }
 
     #[test]
+    fn local_playlists_store_references_and_keep_a_stable_order() {
+        let service = service();
+        let first = insert(
+            &service,
+            Row {
+                path: "/lib/first.mp3",
+                title: "First",
+                ..Default::default()
+            },
+        );
+        let second = insert(
+            &service,
+            Row {
+                path: "/lib/second.mp3",
+                title: "Second",
+                ..Default::default()
+            },
+        );
+        let third = insert(
+            &service,
+            Row {
+                path: "/lib/third.mp3",
+                title: "Third",
+                ..Default::default()
+            },
+        );
+        let playlist = service.create_playlist("Warmup", "").unwrap();
+        assert_eq!(
+            service
+                .add_playlist_tracks(playlist.id, &[first, second, first, third])
+                .unwrap(),
+            (3, 3)
+        );
+
+        let custom = TrackQuery {
+            sort: "custom".into(),
+            order: "asc".into(),
+            limit: 200,
+            ..Default::default()
+        };
+        let titles = || {
+            service
+                .list_playlist_tracks(playlist.id, &custom)
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|track| track.title)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(titles(), ["First", "Second", "Third"]);
+
+        service
+            .reorder_playlist_tracks(playlist.id, &[third], first, true)
+            .unwrap();
+        assert_eq!(titles(), ["Third", "First", "Second"]);
+        assert_eq!(
+            service
+                .remove_playlist_tracks(playlist.id, &[first])
+                .unwrap(),
+            (1, 2)
+        );
+        assert_eq!(titles(), ["Third", "Second"]);
+
+        service.delete_playlist(playlist.id).unwrap();
+        assert!(
+            service.get(first).unwrap().is_some(),
+            "删除播放列表不能删除曲目"
+        );
+        assert!(service.get(third).unwrap().is_some(), "播放列表只保存引用");
+    }
+
+    #[test]
+    fn local_playlist_names_are_trimmed_and_case_insensitively_unique() {
+        let service = service();
+        let playlist = service.create_playlist("  Main Set  ", "").unwrap();
+        assert_eq!(playlist.name, "Main Set");
+        let error = service.create_playlist("main set", "").unwrap_err();
+        assert!(error.to_string().contains("同名"));
+    }
+
+    #[test]
     fn delete_undo_restores_the_file_metadata_tags_and_playlist_position() {
         let base = std::env::temp_dir().join(format!("kdj-delete-undo-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -2680,6 +3254,26 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f64()
+    }
+
+    #[test]
+    fn batch_upsert_preserves_order_and_reuses_existing_rows() {
+        let dir = std::env::temp_dir().join(format!("kdj-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = [dir.join("a.wav"), dir.join("b.wav")];
+        for path in &paths {
+            std::fs::write(path, wav_bytes()).unwrap();
+        }
+        let service = service();
+
+        let first = service.upsert_files_batched(&paths, "local", "").unwrap();
+        let second = service.upsert_files_batched(&paths, "local", "").unwrap();
+
+        assert!(first.iter().all(Option::is_some));
+        assert_eq!(first, second, "重复批扫描应复用原行，不新增或改序");
+        assert_eq!(service.all_paths().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

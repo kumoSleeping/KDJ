@@ -12,7 +12,6 @@ import { InlineNotice } from "../common";
 export function LibraryToolbar() {
   const scan = useLibraryStore((state) => state.scan);
   const filter = useLibraryStore((state) => state.filter);
-  const queueView = useLibraryStore((state) => state.queueView);
   const keyFilter = filter.key;
   const setFilter = useLibraryStore((state) => state.setFilter);
   const [dragIds, setDragIds] = useState<number[]>([]);
@@ -146,7 +145,7 @@ export function LibraryToolbar() {
         }}
       >
         <Trash2 size={13} />
-        {queueView ? "移出临时列表" : "移到废纸篓"}
+        移到废纸篓
       </div>
       {(notice || importError) && (
         <div className="kd-toolbar" style={{ gap: "0.75rem" }}>

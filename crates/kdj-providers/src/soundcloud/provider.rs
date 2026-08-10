@@ -19,7 +19,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt as _;
 
-use crate::net::{host_is, AtomicDownload};
+use crate::net::{create_download_writer, host_is, AtomicDownload};
 use crate::provider::{
     effective_limit, no_login, str_field, unique_download_path, Capabilities, DownloadJob,
     MusicProvider, ProviderContext,
@@ -900,7 +900,7 @@ impl MusicProvider for SoundCloudProvider {
         let total = response.content_length().unwrap_or(0);
         job.report(0, total);
 
-        let mut file = tokio::fs::File::create(guard.partial())
+        let mut file = create_download_writer(guard.partial())
             .await
             .context("创建下载临时文件失败")?;
         let mut downloaded = 0u64;
@@ -912,7 +912,7 @@ impl MusicProvider for SoundCloudProvider {
             downloaded += chunk.len() as u64;
             job.report(downloaded, total.max(downloaded));
         }
-        file.flush().await.ok();
+        file.flush().await.context("提交下载缓冲失败")?;
         drop(file);
         let path = guard.commit()?;
 

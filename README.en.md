@@ -57,11 +57,16 @@ KDJ packs cross-platform search, download, local library management, and music a
 - Library
   - Drag-first organization
   - Local library / folder scanning and tag editing
+  - Sidebar virtual playlists that reference local tracks without duplicating audio
+  - Desktop removable-drive discovery and portable OneLibrary + M3U8 export
   - Camelot wheel with BPM / energy filters
   - Automatic BPM, key, Camelot / Open Key, loudness, and energy analysis
   - Harmonic similarity recommendations (library / folder / temporary queue)
   - Waveform in/out points, star ratings, and cover art
   - Automatic VJ export (requires [FFmpeg](https://ffmpeg.org/download.html))
+
+> [!NOTE]
+> Portable OneLibrary export copies the actual audio files to the drive. A playlist that only references files on the current computer cannot work elsewhere without those files. KDJ currently exports playlist order, BPM, key, and common tags; the target DJ app analyzes waveforms and beatgrids on first load.
 - Playback
   - System-level audio output and volume control
   - rkb-style waveform preview
@@ -77,7 +82,7 @@ KDJ packs cross-platform search, download, local library management, and music a
 
 ## Build for development
 
-Requires Node.js 20+, Rust 1.85+, and the matching [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/).
+Requires Node.js 20+, Rust 1.88+, and the matching [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```bash
 git clone https://github.com/kumoSleeping/KDJ.git

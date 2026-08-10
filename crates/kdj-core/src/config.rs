@@ -44,6 +44,7 @@ const SETTINGS_FIELDS: &[&str] = &[
     "enabled_platforms",
     "auto_start_downloads",
     "player_waveform",
+    "virtual_disk_auto_grow",
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -106,6 +107,9 @@ pub struct Settings {
     /// 播放条默认展示分析波形；可切回传统进度条，给偏好简洁界面的用户。
     #[serde(default = "yes")]
     pub player_waveform: bool,
+    /// KDJ 虚拟磁盘空间不足时，是否允许创建更大的镜像并迁移后重试。
+    #[serde(default = "yes")]
+    pub virtual_disk_auto_grow: bool,
 }
 
 impl Settings {
@@ -137,6 +141,7 @@ impl Settings {
             enabled_platforms: default_enabled_platforms(),
             auto_start_downloads: false,
             player_waveform: true,
+            virtual_disk_auto_grow: true,
         }
     }
 }
@@ -362,9 +367,17 @@ impl AppConfig {
 
     /// 用一份完整 Settings 覆盖当前配置并落盘。
     pub fn apply_settings(&self, settings: Settings) -> Settings {
+        let mut next = settings;
+        sync_soundcloud_flag(&mut next);
+        // 对外返回和落盘都使用展开后的确定路径；相同 PUT 不应白写 settings.json。
+        next.download_dir = expand_user(&next.download_dir)
+            .to_string_lossy()
+            .into_owned();
+        let current = self.to_settings();
+        if current == next {
+            return current;
+        }
         {
-            let mut next = settings;
-            sync_soundcloud_flag(&mut next);
             let mut guard = self.inner.write().unwrap();
             guard.download_dir = expand_user(&next.download_dir);
             guard.settings = next;
@@ -490,6 +503,7 @@ mod tests {
         let config = AppConfig::create(dir.join("data"), dir.join("dl"), 0);
         assert_eq!(config.to_settings().default_quality, Quality::Flac);
         assert_eq!(config.to_settings().concurrent_downloads, 3);
+        assert!(config.to_settings().virtual_disk_auto_grow);
     }
 
     #[test]
@@ -527,6 +541,23 @@ mod tests {
 
         let reopened = AppConfig::create(dir.join("data"), dir.join("dl"), 0);
         assert_eq!(reopened.to_settings(), settings);
+    }
+
+    #[test]
+    fn applying_identical_settings_does_not_rewrite_the_file() {
+        let dir = scratch("no-rewrite");
+        let config = AppConfig::create(dir.join("data"), dir.join("dl"), 0);
+        let mut settings = config.to_settings();
+        settings.auto_analyze = false;
+        config.apply_settings(settings.clone());
+        let path = config.settings_path();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+
+        config.apply_settings(settings);
+
+        let after = std::fs::metadata(path).unwrap().modified().unwrap();
+        assert_eq!(before, after, "完全相同的 PUT 不应触碰 settings.json");
     }
 
     #[test]

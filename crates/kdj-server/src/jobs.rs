@@ -343,8 +343,12 @@ pub fn spawn_waveform_backfill(state: Arc<AppState>) -> String {
     job_id
 }
 
-/// 分析是 CPU 密集的（解码 + FFT），worker 开多了会把机器压满，
-/// 表现是 UI 掉帧、下载速度也跟着掉。固定 2 个。
+/// 分析会顺序读完整媒体再做 FFT。Windows 上很多曲库位于 USB 盘，且低配机器的
+/// Defender/索引器会同时读新文件；单 worker 避免两条整轨读取互相寻道和抢闪存。
+/// 其它平台保留两个 worker，仍受下面的进程级总闸门约束。
+#[cfg(target_os = "windows")]
+const ANALYSIS_WORKERS: usize = 1;
+#[cfg(not(target_os = "windows"))]
 const ANALYSIS_WORKERS: usize = 2;
 
 /// 全局分析并发闸门。
@@ -352,8 +356,8 @@ const ANALYSIS_WORKERS: usize = 2;
 /// `ANALYSIS_WORKERS` 原来只限**一个批次内**的线程数：3 个下载同时完成
 /// 加上后台补齐，就是 4 个批次 × 2 线程 = 8 条分析线程同时在跑，
 /// 正是上面注释想避免的场面（实测「停止」一次取消掉 3 个批次）。
-/// v0.1.0 的做法是所有非插队批次共用一个 2-worker 线程池；这里等价地
-/// 用一个 2 permit 的闸门：**每首歌**取一次 permit，批次之间自然交错，
+/// v0.1.0 的做法是所有非插队批次共用一个小线程池；这里等价地
+/// 用平台对应数量的 permit：**每首歌**取一次 permit，批次之间自然交错，
 /// 不会出现"先来的批次把闸门占到跑完"的饥饿。
 ///
 /// 插队批次（`priority = true`，正在播放的那一首）**不走闸门**——
@@ -623,18 +627,8 @@ fn spawn_analysis_target(
                             tracing::warn!("保存分析结果失败 {track_id}：{err:#}");
                             continue;
                         }
-                        // 固定单 worker 预热默认波形。忙时排队而不是像旧 BUSY 实现那样
-                        // 直接丢掉，批量分析完成后每首歌最终都会有持久缓存。
-                        if target == AnalysisWriteTarget::V1 {
-                            state.waveforms.enqueue_default(
-                                track_id,
-                                path.clone(),
-                                state.config.data_dir.join("waveform"),
-                                false,
-                            );
-                        }
                         if target == AnalysisWriteTarget::V1 && write_tags {
-                            let _ = kdj_providers::tags::write_analysis_tags(
+                            if kdj_providers::tags::write_analysis_tags(
                                 &path,
                                 result.bpm,
                                 &result.camelot,
@@ -643,6 +637,22 @@ fn spawn_analysis_target(
                                 // 备注是用户自己的话，comment 的组法在 tags 层：
                                 // "8A - Energy 7 - 备注"，备注必须原样保留在最后
                                 &track.comment,
+                            )
+                            .is_ok()
+                            {
+                                // 标签写入会改变 mtime；先同步曲库快照，后面的波形缓存
+                                // 才会用最终时间戳命名，拖到 OneLibrary 时可以直接复用。
+                                let _ = state.library.sync_file_stat(track_id);
+                            }
+                        }
+                        // 固定单 worker 预热默认波形。必须排在标签写入之后，否则缓存
+                        // 会绑定旧 mtime，下一步便携导出就找不到刚分析好的波形。
+                        if target == AnalysisWriteTarget::V1 {
+                            state.waveforms.enqueue_default(
+                                track_id,
+                                path.clone(),
+                                state.config.data_dir.join("waveform"),
+                                false,
                             );
                         }
                         updated.lock().unwrap().push(track_id);

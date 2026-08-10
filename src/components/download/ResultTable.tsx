@@ -48,6 +48,8 @@ import {
   type ResultColumn,
 } from "./resultColumns";
 import type { LayoutMode } from "../../lib/useLayoutMode";
+import { collectionToken } from "../../lib/searchCollections";
+import { CoverImage } from "../common/VinylPlaceholder";
 
 const KIND_LABEL: Record<IntakeKind, string> = {
   search: "搜索",
@@ -81,10 +83,6 @@ export function selectableGroups(item: IntakeItem): MergedGroup[] {
       !group.in_library &&
       group.sources.some((source) => source.platform !== "local"),
   );
-}
-
-function collectionToken(collection: CollectionResult): string {
-  return `${collection.platform}:${collection.kind}:${collection.key}`;
 }
 
 function isResolvedCollectionItem(item: IntakeItem): boolean {
@@ -353,39 +351,151 @@ export function ResultTable({
     );
 
   const renderCollectionRows = (item: IntakeItem) =>
-    item.collections.map((collection) => {
+    item.collections.map((collection, collectionIndex) => {
       const token = collectionToken(collection);
       const loadingCollection = loadingCollections.has(token);
-      return (
-        <tr key={`collection:${token}`} data-collection="true">
-          <td />
-          <td />
-          <td colSpan={Math.max(1, visibleColumns.length + 1)}>
-            <span className="kd-row" style={{ gap: "0.45rem", minWidth: 0 }}>
-              <PlatformMark id={collection.platform} size={13} />
-              <strong className="kd-truncate" title={collection.title}>
-                {collection.title}
-              </strong>
-              {collection.subtitle && (
-                <span className="kd-faint kd-truncate" title={collection.subtitle}>
-                  {collection.subtitle}
+      const openCollection = () => {
+        if (!loadingCollection) onLoadCollection(collection);
+      };
+      const collectionCell = (key: string) => {
+        switch (key) {
+          case "title":
+            return (
+              <td key={key} className="kd-td-strong" data-col="title" title={collection.title}>
+                <span className="kd-result-title">
+                  <span className="kd-thumb">
+                    <CoverImage src={collection.cover} alt="" loading="lazy" />
+                  </span>
+                  <span className="kd-result-title-text">{collection.title}</span>
                 </span>
-              )}
-              <button
-                type="button"
-                className="kd-result-download-all"
-                disabled={loadingCollection}
-                onClick={() => onLoadCollection(collection)}
-                title="先载入真实歌曲，再试听或加入队列"
-              >
-                {loadingCollection ? <LoaderCircle className="kd-spin" size={12} /> : <ListMusic size={12} />}
-                {loadingCollection ? "载入中" : "载入曲目"}
-              </button>
-            </span>
+              </td>
+            );
+          case "artist":
+            return (
+              <td key={key} data-col="artist" title={collection.subtitle}>
+                {collection.subtitle}
+              </td>
+            );
+          case "album":
+            return (
+              <td key={key} data-col="album" className="kd-muted">
+                {KIND_LABEL[collection.kind]}
+              </td>
+            );
+          case "duration":
+            return (
+              <td key={key} data-col="duration" className="kd-td-num kd-muted">
+                {collection.count > 0 ? `${collection.count} 首` : ""}
+              </td>
+            );
+          case "sources":
+            return (
+              <td key={key} data-col="sources">
+                <span className="kd-row kd-muted" style={{ gap: "0.35rem" }}>
+                  <PlatformMark id={collection.platform} size={12} />
+                  {PLATFORM_LABEL[collection.platform]}
+                </span>
+              </td>
+            );
+          default:
+            return <td key={key} data-col={key} />;
+        }
+      };
+      return (
+        <tr
+          key={`collection:${token}`}
+          data-collection="true"
+          data-loading={loadingCollection || undefined}
+          aria-busy={loadingCollection || undefined}
+          aria-label={`${collection.title}，打开并载入曲目`}
+          tabIndex={0}
+          onClick={openCollection}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            openCollection();
+          }}
+          title="打开并载入曲目"
+        >
+          <td className="kd-selection-cell" />
+          <td className="kd-result-lead" data-col="index">
+            {loadingCollection ? (
+              <LoaderCircle className="kd-spin" size={12} aria-hidden="true" />
+            ) : (
+              <span className="kd-result-index">{collectionIndex + 1}</span>
+            )}
           </td>
+          {visibleColumns.map((column) => collectionCell(column.key))}
+          <td className="kd-table-fill" aria-hidden="true" />
         </tr>
       );
     });
+
+  const renderOpenedCollectionHead = (
+    item: IntakeItem,
+    index: number,
+    pickableCount: number,
+    collapsed: boolean,
+  ) => (
+    <tr
+      data-collection-open="true"
+      data-collapsed={collapsed || undefined}
+      aria-expanded={!collapsed}
+      aria-label={`${item.title || item.entry}，${collapsed ? "展开" : "收起"}曲目`}
+      tabIndex={0}
+      title={collapsed ? "展开曲目" : "收起曲目"}
+      onClick={(event) => {
+        if ((event.target as HTMLElement).closest("button")) return;
+        onToggleItem(index);
+      }}
+      onKeyDown={(event) => {
+        if ((event.target as HTMLElement).closest("button")) return;
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        onToggleItem(index);
+      }}
+    >
+      <td className="kd-selection-cell" />
+      <td className="kd-result-lead" data-col="index">
+        {collapsed ? (
+          <ChevronRight size={13} aria-hidden="true" />
+        ) : (
+          <ChevronDown size={13} aria-hidden="true" />
+        )}
+      </td>
+      <td colSpan={Math.max(1, visibleColumns.length + 1)}>
+        <span className="kd-row" style={{ gap: "0.45rem", minWidth: 0 }}>
+          {item.groups[0]?.cover ? (
+            <span className="kd-thumb">
+              <CoverImage src={item.groups[0].cover} alt="" loading="lazy" />
+            </span>
+          ) : null}
+          {item.platform ? <PlatformMark id={item.platform} size={13} /> : null}
+          <span className="kd-chip" data-tone="theme">
+            {KIND_LABEL[item.kind]}
+          </span>
+          <strong className="kd-truncate" title={item.title || item.entry}>
+            {item.title || item.entry}
+          </strong>
+          <span className="kd-faint">{item.groups.length} 首</span>
+          {pickableCount > 0 ? (
+            <button
+              type="button"
+              className="kd-result-download-all"
+              style={{ marginLeft: "auto" }}
+              onClick={(event) => {
+                event.stopPropagation();
+                onDownloadItem(index);
+              }}
+            >
+              <Download size={12} />
+              全部下载
+            </button>
+          ) : null}
+        </span>
+      </td>
+    </tr>
+  );
 
   const renderColumnHead = (column: ResultColumn) => {
     const colWidth = widthFor(column.key, column.width);
@@ -588,11 +698,26 @@ export function ResultTable({
                     />
                   ),
                 );
-            // 已经解析成真实曲目的远程歌单/艺术家/专辑就是普通曲目列表：
-            // 不再额外套“歌单 + 标题 + N 首 + 全部下载”的父行，也不画树枝。
-            const rows = directCollection || !collapsed ? <>{renderCollectionRows(item)}{groupRows}</> : null;
+            // 已经解析成真实曲目的远程集合保持普通曲目行，只在第一行上方留一条
+            // 当前集合标题。它不是可折叠父包，不画树枝，也不会把歌曲再次套层级。
+            const rows =
+              !collapsed ? (
+                <>
+                  {renderCollectionRows(item)}
+                  {groupRows}
+                </>
+              ) : null;
 
-            if (itemFlat) return <Fragment key={item.entry}>{rows}</Fragment>;
+            if (itemFlat) {
+              return (
+                <Fragment key={item.entry}>
+                  {directCollection
+                    ? renderOpenedCollectionHead(item, index, pickable.length, collapsed)
+                    : null}
+                  {rows}
+                </Fragment>
+              );
+            }
 
             return (
               <Fragment key={`${index}:${item.entry}`}>

@@ -20,6 +20,8 @@ mod desktop_media;
 /// 桌面 + Android 共用 playback_* 命令；iOS 仍走 native-audio 插件。
 #[cfg(any(desktop, target_os = "android"))]
 mod desktop_player;
+#[cfg(desktop)]
+mod virtual_disk;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -1211,6 +1213,8 @@ pub fn run() {
 
     let builder = builder.setup(|app| {
         app.manage(UpdateProgressState::default());
+        #[cfg(desktop)]
+        app.manage(virtual_disk::VirtualDiskManager::default());
         #[cfg(any(desktop, target_os = "android"))]
         app.manage(
             desktop_player::DesktopPlayerHandle::spawn(app.handle().clone())
@@ -1219,6 +1223,8 @@ pub fn run() {
         let (bridge, theme) = start_server(app.handle())?;
         tracing::info!("KDJ 后端就绪：{}", bridge.base_url);
         app.manage(bridge);
+        #[cfg(desktop)]
+        virtual_disk::sync_existing(app.handle());
         // 服务起好再显示窗口。窗口在配置里是 visible:false，这里补一次 show()——
         // Electron 版靠 `ready-to-show` 做同样的事，为的是不让用户看见
         // 「空窗口 → 内容」的跳变。start_server 失败时直接返回 Err，
@@ -1263,6 +1269,12 @@ pub fn run() {
         window_control,
         set_window_background,
         set_desktop_lyrics,
+        virtual_disk::virtual_disk_status,
+        virtual_disk::virtual_disk_mount,
+        virtual_disk::virtual_disk_ensure_capacity,
+        virtual_disk::virtual_disk_grow,
+        virtual_disk::virtual_disk_eject,
+        virtual_disk::virtual_disk_delete,
         desktop_player::playback_initialize,
         desktop_player::playback_command,
         desktop_player::playback_state
@@ -1321,6 +1333,9 @@ pub fn run() {
             .build(tauri::generate_context!())
             .expect("KDJ 启动失败");
         app.run(|app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = &event {
+                virtual_disk::eject_on_exit(app_handle);
+            }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = &event {
                 // 程序坞图标再点一下：唤回被红灯藏起的主窗。

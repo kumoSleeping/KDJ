@@ -109,7 +109,7 @@ export function isTrackDrag(event: { dataTransfer: DataTransfer | null }): boole
 export function writeTrackDragData(dataTransfer: DataTransfer, ids: number[]): void {
   const payload = JSON.stringify(ids);
   // 先登记，再写 WebKit 接受度最高的 text/plain；自定义 MIME 被拒绝时，
-  // text/plain + activeIds 仍能让文件夹、临时列表和播放器完成 drop。
+  // text/plain + activeIds 仍能让文件夹、OneLibrary 和播放器完成 drop。
   announceTrackDrag(ids);
   dataTransfer.effectAllowed = "copyMove";
   dataTransfer.setData("text/plain", `${TRACK_DND_TEXT_PREFIX}${payload}`);

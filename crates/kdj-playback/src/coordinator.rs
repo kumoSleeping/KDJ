@@ -810,7 +810,12 @@ impl Actor {
                         })
                     }
                 }
-                .map_err(|error| format!("流式解码失败：{error:#}"));
+                .map_err(|error| match request.source_kind {
+                    PlaybackSourceKind::Local => {
+                        format!("本地音频文件无法播放，可能已被移动或所在设备已断开：{error:#}")
+                    }
+                    PlaybackSourceKind::Remote => format!("在线试听无法播放：{error:#}"),
+                });
                 let _ = sender.send(Request::WorkerFinished {
                     deck,
                     revision,
@@ -1182,9 +1187,6 @@ fn validate_source(source: &PlaybackSource) -> Result<(), String> {
         return Err("曲目 id 无效".into());
     }
     match source.source_kind {
-        PlaybackSourceKind::Local if source.track_id < 0 => {
-            return Err("本地曲目 id 无效".into());
-        }
         PlaybackSourceKind::Remote if !is_loopback_http_url(&source.path) => {
             return Err("在线音频必须使用应用内回环代理".into());
         }
@@ -1383,6 +1385,16 @@ mod tests {
             rate: 1.0,
             autoplay: false,
         }
+    }
+
+    #[test]
+    fn negative_onelibrary_ids_are_valid_local_playback_sources() {
+        let local = source(-1_000_000_042, 0.0);
+        assert!(validate_source(&local).is_ok());
+
+        let mut remote = local;
+        remote.source_kind = PlaybackSourceKind::Remote;
+        assert!(validate_source(&remote).is_err());
     }
 
     /// 造假一个“仍在发声”的 Deck：writer 故意泄漏，流永远不会 drained，

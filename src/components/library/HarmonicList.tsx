@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, FolderOpen, Library, ListMusic, ListStart, LoaderCircle, Play } from "lucide-react";
+import { Check, FolderOpen, Library, LoaderCircle, Play } from "lucide-react";
 import { api } from "../../lib/api";
 import { formatBpm } from "../../lib/format";
 import { useHarmonicScope } from "../../lib/harmonicScope";
@@ -7,7 +7,6 @@ import { isOutsideFolder } from "../../lib/outsideFolder";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import { endTrackDrag, writeTrackDragData } from "../../lib/trackDrag";
 import { useLibraryStore } from "../../stores/libraryStore";
-import { useQueueStore } from "../../stores/queueStore";
 import type { HarmonicMatch, Track } from "../../types";
 import { ContextMenu } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
@@ -41,7 +40,6 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
   const scope = useHarmonicScope((state) => state.scope);
   const setScope = useHarmonicScope((state) => state.setScope);
   const folder = useLibraryStore((state) => state.filter.folder);
-  const queueCount = useQueueStore((state) => state.ids.length);
   // 没选文件夹时「当前文件夹」等价于全库——与其给一个点了没反应的开关，
   // 不如让它退回全库并在按钮上说清楚。「其他」也不是真实目录，同样退回全库。
   const activeFolder = scope === "folder" && !isOutsideFolder(folder) ? folder : "";
@@ -68,12 +66,6 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
   }, [track.id]);
 
   useEffect(() => {
-    if (scope === "queue") {
-      setMatches([]);
-      setLoading(false);
-      setError("");
-      return;
-    }
     if (!track.camelot || !track.bpm) {
       setMatches([]);
       setError("");
@@ -100,16 +92,6 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
       alive = false;
     };
   }, [track.id, track.camelot, track.bpm, activeFolder, scope]);
-
-  const menuTracks = rowMenu
-    ? matches
-        .filter((match) =>
-          (selected.has(rowMenu.track.id) ? selected : new Set([rowMenu.track.id])).has(
-            match.track.id,
-          ),
-        )
-        .map((match) => match.track)
-    : [];
 
   const toggleSelected = (id: number) => {
     setSelectedIds((ids) => (ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]));
@@ -140,7 +122,7 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
     setMatches(rest);
   };
 
-  /** 范围开关：三枚小按钮常驻在列表顶上，任何状态下都能切。 */
+  /** 范围开关：全库 / 当前文件夹。 */
   const scopeBar = (
     <div className="kd-scope" role="group" aria-label="接歌范围">
       <button
@@ -161,15 +143,6 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
       >
         <FolderOpen size={14} />
       </button>
-      <button
-        type="button"
-        aria-label="临时列表"
-        aria-pressed={scope === "queue"}
-        onClick={() => setScope("queue")}
-        title="只播放临时列表，放空后停止"
-      >
-        <ListMusic size={14} />
-      </button>
       {scope === "folder" && !folder && <span className="kd-faint">（没选文件夹，仍是全部）</span>}
       {selectionMode && (
         <button
@@ -186,11 +159,7 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
     </div>
   );
 
-  const body = scope === "queue" ? (
-    <p className="kd-muted">
-      临时列表里有 {queueCount} 首，将按排队顺序播放；放空后停止。
-    </p>
-  ) : !track.camelot || !track.bpm ? (
+  const body = !track.camelot || !track.bpm ? (
     <p className="kd-muted">这首还没分析出调号和 BPM，先跑一次分析。</p>
   ) : loading ? (
     <p className="kd-muted kd-row">
@@ -370,26 +339,6 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
           >
             <Check size={12} />
             选择
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setRowMenu(null);
-              useQueueStore.getState().add(menuTracks);
-            }}
-          >
-            <ListMusic size={12} />
-            加入临时列表{menuTracks.length > 1 ? `（${menuTracks.length} 首）` : ""}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setRowMenu(null);
-              useQueueStore.getState().add(menuTracks, true);
-            }}
-          >
-            <ListStart size={12} />
-            下一首播放{menuTracks.length > 1 ? `（${menuTracks.length} 首）` : ""}
           </button>
         </ContextMenu>
       )}

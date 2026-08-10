@@ -1,6 +1,10 @@
 import type { Track, Waveform } from "../types";
 import { api } from "./api";
 import { isStreamTrack } from "./streamTrack";
+import {
+  isOneLibraryPlaybackTrack,
+  oneLibraryPlaybackSource,
+} from "./playbackTrackSource";
 
 /** 当前曲、下一台 Deck 和最近查看过的歌曲足够；避免整晚演出后数组只增不减。 */
 const CACHE_LIMIT = 24;
@@ -504,6 +508,27 @@ export function loadWaveform(trackId: number): Promise<Waveform> {
   return request;
 }
 
+function loadOneLibraryWaveform(track: Track): Promise<Waveform> {
+  const hit = cachedWaveform(track.id);
+  if (hit) return Promise.resolve(hit);
+  const pending = inflight.get(track.id);
+  if (pending) return pending;
+  const source = oneLibraryPlaybackSource(track);
+  if (!source) return Promise.reject(new Error("OneLibrary 播放来源无效"));
+  const request = api
+    .oneLibraryWaveform(source.devicePath, source.contentId, track.id)
+    .then((data) => {
+      inflight.delete(track.id);
+      return remember(track.id, data);
+    })
+    .catch((error: unknown) => {
+      inflight.delete(track.id);
+      throw error;
+    });
+  inflight.set(track.id, request);
+  return request;
+}
+
 /** 曲库波形走服务端缓存；负 id 只能读取媒体播放过程中形成的渐进快照。 */
 export function loadWaveformById(trackId: number): Promise<Waveform> {
   if (trackId >= 0) return loadWaveform(trackId);
@@ -514,6 +539,7 @@ export function loadWaveformById(trackId: number): Promise<Waveform> {
 }
 
 export function loadWaveformForTrack(track: Track): Promise<Waveform> {
+  if (isOneLibraryPlaybackTrack(track)) return loadOneLibraryWaveform(track);
   return isStreamTrack(track) ? loadWaveformById(track.id) : loadWaveform(track.id);
 }
 
@@ -523,5 +549,5 @@ export function loadWaveformForTrack(track: Track): Promise<Waveform> {
  */
 export function prefetchWaveform(track: Track | null | undefined): void {
   if (!track || isStreamTrack(track)) return;
-  void loadWaveform(track.id).catch(() => undefined);
+  void loadWaveformForTrack(track).catch(() => undefined);
 }

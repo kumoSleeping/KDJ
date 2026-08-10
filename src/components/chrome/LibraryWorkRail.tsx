@@ -115,7 +115,6 @@ export function LibraryWorkRail({
   const autoAnalyzeSuspended = useLibraryStore((state) => state.autoAnalyzeSuspended);
   const stats = useLibraryStore((state) => state.stats);
   const total = useLibraryStore((state) => state.total);
-  const queueView = useLibraryStore((state) => state.queueView);
   const filter = useLibraryStore((state) => state.filter);
   const setFilter = useLibraryStore((state) => state.setFilter);
   const selectedIds = useLibraryStore((state) => state.selectedIds);
@@ -172,7 +171,7 @@ export function LibraryWorkRail({
         return true;
       };
 
-      // 1) 优先就在当前文件夹 / 搜索 / 临时列表里定位，别一上来跳走。
+      // 1) 优先就在当前文件夹 / 搜索里定位，别一上来跳走。
       //    只有路径明显不在当前夹时才跳过翻页（避免错夹里把整库页翻完再退）。
       {
         const store = useLibraryStore.getState();
@@ -183,7 +182,6 @@ export function LibraryWorkRail({
           Boolean(folder) &&
           !isOutsideFolder(folder) &&
           !q &&
-          !store.queueView &&
           !path.startsWith(`${folder}/`);
         if (!clearlyElsewhere && (await locateInCurrentView())) return;
       }
@@ -191,9 +189,9 @@ export function LibraryWorkRail({
       // 2) 当前视图盖不住：退回全部曲目再定位。
       const store = useLibraryStore.getState();
       const onAllTracks =
-        !store.filter.folder.trim() && !store.filter.q.trim() && !store.queueView;
+        !store.filter.folder.trim() &&
+        !store.filter.q.trim();
       if (onAllTracks) return;
-      if (store.queueView) store.setQueueView(false);
       useLibraryStore.getState().setFilter({
         folder: "",
         q: "",
@@ -223,7 +221,7 @@ export function LibraryWorkRail({
   const activeMaintenance = maintenance.filter((item) => item.phase !== "done");
   const downloading = showDownloads && activeDownloads > 0;
   const autoPaused = autoAnalyzeSuspended || !autoAnalyze;
-  const searchExpanded = !queueView && !selecting && searchOpen;
+  const searchExpanded = !selecting && searchOpen;
 
   const toggleAutoAnalyze = () => {
     if (autoPaused) {
@@ -250,7 +248,7 @@ export function LibraryWorkRail({
     setSearchOpen(false);
   };
 
-  const folderSearchToggle = !queueView ? (
+  const folderSearchToggle = (
     <button
       type="button"
       className="kd-activity-search-toggle"
@@ -264,7 +262,7 @@ export function LibraryWorkRail({
     >
       <Search size={14} strokeWidth={2.25} />
     </button>
-  ) : null;
+  );
 
   const trailingTools = (
     <span className="kd-activity-trailing-tools">
@@ -439,7 +437,7 @@ export function LibraryWorkRail({
     );
     texts.push(
       <span key="n" className="kd-activity-text">
-        {queueView ? "临时列表" : "曲库"} {trackTotal} 首
+        曲库 {trackTotal} 首
       </span>,
     );
     glyphs.push(

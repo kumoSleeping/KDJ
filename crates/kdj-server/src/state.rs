@@ -165,6 +165,13 @@ pub struct FolderUndoBatch {
     pub items: Vec<FolderUndoItem>,
 }
 
+#[derive(Debug, Clone)]
+pub struct OneLibrarySyncSnapshot {
+    pub rating: i64,
+    pub cover_version: String,
+    pub update_count: i32,
+}
+
 pub struct AppState {
     pub config: Arc<AppConfig>,
     pub hub: EventHub,
@@ -194,6 +201,8 @@ pub struct AppState {
     pub folder_operations: Mutex<()>,
     /// 最近成功的曲目复制/移动/删除批次；进程重启后故意清空，避免误改用户后来变动的文件。
     pub folder_undo: Mutex<VecDeque<FolderUndoBatch>>,
+    /// 已观察到的外置曲目状态，用来区分“本轮 djay 改了”与普通三秒轮询。
+    pub one_library_sync: Mutex<HashMap<String, OneLibrarySyncSnapshot>>,
 }
 
 impl AppState {
@@ -232,6 +241,7 @@ impl AppState {
             maintenance: Default::default(),
             folder_operations: Mutex::new(()),
             folder_undo: Mutex::new(VecDeque::new()),
+            one_library_sync: Mutex::new(HashMap::new()),
         }))
     }
 

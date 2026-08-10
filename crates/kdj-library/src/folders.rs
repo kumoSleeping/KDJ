@@ -64,6 +64,11 @@ fn lyrics_paths(
 }
 
 fn write_text_atomic(path: &Path, text: &str) -> Result<()> {
+    // 重复下载/补词经常拿到完全相同的正文。先做一次小文件比较，避免在歌曲位于
+    // U 盘时仍创建 partial + rename；读几 KiB 比两次目录写便宜得多。
+    if std::fs::read(path).is_ok_and(|current| current == text.as_bytes()) {
+        return Ok(());
+    }
     let tmp = path.with_extension("lrc.partial");
     std::fs::write(&tmp, text.as_bytes())
         .with_context(|| format!("写歌词临时文件失败：{}", tmp.display()))?;
@@ -385,7 +390,11 @@ fn read_manifest(directory: &Path) -> serde_json::Map<String, serde_json::Value>
 }
 
 pub fn read_manifest_order(directory: &Path) -> Vec<String> {
-    read_manifest(directory)
+    manifest_order(&read_manifest(directory))
+}
+
+fn manifest_order(manifest: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    manifest
         .get("order")
         .and_then(serde_json::Value::as_array)
         .map(|list| {
@@ -403,14 +412,12 @@ pub fn has_manifest(directory: &Path) -> bool {
     manifest_path(directory).is_file() || legacy_manifest_path(directory).is_file()
 }
 
-/// 这个目录的顺序是不是“受管的”。树上的 `managed` 字段走这一条。
-fn manifest_is_managed(directory: &Path) -> bool {
-    !read_manifest(directory).is_empty()
-}
-
 /// 同目录写临时文件再 rename。进程被 kill 时最多留一份 `.partial`，
 /// 永远不会把上一份好清单截成半个 JSON。
 fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
+    if std::fs::read(path).is_ok_and(|current| current == body) {
+        return Ok(());
+    }
     let parent = path.parent().context("清单没有上级目录")?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("创建 KDJ 元数据目录失败：{}", parent.display()))?;
@@ -509,25 +516,47 @@ pub fn write_manifest(directory: &Path, order: &[String]) -> Result<()> {
 }
 
 /// 这一层的子目录名，按大小写不敏感的字母序。
-fn child_names(directory: &Path) -> Vec<String> {
+#[derive(Default)]
+struct DirectorySnapshot {
+    child_names: Vec<String>,
+    media_files: i64,
+}
+
+/// 一次 readdir 同时拿子目录和本层媒体数。文件夹树原来为这两项各扫一遍目录，
+/// 外置盘上每次刷新都会把目录 I/O 翻倍。
+fn inspect_directory(directory: &Path) -> DirectorySnapshot {
     let Ok(entries) = std::fs::read_dir(directory) else {
-        return Vec::new();
+        return DirectorySnapshot::default();
     };
-    let mut names: Vec<String> = entries
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            // follow_symlinks=false：符号链接指向的目录不算子目录，
-            // 否则一个指回上层的链接会让遍历无限递归
-            entry
-                .file_type()
-                .map(|kind| kind.is_dir() && !kind.is_symlink())
-                .unwrap_or(false)
-        })
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_str()))
-        .collect();
-    names.sort_by_key(|name| name.to_lowercase());
-    names
+    let mut snapshot = DirectorySnapshot::default();
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if kind.is_dir() {
+            if !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_str()) {
+                snapshot.child_names.push(name);
+            }
+        } else if kind.is_file()
+            && !name.starts_with('.')
+            && Path::new(&name)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(is_media_extension)
+        {
+            snapshot.media_files += 1;
+        }
+    }
+    snapshot.child_names.sort_by_key(|name| name.to_lowercase());
+    snapshot
+}
+
+fn child_names(directory: &Path) -> Vec<String> {
+    inspect_directory(directory).child_names
 }
 
 /// 这一层目录里有几个音频文件（不含子目录）。
@@ -535,26 +564,7 @@ fn child_names(directory: &Path) -> Vec<String> {
 /// 树上要同时显示"库里有几首"和"磁盘上有几个"：两者不一致就说明这个目录还没扫过。
 /// 没有这个数，用户看到的是一个空文件夹，而歌明明就在里面。
 pub fn count_audio_files(directory: &Path) -> i64 {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return 0;
-    };
-    entries
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry
-                .file_type()
-                .map(|kind| kind.is_file() && !kind.is_symlink())
-                .unwrap_or(false)
-        })
-        .filter(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            !name.starts_with('.')
-                && Path::new(&name)
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(is_media_extension)
-        })
-        .count() as i64
+    inspect_directory(directory).media_files
 }
 
 /// 按清单里的顺序排列子目录名。
@@ -563,7 +573,10 @@ pub fn count_audio_files(directory: &Path) -> i64 {
 /// 磁盘上有、清单里没有的（新建的）按名字排在后面。
 /// 两边都不强行同步回文件——只有用户真的调过顺序才写盘。
 pub fn apply_order(directory: &Path, listed: &[String]) -> Vec<String> {
-    let actual = child_names(directory);
+    apply_order_to_actual(child_names(directory), listed)
+}
+
+fn apply_order_to_actual(actual: Vec<String>, listed: &[String]) -> Vec<String> {
     let index: HashMap<&str, usize> = listed
         .iter()
         .enumerate()
@@ -698,13 +711,17 @@ pub fn build_tree(dirs: &[String], track_paths: &[String]) -> FolderTree {
 }
 
 fn walk(directory: &Path, counts: &HashMap<String, i64>, depth: usize) -> FolderNode {
-    let listed = read_manifest_order(directory);
-    let managed = manifest_is_managed(directory);
+    // 清单和目录都只读一次：树刷新是外置曲库最常走的只读路径。
+    let manifest = read_manifest(directory);
+    let listed = manifest_order(&manifest);
+    let managed = !manifest.is_empty();
+    let snapshot = inspect_directory(directory);
+    let files = snapshot.media_files;
     let mut children: Vec<FolderNode> = Vec::new();
     if depth < MAX_DEPTH {
         // 顺序由目录自己的清单决定，不是字母序：DJ 的 set 目录是按演出顺序排的，
         // 按字母排会把「5月 / 6yue / 7yue」打散成毫无意义的次序。
-        for name in apply_order(directory, &listed)
+        for name in apply_order_to_actual(snapshot.child_names, &listed)
             .into_iter()
             .take(MAX_CHILDREN)
         {
@@ -716,7 +733,6 @@ fn walk(directory: &Path, counts: &HashMap<String, i64>, depth: usize) -> Folder
         .get(&directory.to_string_lossy().into_owned())
         .copied()
         .unwrap_or(0);
-    let files = count_audio_files(directory);
     FolderNode {
         path: directory.to_string_lossy().into_owned(),
         name: directory
@@ -1067,6 +1083,35 @@ mod tests {
         // 坏清单不该让整棵树打不开
         std::fs::write(manifest_path(&dir), "{ not json").unwrap();
         assert_eq!(read_manifest_order(&dir), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn identical_manifest_and_lyrics_do_not_rewrite_flash_files() {
+        let dir = scratch("sidecar-noop");
+        let order = vec!["b".to_string(), "a".to_string()];
+        write_manifest(&dir, &order).unwrap();
+        let manifest = manifest_path(&dir);
+        let manifest_before = std::fs::metadata(&manifest).unwrap().modified().unwrap();
+
+        let audio = dir.join("song.flac");
+        std::fs::write(&audio, b"audio").unwrap();
+        write_lyrics(&audio, "wyy", "42", "[00:01]词", "", "").unwrap();
+        let lyric = lyrics_paths(&audio, "wyy", "42").unwrap().0;
+        let lyric_before = std::fs::metadata(&lyric).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+
+        write_manifest(&dir, &order).unwrap();
+        write_lyrics(&audio, "wyy", "42", "[00:01]词", "", "").unwrap();
+
+        assert_eq!(
+            manifest_before,
+            std::fs::metadata(manifest).unwrap().modified().unwrap()
+        );
+        assert_eq!(
+            lyric_before,
+            std::fs::metadata(lyric).unwrap().modified().unwrap()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

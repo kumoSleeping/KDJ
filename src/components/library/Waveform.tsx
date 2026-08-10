@@ -1,13 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   cachedWaveform,
+  loadWaveformForTrack,
   loadWaveformById,
   streamWaveformSnapshot,
   subscribeStreamWaveform,
   updateStreamWaveform,
   type StreamWaveformSnapshot,
 } from "../../lib/waveformCache";
-import type { Waveform as WaveformData } from "../../types";
+import type { CuePoint, Track, Waveform as WaveformData } from "../../types";
+import { cueColor, cueTextColor, cueTitle, hotCueLabel } from "../../lib/cuePoints";
+import { isOneLibraryPlaybackTrack } from "../../lib/playbackTrackSource";
 import { waveformEdgeScales } from "../../lib/waveformRenderPolicy";
 import { waveformScrubPosition } from "../../lib/waveformScrub";
 import { ContextMenu } from "../common";
@@ -40,6 +43,8 @@ export interface SeekDetail {
  */
 export interface WaveformProps {
   trackId: number;
+  /** 负数 id 不再等同于在线试听；OneLibrary 需要这份来源快照加载外置文件波形。 */
+  track?: Track | null;
   /** 播放位置（秒）。传 null 就不画播放头。 */
   position?: number | null;
   /** 波形尚未返回时用于进度条跳转的媒体时长（秒）。 */
@@ -48,6 +53,8 @@ export interface WaveformProps {
   cueMs?: number | null;
   /** 结束点（毫秒）。有值时顶部画主题色小三角。 */
   endMs?: number | null;
+  /** DJ 软件写入的标准 Cue / Loop；仅展示，不参与现有起止点操作。 */
+  cuePoints?: readonly CuePoint[];
   /**
    * 右键设起止点。返回错误文案则菜单旁提示；返回 void/空串表示成功。
    * 不传则不挂右键菜单。
@@ -165,19 +172,24 @@ export function pointPatch(
 
 export function Waveform({
   trackId,
+  track = null,
   position = null,
   duration = 0,
   cueMs = null,
   endMs = null,
+  cuePoints = [],
   onSetPoint,
   height = 56,
   dimPlayed = false,
   seekable = true,
   className,
 }: WaveformProps) {
+  const oneLibraryTrack =
+    track?.id === trackId && isOneLibraryPlaybackTrack(track) ? track : null;
+  const progressiveStream = trackId < 0 && oneLibraryTrack === null;
   const [wave, setWave] = useState<WaveformData | null>(() => cachedWaveform(trackId));
   const [streamSnapshot, setStreamSnapshot] = useState<StreamWaveformSnapshot | null>(() =>
-    trackId < 0 ? streamWaveformSnapshot(trackId) : null,
+    progressiveStream ? streamWaveformSnapshot(trackId) : null,
   );
   const [error, setError] = useState("");
   // 右键设点永远取当时正在播放的位置，不能让鼠标点到波形哪里就误落到哪里。
@@ -252,7 +264,7 @@ export function Waveform({
   };
 
   useEffect(() => {
-    if (trackId < 0) {
+    if (progressiveStream) {
       // 在线曲的波形只由当前媒体的 buffered + analyser 渐进生成，不能从这里另拉整首。
       setWave(null);
       setError("");
@@ -263,7 +275,7 @@ export function Waveform({
     setWave(cached);
     setError("");
     if (cached) return;
-    loadWaveformById(trackId)
+    (oneLibraryTrack ? loadWaveformForTrack(oneLibraryTrack) : loadWaveformById(trackId))
       .then((result) => {
         if (alive) setWave(result);
       })
@@ -274,10 +286,10 @@ export function Waveform({
     return () => {
       alive = false;
     };
-  }, [trackId]);
+  }, [trackId, oneLibraryTrack?.source_key, progressiveStream]);
 
   useEffect(() => {
-    if (trackId >= 0) {
+    if (!progressiveStream) {
       setStreamSnapshot(null);
       return;
     }
@@ -289,18 +301,18 @@ export function Waveform({
     }
     sync();
     return unsubscribe;
-  }, [trackId]);
+  }, [trackId, progressiveStream]);
 
   useEffect(() => {
-    if (trackId < 0 && duration > 0) {
+    if (progressiveStream && duration > 0) {
       // loadedmetadata 可能晚于首帧；只补时长，不清掉 PlayerBar 已喂入的缓存区间。
       updateStreamWaveform(trackId, 0, duration, null);
     }
-  }, [trackId, duration]);
+  }, [trackId, duration, progressiveStream]);
 
   const activeStreamSnapshot =
     streamSnapshot?.waveform.track_id === trackId ? streamSnapshot : null;
-  const displayWave = trackId < 0 ? activeStreamSnapshot?.waveform ?? null : wave;
+  const displayWave = progressiveStream ? activeStreamSnapshot?.waveform ?? null : wave;
 
   // 只在数据/尺寸变化时重画。播放头和已播遮罩都是 DOM 层，
   // 位置每 200ms 变一次也不会触发 canvas 重绘。
@@ -333,6 +345,9 @@ export function Waveform({
   const ratio = total > 0 && position !== null ? Math.min(1, Math.max(0, position / total)) : null;
   const cueRatio = markerRatio(cueMs, total);
   const endRatio = markerRatio(endMs, total);
+  const visibleCuePoints = total > 0
+    ? cuePoints.filter((cue) => cue.start_ms >= 0 && cue.start_ms <= total * 1_000)
+    : [];
   const ready = displayWave !== null && displayWave.amp.length > 0;
 
   const applyPoint = async (kind: "start" | "end") => {
@@ -357,7 +372,7 @@ export function Waveform({
       style={{
         position: "relative",
         height,
-        background: trackId < 0 ? "transparent" : "var(--kd-panel-inset)",
+        background: progressiveStream ? "transparent" : "var(--kd-panel-inset)",
         cursor: seekable && total > 0 ? "pointer" : "default",
         overflow: "hidden",
       }}
@@ -386,7 +401,7 @@ export function Waveform({
             : undefined
       }
     >
-      {trackId < 0 && (
+      {progressiveStream && (
         <span className="kd-wave-stream-bed" aria-hidden="true">
           {(activeStreamSnapshot?.bufferedRanges ?? []).map((range, index) => {
             if (total <= 0) return null;
@@ -415,7 +430,7 @@ export function Waveform({
       />
       {/* 在线流即使还没有第一帧 analyser 数据，也始终显示上面的渐变缓存轨；
           不能让通用的灰色 fallback 在首帧或媒体等待期间盖住它。 */}
-      {!ready && trackId >= 0 && (
+      {!ready && !progressiveStream && (
         <div
           className="kd-wave-fallback"
           aria-hidden="true"
@@ -445,6 +460,46 @@ export function Waveform({
           }}
         />
       )}
+
+      {visibleCuePoints.map((cue) => {
+        const start = markerRatio(cue.start_ms, total);
+        const end = markerRatio(cue.end_ms, total);
+        if (start === null || end === null || end <= start) return null;
+        return (
+          <span
+            key={`loop:${cue.id}`}
+            className="kd-wave-cue-loop"
+            style={{
+              left: `${start * 100}%`,
+              width: `${(end - start) * 100}%`,
+              "--kd-cue-color": cueColor(cue),
+            } as CSSProperties}
+            aria-hidden="true"
+          />
+        );
+      })}
+      {visibleCuePoints.map((cue) => {
+        const at = markerRatio(cue.start_ms, total);
+        if (at === null) return null;
+        const hot = hotCueLabel(cue.hot_cue);
+        return (
+          <span
+            key={`cue:${cue.id}`}
+            className="kd-wave-cue"
+            data-kind={hot ? "hot" : "memory"}
+            data-loop={cue.end_ms !== null ? "true" : undefined}
+            style={{
+              left: `${at * 100}%`,
+              "--kd-cue-color": cueColor(cue),
+              "--kd-cue-text": cueTextColor(cue),
+            } as CSSProperties}
+            title={cueTitle(cue)}
+            aria-hidden="true"
+          >
+            {hot}
+          </span>
+        );
+      })}
 
       {cueRatio !== null && (
         <span

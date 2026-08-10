@@ -46,6 +46,10 @@ tauri-plugin-process = "2"
 souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# hdiutil / diskutil 的 -plist 输出不受系统显示语言影响；不要解析本地化文本。
+plist = "1.10"
+
 # Android Playback v2：与桌面共用 coordinator + CPAL/AAudio；Kotlin 插件只留
 # MediaSession / 前台保活 / 歌词 overlay，不再用 ExoPlayer 出声。
 [target.'cfg(target_os = "android")'.dependencies]

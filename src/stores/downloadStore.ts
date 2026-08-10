@@ -13,9 +13,17 @@ import { isSparseDownloadTitle, withDownloadDisplay } from "../lib/downloadDispl
 import {
   hintForDownload,
   pruneDownloadDisplayCache,
-  rememberDownloadDisplay,
+  rememberDownloadDisplays,
+  syncDownloadDisplayCache,
 } from "../lib/downloadDisplayCache";
-import type { DownloadRequest, DownloadTask, Quality, SongSource, WsEvent } from "../types";
+import type {
+  DownloadRequest,
+  DownloadTask,
+  OneLibraryTarget,
+  Quality,
+  SongSource,
+  WsEvent,
+} from "../types";
 
 const ACTIVE_STATES = new Set(["queued", "running", "processing"]);
 /** 兼容仍在运行的旧后端：queued 取消会回一条 canceled，前端必须把它挡掉。 */
@@ -65,8 +73,7 @@ function mergeTask(prev: DownloadTask | undefined, next: DownloadTask): Download
 }
 
 function commitTasks(map: Map<string, DownloadTask>): void {
-  for (const task of map.values()) rememberDownloadDisplay(task);
-  pruneDownloadDisplayCache(map.keys());
+  syncDownloadDisplayCache(map.values());
 }
 
 /**
@@ -98,7 +105,12 @@ export interface DownloadStore {
   refresh(): Promise<void>;
   enqueue(
     sources: SongSource[],
-    options?: { quality?: Quality | null; analyze?: boolean | null; dest_dir?: string },
+    options?: {
+      quality?: Quality | null;
+      analyze?: boolean | null;
+      dest_dir?: string;
+      one_library_target?: OneLibraryTarget | null;
+    },
   ): Promise<DownloadTask[]>;
   cancel(taskId: string): Promise<void>;
   retry(taskId: string): Promise<void>;
@@ -140,6 +152,16 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       dest_dir: destDir || undefined,
     };
     const tasks = await api.enqueue(body);
+    const explicitTarget = options && "one_library_target" in options
+      ? options.one_library_target
+      : undefined;
+    const target = explicitTarget === null
+      ? null
+      : explicitTarget ?? (await import("./playlistStore")).usePlaylistStore.getState().selectedTarget;
+    if (target) {
+      const { registerOneLibraryDownloads } = await import("../lib/oneLibraryDownloads");
+      registerOneLibraryDownloads(target, sources, tasks);
+    }
     // 旧后端可能不回 dest_dir；本地盖上，左表待下载行才能对上文件夹。
     const stamped = destDir
       ? tasks.map((task) => ({ ...task, dest_dir: task.dest_dir || destDir }))
@@ -191,8 +213,12 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
     for (const task of tasks) {
       const merged = mergeTask(map.get(task.id), task);
       map.set(task.id, merged);
-      rememberDownloadDisplay(merged);
     }
+    rememberDownloadDisplays(
+      tasks
+        .map((task) => map.get(task.id))
+        .filter((task): task is DownloadTask => Boolean(task)),
+    );
     set({ tasks: map, ...derive(map) });
   },
 
@@ -207,6 +233,9 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
     if (event.type === "download.updated") {
       if (removedQueuedTasks.has(event.payload.id)) return;
       get().mergeTasks([event.payload]);
+      void import("../lib/oneLibraryDownloads").then(({ handleOneLibraryDownloadTask }) =>
+        handleOneLibraryDownloadTask(event.payload),
+      );
       return;
     }
     if (event.type === "download.list") {

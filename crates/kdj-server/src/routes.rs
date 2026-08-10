@@ -1,7 +1,7 @@
 //! HTTP 路由。路径和响应形状必须和 `sidecar/kdj/app.py` 一一对应——
 //! 前端 `src/lib/api.ts` 是照着旧契约写的。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -84,6 +84,61 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/video/calibrate", post(video_calibrate))
         .route("/api/vj/export", post(vj_export))
         .route("/api/library/tracks", get(library_tracks))
+        .route(
+            "/api/library/onelibrary/playlists",
+            get(one_library_playlists).post(one_library_playlist_create),
+        )
+        .route(
+            "/api/library/onelibrary/playlists/{id}",
+            patch(one_library_playlist_patch).delete(one_library_playlist_delete),
+        )
+        .route(
+            "/api/library/onelibrary/playlists/{id}/move",
+            post(one_library_playlist_move),
+        )
+        .route(
+            "/api/library/onelibrary/playlists/{id}/tracks/add",
+            post(one_library_playlist_tracks_add),
+        )
+        .route(
+            "/api/library/onelibrary/playlists/{id}/tracks",
+            get(one_library_playlist_tracks).put(one_library_playlist_tracks_reorder),
+        )
+        .route(
+            "/api/library/onelibrary/playlists/{id}/tracks/remove",
+            post(one_library_playlist_tracks_remove),
+        )
+        .route(
+            "/api/library/onelibrary/tracks/copy",
+            post(one_library_playlist_tracks_copy),
+        )
+        .route(
+            "/api/library/onelibrary/tracks/{id}/rating",
+            patch(one_library_track_rating),
+        )
+        .route(
+            "/api/library/onelibrary/capacity",
+            post(one_library_capacity),
+        )
+        .route(
+            "/api/library/onelibrary/import",
+            post(one_library_import_tracks),
+        )
+        .route(
+            "/api/library/onelibrary/cover",
+            get(one_library_cover)
+                .put(one_library_set_cover)
+                .layer(axum::extract::DefaultBodyLimit::max(COVER_MAX_BYTES)),
+        )
+        .route(
+            "/api/library/onelibrary/waveform",
+            get(one_library_waveform),
+        )
+        .route("/api/library/devices", get(library_devices))
+        .route(
+            "/api/library/devices/authorize",
+            post(library_device_authorize),
+        )
         .route("/api/stream/playlists/{platform}", get(stream_playlists))
         .route("/api/stream/playlist", post(stream_playlist))
         .route("/api/library/tracks/{id}", get(library_track))
@@ -2217,6 +2272,563 @@ async fn library_tracks(
     Ok(Json(state.library.list_tracks(&query)?))
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct OneLibraryDeviceParams {
+    #[serde(default)]
+    device_path: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CreateOneLibraryPlaylistRequest {
+    #[serde(default)]
+    device_path: String,
+    #[serde(default)]
+    name: String,
+    parent_id: Option<i32>,
+    #[serde(default)]
+    folder: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PatchOneLibraryPlaylistRequest {
+    #[serde(default)]
+    device_path: String,
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct MoveOneLibraryPlaylistRequest {
+    #[serde(default)]
+    device_path: String,
+    #[serde(default)]
+    parent_id: i32,
+    sequence: Option<i32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OneLibraryPlaylistTracksRequest {
+    #[serde(default)]
+    device_path: String,
+    #[serde(default)]
+    track_ids: Vec<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ReorderOneLibraryPlaylistTracksRequest {
+    #[serde(default)]
+    device_path: String,
+    #[serde(default)]
+    content_ids: Vec<i32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OneLibraryRatingRequest {
+    #[serde(default)]
+    device_path: String,
+    #[serde(default)]
+    rating: i32,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CopyOneLibraryPlaylistTracksRequest {
+    #[serde(default)]
+    source_device_path: String,
+    #[serde(default)]
+    source_playlist_id: i32,
+    #[serde(default)]
+    target_device_path: String,
+    #[serde(default)]
+    target_playlist_id: i32,
+    #[serde(default)]
+    content_ids: Vec<i32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ImportOneLibraryTracksRequest {
+    #[serde(default)]
+    device_path: String,
+    #[serde(default)]
+    playlist_id: i32,
+    #[serde(default)]
+    content_ids: Vec<i32>,
+    #[serde(default)]
+    dest: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OneLibraryCoverParams {
+    #[serde(default)]
+    device_path: String,
+    #[serde(default)]
+    content_id: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct OneLibraryWaveformParams {
+    #[serde(default)]
+    device_path: String,
+    #[serde(default)]
+    content_id: i32,
+    #[serde(default)]
+    playback_id: i64,
+    #[serde(default = "default_buckets")]
+    buckets: usize,
+}
+
+/// rbox 为每次 `OneLibrary::new` 建独立 r2d2 池；同一加密库被列表轮询、封面缩略图
+/// 和写操作同时建多个池时，连接初始化会互相撞成 `database is locked`。HTTP 边界只让
+/// 一个短数据库任务进入；波形解码等拿到安全路径后立即释放许可，不占着锁做重活。
+static ONE_LIBRARY_HTTP_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+async fn one_library_task<T, F>(task: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    let _permit = ONE_LIBRARY_HTTP_SLOT
+        .acquire()
+        .await
+        .map_err(|error| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    let result = tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    Ok(result)
+}
+
+async fn one_library_playlists(
+    Query(params): Query<OneLibraryDeviceParams>,
+) -> ApiResult<Json<Vec<OneLibraryPlaylist>>> {
+    let playlists = one_library_task(move || {
+        crate::usb_library::one_library_playlists(&params.device_path)
+    })
+    .await?;
+    Ok(Json(playlists))
+}
+
+async fn one_library_playlist_create(
+    Json(payload): Json<CreateOneLibraryPlaylistRequest>,
+) -> ApiResult<Json<OneLibraryPlaylist>> {
+    let playlist = one_library_task(move || {
+        crate::usb_library::create_one_library_playlist(
+            &payload.device_path,
+            &payload.name,
+            payload.parent_id,
+            payload.folder,
+        )
+    })
+    .await?;
+    Ok(Json(playlist))
+}
+
+async fn one_library_playlist_patch(
+    AxumPath(id): AxumPath<i32>,
+    Json(payload): Json<PatchOneLibraryPlaylistRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    one_library_task(move || {
+        crate::usb_library::rename_one_library_playlist(&payload.device_path, id, &payload.name)
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn one_library_playlist_move(
+    AxumPath(id): AxumPath<i32>,
+    Json(payload): Json<MoveOneLibraryPlaylistRequest>,
+) -> ApiResult<Json<Vec<OneLibraryPlaylist>>> {
+    let playlists = one_library_task(move || {
+        crate::usb_library::move_one_library_playlist(
+            &payload.device_path,
+            id,
+            payload.parent_id,
+            payload.sequence,
+        )
+    })
+    .await?;
+    Ok(Json(playlists))
+}
+
+async fn one_library_playlist_delete(
+    AxumPath(id): AxumPath<i32>,
+    Json(payload): Json<OneLibraryDeviceParams>,
+) -> ApiResult<Json<serde_json::Value>> {
+    one_library_task(move || {
+        crate::usb_library::delete_one_library_playlist(&payload.device_path, id)
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn one_library_playlist_tracks_add(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i32>,
+    Json(payload): Json<OneLibraryPlaylistTracksRequest>,
+) -> ApiResult<Json<PlaylistExportResult>> {
+    let mut seen = HashSet::new();
+    let mut tracks = Vec::new();
+    for track_id in payload.track_ids {
+        if track_id <= 0 || !seen.insert(track_id) {
+            continue;
+        }
+        tracks.push(
+            state
+                .library
+                .get(track_id)?
+                .ok_or_else(|| ApiError::not_found(format!("曲目不存在：{track_id}")))?,
+        );
+    }
+    let device_path = payload.device_path;
+    let analysis_cache_dir = state.config.data_dir.join("waveform");
+    let result = one_library_task(move || {
+        crate::usb_library::add_one_library_playlist_tracks(
+            &device_path,
+            id,
+            tracks,
+            Some(&analysis_cache_dir),
+        )
+    })
+    .await?;
+    Ok(Json(result))
+}
+
+async fn one_library_playlist_tracks(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i32>,
+    Query(params): Query<OneLibraryDeviceParams>,
+) -> ApiResult<Json<Vec<kdj_core::models::OneLibraryTrack>>> {
+    let device_path = params.device_path;
+    let mut tracks = one_library_task({
+        let device_path = device_path.clone();
+        move || crate::usb_library::one_library_playlist_tracks(&device_path, id)
+    })
+    .await?;
+
+    let mut changed_local_ids = Vec::new();
+    for track in &mut tracks {
+        let Some(local_id) = track.local_track_id else {
+            continue;
+        };
+        let Some(local) = state.library.get(local_id)? else {
+            track.local_track_id = None;
+            continue;
+        };
+        let key = format!("{device_path}\0{}", track.content_id);
+        let previous = state
+            .one_library_sync
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                key,
+                crate::state::OneLibrarySyncSnapshot {
+                    rating: track.rating,
+                    cover_version: track.cover_version.clone(),
+                    update_count: track.external_update_count,
+                },
+            );
+        let first_external_edit = previous.is_none() && track.external_modified;
+        let rating_changed = first_external_edit
+            || previous
+                .as_ref()
+                .is_some_and(|seen| seen.rating != track.rating);
+        let cover_changed = first_external_edit
+            || previous.as_ref().is_some_and(|seen| {
+                seen.cover_version != track.cover_version
+                    || seen.update_count != track.external_update_count
+            });
+
+        if rating_changed && local.rating != track.rating {
+            if let Err(error) = state.library.patch(
+                local_id,
+                &TrackPatch {
+                    rating: Some(track.rating.clamp(0, 5)),
+                    ..TrackPatch::default()
+                },
+            ) {
+                tracing::warn!("同步 OneLibrary 评分到本地曲目 {local_id} 失败：{error:#}");
+            } else {
+                changed_local_ids.push(local_id);
+            }
+        }
+        if cover_changed {
+            let cover = one_library_task({
+                let device_path = device_path.clone();
+                let content_id = track.content_id;
+                move || crate::usb_library::one_library_cover(&device_path, content_id)
+            })
+            .await;
+            if let Ok((data, _)) = cover {
+                if let Err(error) = state.library.write_cover_to_file(local_id, &data) {
+                    tracing::warn!("同步 OneLibrary 封面到本地曲目 {local_id} 失败：{error:#}");
+                } else {
+                    changed_local_ids.push(local_id);
+                }
+            }
+        }
+    }
+    changed_local_ids.sort_unstable();
+    changed_local_ids.dedup();
+    if !changed_local_ids.is_empty() {
+        state.hub.publish_library_updated(&changed_local_ids);
+    }
+    Ok(Json(tracks))
+}
+
+async fn one_library_playlist_tracks_reorder(
+    AxumPath(id): AxumPath<i32>,
+    Json(payload): Json<ReorderOneLibraryPlaylistTracksRequest>,
+) -> ApiResult<Json<Vec<kdj_core::models::OneLibraryTrack>>> {
+    let tracks = one_library_task(move || {
+        crate::usb_library::reorder_one_library_playlist_tracks(
+            &payload.device_path,
+            id,
+            payload.content_ids,
+        )
+    })
+    .await?;
+    Ok(Json(tracks))
+}
+
+async fn one_library_playlist_tracks_remove(
+    AxumPath(id): AxumPath<i32>,
+    Json(payload): Json<ReorderOneLibraryPlaylistTracksRequest>,
+) -> ApiResult<Json<Vec<kdj_core::models::OneLibraryTrack>>> {
+    let tracks = one_library_task(move || {
+        crate::usb_library::remove_one_library_playlist_tracks(
+            &payload.device_path,
+            id,
+            payload.content_ids,
+        )
+    })
+    .await?;
+    Ok(Json(tracks))
+}
+
+async fn one_library_track_rating(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<i32>,
+    Json(payload): Json<OneLibraryRatingRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let rating = payload.rating.clamp(0, 5);
+    let local_track_id = one_library_task(move || {
+        crate::usb_library::set_one_library_rating(&payload.device_path, id, rating)
+    })
+    .await?;
+    if let Some(local_id) = local_track_id.filter(|local_id| {
+        state.library.get(*local_id).ok().flatten().is_some()
+    }) {
+        state.library.patch(
+            local_id,
+            &TrackPatch {
+                rating: Some(i64::from(rating)),
+                ..TrackPatch::default()
+            },
+        )?;
+        state.hub.publish_library_updated(&[local_id]);
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn one_library_playlist_tracks_copy(
+    Json(payload): Json<CopyOneLibraryPlaylistTracksRequest>,
+) -> ApiResult<Json<Vec<kdj_core::models::OneLibraryTrack>>> {
+    let tracks = one_library_task(move || {
+        crate::usb_library::copy_one_library_playlist_tracks(
+            &payload.source_device_path,
+            payload.source_playlist_id,
+            &payload.target_device_path,
+            payload.target_playlist_id,
+            payload.content_ids,
+        )
+    })
+    .await?;
+    Ok(Json(tracks))
+}
+
+async fn one_library_capacity(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<OneLibraryPlaylistTracksRequest>,
+) -> ApiResult<Json<OneLibraryCapacityPlan>> {
+    let mut seen = HashSet::new();
+    let mut tracks = Vec::new();
+    for track_id in payload.track_ids {
+        if track_id <= 0 || !seen.insert(track_id) {
+            continue;
+        }
+        tracks.push(
+            state
+                .library
+                .get(track_id)?
+                .ok_or_else(|| ApiError::not_found(format!("曲目不存在：{track_id}")))?,
+        );
+    }
+    let device_path = payload.device_path;
+    let plan = one_library_task(move || {
+        crate::usb_library::one_library_capacity_plan(&device_path, &tracks)
+    })
+    .await?;
+    Ok(Json(plan))
+}
+
+async fn one_library_import_tracks(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ImportOneLibraryTracksRequest>,
+) -> ApiResult<Json<OneLibraryImportResult>> {
+    let roots = require_roots(&state)?;
+    let dest = kdj_library::folders::ensure_inside(Path::new(&payload.dest), &roots)?;
+    if !dest.is_dir() {
+        return Err(ApiError::bad_request("目标不是文件夹"));
+    }
+    let source_device_key = payload.device_path.clone();
+    let source_tracks = one_library_task({
+        let device_path = payload.device_path.clone();
+        move || crate::usb_library::one_library_playlist_tracks(&device_path, payload.playlist_id)
+    })
+    .await?;
+    let requested: HashSet<i32> = payload
+        .content_ids
+        .into_iter()
+        .filter(|id| *id > 0)
+        .collect();
+    if requested.is_empty() {
+        return Err(ApiError::bad_request("没有选中要导入的 OneLibrary 曲目"));
+    }
+    let library = state.library.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut track_ids = Vec::new();
+        let mut errors = HashMap::new();
+        let mut matched = HashSet::new();
+        for track in source_tracks {
+            if !requested.contains(&track.content_id) {
+                continue;
+            }
+            matched.insert(track.content_id);
+            let source = PathBuf::from(&track.path);
+            let imported = (|| -> anyhow::Result<i64> {
+                anyhow::ensure!(source.is_file(), "外置音频文件已丢失");
+                let target = kdj_library::folders::copy_file(&source, &dest)?;
+                match library.upsert_file(
+                    &target,
+                    "onelibrary",
+                    &format!("{}:{}", source_device_key, track.content_id),
+                ) {
+                    Ok(id) => Ok(id),
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&target);
+                        Err(error)
+                    }
+                }
+            })();
+            match imported {
+                Ok(id) => track_ids.push(id),
+                Err(error) => {
+                    errors.insert(track.content_id.to_string(), format!("{error:#}"));
+                }
+            }
+        }
+        for missing in requested.difference(&matched) {
+            errors.insert(missing.to_string(), "曲目不在来源 OneLibrary 列表中".into());
+        }
+        OneLibraryImportResult { track_ids, errors }
+    })
+    .await
+    .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if !result.track_ids.is_empty() {
+        state.hub.publish_library_updated(&result.track_ids);
+    }
+    Ok(Json(result))
+}
+
+async fn one_library_cover(Query(params): Query<OneLibraryCoverParams>) -> ApiResult<Response> {
+    let (data, mime) = one_library_task(move || {
+        crate::usb_library::one_library_cover(&params.device_path, params.content_id)
+    })
+    .await?;
+    Ok((StatusCode::OK, cover_headers(mime), data).into_response())
+}
+
+async fn one_library_set_cover(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<OneLibraryCoverParams>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.is_empty() {
+        return Err(ApiError::bad_request("没有收到图片数据"));
+    }
+    let local_cover = body.clone();
+    let local_track_id = one_library_task(move || {
+        crate::usb_library::set_one_library_cover(
+            &params.device_path,
+            params.content_id,
+            &body,
+        )
+    })
+    .await?;
+    if let Some(local_id) = local_track_id.filter(|local_id| {
+        state.library.get(*local_id).ok().flatten().is_some()
+    }) {
+        state.library.write_cover_to_file(local_id, &local_cover)?;
+        state.hub.publish_library_updated(&[local_id]);
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn one_library_waveform(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<OneLibraryWaveformParams>,
+) -> ApiResult<Json<Waveform>> {
+    if params.playback_id >= 0 {
+        return Err(ApiError::bad_request("OneLibrary 播放 id 必须是负数"));
+    }
+    let (path, cache_id) = one_library_task({
+        let device_path = params.device_path.clone();
+        move || crate::usb_library::one_library_content_file(&device_path, params.content_id)
+    })
+    .await?;
+    let buckets = params.buckets.clamp(64, 2_000);
+    let waveform = state
+        .waveforms
+        .get_or_compute_detached(
+            cache_id,
+            path,
+            buckets,
+            state.config.data_dir.join("waveform-onelibrary"),
+        )
+        .await
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("{error:#}"),
+            )
+        })?;
+    let mut waveform = crate::waveform::fit_waveform_columns(waveform, buckets);
+    waveform.track_id = params.playback_id;
+    Ok(Json(waveform))
+}
+
+async fn library_devices() -> ApiResult<Json<Vec<RemovableDevice>>> {
+    let devices = tokio::task::spawn_blocking(crate::usb_library::removable_devices)
+        .await
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(devices))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AuthorizeRemovableDeviceRequest {
+    #[serde(default)]
+    path: String,
+}
+
+async fn library_device_authorize(
+    Json(payload): Json<AuthorizeRemovableDeviceRequest>,
+) -> ApiResult<Json<RemovableDevice>> {
+    let device = tokio::task::spawn_blocking(move || {
+        crate::usb_library::authorize_removable_device(&payload.path)
+    })
+    .await
+    .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    Ok(Json(device))
+}
+
 async fn library_track(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<i64>,
@@ -2254,6 +2866,7 @@ async fn library_patch(
     AxumPath(id): AxumPath<i64>,
     Json(payload): Json<TrackPatch>,
 ) -> ApiResult<Json<TrackPatchResult>> {
+    let rating_to_sync = payload.rating.map(|rating| rating.clamp(0, 5) as i32);
     let track = state.library.patch(id, &payload)?;
     // 写回文件标签是尽力而为：文件只读、被 DJ 软件占着都是常事，
     // 让整次保存回滚的话用户白填一遍表单。数据库那份留着，把原因带回去自己判断。
@@ -2264,6 +2877,15 @@ async fn library_patch(
         .map(|err| format!("{err:#}"));
     if let Some(reason) = &tag_write_error {
         tracing::warn!("曲目 {id} 写回文件标签失败：{reason}");
+    }
+    if let Some(rating) = rating_to_sync {
+        if let Err(error) = one_library_task(move || {
+            crate::usb_library::sync_local_rating_to_one_libraries(id, rating)
+        })
+        .await
+        {
+            tracing::warn!("同步本地评分到 OneLibrary 失败：{error:?}");
+        }
     }
     state.hub.publish_library_updated(&[id]);
     Ok(Json(TrackPatchResult {
@@ -3661,6 +4283,14 @@ async fn library_set_cover(
         return Err(ApiError::bad_request("没有收到图片数据"));
     }
     state.library.write_cover_to_file(id, &body)?;
+    let one_library_cover = body.to_vec();
+    if let Err(error) = one_library_task(move || {
+        crate::usb_library::sync_local_cover_to_one_libraries(id, &one_library_cover)
+    })
+    .await
+    {
+        tracing::warn!("同步本地封面到 OneLibrary 失败：{error:?}");
+    }
     let track = state
         .library
         .get(id)?
@@ -3709,6 +4339,32 @@ async fn library_waveform(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_library_http_database_tasks_are_serialized() {
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let active = Arc::clone(&active);
+            let peak = Arc::clone(&peak);
+            tasks.push(tokio::spawn(async move {
+                one_library_task(move || {
+                    let now = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                    active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn preview_refreshes_only_expired_or_denied_upstream_urls() {

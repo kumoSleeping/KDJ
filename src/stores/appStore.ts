@@ -9,7 +9,6 @@ import { api, events } from "../lib/api";
 import type { Account, Health, SearchCapabilities, Settings, WsEvent } from "../types";
 import { useDownloadStore } from "./downloadStore";
 import { useLibraryStore } from "./libraryStore";
-import { useQueueStore } from "./queueStore";
 
 /**
  * hasResults 只管中间搜索半栏是否展开；右栏下载队列只看 showQueue。
@@ -70,6 +69,9 @@ export interface AppStore {
   /** 右栏显示「按顺序导出 VJ」设置面板。 */
   showVjExport: boolean;
   vjExportPanelEpoch: number;
+  /** 右栏显示 KDJ 虚拟磁盘的正式创建与挂载管理面板。 */
+  showVirtualDisk: boolean;
+  virtualDiskPanelEpoch: number;
   /** 右栏显示歌词（播放时后台搜到的 LRC）。 */
   showLyrics: boolean;
   lyricsPanelEpoch: number;
@@ -104,6 +106,7 @@ export interface AppStore {
   openFoldersPanel(): void;
   /** 打开「按顺序导出 VJ」旁路（由文件夹右键触发）。 */
   openVjExportPanel(): void;
+  openVirtualDiskPanel(): void;
   /** 打开右栏歌词面板。 */
   openLyricsPanel(): void;
   toggleLyricsPanel(): void;
@@ -116,6 +119,7 @@ export interface AppStore {
     | "preview"
     | "folders"
     | "vjExport"
+    | "virtualDisk"
     | "lyrics"
     | null;
   bootstrap(): Promise<void>;
@@ -132,6 +136,7 @@ function clearOverlays() {
     showPreview: false,
     showFolders: false,
     showVjExport: false,
+    showVirtualDisk: false,
     showLyrics: false,
   } as const;
 }
@@ -152,6 +157,8 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   foldersPanelEpoch: 0,
   showVjExport: false,
   vjExportPanelEpoch: 0,
+  showVirtualDisk: false,
+  virtualDiskPanelEpoch: 0,
   showLyrics: false,
   lyricsPanelEpoch: 0,
   health: null,
@@ -187,6 +194,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       showPreview: false,
       showFolders: false,
       showVjExport: false,
+      showVirtualDisk: false,
     });
   },
 
@@ -259,6 +267,14 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     });
   },
 
+  openVirtualDiskPanel() {
+    set({
+      ...clearOverlays(),
+      showVirtualDisk: true,
+      virtualDiskPanelEpoch: get().virtualDiskPanelEpoch + 1,
+    });
+  },
+
   openLyricsPanel() {
     set({
       ...clearOverlays(),
@@ -283,6 +299,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     if (state.showPreview) return "preview";
     if (state.showQueue) return "queue";
     if (state.showVjExport) return "vjExport";
+    if (state.showVirtualDisk) return "virtualDisk";
     if (state.showLyrics) return "lyrics";
     return null;
   },
@@ -400,6 +417,5 @@ export function connectEvents(): () => void {
     useAppStore.getState().handleEvent(event);
     useDownloadStore.getState().handleEvent(event);
     useLibraryStore.getState().handleEvent(event);
-    useQueueStore.getState().handleEvent(event);
   });
 }

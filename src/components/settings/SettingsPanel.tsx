@@ -502,10 +502,7 @@ export function SettingsPanel() {
   const setApplyInOutPoints = useDjConfig((state) => state.setApplyInOutPoints);
 
   const widePlay = useTrackClickPrefs((state) => state.widePlay);
-  const clickAddNext = useTrackClickPrefs((state) => state.clickAddNext);
   const setWidePlay = useTrackClickPrefs((state) => state.setWidePlay);
-  const setClickAddNext = useTrackClickPrefs((state) => state.setClickAddNext);
-  const addNextAvailable = widePlay === "double";
   const transportFade = usePlaybackPrefs((state) => state.transportFade);
   const setTransportFade = usePlaybackPrefs((state) => state.setTransportFade);
   const lyricsEngines = useLyricsPrefs((state) => state.engines);
@@ -586,7 +583,8 @@ export function SettingsPanel() {
     };
     refresh();
     // 关闭/清理后仍短轮询：在途 writer 会异步收尾，不能把“缓存中”永久留在 UI。
-    const timer = window.setInterval(refresh, 3_000);
+    // stats 会枚举缓存目录；设置面板停留时无需每 3 秒唤醒下载盘。
+    const timer = window.setInterval(refresh, 10_000);
     return () => {
       disposed = true;
       window.clearInterval(timer);
@@ -703,17 +701,6 @@ export function SettingsPanel() {
               title="移动端歌曲列表固定单击播放；详情请点底部正在播放的歌曲。"
               onChange={() => undefined}
             />
-            <Switch
-              checked={clickAddNext}
-              disabled={!addNextAvailable}
-              label="单击插入下一首待播"
-              title={
-                addNextAvailable
-                  ? "播放设为双击时：单击把歌插到临时列表队头（下一首待播），双击仍负责播放。"
-                  : "需要先把横屏播放手势设为双击，单击才有空档留给「插入下一首待播」。"
-              }
-              onChange={() => setClickAddNext(!clickAddNext)}
-            />
           </div>
         </Panel>
 
@@ -724,6 +711,22 @@ export function SettingsPanel() {
               label="播放 / 暂停渐入渐出"
               title="播放时用约 120 毫秒渐入，暂停时用约 120 毫秒渐出；关掉后立即播放或暂停。"
               onChange={() => setTransportFade(!transportFade)}
+            />
+          </div>
+        </Panel>
+
+        <Panel heading="OneLibrary" dense>
+          <div className="kd-djp-switch-list" aria-label="OneLibrary 选项">
+            <Switch
+              checked={settings?.virtual_disk_auto_grow ?? true}
+              disabled={!settings}
+              label="空间不足时自动迁移至更大的镜像"
+              title="仅用于 KDJ 虚拟磁盘；关闭后空间不足会停止写入并报错。"
+              onChange={() =>
+                void saveSettings({
+                  virtual_disk_auto_grow: !(settings?.virtual_disk_auto_grow ?? true),
+                })
+              }
             />
           </div>
         </Panel>

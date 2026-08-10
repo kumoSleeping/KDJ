@@ -1,6 +1,9 @@
 import {
-  Columns2,
+  Columns3,
   Download,
+  LockKeyhole,
+  LockKeyholeOpen,
+  PanelRight,
   Settings,
   Upload,
 } from "lucide-react";
@@ -9,8 +12,10 @@ import { useUpdateStore } from "../../stores/updateStore";
 export type AsideToggleState = "open" | "closed" | "locked";
 
 export interface ChromeActionsProps {
-  middleSplitEnabled: boolean;
-  onMiddleSplit(): void;
+  asideState?: AsideToggleState;
+  onAsideLock?(): void;
+  multiPaneEnabled: boolean;
+  onMultiPane(): void;
   settingsOpen: boolean;
   onSettings(): void;
   queueOpen: boolean;
@@ -20,10 +25,12 @@ export interface ChromeActionsProps {
   onOpenUpdate?(): void;
 }
 
-/** 主栏顶部右侧的设置、下载入口。右栏收起按钮已移到右栏头部。 */
+/** 主栏顶部右侧的右栏锁、板块模式、设置和下载入口。 */
 export function ChromeActions({
-  middleSplitEnabled,
-  onMiddleSplit,
+  asideState,
+  onAsideLock,
+  multiPaneEnabled,
+  onMultiPane,
   settingsOpen,
   onSettings,
   queueOpen,
@@ -53,21 +60,46 @@ export function ChromeActions({
           <span className="kd-chrome-dot" aria-hidden="true" />
         </button>
       ) : null}
+      {asideState && onAsideLock ? (
+        <button
+          type="button"
+          className="kd-chrome-btn"
+          data-action="aside-lock"
+          data-locked={asideState === "locked" ? "true" : undefined}
+          aria-pressed={asideState === "locked"}
+          aria-label={asideState === "locked" ? "解除右侧栏锁定" : "锁定并收起右侧栏"}
+          title={
+            asideState === "locked"
+              ? "右侧详情栏已锁定：点击解锁"
+              : "锁定右侧详情栏，阻止曲目和视频自动弹出"
+          }
+          onClick={onAsideLock}
+        >
+          <span className="kd-aside-lock-glyph" aria-hidden="true">
+            <PanelRight size={16} strokeWidth={2} />
+            {asideState === "locked" ? (
+              <LockKeyhole className="kd-aside-lock-mark" size={9} strokeWidth={2.8} />
+            ) : (
+              <LockKeyholeOpen className="kd-aside-lock-mark" size={9} strokeWidth={2.8} />
+            )}
+          </span>
+        </button>
+      ) : null}
       <button
         type="button"
         className="kd-chrome-btn"
-        data-action="middle-split"
-        data-active={middleSplitEnabled ? "true" : undefined}
-        aria-pressed={middleSplitEnabled}
-        aria-label={middleSplitEnabled ? "关闭中间分屏模式" : "打开中间分屏模式"}
+        data-action="workspace-panes"
+        data-active={multiPaneEnabled ? "true" : undefined}
+        aria-pressed={multiPaneEnabled}
+        aria-label={multiPaneEnabled ? "关闭多板块模式" : "打开多板块模式"}
         title={
-          middleSplitEnabled
-            ? "分屏模式已开启：本地与在线内容同时显示"
-            : "分屏模式已关闭：只显示当前使用的内容"
+          multiPaneEnabled
+            ? "多板块模式已开启：同时显示最多三个列表"
+            : "多板块模式已关闭：只显示当前列表"
         }
-        onClick={onMiddleSplit}
+        onClick={onMultiPane}
       >
-        <Columns2 size={16} />
+        <Columns3 size={16} />
       </button>
       <button
         type="button"

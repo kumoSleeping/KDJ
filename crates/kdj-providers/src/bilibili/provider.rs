@@ -29,7 +29,7 @@ use super::url::{
 };
 use super::{login, qn_for_height};
 use crate::ffmpeg;
-use crate::net::{ensure_media_url, AtomicDownload};
+use crate::net::{create_download_writer, ensure_media_url, AtomicDownload};
 use crate::provider::{
     effective_limit, qr_data_url_from_text, str_field, unique_download_path, Capabilities,
     DownloadJob, MusicProvider, ProgressSink, ProviderContext,
@@ -86,9 +86,11 @@ impl BilibiliProvider {
             return false;
         }
         matches!(
-            self.client.nav().await.ok().and_then(|data| {
-                data.get("isLogin").and_then(Value::as_bool)
-            }),
+            self.client
+                .nav()
+                .await
+                .ok()
+                .and_then(|data| { data.get("isLogin").and_then(Value::as_bool) }),
             Some(true)
         )
     }
@@ -111,7 +113,9 @@ impl BilibiliProvider {
         Ok(VideoInfo {
             // 空串要退回请求里的 BV 号（Python 的 `str(info.get("bvid") or target.bvid)`）
             bvid: str_field(&info, "bvid").unwrap_or(&target.bvid).to_string(),
-            title: str_field(&info, "title").unwrap_or(&target.bvid).to_string(),
+            title: str_field(&info, "title")
+                .unwrap_or(&target.bvid)
+                .to_string(),
             author: info
                 .pointer("/owner/name")
                 .and_then(Value::as_str)
@@ -169,7 +173,10 @@ impl BilibiliProvider {
         let mut cache = self.preview_urls.lock().unwrap();
         // 顺手清掉过期的：预览是"搜一批、点着看"的用法，不清会越攒越多
         cache.retain(|_, (_, born)| born.elapsed() <= PREVIEW_URL_TTL);
-        cache.insert((bvid.to_string(), page_index), (url.clone(), Instant::now()));
+        cache.insert(
+            (bvid.to_string(), page_index),
+            (url.clone(), Instant::now()),
+        );
         Ok(url)
     }
 
@@ -203,7 +210,10 @@ impl BilibiliProvider {
     pub async fn preview_source(&self, bvid: &str, page_index: usize) -> Result<(String, String)> {
         let bvid = normalize_bvid(bvid);
         anyhow::ensure!(!bvid.is_empty(), "BV 号格式不正确");
-        Ok((self.preview_url(&bvid, page_index).await?, self.client.cookie_header()))
+        Ok((
+            self.preview_url(&bvid, page_index).await?,
+            self.client.cookie_header(),
+        ))
     }
 
     /// 自动校准只需要声音，必须优先拿 DASH 的纯音频 m4s。若复用预览 MP4，
@@ -244,7 +254,8 @@ impl BilibiliProvider {
         page_index: usize,
         range: Option<&str>,
     ) -> Result<PreviewStream> {
-        self.preview_stream_at_height(bvid, page_index, 0, range).await
+        self.preview_stream_at_height(bvid, page_index, 0, range)
+            .await
     }
 
     pub async fn preview_stream_at_height(
@@ -276,7 +287,8 @@ impl BilibiliProvider {
         };
 
         let url = if max_height > 0 {
-            self.preview_url_at_height(&bvid, page_index, max_height).await?
+            self.preview_url_at_height(&bvid, page_index, max_height)
+                .await?
         } else {
             self.preview_url(&bvid, page_index).await?
         };
@@ -289,7 +301,8 @@ impl BilibiliProvider {
                 .unwrap()
                 .remove(&(bvid.clone(), page_index));
             let fresh = if max_height > 0 {
-                self.preview_url_at_height(&bvid, page_index, max_height).await?
+                self.preview_url_at_height(&bvid, page_index, max_height)
+                    .await?
             } else {
                 self.preview_url(&bvid, page_index).await?
             };
@@ -364,7 +377,10 @@ impl BilibiliProvider {
 
         // 没有 ffmpeg 时只能要单流：DASH 的音画是分开的，不混流就没法用。
         let want_dash = ffmpeg::available();
-        let playurl = self.client.playurl(&bvid, cid, qn_for_height(max_height), want_dash).await?;
+        let playurl = self
+            .client
+            .playurl(&bvid, cid, qn_for_height(max_height), want_dash)
+            .await?;
         if cancel.is_cancelled() {
             bail!("下载已取消");
         }
@@ -474,14 +490,17 @@ impl BilibiliProvider {
                 }
                 inputs
             };
-            self.fetch_streams(&plan, &cookies, cancel, progress).await?;
+            self.fetch_streams(&plan, &cookies, cancel, progress)
+                .await?;
             let args = ffmpeg::mux_args(&inputs, &staged, req.transcode, max_height, req.offset_ms);
             ffmpeg::run(&args, &log_path, cancel).await?;
         }
 
         // 校验通过后才原子替换到最终路径：ffmpeg 直接写目标文件的话，
         // 超时/失败会把上一次的成品截断成坏文件并永久留在磁盘上。
-        let size = std::fs::metadata(&staged).map(|meta| meta.len()).unwrap_or(0);
+        let size = std::fs::metadata(&staged)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
         if size == 0 {
             bail!("FFmpeg 没有生成有效的输出文件");
         }
@@ -669,7 +688,7 @@ impl BilibiliProvider {
             .error_for_status()
             .context("哔哩哔哩媒体流请求失败")?;
 
-        let mut file = tokio::fs::File::create(destination)
+        let mut file = create_download_writer(destination)
             .await
             .context("创建媒体临时文件失败")?;
         let mut written = offset;
@@ -688,7 +707,7 @@ impl BilibiliProvider {
                 progress(written, if total > 0 { total.max(written) } else { 0 });
             }
         }
-        file.flush().await.ok();
+        file.flush().await.context("提交媒体写入缓冲失败")?;
         progress(written, if total > 0 { total.max(written) } else { 0 });
         Ok(written)
     }
@@ -753,18 +772,14 @@ impl MusicProvider for BilibiliProvider {
                 "登录已失效，请重新扫码",
             );
         }
-        let mut account = Account::new(
-            Platform::Bilibili,
-            LABEL,
-            AccountState::Valid,
-            "",
-        );
+        let mut account = Account::new(Platform::Bilibili, LABEL, AccountState::Valid, "");
         account.nickname = data
             .get("uname")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        account.avatar = normalize_pic(data.get("face").and_then(Value::as_str).unwrap_or_default());
+        account.avatar =
+            normalize_pic(data.get("face").and_then(Value::as_str).unwrap_or_default());
         account
     }
 
@@ -813,7 +828,10 @@ impl MusicProvider for BilibiliProvider {
             }
             Err(err) => Ok((
                 QrStateValue::Error,
-                format!("轮询登录状态失败：{err}").chars().take(160).collect(),
+                format!("轮询登录状态失败：{err}")
+                    .chars()
+                    .take(160)
+                    .collect(),
             )),
         }
     }
@@ -857,13 +875,19 @@ impl MusicProvider for BilibiliProvider {
                     // 空标题要退回 BV 号（Python 的 `item.get("title") or bvid`），
                     // 否则搜索结果里会出现一行没有名字的条目
                     title: strip_search_markup(str_field(item, "title").unwrap_or(bvid)),
-                    artists: if author.is_empty() { vec![] } else { vec![author] },
+                    artists: if author.is_empty() {
+                        vec![]
+                    } else {
+                        vec![author]
+                    },
                     album: String::new(),
                     // Python 是 `_parse_clock(str(item.get("duration") or ""))`：
                     // 搜索接口一般给 "3:52" 这种钟面串，但也见过直接给秒数（数字）。
                     // 只认字符串的话那些条目在列表里就没有时长。
                     duration: parse_clock(&stringify_duration(item.get("duration"))),
-                    cover: normalize_pic(item.get("pic").and_then(Value::as_str).unwrap_or_default()),
+                    cover: normalize_pic(
+                        item.get("pic").and_then(Value::as_str).unwrap_or_default(),
+                    ),
                     max_quality: None,
                     vip: false,
                     payload,
@@ -997,8 +1021,14 @@ mod tests {
     #[test]
     fn search_durations_survive_both_the_clock_string_and_a_raw_number() {
         // Python 走 `str(...)`，两种形状都能进 _parse_clock
-        assert_eq!(parse_clock(&stringify_duration(Some(&json!("3:52")))), Some(232.0));
-        assert_eq!(parse_clock(&stringify_duration(Some(&json!(232)))), Some(232.0));
+        assert_eq!(
+            parse_clock(&stringify_duration(Some(&json!("3:52")))),
+            Some(232.0)
+        );
+        assert_eq!(
+            parse_clock(&stringify_duration(Some(&json!(232)))),
+            Some(232.0)
+        );
         // 假值一律当"没有时长"，别把 0 当成 0 秒
         assert_eq!(stringify_duration(Some(&json!(0))), "");
         assert_eq!(stringify_duration(Some(&json!(null))), "");

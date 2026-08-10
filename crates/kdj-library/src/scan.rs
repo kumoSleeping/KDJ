@@ -23,6 +23,10 @@ const SKIP_DIR_NAMES: [&str; 12] = [
     ".documentrevisions-v100",
 ];
 
+/// 一次事务提交的变更文件数。64 足以把大扫描的 WAL/刷盘次数降两个数量级，
+/// 同时让每个事务保持很短，列表编辑和分析结果不必等完整场扫描。
+const UPSERT_BATCH_SIZE: usize = 64;
+
 /// 进度回调：(已完成, 总数, 当前文件)
 pub type ProgressFn<'a> = &'a (dyn Fn(usize, usize, &str) + Send + Sync);
 
@@ -174,28 +178,58 @@ pub fn scan_paths(
     let index = service.file_index()?;
     let mut track_ids: Vec<i64> = Vec::with_capacity(total);
 
-    for (done, file_path) in files.iter().enumerate() {
-        if let Some((id, known_mtime, tags_missing)) = index.get(file_path) {
-            let mtime = std::fs::metadata(file_path)
-                .ok()
-                .and_then(|meta| meta.modified().ok())
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64());
-            // 增量扫描：文件没动过就不重读标签。
-            // 库里标签可疑地空的行例外（见 `file_index`）——放它落到 upsert_file
-            // 重读一次，坏行才能自动愈合
-            if !tags_missing && mtime.is_some_and(|mtime| (known_mtime - mtime).abs() < 1e-6) {
-                track_ids.push(*id);
-                on_progress(done + 1, total, file_path);
-                continue;
+    for (chunk_index, chunk) in files.chunks(UPSERT_BATCH_SIZE).enumerate() {
+        let start = chunk_index * UPSERT_BATCH_SIZE;
+        let mut ids = vec![None; chunk.len()];
+        let mut changed_paths = Vec::new();
+        let mut changed_positions = Vec::new();
+
+        for (position, file_path) in chunk.iter().enumerate() {
+            if let Some((id, known_mtime, tags_missing)) = index.get(file_path) {
+                let mtime = std::fs::metadata(file_path)
+                    .ok()
+                    .and_then(|meta| meta.modified().ok())
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs_f64());
+                // 增量扫描：文件没动过就不重读标签。
+                // 库里标签可疑地空的行例外（见 `file_index`）——放它落到批量 upsert
+                // 重读一次，坏行才能自动愈合。
+                if !tags_missing && mtime.is_some_and(|mtime| (known_mtime - mtime).abs() < 1e-6) {
+                    ids[position] = Some(*id);
+                    continue;
+                }
+            }
+            changed_paths.push(PathBuf::from(file_path));
+            changed_positions.push(position);
+        }
+
+        if !changed_paths.is_empty() {
+            match service.upsert_files_batched(&changed_paths, "local", "") {
+                Ok(changed_ids) => {
+                    for (position, id) in changed_positions.iter().zip(changed_ids) {
+                        ids[*position] = id;
+                    }
+                }
+                Err(error) => {
+                    // 批事务若因锁竞争/瞬时 I/O 失败，退回逐文件语义；不能让一首坏歌
+                    // 把同批其余 63 首一起漏掉。正常路径不会走这里。
+                    tracing::warn!("批量入库失败，改用逐文件重试：{error:#}");
+                    for (position, path) in changed_positions.iter().zip(&changed_paths) {
+                        match service.upsert_file(path, "local", "") {
+                            Ok(id) => ids[*position] = Some(id),
+                            Err(error) => tracing::debug!("跳过 {}：{error:#}", path.display()),
+                        }
+                    }
+                }
             }
         }
-        // 单个文件坏掉（权限/正在写入/编码异常）不能让整次扫描中断
-        match service.upsert_file(Path::new(file_path), "local", "") {
-            Ok(id) => track_ids.push(id),
-            Err(err) => tracing::debug!("跳过 {file_path}：{err}"),
+
+        for (position, file_path) in chunk.iter().enumerate() {
+            if let Some(id) = ids[position] {
+                track_ids.push(id);
+            }
+            on_progress(start + position + 1, total, file_path);
         }
-        on_progress(done + 1, total, file_path);
     }
     Ok(ScanReport {
         track_ids,

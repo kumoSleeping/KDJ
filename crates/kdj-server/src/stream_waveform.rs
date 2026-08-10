@@ -37,6 +37,7 @@ const ANALYSIS_MIN_INTERVAL: Duration = Duration::from_secs(1);
 /// 代理已经实际送给播放器的字节每积累到这一档便 flush 一次，供只读分析句柄看见。
 /// 这只是用户态 flush，不做 fsync，也不会阻塞音频网络流等待一次 FFT。
 const CAPTURE_PUBLISH_BYTES: u64 = 512 * 1024;
+const CAPTURE_WRITE_BUFFER_BYTES: usize = CAPTURE_PUBLISH_BYTES as usize;
 /// PlayerBar 每 750ms 续一次这份租约；切歌/卸载后不会再续，已排队的后续前缀
 /// 分析自然停止，不需要让浏览器额外发一个带竞态的 DELETE。
 const REQUEST_LEASE: Duration = Duration::from_secs(5);
@@ -215,7 +216,7 @@ pub(crate) struct StreamWaveformCapture {
     key: String,
     epoch: u64,
     file_lease: Arc<EphemeralFile>,
-    file: Option<tokio::fs::File>,
+    file: Option<tokio::io::BufWriter<tokio::fs::File>>,
     bytes: u64,
     published_bytes: u64,
     response_bytes: u64,
@@ -445,7 +446,7 @@ impl StreamWaveformCoordinator {
             .open(&file_lease.path)
             .await
         {
-            Ok(file) => file,
+            Ok(file) => tokio::io::BufWriter::with_capacity(CAPTURE_WRITE_BUFFER_BYTES, file),
             Err(error) => {
                 self.invalidate_capture(&key, epoch);
                 return Err(error);
@@ -1084,7 +1085,9 @@ fn ensure_entry(inner: &mut StreamWaveformInner, key: &str) {
     inner.entries.insert(key.to_string(), entry);
 }
 
-async fn create_ephemeral_file(root: &Path) -> io::Result<(tokio::fs::File, Arc<EphemeralFile>)> {
+async fn create_ephemeral_file(
+    root: &Path,
+) -> io::Result<(tokio::io::BufWriter<tokio::fs::File>, Arc<EphemeralFile>)> {
     // 根目录由 AppConfig.data_dir 显式提供；随机名配合 create_new，既不依赖全局
     // temp_dir，也不会误碰另一会话的文件。
     for _ in 0..8 {
@@ -1095,7 +1098,12 @@ async fn create_ephemeral_file(root: &Path) -> io::Result<(tokio::fs::File, Arc<
             .open(&path)
             .await
         {
-            Ok(file) => return Ok((file, Arc::new(EphemeralFile { path }))),
+            Ok(file) => {
+                return Ok((
+                    tokio::io::BufWriter::with_capacity(CAPTURE_WRITE_BUFFER_BYTES, file),
+                    Arc::new(EphemeralFile { path }),
+                ));
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
         }

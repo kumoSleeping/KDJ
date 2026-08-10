@@ -7,7 +7,6 @@ import {
   Download,
   FolderOpen,
   Library,
-  ListMusic,
   Music2,
   Pause,
   Play,
@@ -93,7 +92,6 @@ import {
 } from "../../lib/videoPip";
 import type { Track } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
-import { useQueueStore } from "../../stores/queueStore";
 import { InlineNotice } from "../common";
 import { POSITION_EVENT, type PositionDetail } from "../library/TrackDetail";
 import { PLAY_EVENT, parsePlayRequest, playTrack } from "../../lib/playTrack";
@@ -102,10 +100,16 @@ import { usePlayerShortcuts } from "../../lib/usePlayerShortcuts";
 import { recordStreamAnalysisProgress } from "../../lib/streamAnalysis";
 import {
   mergeCachedStreamWaveform,
+  loadWaveformForTrack,
   mediaBufferedRanges,
   prefetchWaveform,
   updateStreamWaveform,
 } from "../../lib/waveformCache";
+import {
+  isOneLibraryPlaybackTrack,
+  oneLibraryPlaybackSource,
+  usesLocalLibraryRecord,
+} from "../../lib/playbackTrackSource";
 import {
   PLAYER_COMMAND_EVENT,
   publishPlayerSession,
@@ -118,6 +122,7 @@ import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackD
 import { runtimePlayer, usesNativeMobilePlayer } from "../../lib/unifiedPlayer";
 import { decideNativeLatestIntent, LatestIntentGate } from "../../lib/latestIntentGate";
 import { LyricsHost } from "./LyricsHost";
+import { writeLocalStorageSoon } from "../../lib/storageWrite";
 
 /** 广播播放位置的节流间隔：节拍网格的播放头不需要每帧更新。 */
 const POSITION_BROADCAST_MS = 200;
@@ -253,14 +258,23 @@ function readPlayerDeckMemory(): PlayerDeckMemory {
   }
 }
 
+function playbackCoverUrl(track: Track): string {
+  if (isStreamTrack(track)) return streamCoverUrl(track);
+  const source = oneLibraryPlaybackSource(track);
+  if (source) {
+    return api.oneLibraryCoverUrl(source.devicePath, source.contentId, track.modified_at);
+  }
+  return usesLocalLibraryRecord(track) ? api.coverUrl(track.id, track.modified_at) : "";
+}
+
 function viewForTrack(track: Track): PlayerDeckView {
   const streaming = isStreamTrack(track);
   return {
-    key: `${streaming ? "stream" : "library"}:${track.id}`,
+    key: `${streaming ? "stream" : isOneLibraryPlaybackTrack(track) ? "onelibrary" : "library"}:${track.id}`,
     track,
     title: track.title || track.filename,
     subtitle: track.artist || "\u00a0",
-    cover: streaming ? streamCoverUrl(track) : api.coverUrl(track.id, track.modified_at),
+    cover: playbackCoverUrl(track),
     video: isVideoTrack(track.format),
   };
 }
@@ -379,8 +393,6 @@ export function PlayerBar() {
   const cycleMode = usePlayMode((state) => state.cycleMode);
   const scope = useHarmonicScope((state) => state.scope);
   const setScope = useHarmonicScope((state) => state.setScope);
-  const queueIds = useQueueStore((state) => state.ids);
-  const queueById = useQueueStore((state) => state.byId);
   const libraryFolder = useLibraryStore((state) => state.filter.folder);
   const librarySort = useLibraryStore((state) => state.filter.sort);
   const libraryOrder = useLibraryStore((state) => state.filter.order);
@@ -599,8 +611,9 @@ export function PlayerBar() {
     trackRef.current = track;
     // 右侧歌词也需要知道当前的在线试听；曲库定位按钮会单独过滤负数临时曲目。
     setPlayingTrack(track);
-    // 独立桌面歌词 WebView 不共享主窗的 BrowserPreviewPlayer，需要显式发布当前试听曲。
-    publishStreamTrack(track && isStreamTrack(track) ? track : null);
+    // 独立桌面歌词 WebView 不共享主窗状态；在线试听和 OneLibrary 都是负数播放 id，
+    // 两者都要显式发布完整曲目快照。
+    publishStreamTrack(track && track.id < 0 ? track : null);
     setBrowserMediaStatus(track && isStreamTrack(track) ? "loading" : "idle");
   }, [track]);
 
@@ -631,7 +644,7 @@ export function PlayerBar() {
     let unlisten: UnlistenFn | null = null;
     void listen("stream-state-request", () => {
       const current = trackRef.current;
-      if (!current || !isStreamTrack(current)) {
+      if (!current || current.id >= 0) {
         publishStreamTrack(null);
         return;
       }
@@ -731,8 +744,6 @@ export function PlayerBar() {
   const nativeLoadInFlightRef = useRef(false);
   /** 快速连点换歌时，迟到的旧 decode 结果不能覆盖新曲目的 UI/transport。 */
   const nativeLoadGenerationRef = useRef(0);
-  /** 后台队列已自行切歌时，React 只接管显示，不能再次 load 把进度打回开头。 */
-  const nativeAdoptedTrackIdRef = useRef<number | null>(null);
   /** 桌面端 state.trackId 连续与 UI 曲目不一致的拍数；稳定分叉时以 UI 为准自愈。 */
   const nativeTrackMismatchRef = useRef(0);
   /** 同一首曲目的自愈补偿节流：补偿失败也不能每一拍都重发 load。 */
@@ -831,7 +842,7 @@ export function PlayerBar() {
       setPosition(0);
       setDuration(restored.duration ?? 0);
       commitPlaying(false);
-      if (!isStreamTrack(restored)) selectTrack(restored);
+      if (usesLocalLibraryRecord(restored)) selectTrack(restored);
     },
     [commitPlaying, selectTrack],
   );
@@ -960,7 +971,7 @@ export function PlayerBar() {
           // 被唤醒，必须先同步正主，避免第二次仍从旧歌挑候选。
           trackRef.current = next;
           setTrack(next);
-          if (!isStreamTrack(next)) selectTrack(next);
+          if (usesLocalLibraryRecord(next)) selectTrack(next);
           setPosition(cue);
           setDuration(next.duration ?? 0);
           commitPlaying(true);
@@ -982,15 +993,18 @@ export function PlayerBar() {
               rate,
               autoplay: true,
             })
-            .then(() => {
+            .then((state) => {
               // load 被更新的播放意图作废时会以 no-op 成功返回；不能让这个旧
               // fallback 继续提交 UI，把用户刚点的新曲目切回去。
               if (!stillCurrent()) return;
+              if (state.status === "error") {
+                throw new Error(state.error || "原生播放器无法播放这个文件");
+              }
               focusLibrary();
               trackRef.current = next;
               djViaRef.current = next.id;
               setTrack(next);
-              if (!isStreamTrack(next)) selectTrack(next);
+              if (usesLocalLibraryRecord(next)) selectTrack(next);
               setPosition(cue);
               setDuration(next.duration ?? 0);
               commitPlaying(true);
@@ -1059,7 +1073,7 @@ export function PlayerBar() {
         setFrontEl(djEngine.frontElement());
         trackRef.current = next;
         setTrack(next);
-        if (!isStreamTrack(next)) selectTrack(next);
+        if (usesLocalLibraryRecord(next)) selectTrack(next);
         setPosition(cue);
         setDuration(next.duration ?? 0);
         commitPlaying(true);
@@ -1119,6 +1133,7 @@ export function PlayerBar() {
       const parsed = parsePlayRequest((event as CustomEvent).detail);
       if (!parsed) return;
       const next = parsed.track;
+      const oneLibraryNext = isOneLibraryPlaybackTrack(next);
       const autoPlay = parsed.autoPlay !== false;
       if (!manualNextDispatchingRef.current) {
         // 双击指定曲目是比“稍后再下一首”更明确的新意图，不能让排队的连点
@@ -1148,7 +1163,7 @@ export function PlayerBar() {
         if (useVideoPip.getState().mode === "panel" && !isStreamTrack(next)) {
           window.dispatchEvent(new Event(DETAIL_EVENT));
         }
-      } else if (!isStreamTrack(next)) {
+      } else if (!isStreamTrack(next) && !oneLibraryNext) {
         // 音频起播只清设置/队列等旁路，不自动钉详情；歌词内容面要保留，
         // 否则双击刚钉住的歌词栏会被 showTrackDetail 的 clearOverlays 拆掉。
         focusLibrary();
@@ -1177,7 +1192,7 @@ export function PlayerBar() {
       }
       // 详情视频控件再点播放：同一首只需恢复播放，绝不能把进度打回 0。
       if (current && next.id === current.id) {
-        if (!isStreamTrack(next)) selectTrack(next);
+        if (usesLocalLibraryRecord(next)) selectTrack(next);
         commitPlaying(autoPlay);
         if (autoPlay) markPlayed(next.id);
         return;
@@ -1191,7 +1206,7 @@ export function PlayerBar() {
       setTrack(next);
       // 右侧详情跟着切到正在放的这首。自动续播接下一首时尤其重要——
       // 不跟的话详情栏还停在上一首，用户看着 A 的 BPM 听着 B
-      if (!isStreamTrack(next)) selectTrack(next);
+      if (usesLocalLibraryRecord(next)) selectTrack(next);
       setPosition(0);
       setDuration(next.duration ?? 0);
       commitPlaying(autoPlay);
@@ -1236,7 +1251,7 @@ export function PlayerBar() {
       };
       return;
     }
-    const waveform = api.waveform(track.id);
+    const waveform = loadWaveformForTrack(track);
     waveform
       .then((wave) => {
         if (!alive) return;
@@ -1260,7 +1275,7 @@ export function PlayerBar() {
   // 放到一首还没分析的歌 → 让它插队分析。去重、和"选中即分析"共享一份
   // 排队记号的逻辑都在 autoAnalyze 里，这里只负责把"在放哪一首"告诉它。
   useEffect(() => {
-    if (track) analyzePlaying(track);
+    if (usesLocalLibraryRecord(track)) analyzePlaying(track);
   }, [track?.id, track?.analyzed_at]);
 
   // 换曲：移动端交给系统媒体服务，正式桌面交给 Rust/CPAL，纯浏览器调试才走
@@ -1278,11 +1293,6 @@ export function PlayerBar() {
       if (desktopNative) {
         djEngine.cancel();
         djEngine.hardPause(djEngine.frontElement());
-      }
-      if (nativeAdoptedTrackIdRef.current === track.id) {
-        nativeAdoptedTrackIdRef.current = null;
-        setNotice("");
-        return;
       }
       const source = mediaUrlForTrack(track);
       const applyAutomaticCue = autoInOutCueRef.current === track.id;
@@ -1302,12 +1312,15 @@ export function PlayerBar() {
           track,
           position: initialPosition,
           autoplay: playingRef.current,
-          artworkUrl: isStreamTrack(track)
-            ? streamCoverUrl(track)
-            : api.coverUrl(track.id, track.modified_at),
+          artworkUrl: playbackCoverUrl(track),
         })
         .then((state) => {
           if (loadGeneration !== nativeLoadGenerationRef.current) return;
+          if (state.status === "error") {
+            commitPlaying(false);
+            setNotice(state.error || "原生播放器无法播放这个文件");
+            return;
+          }
           setPosition(state.currentTime);
           setDuration(state.duration || track.duration || 0);
           setNotice("");
@@ -1396,13 +1409,7 @@ export function PlayerBar() {
       nativeQueueDesiredSignatureRef.current = "";
       return;
     }
-    const tracks = [
-      track,
-      ...queueIds
-        .filter((id) => id !== track.id)
-        .map((id) => queueById[id])
-        .filter((item): item is Track => Boolean(item)),
-    ].filter((item) => !isStreamTrack(item));
+    const tracks = [track].filter((item) => !isStreamTrack(item));
     if (tracks.length === 0) {
       nativeQueueSignatureRef.current = "";
       nativeQueuePendingSignatureRef.current = "";
@@ -1429,9 +1436,7 @@ export function PlayerBar() {
     const sources = tracks.map((item) => ({
       src: mediaUrlForTrack(item),
       track: item,
-      artworkUrl: isStreamTrack(item)
-        ? streamCoverUrl(item)
-        : api.coverUrl(item.id, item.modified_at),
+      artworkUrl: playbackCoverUrl(item),
     }));
     nativeQueuePendingSignatureRef.current = signature;
     void nativePlayer
@@ -1467,7 +1472,7 @@ export function PlayerBar() {
           }
         }, 250);
       });
-  }, [nativePlayer, track?.id, queueIds, queueById, nativeQueueRetry]);
+  }, [nativePlayer, track?.id, nativeQueueRetry]);
 
   useEffect(() => {
     if (!track) return;
@@ -1591,7 +1596,7 @@ export function PlayerBar() {
   // 协同一关立刻回满。这不是「音量设置」，是混音动作，值也从不落盘。
   useEffect(() => {
     playerVolumeRef.current = playerVolume;
-    localStorage.setItem("kd-player-volume", String(playerVolume));
+    writeLocalStorageSoon("kd-player-volume", String(playerVolume), 1_000);
     if (playerVolume > 0) volumeBeforeMuteRef.current = playerVolume;
     // 用户音量与协同交叉推子相乘；移动端直接落到系统 player，桌面两台 deck
     // 一起设，接歌中途也保持一致。
@@ -1844,9 +1849,8 @@ export function PlayerBar() {
         playbackIntentRef.current === intent &&
         trackRef.current?.id === finished.id;
       setPosition(0);
-      // 在线试听也走共享的 pickNext：先消费用户排的本地曲目，再兑现在线搜索
-      // 的后继链，链耗尽后按播放模式回到本地曲库。此前在线分支只看
-      // streamNextTrack，导致在线曲末既不读临时列表，也不会自动接本地曲目。
+      // 在线试听也走共享的 pickNext：先兑现在线搜索的后继链，链耗尽后按
+      // 播放模式回到本地曲库。
       const preferred = isStreamTrack(finished)
         ? streamNextTrack(finished)
         : predictedRef.current;
@@ -1964,20 +1968,7 @@ export function PlayerBar() {
         }
       }
 
-      let current = trackRef.current;
-      if (mobileNative && state.trackId !== null && state.trackId !== current?.id) {
-        const adopted = useQueueStore.getState().byId[state.trackId];
-        if (adopted) {
-          nativeAdoptedTrackIdRef.current = adopted.id;
-          useQueueStore.getState().remove([adopted.id]);
-          trackRef.current = adopted;
-          current = adopted;
-          setTrack(adopted);
-          selectTrack(adopted);
-          markPlayed(adopted.id);
-          setNotice("");
-        }
-      }
+      const current = trackRef.current;
       if (current) {
         broadcast(shownTime);
         broadcastMediaSync({
@@ -1999,6 +1990,8 @@ export function PlayerBar() {
                     ? "playing"
                     : "paused";
           setBrowserMediaStatus(streamStatus);
+        }
+        if (current.id < 0) {
           publishStreamTrackState(current, shownTime, state.playing, state.rate);
         }
         if (
@@ -2191,7 +2184,7 @@ export function PlayerBar() {
       focusLibrary();
       if (isStreamTrack(previous)) setBrowserDjSession(true);
       setTrack(previous);
-      if (!isStreamTrack(previous)) selectTrack(previous); // 同上：详情栏跟着回退
+      if (usesLocalLibraryRecord(previous)) selectTrack(previous); // 同上：详情栏跟着回退
       setPosition(0);
       setDuration(previous.duration ?? 0);
       commitPlaying(true);
@@ -2477,9 +2470,7 @@ export function PlayerBar() {
     bind("nexttrack", () => systemMediaActionRef.current("next"));
     bind("previoustrack", () => systemMediaActionRef.current("previous"));
 
-    const cover = isStreamTrack(track)
-      ? streamCoverUrl(track)
-      : api.coverUrl(track.id, track.modified_at);
+    const cover = playbackCoverUrl(track);
     if (typeof MediaMetadata !== "undefined") {
       try {
         session.metadata = new MediaMetadata({
@@ -3030,9 +3021,7 @@ export function PlayerBar() {
       return cover ? thumbUrl(cover, 96) : "";
     }
     if (!displayTrack) return "";
-    return streaming
-      ? streamCoverUrl(displayTrack)
-      : api.coverUrl(displayTrack.id, displayTrack.modified_at);
+    return playbackCoverUrl(displayTrack);
   })();
   const discKey = pipDriving && pipSession
     ? pipSession.source === "local"
@@ -3068,7 +3057,7 @@ export function PlayerBar() {
   const predictionSort = mode === "order" ? librarySort : "";
   const predictionOrder = mode === "order" ? libraryOrder : "";
 
-  // 当前曲、播放模式、有效范围或点歌队列一变，就给空闲 deck 做一次只读预测。
+  // 当前曲、播放模式或有效范围一变，就给空闲 deck 做一次只读预测。
   // UI 在请求期间保留旧封面防闪烁，但先清掉可消费 ref 和策略票据：用户若恰好
   // 此时按下一首，pickNext 会按新模式现场重算，绝不会把旧预告送进 Deck。
   // 依赖只放真正参与算法的值，单击无关文件夹/列表不会重跑，这是“下一首闪动”的根因修复。
@@ -3085,11 +3074,9 @@ export function PlayerBar() {
     // 错贴成新模式票据，恰好绕过下面的 epoch/mode 校验。
     const generatedPolicy = predictionPolicyNow(base.id, epoch);
     // 首次进入先原样保留上次的另一台唱盘；真正换曲/改模式/改范围后再重新预测。
-    const hasQueuedOverride = queueIds.some((id) => id !== base.id);
     if (
       useRetainedNextOnceRef.current &&
       !track &&
-      !hasQueuedOverride &&
       retainedNextTrack &&
       retainedNextTrack.id !== base.id
     ) {
@@ -3119,8 +3106,6 @@ export function PlayerBar() {
     predictionFolder,
     predictionSort,
     predictionOrder,
-    queueIds,
-    queueById,
     pipDriving,
   ]);
 
@@ -3278,10 +3263,8 @@ export function PlayerBar() {
   const playbackDuration = pipDriving ? pipDuration : duration || displayTrack?.duration || 0;
   const remaining = Math.max(0, playbackDuration - playbackPosition);
   // 随机播放的右唱盘只是预告，不必先切走正在放的歌才能换一个候选。
-  // 点歌队列是明确的用户意图，永远不在这里提供"换一首"来跳过它。
   const canRefreshPrediction =
     mode === "shuffle" &&
-    scope !== "queue" &&
     Boolean(predictionBase) &&
     Boolean(predicted) &&
     !isStreamTrack(predictionBase);
@@ -3317,10 +3300,10 @@ export function PlayerBar() {
   // 两台唱盘及正主方向跨会话保留。网络试听没有稳定的曲库 id，不写进存档。
   useEffect(() => {
     if (transitionShowing) return;
-    const leftId = leftDeckView?.track && !isStreamTrack(leftDeckView.track)
+    const leftId = leftDeckView?.track && usesLocalLibraryRecord(leftDeckView.track)
       ? leftDeckView.track.id
       : deckMemoryRef.current.leftId;
-    const rightId = rightDeckView?.track && !isStreamTrack(rightDeckView.track)
+    const rightId = rightDeckView?.track && usesLocalLibraryRecord(rightDeckView.track)
       ? rightDeckView.track.id
       : deckMemoryRef.current.rightId;
     if (leftId === null && rightId === null) return;
@@ -3347,7 +3330,7 @@ export function PlayerBar() {
     const last = lastDeckOpenRef.current;
     if (last && last.trackId === deckTrack.id && now - last.at < 400) return;
     lastDeckOpenRef.current = { trackId: deckTrack.id, at: now };
-    if (!isStreamTrack(deckTrack) && selected?.id !== deckTrack.id) selectTrack(deckTrack);
+    if (usesLocalLibraryRecord(deckTrack) && selected?.id !== deckTrack.id) selectTrack(deckTrack);
     window.dispatchEvent(
       new CustomEvent(DETAIL_EVENT, { detail: { source: "player-deck" } }),
     );
@@ -3377,7 +3360,11 @@ export function PlayerBar() {
       playTrack(first);
       return;
     }
-    useQueueStore.getState().replaceNext(first, trackRef.current?.id);
+    const base = trackRef.current;
+    const epoch = ++predictionEpochRef.current;
+    predictedRef.current = first;
+    predictedPolicyRef.current = base ? predictionPolicyNow(base.id, epoch) : null;
+    setPredicted(first);
     setNotice(`下一首已替换为：${first.title || first.filename}`);
   };
 
@@ -3622,7 +3609,7 @@ export function PlayerBar() {
 
         {/* 播放模式 + 范围，紧挨走带键：它们改的就是"下一首是谁"。
             各一颗按钮循环切换，图标即状态——模式是四选一（调性/顺序/随机/单曲循环），
-            范围是三选一（全库/当前文件夹/临时列表）。范围复用详情栏「接歌范围」那个开关，
+            范围是二选一（全库/当前文件夹）。范围复用详情栏「接歌范围」那个开关，
             两处拨的是同一个值（见 harmonicScope.ts 为什么必须如此）。 */}
         <button
           type="button"
@@ -3642,23 +3629,17 @@ export function PlayerBar() {
           aria-label={
             scope === "folder"
               ? "范围：当前文件夹"
-              : scope === "queue"
-                ? "范围：临时列表"
-                : "范围：全部曲库"
+              : "范围：全部曲库"
           }
           title={
             scope === "folder"
-              ? "只在当前文件夹里挑下一首。点一下改成临时列表"
-              : scope === "queue"
-                ? "只播放临时列表，队列放空后停止。点一下改成全部曲库"
-                : "在全部曲库里挑下一首。点一下改成只在当前文件夹里挑"
+              ? "只在当前文件夹里挑下一首。点一下改成全部曲库"
+              : "在全部曲库里挑下一首。点一下改成只在当前文件夹里挑"
           }
-          onClick={() => setScope(scope === "all" ? "folder" : scope === "folder" ? "queue" : "all")}
+          onClick={() => setScope(scope === "all" ? "folder" : "all")}
         >
           {scope === "folder" ? (
             <FolderOpen size={14} />
-          ) : scope === "queue" ? (
-            <ListMusic size={14} />
           ) : (
             <Library size={14} />
           )}
@@ -3768,13 +3749,15 @@ export function PlayerBar() {
           <Waveform
             className="kd-player-wave"
             trackId={displayTrack.id}
+            track={displayTrack}
             position={track?.id === displayTrack.id ? position : 0}
             duration={track?.id === displayTrack.id ? playbackDuration : (displayTrack.duration ?? 0)}
             cueMs={selected?.id === displayTrack.id ? selected.cue_ms : displayTrack.cue_ms}
             endMs={selected?.id === displayTrack.id ? selected.end_ms : displayTrack.end_ms}
+            cuePoints={displayTrack.cue_points}
             height={42}
             dimPlayed
-            onSetPoint={track?.id === displayTrack.id ? async (kind, at) => {
+            onSetPoint={track?.id === displayTrack.id && usesLocalLibraryRecord(track) ? async (kind, at) => {
               const cueMs = selected?.id === track.id ? selected.cue_ms : track.cue_ms;
               const endMs = selected?.id === track.id ? selected.end_ms : track.end_ms;
               const patch = pointPatch(kind, at, cueMs, endMs);

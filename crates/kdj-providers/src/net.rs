@@ -13,6 +13,20 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use url::Url;
 
+/// 网络响应常以几 KiB 的小 chunk 到达。直接逐块写文件会在低性能 Windows 和 U 盘上
+/// 产生大量小写调用；512 KiB 用户态缓冲把它们合并成顺序写，同时只占固定内存。
+const DOWNLOAD_WRITE_BUFFER_BYTES: usize = 512 * 1024;
+
+pub async fn create_download_writer(
+    path: &Path,
+) -> std::io::Result<tokio::io::BufWriter<tokio::fs::File>> {
+    let file = tokio::fs::File::create(path).await?;
+    Ok(tokio::io::BufWriter::with_capacity(
+        DOWNLOAD_WRITE_BUFFER_BYTES,
+        file,
+    ))
+}
+
 /// 四家 provider 共用的 HTTP client 超时配置。
 ///
 /// **不能用 `ClientBuilder::timeout`**：那是"从发请求到响应体读完"的全程上限，
@@ -145,10 +159,7 @@ pub async fn expand_short_link(
     bail!("分享短链跳转次数过多")
 }
 
-async fn ensure_hop_allowed(
-    url: &Url,
-    allow_host: &(dyn Fn(&str) -> bool + Sync),
-) -> Result<()> {
+async fn ensure_hop_allowed(url: &Url, allow_host: &(dyn Fn(&str) -> bool + Sync)) -> Result<()> {
     if !matches!(url.scheme(), "http" | "https") {
         bail!("分享链接跳转到了不允许的协议");
     }

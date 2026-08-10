@@ -818,6 +818,173 @@ pub struct TrackPage {
     pub limit: i64,
 }
 
+/// KDJ 本地虚拟播放列表。
+///
+/// 列表项只保存 `track_id` 引用，不复制音频文件；只有显式执行便携导出时才会把
+/// 音频写入外置存储。它和平台侧的 [`StreamPlaylist`] 不是同一种对象。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LocalPlaylist {
+    pub id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub note: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub track_count: i64,
+}
+
+/// 操作播放列表内曲目引用。重复 id 会在服务层去重。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PlaylistTracksRequest {
+    #[serde(default)]
+    pub track_ids: Vec<i64>,
+}
+
+/// 把一组曲目整体移动到目标曲目前/后，组内原顺序不变。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PlaylistReorderRequest {
+    #[serde(default)]
+    pub track_ids: Vec<i64>,
+    pub target_id: i64,
+    #[serde(default)]
+    pub before: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LocalPlaylistPatch {
+    pub name: Option<String>,
+    pub note: Option<String>,
+}
+
+/// 操作系统当前挂载的可移动存储。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemovableDevice {
+    /// 当前挂载点就是一次会话内的稳定键，同时也是导出请求唯一接受的目标。
+    pub path: String,
+    pub name: String,
+    #[serde(default)]
+    pub file_system: String,
+    #[serde(default)]
+    pub total_bytes: u64,
+    #[serde(default)]
+    pub available_bytes: u64,
+    #[serde(default)]
+    pub read_only: bool,
+    /// FAT32 / exFAT / HFS+；这是 OneLibrary 合作软件共同声明支持的文件系统集合。
+    #[serde(default)]
+    pub one_library_file_system: bool,
+    #[serde(default)]
+    pub has_one_library: bool,
+    /// 由 KDJ 管理的虚拟磁盘；真实 U 盘即使卷名也叫 KDJ 仍为 false。
+    #[serde(default)]
+    pub is_virtual: bool,
+}
+
+/// 直接来自外置卷 `exportLibrary.db` 的 OneLibrary 列表节点。
+/// `attribute`: 0 = playlist，1 = folder，4 = smart list。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OneLibraryPlaylist {
+    pub device_path: String,
+    pub id: i32,
+    pub seq: i32,
+    pub name: String,
+    pub attribute: i32,
+    pub parent_id: i32,
+    #[serde(default)]
+    pub track_count: usize,
+}
+
+/// OneLibrary `cue` 表中的只读演出标记。
+/// `hot_cue = None` 表示 Memory Cue；有值时是 Hot Cue 的 1-based 编号。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CuePoint {
+    pub id: i32,
+    pub hot_cue: Option<i32>,
+    pub start_ms: i64,
+    pub end_ms: Option<i64>,
+    pub color_index: Option<i32>,
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub comment: String,
+    #[serde(default)]
+    pub active_loop: bool,
+}
+
+/// OneLibrary `playlist_content` 中按设备顺序展开的曲目。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OneLibraryTrack {
+    pub content_id: i32,
+    pub sequence: i32,
+    /// KDJ 自己导出时写入的本地曲目 id；外来 OneLibrary 曲目没有这个关联。
+    #[serde(default)]
+    pub local_track_id: Option<i64>,
+    /// 目标 DJ 软件是否把这条 OneLibrary 内容标记为已修改。
+    #[serde(default)]
+    pub external_modified: bool,
+    #[serde(default)]
+    pub external_update_count: i32,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    #[serde(default)]
+    pub genre: String,
+    #[serde(default)]
+    pub year: String,
+    pub bpm: Option<f64>,
+    pub music_key: String,
+    pub duration: Option<i64>,
+    #[serde(default)]
+    pub bitrate: Option<i64>,
+    #[serde(default)]
+    pub samplerate: Option<i64>,
+    #[serde(default)]
+    pub size: i64,
+    #[serde(default)]
+    pub rating: i64,
+    #[serde(default)]
+    pub comment: String,
+    /// 封面关联或文件内容发生变化时随之变化，供前端打破图片缓存。
+    #[serde(default)]
+    pub cover_version: String,
+    #[serde(default)]
+    pub cue_points: Vec<CuePoint>,
+    pub path: String,
+    pub filename: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OneLibraryCapacityPlan {
+    pub required_bytes: u64,
+    pub available_bytes: u64,
+    pub sufficient: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OneLibraryImportResult {
+    #[serde(default)]
+    pub track_ids: Vec<i64>,
+    #[serde(default)]
+    pub errors: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PlaylistExportResult {
+    pub playlist_id: i64,
+    pub playlist_name: String,
+    pub device_path: String,
+    pub copied_tracks: usize,
+    pub reused_tracks: usize,
+    pub skipped_tracks: usize,
+    pub copied_bytes: u64,
+    pub database_path: String,
+    /// 本次有多少本地分析被复用，以及哪些曲目仍需目标软件按原流程分析。
+    #[serde(default)]
+    pub analysis_note: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TrackPatch {
     pub rating: Option<i64>,
@@ -1223,10 +1390,8 @@ mod tests {
         assert_eq!(legacy.version, AnalysisVersion::V1);
         assert_eq!(legacy.limit, None);
 
-        let v2: AnalyzeRequest = serde_json::from_str(
-            r#"{"version":"v2","limit":20,"folder":"/Music/set"}"#,
-        )
-        .unwrap();
+        let v2: AnalyzeRequest =
+            serde_json::from_str(r#"{"version":"v2","limit":20,"folder":"/Music/set"}"#).unwrap();
         assert_eq!(v2.version, AnalysisVersion::V2);
         assert_eq!(v2.limit, Some(20));
         assert_eq!(v2.folder, "/Music/set");

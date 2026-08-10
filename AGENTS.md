@@ -30,3 +30,8 @@
 - If more than one KDJ instance is running, verify the target process by PID and executable path before reading or operating its window. If the UI tool cannot distinguish the dev process from the installed app, stop the UI inspection instead of guessing.
 - Pure frontend changes under `src/` or frontend CSS SHOULD use Vite HMR in the running Tauri dev session; do not fully restart the app for each frontend-only edit.
 - Rust backend, `src-tauri/`, Tauri configuration, native capability, or startup changes MUST be validated by fully stopping and restarting `npm run tauri:dev` before reporting completion.
+
+## UI Copy
+
+- Empty lists and panels MUST stay empty. Do not add “未检测到…”, “尚未创建”, “新建第一个…”, default-value hints, or instructional filler.
+- Expose available actions as concise controls (for example `+`); reserve UI copy for actual state, errors, and user data, and put configuration in formal panels or settings.

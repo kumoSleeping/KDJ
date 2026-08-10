@@ -405,7 +405,6 @@ export function QueuePanel() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const folders = useLibraryStore((store) => store.folders);
   const setFilter = useLibraryStore((store) => store.setFilter);
-  const setQueueView = useLibraryStore((store) => store.setQueueView);
   const setListMode = useAppStore((store) => store.setListMode);
   const finishedCount = list.length - activeCount;
   const queuedCount = list.reduce((sum, task) => sum + (task.state === "queued" ? 1 : 0), 0);
@@ -446,7 +445,6 @@ export function QueuePanel() {
     };
     visit(folders?.roots ?? []);
     setListMode("library");
-    setQueueView(false);
     // 树刚启动尚未拉回来时，至少选文件所在的父目录；不能把文件本身
     // 当成 folder filter，否则中间列表会显示为空，看起来像下载丢了。
     const parent = path.replace(/[\\/][^\\/]*$/, "") || path;

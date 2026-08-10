@@ -90,6 +90,22 @@ fn open_for_write(path: &Path) -> Result<lofty::file::TaggedFile> {
     Ok(tagged)
 }
 
+/// 只在规范化后的文本真的变化时改 tag。lofty 的 save 可能重写整个标签区；
+/// 对 U 盘上的大文件来说，“把同一个值再写一遍”也不是免费的。
+fn set_text_if_changed(tag: &mut lofty::tag::Tag, key: ItemKey, value: &str) -> bool {
+    let value = value.trim();
+    let current = tag.get_string(key.clone()).unwrap_or_default().trim();
+    if current == value {
+        return false;
+    }
+    if value.is_empty() {
+        tag.remove_key(key);
+    } else {
+        tag.insert_text(key, value.to_string());
+    }
+    true
+}
+
 /// 写入标题 / 艺人 / 专辑 / 封面。
 ///
 /// 写标签失败**不该让下载算失败**——文件本身已经好了。调用方负责只记一条 warn。
@@ -162,32 +178,55 @@ pub fn write_metadata(path: &Path, edit: &MetadataEdit<'_>) -> Result<()> {
     let mut tagged = open_for_write(path)?;
     let tag = tagged.primary_tag_mut().expect("刚插入过一定存在");
 
+    let mut changed = false;
     for (key, value) in [
         (ItemKey::TrackTitle, edit.title),
         (ItemKey::TrackArtist, edit.artist),
         (ItemKey::AlbumTitle, edit.album),
         (ItemKey::Genre, edit.genre),
-        // 年份统一写 RecordingDate：ID3v2 的映射表里根本没有 Year 这个键，
-        // 写 ItemKey::Year 在 mp3 上会被静默丢弃。`read_tags` 两个键都读，对得上。
-        (ItemKey::RecordingDate, edit.year),
     ] {
         let Some(value) = value else { continue };
-        let value = value.trim();
-        if value.is_empty() {
-            tag.remove_key(key);
-        } else {
-            tag.insert_text(key, value.to_string());
-        }
+        changed |= set_text_if_changed(tag, key, value);
     }
     // Vorbis/APE 里 YEAR 和 DATE 是两个键，留着旧的 YEAR 会让读回来的是老值
-    if edit.year.is_some() {
-        tag.remove_key(ItemKey::Year);
-        if let Some(year) = edit.year.map(str::trim).filter(|value| !value.is_empty()) {
-            // RecordingDate 在这个容器里没有对应键时（少数格式）退回 Year，别让年份整个丢掉
-            if tag.get_string(ItemKey::RecordingDate).is_none() {
-                tag.insert_text(ItemKey::Year, year.to_string());
+    if let Some(year) = edit.year {
+        let year = year.trim();
+        let recording_date = tag
+            .get_string(ItemKey::RecordingDate)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let legacy_year = tag
+            .get_string(ItemKey::Year)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        // 有些容器只支持 YEAR，另一些支持 RecordingDate；任一规范位置已经是目标值
+        // 且没有冲突副本时，都算真正的 no-op。
+        let already_equal = (recording_date == Some(year) && legacy_year.is_none())
+            || (recording_date.is_none() && legacy_year == Some(year))
+            || (year.is_empty() && recording_date.is_none() && legacy_year.is_none());
+        if already_equal {
+            if !changed {
+                return Ok(());
+            }
+        } else {
+            // 年份统一写 RecordingDate：ID3v2 的映射表里根本没有 Year 这个键，
+            // 写 ItemKey::Year 在 mp3 上会被静默丢弃。`read_tags` 两个键都读，对得上。
+            changed |= set_text_if_changed(tag, ItemKey::RecordingDate, year);
+            let had_legacy_year = tag.get_string(ItemKey::Year).is_some();
+            tag.remove_key(ItemKey::Year);
+            changed |= had_legacy_year;
+            if let Some(year) = Some(year).filter(|value| !value.is_empty()) {
+                // RecordingDate 在这个容器里没有对应键时（少数格式）退回 Year，别让年份整个丢掉
+                if tag.get_string(ItemKey::RecordingDate).is_none() {
+                    tag.insert_text(ItemKey::Year, year.to_string());
+                    changed = true;
+                }
             }
         }
+    }
+
+    if !changed {
+        return Ok(());
     }
 
     tag.save_to_path(path, WriteOptions::default())
@@ -205,6 +244,13 @@ pub fn write_cover(path: &Path, data: &[u8]) -> Result<()> {
 
     let mut tagged = open_for_write(path)?;
     let tag = tagged.primary_tag_mut().expect("刚插入过一定存在");
+    if tag.pictures().len() == 1
+        && tag.pictures()[0].pic_type() == PictureType::CoverFront
+        && tag.pictures()[0].data() == data
+        && tag.pictures()[0].mime_type() == Some(&mime)
+    {
+        return Ok(());
+    }
     replace_pictures(tag, data, mime);
     tag.save_to_path(path, WriteOptions::default())
         .with_context(|| format!("写封面失败：{}", path.display()))?;
@@ -384,16 +430,20 @@ pub fn write_analysis_tags(
     let camelot = camelot.trim().to_uppercase();
     let key_text = to_id3_key(music_key);
 
+    let mut changed = false;
     if let Some(bpm) = bpm.filter(|value| *value > 0.0) {
         // BPM 写整数：ID3 的 TBPM 规范上就是整数，写小数有些软件会读成 0
-        tag.insert_text(ItemKey::Bpm, format!("{}", bpm.round() as i64));
+        changed |= set_text_if_changed(tag, ItemKey::Bpm, &format!("{}", bpm.round() as i64));
     }
     if !key_text.is_empty() {
-        tag.insert_text(ItemKey::InitialKey, key_text);
+        changed |= set_text_if_changed(tag, ItemKey::InitialKey, &key_text);
     }
     let note = analysis_comment(&camelot, energy, comment);
     if !note.is_empty() {
-        tag.insert_text(ItemKey::Comment, note);
+        changed |= set_text_if_changed(tag, ItemKey::Comment, &note);
+    }
+    if !changed {
+        return Ok(());
     }
 
     tag.save_to_path(path, WriteOptions::default())
@@ -485,14 +535,19 @@ pub(crate) mod tests {
     fn cover_mime_is_sniffed_from_magic_bytes_not_the_url() {
         assert!(matches!(cover_mime(b"\x89PNG\r\n\x1a\n"), MimeType::Png));
         assert!(matches!(cover_mime(b"\xff\xd8\xff\xe0"), MimeType::Jpeg));
-        assert!(sniff_cover(b"RIFF....WEBPVP8 ").is_none(), "webp 认不出来就该说认不出来");
+        assert!(
+            sniff_cover(b"RIFF....WEBPVP8 ").is_none(),
+            "webp 认不出来就该说认不出来"
+        );
     }
 
     /// 造一张最小的合法 PNG（1x1），只用来验证"写进去能读回来"。
     fn tiny_png() -> Vec<u8> {
         let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
         out.extend_from_slice(&[0, 0, 0, 13, b'I', b'H', b'D', b'R']);
-        out.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89]);
+        out.extend_from_slice(&[
+            0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89,
+        ]);
         out.extend_from_slice(&[0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82]);
         out
     }
@@ -533,7 +588,10 @@ pub(crate) mod tests {
 
     #[test]
     fn analysis_comment_keeps_the_users_note_at_the_end() {
-        assert_eq!(analysis_comment("8A", Some(7), "开场用"), "8A - Energy 7 - 开场用");
+        assert_eq!(
+            analysis_comment("8A", Some(7), "开场用"),
+            "8A - Energy 7 - 开场用"
+        );
         assert_eq!(analysis_comment("8A", None, ""), "8A");
         assert_eq!(analysis_comment("", Some(3), ""), "Energy 3");
         assert_eq!(analysis_comment("", None, ""), "");
@@ -564,15 +622,16 @@ pub(crate) mod tests {
     fn video_extension_list_matches_the_frontend_copy() {
         // 这份表在 src/lib/format.ts 里还有一份手抄的。谁漂移了，表现是
         // "有的视频有角标有的没有"，从症状根本联想不到这里——所以用测试锁死。
-        let ts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/lib/format.ts");
+        let ts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/lib/format.ts");
         let source = std::fs::read_to_string(&ts)
             .expect("src/lib/format.ts 应当存在（前端的视频后缀表在里面）");
         let mut in_front: Vec<String> = Vec::new();
         // 形状：const VIDEO_EXTENSIONS = new Set(["mp4", ...]);
         if let Some(start) = source.find("VIDEO_EXTENSIONS") {
             let tail = &source[start..];
-            let open = tail.find('[').expect("VIDEO_EXTENSIONS 后面应当是数组字面量");
+            let open = tail
+                .find('[')
+                .expect("VIDEO_EXTENSIONS 后面应当是数组字面量");
             let close = tail[open..].find(']').unwrap() + open;
             for piece in tail[open + 1..close].split(',') {
                 let name = piece.trim().trim_matches(|c| c == '"' || c == '\'');
@@ -603,16 +662,33 @@ pub(crate) mod tests {
         .unwrap();
 
         // 只改标题：其余字段没传 = 没动过，文件里那份必须原样留着
-        write_metadata(&path, &MetadataEdit { title: Some("新标题"), ..Default::default() }).unwrap();
+        write_metadata(
+            &path,
+            &MetadataEdit {
+                title: Some("新标题"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let tags = read_tags(&path);
         assert_eq!(tags.title, "新标题");
         assert_eq!(tags.artist, "原艺人");
         assert_eq!(tags.album, "原专辑");
         assert_eq!(tags.genre, "Techno");
-        assert_eq!(tags.year, "2021", "年份要能被 read_tags 读回来，否则等于没写");
+        assert_eq!(
+            tags.year, "2021",
+            "年份要能被 read_tags 读回来，否则等于没写"
+        );
 
         // Some("") 是"用户明确清空"，和 None 不是一回事
-        write_metadata(&path, &MetadataEdit { album: Some("  "), ..Default::default() }).unwrap();
+        write_metadata(
+            &path,
+            &MetadataEdit {
+                album: Some("  "),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let tags = read_tags(&path);
         assert_eq!(tags.album, "");
         assert_eq!(tags.artist, "原艺人", "清空一个字段不该顺手清掉别的");
@@ -632,6 +708,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn identical_metadata_analysis_and_cover_are_not_rewritten() {
+        let path = scratch("same-values");
+        let edit = MetadataEdit {
+            title: Some("同一标题"),
+            artist: Some("同一艺人"),
+            album: Some("同一专辑"),
+            genre: Some("House"),
+            year: Some("2024"),
+        };
+        write_metadata(&path, &edit).unwrap();
+        write_analysis_tags(&path, None, "8A", "A minor", Some(6), "备注").unwrap();
+        let png = tiny_png();
+        write_cover(&path, &png).unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+
+        write_metadata(&path, &edit).unwrap();
+        let after_metadata = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(before, after_metadata, "相同文本标签不应再次写文件");
+        write_analysis_tags(&path, None, "8A", "A minor", Some(6), "备注").unwrap();
+        let after_analysis = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(before, after_analysis, "相同分析标签不应再次写文件");
+        write_cover(&path, &png).unwrap();
+
+        let after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(before, after, "相同封面不应再次写文件");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn write_cover_replaces_the_old_one_and_rejects_unknown_formats() {
         let path = scratch("cover");
         write_cover(&path, &tiny_png()).unwrap();
@@ -647,7 +753,10 @@ pub(crate) mod tests {
         assert_eq!(tag.pictures().len(), 1);
         assert_eq!(read_cover(&path).unwrap().0, jpeg);
 
-        assert!(write_cover(&path, b"GIF89a....").is_err(), "认不出来的格式要挡掉");
+        assert!(
+            write_cover(&path, b"GIF89a....").is_err(),
+            "认不出来的格式要挡掉"
+        );
         assert!(write_cover(&path, b"").is_err());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

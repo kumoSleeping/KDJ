@@ -67,6 +67,8 @@ export interface Settings {
   auto_start_downloads: boolean;
   /** 播放条使用分析波形；关掉时显示常规进度条。 */
   player_waveform: boolean;
+  /** KDJ 虚拟磁盘空间不足时，创建更大的镜像、迁移数据并重试。 */
+  virtual_disk_auto_grow: boolean;
   /**
    * 只读派生字段（后端 GET/PUT /api/settings 附带）：全新安装的默认下载落点
    * ——系统「下载」目录 + KDJ。「保存到」菜单里的「系统下载」项用它。
@@ -421,6 +423,10 @@ export interface Track {
   cue_ms: number | null;
   /** 结束点（毫秒），与 cue_ms 成对。 */
   end_ms: number | null;
+  /** 外置 DJ 曲库带入的只读标准 Cue；本地曲目和在线曲目没有此字段。 */
+  cue_points?: CuePoint[];
+  /** OneLibrary 播放快照所关联的本地曲目，用于复用歌词等本地数据。 */
+  local_track_id?: number | null;
   source_platform: string;
   source_key: string;
   analyzed_at: string | null;
@@ -495,6 +501,102 @@ export interface TrackPage {
   total: number;
   offset: number;
   limit: number;
+}
+
+export interface RemovableDevice {
+  path: string;
+  name: string;
+  file_system: string;
+  total_bytes: number;
+  available_bytes: number;
+  read_only: boolean;
+  one_library_file_system: boolean;
+  has_one_library: boolean;
+  is_virtual: boolean;
+}
+
+/** 直接来自外置卷 exportLibrary.db，而不是 KDJ 本地数据库。 */
+export interface OneLibraryPlaylist {
+  device_path: string;
+  id: number;
+  seq: number;
+  name: string;
+  /** 0 = playlist，1 = folder，4 = smart list。 */
+  attribute: number;
+  parent_id: number;
+  track_count: number;
+}
+
+/** 来自 DJ 曲库标准的只读 Cue；没有 hot_cue 编号时是 Memory Cue。 */
+export interface CuePoint {
+  id: number;
+  hot_cue: number | null;
+  start_ms: number;
+  /** 有效值表示 Loop 的结束位置；普通 Cue 为 null。 */
+  end_ms: number | null;
+  color_index: number | null;
+  color: string;
+  comment: string;
+  active_loop: boolean;
+}
+
+export interface OneLibraryTrack {
+  content_id: number;
+  sequence: number;
+  /** KDJ 自己导出的曲目所关联的本地曲目 id；外来曲目为 null。 */
+  local_track_id: number | null;
+  external_modified: boolean;
+  external_update_count: number;
+  title: string;
+  artist: string;
+  album: string;
+  genre: string;
+  year: string;
+  bpm: number | null;
+  music_key: string;
+  duration: number | null;
+  bitrate: number | null;
+  samplerate: number | null;
+  size: number;
+  rating: number;
+  comment: string;
+  /** OneLibrary 封面关联/文件变化版本，用于刷新浏览器图片缓存。 */
+  cover_version: string;
+  cue_points: CuePoint[];
+  path: string;
+  filename: string;
+}
+
+export interface OneLibraryTarget {
+  device_path: string;
+  device_name: string;
+  is_virtual: boolean;
+  playlist_id: number;
+  playlist_name: string;
+}
+
+export interface OneLibraryCapacityPlan {
+  required_bytes: number;
+  available_bytes: number;
+  sufficient: boolean;
+}
+
+export interface OneLibraryImportResult {
+  track_ids: number[];
+  errors: Record<string, string>;
+}
+
+export interface PlaylistExportResult {
+  playlist_id: number;
+  playlist_name: string;
+  device_path: string;
+  copied_tracks: number;
+  reused_tracks: number;
+  skipped_tracks: number;
+  copied_bytes: number;
+  database_path: string;
+  analysis_note: string;
+  warnings: string[];
 }
 
 export interface TrackPatch {
@@ -680,6 +782,24 @@ export interface SavedLoginQr {
   location: "downloads" | "pictures" | string;
 }
 
+export interface VirtualDiskStatus {
+  supported: boolean;
+  exists: boolean;
+  mounted: boolean;
+  name: string;
+  imagePath: string;
+  mountPath: string;
+  fileSystem: string;
+  partitionScheme: string;
+  imageFormat: string;
+  protocol: string;
+  totalBytes: number;
+  availableBytes: number;
+  writable: boolean;
+  /** Windows 的 DiskPart 挂载/推出会显示系统 UAC；macOS hdiutil 不需要 sudo。 */
+  requiresElevation: boolean;
+}
+
 export interface KdjBridge {
   baseUrl: string;
   platform: NodeJS.Platform | string;
@@ -710,6 +830,15 @@ export interface KdjBridge {
    * 各给各的操作（安卓开 Release 页下 APK，浏览器开发布页）。
    */
   applyUpdate?: null | ((onProgress?: (progress: UpdateProgress) => void) => Promise<void>);
+  /** macOS hdiutil / Windows VHD 生命周期；其它平台为空。 */
+  virtualDisk?: null | {
+    status: () => Promise<VirtualDiskStatus>;
+    mount: (sizeGib?: number) => Promise<VirtualDiskStatus>;
+    ensureCapacity: (requiredBytes: number) => Promise<VirtualDiskStatus>;
+    grow: (sizeGib: number) => Promise<VirtualDiskStatus>;
+    eject: () => Promise<VirtualDiskStatus>;
+    delete: () => Promise<VirtualDiskStatus>;
+  };
   windowControl: (action: "minimize" | "maximize" | "close" | "drag") => void;
   /** 同步原生窗口底色，避免 macOS 拖窗时露出与页面主题不符的底层。 */
   setWindowBackground: (theme: "dark" | "light") => void;

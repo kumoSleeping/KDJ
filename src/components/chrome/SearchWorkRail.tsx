@@ -1,4 +1,4 @@
-import { CheckSquare, Download, ListCollapse } from "lucide-react";
+import { CheckSquare, Download, ListCollapse, ListMusic } from "lucide-react";
 import type { ReactNode } from "react";
 import type { IntakeItem, Platform } from "../../types";
 import { useDownloadStore } from "../../stores/downloadStore";
@@ -11,6 +11,12 @@ const PLATFORM_ORDER = SEARCH_PLATFORMS.map((item) => item.id);
 const PLATFORM_LABEL = Object.fromEntries(
   SEARCH_PLATFORMS.map((item) => [item.id, item.label]),
 ) as Record<Platform, string>;
+
+const COLLECTION_LABEL = {
+  playlist: "歌单",
+  artist: "艺术家",
+  album: "专辑",
+} as const;
 
 function countSourcesByPlatform(items: IntakeItem[]): Partial<Record<Platform, number>> {
   const counts: Partial<Record<Platform, number>> = {};
@@ -109,9 +115,49 @@ export function SearchWorkRail({
       );
     }
 
+    const openedCollection = items.find(
+      (item) =>
+        item.groups.length > 0 &&
+        (item.kind === "playlist" || item.kind === "artist" || item.kind === "album"),
+    );
+    const collections = items.flatMap((item) => item.collections);
+    if (openedCollection || collections.length > 0) {
+      glyphs.push(
+        <span key="collections" className="kd-activity-glyph" aria-hidden="true">
+          <ListMusic size={13} strokeWidth={2.25} />
+        </span>,
+      );
+      if (openedCollection) {
+        texts.push(
+          <span
+            key="opened-collection"
+            className="kd-activity-text kd-truncate"
+            title={`${openedCollection.title} · ${openedCollection.groups.length} 首`}
+          >
+            {openedCollection.title} · {openedCollection.groups.length} 首
+          </span>,
+        );
+      }
+      if (collections.length > 0) {
+        const kinds = new Set(collections.map((collection) => collection.kind));
+        const kind = kinds.size === 1 ? COLLECTION_LABEL[collections[0]!.kind] : "集合";
+        texts.push(
+          <span key="collection-count" className="kd-activity-text">
+            {collections.length} 个{kind}
+          </span>,
+        );
+      }
+    }
+
     const counts = countSourcesByPlatform(items);
     const rows = PLATFORM_ORDER.filter((id) => (counts[id] ?? 0) > 0);
-    if (rows.length === 0 && activeDownloads === 0 && !loading) {
+    if (
+      rows.length === 0 &&
+      activeDownloads === 0 &&
+      !loading &&
+      !openedCollection &&
+      collections.length === 0
+    ) {
       glyphs.push(
         <span key="empty" className="kd-activity-glyph" aria-hidden="true">
           <Download size={13} strokeWidth={2.25} />

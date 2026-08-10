@@ -67,7 +67,9 @@ fn has_encoder(name: &str) -> bool {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    listing.lines().any(|line| line.split_whitespace().any(|word| word == name))
+    listing
+        .lines()
+        .any(|line| line.split_whitespace().any(|word| word == name))
 }
 
 /// 按运行平台挑这台机器真实可用的硬件 H.264 编码器；检测不到则稳定回退 libx264。
@@ -77,7 +79,11 @@ pub fn preferred_vj_video_encoder() -> VjVideoEncoder {
     let candidates: &[VjVideoEncoder] = if cfg!(target_os = "macos") {
         &[VjVideoEncoder::VideoToolbox]
     } else if cfg!(target_os = "windows") {
-        &[VjVideoEncoder::Nvenc, VjVideoEncoder::Amf, VjVideoEncoder::Qsv]
+        &[
+            VjVideoEncoder::Nvenc,
+            VjVideoEncoder::Amf,
+            VjVideoEncoder::Qsv,
+        ]
     } else {
         // Linux 发行版和驱动组合差异很大；VAAPI 还要求额外 hwupload 滤镜，
         // 在这里盲开反而会让普通桌面导出失败。已有 NVENC 则可以安全使用。
@@ -525,6 +531,9 @@ pub async fn run(args: &[String], log_path: &Path, cancel: &CancellationToken) -
     let binary = binary()?;
     let log = std::fs::File::create(log_path).context("创建 ffmpeg 日志失败")?;
     let mut child = tokio::process::Command::new(binary)
+        // 默认进度会每隔几百毫秒往 stderr 刷一整行。日志若跟成品落在 U 盘上，
+        // 一次长 VJ 导出就会制造几千次无价值小写；只保留真正需要展示的错误。
+        .args(["-hide_banner", "-nostats", "-loglevel", "error"])
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::from(log))
@@ -630,7 +639,9 @@ mod tests {
         )
         .unwrap();
         let args = as_str(&args);
-        assert!(args.windows(2).any(|pair| pair == ["-c:v", "h264_videotoolbox"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-c:v", "h264_videotoolbox"]));
         assert!(args.windows(2).any(|pair| pair == ["-b:v", "5M"]));
         assert!(!args.contains(&"-crf"));
         assert!(!args.contains(&"-preset"));

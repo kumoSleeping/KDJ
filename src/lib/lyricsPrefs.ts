@@ -7,6 +7,7 @@ import {
   type LyricsSecondaryMode,
   type LyricsStrokeMode,
 } from "./lyricsColor";
+import { writeLocalStorageSoon } from "./storageWrite";
 
 export type {
   LyricsColorMode,
@@ -425,13 +426,14 @@ function load(): LyricsPrefs {
 }
 
 function save(prefs: LyricsPrefs): void {
-  localStorage.setItem(
+  writeLocalStorageSoon(
     STORAGE_KEY,
     JSON.stringify({
       ...pickPrefs(prefs),
       desktopLockConfigured: true,
       lyricsPrefsVersion: ONLINE_LYRICS_PREF_VERSION,
     }),
+    750,
   );
   // 桌面歌词是独立 WebView：WKWebView 往往不派发跨窗 storage 事件，改用 Tauri 广播。
   notifyPrefsChanged();

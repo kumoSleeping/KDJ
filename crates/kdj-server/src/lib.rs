@@ -9,10 +9,13 @@ pub mod downloads;
 pub mod error;
 pub mod jobs;
 pub mod lyrics;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod one_library_analysis;
 pub mod routes;
 pub mod state;
 pub mod stream_cache;
 pub mod stream_waveform;
+pub mod usb_library;
 pub mod waveform;
 pub mod ws;
 

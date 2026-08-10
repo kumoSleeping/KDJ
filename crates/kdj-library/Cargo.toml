@@ -12,8 +12,11 @@ kdj-core = { version = "0.2.38", path = "../kdj-core" }
 kdj-providers = { version = "0.2.38", path = "../kdj-providers" }
 lofty = "0.24.0"
 r2d2 = "0.8.10"
-r2d2_sqlite = "0.25"
-rusqlite = { version = "0.32", features = ["bundled"] }
+r2d2_sqlite = "0.28"
+# 桌面端的 OneLibrary 写入器会把同一版 libsqlite3-sys 切到 SQLCipher；这里不能再
+# 同时打开普通 bundled SQLite（两个 bundled 提供者都会导出 sqlite3 符号）。移动端
+# 没有 OneLibrary 依赖，仍单独启用 bundled，避免依赖系统 SQLite 的可用性。
+rusqlite = "0.35"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.19"
@@ -25,6 +28,9 @@ walkdir = "2.5.0"
 # service::move_to_trash 在那两个平台上编成一个报错的桩。
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 trash = "5"
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+rusqlite = { version = "0.35", features = ["bundled"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3.2", default-features = false, features = [

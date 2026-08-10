@@ -1,5 +1,9 @@
 /** 左侧真实文件夹的稳定 DOM 标记；不要拿 title 当数据接口。 */
 export const FOLDER_DROP_PATH_ATTR = "data-kd-folder-drop-path";
+/** OneLibrary playlist 落点；值是协议数据库里的 playlist id。 */
+export const PLAYLIST_DROP_ID_ATTR = "data-kd-playlist-drop-id";
+/** 与 playlist id 配对的挂载根目录。 */
+export const PLAYLIST_DROP_DEVICE_ATTR = "data-kd-playlist-drop-device";
 /** 当前曲目表也能接搜索结果；值就是这张表正在看的目标文件夹。 */
 export const SEARCH_DROP_PATH_ATTR = "data-kd-search-drop-path";
 /** 「全部曲目」落点：只接搜索下载，落到默认下载文件夹。 */
@@ -22,6 +26,33 @@ export function folderDropElementAt(clientX: number, clientY: number): HTMLEleme
 
 export function folderDropPathAt(clientX: number, clientY: number): string {
   return folderDropElementAt(clientX, clientY)?.getAttribute(FOLDER_DROP_PATH_ATTR)?.trim() ?? "";
+}
+
+export function playlistDropElementAt(clientX: number, clientY: number): HTMLElement | null {
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+  return document
+    .elementFromPoint(clientX, clientY)
+    ?.closest<HTMLElement>(`[${PLAYLIST_DROP_ID_ATTR}]`) ?? null;
+}
+
+export interface PlaylistDropLocation {
+  devicePath: string;
+  playlistId: number;
+}
+
+/** 从稳定 DOM 属性读取 OneLibrary 落点；拖动结束坐标兜底和原生 drop 共用。 */
+export function playlistDropLocation(
+  element: Pick<HTMLElement, "getAttribute"> | null,
+): PlaylistDropLocation | null {
+  if (!element) return null;
+  const devicePath = element.getAttribute(PLAYLIST_DROP_DEVICE_ATTR)?.trim() ?? "";
+  const playlistId = Number(element.getAttribute(PLAYLIST_DROP_ID_ATTR));
+  if (!devicePath || !Number.isInteger(playlistId) || playlistId <= 0) return null;
+  return { devicePath, playlistId };
+}
+
+export function playlistDropAt(clientX: number, clientY: number): PlaylistDropLocation | null {
+  return playlistDropLocation(playlistDropElementAt(clientX, clientY));
 }
 
 /**

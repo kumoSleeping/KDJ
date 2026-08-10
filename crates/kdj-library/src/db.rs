@@ -91,6 +91,10 @@ CREATE TRIGGER IF NOT EXISTS cleanup_track_bpm_key_analysis_v2
 AFTER DELETE ON tracks BEGIN
   DELETE FROM track_bpm_key_analysis_v2 WHERE track_id = OLD.id;
 END;
+CREATE TRIGGER IF NOT EXISTS cleanup_playlist_track_reference
+AFTER DELETE ON tracks BEGIN
+  DELETE FROM playlist_items WHERE track_id = OLD.id;
+END;
 "#;
 
 /// 索引**必须在补列之后**再建。
@@ -104,6 +108,9 @@ CREATE INDEX IF NOT EXISTS idx_tracks_bpm ON tracks(bpm);
 CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(path);
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
+CREATE INDEX IF NOT EXISTS idx_playlists_name ON playlists(name COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_playlist_items_position
+  ON playlist_items(playlist_id, position);
 CREATE INDEX IF NOT EXISTS idx_waveform_assets_profile ON waveform_assets(profile, revision);
 CREATE INDEX IF NOT EXISTS idx_track_bpm_key_analysis_v2_revision
   ON track_bpm_key_analysis_v2(analyzer_revision, analyzed_at);
@@ -280,8 +287,15 @@ fn prepare_journal_mode(path: &Path) -> Result<()> {
         .with_context(|| format!("打开曲库失败：{}", path.display()))?;
     conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS)
         .context("设置 busy_timeout 失败")?;
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .context("切换 WAL 失败")?;
+    let current: String = conn
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .context("读取 journal_mode 失败")?;
+    // journal_mode 是持久属性。绝大多数启动只需读一次；重复执行切换会在 Windows
+    // 上额外获取文件锁，也可能触碰数据库头，低速盘上没有任何收益。
+    if !current.eq_ignore_ascii_case("wal") {
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .context("切换 WAL 失败")?;
+    }
     Ok(())
 }
 

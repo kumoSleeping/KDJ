@@ -16,13 +16,13 @@ export type OverlayKind =
   | "preview"
   | "folders"
   | "vjExport"
+  | "virtualDisk"
   | "lyrics";
 
 export interface Place {
   listMode: ListMode;
   folder: string;
   folderDeep: boolean;
-  queueView: boolean;
   selectedId: number | null;
   overlay: OverlayKind | null;
 }
@@ -36,6 +36,7 @@ function overlayOf(): OverlayKind | null {
   if (app.showPreview) return "preview";
   if (app.showQueue) return "queue";
   if (app.showVjExport) return "vjExport";
+  if (app.showVirtualDisk) return "virtualDisk";
   if (app.showLyrics) return "lyrics";
   return null;
 }
@@ -47,7 +48,6 @@ export function readPlace(): Place {
     listMode: app.listMode,
     folder: lib.filter.folder,
     folderDeep: lib.filter.folderDeep,
-    queueView: lib.queueView,
     selectedId: lib.selectedId,
     overlay: overlayOf(),
   };
@@ -58,7 +58,6 @@ function samePlace(a: Place, b: Place): boolean {
     a.listMode === b.listMode &&
     a.folder === b.folder &&
     a.folderDeep === b.folderDeep &&
-    a.queueView === b.queueView &&
     a.selectedId === b.selectedId &&
     a.overlay === b.overlay
   );
@@ -78,6 +77,7 @@ function applyOverlay(overlay: OverlayKind | null): void {
   else if (overlay === "queue") app.openQueuePanel();
   else if (overlay === "folders") app.openFoldersPanel();
   else if (overlay === "vjExport") app.openVjExportPanel();
+  else if (overlay === "virtualDisk") app.openVirtualDiskPanel();
   else if (overlay === "lyrics") app.openLyricsPanel();
   else app.dismissOverlay();
 }
@@ -94,9 +94,9 @@ export function applyPlace(place: Place): void {
       showPreview: false,
       showFolders: false,
       showVjExport: false,
+      showVirtualDisk: false,
       showLyrics: false,
     });
-    if (lib.queueView !== place.queueView) lib.setQueueView(place.queueView);
     if (lib.filter.folder !== place.folder || lib.filter.folderDeep !== place.folderDeep) {
       lib.setFilter({ folder: place.folder, folderDeep: place.folderDeep });
     }

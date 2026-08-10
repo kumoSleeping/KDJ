@@ -196,7 +196,19 @@ impl WaveformCoordinator {
         buckets: usize,
         cache_dir: PathBuf,
     ) -> Result<Waveform> {
-        self.get_or_compute_mode(track_id, path, buckets, cache_dir, true)
+        self.get_or_compute_mode(track_id, path, buckets, cache_dir, true, true)
+            .await
+    }
+
+    /// 外置文件的交互波形只使用解码/缓存能力，不向 KDJ 本地曲库写资产状态。
+    pub async fn get_or_compute_detached(
+        self: &Arc<Self>,
+        cache_id: i64,
+        path: PathBuf,
+        buckets: usize,
+        cache_dir: PathBuf,
+    ) -> Result<Waveform> {
+        self.get_or_compute_mode(cache_id, path, buckets, cache_dir, true, false)
             .await
     }
 
@@ -207,8 +219,15 @@ impl WaveformCoordinator {
         path: PathBuf,
         cache_dir: PathBuf,
     ) -> Result<Waveform> {
-        self.get_or_compute_mode(track_id, path, DEFAULT_WAVEFORM_BUCKETS, cache_dir, false)
-            .await
+        self.get_or_compute_mode(
+            track_id,
+            path,
+            DEFAULT_WAVEFORM_BUCKETS,
+            cache_dir,
+            false,
+            true,
+        )
+        .await
     }
 
     async fn get_or_compute_mode(
@@ -218,6 +237,7 @@ impl WaveformCoordinator {
         buckets: usize,
         cache_dir: PathBuf,
         interactive: bool,
+        record_status: bool,
     ) -> Result<Waveform> {
         let buckets = buckets.clamp(64, 2000);
         let mtime = file_mtime(&path);
@@ -228,7 +248,7 @@ impl WaveformCoordinator {
         };
         let cache_file = cache_path(&cache_dir, track_id, buckets, mtime);
         if let Some((cached, canonical)) = read_cached(&cache_dir, key) {
-            if canonical {
+            if canonical && record_status {
                 self.record_status(key, None);
             }
             return Ok(cached);
@@ -260,7 +280,7 @@ impl WaveformCoordinator {
             // 等闸门期间别人可能已经写好缓存（分析预热 / 并发请求）
             if let Some((cached, canonical)) = read_cached(&cache_dir, key) {
                 let outcome = WaveOutcome::Ok(cached);
-                if canonical {
+                if canonical && record_status {
                     coord.record_outcome(key, &outcome);
                 }
                 publish(&coord, key, outcome.clone());
@@ -277,7 +297,9 @@ impl WaveformCoordinator {
                     WaveOutcome::Err(format!("{err:#}"))
                 }
             };
-            coord.record_outcome(key, &outcome);
+            if record_status {
+                coord.record_outcome(key, &outcome);
+            }
             publish(&coord, key, outcome.clone());
             outcome
         })
@@ -410,6 +432,74 @@ fn compute_waveform(path: &Path, track_id: i64, buckets: usize) -> Result<Wavefo
     Ok(wave)
 }
 
+/// 完整播放条使用固定列数。分析器按 STFT 整数步长输出近似列数，这里以时间面积
+/// 重采样到请求宽度；高度保留窗口峰值，颜色按响度加权，短曲也不会退化成双空线。
+pub fn fit_waveform_columns(wave: Waveform, columns: usize) -> Waveform {
+    let columns = columns.clamp(64, 2_000);
+    let source_len = wave.amp.len();
+    if source_len == columns
+        || source_len == 0
+        || wave.r.len() != source_len
+        || wave.g.len() != source_len
+        || wave.b.len() != source_len
+    {
+        return wave;
+    }
+    let mut amp = Vec::with_capacity(columns);
+    let mut red = Vec::with_capacity(columns);
+    let mut green = Vec::with_capacity(columns);
+    let mut blue = Vec::with_capacity(columns);
+    for target in 0..columns {
+        let start = target as f64 * source_len as f64 / columns as f64;
+        let end = (target + 1) as f64 * source_len as f64 / columns as f64;
+        let first = start.floor() as usize;
+        let last = (end.ceil() as usize).min(source_len);
+        let mut peak = 0.0f32;
+        let mut r = 0.0f64;
+        let mut g = 0.0f64;
+        let mut b = 0.0f64;
+        let mut total_weight = 0.0f64;
+        for source in first..last {
+            let overlap = (end.min((source + 1) as f64) - start.max(source as f64)).max(0.0);
+            if overlap <= 0.0 {
+                continue;
+            }
+            let value = wave.amp[source].clamp(0.0, 1.0);
+            peak = peak.max(value);
+            let weight = overlap * (f64::from(value) + 0.001);
+            r += f64::from(wave.r[source]) * weight;
+            g += f64::from(wave.g[source]) * weight;
+            b += f64::from(wave.b[source]) * weight;
+            total_weight += weight;
+        }
+        let fallback = first.min(source_len - 1);
+        amp.push(peak);
+        red.push(if total_weight > 0.0 {
+            (r / total_weight).round() as u8
+        } else {
+            wave.r[fallback]
+        });
+        green.push(if total_weight > 0.0 {
+            (g / total_weight).round() as u8
+        } else {
+            wave.g[fallback]
+        });
+        blue.push(if total_weight > 0.0 {
+            (b / total_weight).round() as u8
+        } else {
+            wave.b[fallback]
+        });
+    }
+    Waveform {
+        track_id: wave.track_id,
+        duration: wave.duration,
+        amp,
+        r: red,
+        g: green,
+        b: blue,
+    }
+}
+
 pub fn file_mtime(path: &Path) -> u64 {
     std::fs::metadata(path)
         .ok()
@@ -490,6 +580,66 @@ fn read_cached(cache_dir: &Path, key: WaveKey) -> Option<(Waveform, bool)> {
     Some((wave, canonical))
 }
 
+/// 只读取本地曲目已经生成好的固定波形，不触发解码或重新分析。
+///
+/// OneLibrary 导出走这条只读路径：缓存不存在时由目标软件沿用原来的分析兜底，
+/// 不能因为一次拖放在后台偷偷再解一遍整首音频。
+pub(crate) fn load_cached_default(
+    track_id: i64,
+    path: &Path,
+    cache_dir: &Path,
+) -> Option<Waveform> {
+    let key = WaveKey {
+        track_id,
+        buckets: DEFAULT_WAVEFORM_BUCKETS,
+        mtime: file_mtime(path),
+    };
+    if let Some((waveform, _)) = read_cached(cache_dir, key) {
+        return Some(waveform);
+    }
+
+    // 旧分析任务曾先生成波形、再把 BPM/Key 写入音频标签。音频内容没变，但
+    // 标签写入会改变 mtime，留下一个仍然有效、文件名时间戳却落后一拍的缓存。
+    // 这里仅回读已有文件，不把它冒充当前资产状态，也不会触发重新解码。
+    let prefix = format!("{track_id}-v3-{}-", DEFAULT_WAVEFORM_BUCKETS);
+    let mut candidates: Vec<(u64, PathBuf)> = std::fs::read_dir(cache_dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let stamp = name
+                .strip_prefix(&prefix)?
+                .strip_suffix(".kdwave")?
+                .parse::<u64>()
+                .ok()?;
+            Some((stamp, entry.path()))
+        })
+        .collect();
+    candidates.sort_unstable_by_key(|(stamp, _)| std::cmp::Reverse(*stamp));
+    candidates.into_iter().find_map(|(_, candidate)| {
+        read_cache(&candidate).filter(|waveform| waveform.track_id == track_id)
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn write_cached_default_for_test(
+    track_id: i64,
+    path: &Path,
+    cache_dir: &Path,
+    waveform: &Waveform,
+) -> Result<()> {
+    let key = WaveKey {
+        track_id,
+        buckets: DEFAULT_WAVEFORM_BUCKETS,
+        mtime: file_mtime(path),
+    };
+    write_cache(
+        &cache_path(cache_dir, key.track_id, key.buckets, key.mtime),
+        waveform,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +655,75 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn write_test_wav(path: &Path) {
+        const RATE: u32 = 44_100;
+        let data_len = RATE * 30;
+        let mut data = Vec::with_capacity(44 + data_len as usize);
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&(36 + data_len).to_le_bytes());
+        data.extend_from_slice(b"WAVEfmt ");
+        data.extend_from_slice(&16u32.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&RATE.to_le_bytes());
+        data.extend_from_slice(&RATE.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&8u16.to_le_bytes());
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&data_len.to_le_bytes());
+        data.resize(44 + data_len as usize, 128);
+        std::fs::write(path, data).unwrap();
+    }
+
+    #[tokio::test]
+    async fn detached_onelibrary_waveform_has_640_columns_without_library_asset_write() {
+        let dir = scratch("detached");
+        let audio = dir.join("track.wav");
+        let cache_dir = dir.join("cache");
+        write_test_wav(&audio);
+        let library = Arc::new(kdj_library::LibraryService::new(
+            kdj_library::Database::open_in_memory().unwrap(),
+        ));
+        let coordinator = WaveformCoordinator::new(Arc::clone(&library));
+        let waveform = coordinator
+            .get_or_compute_detached(9_999, audio.clone(), 640, cache_dir.clone())
+            .await
+            .unwrap();
+        let waveform = fit_waveform_columns(waveform, 640);
+        assert_eq!(waveform.track_id, 9_999);
+        assert_eq!(waveform.amp.len(), 640);
+        assert_eq!(waveform.r.len(), 640);
+        assert_eq!(waveform.g.len(), 640);
+        assert_eq!(waveform.b.len(), 640);
+        let count: i64 = library
+            .db()
+            .conn()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM waveform_assets", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "外置即时波形不能写 KDJ 本地曲库资产状态");
+
+        let cache_file = cache_path(&cache_dir, 9_999, 640, file_mtime(&audio));
+        let written_at = std::fs::metadata(&cache_file).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let restarted_library = Arc::new(kdj_library::LibraryService::new(
+            kdj_library::Database::open_in_memory().unwrap(),
+        ));
+        let restarted = WaveformCoordinator::new(restarted_library);
+        let reused = restarted
+            .get_or_compute_detached(9_999, audio, 640, cache_dir)
+            .await
+            .unwrap();
+        let reused = fit_waveform_columns(reused, 640);
+        assert_eq!(reused.amp, waveform.amp);
+        assert_eq!(
+            std::fs::metadata(cache_file).unwrap().modified().unwrap(),
+            written_at,
+            "新 coordinator 应直接复用磁盘缓存，不能重写波形"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -529,6 +748,32 @@ mod tests {
                 .flatten()
                 .all(|entry| !entry.file_name().to_string_lossy().ends_with(".partial")),
             "成功提交后不能留下半成品"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn export_can_reuse_a_cache_timestamped_before_analysis_tags_were_written() {
+        let dir = scratch("stale-mtime-export");
+        let audio = dir.join("track.mp3");
+        let cache = dir.join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(&audio, b"metadata-changed-after-analysis").unwrap();
+        let wave = Waveform {
+            track_id: 17,
+            duration: 3.5,
+            amp: vec![0.25, 0.75],
+            r: vec![255, 32],
+            g: vec![64, 128],
+            b: vec![32, 255],
+        };
+        write_cache(&cache_path(&cache, 17, DEFAULT_WAVEFORM_BUCKETS, 1), &wave).unwrap();
+
+        let loaded = load_cached_default(17, &audio, &cache).expect("应复用旧 mtime 的现成缓存");
+        assert_eq!(loaded.amp, wave.amp);
+        assert!(
+            !cache_path(&cache, 17, DEFAULT_WAVEFORM_BUCKETS, file_mtime(&audio),).is_file(),
+            "只读导出不能把旧缓存伪装成当前资产"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

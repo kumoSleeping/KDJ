@@ -5,17 +5,14 @@ import { create } from "zustand";
  *
  * 默认 `all`——曲库就是拿来全局接的，一上来限死在当前文件夹里会让人
  * 以为"库里没歌能接"。`folder` 是给按包准备 set 的场景：那时候要的
- * 恰恰是"只在这个歌单里挑"。`queue` 只放临时列表（点歌队列）里的歌，
- * 放空了就停——KTV 的"唱完已点就散场"。
- * （队列非空时本来就**任何范围都优先放队列**，见 autoplay.pickNext；
- * 这一档额外买到的只是"队列空了不要自己找歌"。）
+ * 恰恰是"只在这个文件夹里挑"。
  */
-export type HarmonicScope = "all" | "folder" | "queue";
+export type HarmonicScope = "all" | "folder";
 
 const STORAGE_KEY = "kd-harmonic-scope";
 
 const isScope = (value: string | null): value is HarmonicScope =>
-  value === "all" || value === "folder" || value === "queue";
+  value === "all" || value === "folder";
 
 interface HarmonicScopeState {
   scope: HarmonicScope;

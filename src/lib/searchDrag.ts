@@ -17,7 +17,7 @@ import { rememberVideoEnqueue } from "./queueTaskDraft";
 import { useAppStore } from "../stores/appStore";
 import { useDownloadStore } from "../stores/downloadStore";
 import { useLibraryStore } from "../stores/libraryStore";
-import type { SongSource, VideoDownloadRequest } from "../types";
+import type { OneLibraryTarget, SongSource, VideoDownloadRequest } from "../types";
 
 export { isSparseDownloadTitle, withDownloadDisplay } from "./downloadDisplay";
 
@@ -294,7 +294,7 @@ export function readSearchDrop(dataTransfer: DataTransfer): ActiveSearchDrag | n
 }
 
 /** 「全部曲目」哨兵 → settings.download_dir；其它路径原样返回。 */
-function resolveSearchDestDir(destDir: string): string {
+export function resolveSearchDestDir(destDir: string): string {
   const dest = destDir.trim();
   if (!dest) throw new Error("先打开一个文件夹，再拖进来");
   if (dest === SEARCH_DEFAULT_DOWNLOAD_SENTINEL) {
@@ -358,6 +358,37 @@ export async function enqueueSearchQueuePayload(payload: ActiveSearchDrag): Prom
   await downloads.enqueue(payload.sources, { quality });
 }
 
+/** 在线歌曲直接下载到当前设备 OneLibrary 列表；成品先进入本地曲库，再由持久化补写器复制到设备。 */
+export async function enqueueSearchOneLibraryPayload(
+  payload: ActiveSearchDrag,
+  target: OneLibraryTarget,
+): Promise<void> {
+  if (payload.kind !== "audio" || payload.sources.length === 0) {
+    throw new Error("OneLibrary 列表当前只接受在线歌曲下载");
+  }
+  useAppStore.getState().openQueuePanel();
+  const quality = useAppStore.getState().settings?.default_quality ?? null;
+  await useDownloadStore.getState().enqueue(payload.sources, {
+    quality,
+    one_library_target: target,
+  });
+}
+
+/** 原生 drop 路径：读出拖动载荷后转入与 dragend 坐标兜底相同的入队函数。 */
+export async function enqueueSearchOneLibraryDrop(
+  event: { dataTransfer: DataTransfer },
+  target: OneLibraryTarget,
+): Promise<void> {
+  const payload = readSearchDrop(event.dataTransfer);
+  const alreadyClaimed = dropClaimed;
+  finishSearchDrop();
+  if (!payload) {
+    if (alreadyClaimed) return;
+    throw new Error("拖动的数据读不出来，请再拖一次");
+  }
+  await enqueueSearchOneLibraryPayload(payload, target);
+}
+
 /** 已经由 dragend 兜底认领的搜索载荷，直接送进指定文件夹。 */
 export async function enqueueSearchPayload(
   payload: ActiveSearchDrag,
@@ -371,7 +402,6 @@ export async function enqueueSearchPayload(
   // 搜索结果拖进文件夹只会创建本地下载任务，不写入任何流媒体曲库记录。
   // 先切 UI：左表对准这个文件夹，右栏打开下载队列。入队请求可以稍后再回来。
   const lib = useLibraryStore.getState();
-  lib.setQueueView(false);
   lib.setFilter({ folder: dest, sort: "custom" });
   useAppStore.getState().openQueuePanel();
 

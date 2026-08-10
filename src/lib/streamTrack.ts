@@ -6,6 +6,11 @@
 
 import { api } from "./api";
 import { thumbUrl } from "./format";
+import {
+  isOneLibraryPlaybackTrack,
+  usesRemotePlaybackSource,
+} from "./playbackTrackSource";
+import { discardLocalStorageWrite, writeLocalStorageSoon } from "./storageWrite";
 import type { SongSource, Track } from "../types";
 
 export type StreamKind = "song" | "video";
@@ -161,6 +166,7 @@ export function publishStreamTrack(track: Track | null): void {
     if (track && track.id < 0) {
       localStorage.setItem(PUBLISHED_STREAM_KEY, JSON.stringify(track));
     } else {
+      discardLocalStorageWrite(PUBLISHED_STREAM_PLAYBACK_KEY);
       localStorage.removeItem(PUBLISHED_STREAM_KEY);
       localStorage.removeItem(PUBLISHED_STREAM_PLAYBACK_KEY);
     }
@@ -187,11 +193,9 @@ export function publishStreamTrackState(
   };
   latestStreamPlayback = state;
   publishNativeStreamLyricsClock(state);
-  try {
-    localStorage.setItem(PUBLISHED_STREAM_PLAYBACK_KEY, JSON.stringify(state));
-  } catch {
-    // localStorage 满了也不挡播放。
-  }
+  // timeupdate / 原生快照可达 4~10Hz。跨窗实时同步走下面的 Tauri event，
+  // localStorage 只是歌词窗重启时的兜底，十秒保留一次最新快照已经足够。
+  writeLocalStorageSoon(PUBLISHED_STREAM_PLAYBACK_KEY, JSON.stringify(state), 10_000);
   void import("@tauri-apps/api/event")
     .then(({ emitTo }) =>
       emitTo(
@@ -251,7 +255,7 @@ export function readPublishedStreamPlayback(): PublishedStreamPlayback | null {
 }
 
 export function isStreamTrack(track: Track | null | undefined): boolean {
-  return Boolean(track && track.id < 0);
+  return usesRemotePlaybackSource(track);
 }
 
 export function streamMeta(track: Track | null | undefined): StreamMeta | null {
@@ -274,6 +278,9 @@ export function streamCoverUrl(track: Track): string {
 
 /** 主播放条 / DJ 引擎装 src 时用：在线流优先，否则走曲库音频接口。 */
 export function mediaUrlForTrack(track: Track): string {
+  // OneLibrary 的 path 已是挂载卷里的真实文件。把它的负数临时 id 交给
+  // /api/library/audio/:id 只会查一条不存在的 KDJ 曲库记录并返回 404。
+  if (isOneLibraryPlaybackTrack(track)) return track.path;
   return streamMediaUrl(track) ?? api.audioUrl(track.id);
 }
 

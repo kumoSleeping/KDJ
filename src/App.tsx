@@ -11,6 +11,7 @@ import { bindSongPreviewToPlayer } from "./lib/songPreview";
 import { isEditable } from "./lib/useLibraryClipboard";
 import { useLayoutSignals } from "./lib/useLayoutMode";
 import { bootAll, connectEvents, selectConnected, useAppStore } from "./stores/appStore";
+import { usePlaylistStore } from "./stores/playlistStore";
 import { useLyricsPrefs } from "./lib/lyricsPrefs";
 import { useUpdateStore } from "./stores/updateStore";
 
@@ -36,6 +37,7 @@ export default function App() {
   const booting = useAppStore((state) => state.booting);
   const bootError = useAppStore((state) => state.bootError);
   const connected = useAppStore(selectConnected);
+  const refreshOneLibraryDevices = usePlaylistStore((state) => state.refreshDevices);
   const { columns, chrome, portrait } = useLayoutSignals();
   const [retrying, setRetrying] = useState(false);
   const platform = window.kdj?.platform;
@@ -88,6 +90,24 @@ export default function App() {
     if (!connected) return;
     return useUpdateStore.getState().startBackgroundChecks();
   }, [connected]);
+
+  // 外置卷的生命周期不属于任何一个面板。即使文件夹栏在窄屏下收起，也要持续
+  // 发现 Finder/资源管理器从应用外部完成的挂载与卸载，并清掉已断开的列表视图。
+  useEffect(() => {
+    if (!connected) return;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refreshOneLibraryDevices();
+    };
+    refreshWhenVisible();
+    const timer = window.setInterval(refreshWhenVisible, 3_000);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [connected, refreshOneLibraryDevices]);
 
   const retry = useCallback(() => {
     setRetrying(true);

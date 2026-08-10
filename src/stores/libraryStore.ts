@@ -8,7 +8,6 @@ import { api } from "../lib/api";
 import { continueDataUpgrade } from "../lib/dataUpgrade";
 import { resolveLibraryPasteOp } from "../lib/libraryPaste";
 import { isOutsideFolder } from "../lib/outsideFolder";
-import { useQueueStore } from "./queueStore";
 import type {
   AnalyzeProgress,
   AnalyzeResponseLike,
@@ -64,14 +63,6 @@ export interface LibraryFilter {
 }
 
 const FOLDER_SESSION_KEY = "kd-library-folder";
-
-function readSessionFolder(): string {
-  try {
-    return sessionStorage.getItem(FOLDER_SESSION_KEY)?.trim() || "";
-  } catch {
-    return "";
-  }
-}
 
 function writeSessionFolder(folder: string): void {
   try {
@@ -151,7 +142,10 @@ function claimProgress(current: AnalyzeProgress | null, next: AnalyzeProgress): 
   return next;
 }
 
-function toQuery(filter: LibraryFilter, offset: number): Record<string, string | number | undefined> {
+function toQuery(
+  filter: LibraryFilter,
+  offset: number,
+): Record<string, string | number | undefined> {
   return {
     q: filter.q.trim(),
     key: filter.key,
@@ -213,13 +207,6 @@ export interface LibraryStore {
    * 重新点「分析」才解除。
    */
   autoAnalyzeSuspended: boolean;
-  /**
-   * 中列正显示「临时列表」（点歌队列，见 queueStore）而不是曲库查询结果。
-   * 走同一个 tracks 字段而不是另开一条渲染路：选中、范围多选、详情联动
-   * 全都吃 store.tracks，另开一条的话这些行为要重写一遍。
-   */
-  queueView: boolean;
-
   refresh(): Promise<void>;
   /** 连续翻页直到列表里出现该 id（或已到库底）。 */
   ensureTrackLoaded(id: number): Promise<void>;
@@ -283,8 +270,6 @@ export interface LibraryStore {
   setCover(id: number, file: Blob): Promise<Track>;
   /** 按文件里现存的标签刷新库里那条记录。 */
   rereadTags(id: number): Promise<Track>;
-  /** 切换「临时列表」视图。开 = 中列显示点歌队列；点任何文件夹自动退出。 */
-  setQueueView(on: boolean): void;
   removeTrack(id: number, deleteFile?: boolean): Promise<void>;
   /**
    * 批量删除（多选右键菜单走这条）。一次请求删整批：逐条打 N 个请求
@@ -307,7 +292,7 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   loadingMore: false,
   error: "",
   // 刷新后仍回到刚才打开的文件夹，待下载行才对得上 dest_dir。
-  filter: { ...DEFAULT_FILTER, folder: readSessionFolder() },
+  filter: { ...DEFAULT_FILTER, folder: "" },
   selectedId: null,
   selectedIds: [],
   selectionMode: false,
@@ -321,32 +306,10 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   analyze: null,
   maintenance: [],
   autoAnalyzeSuspended: false,
-  queueView: false,
 
   async refresh() {
     cancelPending();
     const seq = ++requestSeq;
-    // 临时列表视图：tracks 就是队列的快照，按队列顺序，不打后端。
-    // 队列一变（入队/播放消耗）由文件底部的订阅再拉着 refresh 跑一遍。
-    if (get().queueView) {
-      const items = useQueueStore.getState().list();
-      const visible = new Set(items.map((item) => item.id));
-      const selectedIds = get().selectedIds.filter((id) => visible.has(id));
-      const selectedId = get().selectedId;
-      const nextSelectedId = selectedId !== null && visible.has(selectedId)
-        ? selectedId
-        : (selectedIds[selectedIds.length - 1] ?? null);
-      set({
-        tracks: items,
-        total: items.length,
-        loading: false,
-        error: "",
-        selectedIds,
-        selectedId: nextSelectedId,
-        selectedTrack: nextSelectedId === null ? null : get().selectedTrack,
-      });
-      return;
-    }
     // 删曲 / 分析回填都会触发 library.updated → refresh。
     // 若永远只拉第一页，用户滚到第 500 首时列表高度突然塌回 200 行，
     // 视口就会「弹回顶部」——保留当前已加载深度，滚动位置才站得住。
@@ -380,7 +343,6 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
    * 都会让表里找不到行。连续 loadMore，直到看见它或到库底。
    */
   async ensureTrackLoaded(id: number) {
-    if (get().queueView) return;
     // refresh 进行中先等它结束，否则 loadMore 会被 loading 守卫挡住。
     for (let i = 0; i < 80 && get().loading; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -399,23 +361,8 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     }
   },
 
-  setQueueView(on) {
-    if (get().queueView === on) return;
-    // 切视图时旧选区必须失效：否则空队列里按 Delete / Cmd+C，操作的会是
-    // 刚才曲库页里那批已经看不见的曲目。
-    set({
-      queueView: on,
-      selectedId: null,
-      selectedIds: [],
-      selectionMode: false,
-      selectedTrack: null,
-    });
-    void get().refresh();
-  },
-
   async loadMore() {
-    const { tracks, total, loadingMore, loading, queueView } = get();
-    if (queueView) return; // 队列一次全在页里，没有"更多"
+    const { tracks, total, loadingMore, loading } = get();
     if (loadingMore || loading || tracks.length >= total) return;
     const seq = requestSeq;
     set({ loadingMore: true });
@@ -483,16 +430,10 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   setFilter(patch) {
     cancelPending();
-    // 动了筛选/排序/搜索 = 想看曲库查询结果了，临时列表视图自动让位
-    const leavingQueue = get().queueView;
     const filter = { ...get().filter, ...patch };
     if ("folder" in patch) writeSessionFolder(filter.folder);
     set({
       filter,
-      queueView: false,
-      ...(leavingQueue
-        ? { selectedId: null, selectedIds: [], selectedTrack: null }
-        : {}),
     });
     filterTimer = setTimeout(() => {
       filterTimer = null;
@@ -502,14 +443,9 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   resetFilter() {
     cancelPending();
-    const leavingQueue = get().queueView;
     writeSessionFolder("");
     set({
       filter: { ...DEFAULT_FILTER },
-      queueView: false,
-      ...(leavingQueue
-        ? { selectedId: null, selectedIds: [], selectedTrack: null }
-        : {}),
     });
     void get().refresh();
   },
@@ -891,13 +827,6 @@ export function selectAnalyzing(state: LibraryStore): boolean {
   const job = state.analyze;
   return job !== null && (job.total === 0 || job.done < job.total);
 }
-
-// 队列一动（入队/插队/播放消耗/清空），临时列表视图跟着重渲染。
-// 订阅放在这儿而不是 queueStore 里：依赖只许 libraryStore → queueStore 单向走。
-useQueueStore.subscribe(() => {
-  const state = useLibraryStore.getState();
-  if (state.queueView) void state.refresh();
-});
 
 /** 当前选中的曲目。优先取当前页的（最新），页外回落到 selectTrack 暂存的对象。 */
 export function selectSelectedTrack(state: LibraryStore): Track | null {

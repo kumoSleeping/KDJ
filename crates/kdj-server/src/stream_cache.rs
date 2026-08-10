@@ -19,6 +19,8 @@ const CHECKSUM_SEED: u64 = 0xcbf29ce484222325;
 const MEDIA_SUFFIX: &str = ".media";
 const MANIFEST_SUFFIX: &str = ".json";
 const PARTIAL_MARKER: &str = ".partial";
+/// CDN chunk 往往很小；合并后再顺序写，避免下载目录位于 U 盘时持续打小写请求。
+const WRITE_BUFFER_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StreamCacheStats {
@@ -490,7 +492,10 @@ impl StreamCacheReservation {
         }
 
         let writer = StreamCacheWriter {
-            file: Some(file),
+            file: Some(tokio::io::BufWriter::with_capacity(
+                WRITE_BUFFER_BYTES,
+                file,
+            )),
             key: self.key.clone(),
             partial,
             paths,
@@ -526,7 +531,7 @@ impl Drop for StreamCacheReservation {
 }
 
 pub struct StreamCacheWriter {
-    file: Option<tokio::fs::File>,
+    file: Option<tokio::io::BufWriter<tokio::fs::File>>,
     key: String,
     partial: PathBuf,
     paths: CachePaths,
@@ -609,7 +614,8 @@ impl StreamCacheWriter {
             return Ok(false);
         };
         file.flush().await?;
-        file.sync_data().await?;
+        // 这是可校验、可重建的播放缓存，不是用户文档。强制 sync_data 会让每首歌
+        // 都立即刷整轨到闪存；异常退出后下次 checksum 会淘汰坏缓存，无需为缓存 fsync。
         drop(file);
         if !self.is_valid() {
             self.cancel();

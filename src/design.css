@@ -908,7 +908,7 @@ textarea {
   overflow: hidden;
   background: var(--kd-panel);
 }
-.kd-local-list-slot > .kd-middle-split {
+.kd-local-list-slot > .kd-workspace-panes {
   min-width: 0;
   min-height: 0;
   flex: 1 1 auto;
@@ -934,7 +934,7 @@ textarea {
  * 右旁路面板打开时，中间分割整体右缩给右栏让位；
  * 否则绝对定位的详情/队列面板会盖住本地曲库和搜索结果右侧的工具按钮。
  */
-.kd-local-list-slot[data-aside="open"] > .kd-middle-split {
+.kd-local-list-slot[data-aside="open"] > .kd-workspace-panes {
   margin-right: calc(var(--kd-right, 25rem) + 1px);
 }
 
@@ -1512,39 +1512,25 @@ textarea {
   flex-direction: column;
 }
 .kd-table-wrap > .kd-scroll,
-.kd-middle-local > .kd-scroll,
-.kd-middle-search > .kd-scroll {
+.kd-workspace-pane-local > .kd-scroll,
+.kd-workspace-pane-remote > .kd-scroll {
   flex: 1;
   min-height: 0;
 }
 
-/* 中间主区：分屏时本地与在线并排；单屏时当前面独占。 */
-.kd-middle-split {
+/* 统一列表舞台：一套网格同时承载本地、OneLibrary 与在线内容。列轨由组件按
+   当前 1–3 个可见板块及用户保存的宽度权重生成。 */
+.kd-workspace-panes {
   flex: 1;
   min-height: 0;
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
 }
-.kd-middle-split[data-view="split"] {
-  grid-template-columns: minmax(3rem, var(--kd-local-share, 50%)) 1px minmax(8rem, 1fr);
-}
-/* 关闭分屏后只留当前面板。另一面只在视觉上隐藏，搜索结果与勾选现场不卸载。 */
-.kd-middle-split[data-view="local"],
-.kd-middle-split[data-view="search"] {
-  grid-template-columns: minmax(0, 1fr);
-}
-.kd-middle-split[data-view="local"] > .kd-middle-search,
-.kd-middle-split[data-view="local"] > .kd-middle-divider,
-.kd-middle-split[data-view="search"] > .kd-middle-local,
-.kd-middle-split[data-view="search"] > .kd-middle-divider {
+.kd-workspace-pane:not([data-pane-visible="true"]) {
   display: none;
 }
-.kd-middle-split[data-view="search"] > .kd-middle-search {
-  grid-column: 1;
-}
-.kd-middle-local,
-.kd-middle-search {
+.kd-workspace-pane {
   position: relative;
   min-width: 0;
   min-height: 0;
@@ -1553,11 +1539,12 @@ textarea {
   overflow: hidden;
   background: var(--kd-panel);
 }
-.kd-middle-local > .kd-scroll,
-.kd-middle-search > .kd-scroll {
+.kd-workspace-pane-local > .kd-scroll,
+.kd-workspace-pane-remote > .kd-scroll,
+.kd-workspace-pane-onelibrary > .kd-scroll {
   background: var(--kd-panel);
 }
-.kd-middle-search > .kd-scroll {
+.kd-workspace-pane-remote > .kd-scroll {
   position: relative;
 }
 .kd-search-loading {
@@ -1567,48 +1554,61 @@ textarea {
   min-height: 0;
   padding: 0;
 }
-.kd-local-search-drop-overlay {
+.kd-workspace-drop-overlay {
   position: absolute;
   inset: 0;
   z-index: 30;
-  display: grid;
+  display: none;
   place-items: center;
   border: 1px dashed color-mix(in srgb, var(--kd-theme) 58%, transparent);
   background: color-mix(in srgb, var(--kd-bg) 78%, transparent);
   color: var(--kd-muted);
   font-size: var(--kd-size-sm);
   font-weight: 700;
-  pointer-events: auto;
+  pointer-events: none;
   transition: background 0.12s, color 0.12s;
 }
-.kd-local-search-drop-overlay[data-drop-active="true"] {
+.kd-workspace-pane[data-drop-offered="true"] > .kd-workspace-drop-overlay,
+.kd-workspace-pane[data-drop-active="true"] > .kd-workspace-drop-overlay,
+.kd-workspace-pane[data-kd-pointer-search-over="folder"] > .kd-workspace-drop-overlay,
+.kd-workspace-pane[data-kd-pointer-track-over="playlist"] > .kd-workspace-drop-overlay,
+body[data-kd-track-pointer-source="onelibrary"]
+  .kd-workspace-pane-local[data-kd-search-drop-path] > .kd-workspace-drop-overlay,
+body[data-kd-track-pointer-source="local"]
+  .kd-workspace-pane-onelibrary[data-kd-playlist-drop-id] > .kd-workspace-drop-overlay {
+  display: grid;
+}
+.kd-workspace-pane[data-drop-active="true"] > .kd-workspace-drop-overlay,
+.kd-workspace-pane[data-kd-pointer-search-over="folder"] > .kd-workspace-drop-overlay,
+.kd-workspace-pane[data-kd-pointer-track-over="playlist"] > .kd-workspace-drop-overlay {
   background: color-mix(in srgb, var(--kd-theme) 13%, var(--kd-bg));
   color: var(--kd-theme);
 }
-.kd-middle-local[data-drop-active="true"] {
+.kd-workspace-pane[data-drop-active="true"],
+.kd-workspace-pane[data-kd-pointer-search-over="folder"],
+.kd-workspace-pane[data-kd-pointer-track-over="playlist"] {
   outline: 1px dashed color-mix(in srgb, var(--kd-accent) 55%, transparent);
   outline-offset: -3px;
   background: color-mix(in srgb, var(--kd-accent) 6%, transparent);
 }
-/* 左右半栏各自一条工作条，顶边对齐；分割线与侧栏把手同一套细线。 */
-.kd-middle-local > .kd-activity,
-.kd-middle-search > .kd-activity {
+/* 每个板块各自拥有一条工作条，顶边对齐；分隔线与侧栏把手同一套细线。 */
+.kd-workspace-pane > .kd-activity {
   border-top: none;
   border-bottom: 1px solid var(--kd-line);
 }
-.kd-middle-divider {
+.kd-workspace-divider {
   position: relative;
   background: transparent;
   cursor: col-resize;
   touch-action: none;
   z-index: 2;
 }
-.kd-middle-divider::before {
+.kd-workspace-divider::before {
   content: "";
   position: absolute;
   inset: 0 -4px;
 }
-.kd-middle-divider::after {
+.kd-workspace-divider::after {
   content: "";
   position: absolute;
   top: 0;
@@ -1618,12 +1618,55 @@ textarea {
   background: var(--kd-line-soft);
   transition: background 0.12s;
 }
-.kd-middle-divider:hover::after,
-.kd-middle-divider:active::after {
+.kd-workspace-divider:hover::after,
+.kd-workspace-divider:active::after {
   background: var(--kd-line);
 }
-.kd-middle-divider:active::after {
+.kd-workspace-divider:active::after {
   background: var(--kd-muted);
+}
+
+/* 板块拖把只占工作条顶边的一小段，不劫持表格、按钮和曲目本身的拖放。 */
+.kd-workspace-pane-grip {
+  appearance: none;
+  position: absolute;
+  top: 1px;
+  left: 50%;
+  z-index: 8;
+  width: 2.4rem;
+  height: 0.65rem;
+  padding: 0;
+  transform: translateX(-50%);
+  border: none;
+  outline: none;
+  background: transparent;
+  cursor: grab;
+}
+.kd-workspace-pane-grip::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  width: 1.25rem;
+  height: 2px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: var(--kd-line);
+  transition: width 0.12s, background 0.12s;
+}
+.kd-workspace-pane-grip:hover::after,
+.kd-workspace-pane-grip:focus-visible::after {
+  width: 1.7rem;
+  background: var(--kd-muted);
+}
+.kd-workspace-pane-grip:active {
+  cursor: grabbing;
+}
+.kd-workspace-pane[data-pane-dragging="true"] {
+  opacity: 0.52;
+}
+.kd-workspace-pane[data-pane-drop-target="true"] {
+  box-shadow: inset 2px 0 0 var(--kd-theme), inset -2px 0 0 var(--kd-theme);
 }
 
 /* 拖进文件夹后、尚未落盘的占位行 */
@@ -2423,6 +2466,7 @@ body[data-kd-col-dragging="true"] * {
   padding: 0 0.6rem;
   border-bottom: none;
   color: var(--kd-text-body);
+  vertical-align: middle;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2573,10 +2617,13 @@ body[data-kd-track-pointer-dragging="true"] * {
 /* 搜索结果里的小封面位。尺寸固定，图片有没有都不会让标题跳位。 */
 .kd-thumb {
   display: inline-block;
+  flex: none;
   width: 22px;
   height: 22px;
   margin-right: 0.45rem;
-  vertical-align: -6px;
+  /* 黑胶占位会把 overflow 从 hidden 改成 visible；baseline 偏移会因此
+     改用内部网格的基线，让占位图向下掉。middle 不依赖子元素基线。 */
+  vertical-align: middle;
   background: var(--kd-panel-inset);
   border: 1px solid var(--kd-line-soft);
   border-radius: 4px;
@@ -2851,6 +2898,42 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
 .kd-table tbody tr[data-tree="parent"] td:first-child {
   box-shadow: inset 3px 0 0 var(--kd-theme);
 }
+/* 歌单 / 专辑 / 艺术家搜索结果沿用曲目表的列、封面和行高；整行就是“打开”。
+   不再用一条跨列文案外加孤立按钮，避免在线来源突然换一套组件语言。 */
+.kd-table tbody tr[data-collection="true"] {
+  cursor: pointer;
+}
+.kd-table tbody tr[data-collection="true"]:focus-visible {
+  outline: none;
+}
+.kd-table tbody tr[data-collection="true"]:focus-visible td {
+  background: var(--kd-hover);
+}
+.kd-table tbody tr[data-collection="true"][data-loading="true"] {
+  cursor: wait;
+}
+.kd-table tbody tr[data-collection="true"][data-loading="true"] td {
+  color: var(--kd-muted);
+}
+/* 成功载入后置顶的集合标题：形态与批量包头一致；点击可收起/展开，
+   下面仍是没有树枝缩进的普通曲目行。 */
+.kd-table tbody tr[data-collection-open="true"] {
+  cursor: pointer;
+}
+.kd-table tbody tr[data-collection-open="true"]:focus-visible {
+  outline: none;
+}
+.kd-table tbody tr[data-collection-open="true"]:focus-visible td {
+  background: var(--kd-hover);
+}
+.kd-table tbody tr[data-collection-open="true"] td {
+  background: var(--kd-panel-raised);
+  color: var(--kd-text);
+  border-bottom: 1px solid var(--kd-line-soft);
+}
+.kd-table tbody tr[data-collection-open="true"] td:first-child {
+  box-shadow: inset 3px 0 0 var(--kd-theme);
+}
 .kd-result-package-actions {
   display: inline-flex;
   align-items: center;
@@ -2968,6 +3051,27 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
 /* 每个包的最后一行不再向下延伸，竖线到肘部为止 */
 .kd-tree-indent[data-last="true"]::before {
   bottom: 50%;
+}
+/* 搜索/远程歌单的标题格固定为一条 flex 轴：缩略图和状态不收缩，
+   只有标题文字吃剩余宽度并省略，长文本不会把右侧数据列挤乱。 */
+.kd-result-title {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+}
+.kd-result-title > .kd-result-source-toggle,
+.kd-result-title > .kd-thumb,
+.kd-result-title > .kd-chip {
+  flex: none;
+}
+.kd-result-title-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .kd-td-strong {
@@ -4060,11 +4164,68 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
     0 0 3px rgba(0, 0, 0, 0.55);
 }
 
-/* 起止点：只留顶部主题色三角，不画竖线——竖线会压住下面的波形柱。 */
+/* OneLibrary Loop 用浅色区间，Cue 起点用顶部旗标；两层都不挡波形跳转。 */
+.kd-wave-cue-loop {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  min-width: 1px;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--kd-cue-color) 18%, transparent);
+  box-shadow:
+    inset 1px 0 color-mix(in srgb, var(--kd-cue-color) 72%, transparent),
+    inset -1px 0 color-mix(in srgb, var(--kd-cue-color) 72%, transparent);
+}
+.kd-wave-cue {
+  --kd-cue-color: #7d8796;
+  --kd-cue-text: #fff;
+  position: absolute;
+  top: 0;
+  z-index: 5;
+  transform: translateX(-50%);
+  pointer-events: none;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.72));
+}
+.kd-wave-cue[data-kind="hot"] {
+  display: grid;
+  place-items: center;
+  min-width: 13px;
+  height: 12px;
+  padding: 0 2px;
+  border-radius: 0 0 3px 3px;
+  background: var(--kd-cue-color);
+  color: var(--kd-cue-text);
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 1;
+}
+.kd-wave-cue[data-kind="hot"]::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -3px;
+  width: 5px;
+  height: 5px;
+  background: var(--kd-cue-color);
+  transform: translateX(-50%) rotate(45deg);
+}
+.kd-wave-cue[data-kind="memory"] {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 7px solid var(--kd-cue-color);
+}
+.kd-wave-cue[data-loop="true"][data-kind="hot"] {
+  box-shadow: inset 0 -2px color-mix(in srgb, var(--kd-cue-text) 62%, transparent);
+}
+
+/* KDJ 裁切起止点：只留顶部主题色三角，不画竖线——竖线会压住下面的波形柱。 */
 .kd-wave-marker {
   position: absolute;
   top: 0;
-  z-index: 4;
+  z-index: 6;
   width: 0;
   height: 0;
   border-left: 5px solid transparent;
@@ -5528,6 +5689,10 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
   background: var(--kd-theme);
   color: #fff;
 }
+.kd-playlist-row[data-kd-pointer-track-over="playlist"] {
+  background: var(--kd-theme);
+  color: #fff;
+}
 .kd-narrow-folder-rail button[data-drop="true"] {
   background: var(--kd-selected);
   color: var(--kd-text);
@@ -5592,7 +5757,167 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 /* 文件夹栏里的 InlineNotice 只需要一条上边框把它和树分开；
    竖线之类的装饰不加，这一栏本来就窄。 */
 .kd-folder-notice {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
   border-top: 1px solid var(--kd-line);
+}
+
+/* OneLibrary 外置卷与设备内列表。 */
+.kd-playlist-root,
+.kd-playlist-device,
+.kd-playlist-row {
+  cursor: pointer;
+}
+.kd-playlist-root > svg,
+.kd-playlist-device > svg,
+.kd-onelibrary-node-icon {
+  flex: none;
+  color: var(--kd-muted);
+}
+.kd-playlist-device[data-disabled="true"] {
+  color: var(--kd-faint);
+}
+.kd-onelibrary-playlist[data-disabled="true"] {
+  color: var(--kd-faint);
+}
+.kd-onelibrary-name-input {
+  min-width: 0;
+  height: 1.35rem;
+  padding: 0 0.25rem;
+  border: 1px solid var(--kd-theme);
+  outline: none;
+  background: var(--kd-panel);
+  color: var(--kd-text);
+  font: inherit;
+}
+.kd-onelibrary-track-view {
+  min-height: 0;
+  height: 100%;
+}
+.kd-onelibrary-track-loading {
+  display: grid;
+  flex: 1;
+  place-items: center;
+  color: var(--kd-muted);
+}
+.kd-onelibrary-track-table {
+  width: 100%;
+}
+/* 表格靠程序聚焦来接住 Cmd/Ctrl+A，不是可 Tab 到达的控件；WebKit 默认会沿整张表
+   画一圈粗橙色 focus ring，表宽溢出时只剩底边，看起来像无缘无故的横线。 */
+.kd-onelibrary-track-table:focus {
+  outline: none;
+}
+.kd-onelibrary-track-table th,
+.kd-onelibrary-track-table td {
+  overflow: hidden;
+  max-width: 16rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-onelibrary-track-table td[data-col="title"] > .kd-thumb {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+.kd-onelibrary-track-table th > svg {
+  display: inline-block;
+  margin-left: 0.2rem;
+  vertical-align: -1px;
+}
+.kd-onelibrary-filterbar > .kd-input,
+.kd-onelibrary-filterbar > .kd-onelibrary-rating-filter {
+  flex: 0 0 auto;
+  width: 6.5rem;
+  height: 1.45rem;
+  min-height: 0;
+  padding: 0 0.35rem;
+  font-size: inherit;
+}
+.kd-onelibrary-filterbar > .kd-input-number { width: 4.8rem; }
+.kd-onelibrary-filterbar > .kd-input-short { width: 4rem; }
+.kd-onelibrary-filterbar > .kd-input {
+  border-color: var(--kd-line);
+  background: transparent;
+}
+.kd-onelibrary-rating {
+  gap: 0.08rem;
+  color: var(--kd-muted);
+}
+.kd-onelibrary-detail-fact {
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 0;
+}
+.kd-onelibrary-detail-fact > :last-child {
+  text-align: right;
+}
+.kd-onelibrary-cue-list {
+  margin-top: 0.45rem;
+  overflow-x: auto;
+}
+.kd-onelibrary-cue-list table {
+  width: 100%;
+  min-width: 30rem;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: var(--kd-size-xs);
+}
+.kd-onelibrary-cue-list th,
+.kd-onelibrary-cue-list td {
+  padding: 0.28rem 0.35rem;
+  border-bottom: 1px solid var(--kd-line);
+  color: var(--kd-text-body);
+  text-align: left;
+  vertical-align: middle;
+}
+.kd-onelibrary-cue-list th {
+  color: var(--kd-muted);
+  font-weight: 600;
+}
+.kd-onelibrary-cue-list th:nth-child(1) { width: 8rem; }
+.kd-onelibrary-cue-list th:nth-child(2) { width: 10.2rem; }
+.kd-onelibrary-cue-list th:nth-child(3) { width: 4.2rem; }
+.kd-onelibrary-cue-list td:last-child {
+  max-width: 8rem;
+}
+.kd-onelibrary-cue-type,
+.kd-onelibrary-cue-color {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  min-width: 0;
+}
+.kd-onelibrary-cue-type > i {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 0.2rem;
+  color: #fff;
+  font-size: 0.58rem;
+  font-style: normal;
+  font-weight: 800;
+  text-shadow: 0 1px 1px rgb(0 0 0 / 0.45);
+}
+.kd-onelibrary-cue-type > i[data-kind="memory"] {
+  border-radius: 50%;
+}
+.kd-onelibrary-cue-type > small {
+  color: var(--kd-theme);
+  font-size: 0.58rem;
+}
+.kd-onelibrary-cue-color > i {
+  width: 0.55rem;
+  height: 0.55rem;
+  flex: none;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 24%, transparent);
 }
 
 /* 曲目表的报错浮条：表格没有状态栏，删除失败的原因就近贴在滚动区底边。
@@ -6335,6 +6660,31 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 .kd-chrome-btn[data-locked="true"] {
   color: var(--kd-text-body);
 }
+.kd-aside-lock-glyph {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  display: inline-grid;
+  place-items: center;
+}
+.kd-aside-lock-mark {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  box-sizing: content-box;
+  padding: 1px;
+  background: var(--kd-panel);
+  color: var(--kd-faint);
+  pointer-events: none;
+}
+.kd-chrome-btn[data-action="aside-lock"][data-locked="true"],
+.kd-chrome-btn[data-action="aside-lock"][data-locked="true"] .kd-aside-lock-mark {
+  color: var(--kd-theme);
+}
+.kd-chrome-btn[data-action="aside-lock"][data-locked="true"]:hover,
+.kd-chrome-btn[data-action="aside-lock"][data-locked="true"]:hover .kd-aside-lock-mark {
+  color: var(--kd-theme-strong);
+}
 .kd-chrome-btn:disabled {
   color: var(--kd-faint);
   opacity: 0.45;
@@ -6811,8 +7161,8 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
  * 曲目表本来就是一张表，表放不下时横着拖是所有人都懂的动作。
  * ========================================================== */
 .kd-table-wrap > .kd-scroll,
-.kd-middle-local > .kd-scroll,
-.kd-middle-search > .kd-scroll {
+.kd-workspace-pane-local > .kd-scroll,
+.kd-workspace-pane-remote > .kd-scroll {
   overflow-x: auto;
   overscroll-behavior-x: contain;
   /* 全局默认藏滚动条，但表格列能自由加宽后必须给一条可拖回最左侧的横滚条。 */
@@ -6820,14 +7170,16 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   scrollbar-color: var(--kd-line) transparent;
 }
 .kd-table-wrap > .kd-scroll::-webkit-scrollbar,
-.kd-middle-local > .kd-scroll::-webkit-scrollbar,
-.kd-middle-search > .kd-scroll::-webkit-scrollbar {
+.kd-workspace-pane-local > .kd-scroll::-webkit-scrollbar,
+.kd-workspace-pane-remote > .kd-scroll::-webkit-scrollbar,
+.kd-workspace-pane-onelibrary > .kd-scroll::-webkit-scrollbar {
   width: 0;
   height: 8px;
 }
 .kd-table-wrap > .kd-scroll::-webkit-scrollbar-thumb,
-.kd-middle-local > .kd-scroll::-webkit-scrollbar-thumb,
-.kd-middle-search > .kd-scroll::-webkit-scrollbar-thumb {
+.kd-workspace-pane-local > .kd-scroll::-webkit-scrollbar-thumb,
+.kd-workspace-pane-remote > .kd-scroll::-webkit-scrollbar-thumb,
+.kd-workspace-pane-onelibrary > .kd-scroll::-webkit-scrollbar-thumb {
   border-radius: 999px;
   background: var(--kd-line);
 }
@@ -6842,7 +7194,8 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 .kd-table[data-kind="library"] {
   min-width: 53.7rem;
 }
-.kd-table[data-kind="library"] [data-col="index"] {
+.kd-table[data-kind="library"] [data-col="index"],
+.kd-table[data-kind="onelibrary"] [data-col="index"] {
   color: var(--kd-faint);
   text-align: right;
   padding-left: 0.35rem;
@@ -7211,6 +7564,69 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   color: var(--kd-text);
   font-weight: 700;
 }
+.kd-virtual-disk-intro {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  color: var(--kd-text-body);
+}
+.kd-virtual-disk-intro > svg {
+  flex: none;
+  margin-top: 0.12rem;
+  color: var(--kd-theme-strong);
+}
+.kd-virtual-disk-intro > p {
+  margin: 0;
+  font-size: var(--kd-size-xs);
+  line-height: 1.6;
+}
+.kd-virtual-disk-actions {
+  margin-top: 0.65rem;
+  flex-wrap: wrap;
+}
+.kd-virtual-disk-section {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--kd-line);
+}
+.kd-virtual-disk-section > .kd-djp-label {
+  margin-bottom: 0;
+}
+.kd-virtual-disk-confirm {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.45rem 0.55rem;
+  width: 100%;
+  padding: 0.65rem;
+  border: 1px solid var(--kd-line);
+  border-radius: 0;
+  background: var(--kd-panel-raised);
+  color: var(--kd-text-body);
+}
+.kd-virtual-disk-confirm > svg {
+  margin-top: 0.15rem;
+  color: var(--kd-theme-strong);
+}
+.kd-virtual-disk-confirm > p {
+  margin: 0;
+  font-size: var(--kd-size-xs);
+  line-height: 1.55;
+}
+.kd-virtual-disk-confirm > .kd-row {
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+}
+.kd-virtual-disk-confirm[data-danger="true"] {
+  border-color: color-mix(in srgb, var(--kd-danger) 55%, var(--kd-line));
+  background: color-mix(in srgb, var(--kd-danger) 9%, var(--kd-panel-raised));
+}
+.kd-virtual-disk-confirm[data-danger="true"] > svg {
+  color: var(--kd-danger);
+}
 .kd-djp-slider-block {
   -webkit-app-region: no-drag;
 }
@@ -7298,41 +7714,13 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 }
 
 /* ============================================================
- * 三栏换位
- *
- * 用 CSS order 换位，不动 DOM：两条拖宽把手是按"左栏/右栏"绑定的，
- * DOM 一动，把手拖的就不是它旁边那一栏了。
- * 列宽是**按位置**定的（第一栏窄、第三栏宽），换位之后各自继承所在位置的宽度，
- * 不满意可以接着拖宽——两个动作互不干扰。
+ * 固定来源导航 + 内容舞台
  * ========================================================== */
 .kd-col-slot {
   display: flex;
   flex-direction: column;
   min-height: 0;
   position: relative;
-}
-/* 换位把手：贴在每栏顶边中间的一小条。只有它可拖——整栏可拖的话，
-   栏里的按钮、输入框、波形点击全会先被拖拽劫走。 */
-.kd-col-grip {
-  position: absolute;
-  top: 0;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 2.2rem;
-  height: 5px;
-  z-index: 5;
-  cursor: grab;
-  background: transparent;
-  transition: background 0.12s;
-}
-.kd-col-grip:hover {
-  /* 这是换位拖把，不是搜索框或分割线；悬停时不再凭空冒出灰色长方体，
-     只有真正按住拖动时才给反馈。 */
-  background: transparent;
-}
-.kd-col-grip:active {
-  background: var(--kd-muted);
-  cursor: grabbing;
 }
 .kd-table-wrap,
 .kd-split-aside {

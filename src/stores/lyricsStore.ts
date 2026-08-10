@@ -7,6 +7,7 @@ import { create } from "zustand";
 import { api, ApiError } from "../lib/api";
 import { useLyricsPrefs } from "../lib/lyricsPrefs";
 import { parseLrc, type LrcLine } from "../lib/lrc";
+import { localLibraryDataTrackId } from "../lib/playbackTrackSource";
 import type { LyricsResponse, Platform, Track } from "../types";
 
 export type LyricsStatus = "idle" | "loading" | "ready" | "empty" | "error";
@@ -167,10 +168,12 @@ export const useLyricsStore = create<LyricsStore>((set, get) => ({
         const prefs = useLyricsPrefs.getState();
         let meta: LyricsResponse | null = null;
 
-        // 下载时已经落盘的歌词优先；在线试听是负数临时曲目，没有本地文件。
-        if (track.id > 0) {
+        // 下载时已经落盘的歌词优先；KDJ 导出的 OneLibrary 快照虽是负数播放 id，
+        // 仍可通过 local_track_id 复用原曲的歌词。
+        const localLyricsTrackId = localLibraryDataTrackId(track);
+        if (localLyricsTrackId) {
           try {
-            const local = await api.libraryLyrics(track.id);
+            const local = await api.libraryLyrics(localLyricsTrackId);
             // sidecar 只要文件存在不代表里面有可解析的 LRC；损坏/仅元数据时
             // 继续走在线匹配，避免一个空本地文件把正确歌词永久挡住。
             if (

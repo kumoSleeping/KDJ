@@ -6,19 +6,17 @@ import {
   Copy,
   Download,
   FolderOpen,
-  ListMusic,
-  ListStart,
   ListX,
   LoaderCircle,
   Play,
   RotateCcw,
-  Star,
   Undo2,
   Trash2,
   Video,
 } from "lucide-react";
 import { api } from "../../lib/api";
 import { CoverImage } from "../common/VinylPlaceholder";
+import { TableRating } from "../common/TableRating";
 import { copyText } from "../../lib/copyText";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import { observeTrackScroller } from "../../lib/autoAnalyze";
@@ -37,16 +35,19 @@ import {
   TRACK_TRASH_DROP_EVENT,
   type TrackDragDetail,
 } from "../../lib/trackDrag";
-import { folderDropElementAt, FOLDER_DROP_PATH_ATTR } from "../../lib/folderDrop";
+import {
+  folderDropElementAt,
+  playlistDropElementAt,
+  FOLDER_DROP_PATH_ATTR,
+  PLAYLIST_DROP_DEVICE_ATTR,
+  PLAYLIST_DROP_ID_ATTR,
+} from "../../lib/folderDrop";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
 import { DASH, formatBpm, formatDuration, isVideoTrack, thumbUrl } from "../../lib/format";
-import {
-  clickAddsNext,
-  playClickForLayout,
-  useTrackClickPrefs,
-} from "../../lib/trackClickPrefs";
+import { playClickForLayout, useTrackClickPrefs } from "../../lib/trackClickPrefs";
 import type { LayoutMode } from "../../lib/useLayoutMode";
+import { shouldHandleWorkspaceDelete } from "../../lib/workspacePanes";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import {
@@ -56,7 +57,7 @@ import {
   type TrackSort,
 } from "../../stores/libraryStore";
 import type { DownloadTask } from "../../types";
-import { useQueueStore } from "../../stores/queueStore";
+import { usePlaylistStore } from "../../stores/playlistStore";
 import type { FileDisposalMode, Track } from "../../types";
 import { playTrack } from "../../lib/playTrack";
 import {
@@ -70,6 +71,12 @@ import {
   type TableColumnPrefs,
   type TableColumnPrefsSchema,
 } from "../../lib/tableColumnPrefs";
+import {
+  dispatchOneLibraryCoverDrop,
+  ONE_LIBRARY_COVER_CONTENT_ATTR,
+  ONE_LIBRARY_COVER_DEVICE_ATTR,
+  ONE_LIBRARY_COVER_TARGET_ATTR,
+} from "../../lib/oneLibraryCoverDrag";
 import { ContextMenu, EmptyState, InlineNotice } from "../common";
 
 /** @deprecated 请从 `lib/playTrack` 引用；保留 re-export 以免旧 import 断掉。 */
@@ -246,6 +253,8 @@ export interface TrackTableProps {
   layout: LayoutMode;
   selectedId: number | null;
   selectedIds: number[];
+  /** 分屏中只有当前点亮板块可以消费全局删除快捷键。 */
+  shortcutActive: boolean;
   sort: TrackSort;
   order: SortOrder;
   /** 副排序键：主键相同的那一撮再按它排。null = 只按主键。 */
@@ -413,24 +422,7 @@ function trackCell(
     case "rating":
       return (
         <td key={key} data-col="rating">
-          <span className="kd-table-rating" role="group" aria-label={`当前评分 ${track.rating || 0} 星`}>
-            {[1, 2, 3, 4, 5].map((value) => (
-              <button
-                key={value}
-                type="button"
-                draggable={false}
-                aria-label={`${value} 星`}
-                title={`${value} 星${track.rating === value ? "；再次点击清除评分" : ""}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onRate?.(track.rating === value ? 0 : value);
-                }}
-                onDoubleClick={(event) => event.stopPropagation()}
-              >
-                <Star size={11} fill={value <= track.rating ? "currentColor" : "none"} />
-              </button>
-            ))}
-          </span>
+          <TableRating value={track.rating} onChange={onRate} />
         </td>
       );
     default:
@@ -524,20 +516,16 @@ export function TrackTable({
   onScrollEnd,
   reorderable = false,
   onReorder,
+  shortcutActive,
 }: TrackTableProps) {
   const loadingMore = useLibraryStore((state) => state.loadingMore);
-  const queueView = useLibraryStore((state) => state.queueView);
   const filterFolder = useLibraryStore((state) => state.filter.folder);
   const filterQuery = useLibraryStore((state) => state.filter.q);
   const removeTracks = useLibraryStore((state) => state.removeTracks);
   const startAnalyze = useLibraryStore((state) => state.startAnalyze);
-  const addToQueue = useQueueStore((state) => state.add);
-  const removeFromQueue = useQueueStore((state) => state.remove);
   const widePlay = useTrackClickPrefs((state) => state.widePlay);
   const narrowPlay = useTrackClickPrefs((state) => state.narrowPlay);
-  const clickAddNext = useTrackClickPrefs((state) => state.clickAddNext);
   const playClick = playClickForLayout({ widePlay, narrowPlay }, layout);
-  const singleAddsNext = clickAddsNext({ widePlay, narrowPlay, clickAddNext }, layout);
   const copyToClipboard = useLibraryStore((state) => state.copyToClipboard);
   const undo = useLibraryStore((state) => state.undo);
   const undoLast = useLibraryStore((state) => state.undoLast);
@@ -546,9 +534,9 @@ export function TrackTable({
   const selectionMode = useLibraryStore((state) => state.selectionMode);
   const setSelectionMode = useLibraryStore((state) => state.setSelectionMode);
   const downloadTasks = useDownloadStore((state) => state.list);
-  const pendingDownloads = queueView
-    ? []
-    : downloadTasks.filter((task) => isPendingForFolder(task, filterFolder, tracks));
+  const pendingDownloads = downloadTasks.filter((task) =>
+    isPendingForFolder(task, filterFolder, tracks),
+  );
   const selected = new Set(selectedIds);
   const pressTimerRef = useRef<number | null>(null);
   const suppressClickRef = useRef<number | null>(null);
@@ -628,7 +616,17 @@ export function TrackTable({
         folder.setAttribute("data-kd-pointer-track-over", "folder");
         return;
       }
+      const playlist = playlistDropElementAt(x, y);
+      if (playlist) {
+        playlist.setAttribute("data-kd-pointer-track-over", "playlist");
+        return;
+      }
       const hit = hitAt(x, y);
+      const oneLibraryCover = hit?.closest<HTMLElement>(`[${ONE_LIBRARY_COVER_TARGET_ATTR}]`);
+      if (oneLibraryCover) {
+        oneLibraryCover.setAttribute("data-kd-pointer-track-over", "cover");
+        return;
+      }
       const trash = hit?.closest<HTMLElement>("[data-kd-track-trash-target]");
       if (trash) {
         trash.setAttribute("data-kd-pointer-track-over", "trash");
@@ -653,6 +651,7 @@ export function TrackTable({
       ghost?.remove();
       ghost = null;
       delete document.body.dataset.kdTrackPointerDragging;
+      delete document.body.dataset.kdTrackPointerSource;
       pointerDragCleanupRef.current = null;
     };
     const activate = (x: number, y: number) => {
@@ -663,6 +662,7 @@ export function TrackTable({
       if (!selected.has(track.id)) onSelect(track.id, "replace");
       announceTrackDrag(ids);
       document.body.dataset.kdTrackPointerDragging = "true";
+      document.body.dataset.kdTrackPointerSource = "local";
       ghost = document.createElement("div");
       ghost.className = "kd-track-pointer-ghost";
       ghost.textContent = ids.length > 1 ? `移动 ${ids.length} 首曲目` : (track.title || track.filename);
@@ -683,11 +683,18 @@ export function TrackTable({
       if (up.pointerId !== pointerId) return;
       const folder = folderDropElementAt(up.clientX, up.clientY);
       const hit = hitAt(up.clientX, up.clientY);
+      const playlist = playlistDropElementAt(up.clientX, up.clientY);
       const trash = hit?.closest<HTMLElement>("[data-kd-track-trash-target]");
+      const oneLibraryCover = hit?.closest<HTMLElement>(`[${ONE_LIBRARY_COVER_TARGET_ATTR}]`);
       const cover = hit?.closest<HTMLElement>(`[${TRACK_COVER_DROP_TARGET_ATTR}]`);
       const row = reorderable ? hit?.closest<HTMLElement>("tr[data-kd-track-id]") : null;
       const rowEdge = row?.getAttribute("data-kd-pointer-track-over");
       const coverTrackId = cover ? Number(cover.dataset.kdTrackId) : NaN;
+      const oneLibraryCoverContentId = oneLibraryCover
+        ? Number(oneLibraryCover.getAttribute(ONE_LIBRARY_COVER_CONTENT_ATTR))
+        : NaN;
+      const oneLibraryCoverDevice =
+        oneLibraryCover?.getAttribute(ONE_LIBRARY_COVER_DEVICE_ATTR)?.trim() ?? "";
       cleanup();
       if (!dragging) return;
       up.preventDefault();
@@ -710,10 +717,41 @@ export function TrackTable({
           .catch((error: unknown) => setNotice(`操作失败：${(error as Error).message}`));
         return;
       }
+      if (playlist) {
+        const playlistId = Number(playlist.getAttribute(PLAYLIST_DROP_ID_ATTR));
+        const devicePath = playlist.getAttribute(PLAYLIST_DROP_DEVICE_ATTR)?.trim() ?? "";
+        const claimed = claimActiveTrackDragIds();
+        if (!devicePath || !Number.isFinite(playlistId) || claimed.length === 0) return;
+        void usePlaylistStore
+          .getState()
+          .addTracks(devicePath, playlistId, claimed)
+          .then((result) => {
+            // 全成功时目标列表的数量/内容就是回执，不把成功句子塞进“出错”浮条。
+            if (result.skipped_tracks > 0) {
+              setNotice(`有 ${result.skipped_tracks} 首未写入 OneLibrary`);
+            }
+          })
+          .catch((error: unknown) => setNotice(`写入 OneLibrary 失败：${(error as Error).message}`));
+        return;
+      }
       if (trash) {
         window.dispatchEvent(
           new CustomEvent<TrackDragDetail>(TRACK_TRASH_DROP_EVENT, { detail: { ids } }),
         );
+        finishTrackDrop();
+        return;
+      }
+      if (
+        oneLibraryCover
+        && oneLibraryCoverDevice
+        && Number.isFinite(oneLibraryCoverContentId)
+      ) {
+        suppressCoverClickAfterTrackDrop();
+        dispatchOneLibraryCoverDrop({
+          source: { kind: "local", ids },
+          targetDevicePath: oneLibraryCoverDevice,
+          targetContentId: oneLibraryCoverContentId,
+        });
         finishTrackDrop();
         return;
       }
@@ -768,17 +806,7 @@ export function TrackTable({
       ? selectedIds
       : [rowMenu.track.id]
     : [];
-  const menuTracks = rowMenu
-    ? menuIds.flatMap((id) => {
-        const track = tracks.find((item) => item.id === id);
-        return track ? [track] : [];
-      })
-    : [];
-
   const playFromTable = (track: Track) => {
-    // 临时列表是待播清单，直接点播也算消费；否则 A/B 队列里手动播 A，
-    // 自动续播会先播 B，再把仍留在队列里的 A 播第二遍。
-    if (queueView) removeFromQueue([track.id]);
     playTrack(track);
   };
 
@@ -807,9 +835,12 @@ export function TrackTable({
     if (!trashSupported) return;
     const onKey = (event: KeyboardEvent) => {
       if (isEditable(event.target)) return;
-      const wanted =
-        event.key === "Delete" || (event.key === "Backspace" && (event.metaKey || event.ctrlKey));
-      if (!wanted) return;
+      if (!shouldHandleWorkspaceDelete(
+        shortcutActive,
+        "local",
+        event.key,
+        event.metaKey || event.ctrlKey,
+      )) return;
       const ids = useLibraryStore.getState().selectedIds;
       if (ids.length === 0) return;
       event.preventDefault();
@@ -819,16 +850,12 @@ export function TrackTable({
     return () => window.removeEventListener("keydown", onKey);
     // deleteWithNotice 闭包里只有稳定的 store action 和 setNotice，不用进依赖
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trashSupported]);
+  }, [shortcutActive, trashSupported]);
 
   useEffect(() => {
     const onTrashDrop = (event: Event) => {
       const ids = (event as CustomEvent<TrackDragDetail>).detail?.ids ?? [];
       if (ids.length === 0) return;
-      if (queueView) {
-        removeFromQueue(ids);
-        return;
-      }
       if (!trashSupported) {
         setNotice("这个系统没有可恢复的废纸篓，不能通过拖放删除文件");
         return;
@@ -839,7 +866,7 @@ export function TrackTable({
     return () => window.removeEventListener(TRACK_TRASH_DROP_EVENT, onTrashDrop);
     // deleteWithNotice 只封装稳定的 store action；不让每次渲染重挂全局事件。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queueView, trashSupported, removeFromQueue]);
+  }, [trashSupported]);
 
   /* ------------------------------------------------ 回到正在播的那首 */
   const scrollerRef = useRef<HTMLDivElement | null>(null);
@@ -1051,7 +1078,7 @@ export function TrackTable({
 
   // ↑↓：在可手排的文件夹里，按「当前列表顺序」把选中曲目上移/下移一格。
   // 捕获阶段先于播放器音量快捷键，避免一边换位一边改音量。
-  // 不可手排（全部曲目 / 深目录 / 临时列表）时不接管，↑↓ 仍归音量。
+  // 不可手排（全部曲目 / 深目录）时不接管，↑↓ 仍归音量。
   useEffect(() => {
     if (!reorderable) return;
     const onKey = (event: KeyboardEvent) => {
@@ -1131,15 +1158,6 @@ export function TrackTable({
   }
 
   if (tracks.length === 0 && pendingDownloads.length === 0) {
-    if (queueView) {
-      return (
-        <EmptyState
-          icon={<ListMusic size={22} />}
-          title="临时列表是空的"
-          hint="回到全部曲目后右键加入；也可以复制曲目，再在这里按 Cmd/Ctrl+V。"
-        />
-      );
-    }
     const query = filterQuery.trim();
     return (
       <EmptyState
@@ -1417,12 +1435,10 @@ export function TrackTable({
                 onSelect(track.id, mode, event.detail);
                 // 带修饰键的多选不算——那是在攒选区。
                 if (mode !== "replace") return;
-                // 单击播放 / 单击加入下一首（仅播放手势为双击时）按设置走。
+                // 单击播放按设置走；双击模式下单击只负责选择。
                 // 详情入口仍留给播放条唱盘（见 PlayerBar.DETAIL_EVENT）。
                 if (playClick === "single") {
                   playFromTable(track);
-                } else if (singleAddsNext) {
-                  addToQueue([track], true);
                 }
               }}
               onPointerDown={(event) => {
@@ -1656,26 +1672,6 @@ export function TrackTable({
             <BarChart3 size={12} />
             重新分析{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              setRowMenu(null);
-              addToQueue(menuTracks);
-            }}
-          >
-            <ListMusic size={12} />
-            加入临时列表{menuTracks.length > 1 ? `（${menuTracks.length} 首）` : ""}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setRowMenu(null);
-              addToQueue(menuTracks, true);
-            }}
-          >
-            <ListStart size={12} />
-            下一首播放{menuTracks.length > 1 ? `（${menuTracks.length} 首）` : ""}
-          </button>
           {menuIds.length === 1 && (
             <button
               type="button"
@@ -1712,10 +1708,12 @@ export function TrackTable({
                 : `删除文件${menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}…`}
             </button>
           )}
-          <button type="button" onClick={() => runDelete("keep")}>
-            <ListX size={12} />
-            移出曲库{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}
-          </button>
+          {(
+            <button type="button" onClick={() => runDelete("keep")}>
+              <ListX size={12} />
+              移出曲库{menuIds.length > 1 ? `（${menuIds.length} 首）` : ""}
+            </button>
+          )}
         </ContextMenu>
       )}
       {/* 删除失败的原因就近浮在滚动区里：表格没有自己的状态栏 */}
