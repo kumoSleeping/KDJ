@@ -71,6 +71,32 @@ jobs:
           node-version: 22
           cache: npm
 
+      # openssl-src 在 bash step 中只会按 PATH 查找 `perl`。Windows runner 的
+      # Git Bash 自带一个精简 Perl，缺 Locale::Maketext::Simple；它一旦排在
+      # Strawberry Perl 前面，vendored SQLCipher/OpenSSL 就会在 Configure 阶段
+      # 失败。显式准备完整 Perl 并通过 GITHUB_PATH 提到后续 step 的最前面。
+      - name: 配置 Windows OpenSSL 构建环境
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $perlDir = 'C:\Strawberry\perl\bin'
+          $perlExe = Join-Path $perlDir 'perl.exe'
+          if (-not (Test-Path $perlExe)) {
+            choco install strawberryperl --yes --no-progress --limit-output
+          }
+          if (-not (Test-Path $perlExe)) {
+            throw "找不到完整的 Strawberry Perl：$perlExe"
+          }
+          & $perlExe -MLocale::Maketext::Simple -e 'print qq(perl-ok\n)'
+          $perlDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: 验证 Windows bash 使用完整 Perl
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          command -v perl
+          perl -MLocale::Maketext::Simple -e 'print qq(perl-ok\n)'
+
       # Tauri 在 Linux 上是壳，真正渲染的是系统 WebKitGTK，所以这些 -dev 包
       # 是**编译期**依赖，缺一个就是 pkg-config 报错而不是运行期白屏。
       #   libwebkit2gtk-4.1-dev  Tauri 2 用 4.1（Tauri 1 才是 4.0），
