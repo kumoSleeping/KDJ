@@ -7,9 +7,9 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 chrono = "0.4.45"
-kdj-analysis = { version = "0.2.38", path = "../kdj-analysis" }
-kdj-core = { version = "0.2.38", path = "../kdj-core" }
-kdj-providers = { version = "0.2.38", path = "../kdj-providers" }
+kdj-analysis = { version = "0.2.39", path = "../kdj-analysis" }
+kdj-core = { version = "0.2.39", path = "../kdj-core" }
+kdj-providers = { version = "0.2.39", path = "../kdj-providers" }
 lofty = "0.24.0"
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.28"
