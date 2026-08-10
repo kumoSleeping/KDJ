@@ -10,6 +10,7 @@ members = [
     "crates/kdj-server",
     "src-tauri",
 ]
+exclude = ["vendor/rbox"]
 
 [workspace.package]
 version = "0.2.38"
