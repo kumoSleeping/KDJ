@@ -5,6 +5,7 @@
 pub mod config;
 pub mod events;
 pub mod models;
+pub mod musical_key;
 pub mod paths;
 
 pub use config::{AppConfig, Settings};

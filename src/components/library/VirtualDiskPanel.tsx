@@ -14,8 +14,20 @@ import {
 } from "lucide-react";
 import { formatBytes } from "../../lib/format";
 import {
+  defaultVirtualDiskChangeSizeGib,
+  normalizeVirtualDiskName,
+  parseVirtualDiskSizeGib,
+  VIRTUAL_DISK_DEFAULT_NAME,
+  VIRTUAL_DISK_MAX_SIZE_GIB,
+  VIRTUAL_DISK_MIN_SIZE_GIB,
+  VIRTUAL_DISK_NAME_MAX_LENGTH,
+  VIRTUAL_DISK_RESERVE_BYTES,
   VIRTUAL_DISK_SIZE_OPTIONS,
-  virtualDiskGrowthOptions,
+  virtualDiskChangeOptions,
+  virtualDiskNameInputError,
+  virtualDiskSizeGib,
+  virtualDiskSizeInputError,
+  virtualDiskSizeMib,
 } from "../../lib/virtualDisk";
 import { usePlaylistStore } from "../../stores/playlistStore";
 import { Button, InlineNotice, Panel, PanelStack } from "../common";
@@ -25,6 +37,101 @@ function Fact({ label, value, title }: { label: string; value: string; title?: s
     <div className="kd-stream-cache-row">
       <span className="kd-muted">{label}</span>
       <span title={title ?? value}>{value}</span>
+    </div>
+  );
+}
+
+function CapacityPicker({
+  value,
+  options,
+  disabled,
+  error,
+  label = "容量",
+  onChange,
+}: {
+  value: string;
+  options: readonly number[];
+  disabled: boolean;
+  error: string;
+  label?: string;
+  onChange: (value: string) => void;
+}) {
+  const parsed = parseVirtualDiskSizeGib(value);
+  return (
+    <>
+      <span className="kd-djp-label">{label}</span>
+      <div className="kd-djp-choice" role="group" aria-label={`KDJ 虚拟磁盘${label}`}>
+        {options.map((size) => (
+          <button
+            key={size}
+            type="button"
+            className="kd-djp-choice-btn"
+            aria-pressed={parsed === size}
+            disabled={disabled}
+            onClick={() => onChange(String(size))}
+          >
+            {size} GB
+          </button>
+        ))}
+        <label className="kd-virtual-disk-custom-size">
+          <span>自定义</span>
+          <input
+            className="kd-input"
+            type="number"
+            inputMode="decimal"
+            min={VIRTUAL_DISK_MIN_SIZE_GIB}
+            max={VIRTUAL_DISK_MAX_SIZE_GIB}
+            step="0.1"
+            value={value}
+            disabled={disabled}
+            aria-label={`自定义${label}`}
+            aria-invalid={Boolean(error)}
+            onChange={(event) => onChange(event.target.value)}
+            onBlur={() => {
+              const size = parseVirtualDiskSizeGib(value);
+              if (size !== null) onChange(String(size));
+            }}
+          />
+          <span>GB</span>
+        </label>
+      </div>
+      {error ? (
+        <p className="kd-virtual-disk-field-error" role="alert">{error}</p>
+      ) : null}
+    </>
+  );
+}
+
+function VolumeNameField({
+  id,
+  value,
+  disabled,
+  error,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  disabled: boolean;
+  error: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="kd-virtual-disk-name-field">
+      <label className="kd-djp-label" htmlFor={id}>
+        磁盘名称
+      </label>
+      <input
+        id={id}
+        className="kd-input"
+        value={value}
+        maxLength={VIRTUAL_DISK_NAME_MAX_LENGTH}
+        disabled={disabled}
+        aria-invalid={Boolean(error)}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {error ? (
+        <p className="kd-virtual-disk-field-error" role="alert">{error}</p>
+      ) : null}
     </div>
   );
 }
@@ -41,8 +148,10 @@ export function VirtualDiskPanel() {
   const deleteDisk = usePlaylistStore((state) => state.deleteVirtualDisk);
   const authorizeDevice = usePlaylistStore((state) => state.authorizeDevice);
   const clearError = usePlaylistStore((state) => state.clearError);
-  const [sizeGib, setSizeGib] = useState(8);
-  const [growSizeGib, setGrowSizeGib] = useState(16);
+  const [sizeInput, setSizeInput] = useState("8");
+  const [volumeName, setVolumeName] = useState(VIRTUAL_DISK_DEFAULT_NAME);
+  const [growSizeInput, setGrowSizeInput] = useState("16");
+  const [growVolumeName, setGrowVolumeName] = useState(VIRTUAL_DISK_DEFAULT_NAME);
   const [confirming, setConfirming] = useState<"grow" | "delete" | null>(null);
   const [authorizing, setAuthorizing] = useState(false);
   const [authorizedName, setAuthorizedName] = useState("");
@@ -51,29 +160,47 @@ export function VirtualDiskPanel() {
     void refresh();
   }, [refresh]);
 
-  const growOptions = useMemo(
-    () => virtualDiskGrowthOptions(status?.totalBytes ?? 0),
-    [status?.totalBytes],
+  const configuredBytes = status ? status.configuredBytes || status.totalBytes : 0;
+  const usedBytes = status?.mounted
+    ? Math.max(0, status.totalBytes - status.availableBytes)
+    : 0;
+  const minimumChangeBytes = usedBytes + VIRTUAL_DISK_RESERVE_BYTES;
+  const changeOptions = useMemo(
+    () => virtualDiskChangeOptions(configuredBytes, minimumChangeBytes),
+    [configuredBytes, minimumChangeBytes],
   );
   useEffect(() => {
-    if (growOptions.length > 0 && !growOptions.some((size) => size === growSizeGib)) {
-      setGrowSizeGib(growOptions[0]);
-    }
-  }, [growOptions, growSizeGib]);
+    setGrowSizeInput(String(defaultVirtualDiskChangeSizeGib(configuredBytes, changeOptions)));
+  }, [changeOptions, configuredBytes]);
+  useEffect(() => {
+    if (status?.exists && status.name) setGrowVolumeName(status.name);
+  }, [status?.exists, status?.name]);
   useEffect(() => {
     setConfirming(null);
   }, [status?.exists, status?.mounted, operation]);
 
   const busy = operation !== null || exporting !== null;
-  const usedBytes = status?.mounted
-    ? Math.max(0, status.totalBytes - status.availableBytes)
-    : 0;
+  const sizeGib = parseVirtualDiskSizeGib(sizeInput);
+  const sizeError = virtualDiskSizeInputError(sizeInput);
+  const volumeNameError = virtualDiskNameInputError(volumeName);
+  const growSizeGib = parseVirtualDiskSizeGib(growSizeInput);
+  const growSizeError = virtualDiskSizeInputError(growSizeInput, minimumChangeBytes);
+  const growVolumeNameError = virtualDiskNameInputError(growVolumeName);
+  const currentSizeMib = virtualDiskSizeMib(virtualDiskSizeGib(configuredBytes));
+  const targetSizeMib = growSizeGib === null ? null : virtualDiskSizeMib(growSizeGib);
+  const hasDiskChange = targetSizeMib !== null
+    && !growSizeError
+    && !growVolumeNameError
+    && (
+      targetSizeMib !== currentSizeMib
+      || normalizeVirtualDiskName(growVolumeName) !== status?.name
+    );
   const actionLabel = operation === "mount"
     ? status?.exists ? "正在加载" : "正在创建"
     : operation === "eject"
       ? "正在安全卸载"
       : operation === "grow"
-        ? "正在建立更大镜像、迁移并验证数据"
+        ? "正在改变容量并迁移数据"
         : operation === "delete"
           ? "正在安全卸载并彻底删除"
           : "";
@@ -89,8 +216,9 @@ export function VirtualDiskPanel() {
           <div className="kd-virtual-disk-intro">
             <HardDrive size={18} aria-hidden="true" />
             <p>
-              OneLibrary 让 KDJ 与兼容的 DJ 软件共享播放列表、曲目、封面和分析数据。
-              KDJ 虚拟盘是在本机保存并由系统挂载的 ExFAT 磁盘镜像，不是云盘。
+              OneLibrary 是一种 DJ 曲库格式，可让播放列表、Cue 点和 Beatgrid 等演出数据
+              在兼容的软件与硬件间使用。KDJ 同时支持真实设备和虚拟设备。
+              你可以连接 U 盘或移动硬盘，也可以创建 KDJ 虚拟盘。
             </p>
           </div>
         </Panel>
@@ -134,11 +262,12 @@ export function VirtualDiskPanel() {
           {status?.exists ? (
             <div className="kd-djp-switch-list">
               <Fact label="状态" value={status.mounted ? "已加载" : "已卸载"} />
+              <Fact label="磁盘名称" value={status.name} />
               <Fact label="镜像位置" value={status.imagePath} title={status.imagePath} />
               {status.mounted ? (
                 <>
                   <Fact label="挂载点" value={status.mountPath} title={status.mountPath} />
-                  <Fact label="容量" value={formatBytes(status.totalBytes)} />
+                  <Fact label="容量" value={formatBytes(configuredBytes)} />
                   <Fact label="已用" value={formatBytes(usedBytes)} />
                   <Fact label="可用" value={formatBytes(status.availableBytes)} />
                   <Fact label="文件系统" value={status.fileSystem || "ExFAT"} />
@@ -149,29 +278,26 @@ export function VirtualDiskPanel() {
                   />
                   <Fact label="协议" value={status.protocol} />
                 </>
-              ) : status.totalBytes > 0 ? (
-                <Fact label="配置容量" value={formatBytes(status.totalBytes)} />
+              ) : configuredBytes > 0 ? (
+                <Fact label="配置容量" value={formatBytes(configuredBytes)} />
               ) : null}
             </div>
           ) : (
             <>
-              <p className="kd-djp-note">创建后会作为名为 KDJ 的 ExFAT 卷供兼容软件读取。</p>
-              <span className="kd-djp-label">容量</span>
-              <div className="kd-djp-choice" role="radiogroup" aria-label="KDJ 虚拟磁盘容量">
-                {VIRTUAL_DISK_SIZE_OPTIONS.map((size) => (
-                  <button
-                    key={size}
-                    type="button"
-                    role="radio"
-                    className="kd-djp-choice-btn"
-                    aria-checked={sizeGib === size}
-                    disabled={busy}
-                    onClick={() => setSizeGib(size)}
-                  >
-                    {size} GB
-                  </button>
-                ))}
-              </div>
+              <VolumeNameField
+                id="kd-virtual-disk-create-name"
+                value={volumeName}
+                disabled={busy}
+                error={volumeNameError}
+                onChange={setVolumeName}
+              />
+              <CapacityPicker
+                value={sizeInput}
+                options={VIRTUAL_DISK_SIZE_OPTIONS}
+                disabled={busy}
+                error={sizeError}
+                onChange={setSizeInput}
+              />
             </>
           )}
 
@@ -183,14 +309,22 @@ export function VirtualDiskPanel() {
             {!status?.mounted ? (
               <Button
                 variant="primary"
-                disabled={busy || !status}
+                disabled={
+                  busy
+                  || !status
+                  || (!status.exists
+                    && (sizeGib === null || Boolean(sizeError || volumeNameError)))
+                }
                 onClick={() => {
                   clearError();
-                  void mount(sizeGib).catch(() => undefined);
+                  const task = status?.exists
+                    ? mount()
+                    : mount(sizeGib ?? undefined, normalizeVirtualDiskName(volumeName));
+                  void task.catch(() => undefined);
                 }}
               >
                 {status?.exists ? <Power size={13} /> : <Plus size={13} />}
-                {status?.exists ? "加载 KDJ" : "创建并加载"}
+                {status?.exists ? `加载 ${status.name}` : "创建并加载"}
               </Button>
             ) : (
               <>
@@ -211,42 +345,47 @@ export function VirtualDiskPanel() {
             )}
           </div>
 
-          {status?.mounted && growOptions.length > 0 ? (
+          {status?.mounted ? (
             <div className="kd-virtual-disk-section">
-              <span className="kd-djp-label">扩容目标</span>
-              <div className="kd-djp-choice" role="radiogroup" aria-label="KDJ 虚拟盘扩容目标">
-                {growOptions.map((size) => (
-                  <button
-                    key={size}
-                    type="button"
-                    role="radio"
-                    className="kd-djp-choice-btn"
-                    aria-checked={growSizeGib === size}
-                    disabled={busy || confirming !== null}
-                    onClick={() => setGrowSizeGib(size)}
-                  >
-                    {size} GB
-                  </button>
-                ))}
-              </div>
+              <span className="kd-virtual-disk-section-title">改变容量</span>
+              <VolumeNameField
+                id="kd-virtual-disk-grow-name"
+                value={growVolumeName}
+                disabled={busy || confirming !== null}
+                error={growVolumeNameError}
+                onChange={setGrowVolumeName}
+              />
+              <CapacityPicker
+                label="新容量"
+                value={growSizeInput}
+                options={changeOptions}
+                disabled={busy || confirming !== null}
+                error={growSizeError}
+                onChange={setGrowSizeInput}
+              />
               {confirming === "grow" ? (
                 <div className="kd-virtual-disk-confirm" role="alert">
                   <ShieldCheck size={15} aria-hidden="true" />
                   <p>
-                    将建立 {growSizeGib} GB 新镜像，完整复制并验证数据后再切换。
-                    过程中需要同时容纳新旧镜像；失败会保留原盘。
+                    将创建名为 {normalizeVirtualDiskName(growVolumeName)} 的 {growSizeGib} GB
+                    新镜像并复制原盘数据。完成后换用新镜像；失败时保留原盘。
                   </p>
                   <div className="kd-row">
                     <Button
                       variant="primary"
-                      disabled={busy}
+                      disabled={
+                        busy
+                        || !hasDiskChange
+                      }
                       onClick={() => {
                         setConfirming(null);
                         clearError();
-                        void grow(growSizeGib).catch(() => undefined);
+                        if (growSizeGib === null) return;
+                        void grow(growSizeGib, normalizeVirtualDiskName(growVolumeName))
+                          .catch(() => undefined);
                       }}
                     >
-                      确认扩容至 {growSizeGib} GB
+                      确认改变容量
                     </Button>
                     <Button variant="ghost" disabled={busy} onClick={() => setConfirming(null)}>
                       取消
@@ -254,8 +393,14 @@ export function VirtualDiskPanel() {
                   </div>
                 </div>
               ) : (
-                <Button disabled={busy} onClick={() => setConfirming("grow")}>
-                  <Expand size={13} /> 扩容至 {growSizeGib} GB
+                <Button
+                  disabled={
+                    busy
+                    || !hasDiskChange
+                  }
+                  onClick={() => setConfirming("grow")}
+                >
+                  <Expand size={13} /> 改变容量
                 </Button>
               )}
             </div>
@@ -268,8 +413,8 @@ export function VirtualDiskPanel() {
                 <div className="kd-virtual-disk-confirm" data-danger="true" role="alert">
                   <Trash2 size={15} aria-hidden="true" />
                   <p>
-                    将先安全卸载，再永久删除容量为 {formatBytes(status.totalBytes)} 的
-                    KDJ 镜像及其全部内容。此操作无法撤销。
+                    将先安全卸载，再永久删除容量为 {formatBytes(configuredBytes)} 的
+                    {status.name} 镜像及其全部内容。此操作无法撤销。
                   </p>
                   <div className="kd-row">
                     <Button
@@ -298,7 +443,7 @@ export function VirtualDiskPanel() {
 
           {status?.requiresElevation ? (
             <p className="kd-djp-note">
-              Windows 创建、加载、扩容、卸载或删除时可能要求系统 UAC 权限。
+              Windows 创建、加载、改变容量、卸载或删除时可能要求系统 UAC 权限。
             </p>
           ) : null}
           <InlineNotice text={error} onDismiss={clearError} block />

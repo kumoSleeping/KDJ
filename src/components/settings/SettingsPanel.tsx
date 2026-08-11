@@ -40,7 +40,7 @@ import { formatBytes } from "../../lib/format";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
-import type { Quality, StreamCacheStats } from "../../types";
+import type { KeyNotation, Quality, StreamCacheStats } from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { Button, InlineNotice, Panel } from "../common";
@@ -717,6 +717,16 @@ export function SettingsPanel() {
 
         <Panel heading="OneLibrary" dense>
           <div className="kd-djp-switch-list" aria-label="OneLibrary 选项">
+            <CycleToggle<KeyNotation>
+              label="列表调性"
+              value={settings?.key_notation ?? "camelot"}
+              options={[
+                { id: "camelot", text: "Camelot" },
+                { id: "traditional", text: "音名" },
+              ]}
+              title="本地与 OneLibrary 歌曲列表统一显示 Camelot 数字制或传统音名；不会改写曲目数据。"
+              onChange={(next) => void saveSettings({ key_notation: next })}
+            />
             <Switch
               checked={settings?.virtual_disk_auto_grow ?? true}
               disabled={!settings}

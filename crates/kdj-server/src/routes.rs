@@ -2399,10 +2399,9 @@ where
 async fn one_library_playlists(
     Query(params): Query<OneLibraryDeviceParams>,
 ) -> ApiResult<Json<Vec<OneLibraryPlaylist>>> {
-    let playlists = one_library_task(move || {
-        crate::usb_library::one_library_playlists(&params.device_path)
-    })
-    .await?;
+    let playlists =
+        one_library_task(move || crate::usb_library::one_library_playlists(&params.device_path))
+            .await?;
     Ok(Json(playlists))
 }
 
@@ -2613,9 +2612,9 @@ async fn one_library_track_rating(
         crate::usb_library::set_one_library_rating(&payload.device_path, id, rating)
     })
     .await?;
-    if let Some(local_id) = local_track_id.filter(|local_id| {
-        state.library.get(*local_id).ok().flatten().is_some()
-    }) {
+    if let Some(local_id) =
+        local_track_id.filter(|local_id| state.library.get(*local_id).ok().flatten().is_some())
+    {
         state.library.patch(
             local_id,
             &TrackPatch {
@@ -2703,20 +2702,28 @@ async fn one_library_import_tracks(
             }
             matched.insert(track.content_id);
             let source = PathBuf::from(&track.path);
+            let portable_metadata = PortableTrackMetadata::from(&track);
             let imported = (|| -> anyhow::Result<i64> {
                 anyhow::ensure!(source.is_file(), "外置音频文件已丢失");
                 let target = kdj_library::folders::copy_file(&source, &dest)?;
-                match library.upsert_file(
+                let id = match library.upsert_file(
                     &target,
                     "onelibrary",
                     &format!("{}:{}", source_device_key, track.content_id),
                 ) {
-                    Ok(id) => Ok(id),
+                    Ok(id) => id,
                     Err(error) => {
                         let _ = std::fs::remove_file(&target);
-                        Err(error)
+                        return Err(error);
                     }
+                };
+                if let Err(error) = library.apply_portable_metadata(id, &portable_metadata) {
+                    // 元数据和文件必须作为一次导入出现；半成品记录不能冒充成功。
+                    let _ = library.delete(id, FileDisposal::Keep);
+                    let _ = std::fs::remove_file(&target);
+                    return Err(error);
                 }
+                Ok(id)
             })();
             match imported {
                 Ok(id) => track_ids.push(id),
@@ -2756,16 +2763,12 @@ async fn one_library_set_cover(
     }
     let local_cover = body.clone();
     let local_track_id = one_library_task(move || {
-        crate::usb_library::set_one_library_cover(
-            &params.device_path,
-            params.content_id,
-            &body,
-        )
+        crate::usb_library::set_one_library_cover(&params.device_path, params.content_id, &body)
     })
     .await?;
-    if let Some(local_id) = local_track_id.filter(|local_id| {
-        state.library.get(*local_id).ok().flatten().is_some()
-    }) {
+    if let Some(local_id) =
+        local_track_id.filter(|local_id| state.library.get(*local_id).ok().flatten().is_some())
+    {
         state.library.write_cover_to_file(local_id, &local_cover)?;
         state.hub.publish_library_updated(&[local_id]);
     }
@@ -2779,7 +2782,7 @@ async fn one_library_waveform(
     if params.playback_id >= 0 {
         return Err(ApiError::bad_request("OneLibrary 播放 id 必须是负数"));
     }
-    let (path, cache_id) = one_library_task({
+    let file = one_library_task({
         let device_path = params.device_path.clone();
         move || crate::usb_library::one_library_content_file(&device_path, params.content_id)
     })
@@ -2788,18 +2791,15 @@ async fn one_library_waveform(
     let waveform = state
         .waveforms
         .get_or_compute_detached(
-            cache_id,
-            path,
+            file.cache_id,
+            file.legacy_cache_id,
+            file.path,
             buckets,
             state.config.data_dir.join("waveform-onelibrary"),
+            file.portable_waveform_dir,
         )
         .await
-        .map_err(|error| {
-            ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("{error:#}"),
-            )
-        })?;
+        .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("{error:#}")))?;
     let mut waveform = crate::waveform::fit_waveform_columns(waveform, buckets);
     waveform.track_id = params.playback_id;
     Ok(Json(waveform))

@@ -15,6 +15,7 @@ use kdj_core::models::{
     CuePoint, OneLibraryCapacityPlan, OneLibraryPlaylist, OneLibraryTrack, PlaylistExportResult,
     RemovableDevice, Track,
 };
+use kdj_core::musical_key::parse_musical_key;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::one_library_analysis::{AnalysisBundle, LocalAnalysis};
@@ -58,12 +59,22 @@ struct CachedCoverSource {
     audio: PathBuf,
 }
 
+/// 波形缓存身份只使用 OneLibrary 内部相对路径/内容属性，不含 `/Volumes/...` 或盘符。
+/// 同一张软盘换挂载点后仍命中；legacy_cache_id 只用于接住 0.2.39 的旧本机缓存。
+#[derive(Debug, Clone)]
+pub(crate) struct OneLibraryContentFile {
+    pub path: PathBuf,
+    pub cache_id: i64,
+    pub legacy_cache_id: i64,
+    pub portable_waveform_dir: Option<PathBuf>,
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 struct CachedOneLibraryRead {
     revision: OneLibraryRevision,
     playlists: Option<Vec<OneLibraryPlaylist>>,
     tracks: HashMap<i32, Vec<OneLibraryTrack>>,
-    content_files: HashMap<i32, (PathBuf, i64)>,
+    content_files: HashMap<i32, OneLibraryContentFile>,
     cover_sources: HashMap<i32, CachedCoverSource>,
 }
 
@@ -223,7 +234,7 @@ fn cached_content_file(
     db_path: &Path,
     revision: OneLibraryRevision,
     content_id: i32,
-) -> Option<(PathBuf, i64)> {
+) -> Option<OneLibraryContentFile> {
     let cache = ONE_LIBRARY_READ_CACHE
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -231,6 +242,32 @@ fn cached_content_file(
     (entry.revision == revision)
         .then(|| entry.content_files.get(&content_id).cloned())
         .flatten()
+}
+
+fn positive_cache_id(parts: &[&[u8]]) -> i64 {
+    let value = stable_hash(parts) & i64::MAX as u64;
+    i64::try_from(value.max(1)).unwrap_or(1)
+}
+
+fn one_library_content_file_snapshot(
+    root: &Path,
+    writable: bool,
+    content_id: i32,
+    content_path: &str,
+    file_size: Option<i32>,
+    audio: PathBuf,
+) -> OneLibraryContentFile {
+    let normalized_path = content_path.replace('\\', "/");
+    let size = i64::from(file_size.unwrap_or_default()).to_le_bytes();
+    let id = content_id.to_le_bytes();
+    OneLibraryContentFile {
+        // 新身份不含挂载点；同一 OneLibrary 卷改名、换盘符或重挂载仍能复用。
+        cache_id: positive_cache_id(&[normalized_path.as_bytes(), &size, &id]),
+        // 0.2.39 使用绝对路径。保留一轮只读兼容，命中后 coordinator 会原子转存。
+        legacy_cache_id: positive_cache_id(&[audio.to_string_lossy().as_bytes(), &id]),
+        path: audio,
+        portable_waveform_dir: writable.then(|| root.join(".kdj/onelibrary-waveform")),
+    }
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -478,6 +515,18 @@ fn safe_component(value: &str, fallback: &str) -> String {
         clipped = fallback.to_owned();
     }
     clipped
+}
+
+fn one_library_key_name(music_key: &str, camelot: &str) -> String {
+    let raw = if music_key.trim().is_empty() {
+        camelot.trim()
+    } else {
+        music_key.trim()
+    };
+    parse_musical_key(raw)
+        .map(|key| key.one_library_name())
+        // OneLibrary key.name 是自由文本；识别不了的第三方调式必须原样保留。
+        .unwrap_or_else(|| raw.to_owned())
 }
 
 fn stable_hash(parts: &[&[u8]]) -> u64 {
@@ -1088,6 +1137,7 @@ pub fn one_library_playlist_tracks(
             .and_then(|id| keys.get(&id))
             .cloned()
             .unwrap_or_default();
+        let normalized_key = parse_musical_key(&music_key);
         let genre = content
             .genre_id
             .and_then(|id| genres.get(&id))
@@ -1136,14 +1186,17 @@ pub fn one_library_playlist_tracks(
             .flatten()
             .filter(|id| *id > 0)
             .map(i64::from);
-        let cache_id = stable_hash(&[
-            audio.to_string_lossy().as_bytes(),
-            &content.id.to_le_bytes(),
-        ]) & i64::MAX as u64;
         if audio.is_file() {
             content_files.insert(
                 content.id,
-                (audio.clone(), i64::try_from(cache_id.max(1)).unwrap_or(1)),
+                one_library_content_file_snapshot(
+                    root,
+                    !device.read_only,
+                    content.id,
+                    &content.path,
+                    content.file_size,
+                    audio.clone(),
+                ),
             );
         }
         cover_sources.insert(
@@ -1169,6 +1222,11 @@ pub fn one_library_playlist_tracks(
                 .unwrap_or_default(),
             bpm: content.bpmx100.map(|value| f64::from(value) / 100.0),
             music_key,
+            camelot: normalized_key
+                .as_ref()
+                .map(|key| key.camelot.clone())
+                .unwrap_or_default(),
+            open_key: normalized_key.map(|key| key.open_key).unwrap_or_default(),
             duration: content.length.map(i64::from),
             bitrate: content.bitrate.map(i64::from),
             samplerate: content.sampling_rate.map(i64::from),
@@ -1230,16 +1288,19 @@ fn one_library_existing_path_from_root(
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn one_library_content_file(requested_device: &str, content_id: i32) -> Result<(PathBuf, i64)> {
+pub(crate) fn one_library_content_file(
+    requested_device: &str,
+    content_id: i32,
+) -> Result<OneLibraryContentFile> {
     anyhow::ensure!(content_id > 0, "OneLibrary 曲目无效");
     let device = current_device(requested_device, false)?;
     let root = Path::new(&device.path);
     let db_path = one_library_db(root);
     anyhow::ensure!(db_path.is_file(), "这个存储上还没有 OneLibrary");
     let revision = one_library_revision(&db_path);
-    if let Some((path, cache_id)) = cached_content_file(&db_path, revision, content_id) {
-        anyhow::ensure!(path.is_file(), "外置音频文件已丢失");
-        return Ok((path, cache_id));
+    if let Some(file) = cached_content_file(&db_path, revision, content_id) {
+        anyhow::ensure!(file.path.is_file(), "外置音频文件已丢失");
+        return Ok(file);
     }
     let library = read_one_library(&db_path)?;
     let content = library
@@ -1247,9 +1308,14 @@ pub fn one_library_content_file(requested_device: &str, content_id: i32) -> Resu
         .context("OneLibrary 曲目不存在")?;
     let path = one_library_existing_path(root, &content.path)?;
     anyhow::ensure!(path.is_file(), "外置音频文件已丢失");
-    let key = stable_hash(&[path.to_string_lossy().as_bytes(), &content_id.to_le_bytes()])
-        & i64::MAX as u64;
-    let result = (path, i64::try_from(key.max(1)).unwrap_or(1));
+    let result = one_library_content_file_snapshot(
+        root,
+        !device.read_only,
+        content.id,
+        &content.path,
+        content.file_size,
+        path,
+    );
     if one_library_revision(&db_path) == revision {
         update_read_cache(&db_path, revision, |entry| {
             entry.content_files.insert(content_id, result.clone());
@@ -2206,18 +2272,16 @@ fn export_playlist_to_device(
                 genre_ids.insert(genre_name.to_owned(), id);
                 Some(id)
             };
-            let key_name = if item.track.music_key.trim().is_empty() {
-                item.track.camelot.trim()
-            } else {
-                item.track.music_key.trim()
-            };
+            // OneLibrary 只存一份自由文本 key.name。统一写 djay 原生的 `F# M` / `F# m`
+            // 形状；旧库里的 Camelot 或 KDJ 长音名都会在这个 IO 边界规范化。
+            let key_name = one_library_key_name(&item.track.music_key, &item.track.camelot);
             let key_id = if key_name.is_empty() {
                 None
-            } else if let Some(id) = key_ids.get(key_name) {
+            } else if let Some(id) = key_ids.get(&key_name) {
                 Some(*id)
             } else {
-                let id = library.create_key(key_name)?.id;
-                key_ids.insert(key_name.to_owned(), id);
+                let id = library.create_key(&key_name)?.id;
+                key_ids.insert(key_name, id);
                 Some(id)
             };
             let title = if item.track.title.trim().is_empty() {
@@ -2475,10 +2539,10 @@ pub fn one_library_cover(_requested_device: &str, _content_id: i32) -> Result<(V
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
-pub fn one_library_content_file(
+pub(crate) fn one_library_content_file(
     _requested_device: &str,
     _content_id: i32,
-) -> Result<(PathBuf, i64)> {
+) -> Result<OneLibraryContentFile> {
     anyhow::bail!("移动端暂不支持读取 OneLibrary")
 }
 
@@ -2602,6 +2666,39 @@ pub fn one_library_capacity_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exported_keys_use_djay_notation_without_dropping_unknown_modes() {
+        assert_eq!(one_library_key_name("F# major", "2B"), "F# M");
+        assert_eq!(one_library_key_name("", "11A"), "F# m");
+        assert_eq!(one_library_key_name("custom mode", ""), "custom mode");
+    }
+
+    #[test]
+    fn waveform_cache_identity_survives_a_mount_path_change() {
+        let first = one_library_content_file_snapshot(
+            Path::new("/Volumes/KDJ"),
+            true,
+            42,
+            "/Contents/KDJ/song.mp3",
+            Some(12_345),
+            PathBuf::from("/Volumes/KDJ/Contents/KDJ/song.mp3"),
+        );
+        let remounted = one_library_content_file_snapshot(
+            Path::new("/Volumes/SET"),
+            true,
+            42,
+            "/Contents/KDJ/song.mp3",
+            Some(12_345),
+            PathBuf::from("/Volumes/SET/Contents/KDJ/song.mp3"),
+        );
+        assert_eq!(first.cache_id, remounted.cache_id);
+        assert_ne!(first.legacy_cache_id, remounted.legacy_cache_id);
+        assert_eq!(
+            remounted.portable_waveform_dir,
+            Some(PathBuf::from("/Volumes/SET/.kdj/onelibrary-waveform"))
+        );
+    }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     #[derive(diesel::QueryableByName)]

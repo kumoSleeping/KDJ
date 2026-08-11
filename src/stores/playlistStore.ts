@@ -69,6 +69,8 @@ export interface PlaylistStore {
   lastExport: PlaylistExportResult | null;
   selectedTarget: OneLibraryTarget | null;
   selectedTracks: OneLibraryTrack[];
+  /** 当前表格筛选/排序后可见的 id；null 表示列表组件尚未报告视图。 */
+  visibleContentIds: number[] | null;
   selectedContentIds: number[];
   focusedContentId: number | null;
   selectionMode: boolean;
@@ -99,11 +101,12 @@ export interface PlaylistStore {
   removeTracks(contentIds: number[]): Promise<void>;
   selectTrack(contentId: number | null, mode?: OneLibrarySelectMode): void;
   selectAllTracks(): void;
+  setVisibleContentIds(contentIds: number[] | null): void;
   setSelectionMode(on: boolean): void;
   closePlaylist(): void;
   authorizeDevice(): Promise<RemovableDevice | null>;
-  mountVirtualDisk(sizeGib?: number): Promise<VirtualDiskStatus>;
-  growVirtualDisk(sizeGib: number): Promise<VirtualDiskStatus>;
+  mountVirtualDisk(sizeGib?: number, volumeName?: string): Promise<VirtualDiskStatus>;
+  growVirtualDisk(sizeGib: number, volumeName: string): Promise<VirtualDiskStatus>;
   ejectVirtualDisk(): Promise<VirtualDiskStatus>;
   deleteVirtualDisk(): Promise<VirtualDiskStatus>;
   clearError(): void;
@@ -137,6 +140,7 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
   lastExport: null,
   selectedTarget: readSelectedTarget(),
   selectedTracks: [],
+  visibleContentIds: null,
   selectedContentIds: [],
   focusedContentId: null,
   selectionMode: false,
@@ -169,6 +173,7 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
             ? {
                 selectedTarget: null,
                 selectedTracks: [],
+                visibleContentIds: null,
                 selectedContentIds: [],
                 focusedContentId: null,
                 selectionMode: false,
@@ -304,6 +309,7 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
         ? {
             selectedTarget: null,
             selectedTracks: [],
+            visibleContentIds: null,
             selectedContentIds: [],
             focusedContentId: null,
             selectionMode: false,
@@ -329,7 +335,7 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
           );
         }
         const virtualDisk = getBridge().virtualDisk;
-        if (!virtualDisk) throw new Error("当前桌面壳不能扩容 KDJ 虚拟磁盘");
+        if (!virtualDisk) throw new Error("当前桌面壳不能改变 KDJ 虚拟磁盘容量");
         set({ operation: "grow" });
         const status = await virtualDisk.ensureCapacity(plan.required_bytes);
         targetPath = status.mountPath;
@@ -357,6 +363,7 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
     set({
       selectedTarget: target,
       selectedTracks: [],
+      visibleContentIds: null,
       selectedContentIds: [],
       focusedContentId: null,
       selectionMode: false,
@@ -372,7 +379,7 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
       ) return;
       set({ selectedTracks: tracks, tracksLoading: false });
     } catch (error) {
-      set({ selectedTracks: [], tracksLoading: false, deviceError: message(error) });
+      set({ selectedTracks: [], visibleContentIds: [], tracksLoading: false, deviceError: message(error) });
       throw error;
     }
   },
@@ -539,11 +546,27 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
   },
 
   selectAllTracks() {
-    const tracks = get().selectedTracks;
+    const { selectedTracks, visibleContentIds, focusedContentId } = get();
+    const ids = visibleContentIds ?? selectedTracks.map((track) => track.content_id);
     set({
-      selectedContentIds: tracks.map((track) => track.content_id),
-      focusedContentId: get().focusedContentId ?? (tracks[0]?.content_id ?? null),
+      selectedContentIds: ids,
+      focusedContentId: focusedContentId !== null && ids.includes(focusedContentId)
+        ? focusedContentId
+        : (ids[0] ?? null),
       selectionMode: true,
+    });
+  },
+
+  setVisibleContentIds(contentIds) {
+    set((state) => {
+      if (
+        state.visibleContentIds === contentIds
+        || (state.visibleContentIds !== null
+          && contentIds !== null
+          && state.visibleContentIds.length === contentIds.length
+          && state.visibleContentIds.every((id, index) => id === contentIds[index]))
+      ) return state;
+      return { visibleContentIds: contentIds };
     });
   },
 
@@ -556,6 +579,7 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
     set({
       selectedTarget: null,
       selectedTracks: [],
+      visibleContentIds: null,
       selectedContentIds: [],
       focusedContentId: null,
       selectionMode: false,
@@ -577,12 +601,12 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
     }
   },
 
-  async mountVirtualDisk(sizeGib = 8) {
+  async mountVirtualDisk(sizeGib = 8, volumeName = "KDJ") {
     const virtualDisk = getBridge().virtualDisk;
     if (!virtualDisk) throw new Error("KDJ 虚拟磁盘只支持 macOS 和 Windows");
     set({ operation: "mount", deviceError: "" });
     try {
-      const status = await virtualDisk.mount(sizeGib);
+      const status = await virtualDisk.mount(sizeGib, volumeName);
       set({ virtualDisk: status, operation: null });
       await get().refreshDevices();
       return status;
@@ -607,12 +631,12 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
     }
   },
 
-  async growVirtualDisk(sizeGib) {
+  async growVirtualDisk(sizeGib, volumeName) {
     const virtualDisk = getBridge().virtualDisk;
     if (!virtualDisk) throw new Error("KDJ 虚拟磁盘只支持 macOS 和 Windows");
     set({ operation: "grow", deviceError: "" });
     try {
-      const status = await virtualDisk.grow(sizeGib);
+      const status = await virtualDisk.grow(sizeGib, volumeName);
       set({ virtualDisk: status, operation: null });
       await get().refreshDevices();
       return status;

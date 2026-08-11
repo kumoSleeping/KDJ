@@ -17,12 +17,14 @@ import {
 import { api } from "../../lib/api";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { TableRating } from "../common/TableRating";
+import { TableSortMark } from "../common/TableSortMark";
+import { TrackKeyChip } from "../common/TrackKeyChip";
 import { copyText } from "../../lib/copyText";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import { observeTrackScroller } from "../../lib/autoAnalyze";
 import { getBridge } from "../../lib/bridge";
 import { isEditable } from "../../lib/useLibraryClipboard";
-import { camelotColor } from "../../lib/camelot";
+import { tableSortTitle } from "../../lib/tableSort";
 import {
   announceTrackDrag,
   claimActiveTrackDragIds,
@@ -58,7 +60,7 @@ import {
 } from "../../stores/libraryStore";
 import type { DownloadTask } from "../../types";
 import { usePlaylistStore } from "../../stores/playlistStore";
-import type { FileDisposalMode, Track } from "../../types";
+import type { FileDisposalMode, KeyNotation, Track } from "../../types";
 import { playTrack } from "../../lib/playTrack";
 import {
   beginColumnPointerReorder,
@@ -136,26 +138,6 @@ export function EnergyMeter({
   return (
     <span className="kd-loudness-number" data-tone={tone} title={details.join(" · ")}>
       {ratio !== null ? `${Math.round(ratio)}%` : DASH}
-    </span>
-  );
-}
-
-/** Camelot 色块。空值给虚线占位，保持列宽稳定。 */
-export function CamelotChip({ code }: { code: string }) {
-  if (!code) {
-    return (
-      <span className="kd-camelot" data-empty="true">
-        {DASH}
-      </span>
-    );
-  }
-  return (
-    <span
-      className="kd-camelot"
-      // 原色只负责提供色相；深浅主题各自决定填充、边框和文字亮度。
-      style={{ "--kd-key-color": camelotColor(code) } as React.CSSProperties}
-    >
-      {code}
     </span>
   );
 }
@@ -354,6 +336,7 @@ function TrackCoverThumb({
 function trackCell(
   track: Track,
   key: string,
+  keyNotation: KeyNotation,
   selectionControl?: React.ReactNode,
   onTrackDragStart?: (event: React.DragEvent<HTMLSpanElement>) => void,
   onRate?: (rating: number) => void,
@@ -398,7 +381,7 @@ function trackCell(
     case "camelot":
       return (
         <td key={key} data-col="camelot">
-          <CamelotChip code={track.camelot} />
+          <TrackKeyChip track={track} notation={keyNotation} />
         </td>
       );
     case "energy":
@@ -519,6 +502,7 @@ export function TrackTable({
   shortcutActive,
 }: TrackTableProps) {
   const loadingMore = useLibraryStore((state) => state.loadingMore);
+  const keyNotation = useAppStore((state) => state.settings?.key_notation ?? "camelot");
   const filterFolder = useLibraryStore((state) => state.filter.folder);
   const filterQuery = useLibraryStore((state) => state.filter.q);
   const removeTracks = useLibraryStore((state) => state.removeTracks);
@@ -1301,11 +1285,7 @@ export function TrackTable({
                 }
                 title={
                   column.id
-                    ? column.id === sort
-                      ? "再点一下换方向；拖动列头可调整顺序"
-                      : column.id === sort2
-                        ? "副排序键；再点升为主排序，拖动可调整列顺序"
-                        : "点一下按它排；拖动列头可调整顺序"
+                    ? tableSortTitle({ sort, order, sort2, order2 }, column.id)
                     : "拖动列头换列序；右缘拖动调列宽；右键选择显示哪些列"
                 }
               >
@@ -1313,14 +1293,10 @@ export function TrackTable({
                 {/* 主、副排序仍由 store 中的 sort / sort2 区分；表头只显示方向，
                     避免带圈数字与列名字号不协调。层级说明保留在表头 title 中。 */}
                 {column.id !== null && column.id === sort && (
-                  <span className="kd-sort-mark" aria-label="主排序">
-                    {order === "asc" ? "↑" : "↓"}
-                  </span>
+                  <TableSortMark order={order} />
                 )}
                 {column.id !== null && column.id !== sort && column.id === sort2 && (
-                  <span className="kd-sort-mark" aria-label="副排序">
-                    {order2 === "asc" ? "↑" : "↓"}
-                  </span>
+                  <TableSortMark order={order2} secondary />
                 )}
                 <span
                   className="kd-col-resize"
@@ -1504,6 +1480,7 @@ export function TrackTable({
                 const cell = trackCell(
                   track,
                   column.key,
+                  keyNotation,
                   column.key === "title" && selectionMode ? (
                     <button
                       type="button"

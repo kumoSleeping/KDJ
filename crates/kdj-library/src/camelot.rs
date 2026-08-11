@@ -3,48 +3,8 @@
 //! 这些是和声推荐的地基。表打错一格，用户就会在现场把两首根本不搭的歌接到一起。
 
 use kdj_core::models::HarmonicRelation;
-
-/// 逐条对应契约第 5 节的调号轮表格。
-pub const CAMELOT_TO_KEY: [(&str, &str); 24] = [
-    ("1A", "Ab minor"),
-    ("1B", "B major"),
-    ("2A", "Eb minor"),
-    ("2B", "F# major"),
-    ("3A", "Bb minor"),
-    ("3B", "Db major"),
-    ("4A", "F minor"),
-    ("4B", "Ab major"),
-    ("5A", "C minor"),
-    ("5B", "Eb major"),
-    ("6A", "G minor"),
-    ("6B", "Bb major"),
-    ("7A", "D minor"),
-    ("7B", "F major"),
-    ("8A", "A minor"),
-    ("8B", "C major"),
-    ("9A", "E minor"),
-    ("9B", "G major"),
-    ("10A", "B minor"),
-    ("10B", "D major"),
-    ("11A", "F# minor"),
-    ("11B", "A major"),
-    ("12A", "Db minor"),
-    ("12B", "E major"),
-];
-
-/// 同音异名。用户搜 "G# minor" 必须能命中库里存成 "Ab minor" 的那些。
-const ENHARMONIC: [(&str, &str); 10] = [
-    ("ab", "g#"),
-    ("g#", "ab"),
-    ("eb", "d#"),
-    ("d#", "eb"),
-    ("bb", "a#"),
-    ("a#", "bb"),
-    ("db", "c#"),
-    ("c#", "db"),
-    ("gb", "f#"),
-    ("f#", "gb"),
-];
+use kdj_core::musical_key::parse_musical_key;
+pub use kdj_core::musical_key::CAMELOT_TO_KEY;
 
 pub fn relation_label(relation: HarmonicRelation) -> &'static str {
     match relation {
@@ -73,17 +33,7 @@ pub fn relation_distance(relation: HarmonicRelation) -> f64 {
 
 /// 解析 "8A" / "8a" / "10 B"。
 pub fn split_camelot(camelot: &str) -> Option<(u32, char)> {
-    let cleaned: String = camelot.chars().filter(|c| !c.is_whitespace()).collect();
-    if cleaned.len() < 2 {
-        return None;
-    }
-    let (number_part, letter_part) = cleaned.split_at(cleaned.len() - 1);
-    let letter = letter_part.chars().next()?.to_ascii_uppercase();
-    if letter != 'A' && letter != 'B' {
-        return None;
-    }
-    let number: u32 = number_part.parse().ok()?;
-    (1..=12).contains(&number).then_some((number, letter))
+    kdj_core::musical_key::split_camelot(camelot)
 }
 
 /// 1..12 的环形（12 + 1 = 1）。
@@ -100,45 +50,10 @@ pub fn parse_key_filter(value: &str) -> (String, String) {
     if raw.is_empty() {
         return (String::new(), String::new());
     }
-    if let Some((number, letter)) = split_camelot(raw) {
-        return (format!("{number}{letter}"), raw.to_string());
-    }
-    let normalized = raw.to_lowercase().replace('♯', "#").replace('♭', "b");
-    for (code, name) in CAMELOT_TO_KEY {
-        if key_variants(name)
-            .iter()
-            .any(|variant| *variant == normalized)
-        {
-            return (code.to_string(), raw.to_string());
-        }
+    if let Some(key) = parse_musical_key(raw) {
+        return (key.camelot, raw.to_string());
     }
     (String::new(), raw.to_string())
-}
-
-/// 一个调名的所有可接受写法（含同音异名）。
-fn key_variants(name: &str) -> Vec<String> {
-    let (root, mode) = name.split_once(' ').unwrap_or((name, ""));
-    let is_minor = mode.starts_with("min");
-    let short_mode = if is_minor { "m" } else { "" };
-
-    let mut roots = vec![root.to_string()];
-    let lower = root.to_lowercase();
-    if let Some((_, alt)) = ENHARMONIC.iter().find(|(from, _)| *from == lower) {
-        let mut chars = alt.chars();
-        let capitalized = match chars.next() {
-            Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
-            None => String::new(),
-        };
-        roots.push(capitalized);
-    }
-
-    let mut out = Vec::new();
-    for r in roots {
-        out.push(format!("{r} {mode}").to_lowercase());
-        out.push(format!("{r}{short_mode}").to_lowercase());
-        out.push(format!("{r} {}", if is_minor { "min" } else { "maj" }).to_lowercase());
-    }
-    out
 }
 
 /// 给定 Camelot 返回 `[(兼容调, relation)]`。

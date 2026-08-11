@@ -66,7 +66,7 @@ KDJ packs cross-platform search, download, local library management, and music a
   - Automatic VJ export (requires [FFmpeg](https://ffmpeg.org/download.html))
 
 > [!NOTE]
-> Portable OneLibrary export copies the actual audio files to the drive. A playlist that only references files on the current computer cannot work elsewhere without those files. KDJ currently exports playlist order, BPM, key, and common tags; the target DJ app analyzes waveforms and beatgrids on first load.
+> Portable OneLibrary export copies the audio files to the drive; a playlist that only references files on the current computer cannot work elsewhere. Tracks with complete KDJ analysis also export BPM, key, beatgrid, and OneLibrary waveform data. The target DJ app fills in tracks that are still missing analysis. KDJ keeps a portable waveform cache under `.kdj` on the drive so remounting the virtual disk does not decode the same tracks again.
 - Playback
   - System-level audio output and volume control
   - rkb-style waveform preview

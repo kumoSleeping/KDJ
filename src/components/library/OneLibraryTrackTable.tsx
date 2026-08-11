@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowDown,
-  ArrowUp,
   Check,
   Copy,
   FolderOpen,
@@ -12,6 +10,8 @@ import {
 } from "lucide-react";
 import { api } from "../../lib/api";
 import { formatBpm, formatDuration } from "../../lib/format";
+import { trackKeyMatches, trackKeySortValue } from "../../lib/keyDisplay";
+import { cycleTableSort, tableSortTitle, type TableSortOrder } from "../../lib/tableSort";
 import {
   PLAYLIST_DROP_DEVICE_ATTR,
   PLAYLIST_DROP_ID_ATTR,
@@ -40,10 +40,13 @@ import type { LayoutMode } from "../../lib/useLayoutMode";
 import { shouldHandleWorkspaceDelete } from "../../lib/workspacePanes";
 import { isEditable } from "../../lib/useLibraryClipboard";
 import { usePlaylistStore, type OneLibrarySelectMode } from "../../stores/playlistStore";
+import { useAppStore } from "../../stores/appStore";
 import type { OneLibraryTrack } from "../../types";
 import { ContextMenu, InlineNotice } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { TableRating } from "../common/TableRating";
+import { TableSortMark } from "../common/TableSortMark";
+import { TrackKeyChip } from "../common/TrackKeyChip";
 import {
   beginColumnPointerReorder,
   loadTableColumnPrefs,
@@ -63,7 +66,6 @@ import {
 } from "../../lib/oneLibraryCoverDrag";
 
 type OneLibrarySort = "custom" | "title" | "artist" | "album" | "bpm" | "key" | "rating" | "duration";
-type OneLibrarySortOrder = "asc" | "desc";
 interface OneLibraryViewState {
   title: string;
   artist: string;
@@ -73,7 +75,9 @@ interface OneLibraryViewState {
   key: string;
   ratingMin: number | null;
   sort: OneLibrarySort;
-  order: OneLibrarySortOrder;
+  order: TableSortOrder;
+  sort2: OneLibrarySort | null;
+  order2: TableSortOrder;
 }
 
 const DEFAULT_VIEW: OneLibraryViewState = {
@@ -86,18 +90,20 @@ const DEFAULT_VIEW: OneLibraryViewState = {
   ratingMin: null,
   sort: "custom",
   order: "asc",
+  sort2: null,
+  order2: "asc",
 };
 const ONE_LIBRARY_VIEWS_KEY = "kd-onelibrary-views-v1";
 const ONE_LIBRARY_COLUMNS_KEY = "kd-onelibrary-columns-v1";
 const INDEX_KEY = "index";
 const COLUMNS = [
-  { key: "title", label: "标题", width: "15rem", min: "8rem" },
-  { key: "artist", label: "艺人", width: "8rem", min: "4rem" },
-  { key: "album", label: "专辑", width: "9rem", min: "4rem" },
-  { key: "bpm", label: "BPM", width: "4rem", min: "3rem" },
-  { key: "key", label: "KEY", width: "4rem", min: "3rem" },
-  { key: "rating", label: "评分", width: "5rem", min: "3.6rem" },
-  { key: "duration", label: "时长", width: "4.5rem", min: "3.5rem" },
+  { key: "title", label: "标题", width: "14rem", min: "4rem" },
+  { key: "artist", label: "艺人", width: "6.5rem", min: "3rem" },
+  { key: "album", label: "专辑", width: "5.75rem", min: "3rem" },
+  { key: "bpm", label: "BPM", width: "4.2rem", min: "2.8rem" },
+  { key: "key", label: "KEY", width: "4rem", min: "2.8rem" },
+  { key: "duration", label: "时长", width: "4rem", min: "2.8rem" },
+  { key: "rating", label: "评分", width: "4.2rem", min: "3rem" },
 ] as const;
 const COLUMN_KEYS = COLUMNS.map((column) => column.key);
 const COLUMN_MIN = Object.fromEntries(COLUMNS.map((column) => [column.key, column.min]));
@@ -105,8 +111,8 @@ const COLUMN_SCHEMA: TableColumnPrefsSchema = {
   columnKeys: COLUMN_KEYS,
   widthKeys: [INDEX_KEY, ...COLUMN_KEYS],
   lockedVisible: ["title"],
-  minWidths: { [INDEX_KEY]: "2.8rem", ...COLUMN_MIN },
-  maxWidth: "40rem",
+  minWidths: { [INDEX_KEY]: "1.4rem", ...COLUMN_MIN },
+  maxWidth: "80rem",
 };
 
 function playlistViewKey(devicePath: string, playlistId: number): string {
@@ -122,6 +128,10 @@ function readStoredView(key: string): OneLibraryViewState {
       const numberOrNull = (candidate: unknown) =>
         typeof candidate === "number" && Number.isFinite(candidate) ? candidate : null;
       const sorts: OneLibrarySort[] = ["custom", "title", "artist", "album", "bpm", "key", "rating", "duration"];
+      const sort = sorts.includes(raw.sort as OneLibrarySort) ? raw.sort as OneLibrarySort : "custom";
+      const sort2 = sorts.includes(raw.sort2 as OneLibrarySort) && raw.sort2 !== "custom"
+        ? raw.sort2 as OneLibrarySort
+        : null;
       return {
         title: typeof raw.title === "string" ? raw.title : "",
         artist: typeof raw.artist === "string" ? raw.artist : "",
@@ -130,8 +140,10 @@ function readStoredView(key: string): OneLibraryViewState {
         bpmMax: numberOrNull(raw.bpmMax),
         key: typeof raw.key === "string" ? raw.key : "",
         ratingMin: numberOrNull(raw.ratingMin),
-        sort: sorts.includes(raw.sort as OneLibrarySort) ? raw.sort as OneLibrarySort : "custom",
+        sort,
         order: raw.order === "desc" ? "desc" : "asc",
+        sort2: sort === "custom" || sort2 === sort ? null : sort2,
+        order2: raw.order2 === "desc" ? "desc" : "asc",
       };
     }
   } catch {
@@ -177,9 +189,12 @@ export function OneLibraryTrackTable({
   const focusedId = usePlaylistStore((state) => state.focusedContentId);
   const selectionMode = usePlaylistStore((state) => state.selectionMode);
   const loading = usePlaylistStore((state) => state.tracksLoading);
+  const keyNotation = useAppStore((state) => state.settings?.key_notation ?? "camelot");
   const error = usePlaylistStore((state) => state.deviceError);
   const devices = usePlaylistStore((state) => state.devices);
   const selectTrack = usePlaylistStore((state) => state.selectTrack);
+  const selectAllTracks = usePlaylistStore((state) => state.selectAllTracks);
+  const setVisibleContentIds = usePlaylistStore((state) => state.setVisibleContentIds);
   const setSelectionMode = usePlaylistStore((state) => state.setSelectionMode);
   const reorder = usePlaylistStore((state) => state.reorderTracks);
   const rateTrack = usePlaylistStore((state) => state.rateTrack);
@@ -267,33 +282,49 @@ export function OneLibraryTrackTable({
       && textMatch(track.album, view.album)
       && (view.bpmMin === null || (track.bpm !== null && track.bpm >= view.bpmMin))
       && (view.bpmMax === null || (track.bpm !== null && track.bpm <= view.bpmMax))
-      && (!view.key.trim() || track.music_key.toLocaleLowerCase() === view.key.trim().toLocaleLowerCase())
+      && trackKeyMatches(track, view.key)
       && (view.ratingMin === null || track.rating >= view.ratingMin),
     );
     if (view.sort === "custom") return filtered;
-    const value = (track: OneLibraryTrack): string | number | null => {
-      switch (view.sort) {
+    const value = (track: OneLibraryTrack, sort: OneLibrarySort): string | number | null => {
+      switch (sort) {
         case "title": return track.title || track.filename;
         case "artist": return track.artist;
         case "album": return track.album;
         case "bpm": return track.bpm;
-        case "key": return track.music_key;
+        case "key": return trackKeySortValue(track);
         case "rating": return track.rating;
         case "duration": return track.duration;
         default: return track.sequence;
       }
     };
     return [...filtered].sort((left, right) => {
-      const compared = compareNullable(value(left), value(right));
-      return (view.order === "asc" ? compared : -compared) || left.sequence - right.sequence;
+      const primary = compareNullable(value(left, view.sort), value(right, view.sort));
+      const primaryResult = view.order === "asc" ? primary : -primary;
+      if (primaryResult) return primaryResult;
+      if (view.sort2) {
+        const secondary = compareNullable(value(left, view.sort2), value(right, view.sort2));
+        const secondaryResult = view.order2 === "asc" ? secondary : -secondary;
+        if (secondaryResult) return secondaryResult;
+      }
+      return left.sequence - right.sequence;
     });
   }, [tracks, view]);
 
+  useEffect(() => {
+    setVisibleContentIds(visibleTracks.map((track) => track.content_id));
+  }, [setVisibleContentIds, visibleTracks]);
+
+  useEffect(
+    () => () => setVisibleContentIds(null),
+    [setVisibleContentIds, viewKey],
+  );
+
   const orderedColumns = orderByPrefs(COLUMNS, columnPrefs.order);
   const visibleColumns = orderedColumns.filter((column) => !columnPrefs.hidden.includes(column.key));
-  const visibleColumnKeys = visibleColumns.map((column) => column.key);
+  const visibleColumnKeys: string[] = visibleColumns.map((column) => column.key);
   const tableMinWidth =
-    remStringToPx(columnPrefs.widths[INDEX_KEY] ?? "3.2rem")
+    remStringToPx(columnPrefs.widths[INDEX_KEY] ?? "1.75rem")
     + visibleColumns.reduce(
       (sum, column) => sum + remStringToPx(columnPrefs.widths[column.key] ?? column.width),
       0,
@@ -346,7 +377,7 @@ export function OneLibraryTrackTable({
       return;
     }
     const sort = key as OneLibrarySort;
-    updateView({ sort, order: view.sort === sort && view.order === "asc" ? "desc" : "asc" });
+    updateView(cycleTableSort(view, sort, "custom", "asc"));
   };
   const hasViewFilter = Boolean(
     view.title.trim()
@@ -652,17 +683,13 @@ export function OneLibraryTrackTable({
               if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "a") {
                 event.preventDefault();
                 event.stopPropagation();
-                usePlaylistStore.setState({
-                  selectedContentIds: visibleTracks.map((track) => track.content_id),
-                  focusedContentId: visibleTracks[0]?.content_id ?? null,
-                  selectionMode: true,
-                });
+                selectAllTracks();
               }
             }}
             onPointerDownCapture={(event) => event.currentTarget.focus({ preventScroll: true })}
           >
             <colgroup>
-              <col style={{ width: columnPrefs.widths[INDEX_KEY] ?? "3.2rem" }} />
+              <col style={{ width: columnPrefs.widths[INDEX_KEY] ?? "1.75rem" }} />
               {visibleColumns.map((column) => (
                 <col key={column.key} style={{ width: columnPrefs.widths[column.key] ?? column.width }} />
               ))}
@@ -672,14 +699,16 @@ export function OneLibraryTrackTable({
               <tr>
                 <th
                   data-col="index"
-                  onClick={() => updateView({ sort: "custom", order: "asc" })}
+                  data-sortable="true"
+                  title="恢复播放列表原始顺序"
+                  onClick={() => updateView({ sort: "custom", order: "asc", sort2: null, order2: "asc" })}
                   onContextMenu={(event) => {
                     event.preventDefault();
                     setColumnMenu({ x: event.clientX, y: event.clientY });
                   }}
                 >
                   序号
-                  {view.sort === "custom" ? <ArrowUp size={10} /> : null}
+                  {view.sort === "custom" ? <TableSortMark order="asc" /> : null}
                   <span
                     className="kd-col-resize"
                     role="separator"
@@ -691,8 +720,17 @@ export function OneLibraryTrackTable({
                   <th
                     key={column.key}
                     data-col={column.key}
+                    data-sortable="true"
+                    data-column-reorder="true"
                     data-dragging={dragColumn === column.key ? "true" : undefined}
-                    data-drag-over={overColumn === column.key ? "true" : undefined}
+                    data-col-drop={
+                      dragColumn && dragColumn !== column.key && overColumn === column.key
+                        ? visibleColumnKeys.indexOf(dragColumn) < visibleColumnKeys.indexOf(column.key)
+                          ? "after"
+                          : "before"
+                        : undefined
+                    }
+                    title={tableSortTitle(view, column.key)}
                     onClick={() => sortBy(column.key)}
                     onContextMenu={(event) => {
                       event.preventDefault();
@@ -718,8 +756,9 @@ export function OneLibraryTrackTable({
                     }}
                   >
                     {column.label}
-                    {view.sort === column.key
-                      ? view.order === "asc" ? <ArrowUp size={10} /> : <ArrowDown size={10} />
+                    {view.sort === column.key ? <TableSortMark order={view.order} /> : null}
+                    {view.sort !== column.key && view.sort2 === column.key
+                      ? <TableSortMark order={view.order2} secondary />
                       : null}
                     <span
                       className="kd-col-resize"
@@ -785,6 +824,20 @@ export function OneLibraryTrackTable({
                     switch (column.key) {
                       case "title": return (
                         <td key={column.key} data-col="title" className="kd-td-strong" title={track.path}>
+                          {selectionMode ? (
+                            <button
+                              type="button"
+                              className="kd-row-select"
+                              aria-label={selected.has(track.content_id) ? "取消选择" : "选择曲目"}
+                              aria-pressed={selected.has(track.content_id)}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                selectTrack(track.content_id, "toggle");
+                              }}
+                            >
+                              <Check size={9} />
+                            </button>
+                          ) : null}
                           <span className="kd-thumb">
                             <CoverImage
                               src={api.oneLibraryCoverUrl(
@@ -802,7 +855,11 @@ export function OneLibraryTrackTable({
                       case "artist": return <td key={column.key} data-col="artist">{track.artist || "—"}</td>;
                       case "album": return <td key={column.key} data-col="album">{track.album || "—"}</td>;
                       case "bpm": return <td key={column.key} data-col="bpm" className="kd-td-num">{formatBpm(track.bpm)}</td>;
-                      case "key": return <td key={column.key} data-col="key">{track.music_key || "—"}</td>;
+                      case "key": return (
+                        <td key={column.key} data-col="key">
+                          <TrackKeyChip track={track} notation={keyNotation} />
+                        </td>
+                      );
                       case "rating": return (
                         <td key={column.key} data-col="rating">
                           <TableRating

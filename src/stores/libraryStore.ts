@@ -8,6 +8,7 @@ import { api } from "../lib/api";
 import { continueDataUpgrade } from "../lib/dataUpgrade";
 import { resolveLibraryPasteOp } from "../lib/libraryPaste";
 import { isOutsideFolder } from "../lib/outsideFolder";
+import { cycleTableSort } from "../lib/tableSort";
 import type {
   AnalyzeProgress,
   AnalyzeResponseLike,
@@ -400,32 +401,12 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   cycleSort(column) {
     const { sort, order, sort2, order2 } = get().filter;
-    // `added_at` 是"没有显式排序"的意思（入库序），不算用户选的主键——
-    // 不这么判的话，第一次点 BPM 会变成副键而不是主键，和用户的心智反着来
-    const hasPrimary = sort !== DEFAULT_SORT;
-
-    if (column === sort) {
-      // 主键：asc → desc → 取消。一列只有两个有意义的方向，
-      // 第三次点回原状正好就是"我不要按它排了"
-      if (order === "asc") {
-        get().setFilter({ order: "desc" });
-      } else if (sort2) {
-        // 取消主键时副键顶上来，而不是连它一起清掉
-        get().setFilter({ sort: sort2, order: order2, sort2: null, order2: "asc" });
-      } else {
-        get().setFilter({ sort: DEFAULT_SORT, order: "desc", sort2: null });
-      }
-      return;
-    }
-    if (column === sort2) {
-      // 副键：升为主键，原主键降为副键，各自的方向跟着走
-      get().setFilter({ sort: sort2, order: order2, sort2: sort, order2: order });
-      return;
-    }
-    // 没参与排序的列：已经有主键就当副键，否则自己当主键
-    get().setFilter(
-      hasPrimary ? { sort2: column, order2: "asc" } : { sort: column, order: "asc" },
-    );
+    get().setFilter(cycleTableSort(
+      { sort, order, sort2, order2 },
+      column,
+      DEFAULT_SORT,
+      "desc",
+    ));
   },
 
   setFilter(patch) {

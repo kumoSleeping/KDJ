@@ -10,7 +10,7 @@ use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::models::{Quality, Theme, VideoFormat};
+use crate::models::{KeyNotation, Quality, Theme, VideoFormat};
 
 pub const SETTINGS_FILENAME: &str = "settings.json";
 // 桌面版历史主库一直叫 kumodeck.db。改名会在同一 data_dir 静默创建一份空库，
@@ -44,6 +44,7 @@ const SETTINGS_FIELDS: &[&str] = &[
     "enabled_platforms",
     "auto_start_downloads",
     "player_waveform",
+    "key_notation",
     "virtual_disk_auto_grow",
 ];
 
@@ -107,6 +108,9 @@ pub struct Settings {
     /// 播放条默认展示分析波形；可切回传统进度条，给偏好简洁界面的用户。
     #[serde(default = "yes")]
     pub player_waveform: bool,
+    /// 本地与 OneLibrary 曲目列表共用的调性显示方式；数据层始终保留两种表示。
+    #[serde(default)]
+    pub key_notation: KeyNotation,
     /// KDJ 虚拟磁盘空间不足时，是否允许创建更大的镜像并迁移后重试。
     #[serde(default = "yes")]
     pub virtual_disk_auto_grow: bool,
@@ -141,6 +145,7 @@ impl Settings {
             enabled_platforms: default_enabled_platforms(),
             auto_start_downloads: false,
             player_waveform: true,
+            key_notation: KeyNotation::Camelot,
             virtual_disk_auto_grow: true,
         }
     }
@@ -503,6 +508,7 @@ mod tests {
         let config = AppConfig::create(dir.join("data"), dir.join("dl"), 0);
         assert_eq!(config.to_settings().default_quality, Quality::Flac);
         assert_eq!(config.to_settings().concurrent_downloads, 3);
+        assert_eq!(config.to_settings().key_notation, KeyNotation::Camelot);
         assert!(config.to_settings().virtual_disk_auto_grow);
     }
 

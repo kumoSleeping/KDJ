@@ -26,6 +26,7 @@ import type { OneLibraryTarget, OneLibraryTrack, Platform, SongSource, Track } f
 import { Button, InlineNotice, Panel, PanelStack } from "../common";
 import { VinylPlaceholder } from "../common/VinylPlaceholder";
 import { TableRating } from "../common/TableRating";
+import { TrackKeyChip } from "../common/TrackKeyChip";
 import { TrackDetail } from "./TrackDetail";
 import { OneLibraryCueList } from "./OneLibraryCueList";
 import { POSITION_EVENT, type PositionDetail } from "./TrackDetail";
@@ -351,7 +352,9 @@ function ExternalOneLibraryTrackDetail({
         </Panel>
         <Panel key="music" heading="曲目信息" dense>
           <Fact label="BPM">{formatBpm(track.bpm)}</Fact>
-          <Fact label="KEY">{track.music_key}</Fact>
+          <Fact label="KEY">
+            <TrackKeyChip track={track} notation={settings?.key_notation ?? "camelot"} />
+          </Fact>
           <Fact label="时长">{formatDuration(track.duration)}</Fact>
           <Fact label="流派">{track.genre}</Fact>
           <Fact label="年份">{track.year}</Fact>

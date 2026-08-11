@@ -1,6 +1,6 @@
 {
   "name": "kdj",
-  "version": "0.2.39",
+  "version": "0.2.40",
   "private": true,
   "description": "KDJ — DJ 曲库与多平台音乐/视频下载工作台",
   "scripts": {
@@ -30,8 +30,11 @@
     "test:waveform-scrub": "esbuild tests/waveformScrub.test.ts --bundle --platform=node --format=esm --outfile=target/waveformScrub.test.mjs && node --test target/waveformScrub.test.mjs",
     "test:stream-analysis": "esbuild tests/streamAnalysis.test.ts --bundle --platform=node --format=esm --outfile=target/streamAnalysis.test.mjs && node --test target/streamAnalysis.test.mjs",
     "test:storage-write": "esbuild tests/storageWrite.test.ts --bundle --platform=node --format=esm --outfile=target/storageWrite.test.mjs && node --test target/storageWrite.test.mjs",
+    "test:virtual-disk": "esbuild tests/virtualDisk.test.ts --bundle --platform=node --format=esm --outfile=target/virtualDisk.test.mjs && node --test target/virtualDisk.test.mjs",
+    "test:key-display": "esbuild tests/keyDisplay.test.ts --bundle --platform=node --format=esm --outfile=target/keyDisplay.test.mjs && node --test target/keyDisplay.test.mjs",
+    "test:table-sort": "esbuild tests/tableSort.test.ts --bundle --platform=node --format=esm --outfile=target/tableSort.test.mjs && node --test target/tableSort.test.mjs",
     "test:workspace-panes": "esbuild tests/workspacePanes.test.ts --bundle --platform=node --format=esm --outfile=target/workspacePanes.test.mjs && node --test target/workspacePanes.test.mjs",
-    "test:frontend-logic": "npm run test:dj-audio-policy && npm run test:latest-intent-gate && npm run test:player-handoff && npm run test:waveform-render && npm run test:lrc && npm run test:waveform-scrub && npm run test:stream-analysis && npm run test:storage-write && npm run test:workspace-panes && npm run test:onelibrary-downloads && npm run test:onelibrary-interactions && npm run test:onelibrary-playback && npm run test:folder-expansion && npm run test:video-float-box && npm run test:local-video-sync && npm run test:local-video-seek-bridge && npm run test:local-video-seek-timing",
+    "test:frontend-logic": "npm run test:dj-audio-policy && npm run test:latest-intent-gate && npm run test:player-handoff && npm run test:waveform-render && npm run test:lrc && npm run test:waveform-scrub && npm run test:stream-analysis && npm run test:storage-write && npm run test:virtual-disk && npm run test:key-display && npm run test:table-sort && npm run test:workspace-panes && npm run test:onelibrary-downloads && npm run test:onelibrary-interactions && npm run test:onelibrary-playback && npm run test:folder-expansion && npm run test:video-float-box && npm run test:local-video-sync && npm run test:local-video-seek-bridge && npm run test:local-video-seek-timing",
     "test:onelibrary-downloads": "esbuild tests/oneLibraryDownloads.test.ts --bundle --platform=node --format=esm --outfile=target/oneLibraryDownloads.test.mjs && node --test target/oneLibraryDownloads.test.mjs",
     "test:onelibrary-interactions": "esbuild tests/oneLibraryInteractions.test.ts --bundle --platform=node --format=esm --packages=external --define:import.meta.env.DEV=false --outfile=target/oneLibraryInteractions.test.mjs && node --test target/oneLibraryInteractions.test.mjs",
     "test:onelibrary-playback": "esbuild tests/oneLibraryPlayback.test.ts --bundle --platform=node --format=esm --define:import.meta.env.DEV=false --outfile=target/oneLibraryPlayback.test.mjs && node --test target/oneLibraryPlayback.test.mjs",

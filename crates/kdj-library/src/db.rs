@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use kdj_core::musical_key::parse_musical_key;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
@@ -82,6 +83,10 @@ CREATE TABLE IF NOT EXISTS track_bpm_key_analysis_v2 (
   chroma_json TEXT NOT NULL DEFAULT '[]',
   analyzed_at TEXT NOT NULL,
   analysis_error TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS kdj_schema_migrations (
+  name TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL
 );
 CREATE TRIGGER IF NOT EXISTS cleanup_waveform_asset
 AFTER DELETE ON tracks BEGIN
@@ -239,7 +244,7 @@ impl Database {
 
     /// 幂等：全部 `CREATE ... IF NOT EXISTS`，外加缺列补齐。
     pub fn init_schema(&self) -> Result<()> {
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
         conn.execute_batch(SCHEMA_SQL).context("建表失败")?;
 
         let existing: Vec<String> = {
@@ -255,8 +260,82 @@ impl Database {
         }
 
         conn.execute_batch(INDEX_SQL).context("建索引失败")?;
+        migrate_key_notations(&mut conn)?;
         Ok(())
     }
+}
+
+/// 旧库和 OneLibrary 导入曾可能只保存自由文本 `music_key`。这里只补空的派生列，
+/// 绝不改原调名、也不覆盖已有 Camelot/Open Key；重复启动执行结果相同。
+fn migrate_key_notations(conn: &mut rusqlite::Connection) -> Result<()> {
+    const MIGRATION: &str = "key-notations-v1";
+    if conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM kdj_schema_migrations WHERE name = ?)",
+        [MIGRATION],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Ok(());
+    }
+    fn candidates(
+        conn: &rusqlite::Connection,
+        table: &str,
+    ) -> Result<Vec<(i64, String, String, String)>> {
+        let sql = format!(
+            "SELECT track_id, COALESCE(music_key, ''), COALESCE(camelot, ''), \
+             COALESCE(open_key, '') FROM {table} \
+             WHERE TRIM(COALESCE(music_key, '')) != '' \
+             AND (TRIM(COALESCE(camelot, '')) = '' OR TRIM(COALESCE(open_key, '')) = '')"
+        );
+        let id_column = if table == "tracks" { "id" } else { "track_id" };
+        let sql = sql.replacen("SELECT track_id", &format!("SELECT {id_column}"), 1);
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    let legacy = candidates(conn, "tracks")?;
+    let v2 = candidates(conn, "track_bpm_key_analysis_v2")?;
+    let tx = conn.transaction().context("开始调性表示迁移失败")?;
+    for (table, rows) in [("tracks", legacy), ("track_bpm_key_analysis_v2", v2)] {
+        let id_column = if table == "tracks" { "id" } else { "track_id" };
+        let sql = format!(
+            "UPDATE {table} SET \
+             camelot = CASE WHEN TRIM(COALESCE(camelot, '')) = '' THEN ? ELSE camelot END, \
+             open_key = CASE WHEN TRIM(COALESCE(open_key, '')) = '' THEN ? ELSE open_key END \
+             WHERE {id_column} = ?"
+        );
+        for (track_id, music_key, camelot, open_key) in rows {
+            let Some(key) = parse_musical_key(&music_key) else {
+                continue;
+            };
+            tx.execute(
+                &sql,
+                rusqlite::params![
+                    if camelot.trim().is_empty() {
+                        key.camelot.as_str()
+                    } else {
+                        camelot.as_str()
+                    },
+                    if open_key.trim().is_empty() {
+                        key.open_key.as_str()
+                    } else {
+                        open_key.as_str()
+                    },
+                    track_id,
+                ],
+            )?;
+        }
+    }
+    tx.execute(
+        "INSERT INTO kdj_schema_migrations (name, applied_at) VALUES (?, ?)",
+        rusqlite::params![MIGRATION, chrono::Utc::now().to_rfc3339()],
+    )?;
+    tx.commit().context("提交调性表示迁移失败")?;
+    Ok(())
 }
 
 /// 池连接的初始化。
@@ -486,6 +565,55 @@ mod tests {
         assert_eq!(filename, "b.mp3");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_free_text_keys_gain_only_missing_derived_notations() {
+        let dir = temp_dir("key-notation-migration");
+        let path = dir.join("old.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tracks (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   path TEXT NOT NULL UNIQUE,
+                   filename TEXT NOT NULL,
+                   music_key TEXT,
+                   camelot TEXT,
+                   open_key TEXT,
+                   added_at TEXT NOT NULL,
+                   modified_at TEXT NOT NULL
+                 );
+                 INSERT INTO tracks
+                   (path, filename, music_key, camelot, open_key, added_at, modified_at)
+                 VALUES
+                   ('/a.mp3', 'a.mp3', 'F# M', '', NULL, '2020-01-01', '2020-01-01'),
+                   ('/b.mp3', 'b.mp3', 'F# m', 'CUSTOM', '', '2020-01-01', '2020-01-01');",
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path).unwrap();
+        // 再跑一次，证明迁移幂等且不会把已有值重写。
+        db.init_schema().unwrap();
+        let conn = db.conn().unwrap();
+        let first: (String, String, String) = conn
+            .query_row(
+                "SELECT music_key, camelot, open_key FROM tracks WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(first, ("F# M".into(), "2B".into(), "7d".into()));
+        let second: (String, String) = conn
+            .query_row(
+                "SELECT camelot, open_key FROM tracks WHERE id = 2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(second, ("CUSTOM".into(), "4m".into()));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// r2d2 建池阶段的错误只会进日志（默认 `LoggingErrorHandler`），

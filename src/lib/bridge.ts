@@ -22,6 +22,7 @@ import type {
   VirtualDiskStatus,
 } from "../types";
 import { djEngine } from "./djMix";
+import { virtualDiskSizeMib } from "./virtualDisk";
 
 declare global {
   interface Window {
@@ -150,12 +151,18 @@ async function createTauriBridge(): Promise<KdjBridge> {
     virtualDisk: ["darwin", "win32"].includes(info.platform)
       ? {
           status: () => tauriInvoke<VirtualDiskStatus>("virtual_disk_status"),
-          mount: (sizeGib = 8) =>
-            tauriInvoke<VirtualDiskStatus>("virtual_disk_mount", { sizeGib }),
+          mount: (sizeGib = 8, volumeName = "KDJ") =>
+            tauriInvoke<VirtualDiskStatus>("virtual_disk_mount", {
+              sizeMib: virtualDiskSizeMib(sizeGib),
+              volumeName,
+            }),
           ensureCapacity: (requiredBytes) =>
             tauriInvoke<VirtualDiskStatus>("virtual_disk_ensure_capacity", { requiredBytes }),
-          grow: (sizeGib) =>
-            tauriInvoke<VirtualDiskStatus>("virtual_disk_grow", { sizeGib }),
+          grow: (sizeGib, volumeName) =>
+            tauriInvoke<VirtualDiskStatus>("virtual_disk_grow", {
+              sizeMib: virtualDiskSizeMib(sizeGib),
+              volumeName,
+            }),
           eject: () => tauriInvoke<VirtualDiskStatus>("virtual_disk_eject"),
           delete: () => tauriInvoke<VirtualDiskStatus>("virtual_disk_delete"),
         }

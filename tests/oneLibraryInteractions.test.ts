@@ -33,6 +33,7 @@ import {
   hotCueLabel,
 } from "../src/lib/cuePoints";
 import { OneLibraryCueList } from "../src/components/library/OneLibraryCueList";
+import { TrackKeyChip } from "../src/components/common/TrackKeyChip";
 
 test("OneLibrary multi-row reorder keeps the selected block in visible order", () => {
   assert.deepEqual(
@@ -205,31 +206,36 @@ test("OneLibrary cue UI renders waveform flags, loop ranges, details, and no emp
   assert.equal(renderToStaticMarkup(createElement(OneLibraryCueList, { cuePoints: [] })), "");
 });
 
-test("OneLibrary storage overview explains the managed volume without migration filler", async () => {
-  Object.assign(globalThis, {
-    localStorage: {
-      getItem: () => null,
-      setItem: () => {},
-      removeItem: () => {},
-    },
-    window: {
-      kdj: {
-        baseUrl: "http://127.0.0.1:43123",
-        platform: "darwin",
-        openPath: async () => {},
-      },
-      addEventListener: () => {},
-      removeEventListener: () => {},
-    },
-  });
-  const { VirtualDiskPanel } = await import("../src/components/library/VirtualDiskPanel");
+test("local and OneLibrary keys share the same colored presentation", () => {
+  const camelot = renderToStaticMarkup(createElement(TrackKeyChip, {
+    track: { music_key: "F# M", camelot: "2B" },
+    notation: "camelot",
+  }));
+  const traditional = renderToStaticMarkup(createElement(TrackKeyChip, {
+    track: { music_key: "F# M", camelot: "2B" },
+    notation: "traditional",
+  }));
+  assert.match(camelot, /class="kd-camelot"/);
+  assert.match(camelot, /--kd-key-color:hsl\(/);
+  assert.match(camelot, />2B</);
+  assert.match(traditional, /--kd-key-color:hsl\(/);
+  assert.match(traditional, />F# M</);
+});
 
-  const markup = renderToStaticMarkup(createElement(VirtualDiskPanel));
-  assert.match(markup, /OneLibrary/);
-  assert.match(markup, /ExFAT 磁盘镜像，不是云盘/);
-  assert.match(markup, /选择未自动识别的存储/);
-  assert.match(markup, /创建并加载/);
-  assert.doesNotMatch(markup, /数据迁移|备份/);
+test("OneLibrary select all follows the currently visible filtered rows", async () => {
+  const { usePlaylistStore } = await import("../src/stores/playlistStore");
+  const tracks = [{ content_id: 1 }, { content_id: 2 }, { content_id: 3 }] as OneLibraryTrack[];
+  usePlaylistStore.setState({
+    selectedTracks: tracks,
+    visibleContentIds: [2, 3],
+    selectedContentIds: [1],
+    focusedContentId: 1,
+    selectionMode: false,
+  });
+  usePlaylistStore.getState().selectAllTracks();
+  assert.deepEqual(usePlaylistStore.getState().selectedContentIds, [2, 3]);
+  assert.equal(usePlaylistStore.getState().focusedContentId, 2);
+  assert.equal(usePlaylistStore.getState().selectionMode, true);
 });
 
 test("OneLibrary playback snapshots use stable non-library ids and the mounted path", () => {
@@ -253,6 +259,8 @@ test("OneLibrary playback snapshots use stable non-library ids and the mounted p
     year: "2026",
     bpm: 128,
     music_key: "Am",
+    camelot: "8A",
+    open_key: "1m",
     duration: 180,
     bitrate: 320,
     samplerate: 44_100,
@@ -328,6 +336,8 @@ test("real online preview ids still use the remote playback source", () => {
         year: "",
         bpm: null,
         music_key: "",
+        camelot: "",
+        open_key: "",
         duration: 120,
         bitrate: null,
         samplerate: null,

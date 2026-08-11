@@ -83,6 +83,8 @@ test("OneLibrary negative ids request the dedicated complete waveform instead of
       year: "",
       bpm: null,
       music_key: "",
+      camelot: "",
+      open_key: "",
       duration: 314.8,
       bitrate: 320,
       samplerate: 44_100,

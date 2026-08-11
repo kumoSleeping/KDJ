@@ -5,6 +5,7 @@ import type {
   RemovableDevice,
   Track,
 } from "../types";
+import { canonicalTrackCamelot } from "./keyDisplay";
 
 export const ONE_LIBRARY_FILTER_TOGGLE_EVENT = "kd:onelibrary-filter-toggle";
 
@@ -112,8 +113,8 @@ export function oneLibraryPlayableTrack(
     bpm_confidence: null,
     first_beat: null,
     music_key: track.music_key,
-    camelot: "",
-    open_key: "",
+    camelot: canonicalTrackCamelot(track),
+    open_key: track.open_key ?? "",
     key_confidence: null,
     energy: null,
     rms_db: null,

@@ -12,13 +12,21 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::{Manager, Runtime};
 
-const VOLUME_NAME: &str = "KDJ";
+const DEFAULT_VOLUME_NAME: &str = "KDJ";
+const MIB_BYTES: u64 = 1_048_576;
+#[cfg(any(target_os = "windows", test))]
 const IMAGE_SIZE_BYTES: u64 = 1_073_741_824;
-const DEFAULT_SIZE_GIB: u32 = 8;
-const MIN_SIZE_GIB: u32 = 1;
-const MAX_SIZE_GIB: u32 = 64;
+const DEFAULT_SIZE_MIB: u64 = 8 * 1024;
+const MIN_SIZE_MIB: u64 = 1024;
+const MAX_SIZE_MIB: u64 = 64 * 1024;
 const GROWTH_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 const MARKER_BODY: &str = "KDJ managed virtual disk v1\n";
+#[cfg(any(target_os = "macos", test))]
+const MACOS_VOLUME_ICON: &[u8] = include_bytes!("../icons/icon.icns");
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_VOLUME_ICON: &[u8] = include_bytes!("../icons/icon.ico");
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_AUTORUN: &[u8] = b"[Autorun]\r\nicon=KDJ.ico,0\r\n";
 
 #[derive(Default)]
 pub struct VirtualDiskManager {
@@ -39,6 +47,7 @@ pub struct VirtualDiskStatus {
     pub image_format: String,
     pub protocol: String,
     pub total_bytes: u64,
+    pub configured_bytes: u64,
     pub available_bytes: u64,
     pub writable: bool,
     pub requires_elevation: bool,
@@ -46,12 +55,14 @@ pub struct VirtualDiskStatus {
 
 impl VirtualDiskStatus {
     fn base(image: &Path) -> Self {
+        let configured_bytes = configured_capacity_bytes(image);
         Self {
             supported: cfg!(any(target_os = "macos", target_os = "windows")),
             exists: image.is_file(),
-            name: VOLUME_NAME.to_owned(),
+            name: configured_volume_name(image),
             image_path: image.to_string_lossy().into_owned(),
-            total_bytes: configured_capacity_bytes(image),
+            total_bytes: configured_bytes,
+            configured_bytes,
             requires_elevation: cfg!(target_os = "windows"),
             ..Self::default()
         }
@@ -63,6 +74,14 @@ fn capacity_sidecar(image: &Path) -> PathBuf {
         .extension()
         .map(|value| format!("{}.capacity", value.to_string_lossy()))
         .unwrap_or_else(|| "capacity".into());
+    image.with_extension(extension)
+}
+
+fn name_sidecar(image: &Path) -> PathBuf {
+    let extension = image
+        .extension()
+        .map(|value| format!("{}.name", value.to_string_lossy()))
+        .unwrap_or_else(|| "name".into());
     image.with_extension(extension)
 }
 
@@ -83,12 +102,29 @@ fn configured_capacity_bytes(image: &Path) -> u64 {
         .unwrap_or_default()
 }
 
-fn remember_capacity(image: &Path, size_gib: u32) -> Result<(), String> {
+fn configured_volume_name(image: &Path) -> String {
+    fs::read_to_string(name_sidecar(image))
+        .ok()
+        .and_then(|value| checked_volume_name(&value).ok())
+        .unwrap_or_else(|| DEFAULT_VOLUME_NAME.to_owned())
+}
+
+fn remember_capacity(image: &Path, size_mib: u64) -> Result<(), String> {
     fs::write(
         capacity_sidecar(image),
-        format!("{}\n", u64::from(size_gib) * IMAGE_SIZE_BYTES),
+        format!("{}\n", size_mib.saturating_mul(MIB_BYTES)),
     )
     .map_err(|err| format!("无法记录 KDJ 虚拟磁盘容量：{err}"))
+}
+
+fn remember_volume_name(image: &Path, volume_name: &str) -> Result<(), String> {
+    fs::write(name_sidecar(image), format!("{volume_name}\n"))
+        .map_err(|err| format!("无法记录虚拟磁盘名称：{err}"))
+}
+
+fn remember_disk_metadata(image: &Path, size_mib: u64, volume_name: &str) -> Result<(), String> {
+    remember_capacity(image, size_mib)?;
+    remember_volume_name(image, volume_name)
 }
 
 fn virtual_disk_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
@@ -101,7 +137,7 @@ fn virtual_disk_path<R: Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, S
         .app_data_dir()
         .map(|dir| {
             dir.join("virtual-disks")
-                .join(format!("{VOLUME_NAME}.{extension}"))
+                .join(format!("{DEFAULT_VOLUME_NAME}.{extension}"))
         })
         .map_err(|err| format!("无法确定 KDJ 虚拟磁盘保存位置：{err}"))
 }
@@ -126,6 +162,113 @@ fn run_checked(command: &mut Command, action: &str) -> Result<Output, String> {
     } else {
         Err(command_error(action, &output))
     }
+}
+
+fn write_if_changed(path: &Path, contents: &[u8], label: &str) -> Result<(), String> {
+    if fs::read(path).is_ok_and(|existing| existing == contents) {
+        return Ok(());
+    }
+    fs::write(path, contents).map_err(|err| format!("无法写入{label}：{err}"))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn write_macos_volume_icon(root: &Path) -> Result<(), String> {
+    write_if_changed(
+        &root.join(".VolumeIcon.icns"),
+        MACOS_VOLUME_ICON,
+        "macOS 虚拟盘图标",
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn write_windows_volume_icon(root: &Path) -> Result<(), String> {
+    write_if_changed(
+        &root.join("KDJ.ico"),
+        WINDOWS_VOLUME_ICON,
+        "Windows 虚拟盘图标",
+    )?;
+    write_if_changed(
+        &root.join("autorun.inf"),
+        WINDOWS_AUTORUN,
+        "Windows 虚拟盘图标配置",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_finder_info(root: &Path) -> [u8; 32] {
+    let mut finder_info = [0u8; 32];
+    let Ok(output) = Command::new("/usr/bin/xattr")
+        .args(["-px", "com.apple.FinderInfo"])
+        .arg(root)
+        .output()
+    else {
+        return finder_info;
+    };
+    if !output.status.success() {
+        return finder_info;
+    }
+    let hex: Vec<u8> = output
+        .stdout
+        .into_iter()
+        .filter(|byte| byte.is_ascii_hexdigit())
+        .collect();
+    if hex.len() != 64 {
+        return finder_info;
+    }
+    for (index, pair) in hex.chunks_exact(2).enumerate() {
+        let Ok(text) = std::str::from_utf8(pair) else {
+            return [0u8; 32];
+        };
+        let Ok(byte) = u8::from_str_radix(text, 16) else {
+            return [0u8; 32];
+        };
+        finder_info[index] = byte;
+    }
+    finder_info
+}
+
+#[cfg(target_os = "macos")]
+fn activate_macos_volume_icon(root: &Path) -> Result<(), String> {
+    let mut finder_info = macos_finder_info(root);
+    // FileInfo.flags 的 kHasCustomIcon = 0x0400，Finder 才会读取 .VolumeIcon.icns。
+    finder_info[8] |= 0x04;
+    let hex = finder_info
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    run_checked(
+        Command::new("/usr/bin/xattr")
+            .args(["-wx", "com.apple.FinderInfo", &hex])
+            .arg(root),
+        "启用 macOS 虚拟盘图标",
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn hide_windows_branding_file(path: &Path) -> Result<(), String> {
+    run_checked(
+        Command::new("attrib.exe").args(["+h", "+s"]).arg(path),
+        "隐藏 Windows 虚拟盘图标文件",
+    )?;
+    Ok(())
+}
+
+fn ensure_volume_branding(root: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        write_macos_volume_icon(root)?;
+        activate_macos_volume_icon(root)?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        write_windows_volume_icon(root)?;
+        hide_windows_branding_file(&root.join("KDJ.ico"))?;
+        hide_windows_branding_file(&root.join("autorun.inf"))?;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = root;
+    Ok(())
 }
 
 fn ensure_volume_layout(status: &VirtualDiskStatus) -> Result<(), String> {
@@ -163,6 +306,7 @@ fn ensure_volume_layout(status: &VirtualDiskStatus) -> Result<(), String> {
         fs::write(&marker, MARKER_BODY)
             .map_err(|err| format!("无法写入 KDJ 虚拟磁盘标记：{err}"))?;
     }
+    ensure_volume_branding(root)?;
     Ok(())
 }
 
@@ -192,29 +336,48 @@ fn status_impl(image: &Path) -> Result<VirtualDiskStatus, String> {
     }
 }
 
-fn checked_size_gib(size_gib: u32) -> Result<u32, String> {
-    if (MIN_SIZE_GIB..=MAX_SIZE_GIB).contains(&size_gib) {
-        Ok(size_gib)
+fn checked_size_mib(size_mib: u64) -> Result<u64, String> {
+    if (MIN_SIZE_MIB..=MAX_SIZE_MIB).contains(&size_mib) {
+        Ok(size_mib)
     } else {
-        Err(format!(
-            "KDJ 虚拟磁盘容量必须在 {MIN_SIZE_GIB}–{MAX_SIZE_GIB}GB 之间"
-        ))
+        Err("KDJ 虚拟磁盘容量必须在 1–64GB 之间".into())
     }
 }
 
-fn mount_impl(image: &Path, size_gib: u32) -> Result<VirtualDiskStatus, String> {
-    let size_gib = checked_size_gib(size_gib)?;
+fn checked_volume_name(volume_name: &str) -> Result<String, String> {
+    let volume_name = volume_name.trim();
+    if volume_name.is_empty() {
+        return Err("磁盘名称不能为空".into());
+    }
+    if volume_name.encode_utf16().count() > 11 {
+        return Err("磁盘名称不能超过 11 个字符".into());
+    }
+    if volume_name.chars().any(|character| {
+        character.is_control()
+            || matches!(
+                character,
+                '"' | '*' | '/' | ':' | '<' | '>' | '?' | '\\' | '|'
+            )
+    }) {
+        return Err(r#"磁盘名称不能包含 " * / : < > ? \ | 或控制字符"#.into());
+    }
+    Ok(volume_name.to_owned())
+}
+
+fn mount_impl(image: &Path, size_mib: u64, volume_name: &str) -> Result<VirtualDiskStatus, String> {
+    let size_mib = checked_size_mib(size_mib)?;
+    let volume_name = checked_volume_name(volume_name)?;
     #[cfg(target_os = "macos")]
     {
-        return macos_mount(image, size_gib);
+        return macos_mount(image, size_mib, &volume_name);
     }
     #[cfg(target_os = "windows")]
     {
-        return windows_mount(image, size_gib);
+        return windows_mount(image, size_mib, &volume_name);
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = (image, size_gib);
+        let _ = (image, size_mib, volume_name);
         Err("KDJ 虚拟磁盘目前只支持 macOS 和 Windows".into())
     }
 }
@@ -266,10 +429,12 @@ pub async fn virtual_disk_status(app: tauri::AppHandle) -> Result<VirtualDiskSta
 #[tauri::command]
 pub async fn virtual_disk_mount(
     app: tauri::AppHandle,
-    size_gib: Option<u32>,
+    size_mib: Option<u64>,
+    volume_name: Option<String>,
 ) -> Result<VirtualDiskStatus, String> {
-    let size_gib = size_gib.unwrap_or(DEFAULT_SIZE_GIB);
-    blocking_operation(app, move |image| mount_impl(image, size_gib)).await
+    let size_mib = size_mib.unwrap_or(DEFAULT_SIZE_MIB);
+    let volume_name = volume_name.unwrap_or_else(|| DEFAULT_VOLUME_NAME.to_owned());
+    blocking_operation(app, move |image| mount_impl(image, size_mib, &volume_name)).await
 }
 
 #[tauri::command]
@@ -288,9 +453,13 @@ pub async fn virtual_disk_ensure_capacity(
 #[tauri::command]
 pub async fn virtual_disk_grow(
     app: tauri::AppHandle,
-    size_gib: u32,
+    size_mib: u64,
+    volume_name: String,
 ) -> Result<VirtualDiskStatus, String> {
-    blocking_operation(app, move |image| grow_to_impl(image, size_gib)).await
+    blocking_operation(app, move |image| {
+        grow_to_impl(image, size_mib, &volume_name)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -329,40 +498,54 @@ pub fn eject_on_exit<R: Runtime>(app: &tauri::AppHandle<R>) {
 fn remove_image_artifacts(image: &Path) {
     let _ = fs::remove_file(image);
     let _ = fs::remove_file(capacity_sidecar(image));
+    let _ = fs::remove_file(name_sidecar(image));
+}
+
+fn restore_sidecars(sidecars: &[(PathBuf, Option<Vec<u8>>)]) {
+    for (path, contents) in sidecars {
+        if let Some(contents) = contents {
+            let _ = fs::write(path, contents);
+        } else {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 fn remove_managed_image_files(image: &Path) -> Result<(), String> {
     if !image.is_file() {
         return Err("KDJ 虚拟磁盘尚未创建".into());
     }
-    let sidecar = capacity_sidecar(image);
+    let sidecars = [capacity_sidecar(image), name_sidecar(image)].map(|path| {
+        let contents = fs::read(&path).ok();
+        (path, contents)
+    });
     let extension = image.extension().unwrap_or_default().to_string_lossy();
     let parent = image
         .parent()
         .ok_or_else(|| "KDJ 镜像路径缺少父目录".to_string())?;
     let tombstone = parent.join(format!(".KDJ-delete-{}.{}", std::process::id(), extension));
-    let sidecar_backup = fs::read(&sidecar).ok();
     remove_image_artifacts(&tombstone);
     fs::rename(image, &tombstone).map_err(|err| format!("无法隔离待删除的 KDJ 镜像：{err}"))?;
 
-    if sidecar.is_file() {
-        if let Err(err) = fs::remove_file(&sidecar) {
-            let rollback = fs::rename(&tombstone, image);
-            return Err(match rollback {
-                Ok(()) => format!("无法删除 KDJ 容量记录，镜像已恢复：{err}"),
-                Err(rollback) => {
-                    format!("无法删除 KDJ 容量记录（{err}），且镜像恢复失败：{rollback}")
-                }
-            });
+    for (sidecar, _) in &sidecars {
+        if sidecar.is_file() {
+            if let Err(err) = fs::remove_file(sidecar) {
+                restore_sidecars(&sidecars);
+                let rollback = fs::rename(&tombstone, image);
+                return Err(match rollback {
+                    Ok(()) => format!("无法删除 KDJ 磁盘记录，镜像已恢复：{err}"),
+                    Err(rollback) => {
+                        format!("无法删除 KDJ 磁盘记录（{err}），且镜像恢复失败：{rollback}")
+                    }
+                });
+            }
         }
     }
 
     if let Err(err) = fs::remove_file(&tombstone) {
         let rollback = fs::rename(&tombstone, image);
         if rollback.is_ok() {
-            if let Some(bytes) = sidecar_backup {
-                let _ = fs::write(&sidecar, bytes);
-            }
+            restore_sidecars(&sidecars);
             return Err(format!("无法彻底删除 KDJ 镜像，原镜像已恢复：{err}"));
         }
         return Err(format!(
@@ -398,7 +581,7 @@ fn copy_volume_tree(source: &Path, destination: &Path) -> Result<(u64, u64), Str
             .map_err(|err| format!("无法读取 KDJ 文件类型：{err}"))?;
         if file_type.is_dir() {
             fs::create_dir_all(&destination_path)
-                .map_err(|err| format!("无法创建扩容目标目录：{err}"))?;
+                .map_err(|err| format!("无法创建新镜像目录：{err}"))?;
             let (child_files, child_bytes) = copy_volume_tree(&source_path, &destination_path)?;
             files += child_files;
             bytes += child_bytes;
@@ -416,7 +599,21 @@ fn copy_volume_tree(source: &Path, destination: &Path) -> Result<(u64, u64), Str
     Ok((files, bytes))
 }
 
-fn target_growth_gib(status: &VirtualDiskStatus, required_bytes: u64) -> Result<u32, String> {
+fn configured_size_mib(status: &VirtualDiskStatus) -> u64 {
+    let bytes = status.configured_bytes.max(status.total_bytes);
+    ((bytes + MIB_BYTES - 1) / MIB_BYTES).clamp(MIN_SIZE_MIB, MAX_SIZE_MIB)
+}
+
+fn display_size_gib(size_mib: u64) -> String {
+    let value = size_mib as f64 / 1024.0;
+    if size_mib % 1024 == 0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
+}
+
+fn target_growth_mib(status: &VirtualDiskStatus, required_bytes: u64) -> Result<u64, String> {
     if required_bytes <= status.available_bytes {
         return Ok(0);
     }
@@ -424,53 +621,57 @@ fn target_growth_gib(status: &VirtualDiskStatus, required_bytes: u64) -> Result<
     let needed = used
         .saturating_add(required_bytes)
         .saturating_add(GROWTH_RESERVE_BYTES);
-    let mut size_gib = ((status.total_bytes + IMAGE_SIZE_BYTES - 1) / IMAGE_SIZE_BYTES)
-        .max(u64::from(MIN_SIZE_GIB)) as u32;
-    while u64::from(size_gib) * IMAGE_SIZE_BYTES < needed && size_gib < MAX_SIZE_GIB {
-        size_gib = size_gib.saturating_mul(2).min(MAX_SIZE_GIB);
+    let mut size_mib = configured_size_mib(status);
+    while size_mib.saturating_mul(MIB_BYTES) < needed && size_mib < MAX_SIZE_MIB {
+        size_mib = size_mib.saturating_mul(2).min(MAX_SIZE_MIB);
     }
-    if u64::from(size_gib) * IMAGE_SIZE_BYTES < needed {
+    if size_mib.saturating_mul(MIB_BYTES) < needed {
+        return Err("这次导出需要的容量超过 KDJ 虚拟磁盘上限 64GB；请改用真实 U 盘".into());
+    }
+    Ok(size_mib)
+}
+
+fn validate_manual_change(
+    current: &VirtualDiskStatus,
+    target_mib: u64,
+    volume_name: &str,
+) -> Result<(), String> {
+    let current_mib = configured_size_mib(current);
+    if target_mib == current_mib && volume_name == current.name {
+        return Err("容量和磁盘名称都没有变化".into());
+    }
+    let used_bytes = current.total_bytes.saturating_sub(current.available_bytes);
+    let minimum_bytes = used_bytes.saturating_add(GROWTH_RESERVE_BYTES);
+    if target_mib.saturating_mul(MIB_BYTES) < minimum_bytes {
+        let minimum_mib = (minimum_bytes + MIB_BYTES - 1) / MIB_BYTES;
         return Err(format!(
-            "这次导出需要的容量超过 KDJ 虚拟磁盘上限 {MAX_SIZE_GIB}GB；请改用真实 U 盘"
+            "当前数据至少需要 {}GB 的新容量",
+            display_size_gib(minimum_mib)
         ));
     }
-    Ok(size_gib)
+    Ok(())
 }
 
-fn required_bytes_for_target(status: &VirtualDiskStatus, target_gib: u32) -> Result<u64, String> {
-    let target_gib = checked_size_gib(target_gib)?;
-    let current_gib = ((status.total_bytes + IMAGE_SIZE_BYTES - 1) / IMAGE_SIZE_BYTES)
-        .max(u64::from(MIN_SIZE_GIB)) as u32;
-    if target_gib <= current_gib {
-        return Err(format!("扩容目标必须大于当前容量 {current_gib}GB"));
-    }
-    let used = status.total_bytes.saturating_sub(status.available_bytes);
-    Ok(u64::from(target_gib)
-        .saturating_mul(IMAGE_SIZE_BYTES)
-        .saturating_sub(used)
-        .saturating_sub(GROWTH_RESERVE_BYTES))
-}
-
-fn grow_to_impl(image: &Path, target_gib: u32) -> Result<VirtualDiskStatus, String> {
+fn grow_to_impl(
+    image: &Path,
+    target_mib: u64,
+    volume_name: &str,
+) -> Result<VirtualDiskStatus, String> {
+    let target_mib = checked_size_mib(target_mib)?;
+    let volume_name = checked_volume_name(volume_name)?;
     let current = status_impl(image)?;
     if !current.exists {
         return Err("KDJ 虚拟磁盘尚未创建".into());
     }
     if !current.mounted {
-        return Err("请先加载 KDJ 虚拟磁盘再扩容".into());
+        return Err("请先加载 KDJ 虚拟磁盘再改变容量".into());
     }
-    let required_bytes = required_bytes_for_target(&current, target_gib)?;
-    let grown = grow_impl(image, required_bytes)?;
-    let grown_gib = (grown.total_bytes + IMAGE_SIZE_BYTES - 1) / IMAGE_SIZE_BYTES;
-    if grown_gib < u64::from(target_gib) {
-        return Err(format!(
-            "扩容结果只有 {grown_gib}GB，未达到目标 {target_gib}GB"
-        ));
-    }
-    Ok(grown)
+    ensure_volume_layout(&current)?;
+    validate_manual_change(&current, target_mib, &volume_name)?;
+    replace_disk(image, current, target_mib, &volume_name)
 }
 
-/// ExFAT 无法通过 macOS 自带工具在 UDRW 里原地扩展。跨平台统一走“新建更大镜像
+/// ExFAT 无法通过 macOS 自带工具在 UDRW 里安全地原地改变容量。跨平台统一走“新建镜像
 /// → 完整复制 → 验证 → 原子换名 → 重新挂载”；任何换名前的失败都不碰原镜像。
 fn grow_impl(image: &Path, required_bytes: u64) -> Result<VirtualDiskStatus, String> {
     let current = status_impl(image)?;
@@ -478,14 +679,23 @@ fn grow_impl(image: &Path, required_bytes: u64) -> Result<VirtualDiskStatus, Str
         return Err("KDJ 虚拟磁盘尚未创建".into());
     }
     if !current.mounted {
-        return Err("请先加载 KDJ 虚拟磁盘再扩容".into());
+        return Err("请先加载 KDJ 虚拟磁盘再改变容量".into());
     }
     ensure_volume_layout(&current)?;
-    let target_gib = target_growth_gib(&current, required_bytes)?;
-    if target_gib == 0 {
+    let target_mib = target_growth_mib(&current, required_bytes)?;
+    if target_mib == 0 {
         return Ok(current);
     }
+    let volume_name = current.name.clone();
+    replace_disk(image, current, target_mib, &volume_name)
+}
 
+fn replace_disk(
+    image: &Path,
+    current: VirtualDiskStatus,
+    target_mib: u64,
+    volume_name: &str,
+) -> Result<VirtualDiskStatus, String> {
     let extension = image.extension().unwrap_or_default().to_string_lossy();
     let parent = image
         .parent()
@@ -499,11 +709,11 @@ fn grow_impl(image: &Path, required_bytes: u64) -> Result<VirtualDiskStatus, Str
     remove_image_artifacts(&temp_image);
     remove_image_artifacts(&backup_image);
 
-    let temp_status = match mount_impl(&temp_image, target_gib) {
+    let temp_status = match mount_impl(&temp_image, target_mib, volume_name) {
         Ok(status) => status,
         Err(err) => {
             remove_image_artifacts(&temp_image);
-            return Err(format!("无法建立扩容目标，原 KDJ 未改动：{err}"));
+            return Err(format!("无法创建新镜像，原磁盘未改动：{err}"));
         }
     };
     let copied = copy_volume_tree(
@@ -515,58 +725,56 @@ fn grow_impl(image: &Path, required_bytes: u64) -> Result<VirtualDiskStatus, Str
         remove_image_artifacts(&temp_image);
         return Err(format!("{err}；原 KDJ 未改动"));
     }
-    if !Path::new(&temp_status.mount_path)
-        .join(kdj_server::usb_library::VIRTUAL_DISK_MARKER)
-        .is_file()
-    {
+    if let Err(err) = ensure_volume_layout(&temp_status) {
         let _ = eject_impl(&temp_image);
         remove_image_artifacts(&temp_image);
-        return Err("扩容副本验证失败；原 KDJ 未改动".into());
+        return Err(format!("新镜像验证失败，原磁盘未改动：{err}"));
     }
 
     if let Err(err) = eject_impl(&temp_image) {
-        return Err(format!("扩容副本无法安全推出，原 KDJ 未改动：{err}"));
+        return Err(format!("新镜像无法安全卸载，原磁盘未改动：{err}"));
     }
     if let Err(err) = eject_impl(image) {
         remove_image_artifacts(&temp_image);
-        return Err(format!("原 KDJ 正被占用，无法切换扩容副本：{err}"));
+        return Err(format!("原磁盘正被占用，无法改变容量：{err}"));
     }
 
-    let current_gib = ((current.total_bytes + IMAGE_SIZE_BYTES - 1) / IMAGE_SIZE_BYTES)
-        .clamp(u64::from(MIN_SIZE_GIB), u64::from(MAX_SIZE_GIB)) as u32;
+    let current_mib = configured_size_mib(&current);
+    let current_name = current.name.clone();
     if let Err(err) = fs::rename(image, &backup_image) {
-        let _ = mount_impl(image, current_gib);
+        let _ = mount_impl(image, current_mib, &current_name);
         remove_image_artifacts(&temp_image);
         return Err(format!("无法为原 KDJ 建立回滚副本：{err}"));
     }
     if let Err(err) = fs::rename(&temp_image, image) {
         let _ = fs::rename(&backup_image, image);
-        let _ = remember_capacity(image, current_gib);
-        let _ = mount_impl(image, current_gib);
+        let _ = remember_disk_metadata(image, current_mib, &current_name);
+        let _ = mount_impl(image, current_mib, &current_name);
         remove_image_artifacts(&temp_image);
-        return Err(format!("无法启用扩容副本，已恢复原 KDJ：{err}"));
+        return Err(format!("无法启用新镜像，已恢复原磁盘：{err}"));
     }
-    let _ = remember_capacity(image, target_gib);
 
-    match mount_impl(image, target_gib) {
+    let switched = remember_disk_metadata(image, target_mib, volume_name)
+        .and_then(|()| mount_impl(image, target_mib, volume_name));
+    match switched {
         Ok(status) => {
             remove_image_artifacts(&backup_image);
-            let _ = fs::remove_file(capacity_sidecar(&temp_image));
+            remove_image_artifacts(&temp_image);
             Ok(status)
         }
         Err(err) => {
             let _ = eject_impl(image);
             remove_image_artifacts(image);
             let rollback = fs::rename(&backup_image, image)
-                .map_err(|rollback| format!("扩容加载失败（{err}），回滚镜像也失败：{rollback}"));
+                .map_err(|rollback| format!("改变容量失败（{err}），回滚镜像也失败：{rollback}"));
             if let Err(rollback) = rollback {
                 return Err(rollback);
             }
-            let _ = remember_capacity(image, current_gib);
-            mount_impl(image, current_gib).map_err(|rollback| {
-                format!("扩容加载失败（{err}），原镜像已恢复但重新加载失败：{rollback}")
+            let _ = remember_disk_metadata(image, current_mib, &current_name);
+            mount_impl(image, current_mib, &current_name).map_err(|rollback| {
+                format!("改变容量失败（{err}），原镜像已恢复但重新加载失败：{rollback}")
             })?;
-            Err(format!("扩容副本无法加载，已恢复原 KDJ：{err}"))
+            Err(format!("新镜像无法加载，已恢复原磁盘：{err}"))
         }
     }
 }
@@ -688,13 +896,15 @@ fn macos_status(image: &Path) -> Result<VirtualDiskStatus, String> {
         .ok_or_else(|| "diskutil info 没有返回卷信息".to_string())?;
     let volume_name = plist_string(dict, "VolumeName");
     let protocol = plist_string(dict, "BusProtocol");
-    if volume_name != VOLUME_NAME || protocol != "Disk Image" {
+    if volume_name != status.name || protocol != "Disk Image" {
         return Err(format!(
-            "镜像挂载结果不符合 KDJ 约定（卷名 {volume_name:?}，协议 {protocol:?}）"
+            "镜像挂载结果不符合 KDJ 约定（卷名 {volume_name:?}，应为 {:?}；协议 {protocol:?}）",
+            status.name
         ));
     }
 
     status.mounted = true;
+    status.name = volume_name;
     status.mount_path = plist_string(dict, "MountPoint");
     status.file_system = plist_string(dict, "FilesystemUserVisibleName");
     if status.file_system.is_empty() {
@@ -727,7 +937,11 @@ fn macos_detach_attachment(attachment: &MacAttachment) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_mount(image: &Path, size_gib: u32) -> Result<VirtualDiskStatus, String> {
+fn macos_mount(
+    image: &Path,
+    size_mib: u64,
+    volume_name: &str,
+) -> Result<VirtualDiskStatus, String> {
     if let Some(attachment) = macos_attachment(image)? {
         if !attachment.mount_path.is_empty() {
             let status = macos_status(image)?;
@@ -747,21 +961,21 @@ fn macos_mount(image: &Path, size_gib: u32) -> Result<VirtualDiskStatus, String>
             Command::new("/usr/bin/hdiutil")
                 .arg("create")
                 .arg("-size")
-                .arg(format!("{size_gib}g"))
+                .arg(format!("{size_mib}m"))
                 .args([
                     "-fs",
                     "ExFAT",
                     "-layout",
                     "MBRSPUD",
                     "-volname",
-                    VOLUME_NAME,
+                    volume_name,
                     "-type",
                     "UDIF",
                 ])
                 .arg(image),
             "创建 KDJ 虚拟磁盘",
         )?;
-        remember_capacity(image, size_gib)?;
+        remember_disk_metadata(image, size_mib, volume_name)?;
     }
 
     // 故意不传 -nobrowse：Finder 与 djay/OneLibrary 都必须能发现这个卷。
@@ -841,6 +1055,7 @@ fn windows_status(image: &Path) -> Result<VirtualDiskStatus, String> {
     status.protocol = "Virtual Hard Disk".into();
     if status.total_bytes == 0 {
         status.total_bytes = IMAGE_SIZE_BYTES;
+        status.configured_bytes = IMAGE_SIZE_BYTES;
     }
     if !image.is_file() {
         return Ok(status);
@@ -876,13 +1091,14 @@ if ($null -eq $volume) {{ exit 0 }}
     }
     let info: WindowsVolumeInfo = serde_json::from_str(&json)
         .map_err(|err| format!("无法解析 Windows 虚拟磁盘状态：{err}；原始输出：{json}"))?;
-    if info.volume_name != VOLUME_NAME {
+    if info.volume_name != status.name {
         return Err(format!(
-            "VHD 已连接，但卷名是 {:?} 而不是 KDJ，为避免误写已停止",
-            info.volume_name
+            "VHD 已连接，但卷名是 {:?} 而不是 {:?}，为避免误写已停止",
+            info.volume_name, status.name
         ));
     }
     status.mounted = true;
+    status.name = info.volume_name;
     status.mount_path = info.mount_path;
     status.file_system = info.file_system;
     status.partition_scheme = info.partition_scheme;
@@ -934,19 +1150,20 @@ try {{
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn diskpart_create_script(image: &Path, size_gib: u32) -> String {
+fn diskpart_create_script(image: &Path, size_mib: u64, volume_name: &str) -> String {
     format!(
         "create vdisk file=\"{}\" maximum={} type=expandable\r\n\
          select vdisk file=\"{}\"\r\n\
          attach vdisk\r\n\
          convert mbr\r\n\
          create partition primary\r\n\
-         format fs=exfat label=\"KDJ\" quick\r\n\
+         format fs=exfat label=\"{}\" quick\r\n\
          assign\r\n\
          exit\r\n",
         image.display(),
-        u64::from(size_gib) * 1024,
-        image.display()
+        size_mib,
+        image.display(),
+        volume_name
     )
 }
 
@@ -967,7 +1184,11 @@ fn diskpart_detach_script(image: &Path) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_mount(image: &Path, size_gib: u32) -> Result<VirtualDiskStatus, String> {
+fn windows_mount(
+    image: &Path,
+    size_mib: u64,
+    volume_name: &str,
+) -> Result<VirtualDiskStatus, String> {
     let current = windows_status(image)?;
     if current.mounted {
         ensure_volume_layout(&current)?;
@@ -975,7 +1196,7 @@ fn windows_mount(image: &Path, size_gib: u32) -> Result<VirtualDiskStatus, Strin
     }
     let create = !image.is_file();
     let script = if create {
-        diskpart_create_script(image, size_gib)
+        diskpart_create_script(image, size_mib, volume_name)
     } else {
         diskpart_attach_script(image)
     };
@@ -989,7 +1210,7 @@ fn windows_mount(image: &Path, size_gib: u32) -> Result<VirtualDiskStatus, Strin
         },
     )?;
     if create {
-        remember_capacity(image, size_gib)?;
+        remember_disk_metadata(image, size_mib, volume_name)?;
     }
 
     for _ in 0..80 {
@@ -1030,10 +1251,10 @@ mod tests {
 
     #[test]
     fn diskpart_create_contract_is_selected_size_exfat_mbr() {
-        let script = diskpart_create_script(Path::new("C:\\KDJ\\KDJ.vhd"), 8);
-        assert!(script.contains("maximum=8192"));
+        let script = diskpart_create_script(Path::new("C:\\KDJ\\KDJ.vhd"), 8704, "DJ SET");
+        assert!(script.contains("maximum=8704"));
         assert!(script.contains("convert mbr"));
-        assert!(script.contains("format fs=exfat label=\"KDJ\" quick"));
+        assert!(script.contains("format fs=exfat label=\"DJ SET\" quick"));
         assert!(!script.to_ascii_lowercase().contains("ntfs"));
     }
 
@@ -1045,28 +1266,69 @@ mod tests {
             available_bytes: 128 * 1024 * 1024,
             ..VirtualDiskStatus::default()
         };
-        assert_eq!(target_growth_gib(&status, 512 * 1024 * 1024).unwrap(), 16);
-        assert_eq!(target_growth_gib(&status, 64 * 1024 * 1024).unwrap(), 0);
+        assert_eq!(
+            target_growth_mib(&status, 512 * 1024 * 1024).unwrap(),
+            16 * 1024
+        );
+        assert_eq!(target_growth_mib(&status, 64 * 1024 * 1024).unwrap(), 0);
 
         let full = VirtualDiskStatus {
             total_bytes: 64 * IMAGE_SIZE_BYTES,
             available_bytes: 0,
             ..VirtualDiskStatus::default()
         };
-        assert!(target_growth_gib(&full, IMAGE_SIZE_BYTES).is_err());
+        assert!(target_growth_mib(&full, IMAGE_SIZE_BYTES).is_err());
     }
 
     #[test]
-    fn manual_growth_reaches_the_selected_larger_capacity() {
+    fn manual_capacity_accepts_mib_precision_and_enforces_limits() {
+        assert_eq!(checked_size_mib(8 * 1024 + 512).unwrap(), 8704);
+        assert!(checked_size_mib(MIN_SIZE_MIB - 1).is_err());
+        assert!(checked_size_mib(MAX_SIZE_MIB + 1).is_err());
+        assert_eq!(display_size_gib(8704), "8.5");
+    }
+
+    #[test]
+    fn manual_change_allows_safe_shrink_and_name_only_migration() {
         let status = VirtualDiskStatus {
+            name: "KDJ".into(),
             total_bytes: 8 * IMAGE_SIZE_BYTES,
+            configured_bytes: 8 * IMAGE_SIZE_BYTES,
             available_bytes: 6 * IMAGE_SIZE_BYTES,
             ..VirtualDiskStatus::default()
         };
-        let required = required_bytes_for_target(&status, 32).unwrap();
-        assert_eq!(target_growth_gib(&status, required).unwrap(), 32);
-        assert!(required_bytes_for_target(&status, 8).is_err());
-        assert!(required_bytes_for_target(&status, 65).is_err());
+        assert!(validate_manual_change(&status, 4 * 1024, "KDJ").is_ok());
+        assert!(validate_manual_change(&status, 2 * 1024, "KDJ").is_err());
+        assert!(validate_manual_change(&status, 8 * 1024, "DJ SET").is_ok());
+        assert!(validate_manual_change(&status, 8 * 1024, "KDJ").is_err());
+    }
+
+    #[test]
+    fn volume_name_contract_matches_exfat_and_diskpart_limits() {
+        assert_eq!(checked_volume_name("  DJ SET  ").unwrap(), "DJ SET");
+        assert_eq!(checked_volume_name("中文盘").unwrap(), "中文盘");
+        assert!(checked_volume_name("").is_err());
+        assert!(checked_volume_name("123456789012").is_err());
+        assert!(checked_volume_name("DJ/SET").is_err());
+    }
+
+    #[test]
+    fn volume_branding_uses_the_bundled_application_icons() {
+        let root = std::env::temp_dir().join(format!("kdj-volume-branding-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        write_macos_volume_icon(&root).unwrap();
+        write_windows_volume_icon(&root).unwrap();
+
+        assert_eq!(
+            fs::read(root.join(".VolumeIcon.icns")).unwrap(),
+            MACOS_VOLUME_ICON
+        );
+        assert_eq!(fs::read(root.join("KDJ.ico")).unwrap(), WINDOWS_VOLUME_ICON);
+        assert_eq!(fs::read(root.join("autorun.inf")).unwrap(), WINDOWS_AUTORUN);
+        assert!(!String::from_utf8_lossy(WINDOWS_AUTORUN).contains("open="));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1078,12 +1340,14 @@ mod tests {
         let sibling = root.join("keep.txt");
         fs::write(&image, b"disk-image").unwrap();
         fs::write(capacity_sidecar(&image), b"8589934592\n").unwrap();
+        fs::write(name_sidecar(&image), b"DJ SET\n").unwrap();
         fs::write(&sibling, b"keep").unwrap();
 
         remove_managed_image_files(&image).unwrap();
 
         assert!(!image.exists());
         assert!(!capacity_sidecar(&image).exists());
+        assert!(!name_sidecar(&image).exists());
         assert_eq!(fs::read(&sibling).unwrap(), b"keep");
         let _ = fs::remove_dir_all(root);
     }

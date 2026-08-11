@@ -10,7 +10,8 @@ import { useLibraryStore } from "../../stores/libraryStore";
 import type { HarmonicMatch, Track } from "../../types";
 import { ContextMenu } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
-import { CamelotChip, playTrack } from "./TrackTable";
+import { TrackKeyChip } from "../common/TrackKeyChip";
+import { playTrack } from "./TrackTable";
 
 export interface HarmonicListProps {
   track: Track;
@@ -290,7 +291,7 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
             {match.track.title || match.track.filename}
           </span>
           <span>
-            <CamelotChip code={match.track.camelot} />
+            <TrackKeyChip track={match.track} notation="camelot" />
           </span>
           <div className="kd-queue-meta">
             {/* 艺人为空时整条不占位，免得留一个孤零零的破折号 */}

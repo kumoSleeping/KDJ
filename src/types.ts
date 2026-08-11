@@ -28,6 +28,7 @@ export interface Health {
 export type FileDisposalMode = "keep" | "trash" | "remove";
 
 export type VideoFormat = "mp4" | "mkv" | "mov";
+export type KeyNotation = "camelot" | "traditional";
 
 export interface Settings {
   download_dir: string;
@@ -67,6 +68,8 @@ export interface Settings {
   auto_start_downloads: boolean;
   /** 播放条使用分析波形；关掉时显示常规进度条。 */
   player_waveform: boolean;
+  /** 本地与 OneLibrary 列表里的调性表示。 */
+  key_notation: KeyNotation;
   /** KDJ 虚拟磁盘空间不足时，创建更大的镜像、迁移数据并重试。 */
   virtual_disk_auto_grow: boolean;
   /**
@@ -554,6 +557,9 @@ export interface OneLibraryTrack {
   year: string;
   bpm: number | null;
   music_key: string;
+  /** 从 OneLibrary 的自由文本调名派生，旧后端缺字段时为空。 */
+  camelot: string;
+  open_key: string;
   duration: number | null;
   bitrate: number | null;
   samplerate: number | null;
@@ -794,6 +800,8 @@ export interface VirtualDiskStatus {
   imageFormat: string;
   protocol: string;
   totalBytes: number;
+  /** 镜像创建时选择的容量；挂载后的 totalBytes 是扣除分区开销的卷容量。 */
+  configuredBytes: number;
   availableBytes: number;
   writable: boolean;
   /** Windows 的 DiskPart 挂载/推出会显示系统 UAC；macOS hdiutil 不需要 sudo。 */
@@ -833,9 +841,9 @@ export interface KdjBridge {
   /** macOS hdiutil / Windows VHD 生命周期；其它平台为空。 */
   virtualDisk?: null | {
     status: () => Promise<VirtualDiskStatus>;
-    mount: (sizeGib?: number) => Promise<VirtualDiskStatus>;
+    mount: (sizeGib?: number, volumeName?: string) => Promise<VirtualDiskStatus>;
     ensureCapacity: (requiredBytes: number) => Promise<VirtualDiskStatus>;
-    grow: (sizeGib: number) => Promise<VirtualDiskStatus>;
+    grow: (sizeGib: number, volumeName: string) => Promise<VirtualDiskStatus>;
     eject: () => Promise<VirtualDiskStatus>;
     delete: () => Promise<VirtualDiskStatus>;
   };

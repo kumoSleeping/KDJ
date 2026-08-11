@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use kdj_analysis::engine::AnalysisResult;
 use kdj_core::models::{
-    HarmonicMatch, HarmonicRelation, LibraryStats, LocalPlaylist, LocalPlaylistPatch, Track,
-    TrackPage, TrackPatch,
+    HarmonicMatch, HarmonicRelation, LibraryStats, LocalPlaylist, LocalPlaylistPatch,
+    PortableTrackMetadata, Track, TrackPage, TrackPatch,
 };
 use kdj_providers::tags::{read_tags, write_cover, write_metadata, MetadataEdit, TrackTags};
 use rusqlite::types::Value as SqlValue;
@@ -1279,6 +1279,52 @@ impl LibraryService {
         // source_platform / source_key 传空 = 这次不动来源信息
         self.upsert_file(Path::new(&path), "", "")?;
         self.get(track_id)?.context("刚重读的曲目查不到了")
+    }
+
+    /// 把 DJ 曲库数据库中的可移植字段作为一个事务写入刚导入的本地记录。
+    /// 文件标签扫描与这份快照可能不同；外置数据库是这次显式导入的来源，因此由它
+    /// 覆盖同名字段。KDJ 私有分析（能量、置信度、拍点）不在此列，绝不清空。
+    pub fn apply_portable_metadata(
+        &self,
+        track_id: i64,
+        metadata: &PortableTrackMetadata,
+    ) -> Result<Track> {
+        let conn = self.db.conn()?;
+        let changed = conn.execute(
+            "UPDATE tracks SET title = ?, artist = ?, album = ?, genre = ?, year = ?, \
+             duration = COALESCE(?, duration), bitrate = COALESCE(?, bitrate), \
+             samplerate = COALESCE(?, samplerate), size = CASE WHEN ? > 0 THEN ? ELSE size END, \
+             bpm = COALESCE(?, bpm), music_key = CASE WHEN ? != '' THEN ? ELSE music_key END, \
+             camelot = CASE WHEN ? != '' THEN ? ELSE camelot END, \
+             open_key = CASE WHEN ? != '' THEN ? ELSE open_key END, \
+             rating = ?, comment = ?, modified_at = ? WHERE id = ?",
+            rusqlite::params![
+                metadata.title,
+                metadata.artist,
+                metadata.album,
+                metadata.genre,
+                metadata.year,
+                metadata.duration,
+                metadata.bitrate,
+                metadata.samplerate,
+                metadata.size,
+                metadata.size,
+                metadata.bpm,
+                metadata.music_key,
+                metadata.music_key,
+                metadata.camelot,
+                metadata.camelot,
+                metadata.open_key,
+                metadata.open_key,
+                metadata.rating.clamp(0, 5),
+                metadata.comment,
+                now_iso(),
+                track_id,
+            ],
+        )?;
+        anyhow::ensure!(changed == 1, "导入元数据对应的曲目不存在：{track_id}");
+        drop(conn);
+        self.get(track_id)?.context("导入元数据后的曲目查不到了")
     }
 
     /// 写文件之后一律同步一次 stat，**哪怕写失败**：
@@ -2596,6 +2642,51 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn portable_metadata_updates_shared_fields_without_erasing_kdj_analysis() {
+        let service = service();
+        let id = insert(
+            &service,
+            Row {
+                path: "/lib/portable.mp3",
+                title: "file tag title",
+                ..Row::default()
+            },
+        );
+        service
+            .db()
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE tracks SET energy = 7, key_confidence = 0.91 WHERE id = ?",
+                [id],
+            )
+            .unwrap();
+        let metadata = PortableTrackMetadata {
+            title: "OneLibrary title".into(),
+            artist: "Artist".into(),
+            bpm: Some(128.5),
+            music_key: "F# M".into(),
+            camelot: "2B".into(),
+            open_key: "7d".into(),
+            rating: 4,
+            comment: "portable".into(),
+            ..PortableTrackMetadata::default()
+        };
+
+        let track = service.apply_portable_metadata(id, &metadata).unwrap();
+        assert_eq!(track.title, "OneLibrary title");
+        assert_eq!(track.artist, "Artist");
+        assert_eq!(track.bpm, Some(128.5));
+        assert_eq!(track.music_key, "F# M");
+        assert_eq!(track.camelot, "2B");
+        assert_eq!(track.open_key, "7d");
+        assert_eq!(track.rating, 4);
+        assert_eq!(track.comment, "portable");
+        assert_eq!(track.energy, Some(7));
+        assert_eq!(track.key_confidence, Some(0.91));
     }
 
     fn query(folder: &str, deep: bool) -> TrackQuery {

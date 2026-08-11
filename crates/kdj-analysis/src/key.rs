@@ -1,6 +1,7 @@
 //! 调性识别：chroma → Krumhansl-Schmuckler → 24 调 → Camelot / OpenKey。
 
 use crate::dsp::{self, median, rfft_freqs};
+use kdj_core::musical_key::{camelot_to_open_key as shared_open_key, MusicalKey};
 
 /// 调性只关心频率分辨率，时间分辨率无所谓：tempo 用的 2048 在 180 Hz 以下
 /// 已经宽过一个半音，低音区会整片糊掉，所以这里窗加到 4096（bin 宽 5.4 Hz）。
@@ -59,19 +60,7 @@ pub struct KeyResult {
 /// 两套轮盘只差一个固定旋转量 7：Camelot 的 8B 是 C 大调、OpenKey 的 1d 也是 C 大调，
 /// 所以 `open = ((n - 8) mod 12) + 1`；字母 A→m（小调）、B→d（大调）。
 pub fn camelot_to_open_key(camelot: &str) -> String {
-    if camelot.len() < 2 {
-        return String::new();
-    }
-    let (number_part, letter) = camelot.split_at(camelot.len() - 1);
-    let letter = letter.to_ascii_uppercase();
-    let Ok(number) = number_part.parse::<i32>() else {
-        return String::new();
-    };
-    if !(1..=12).contains(&number) || (letter != "A" && letter != "B") {
-        return String::new();
-    }
-    let open_number = (number - 8).rem_euclid(12) + 1;
-    format!("{open_number}{}", if letter == "A" { "m" } else { "d" })
+    shared_open_key(camelot)
 }
 
 /// 沿时间做中值滤波：谐波成分保留、瞬态打击成分被压掉。
@@ -248,21 +237,22 @@ pub fn key_from_chroma(chroma: &[f64]) -> KeyResult {
     let second = scores[1].0;
     let confidence = ((best_score - second) / (best_score.abs() + 1e-9)).clamp(0.0, 1.0);
 
-    let name = NAMES[tonic];
     let camelot = if is_minor {
         CAMELOT[tonic].0
     } else {
         CAMELOT[tonic].1
     };
+    let key = MusicalKey::from_camelot(camelot).expect("分析器只会产生 24 个合法 Camelot 调性");
+    let name = NAMES[tonic];
     KeyResult {
-        key: format!("{name} {}", if is_minor { "minor" } else { "major" }),
+        key: key.traditional,
         key_short: if is_minor {
             format!("{name}m")
         } else {
             name.to_string()
         },
         camelot: camelot.to_string(),
-        open_key: camelot_to_open_key(camelot),
+        open_key: key.open_key,
         confidence: (confidence * 1000.0).round() / 1000.0,
         chroma: chroma
             .iter()

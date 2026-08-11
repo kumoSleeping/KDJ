@@ -169,6 +169,20 @@ pub enum Theme {
     System,
 }
 
+/// 曲目列表里的调性表示。底层始终保留可互转的音名与 Camelot，不按显示偏好改写数据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyNotation {
+    Camelot,
+    Traditional,
+}
+
+impl Default for KeyNotation {
+    fn default() -> Self {
+        Self::Camelot
+    }
+}
+
 // ---------------------------------------------------------------- 基础
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -933,6 +947,11 @@ pub struct OneLibraryTrack {
     pub year: String,
     pub bpm: Option<f64>,
     pub music_key: String,
+    /// 从 OneLibrary 自由文本 key.name 规范化出的 Camelot；原文本仍保留在 music_key。
+    #[serde(default)]
+    pub camelot: String,
+    #[serde(default)]
+    pub open_key: String,
     pub duration: Option<i64>,
     #[serde(default)]
     pub bitrate: Option<i64>,
@@ -951,6 +970,51 @@ pub struct OneLibraryTrack {
     pub cue_points: Vec<CuePoint>,
     pub path: String,
     pub filename: String,
+}
+
+/// 本地曲库接收外置 DJ 曲库元数据时的协议无关边界。
+///
+/// OneLibrary 的表/外键形状不进入 kdj-library；server 在 IO 边界展开后，曲库只负责
+/// 一次事务写入这份可移植快照。后续支持其它 DJ 协议时可以复用同一入口。
+#[derive(Debug, Clone, Default)]
+pub struct PortableTrackMetadata {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub genre: String,
+    pub year: String,
+    pub bpm: Option<f64>,
+    pub music_key: String,
+    pub camelot: String,
+    pub open_key: String,
+    pub duration: Option<f64>,
+    pub bitrate: Option<i64>,
+    pub samplerate: Option<i64>,
+    pub size: i64,
+    pub rating: i64,
+    pub comment: String,
+}
+
+impl From<&OneLibraryTrack> for PortableTrackMetadata {
+    fn from(track: &OneLibraryTrack) -> Self {
+        Self {
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            genre: track.genre.clone(),
+            year: track.year.clone(),
+            bpm: track.bpm,
+            music_key: track.music_key.clone(),
+            camelot: track.camelot.clone(),
+            open_key: track.open_key.clone(),
+            duration: track.duration.map(|value| value as f64),
+            bitrate: track.bitrate,
+            samplerate: track.samplerate,
+            size: track.size,
+            rating: track.rating,
+            comment: track.comment.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

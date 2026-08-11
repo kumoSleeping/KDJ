@@ -204,12 +204,58 @@ impl WaveformCoordinator {
     pub async fn get_or_compute_detached(
         self: &Arc<Self>,
         cache_id: i64,
+        legacy_cache_id: i64,
         path: PathBuf,
         buckets: usize,
         cache_dir: PathBuf,
+        portable_cache_dir: Option<PathBuf>,
     ) -> Result<Waveform> {
-        self.get_or_compute_mode(cache_id, path, buckets, cache_dir, true, false)
-            .await
+        let buckets = buckets.clamp(64, 2_000);
+        let mtime = file_mtime(&path);
+        let key = WaveKey {
+            track_id: cache_id,
+            buckets,
+            mtime,
+        };
+
+        // 可移动卷上的 KDJ 旁路缓存优先：它跟着软盘走，换电脑或换盘符仍可读取。
+        if let Some((mut waveform, _)) = portable_cache_dir
+            .as_ref()
+            .and_then(|directory| read_cached(directory, key))
+        {
+            waveform.track_id = cache_id;
+            // 回填本机缓存是优化；外置缓存已完整可读，即使本机目录暂时不可写也能播放。
+            let _ = write_cache(&cache_path(&cache_dir, cache_id, buckets, mtime), &waveform);
+            return Ok(waveform);
+        }
+
+        if let Some((mut waveform, _)) = read_cached(&cache_dir, key) {
+            waveform.track_id = cache_id;
+            persist_portable_waveform(portable_cache_dir.as_deref(), key, &waveform);
+            return Ok(waveform);
+        }
+
+        // 0.2.39 把绝对挂载路径算进 id。只读一次旧键，命中后转存到稳定新键；
+        // 老文件在新缓存重新读回前不会删除，迁移中断也不会丢波形。
+        if legacy_cache_id != cache_id {
+            let legacy_key = WaveKey {
+                track_id: legacy_cache_id,
+                buckets,
+                mtime,
+            };
+            if let Some((mut waveform, _)) = read_cached(&cache_dir, legacy_key) {
+                waveform.track_id = cache_id;
+                write_cache(&cache_path(&cache_dir, cache_id, buckets, mtime), &waveform)?;
+                persist_portable_waveform(portable_cache_dir.as_deref(), key, &waveform);
+                return Ok(waveform);
+            }
+        }
+
+        let waveform = self
+            .get_or_compute_mode(cache_id, path, buckets, cache_dir, true, false)
+            .await?;
+        persist_portable_waveform(portable_cache_dir.as_deref(), key, &waveform);
+        Ok(waveform)
     }
 
     /// 旧曲库补齐固定演奏波形。它仍然单飞，但不抢交互优先权、不暂停主分析。
@@ -332,6 +378,24 @@ impl WaveformCoordinator {
         ) {
             tracing::warn!("记录波形就绪状态失败 {}：{err:#}", key.track_id);
         }
+    }
+}
+
+/// OneLibrary 协议外的 `.kdj/onelibrary-waveform` 是尽力而为的第二份资产。
+/// OneLibrary 本身或卷权限异常不能让已经算好的本机波形请求失败。
+fn persist_portable_waveform(directory: Option<&Path>, key: WaveKey, waveform: &Waveform) {
+    let Some(directory) = directory else {
+        return;
+    };
+    let path = cache_path(directory, key.track_id, key.buckets, key.mtime);
+    if read_cache(&path).is_some_and(|saved| saved.track_id == key.track_id) {
+        return;
+    }
+    if let Err(error) = write_cache(&path, waveform) {
+        tracing::warn!(
+            "OneLibrary 便携波形缓存写入失败 {}：{error:#}",
+            path.display()
+        );
     }
 }
 
@@ -682,13 +746,21 @@ mod tests {
         let dir = scratch("detached");
         let audio = dir.join("track.wav");
         let cache_dir = dir.join("cache");
+        let portable_dir = dir.join("portable");
         write_test_wav(&audio);
         let library = Arc::new(kdj_library::LibraryService::new(
             kdj_library::Database::open_in_memory().unwrap(),
         ));
         let coordinator = WaveformCoordinator::new(Arc::clone(&library));
         let waveform = coordinator
-            .get_or_compute_detached(9_999, audio.clone(), 640, cache_dir.clone())
+            .get_or_compute_detached(
+                9_999,
+                8_888,
+                audio.clone(),
+                640,
+                cache_dir.clone(),
+                Some(portable_dir.clone()),
+            )
             .await
             .unwrap();
         let waveform = fit_waveform_columns(waveform, 640);
@@ -706,23 +778,89 @@ mod tests {
         assert_eq!(count, 0, "外置即时波形不能写 KDJ 本地曲库资产状态");
 
         let cache_file = cache_path(&cache_dir, 9_999, 640, file_mtime(&audio));
-        let written_at = std::fs::metadata(&cache_file).unwrap().modified().unwrap();
+        let portable_file = cache_path(&portable_dir, 9_999, 640, file_mtime(&audio));
+        assert!(
+            portable_file.is_file(),
+            "可写 OneLibrary 卷必须带走旁路波形"
+        );
+        let portable_written_at = std::fs::metadata(&portable_file)
+            .unwrap()
+            .modified()
+            .unwrap();
+        // 模拟换电脑：本机缓存不存在，只剩软盘内的便携副本。
+        std::fs::remove_file(&cache_file).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         let restarted_library = Arc::new(kdj_library::LibraryService::new(
             kdj_library::Database::open_in_memory().unwrap(),
         ));
         let restarted = WaveformCoordinator::new(restarted_library);
         let reused = restarted
-            .get_or_compute_detached(9_999, audio, 640, cache_dir)
+            .get_or_compute_detached(
+                9_999,
+                8_888,
+                audio,
+                640,
+                cache_dir.clone(),
+                Some(portable_dir),
+            )
             .await
             .unwrap();
         let reused = fit_waveform_columns(reused, 640);
         assert_eq!(reused.amp, waveform.amp);
         assert_eq!(
-            std::fs::metadata(cache_file).unwrap().modified().unwrap(),
-            written_at,
-            "新 coordinator 应直接复用磁盘缓存，不能重写波形"
+            std::fs::metadata(&portable_file)
+                .unwrap()
+                .modified()
+                .unwrap(),
+            portable_written_at,
+            "新 coordinator 应直接复用便携波形，不能重写"
         );
+        assert!(cache_file.is_file(), "便携命中后应回填新电脑的本机缓存");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn detached_onelibrary_cache_migrates_the_absolute_path_identity_without_decoding() {
+        let dir = scratch("detached-legacy-id");
+        let audio = dir.join("not-decodable.mp3");
+        let cache_dir = dir.join("cache");
+        let portable_dir = dir.join("portable");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(&audio, b"migration must not try to decode this").unwrap();
+        let legacy_id = 71;
+        let stable_id = 72;
+        let mtime = file_mtime(&audio);
+        let legacy = Waveform {
+            track_id: legacy_id,
+            duration: 8.0,
+            amp: vec![0.2, 0.8],
+            r: vec![1, 2],
+            g: vec![3, 4],
+            b: vec![5, 6],
+        };
+        let old_path = cache_path(&cache_dir, legacy_id, 640, mtime);
+        write_cache(&old_path, &legacy).unwrap();
+        let library = Arc::new(kdj_library::LibraryService::new(
+            kdj_library::Database::open_in_memory().unwrap(),
+        ));
+        let coordinator = WaveformCoordinator::new(library);
+
+        let migrated = coordinator
+            .get_or_compute_detached(
+                stable_id,
+                legacy_id,
+                audio,
+                640,
+                cache_dir.clone(),
+                Some(portable_dir.clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(migrated.track_id, stable_id);
+        assert_eq!(migrated.amp, legacy.amp);
+        assert!(old_path.is_file(), "新缓存校验前不能删除旧资产");
+        assert!(cache_path(&cache_dir, stable_id, 640, mtime).is_file());
+        assert!(cache_path(&portable_dir, stable_id, 640, mtime).is_file());
         let _ = std::fs::remove_dir_all(dir);
     }
 

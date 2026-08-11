@@ -7560,9 +7560,40 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 .kd-djp-choice-btn:hover {
   color: var(--kd-text);
 }
-.kd-djp-choice-btn[aria-checked="true"] {
+.kd-djp-choice-btn[aria-checked="true"],
+.kd-djp-choice-btn[aria-pressed="true"] {
   color: var(--kd-text);
   font-weight: 700;
+}
+.kd-virtual-disk-custom-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+}
+.kd-virtual-disk-custom-size > .kd-input {
+  width: 4.5rem;
+  height: 1.55rem;
+  padding: 0 0.35rem;
+  text-align: right;
+  font-size: var(--kd-size-xs);
+}
+.kd-virtual-disk-name-field {
+  width: min(15rem, 100%);
+  margin-bottom: 0.65rem;
+}
+.kd-virtual-disk-name-field > .kd-input {
+  width: 100%;
+}
+.kd-virtual-disk-field-error {
+  margin: 0.3rem 0 0;
+  color: var(--kd-danger);
+  font-size: var(--kd-size-xs);
+  line-height: 1.4;
+}
+.kd-input[aria-invalid="true"] {
+  border-color: color-mix(in srgb, var(--kd-danger) 65%, var(--kd-line));
 }
 .kd-virtual-disk-intro {
   display: flex;
@@ -7594,6 +7625,14 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   border-top: 1px solid var(--kd-line);
 }
 .kd-virtual-disk-section > .kd-djp-label {
+  margin-bottom: 0;
+}
+.kd-virtual-disk-section-title {
+  color: var(--kd-text);
+  font-size: var(--kd-size-sm);
+  font-weight: 700;
+}
+.kd-virtual-disk-section > .kd-virtual-disk-name-field {
   margin-bottom: 0;
 }
 .kd-virtual-disk-confirm {
