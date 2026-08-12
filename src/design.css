@@ -24,20 +24,30 @@
   --kd-theme-soft: color-mix(in srgb, var(--kd-theme) 14%, transparent);
 
   /* —— 文本 —— */
-  --kd-text: #f2f2f2;
-  --kd-text-body: #d4d4d8;
-  --kd-muted: #8a8a90;
-  --kd-faint: #5f5f66;
+  /* 紧凑工作台不该满屏纯亮白：主字退一阶到 Primer neutral.11，
+     保住可读性，也减少长时间盯着黑底时的刺眼感。 */
+  --kd-text: #d1d7e0;
+  --kd-text-body: #c9d1d9;
+  --kd-muted: #9198a1;
+  --kd-faint: #656c76;
+  /* 设置需要保留层级，但次级文字不能淡到读不清。 */
+  --kd-settings-muted: #b7bdc8;
+  --kd-settings-faint: #9198a1;
 
   /* —— 面 —— */
-  --kd-bg: #111113;
-  --kd-panel: #17171a;
-  --kd-panel-raised: #1d1d21;
-  --kd-panel-inset: #0d0d0f;
-  --kd-line: #2a2a2f;
-  --kd-line-soft: #202024;
-  --kd-hover: #232328;
-  --kd-selected: #2a2a31;
+  /* GitHub Dark：主画布本身就是 #0d1117；浅一层只留给浮层、悬停和选中，
+     不能把这个“辅助面”误用成整页默认面，否则会看成灰色应用。 */
+  --kd-bg: #0d1117;
+  --kd-panel: #0d1117;
+  --kd-panel-raised: #151b23;
+  --kd-panel-inset: #010409;
+  /* KDJ 的分隔线密度高于 GitHub 网页，采用较柔和的 GitHub Dark 线色。 */
+  --kd-line: #30363d;
+  --kd-line-soft: #212830;
+  --kd-hover: #151b23;
+  /* 选中单独取更纯的标准红：主题红 #ef4444 偏珊瑚，铺在黑底会显粉。 */
+  --kd-selection-red: #e02020;
+  --kd-selected: color-mix(in srgb, var(--kd-selection-red) 16%, transparent);
   /* 播放条上"已播部分"的遮罩：深色主题盖黑 */
   --kd-wave-dim: rgba(0, 0, 0, 0.55);
 
@@ -137,6 +147,8 @@
   --kd-text-body: #3a3a3c;
   --kd-muted: #86868b;
   --kd-faint: #b0b0b6;
+  --kd-settings-muted: #5f5f66;
+  --kd-settings-faint: #76767d;
   --kd-bg: #f2f2f2;
   --kd-panel: #ffffff;
   --kd-panel-raised: #ffffff;
@@ -144,7 +156,8 @@
   --kd-line: #e5e7eb;
   --kd-line-soft: #f0f0f2;
   --kd-hover: #f4f4f5;
-  --kd-selected: #ececef;
+  --kd-selection-red: #e02020;
+  --kd-selected: color-mix(in srgb, var(--kd-selection-red) 12%, transparent);
   /* 浅色主题的已播遮罩盖白：盖黑的话白天整条进度是一坨黑 */
   --kd-wave-dim: rgba(255, 255, 255, 0.62);
   --kd-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
@@ -2483,7 +2496,7 @@ body[data-kd-col-dragging="true"] * {
 .kd-table tbody tr[data-spacer]:hover > td {
   background: transparent;
 }
-/* 选中只靠底色，不描红边：红色留给动作，选中是状态 */
+/* 选中只靠一层淡红底色，不描边，状态明确但不抢主操作。 */
 .kd-table tbody tr[aria-selected="true"] td {
   background: var(--kd-selected);
   color: var(--kd-text);
@@ -7390,6 +7403,9 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
    接播的四组配置收在同一个 Panel 里，组间只用小标签分节。
    选中态走主题红，避免整板灰阶「水墨」糊成一团。 */
 .kd-djp {
+  /* 设置里的次级文字比全局弱化文字更清楚，同时仍低于正文。 */
+  --kd-muted: var(--kd-settings-muted);
+  --kd-faint: var(--kd-settings-faint);
   display: flex;
   flex-direction: column;
   gap: 0.55rem;

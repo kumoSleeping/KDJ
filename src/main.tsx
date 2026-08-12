@@ -5,6 +5,7 @@ import App from "./App";
 import { DesktopLyricsOverlay } from "./components/player/DesktopLyricsOverlay";
 import { RootErrorBoundary } from "./components/RootErrorBoundary";
 import { initBridge } from "./lib/bridge";
+import { applyAppFontScale, readAppFontScale } from "./lib/fontScale";
 import { applyTheme, useAppStore } from "./stores/appStore";
 
 const root = document.getElementById("root");
@@ -12,6 +13,8 @@ if (!root) throw new Error("找不到 #root，index.html 被改坏了");
 
 const isLyricsWindow = new URLSearchParams(window.location.search).get("window") === "lyrics";
 if (isLyricsWindow) document.documentElement.dataset.window = "lyrics";
+// 悬浮歌词已有独立字号；主界面在 React 挂载前恢复上次选择，避免刷新后跳变。
+if (!isLyricsWindow) applyAppFontScale(readAppFontScale());
 
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
 

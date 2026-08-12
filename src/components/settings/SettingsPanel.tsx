@@ -35,6 +35,14 @@ import {
 } from "../../lib/lyricsPrefs";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { useTrackClickPrefs } from "../../lib/trackClickPrefs";
+import {
+  APP_FONT_SCALE_MAX,
+  APP_FONT_SCALE_MIN,
+  APP_FONT_SCALE_TICKS,
+  readAppFontScale,
+  setAppFontScale,
+  type AppFontScale,
+} from "../../lib/fontScale";
 import { api } from "../../lib/api";
 import { formatBytes } from "../../lib/format";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
@@ -239,6 +247,79 @@ function BarsSlider({
         <span className="kd-djp-slider-value kd-num">
           {bars} 小节
           <small>{hint}</small>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** 主界面字号：75–150%，鼠标和方向键都可按 1% 微调。 */
+function FontScaleSlider({
+  value,
+  onChange,
+}: {
+  value: AppFontScale;
+  onChange(next: AppFontScale): void;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const span = APP_FONT_SCALE_MAX - APP_FONT_SCALE_MIN;
+  const fill = span <= 0 ? 0 : (value - APP_FONT_SCALE_MIN) / span;
+  const choose = (nextValue: number) => {
+    onChange(Math.max(APP_FONT_SCALE_MIN, Math.min(APP_FONT_SCALE_MAX, Math.round(nextValue))));
+  };
+  const handlers = usePointerSlider(trackRef, (t) => choose(APP_FONT_SCALE_MIN + t * span));
+
+  return (
+    <div className="kd-djp-slider-block" title="调整主界面的文字大小；悬浮歌词可在歌词设置中单独调整。">
+      <div className="kd-djp-slider-row">
+        <div className="kd-djp-slider-main">
+          <div
+            ref={trackRef}
+            className="kd-djp-slider"
+            role="slider"
+            tabIndex={0}
+            aria-label="界面字号"
+            aria-valuemin={APP_FONT_SCALE_MIN}
+            aria-valuemax={APP_FONT_SCALE_MAX}
+            aria-valuenow={value}
+            aria-valuetext={`${value}%`}
+            style={{ "--kd-djp-fill": `${fill * 100}%` } as CSSProperties}
+            {...handlers}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
+                event.preventDefault();
+                choose(value - 1);
+              } else if (event.key === "ArrowRight" || event.key === "ArrowUp") {
+                event.preventDefault();
+                choose(value + 1);
+              } else if (event.key === "PageDown") {
+                event.preventDefault();
+                choose(value - 5);
+              } else if (event.key === "PageUp") {
+                event.preventDefault();
+                choose(value + 5);
+              } else if (event.key === "Home") {
+                event.preventDefault();
+                choose(APP_FONT_SCALE_MIN);
+              } else if (event.key === "End") {
+                event.preventDefault();
+                choose(APP_FONT_SCALE_MAX);
+              }
+            }}
+          >
+            <span className="kd-djp-slider-track" aria-hidden="true" />
+          </div>
+          <div className="kd-djp-slider-ticks" aria-hidden="true">
+            {APP_FONT_SCALE_TICKS.map((scale) => (
+              <span key={scale} className="kd-num">
+                {scale}
+              </span>
+            ))}
+          </div>
+        </div>
+        <span className="kd-djp-slider-value kd-num">
+          {value}%
+          <small>界面字号</small>
         </span>
       </div>
     </div>
@@ -487,6 +568,7 @@ export function SettingsPanel() {
   const theme = useAppStore((state) => state.settings?.theme ?? "system");
   const settings = useAppStore((state) => state.settings);
   const saveSettings = useAppStore((state) => state.saveSettings);
+  const [appFontScale, setFontScale] = useState(readAppFontScale);
   const [streamCacheStats, setStreamCacheStats] = useState<StreamCacheStats | null>(null);
   const [streamCacheBusy, setStreamCacheBusy] = useState(false);
   const [streamCacheError, setStreamCacheError] = useState("");
@@ -680,6 +762,13 @@ export function SettingsPanel() {
               </button>
             ))}
           </div>
+          <FontScaleSlider
+            value={appFontScale}
+            onChange={(next) => {
+              setFontScale(next);
+              setAppFontScale(next);
+            }}
+          />
         </Panel>
 
         <Panel heading="列表点击" dense>

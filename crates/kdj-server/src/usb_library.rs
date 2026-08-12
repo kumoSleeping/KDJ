@@ -18,13 +18,15 @@ use kdj_core::models::{
 use kdj_core::musical_key::parse_musical_key;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use crate::one_library_analysis::{AnalysisBundle, LocalAnalysis};
+use crate::one_library_analysis::{preserve_external_cue_sections, AnalysisBundle, LocalAnalysis};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use diesel::{Connection, RunQueryDsl};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use rbox::one_library::{FileType, NewContent, OneLibrary};
 
 const DB_RELATIVE: [&str; 3] = ["PIONEER", "rekordbox", "exportLibrary.db"];
+/// OneLibrary baseline link mask used by both Rekordbox exports and rows created by djay.
+const ONE_LIBRARY_CONTENT_LINK: i32 = 788_224;
 /// 挂载卷根目录里的标记。只有 Tauri 壳创建的 KDJ 镜像会写它；不能只看卷名，
 /// 否则用户碰巧把内置分区命名成 KDJ 时也会被当作导出目标。
 pub const VIRTUAL_DISK_MARKER: &str = ".kdj-virtual-disk";
@@ -101,6 +103,12 @@ static ONE_LIBRARY_READ_CACHE: LazyLock<RwLock<HashMap<PathBuf, CachedOneLibrary
 /// VHD 上都稳定，不会像 mtime 一样被普通曲目写入反复打掉。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 static DJAY_SCHEMA_CHECKED: LazyLock<RwLock<HashMap<PathBuf, Option<u128>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// 旧 KDJ 导出可能没有 `analysisDataFilePath`。每个数据库文件只扫描一次；新导出
+/// 从创建时就带占位 ANLZ，不需要靠轮询反复检查。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+static ANALYSIS_PATHS_CHECKED: LazyLock<RwLock<HashMap<PathBuf, Option<u128>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 pub fn set_managed_virtual_disk_mount(path: Option<PathBuf>) {
@@ -194,10 +202,15 @@ fn invalidate_one_library_read_cache(db_path: &Path) {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn invalidate_one_library_schema_cache(db_path: &Path) {
+    let key = cache_key(db_path);
     DJAY_SCHEMA_CHECKED
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(&cache_key(db_path));
+        .remove(&key);
+    ANALYSIS_PATHS_CHECKED
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&key);
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -328,6 +341,7 @@ fn read_one_library(db_path: &Path) -> Result<OneLibrary> {
     // 它需要的写入窗口并静默失败。每个 HTTP 数据库任务只保留这一枚短连接，任务
     // 返回即关闭；外部应用下一次写入无需等待 KDJ 的三秒刷新周期。
     repair_djay_schema(db_path)?;
+    repair_missing_kdj_analysis_bundles(db_path)?;
     OneLibrary::new(db_path).context("OneLibrary 数据库无法读取")
 }
 
@@ -592,7 +606,11 @@ fn write_analysis_bundle(
     for file in bundle.files {
         let path = root.join(&file.relative_path);
         let previous = fs::read(&path).ok();
-        if previous.as_deref() == Some(file.body.as_slice()) {
+        let body = previous
+            .as_deref()
+            .map(|existing| preserve_external_cue_sections(&file.body, existing))
+            .unwrap_or(file.body);
+        if previous.as_deref() == Some(body.as_slice()) {
             continue;
         }
         let parent = path.parent().context("OneLibrary 分析文件缺少父目录")?;
@@ -604,7 +622,7 @@ fn write_analysis_bundle(
                 .unwrap_or_default()
         ));
         let _ = fs::remove_file(&temp);
-        fs::write(&temp, &file.body)
+        fs::write(&temp, &body)
             .with_context(|| format!("写 OneLibrary 分析临时文件失败：{}", temp.display()))?;
         if let Err(first) = fs::rename(&temp, &path) {
             if previous.is_some() && path.is_file() {
@@ -639,6 +657,44 @@ fn write_analysis_bundle(
             Some(body) => replaced_files.push((path, body)),
             None => created_files.push(path),
         }
+        changed = true;
+    }
+    Ok(changed)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn write_missing_analysis_bundle(
+    root: &Path,
+    bundle: AnalysisBundle,
+    created_files: &mut Vec<PathBuf>,
+) -> Result<bool> {
+    let mut changed = false;
+    for file in bundle.files {
+        let path = root.join(file.relative_path);
+        if path.is_file() {
+            continue;
+        }
+        let parent = path.parent().context("OneLibrary 分析文件缺少父目录")?;
+        fs::create_dir_all(parent)?;
+        let temp = path.with_extension(format!(
+            "{}.kdj-part",
+            path.extension()
+                .map(|value| value.to_string_lossy())
+                .unwrap_or_default()
+        ));
+        let _ = fs::remove_file(&temp);
+        fs::write(&temp, file.body)
+            .with_context(|| format!("写 OneLibrary 占位分析文件失败：{}", temp.display()))?;
+        if let Err(error) = fs::rename(&temp, &path) {
+            if path.is_file() {
+                let _ = fs::remove_file(&temp);
+                continue;
+            }
+            let _ = fs::remove_file(&temp);
+            return Err(error)
+                .with_context(|| format!("提交 OneLibrary 占位分析文件失败：{}", path.display()));
+        }
+        created_files.push(path);
         changed = true;
     }
     Ok(changed)
@@ -717,9 +773,11 @@ fn schema_column_count(
     Ok(diesel::sql_query(query).get_result::<SqlCount>(conn)?.count)
 }
 
-/// 修复诊断日志确认会阻断 djay 5.6.7 拖放的两处 rbox 0.1.5 建库差异：
+/// 修复诊断日志确认会阻断 djay 5.6.7 的 rbox 0.1.5 建库差异：
 /// `image.path`、`content.dateCreated/dateAdded` 被错设为 NOT NULL，且 `content`
-/// 缺少 djay 插入语句使用的 `djPlayCount`。只迁移缺失项；官方/djay 所建的
+/// 缺少 djay 插入语句使用的 `djPlayCount`。旧 KDJ 行还把 `contentLink` 和三个
+/// 更新计数错误初始化为 0，与官方 OneLibrary 基线不一致。同时补齐官方默认的
+/// Hot Cue 自动载入标记。只迁移缺失项；官方/djay 所建的
 /// 兼容库检测通过后不写。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn repair_djay_schema(db_path: &Path) -> Result<bool> {
@@ -758,10 +816,21 @@ fn repair_djay_schema(db_path: &Path) -> Result<bool> {
         "content",
         "name = 'dateAdded' AND \"notnull\" <> 0",
     )? > 0;
+    let legacy_content_defaults_missing = diesel::sql_query(
+        "SELECT COUNT(*) AS count FROM content \
+         WHERE isHotCueAutoLoadOn IS NULL OR masterDbId IS NULL \
+            OR contentLink IS NULL OR contentLink = 0 \
+            OR cueUpdateCount = 0 OR analysisDataUpdateCount = 0 \
+            OR informationUpdateCount = 0",
+    )
+    .get_result::<SqlCount>(&mut check_conn)?
+    .count
+        > 0;
     if !image_path_required
         && !dj_play_count_missing
         && !date_created_required
         && !date_added_required
+        && !legacy_content_defaults_missing
     {
         DJAY_SCHEMA_CHECKED
             .write()
@@ -850,6 +919,24 @@ fn repair_djay_schema(db_path: &Path) -> Result<bool> {
                 ))
                 .execute(conn)?;
             }
+            if legacy_content_defaults_missing {
+                diesel::sql_query(format!(
+                    "UPDATE content SET \
+                         isHotCueAutoLoadOn = COALESCE(isHotCueAutoLoadOn, 1), \
+                         masterDbId = COALESCE(masterDbId, 0), \
+                         contentLink = CASE \
+                             WHEN contentLink IS NULL OR contentLink = 0 \
+                             THEN {ONE_LIBRARY_CONTENT_LINK} ELSE contentLink END, \
+                         cueUpdateCount = NULLIF(cueUpdateCount, 0), \
+                         analysisDataUpdateCount = NULLIF(analysisDataUpdateCount, 0), \
+                         informationUpdateCount = NULLIF(informationUpdateCount, 0) \
+                     WHERE isHotCueAutoLoadOn IS NULL OR masterDbId IS NULL \
+                        OR contentLink IS NULL OR contentLink = 0 \
+                        OR cueUpdateCount = 0 OR analysisDataUpdateCount = 0 \
+                        OR informationUpdateCount = 0"
+                ))
+                .execute(conn)?;
+            }
             Ok(())
         });
         let enable = diesel::sql_query("PRAGMA foreign_keys = ON").execute(&mut conn);
@@ -865,6 +952,104 @@ fn repair_djay_schema(db_path: &Path) -> Result<bool> {
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(cache_key(db_path), schema_created_ns(db_path));
+    Ok(true)
+}
+
+/// 0.2.39 只在 djay 自己完成分析后才可能得到 `analysisDataFilePath`。但 djay 的
+/// Cue 持久化目标正是 ANLZ；没有路径时 Cue 只留在当前 deck，另一 deck 立即读不到。
+/// 为旧 KDJ 曲目补最小可写 bundle，不伪造 beatgrid/波形，也绝不替换已有分析文件。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn repair_missing_kdj_analysis_bundles(db_path: &Path) -> Result<bool> {
+    let key = cache_key(db_path);
+    let created_ns = schema_created_ns(db_path);
+    if ANALYSIS_PATHS_CHECKED
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+        .is_some_and(|cached| *cached == created_ns)
+    {
+        return Ok(false);
+    }
+
+    let root = db_path
+        .ancestors()
+        .nth(3)
+        .context("OneLibrary 数据库路径不完整")?
+        .to_path_buf();
+    let library = OneLibrary::new(db_path).context("扫描旧 KDJ 分析路径失败")?;
+    let missing: Vec<_> = library
+        .get_contents()?
+        .into_iter()
+        .filter(|content| {
+            if !content
+                .path
+                .replace('\\', "/")
+                .starts_with("/Contents/KDJ/")
+            {
+                return false;
+            }
+            let expected = AnalysisBundle::placeholder(&content.path);
+            let has_expected_path = content
+                .analysis_data_file_path
+                .as_deref()
+                .is_some_and(|path| path == expected.database_path);
+            content
+                .analysis_data_file_path
+                .as_deref()
+                .is_none_or(str::is_empty)
+                || (has_expected_path
+                    && expected
+                        .files
+                        .iter()
+                        .any(|file| !root.join(&file.relative_path).is_file()))
+        })
+        .collect();
+    drop(library);
+    if missing.is_empty() {
+        ANALYSIS_PATHS_CHECKED
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, created_ns);
+        return Ok(false);
+    }
+
+    let backup = backup_database(db_path)?;
+    let mut created_files = Vec::new();
+    let result = (|| -> Result<()> {
+        let library = OneLibrary::new(db_path).context("修复旧 KDJ 分析路径失败")?;
+        for mut content in missing {
+            let bundle = AnalysisBundle::placeholder(&content.path);
+            let database_path = bundle.database_path.clone();
+            write_missing_analysis_bundle(&root, bundle, &mut created_files)?;
+            content.analysis_data_file_path = Some(database_path);
+            content.analysed_bits.get_or_insert(0);
+            content.is_hot_cue_auto_load_on.get_or_insert(1);
+            content.master_db_id.get_or_insert(0);
+            if content.content_link.unwrap_or_default() == 0 {
+                content.content_link = Some(ONE_LIBRARY_CONTENT_LINK);
+            }
+            content.information_update_count = Some(
+                content
+                    .information_update_count
+                    .unwrap_or_default()
+                    .saturating_add(1),
+            );
+            library.update_content(content)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        restore_database(db_path, backup.as_deref());
+        for path in created_files {
+            let _ = fs::remove_file(path);
+        }
+        return Err(error).context("补齐旧 KDJ Cue 存储失败，已恢复原数据库");
+    }
+    invalidate_one_library_read_cache(db_path);
+    ANALYSIS_PATHS_CHECKED
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key, schema_created_ns(db_path));
     Ok(true)
 }
 
@@ -917,6 +1102,7 @@ fn repair_new_rbox_schema(db_path: &Path) -> Result<()> {
 fn open_or_create_library(db_path: &Path) -> Result<OneLibrary> {
     if db_path.is_file() {
         repair_djay_schema(db_path)?;
+        repair_missing_kdj_analysis_bundles(db_path)?;
         return OneLibrary::new(db_path).context("现有 OneLibrary 数据库无法读取");
     }
     if let Some(parent) = db_path.parent() {
@@ -2112,6 +2298,52 @@ fn export_embedded_cover(
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn existing_kdj_content_paths(db_path: &Path) -> Result<HashMap<i64, String>> {
+    if !db_path.is_file() {
+        return Ok(HashMap::new());
+    }
+    let library = OneLibrary::new(db_path).context("OneLibrary 数据库无法读取")?;
+    let mut selected: HashMap<i64, ((i32, i32, i32), String)> = HashMap::new();
+    for content in library.get_contents()? {
+        if !content
+            .path
+            .replace('\\', "/")
+            .starts_with("/Contents/KDJ/")
+        {
+            continue;
+        }
+        let Some(local_id) = content.master_content_id.map(i64::from) else {
+            continue;
+        };
+        // 旧版本可能在本地文件大小或路径变化后为同一 track id 插入重复 content。
+        // 优先继续使用已被 djay 修改、修订号更高的原记录，避免新副本绕开其 Cue。
+        let score = (
+            content.has_modified.unwrap_or_default(),
+            content
+                .cue_update_count
+                .unwrap_or_default()
+                .saturating_add(content.analysis_data_update_count.unwrap_or_default())
+                .saturating_add(content.information_update_count.unwrap_or_default()),
+            -content.id,
+        );
+        match selected.entry(local_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert((score, content.path));
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if score > entry.get().0 {
+                    entry.insert((score, content.path));
+                }
+            }
+        }
+    }
+    Ok(selected
+        .into_iter()
+        .map(|(id, (_, path))| (id, path))
+        .collect())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn export_playlist_to_device(
     device: RemovableDevice,
     target_playlist_id: Option<i32>,
@@ -2131,10 +2363,17 @@ fn export_playlist_to_device(
         db_path: String,
         relative: PathBuf,
         file_size: u64,
+        exported_file_size: u64,
+        reuse_existing_audio: bool,
         file_type: i32,
         analysis: Option<LocalAnalysis>,
     }
 
+    if db_path.is_file() {
+        repair_djay_schema(&db_path)?;
+        repair_missing_kdj_analysis_bundles(&db_path)?;
+    }
+    let existing_paths = existing_kdj_content_paths(&db_path)?;
     let mut prepared = Vec::new();
     let mut warnings = Vec::new();
     for track in tracks {
@@ -2158,7 +2397,25 @@ fn export_playlist_to_device(
             warnings.push(format!("已跳过超过 2 GB 的文件：{}", track.filename));
             continue;
         }
-        let (database_path, relative) = usb_track_path(&track, file_size);
+        let (database_path, relative, stable_existing_path) =
+            if let Some(database_path) = existing_paths.get(&track.id) {
+                let absolute = one_library_relative_path(&root, database_path)?;
+                let relative = absolute
+                    .strip_prefix(&root)
+                    .context("OneLibrary 曲目路径不在存储根目录内")?
+                    .to_path_buf();
+                (database_path.clone(), relative, true)
+            } else {
+                let (database_path, relative) = usb_track_path(&track, file_size);
+                (database_path, relative, false)
+            };
+        let destination_size = root
+            .join(&relative)
+            .metadata()
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.len());
+        let reuse_existing_audio = stable_existing_path && destination_size.is_some();
         let analysis = analysis_cache_dir
             .and_then(|cache_dir| crate::waveform::load_cached_default(track.id, source, cache_dir))
             .and_then(|waveform| LocalAnalysis::from_local(&track, waveform));
@@ -2167,6 +2424,8 @@ fn export_playlist_to_device(
             db_path: database_path,
             relative,
             file_size,
+            exported_file_size: destination_size.unwrap_or(file_size),
+            reuse_existing_audio,
             file_type: kind,
             analysis,
         });
@@ -2198,10 +2457,11 @@ fn export_playlist_to_device(
         let mut exported_analysis = 0usize;
         for item in &prepared {
             let destination = root.join(&item.relative);
-            if destination
-                .metadata()
-                .map(|meta| meta.len() == item.file_size)
-                .unwrap_or(false)
+            if item.reuse_existing_audio
+                || destination
+                    .metadata()
+                    .map(|meta| meta.len() == item.file_size)
+                    .unwrap_or(false)
             {
                 reused_tracks += 1;
             } else {
@@ -2294,22 +2554,21 @@ fn export_playlist_to_device(
                 .year
                 .get(..4)
                 .and_then(|value| value.parse::<i32>().ok());
-            let analysis = item
-                .analysis
-                .as_ref()
-                .map(|analysis| {
-                    let bundle = analysis.bundle(&item.db_path);
-                    let database_path = bundle.database_path.clone();
-                    let changed = write_analysis_bundle(
-                        &root,
-                        bundle,
-                        &mut created_files,
-                        &mut replaced_files,
-                    )?;
-                    exported_analysis += 1;
-                    Ok::<_, anyhow::Error>((database_path, changed))
-                })
-                .transpose()?;
+            let (analysis_path, analysis_changed, has_local_analysis) = if let Some(local) =
+                item.analysis.as_ref()
+            {
+                let bundle = local.bundle(&item.db_path);
+                let database_path = bundle.database_path.clone();
+                let changed =
+                    write_analysis_bundle(&root, bundle, &mut created_files, &mut replaced_files)?;
+                exported_analysis += 1;
+                (database_path, changed, true)
+            } else {
+                let bundle = AnalysisBundle::placeholder(&item.db_path);
+                let database_path = bundle.database_path.clone();
+                let changed = write_missing_analysis_bundle(&root, bundle, &mut created_files)?;
+                (database_path, changed, false)
+            };
             if let Some(mut content) = existing_content.remove(&item.db_path) {
                 let previous = content.clone();
                 if !one_library_image_is_readable(&root, &library, content.image_id)? {
@@ -2334,15 +2593,16 @@ fn export_playlist_to_device(
                 content.dj_comment = Some(item.track.comment.clone());
                 content.rating = Some(item.track.rating.clamp(0, 5) as i32);
                 content.release_year = release_year;
+                content.is_hot_cue_auto_load_on.get_or_insert(1);
                 content.file_name = Some(item.track.filename.clone());
-                content.file_size = Some(item.file_size as i32);
+                content.file_size = Some(item.exported_file_size as i32);
                 content.file_type = Some(item.file_type);
                 content.bitrate = item.track.bitrate.map(|value| value as i32);
                 content.sampling_rate = item.track.samplerate.map(|value| value as i32);
-                if let Some((analysis_path, analysis_changed)) = &analysis {
-                    content.analysis_data_file_path = Some(analysis_path.clone());
+                content.analysis_data_file_path = Some(analysis_path.clone());
+                if has_local_analysis {
                     content.analysed_bits = Some(41);
-                    if *analysis_changed {
+                    if analysis_changed {
                         content.analysis_data_update_count = Some(
                             content
                                 .analysis_data_update_count
@@ -2350,6 +2610,8 @@ fn export_playlist_to_device(
                                 .saturating_add(1),
                         );
                     }
+                } else {
+                    content.analysed_bits.get_or_insert(0);
                 }
                 if content.image_id != previous.image_id {
                     content.has_modified = Some(1);
@@ -2387,19 +2649,18 @@ fn export_playlist_to_device(
                 content.dj_comment = Some(item.track.comment.clone());
                 content.rating = Some(item.track.rating.clamp(0, 5) as i32);
                 content.release_year = release_year;
+                content.is_hot_cue_auto_load_on = Some(1);
                 content.file_name = Some(item.track.filename.clone());
-                content.file_size = Some(item.file_size as i32);
+                content.file_size = Some(item.exported_file_size as i32);
                 content.file_type = Some(item.file_type);
                 content.bitrate = item.track.bitrate.map(|value| value as i32);
                 content.sampling_rate = item.track.samplerate.map(|value| value as i32);
+                content.master_db_id = Some(0);
                 content.master_content_id = i32::try_from(item.track.id).ok();
-                content.analysis_data_file_path = analysis.as_ref().map(|(path, _)| path.clone());
-                content.analysed_bits = Some(if analysis.is_some() { 41 } else { 0 });
-                content.content_link = Some(0);
+                content.analysis_data_file_path = Some(analysis_path);
+                content.analysed_bits = Some(if has_local_analysis { 41 } else { 0 });
+                content.content_link = Some(ONE_LIBRARY_CONTENT_LINK);
                 content.has_modified = Some(0);
-                content.cue_update_count = Some(0);
-                content.analysis_data_update_count = Some(0);
-                content.information_update_count = Some(0);
                 content_ids.push(library.insert_content(content)?.id);
             }
         }
@@ -2508,6 +2769,7 @@ pub fn one_library_capacity_plan(
 ) -> Result<OneLibraryCapacityPlan> {
     let device = checked_device(requested_device)?;
     let root = Path::new(&device.path);
+    let existing_paths = existing_kdj_content_paths(&one_library_db(root))?;
     let mut seen = std::collections::HashSet::new();
     let mut required_bytes = 16 * 1024 * 1024u64; // SQLite/WAL、M3U 与目录结构余量。
     for track in tracks {
@@ -2516,8 +2778,13 @@ pub fn one_library_capacity_plan(
             continue;
         }
         let file_size = source.metadata()?.len();
-        let (_, relative) = usb_track_path(track, file_size);
-        if !root.join(relative).is_file() {
+        let destination = if let Some(path) = existing_paths.get(&track.id) {
+            one_library_relative_path(root, path)?
+        } else {
+            let (_, relative) = usb_track_path(track, file_size);
+            root.join(relative)
+        };
+        if !destination.is_file() {
             required_bytes = required_bytes.saturating_add(file_size);
         }
     }
@@ -2888,6 +3155,110 @@ mod tests {
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     #[test]
+    fn repairs_missing_kdj_analysis_path_or_files_with_a_writable_cue_bundle() {
+        let root = std::env::temp_dir().join(format!(
+            "kdj-one-cue-bundle-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let db_path = one_library_db(&root);
+        let library = open_or_create_library(&db_path).unwrap();
+        let content = library
+            .insert_content(NewContent::new("/Contents/KDJ/song.mp3"))
+            .unwrap();
+        let missing_files_bundle = AnalysisBundle::placeholder("/Contents/KDJ/missing-files.mp3");
+        let mut missing_files = NewContent::new("/Contents/KDJ/missing-files.mp3");
+        missing_files.analysis_data_file_path = Some(missing_files_bundle.database_path.clone());
+        let missing_files = library.insert_content(missing_files).unwrap();
+        drop(library);
+
+        repair_djay_schema(&db_path).unwrap();
+        assert!(repair_missing_kdj_analysis_bundles(&db_path).unwrap());
+        let library = OneLibrary::new(&db_path).unwrap();
+        let repaired = library.get_content_by_id(content.id).unwrap().unwrap();
+        let dat = repaired
+            .analysis_data_file_path
+            .as_deref()
+            .expect("旧曲目必须得到 Cue 存储路径");
+        assert_eq!(repaired.analysed_bits, Some(0));
+        let directory = root
+            .join(dat.trim_start_matches('/'))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(directory.join("ANLZ0000.DAT").is_file());
+        assert!(directory.join("ANLZ0000.EXT").is_file());
+        assert!(directory.join("ANLZ0000.2EX").is_file());
+        let repaired_files = library
+            .get_content_by_id(missing_files.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            repaired_files.analysis_data_file_path,
+            Some(missing_files_bundle.database_path)
+        );
+        for file in missing_files_bundle.files {
+            assert!(root.join(file.relative_path).is_file());
+        }
+        drop(library);
+        assert!(!repair_missing_kdj_analysis_bundles(&db_path).unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn repairs_old_kdj_rows_without_overriding_an_explicit_hot_cue_setting() {
+        let root = std::env::temp_dir().join(format!(
+            "kdj-one-cue-autoload-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let db_path = one_library_db(&root);
+        let library = open_or_create_library(&db_path).unwrap();
+        let content = library
+            .insert_content(NewContent::new("/Contents/KDJ/song.mp3"))
+            .unwrap();
+        drop(library);
+        let mut conn = rbox::one_library::establish_connection(db_path.to_str().unwrap()).unwrap();
+        diesel::sql_query(
+            "INSERT INTO cue (cue_id, content_id, kind, isActiveLoop, inUsec, outUsec) \
+             VALUES (1, ?, 1, 1, 1000000, 2000000)",
+        )
+        .bind::<diesel::sql_types::Integer, _>(content.id)
+        .execute(&mut conn)
+        .unwrap();
+        drop(conn);
+
+        assert!(repair_djay_schema(&db_path).unwrap());
+        let library = OneLibrary::new(&db_path).unwrap();
+        let repaired = library.get_content_by_id(content.id).unwrap().unwrap();
+        assert_eq!(repaired.is_hot_cue_auto_load_on, Some(1));
+        assert_eq!(repaired.master_db_id, Some(0));
+        assert_eq!(repaired.content_link, Some(ONE_LIBRARY_CONTENT_LINK));
+        assert_eq!(repaired.cue_update_count, None);
+        assert_eq!(repaired.analysis_data_update_count, None);
+        assert_eq!(repaired.information_update_count, None);
+        assert_eq!(library.get_cues().unwrap().len(), 1, "修复不能删除已有 Cue");
+
+        let mut disabled = repaired;
+        disabled.is_hot_cue_auto_load_on = Some(0);
+        disabled.content_link = Some(853_760);
+        disabled.cue_update_count = Some(1);
+        library.update_content(disabled).unwrap();
+        drop(library);
+        invalidate_one_library_schema_cache(&db_path);
+        assert!(!repair_djay_schema(&db_path).unwrap());
+        let library = OneLibrary::new(&db_path).unwrap();
+        let unchanged = library.get_content_by_id(content.id).unwrap().unwrap();
+        assert_eq!(unchanged.is_hot_cue_auto_load_on, Some(0));
+        assert_eq!(unchanged.content_link, Some(853_760));
+        assert_eq!(unchanged.cue_update_count, Some(1));
+        drop(library);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
     fn one_library_content_paths_cannot_escape_the_device_root() {
         let base = std::env::temp_dir().join(format!(
             "kdj-one-path-{}-{}",
@@ -3159,13 +3530,34 @@ mod tests {
             .expect("导出的播放列表");
         let contents = library.get_playlist_contents(exported.id).unwrap();
         assert_eq!(contents.len(), 1);
+        let original_content_id = contents[0].id;
+        let original_content_path = contents[0].path.clone();
         assert_eq!(contents[0].title.as_deref(), Some("Test Track"));
         assert_eq!(contents[0].bpmx100, Some(12_800));
         assert!(contents[0].path.starts_with("/Contents/KDJ/"));
-        assert_eq!(contents[0].analysis_data_file_path, None);
+        let placeholder_path = contents[0]
+            .analysis_data_file_path
+            .as_deref()
+            .expect("未分析曲目也必须预留 Cue 存储");
+        assert!(root
+            .join(placeholder_path.trim_start_matches('/'))
+            .is_file());
         assert_eq!(contents[0].analysed_bits, Some(0));
+        assert_eq!(contents[0].is_hot_cue_auto_load_on, Some(1));
+        assert_eq!(contents[0].master_db_id, Some(0));
+        assert_eq!(contents[0].content_link, Some(ONE_LIBRARY_CONTENT_LINK));
+        assert_eq!(contents[0].cue_update_count, None);
+        assert_eq!(contents[0].analysis_data_update_count, None);
+        assert_eq!(contents[0].information_update_count, None);
         drop(library);
 
+        // 音频标签编辑会改变文件大小；track id 没变时仍必须复用原 content 与
+        // 原 ANLZ 路径，否则 djay 保存的 Cue 会留在旧副本上。
+        fs::write(
+            &source,
+            b"not-real-audio-but-valid-export-payload-after-tag-edit",
+        )
+        .unwrap();
         let second = export_playlist_to_device(device, None, export_name, vec![track], None)
             .expect("增量导出");
         assert_eq!(second.copied_tracks, 0);
@@ -3181,11 +3573,15 @@ mod tests {
             .into_iter()
             .find(|item| item.name == export_name)
             .unwrap();
+        let contents = library.get_playlist_contents(exported.id).unwrap();
         assert_eq!(
-            library.get_playlist_contents(exported.id).unwrap().len(),
+            contents.len(),
             1,
             "重复拖入必须复用 playlist_content，不能在 OneLibrary 中复制条目"
         );
+        assert_eq!(contents[0].id, original_content_id);
+        assert_eq!(contents[0].path, original_content_path);
+        assert_eq!(library.get_contents().unwrap().len(), 1);
         drop(library);
         let _ = fs::remove_dir_all(base);
     }
@@ -3240,14 +3636,26 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            export_playlist_to_device(device, None, "Analyzed", vec![track], Some(&cache)).unwrap();
+        let result = export_playlist_to_device(
+            device.clone(),
+            None,
+            "Analyzed",
+            vec![track.clone()],
+            Some(&cache),
+        )
+        .unwrap();
         assert!(result.analysis_note.contains("无需重新分析"));
 
         let library = OneLibrary::new(one_library_db(&root)).unwrap();
         let content = library.get_contents().unwrap().pop().unwrap();
         let analysis_path = content.analysis_data_file_path.expect("应关联本地分析文件");
         assert_eq!(content.analysed_bits, Some(41));
+        assert_eq!(content.is_hot_cue_auto_load_on, Some(1));
+        assert_eq!(content.master_db_id, Some(0));
+        assert_eq!(content.content_link, Some(ONE_LIBRARY_CONTENT_LINK));
+        assert_eq!(content.cue_update_count, None);
+        assert_eq!(content.analysis_data_update_count, None);
+        assert_eq!(content.information_update_count, None);
         assert!(root.join(analysis_path.trim_start_matches('/')).is_file());
         let directory = root
             .join(analysis_path.trim_start_matches('/'))
@@ -3257,6 +3665,29 @@ mod tests {
         assert!(directory.join("ANLZ0000.EXT").is_file());
         assert!(directory.join("ANLZ0000.2EX").is_file());
         drop(library);
+
+        // 模拟 djay 把 Hot Cue 写入现有 PCOB。增量导出只能更新波形/beatgrid，
+        // 不能把这个外部 Cue 段重新写成空列表。
+        let dat_path = directory.join("ANLZ0000.DAT");
+        let mut external = fs::read(&dat_path).unwrap();
+        let hot_cue = external
+            .windows(4)
+            .position(|window| window == b"PCOB")
+            .expect("DAT 应包含 Hot Cue PCOB");
+        assert_eq!(
+            u32::from_be_bytes(external[hot_cue + 12..hot_cue + 16].try_into().unwrap()),
+            1
+        );
+        external[hot_cue + 18..hot_cue + 20].copy_from_slice(&1u16.to_be_bytes());
+        fs::write(&dat_path, &external).unwrap();
+
+        export_playlist_to_device(device, None, "Analyzed", vec![track], Some(&cache)).unwrap();
+        let preserved = fs::read(&dat_path).unwrap();
+        assert_eq!(
+            &preserved[hot_cue..hot_cue + 24],
+            &external[hot_cue..hot_cue + 24],
+            "再次导出必须保留 djay 写入的 Cue 段"
+        );
         let _ = fs::remove_dir_all(base);
     }
 

@@ -1,7 +1,7 @@
 //! 把 KDJ 已有的本地分析组装成 Pioneer/OneLibrary 可直接读取的 ANLZ 文件。
 //!
-//! 这里只做格式转换，不解码音频：BPM、首拍和波形任一缺失时返回 `None`，
-//! 调用方继续保留未分析状态，让目标软件按原有流程兜底。
+//! 这里只做格式转换，不解码音频。完整 BPM、首拍和波形可直接生成分析；缺少它们时
+//! 仍生成只预留 Cue 段的占位 bundle，让 djay 有稳定、可写的 ANLZ 目标。
 
 use std::path::PathBuf;
 
@@ -46,6 +46,42 @@ pub(crate) struct AnalysisBundle {
     /// `content.analysisDataFilePath` 使用带前导 `/` 的 DAT 路径。
     pub database_path: String,
     pub files: Vec<AnalysisFile>,
+}
+
+impl AnalysisBundle {
+    /// 未完成本地分析的曲目仍必须有关联 ANLZ。djay 把 Cue 写在这些文件里；若
+    /// `analysisDataFilePath` 为空，Cue 只活在当前 deck，换歌后立即消失。
+    pub fn placeholder(usb_path: &str) -> Self {
+        let directory = anlz_directory(usb_path);
+        let path = path_section(usb_path);
+        let dat = anlz_file(&[path.clone(), empty_cue_section(1), empty_cue_section(0)]);
+        let ext = anlz_file(&[
+            path.clone(),
+            empty_cue_section(1),
+            empty_cue_section(0),
+            empty_extended_cue_section(1),
+            empty_extended_cue_section(0),
+        ]);
+        let two_ex = anlz_file(&[path]);
+        let database_path = format!("/{directory}/ANLZ0000.DAT");
+        Self {
+            database_path,
+            files: vec![
+                AnalysisFile {
+                    relative_path: PathBuf::from(&directory).join("ANLZ0000.DAT"),
+                    body: dat,
+                },
+                AnalysisFile {
+                    relative_path: PathBuf::from(&directory).join("ANLZ0000.EXT"),
+                    body: ext,
+                },
+                AnalysisFile {
+                    relative_path: PathBuf::from(directory).join("ANLZ0000.2EX"),
+                    body: two_ex,
+                },
+            ],
+        }
+    }
 }
 
 impl LocalAnalysis {
@@ -453,6 +489,84 @@ fn three_band_summary_section() -> Vec<u8> {
     tag(b"PWVC", &[0, 0], &body)
 }
 
+fn anlz_section_ranges(body: &[u8]) -> Option<(usize, Vec<std::ops::Range<usize>>)> {
+    if body.len() < ANLZ_HEADER_LEN as usize || body.get(..4)? != b"PMAI" {
+        return None;
+    }
+    let header_len = usize::try_from(u32::from_be_bytes(body.get(4..8)?.try_into().ok()?)).ok()?;
+    let declared_len =
+        usize::try_from(u32::from_be_bytes(body.get(8..12)?.try_into().ok()?)).ok()?;
+    if header_len < 12 || header_len > body.len() || declared_len != body.len() {
+        return None;
+    }
+    let mut ranges = Vec::new();
+    let mut offset = header_len;
+    while offset < body.len() {
+        let section_header_end = offset.checked_add(12)?;
+        if section_header_end > body.len() {
+            return None;
+        }
+        let total_len = usize::try_from(u32::from_be_bytes(
+            body.get(offset + 8..section_header_end)?.try_into().ok()?,
+        ))
+        .ok()?;
+        if total_len < 12 {
+            return None;
+        }
+        let end = offset.checked_add(total_len)?;
+        if end > body.len() {
+            return None;
+        }
+        ranges.push(offset..end);
+        offset = end;
+    }
+    (offset == body.len()).then_some((header_len, ranges))
+}
+
+fn cue_section_key(body: &[u8], range: &std::ops::Range<usize>) -> Option<([u8; 4], u32)> {
+    if range.end.saturating_sub(range.start) < 16 {
+        return None;
+    }
+    let tag: [u8; 4] = body.get(range.start..range.start + 4)?.try_into().ok()?;
+    if tag != *b"PCOB" && tag != *b"PCO2" {
+        return None;
+    }
+    let list_type = u32::from_be_bytes(
+        body.get(range.start + 12..range.start + 16)?
+            .try_into()
+            .ok()?,
+    );
+    Some((tag, list_type))
+}
+
+/// KDJ 只拥有 beatgrid 与波形；djay/Rekordbox 写入的 PCOB/PCO2 才是演出 Cue 的
+/// 权威副本。增量导出可以更新其它段，但绝不能用本地生成的空 Cue 段覆盖它们。
+pub(crate) fn preserve_external_cue_sections(generated: &[u8], existing: &[u8]) -> Vec<u8> {
+    let Some((generated_header_len, generated_ranges)) = anlz_section_ranges(generated) else {
+        return generated.to_vec();
+    };
+    let Some((_, existing_ranges)) = anlz_section_ranges(existing) else {
+        return generated.to_vec();
+    };
+
+    let mut merged = Vec::with_capacity(generated.len().max(existing.len()));
+    merged.extend_from_slice(&generated[..generated_header_len]);
+    for generated_range in generated_ranges {
+        let replacement = cue_section_key(generated, &generated_range).and_then(|key| {
+            existing_ranges.iter().find_map(|existing_range| {
+                (cue_section_key(existing, existing_range) == Some(key))
+                    .then(|| &existing[existing_range.clone()])
+            })
+        });
+        merged.extend_from_slice(replacement.unwrap_or(&generated[generated_range]));
+    }
+    let Ok(total_len) = u32::try_from(merged.len()) else {
+        return generated.to_vec();
+    };
+    merged[8..12].copy_from_slice(&total_len.to_be_bytes());
+    merged
+}
+
 /// Rekordbox 从音频的 USB 路径计算 USBANLZ 目录；数据库路径也必须指向同一处。
 fn anlz_directory(usb_path: &str) -> String {
     let mut hash = 0u32;
@@ -551,5 +665,70 @@ mod tests {
         incomplete.first_beat = Some(0.25);
         incomplete.analyzed_at = None;
         assert!(LocalAnalysis::from_local(&incomplete, waveform()).is_none());
+    }
+
+    #[test]
+    fn placeholder_bundle_reserves_writable_memory_hot_and_extended_cues() {
+        let bundle = AnalysisBundle::placeholder("/Contents/KDJ/Test.mp3");
+        assert_eq!(bundle.files.len(), 3);
+        let dat = &bundle.files[0].body;
+        let dat_keys: Vec<_> = anlz_section_ranges(dat)
+            .unwrap()
+            .1
+            .iter()
+            .filter_map(|range| cue_section_key(dat, range))
+            .collect();
+        assert_eq!(dat_keys, vec![(*b"PCOB", 1), (*b"PCOB", 0)]);
+        let ext = &bundle.files[1].body;
+        let ext_keys: Vec<_> = anlz_section_ranges(ext)
+            .unwrap()
+            .1
+            .iter()
+            .filter_map(|range| cue_section_key(ext, range))
+            .collect();
+        assert_eq!(
+            ext_keys,
+            vec![(*b"PCOB", 1), (*b"PCOB", 0), (*b"PCO2", 1), (*b"PCO2", 0),]
+        );
+        assert!(bundle.database_path.ends_with("/ANLZ0000.DAT"));
+    }
+
+    #[test]
+    fn incremental_analysis_keeps_external_cue_sections_byte_for_byte() {
+        let analysis = LocalAnalysis::from_local(&track(), waveform()).unwrap();
+        let generated = analysis.bundle("/Contents/KDJ/Test.mp3").files[0]
+            .body
+            .clone();
+        let (_, ranges) = anlz_section_ranges(&generated).unwrap();
+        let hot_range = ranges
+            .into_iter()
+            .find(|range| cue_section_key(&generated, range) == Some((*b"PCOB", 1)))
+            .unwrap();
+        let mut external_hot = generated[hot_range.clone()].to_vec();
+        external_hot[18..20].copy_from_slice(&1u16.to_be_bytes());
+        external_hot.extend_from_slice(b"PCPT-external-cue");
+        let section_len = u32::try_from(external_hot.len()).unwrap();
+        external_hot[8..12].copy_from_slice(&section_len.to_be_bytes());
+
+        let mut existing = Vec::new();
+        existing.extend_from_slice(&generated[..hot_range.start]);
+        existing.extend_from_slice(&external_hot);
+        existing.extend_from_slice(&generated[hot_range.end..]);
+        let existing_len = u32::try_from(existing.len()).unwrap();
+        existing[8..12].copy_from_slice(&existing_len.to_be_bytes());
+
+        let mut regenerated = generated.clone();
+        // 改一个非 Cue 段字节，证明合并仍采用新分析内容。
+        let path_range = anlz_section_ranges(&regenerated).unwrap().1[0].clone();
+        regenerated[path_range.end - 2] ^= 0x01;
+
+        let merged = preserve_external_cue_sections(&regenerated, &existing);
+        let (_, merged_ranges) = anlz_section_ranges(&merged).unwrap();
+        let merged_hot = merged_ranges
+            .into_iter()
+            .find(|range| cue_section_key(&merged, range) == Some((*b"PCOB", 1)))
+            .unwrap();
+        assert_eq!(&merged[merged_hot], external_hot);
+        assert_eq!(merged[path_range.end - 2], regenerated[path_range.end - 2]);
     }
 }
