@@ -58,6 +58,9 @@ pub use scan::{next_scan_work, ScanJobView, ScanWork, StemScanStatus, SCAN_VIEWP
 
 pub const MODEL_ID: &str = "classical-vocal-hpss";
 pub const MODEL_VERSION: &str = "dsp-v2";
+/// Stable non-file identity passed through the legacy `cachePath` transport field. The playback
+/// actor uses this only to key and reuse the live DSP pool; the model-free runtime never opens it.
+pub const RUNTIME_KEY: &str = "builtin://classical-vocal-hpss/dsp-v2";
 pub const MODEL_ARCHIVE_BYTES: u64 = 0;
 /// Algorithm/cache identity, not a downloadable artifact hash.
 pub const MODEL_ARCHIVE_SHA256: &str =

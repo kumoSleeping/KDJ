@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::cache::{StemKind, StemWaveform};
 use crate::live::{live_stem_waveform, stem_runtime_diagnostics, StemRuntimeDiagnostics};
 use crate::scan::{StemScanScheduler, StemScanStatus};
-use crate::{MODEL_ID, MODEL_VERSION};
+use crate::{MODEL_ID, MODEL_VERSION, RUNTIME_KEY};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,7 +28,8 @@ pub struct TrackStemStatus {
     pub track_id: i64,
     pub state: String,
     pub progress: f32,
-    /// Kept for the existing transport schema. Classical DSP owns no model or whole-track cache.
+    /// Kept for the existing transport schema. For classical DSP this is a stable runtime key,
+    /// not a model or whole-track cache path.
     pub cache_path: String,
     pub duration: f64,
     pub error: String,
@@ -81,7 +82,10 @@ impl StemCoordinator {
             track_id,
             state: "ready".into(),
             progress,
-            cache_path: String::new(),
+            // Performance playback still carries its runtime identity through the historical
+            // `cachePath` field. An empty value means "not installable" to PlayerBar, so publish
+            // the built-in DSP key even though the worker never opens a file at this location.
+            cache_path: RUNTIME_KEY.into(),
             duration: scan.duration,
             error: scan.error.clone(),
             phase: scan.phase,
@@ -173,5 +177,13 @@ mod tests {
         assert_eq!(status.state, "ready");
         assert_eq!(status.total_bytes, 0);
         assert!(status.diagnostics.runtime.contains("Classical"));
+    }
+
+    #[test]
+    fn ready_track_exposes_the_builtin_runtime_to_the_playback_bridge() {
+        let coordinator = StemCoordinator::new(Path::new("/unused"));
+        let status = coordinator.track_status(42, 7);
+        assert_eq!(status.state, "ready");
+        assert_eq!(status.cache_path, RUNTIME_KEY);
     }
 }
