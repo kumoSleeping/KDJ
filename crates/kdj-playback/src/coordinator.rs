@@ -4,9 +4,21 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use kdj_core::FilterResonance;
+#[cfg(test)]
+use kdj_player::DecodedTrack;
 use kdj_player::{
-    decode_file_streaming, decode_source_streaming, DeckId, PlayerMode, RtCommand, StreamMetadata,
-    StreamSource, TransitionPlan, DEFAULT_STREAM_BUFFER_SECONDS,
+    decode_file_streaming_looped, decode_live_stem_streaming, decode_source_streaming_looped,
+    run_pitch_preserving_pipeline, DeckId, LoopWindow, PlayerMode, RtCommand, StemFrame,
+    StreamMetadata, StreamSeekControl, StreamSource, StreamWriter, TempoControl, TransitionPlan,
+    DEFAULT_FILTER_RESONANCE_Q, DEFAULT_STREAM_BUFFER_SECONDS, FILTER_RESONANCE_HIGH_Q,
+    FILTER_RESONANCE_LOW_Q, FILTER_RESONANCE_MEDIUM_Q, STEM_GAIN_MAX,
+};
+#[cfg(test)]
+use kdj_stems::record_stem_output_underrun;
+use kdj_stems::{
+    acquire_stem_pool, stem_output_underruns_by_deck, stem_runtime_diagnostics, StemInferencePool,
+    StemPoolGuard,
 };
 
 use crate::contract::{
@@ -21,11 +33,36 @@ const ACTOR_TICK: Duration = Duration::from_millis(10);
 const SEEK_ACTOR_TICK: Duration = Duration::from_millis(1);
 const STATE_INTERVAL: Duration = Duration::from_millis(100);
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
+// A long raw PCM ring absorbs decode/network jitter. The final post-Rubber-Band ring is
+// intentionally short, so a new fader target cannot wait behind seconds of old-tempo PCM.
+const TEMPO_OUTPUT_BUFFER_MS: u64 = 160;
 const STARTUP_BUFFER_MS: u64 = 120;
-const SEEK_BUFFER_MS: u64 = 40;
+const SEEK_BUFFER_MS: u64 = 120;
+// SCNet inference and tile assembly stay outside the callback. Once a fixed tile is ready, this
+// short post-tempo ring absorbs scheduler jitter without retaining seconds of stale controls.
+const STEM_TEMPO_OUTPUT_BUFFER_MS: u64 = 640;
+/// ORG remains audible throughout a cache miss. Replace it only after SCNet has produced a bounded
+/// quarter-second cushion from the context-safe centre of its fixed tile.
+const STEM_STARTUP_BUFFER_MS: u64 = 250;
+const STEM_SEEK_STARTUP_BUFFER_MS: u64 = 250;
 /// 同曲 seek 的互补平滑换手时长：短到无感，长到足以消掉随机采样点之间的阶跃。
 const SEEK_HANDOFF_MS: u64 = 5;
+/// A pending replacement even a few milliseconds away must not publish the outgoing decoder.
+/// 50ms used to let SYNC phase-align seeks leak the old playhead, which the UI interpolated
+/// as the needle and beat grid reversing under a centered playhead.
+const LIVE_CLOCK_SAME_ORIGIN_SEC: f64 = 0.008;
 const TRANSPORT_FADE_MS: u64 = 120;
+/// Edge-jog pitch bend persists just long enough for consecutive rotary packets to feel smooth,
+/// then automatically returns to the deck's actual TEMPO without a frontend timer race.
+const JOG_NUDGE_HOLD: Duration = Duration::from_millis(90);
+const JOG_NUDGE_MAX_RATE_OFFSET: f32 = 0.18;
+/// A prepared replacement is aligned to the still-running original Deck. Late cache output is
+/// skipped forward; the transport clock is never pulled backwards.
+const STEM_HANDOFF_EARLY_SEC: f64 = 0.002;
+const STEM_HANDOFF_ALIGN_SEC: f64 = 0.02;
+const STEM_HANDOFF_KEEP_MS: u64 = 80;
+const STEM_RECOVERY_BASE_DELAY: Duration = Duration::from_millis(900);
+const STEM_RECOVERY_MAX_DELAY: Duration = Duration::from_secs(8);
 
 type CommandReply = SyncSender<Result<CommandAck, String>>;
 type StateReply = SyncSender<PlaybackSnapshot>;
@@ -135,11 +172,66 @@ enum Request {
 }
 
 #[derive(Clone)]
+enum PlaybackStream {
+    Stereo(Arc<StreamSource>),
+    Stems(Arc<StreamSource<StemFrame>>),
+}
+
+impl PlaybackStream {
+    fn buffered_frames(&self) -> u64 {
+        match self {
+            Self::Stereo(source) => source.buffered_frames(),
+            Self::Stems(source) => source.buffered_frames(),
+        }
+    }
+
+    fn ended(&self) -> bool {
+        match self {
+            Self::Stereo(source) => source.ended(),
+            Self::Stems(source) => source.ended(),
+        }
+    }
+
+    fn drained(&self) -> bool {
+        match self {
+            Self::Stereo(source) => source.drained(),
+            Self::Stems(source) => source.drained(),
+        }
+    }
+
+    fn discard_frames(&self, frames: u64) -> u64 {
+        match self {
+            Self::Stereo(source) => source.discard_frames(frames),
+            Self::Stems(source) => source.discard_frames(frames),
+        }
+    }
+}
+
+enum PlaybackStreamWriter {
+    Stereo(StreamWriter),
+    Stems(StreamWriter<StemFrame>),
+}
+
+#[derive(Clone)]
 struct DeckRuntime {
     source_id: u64,
-    source: Arc<StreamSource>,
+    source: PlaybackStream,
     request: PlaybackSource,
+    tempo: TempoControl,
     output_sample_rate: u32,
+    loop_playback: Option<LoopPlayback>,
+    /// Per-worker cancel epoch. Seek/STEM replacements create a new pending worker without
+    /// storing 0 here, so the audible decoder keeps filling its ring until promote.
+    cancel: Arc<AtomicU64>,
+    /// Deck seek. A SCNet cache miss lands on ORG first and publishes only the latest prepared tile.
+    seek: StreamSeekControl,
+}
+
+/// Transport loop on the current source. Times are track seconds, not a replacement slice.
+#[derive(Clone, Copy)]
+struct LoopPlayback {
+    start: f64,
+    length: f64,
 }
 
 impl DeckRuntime {
@@ -170,17 +262,67 @@ enum Activation {
     Transition(PendingTransition),
 }
 
+#[derive(Debug)]
+enum StemHandoff {
+    Install,
+    Wait,
+    Retarget(f64),
+}
+
 struct PendingStream {
     revision: u64,
-    source: Arc<StreamSource>,
+    source: PlaybackStream,
     request: PlaybackSource,
+    tempo: TempoControl,
     output_sample_rate: u32,
+    startup_buffer_frames: u64,
     activation: Option<Activation>,
+    cancel: Arc<AtomicU64>,
+    /// After an instant stereo seek lands, start the live STEM worker without holding the jump.
+    followup_stems: bool,
+    /// A moved capacitive platter keeps the outgoing source frozen until this replacement has a
+    /// decoded cushion. Promotion releases it without changing logical Play/Pause intent.
+    release_scratch_hold: bool,
+    seek: StreamSeekControl,
 }
 
 struct DeferredStream {
     request: PlaybackSource,
     activation: Option<Activation>,
+}
+
+#[derive(Clone)]
+struct StemRecovery {
+    track_id: i64,
+    cache_path: String,
+    mask: u8,
+    gains: [f32; 4],
+    attempts: u32,
+    next_attempt: Instant,
+    in_flight: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DeckMixer {
+    channel_gain: f32,
+    trim_db: f32,
+    low_db: f32,
+    mid_db: f32,
+    high_db: f32,
+    filter: f32,
+}
+
+impl Default for DeckMixer {
+    fn default() -> Self {
+        Self {
+            channel_gain: 1.0,
+            trim_db: 0.0,
+            low_db: 0.0,
+            mid_db: 0.0,
+            high_db: 0.0,
+            filter: 0.0,
+        }
+    }
 }
 
 struct Actor {
@@ -193,6 +335,7 @@ struct Actor {
     pending: [Option<PendingStream>; 2],
     revisions: [u64; 2],
     revision_fences: [Arc<AtomicU64>; 2],
+    loop_windows: [Arc<LoopWindow>; 2],
     next_revision: u64,
     front: DeckId,
     retire_after_transition: Option<DeckId>,
@@ -202,6 +345,15 @@ struct Actor {
     last_state_tick: Instant,
     volume: f32,
     eq: (f32, f32),
+    filter_resonance: f32,
+    manual_mode: bool,
+    manual_desired_playing: [bool; 2],
+    scratch_held: [bool; 2],
+    jog_nudge_until: [Option<Instant>; 2],
+    deck_mixers: [DeckMixer; 2],
+    stem_pool: Option<(PathBuf, Arc<StemInferencePool>, StemPoolGuard)>,
+    observed_stem_underruns: [u64; 2],
+    stem_recoveries: [Option<StemRecovery>; 2],
     shutdown: bool,
     queue: Vec<PlaybackSource>,
 }
@@ -223,6 +375,7 @@ impl Actor {
             pending: [None, None],
             revisions: [0, 0],
             revision_fences: [Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))],
+            loop_windows: [Arc::new(LoopWindow::new()), Arc::new(LoopWindow::new())],
             next_revision: 1,
             front: DeckId::A,
             retire_after_transition: None,
@@ -232,6 +385,15 @@ impl Actor {
             last_state_tick: Instant::now(),
             volume: 1.0,
             eq: (0.0, 0.0),
+            filter_resonance: DEFAULT_FILTER_RESONANCE_Q,
+            manual_mode: false,
+            manual_desired_playing: [false; 2],
+            scratch_held: [false; 2],
+            jog_nudge_until: [None, None],
+            deck_mixers: [DeckMixer::default(); 2],
+            stem_pool: None,
+            observed_stem_underruns: stem_output_underruns_by_deck(),
+            stem_recoveries: [None, None],
             shutdown: false,
             queue: Vec::new(),
         };
@@ -254,8 +416,12 @@ impl Actor {
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
+            self.release_expired_jog_nudges();
             self.promote_ready_streams();
+            self.release_stem_pool_if_idle();
             self.refresh_from_audio();
+            self.protect_audio_from_stem_underrun();
+            self.retry_interrupted_stems();
             self.publish(false);
         }
         self.invalidate(DeckId::A);
@@ -265,11 +431,12 @@ impl Actor {
 
     fn awaiting_seek_promotion(&self) -> bool {
         self.state.phase == PlaybackPhase::Seeking
-            || self
-                .pending
-                .iter()
-                .flatten()
-                .any(|pending| matches!(pending.activation, Some(Activation::Seek)))
+            || self.pending.iter().enumerate().any(|(index, pending)| {
+                pending.as_ref().is_some_and(|pending| {
+                    matches!(pending.activation, Some(Activation::Seek))
+                        || self.decks[index].is_some()
+                })
+            })
     }
 
     fn handle(&mut self, request: Request) {
@@ -287,9 +454,19 @@ impl Actor {
                     }));
                     return;
                 }
+                // TEMPO is a continuous control, not a transport transition. Its acknowledgement
+                // must still be ordered, but force-emitting a full snapshot for every pointer
+                // sample makes the WebView re-render every waveform rail at mouse-event rate.
+                let immediate_snapshot = !matches!(
+                    &command,
+                    PlaybackCommand::SetDeckRate { .. }
+                        | PlaybackCommand::NudgeDeck { .. }
+                        | PlaybackCommand::ScratchDeck { .. }
+                        | PlaybackCommand::SetDeckStems { .. }
+                );
                 let result = self.apply_command(command_id, command).map(|()| {
                     self.bump_sequence();
-                    self.publish(true);
+                    self.publish(immediate_snapshot);
                     CommandAck {
                         command_id,
                         accepted_sequence: self.state.sequence,
@@ -300,9 +477,16 @@ impl Actor {
             }
             Request::PlatformCommand { command, reply } => {
                 let command_id = self.state.last_command_id;
+                let immediate_snapshot = !matches!(
+                    &command,
+                    PlaybackCommand::SetDeckRate { .. }
+                        | PlaybackCommand::NudgeDeck { .. }
+                        | PlaybackCommand::ScratchDeck { .. }
+                        | PlaybackCommand::SetDeckStems { .. }
+                );
                 let result = self.apply_command(command_id, command).map(|()| {
                     self.bump_sequence();
-                    self.publish(true);
+                    self.publish(immediate_snapshot);
                     CommandAck {
                         command_id,
                         accepted_sequence: self.state.sequence,
@@ -329,11 +513,51 @@ impl Actor {
                     return;
                 }
                 if let Err(error) = result {
-                    let activation = self.pending[deck as usize]
+                    let failed = self.pending[deck as usize].take();
+                    let activation = failed.as_ref().and_then(|pending| pending.activation);
+                    let failed_stem = failed
                         .as_ref()
-                        .and_then(|pending| pending.activation);
-                    self.pending[deck as usize] = None;
-                    if activation.is_some() || deck == self.front {
+                        .is_some_and(|pending| pending.request.stem_enabled);
+                    let releases_scratch_hold = failed
+                        .as_ref()
+                        .is_some_and(|pending| pending.release_scratch_hold);
+                    if releases_scratch_hold {
+                        // A replacement that never reached its cushion must not leave its old
+                        // source frozen under the user's hand forever. Keep the original transport
+                        // intent and return that still-installed source to audible playback.
+                        self.release_scratch_hold(deck);
+                    }
+                    if activation.is_none() && self.decks[deck as usize].is_some() {
+                        self.state.decks[deck as usize].buffering = false;
+                        self.state.buffering = false;
+                        if failed_stem {
+                            // A live STEM worker is an optional replacement while the original
+                            // stream stays installed. Never turn a model/cache failure into a
+                            // transport command: SYNC and a platter release must leave the Deck
+                            // playing its original mix rather than silently pausing it.
+                            self.state.decks[deck as usize].desired_playing =
+                                self.manual_desired_playing[deck as usize];
+                            if self.manual_desired_playing[deck as usize] {
+                                self.state.decks[deck as usize].is_playing = true;
+                            }
+                            self.state.desired_playing = self
+                                .manual_desired_playing
+                                .into_iter()
+                                .any(|playing| playing);
+                            self.state.is_playing =
+                                self.state.decks.iter().any(|view| view.is_playing);
+                            self.state.phase = if self.state.is_playing {
+                                PlaybackPhase::Playing
+                            } else {
+                                PlaybackPhase::Paused
+                            };
+                            self.state.error = format!("实时 STEM 启动失败，已保留原曲：{error}");
+                        } else {
+                            // Switching back to explicit ORG is allowed to preserve the old
+                            // runtime if its replacement decode fails.
+                            self.state.error = format!("音频模式切换失败，已保留当前声音：{error}");
+                        }
+                    } else if activation.is_some() || deck == self.front {
                         self.fail(error);
                     } else {
                         self.state.prepared_track_id = None;
@@ -359,12 +583,61 @@ impl Actor {
         match command {
             PlaybackCommand::Load { source } => self.load(source),
             PlaybackCommand::Prepare { source } => self.prepare(source),
+            PlaybackCommand::LoadDeck { deck, source } => self.load_deck(deck, source),
             PlaybackCommand::SetQueue { sources } => {
                 self.queue = sources;
                 self.prewarm_queue()
             }
             PlaybackCommand::Play => self.set_playing(true),
             PlaybackCommand::Pause => self.set_playing(false),
+            PlaybackCommand::PlayDeck { deck } => self.set_deck_playing(deck, true),
+            PlaybackCommand::PauseDeck { deck } => self.set_deck_playing(deck, false),
+            PlaybackCommand::SetDeckScratchHeld { deck, held } => {
+                self.set_deck_scratch_held(deck, held)
+            }
+            PlaybackCommand::ScratchDeck { deck, delta } => self.scratch_deck(deck, delta),
+            PlaybackCommand::SeekDeck {
+                deck,
+                position,
+                play_when_ready,
+            } => self.seek_deck_when_ready(deck, position, play_when_ready),
+            PlaybackCommand::NudgeDeck { deck, amount } => self.nudge_deck(deck, amount),
+            PlaybackCommand::SetDeckRate { deck, rate } => self.set_deck_rate(deck, rate),
+            PlaybackCommand::SetDeckMixer {
+                deck,
+                channel_gain,
+                trim_db,
+                low_db,
+                mid_db,
+                high_db,
+                filter,
+            } => self.set_deck_mixer(
+                deck,
+                DeckMixer {
+                    channel_gain,
+                    trim_db,
+                    low_db,
+                    mid_db,
+                    high_db,
+                    filter,
+                },
+            ),
+            PlaybackCommand::SetFilterResonance { resonance } => {
+                self.set_filter_resonance(resonance)
+            }
+            PlaybackCommand::SetDeckStems {
+                track_id,
+                enabled,
+                cache_path,
+                mask,
+                gains,
+            } => self.set_deck_stems(track_id, enabled, cache_path, mask, gains),
+            PlaybackCommand::SetDeckLoop {
+                track_id,
+                start,
+                length,
+            } => self.set_deck_loop(track_id, start, length),
+            PlaybackCommand::ClearDeckLoop { track_id } => self.clear_deck_loop(track_id),
             PlaybackCommand::Seek { position } => self.seek(position),
             PlaybackCommand::Handoff {
                 track_id,
@@ -403,6 +676,11 @@ impl Actor {
         player
             .send(RtCommand::SetMasterGain(self.volume))
             .map_err(|error| error.to_string())?;
+        player
+            .send(RtCommand::SetFilterResonance {
+                q: self.filter_resonance,
+            })
+            .map_err(|error| error.to_string())?;
         self.player = Some(player);
         Ok(())
     }
@@ -410,6 +688,8 @@ impl Actor {
     fn load(&mut self, mut source: PlaybackSource) -> Result<(), String> {
         self.open_output()?;
         validate_source(&source)?;
+        self.manual_mode = false;
+        self.manual_desired_playing = [false; 2];
         self.settle_transition()?;
         source.position = source.position.max(0.0);
         // 状态先落账、激活后执行：一旦激活失败必须整体回滚，
@@ -422,7 +702,7 @@ impl Actor {
         self.state.prepared_track_id = None;
         self.state.current_time = source.position;
         self.state.duration = source.duration.unwrap_or(0.0).max(0.0);
-        self.state.rate = 1.0;
+        self.state.rate = source.rate;
         self.state.buffering = true;
         self.state.transitioning = false;
 
@@ -448,6 +728,12 @@ impl Actor {
     fn prepare(&mut self, mut source: PlaybackSource) -> Result<(), String> {
         self.open_output()?;
         validate_source(&source)?;
+        // LoadDeck 把 coordinator 交给用户直接控制的两台物理 Deck。此后普通播放器
+        // 的推荐/队列 prepare 只能被忽略；它没有目标 side 所有权，若继续按
+        // front.other() 预热，会 bump 掉用户刚拖入但尚未完成解码的明确装盘。
+        if self.manual_mode {
+            return Ok(());
+        }
         source.position = source.position.max(0.0);
         if self.reusable_deck(&source).is_some()
             || self
@@ -493,6 +779,635 @@ impl Actor {
         self.start_stream(target, source, None)
     }
 
+    fn load_deck(&mut self, deck: u8, mut source: PlaybackSource) -> Result<(), String> {
+        self.open_output()?;
+        validate_source(&source)?;
+        let deck = deck_id(deck)?;
+        self.stem_recoveries[deck as usize] = None;
+        self.clear_jog_nudge(deck);
+        self.release_scratch_hold(deck);
+        self.settle_transition()?;
+        self.enter_manual_mode();
+        source.position = clamp_position(source.position, source.duration);
+        self.manual_desired_playing[deck as usize] = source.autoplay;
+        let view = &mut self.state.decks[deck as usize];
+        view.track_id = Some(source.track_id);
+        view.current_time = source.position;
+        view.duration = source.duration.unwrap_or(0.0).max(0.0);
+        view.desired_playing = source.autoplay;
+        view.is_playing = false;
+        view.rate = source.rate;
+        view.buffering = true;
+        // SCNet is a background tile model. Even an explicit STEM load starts with ORG and records
+        // a follow-up request; only a context-safe prepared cushion may replace it.
+        self.start_original_with_optional_stem_followup(deck, source, None, true)
+    }
+
+    fn set_deck_playing(&mut self, deck: u8, playing: bool) -> Result<(), String> {
+        let deck = deck_id(deck)?;
+        if !playing {
+            self.clear_jog_nudge(deck);
+        }
+        let request = self
+            .source_for_deck(deck)
+            .ok_or_else(|| "目标 Deck 尚未装入曲目".to_string())?;
+        self.enter_manual_mode();
+        let index = deck as usize;
+        if self.scratch_held[index] {
+            // An explicit transport button supersedes a momentary platter gesture. Clear the
+            // callback hold first; `SetDeckPlaying` then remains the only Play/Pause mutation.
+            self.send(RtCommand::SetDeckScratchHeld { deck, held: false })?;
+            self.scratch_held[index] = false;
+        }
+        self.manual_desired_playing[index] = playing;
+        self.state.decks[index].desired_playing = playing;
+        if self.decks[index].is_some() {
+            self.send(RtCommand::SetMode(PlayerMode::RealtimeDj))?;
+            self.send(RtCommand::SetDeckPlaying { deck, playing })?;
+            self.state.decks[index].is_playing = playing;
+        }
+        self.front = deck;
+        let current_time = self.state.decks[index].current_time;
+        let duration = self.decks[index]
+            .as_ref()
+            .map(DeckRuntime::duration)
+            .unwrap_or_else(|| request.duration.unwrap_or(0.0).max(0.0));
+        self.state.track_id = Some(request.track_id);
+        self.adopt_metadata(&request);
+        self.state.current_time = current_time;
+        self.state.duration = duration;
+        self.state.rate = request.rate;
+        self.state.buffering = self.state.decks[index].buffering;
+        self.state.desired_playing = self.manual_desired_playing.into_iter().any(|value| value);
+        self.state.is_playing = self.state.decks.iter().any(|deck| deck.is_playing);
+        self.state.phase = if self.state.is_playing {
+            PlaybackPhase::Playing
+        } else if self.state.track_id.is_some() {
+            PlaybackPhase::Paused
+        } else {
+            PlaybackPhase::Idle
+        };
+        Ok(())
+    }
+
+    fn set_deck_scratch_held(&mut self, deck: u8, held: bool) -> Result<(), String> {
+        let deck = deck_id(deck)?;
+        let index = deck as usize;
+        if !held {
+            self.release_scratch_hold(deck);
+            return Ok(());
+        }
+        if self.decks[index].is_none() {
+            return Err("目标 Deck 尚未装入曲目".to_string());
+        }
+        // A jog touch is a source-cursor hold, not a hidden PauseDeck command.
+        self.enter_manual_mode();
+        // `enter_manual_mode` is a no-op when already manual, so a stale false intent must not
+        // ignore a Deck that is actually playing. Touching that platter used to freeze only the
+        // waveform while the callback kept walking, and note-off jumped to "where it would have been".
+        let playing = self.manual_desired_playing[index]
+            || self.state.decks[index].is_playing
+            || self.state.decks[index].desired_playing;
+        if !playing {
+            return Ok(());
+        }
+        self.manual_desired_playing[index] = true;
+        self.state.decks[index].desired_playing = true;
+        self.clear_jog_nudge(deck);
+        self.send(RtCommand::SetMode(PlayerMode::RealtimeDj))?;
+        self.send(RtCommand::SetDeckScratchHeld { deck, held: true })?;
+        self.scratch_held[index] = true;
+        Ok(())
+    }
+
+    fn release_scratch_hold(&mut self, deck: DeckId) {
+        let index = deck as usize;
+        if !self.scratch_held[index] {
+            return;
+        }
+        let _ = self.send(RtCommand::SetDeckScratchHeld { deck, held: false });
+        self.scratch_held[index] = false;
+    }
+
+    fn seek_deck(&mut self, deck: u8, position: f64) -> Result<(), String> {
+        self.seek_deck_when_ready(deck, position, false)
+    }
+
+    fn seek_deck_when_ready(
+        &mut self,
+        deck: u8,
+        position: f64,
+        play_when_ready: bool,
+    ) -> Result<(), String> {
+        if !position.is_finite() || position < 0.0 {
+            return Err("播放位置无效".into());
+        }
+        let deck = deck_id(deck)?;
+        self.clear_jog_nudge(deck);
+        // 自动接歌模式下 manual_desired_playing 还没有接管两台 Deck。先从真实
+        // snapshot 继承走带状态，再重建流；否则第一次点 Hot Cue / scratch 会把
+        // 正在播放的 Deck 当成 false，seek 完就意外停住。
+        self.enter_manual_mode();
+        let index = deck as usize;
+        let release_scratch_hold = self.scratch_held[index];
+        if play_when_ready {
+            // Do not send SetDeckPlaying here. A paused ordinary Deck may request a resume at
+            // promotion time, while a held playing Deck already retains its true transport intent.
+            self.manual_desired_playing[index] = true;
+            self.state.decks[index].desired_playing = true;
+        }
+        let Some(mut source) = self.source_for_deck(deck) else {
+            if release_scratch_hold {
+                self.release_scratch_hold(deck);
+            }
+            return Err("目标 Deck 没有可重建的音频源".to_string());
+        };
+        source.position = clamp_position(position, source.duration);
+        source.autoplay = self.manual_desired_playing[index];
+        let view = &mut self.state.decks[index];
+        view.current_time = source.position;
+        // Keep the live decoder audible while the new position buffers. Marking buffering here
+        // used to freeze the transport UI for the whole time-stretcher startup window.
+        view.buffering = self.decks[deck as usize].is_none();
+        // SCNet is non-causal and needs a complete context tile. A seek outside the prepared ring
+        // must never fade into silence while that tile runs: install ORG at the target first, then
+        // let the normal follow-up handoff publish only the latest generation.
+        if source.stem_enabled {
+            let result = self.start_original_with_optional_stem_followup(deck, source, None, true);
+            if result.is_ok() && release_scratch_hold {
+                if let Some(pending) = self.pending[index].as_mut() {
+                    pending.release_scratch_hold = true;
+                }
+            } else if result.is_err() && release_scratch_hold {
+                self.release_scratch_hold(deck);
+            }
+            return result;
+        }
+        if self.retarget_live_stems(deck, source.track_id, source.position)? {
+            if release_scratch_hold {
+                self.release_scratch_hold(deck);
+            }
+            return Ok(());
+        }
+        let result = self.start_original_with_optional_stem_followup(deck, source, None, true);
+        match result {
+            Ok(()) => {
+                if release_scratch_hold {
+                    if let Some(pending) = self.pending[index].as_mut() {
+                        pending.release_scratch_hold = true;
+                    }
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if release_scratch_hold {
+                    self.release_scratch_hold(deck);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn scratch_deck(&mut self, deck: u8, delta: f64) -> Result<(), String> {
+        let deck = deck_id(deck)?;
+        if !delta.is_finite() || delta == 0.0 {
+            return Ok(());
+        }
+        let index = deck as usize;
+        // A jog packet is never an implicit load. Ignore ticks that arrive before the source
+        // exists instead of rebuilding a decoder for every relative CC.
+        if self.decks[index].is_none() {
+            return Ok(());
+        }
+        if !self.scratch_held[index] {
+            return Ok(());
+        }
+        let sample_rate = self.decks[index]
+            .as_ref()
+            .expect("checked installed Deck before converting platter delta")
+            .output_sample_rate
+            .max(1);
+        self.send(RtCommand::ScratchDeck {
+            deck,
+            delta_frames: delta * f64::from(sample_rate),
+        })?;
+        let duration = self.state.decks[index].duration;
+        let next = (self.state.decks[index].current_time + delta).max(0.0);
+        self.state.decks[index].current_time = if duration > 0.0 {
+            next.min(duration)
+        } else {
+            next
+        };
+        if deck == self.front {
+            self.state.current_time = self.state.decks[index].current_time;
+        }
+        Ok(())
+    }
+
+    fn nudge_deck(&mut self, deck: u8, amount: f32) -> Result<(), String> {
+        let deck = deck_id(deck)?;
+        if !amount.is_finite() {
+            return Err("缓动盘偏移量无效".into());
+        }
+        let index = deck as usize;
+        // A jog wheel is a realtime control, not an implicit load request. Ignore its early
+        // packets while a track is still being installed instead of restarting that install.
+        if self.decks[index].is_none() {
+            return Ok(());
+        }
+        self.enter_manual_mode();
+        let runtime = self.decks[index]
+            .as_mut()
+            .expect("checked installed Deck before entering manual mode");
+        let amount = amount.clamp(-1.0, 1.0);
+        let rate =
+            (runtime.request.rate * (1.0 + amount * JOG_NUDGE_MAX_RATE_OFFSET)).clamp(0.5, 2.0);
+        runtime.tempo.set(rate);
+        self.send(RtCommand::SetRate { deck, rate })?;
+        self.jog_nudge_until[index] = Some(Instant::now() + JOG_NUDGE_HOLD);
+        Ok(())
+    }
+
+    fn retarget_live_stems(
+        &mut self,
+        deck: DeckId,
+        track_id: i64,
+        position: f64,
+    ) -> Result<bool, String> {
+        let index = deck as usize;
+        if let Some(pending) = self.pending[index].as_mut() {
+            if pending.request.stem_enabled && pending.request.track_id == track_id {
+                let position = clamp_position(position, pending.request.duration);
+                pending.request.position = position;
+                pending.seek.request(position);
+                self.state.decks[index].current_time = position;
+                self.state.decks[index].buffering = false;
+                if deck == self.front {
+                    self.state.current_time = position;
+                    self.state.buffering = false;
+                }
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        let Some(runtime) = self.decks[index].as_mut() else {
+            return Ok(false);
+        };
+        if !runtime.request.stem_enabled || runtime.request.track_id != track_id {
+            return Ok(false);
+        }
+        let position = clamp_position(position, runtime.request.duration);
+        runtime.request.position = position;
+        runtime.seek.request(position);
+        let frame = runtime.frame_for_seconds(position);
+        self.send(RtCommand::SeekPrepared { deck, frame })?;
+        self.state.decks[index].current_time = position;
+        self.state.decks[index].buffering = false;
+        if deck == self.front {
+            self.state.current_time = position;
+            self.state.buffering = false;
+        }
+        Ok(true)
+    }
+
+    fn start_original_with_optional_stem_followup(
+        &mut self,
+        deck: DeckId,
+        mut source: PlaybackSource,
+        activation: Option<Activation>,
+        keep_original_audible: bool,
+    ) -> Result<(), String> {
+        let followup_stems = source.stem_enabled && keep_original_audible;
+        if followup_stems {
+            source.stem_enabled = false;
+        }
+        self.start_stream(deck, source, activation)?;
+        if followup_stems {
+            if let Some(pending) = self.pending[deck as usize].as_mut() {
+                pending.followup_stems = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn set_deck_rate(&mut self, deck: u8, rate: f32) -> Result<(), String> {
+        if !rate.is_finite() || !(0.5..=2.0).contains(&rate) {
+            return Err("播放速度必须在 0.5 到 2.0 之间".into());
+        }
+        let deck = deck_id(deck)?;
+        self.clear_jog_nudge(deck);
+        if self.decks[deck as usize].is_none() && self.pending[deck as usize].is_none() {
+            return Err("目标曲目尚未装入 Deck".to_string());
+        }
+        // 同 seek：第一次从自动模式进入手动 Performance 时必须继承实际播放状态，
+        // SYNC 只改 rate，不能顺带暂停正在走带的 Deck。
+        self.enter_manual_mode();
+        let index = deck as usize;
+        let live = self.decks[index].as_ref().is_some();
+        if let Some(runtime) = self.decks[index].as_mut() {
+            runtime.request.rate = rate;
+            runtime.tempo.set(rate);
+        }
+        if let Some(pending) = self.pending[index].as_mut() {
+            pending.request.rate = rate;
+            pending.tempo.set(rate);
+        }
+        self.state.decks[deck as usize].rate = rate;
+        if self.front == deck {
+            self.state.rate = rate;
+        }
+        // The Rubber Band worker sees the latest atomic target at its next input block; the
+        // callback only moves the authoritative media clock. Neither side replaces a decoder or
+        // source for a TEMPO/SYNC adjustment.
+        if live {
+            self.send(RtCommand::SetRate { deck, rate })?;
+        }
+        Ok(())
+    }
+
+    fn set_deck_mixer(&mut self, deck: u8, mut mixer: DeckMixer) -> Result<(), String> {
+        let deck = deck_id(deck)?;
+        mixer.channel_gain = finite_clamp(mixer.channel_gain, 0.0, 1.0, 1.0);
+        mixer.trim_db = finite_clamp(mixer.trim_db, -24.0, 6.0, 0.0);
+        mixer.low_db = finite_clamp(mixer.low_db, -48.0, 12.0, 0.0);
+        mixer.mid_db = finite_clamp(mixer.mid_db, -48.0, 12.0, 0.0);
+        mixer.high_db = finite_clamp(mixer.high_db, -48.0, 12.0, 0.0);
+        mixer.filter = finite_clamp(mixer.filter, -1.0, 1.0, 0.0);
+        self.deck_mixers[deck as usize] = mixer;
+        if self.decks[deck as usize].is_some() {
+            self.apply_deck_mixer(deck, mixer)?;
+        }
+        Ok(())
+    }
+
+    fn set_deck_stems(
+        &mut self,
+        track_id: i64,
+        enabled: bool,
+        cache_path: String,
+        mask: u8,
+        gains: [f32; 4],
+    ) -> Result<(), String> {
+        let deck = self
+            .deck_for_track(track_id)
+            .ok_or_else(|| "目标曲目尚未装入 Deck".to_string())?;
+        self.enter_manual_mode();
+        let mask = mask & 0b1111;
+        let gains = std::array::from_fn(|lane| finite_clamp(gains[lane], 0.0, STEM_GAIN_MAX, 1.0));
+        if enabled && cache_path.trim().is_empty() {
+            return Err("STEM runtime 路径为空".into());
+        }
+        let index = deck as usize;
+        if !enabled {
+            // An explicit ORG command cancels automatic recovery. The underrun protector restores
+            // its own recovery intent only after this call has successfully queued the bridge.
+            self.stem_recoveries[index] = None;
+        }
+        // 快速路径：Deck 已在（或正在准备）同一实时 STEM session。掩码/增益只是渲染线程的
+        // 实时混音参数，直接进回调 —— 静音/滑杆在下一回调边界生效，不重启解码 worker。
+        let live_same = self.decks[index].as_ref().is_some_and(|runtime| {
+            runtime.request.stem_enabled && runtime.request.stem_cache_path == cache_path
+        });
+        let pending_same = self.pending[index].as_ref().is_some_and(|pending| {
+            pending.request.stem_enabled && pending.request.stem_cache_path == cache_path
+        });
+        if enabled && (live_same || pending_same) {
+            if let Some(runtime) = self.decks[index].as_mut() {
+                runtime.request.stem_mask = mask;
+                runtime.request.stem_gains = gains;
+            }
+            if let Some(pending) = self.pending[index].as_mut() {
+                pending.request.stem_mask = mask;
+                pending.request.stem_gains = gains;
+            }
+            if live_same {
+                self.send(RtCommand::SetDeckStemGains {
+                    deck,
+                    gains: effective_stem_gains(mask, gains),
+                })?;
+            }
+            return Ok(());
+        }
+        // 慢速路径：原曲↔实时 STEM。原曲继续发声，分轨 worker 从当前位置开始推理。
+        let mut source = self
+            .source_for_deck(deck)
+            .ok_or_else(|| "目标 Deck 没有可重建的音频源".to_string())?;
+        source.stem_enabled = enabled;
+        source.stem_cache_path = cache_path;
+        source.stem_mask = mask;
+        source.stem_gains = gains;
+        source.position = self.state.decks[deck as usize].current_time;
+        source.autoplay = self.manual_desired_playing[deck as usize];
+        if enabled {
+            // The worker may take a while to fill its first live STEM buffer. Seed the callback
+            // before that wait instead of relying only on the post-install command below: an
+            // initial EQ mute must survive the first source installation exactly as a later
+            // realtime EQ move does.
+            self.send(RtCommand::SetDeckStemGains {
+                deck,
+                gains: effective_stem_gains(mask, gains),
+            })?;
+        }
+        // Keep the current mix audible. Pausing until the first inference block made a newly
+        // loaded playing Deck go silent, so the live waveform looked like it never started.
+        self.state.decks[deck as usize].buffering = self.decks[deck as usize].is_none();
+        self.start_stream(deck, source, None)?;
+        Ok(())
+    }
+
+    fn set_deck_loop(&mut self, track_id: i64, start: f64, length: f64) -> Result<(), String> {
+        if !start.is_finite() || !length.is_finite() || start < 0.0 || length < 0.05 {
+            return Err("循环区间无效".into());
+        }
+        if length > 180.0 {
+            return Err("循环长度超出上限".into());
+        }
+        let deck = self
+            .deck_for_track(track_id)
+            .ok_or_else(|| "目标曲目尚未装入 Deck".to_string())?;
+        self.enter_manual_mode();
+        let duration = self.state.decks[deck as usize].duration;
+        if duration > 0.0 && start + length > duration + 0.05 {
+            return Err("循环区间超出曲目长度".into());
+        }
+        let playhead = self.live_deck_seconds(deck);
+        // The performance UI can report 0 while the engine is already mid-track (deck state
+        // not yet bound). A loop starting at 0 then wrapping the live playhead would decode
+        // the intro after draining the current buffer — exactly "unrelated clip, then intro".
+        let start = if start < 0.05 && playhead.is_finite() && playhead > length + 0.05 {
+            playhead
+        } else {
+            start
+        };
+        if duration > 0.0 && start + length > duration + 0.05 {
+            return Err("循环区间超出曲目长度".into());
+        }
+        let stored_playhead = if playhead.is_finite() && playhead > 0.05 {
+            playhead
+        } else {
+            start
+        };
+        if let Some(runtime) = self.decks[deck as usize].as_mut() {
+            runtime.loop_playback = Some(LoopPlayback { start, length });
+        }
+        self.state.decks[deck as usize].loop_start = Some(start);
+        self.state.decks[deck as usize].loop_length = Some(length);
+        // Arm the callback loop flag before the decoder notices the window, so an engage
+        // underrun freezes the playhead instead of spinning around the window.
+        self.apply_engine_loop(deck)?;
+        self.loop_windows[deck as usize].set(start, length, stored_playhead);
+        Ok(())
+    }
+
+    fn clear_deck_loop(&mut self, track_id: i64) -> Result<(), String> {
+        let deck = self
+            .deck_for_track(track_id)
+            .ok_or_else(|| "目标曲目尚未装入 Deck".to_string())?;
+        self.enter_manual_mode();
+        self.invalidate_loop(deck)
+    }
+
+    /// Drop the transport loop without rebuilding the audible source, EQ or STEM session.
+    fn invalidate_loop(&mut self, deck: DeckId) -> Result<(), String> {
+        self.loop_windows[deck as usize].clear();
+        if let Some(runtime) = self.decks[deck as usize].as_mut() {
+            runtime.loop_playback = None;
+        }
+        self.state.decks[deck as usize].loop_start = None;
+        self.state.decks[deck as usize].loop_length = None;
+        self.send(RtCommand::SetDeckLoop {
+            deck,
+            looping: false,
+            start_frames: 0,
+            frames: 0,
+        })
+    }
+
+    fn apply_engine_loop(&mut self, deck: DeckId) -> Result<(), String> {
+        let Some(runtime) = self.decks[deck as usize].as_ref() else {
+            return Ok(());
+        };
+        let Some(looping) = runtime.loop_playback else {
+            return self.send(RtCommand::SetDeckLoop {
+                deck,
+                looping: false,
+                start_frames: 0,
+                frames: 0,
+            });
+        };
+        let start_frames = runtime.frame_for_seconds(looping.start);
+        let frames = runtime.frame_for_seconds(looping.length).max(1);
+        self.send(RtCommand::SetDeckLoop {
+            deck,
+            looping: true,
+            start_frames,
+            frames,
+        })
+    }
+
+    fn deck_for_track(&self, track_id: i64) -> Option<DeckId> {
+        [DeckId::A, DeckId::B].into_iter().find(|deck| {
+            self.decks[*deck as usize]
+                .as_ref()
+                .is_some_and(|runtime| runtime.request.track_id == track_id)
+                || self.pending[*deck as usize]
+                    .as_ref()
+                    .is_some_and(|pending| pending.request.track_id == track_id)
+        })
+    }
+
+    fn live_deck_seconds(&mut self, deck: DeckId) -> f64 {
+        let state_time = self.state.decks[deck as usize].current_time;
+        let Some(runtime) = self.decks[deck as usize].as_ref() else {
+            return state_time;
+        };
+        let source_id = runtime.source_id;
+        let output_sample_rate = runtime.output_sample_rate;
+        let Some(player) = self.player.as_mut() else {
+            return state_time;
+        };
+        let audio = player.snapshot();
+        if audio.deck_source_ids[deck as usize] != source_id {
+            return state_time;
+        }
+        let played = audio.deck_frames[deck as usize] as f64 / f64::from(output_sample_rate);
+        if played > 0.05 {
+            played
+        } else {
+            state_time.max(played)
+        }
+    }
+
+    fn enter_manual_mode(&mut self) {
+        if self.manual_mode {
+            return;
+        }
+        self.manual_desired_playing = [
+            self.state.decks[0].is_playing,
+            self.state.decks[1].is_playing,
+        ];
+        if self.state.desired_playing {
+            self.manual_desired_playing[self.front as usize] = true;
+        }
+        for index in 0..2 {
+            self.state.decks[index].desired_playing = self.manual_desired_playing[index];
+        }
+        self.manual_mode = true;
+    }
+
+    fn clear_jog_nudge(&mut self, deck: DeckId) {
+        let index = deck as usize;
+        if self.jog_nudge_until[index].take().is_none() {
+            return;
+        }
+        let rate = self.decks[index]
+            .as_ref()
+            .map(|runtime| runtime.request.rate);
+        if let Some(runtime) = self.decks[index].as_mut() {
+            runtime.tempo.set(runtime.request.rate);
+        }
+        if let Some(rate) = rate {
+            // The Rubber Band worker and audio callback own separate clocks. Restore both
+            // together so a temporary edge bend cannot leave the reported position drifting.
+            let _ = self.send(RtCommand::SetRate { deck, rate });
+        }
+    }
+
+    fn release_expired_jog_nudges(&mut self) {
+        let now = Instant::now();
+        for deck in [DeckId::A, DeckId::B] {
+            if self.jog_nudge_until[deck as usize].is_some_and(|until| until <= now) {
+                self.clear_jog_nudge(deck);
+            }
+        }
+    }
+
+    fn source_for_deck(&self, deck: DeckId) -> Option<PlaybackSource> {
+        self.pending[deck as usize]
+            .as_ref()
+            .map(|pending| pending.request.clone())
+            .or_else(|| {
+                self.decks[deck as usize]
+                    .as_ref()
+                    .map(|runtime| runtime.request.clone())
+            })
+    }
+
+    fn apply_deck_mixer(&mut self, deck: DeckId, mixer: DeckMixer) -> Result<(), String> {
+        self.send(RtCommand::SetDeckGain {
+            deck,
+            gain: mixer.channel_gain,
+        })?;
+        self.send(RtCommand::SetEq {
+            deck,
+            trim_db: mixer.trim_db,
+            low_db: mixer.low_db,
+            mid_db: mixer.mid_db,
+            high_db: mixer.high_db,
+            filter: mixer.filter,
+        })
+    }
+
     fn prewarm_queue(&mut self) -> Result<(), String> {
         let Some(source) = self
             .queue
@@ -506,6 +1421,13 @@ impl Actor {
     }
 
     fn set_playing(&mut self, playing: bool) -> Result<(), String> {
+        if self.manual_mode {
+            return self.set_deck_playing(self.front as u8, playing);
+        }
+        if !playing {
+            self.release_scratch_hold(DeckId::A);
+            self.release_scratch_hold(DeckId::B);
+        }
         self.state.desired_playing = playing;
         self.send_playing(playing)?;
         if !matches!(
@@ -524,6 +1446,9 @@ impl Actor {
     }
 
     fn seek(&mut self, position: f64) -> Result<(), String> {
+        if self.manual_mode {
+            return self.seek_deck(self.front as u8, position);
+        }
         // 换曲（Hard 激活）还没落地时，front 上仍是旧曲目：跳转旧曲目会顶掉
         // 新曲目的待激活流。但用户点的是新曲目的进度条——把这次跳转折进换曲，
         // 让新曲目改从目标位置起播；连续 scrub 时后到的跳转覆盖先到的装载位置。
@@ -744,6 +1669,13 @@ impl Actor {
         self.send(RtCommand::SetMasterGain(volume))
     }
 
+    fn set_filter_resonance(&mut self, resonance: FilterResonance) -> Result<(), String> {
+        self.filter_resonance = filter_resonance_q(resonance);
+        self.send(RtCommand::SetFilterResonance {
+            q: self.filter_resonance,
+        })
+    }
+
     fn set_eq(&mut self, low_db: f32, high_db: f32) -> Result<(), String> {
         if !low_db.is_finite() || !high_db.is_finite() {
             return Err("EQ 参数必须是有限数字".into());
@@ -751,10 +1683,15 @@ impl Actor {
         let values = (low_db.clamp(-24.0, 12.0), high_db.clamp(-24.0, 12.0));
         self.eq = values;
         for deck in [DeckId::A, DeckId::B] {
+            self.deck_mixers[deck as usize].low_db = values.0;
+            self.deck_mixers[deck as usize].high_db = values.1;
             self.send(RtCommand::SetEq {
                 deck,
+                trim_db: 0.0,
                 low_db: values.0,
+                mid_db: 0.0,
                 high_db: values.1,
+                filter: 0.0,
             })?;
         }
         Ok(())
@@ -772,49 +1709,212 @@ impl Actor {
             .map(|player| player.spec())
             .ok_or_else(|| "原生音频输出未初始化".to_string())?
             .sample_rate;
-        let capacity = output_rate as usize * DEFAULT_STREAM_BUFFER_SECONDS;
-        let (source, writer) = StreamSource::bounded(capacity);
-        let revision = self.bump_revision(deck);
+        let raw_capacity = output_rate as usize * DEFAULT_STREAM_BUFFER_SECONDS;
+        let output_buffer_ms = if request.stem_enabled {
+            STEM_TEMPO_OUTPUT_BUFFER_MS
+        } else {
+            TEMPO_OUTPUT_BUFFER_MS
+        };
+        let capacity = (u64::from(output_rate) * output_buffer_ms / 1_000).max(2) as usize;
+        let startup_ms = if request.stem_enabled {
+            let replacing_live_stems = self.decks[deck as usize]
+                .as_ref()
+                .is_some_and(|runtime| runtime.request.stem_enabled);
+            if replacing_live_stems {
+                STEM_SEEK_STARTUP_BUFFER_MS
+            } else {
+                STEM_STARTUP_BUFFER_MS
+            }
+            .min(output_buffer_ms.saturating_sub(40))
+        } else if matches!(activation, Some(Activation::Seek)) {
+            SEEK_BUFFER_MS.min(output_buffer_ms / 2)
+        } else {
+            STARTUP_BUFFER_MS.min(output_buffer_ms / 2)
+        };
+        let startup_buffer_frames = (u64::from(output_rate) * startup_ms / 1_000)
+            .max(1)
+            .min(capacity as u64);
+        let stem_pool = if request.stem_enabled {
+            Some(self.live_stem_pool(PathBuf::from(&request.stem_cache_path))?)
+        } else {
+            None
+        };
+        if request.stem_enabled {
+            // A prepared SCNet replacement owns a new generation. Stop an outgoing separated
+            // producer only after its ORG bridge has kept the transport audible.
+            if let Some(runtime) = self.decks[deck as usize].as_ref() {
+                if runtime.request.stem_enabled {
+                    cancel_stream(&runtime.cancel);
+                    let buffered = runtime.source.buffered_frames();
+                    if buffered > 0 {
+                        runtime.source.discard_frames(buffered);
+                    }
+                }
+            }
+        }
+        let (source, writer) = if request.stem_enabled {
+            let (source, writer) = StreamSource::<StemFrame>::bounded(capacity);
+            (
+                PlaybackStream::Stems(source),
+                PlaybackStreamWriter::Stems(writer),
+            )
+        } else {
+            let (source, writer) = StreamSource::bounded(capacity);
+            (
+                PlaybackStream::Stereo(source),
+                PlaybackStreamWriter::Stereo(writer),
+            )
+        };
+        let revision = self.bump_pending_revision(deck);
+        let same_track = self.state.decks[deck as usize].track_id == Some(request.track_id)
+            || self.decks[deck as usize]
+                .as_ref()
+                .is_some_and(|runtime| runtime.request.track_id == request.track_id);
+        if !same_track {
+            let _ = self.invalidate_loop(deck);
+        }
+        let loop_window = Arc::clone(&self.loop_windows[deck as usize]);
+        let tempo = TempoControl::new(request.rate);
+        let cancel = Arc::new(AtomicU64::new(revision));
+        let seek = StreamSeekControl::new();
         self.pending[deck as usize] = Some(PendingStream {
             revision,
-            source: Arc::clone(&source),
+            source: source.clone(),
             request: request.clone(),
+            tempo: tempo.clone(),
             output_sample_rate: output_rate,
+            startup_buffer_frames,
             activation,
+            cancel: Arc::clone(&cancel),
+            followup_stems: false,
+            release_scratch_hold: false,
+            seek: seek.clone(),
         });
         let sender = self.sender.clone();
-        let fence = Arc::clone(&self.revision_fences[deck as usize]);
         std::thread::Builder::new()
             .name(format!("kdj-stream-{}-{revision}", request.track_id))
             .spawn(move || {
-                let result = match request.source_kind {
-                    PlaybackSourceKind::Local => {
-                        let path = PathBuf::from(&request.path);
-                        decode_file_streaming(&path, request.position, output_rate, writer, || {
-                            fence.load(Ordering::Acquire) != revision
-                        })
-                    }
-                    PlaybackSourceKind::Remote => {
-                        let opened =
-                            HttpRangeSource::open(&request.path, Arc::clone(&fence), revision);
-                        opened.map_err(anyhow::Error::new).and_then(|opened| {
-                            decode_source_streaming(
-                                Box::new(opened.source),
-                                opened.hint_extension.as_deref(),
-                                &request.path,
-                                request.position,
+                let worker_request = request.clone();
+                let cancellation: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new({
+                    let cancel = Arc::clone(&cancel);
+                    move || cancel.load(Ordering::Acquire) != revision
+                });
+                let fence = Arc::clone(&cancel);
+                let result = match writer {
+                    PlaybackStreamWriter::Stems(writer) => {
+                        if worker_request.source_kind != PlaybackSourceKind::Local {
+                            Err(anyhow::anyhow!("在线曲目不能使用本机实时 STEM"))
+                        } else {
+                            let path = PathBuf::from(&worker_request.path);
+                            let track_id = worker_request.track_id;
+                            let position = worker_request.position;
+                            let duration = worker_request.duration.unwrap_or(0.0);
+                            let pool = stem_pool.expect("live STEM pool");
+                            let epoch = Arc::clone(&fence);
+                            let worker_loop = Arc::clone(&loop_window);
+                            let worker_seek = seek.clone();
+                            run_pitch_preserving_pipeline(
+                                tempo.clone(),
                                 output_rate,
+                                raw_capacity,
                                 writer,
-                                || fence.load(Ordering::Acquire) != revision,
+                                move |raw_writer, cancelled| {
+                                    let is_cancelled = || cancelled();
+                                    decode_live_stem_streaming(
+                                        &path,
+                                        track_id,
+                                        position,
+                                        duration,
+                                        output_rate,
+                                        pool,
+                                        epoch,
+                                        revision,
+                                        raw_writer,
+                                        &is_cancelled,
+                                        Some(worker_loop),
+                                        Some(worker_seek),
+                                    )
+                                },
+                                Arc::clone(&cancellation),
+                                Some(Arc::clone(&loop_window)),
+                                Some(seek),
                             )
-                        })
+                        }
                     }
+                    PlaybackStreamWriter::Stereo(writer) => match worker_request.source_kind {
+                        PlaybackSourceKind::Local => {
+                            let path = PathBuf::from(&worker_request.path);
+                            let position = worker_request.position;
+                            let worker_loop = Arc::clone(&loop_window);
+                            run_pitch_preserving_pipeline(
+                                tempo.clone(),
+                                output_rate,
+                                raw_capacity,
+                                writer,
+                                move |raw_writer, cancelled| {
+                                    let is_cancelled = || cancelled();
+                                    decode_file_streaming_looped(
+                                        &path,
+                                        position,
+                                        output_rate,
+                                        raw_writer,
+                                        &is_cancelled,
+                                        Some(worker_loop),
+                                    )
+                                },
+                                Arc::clone(&cancellation),
+                                Some(Arc::clone(&loop_window)),
+                                None,
+                            )
+                        }
+                        PlaybackSourceKind::Remote => {
+                            let path = worker_request.path.clone();
+                            let position = worker_request.position;
+                            let remote_fence = Arc::clone(&fence);
+                            let worker_loop = Arc::clone(&loop_window);
+                            run_pitch_preserving_pipeline(
+                                tempo.clone(),
+                                output_rate,
+                                raw_capacity,
+                                writer,
+                                move |raw_writer, cancelled| {
+                                    let opened = HttpRangeSource::open(
+                                        &path,
+                                        Arc::clone(&remote_fence),
+                                        revision,
+                                    );
+                                    opened.map_err(anyhow::Error::new).and_then(|opened| {
+                                        let is_cancelled = || cancelled();
+                                        decode_source_streaming_looped(
+                                            Box::new(opened.source),
+                                            opened.hint_extension.as_deref(),
+                                            &path,
+                                            position,
+                                            output_rate,
+                                            raw_writer,
+                                            &is_cancelled,
+                                            Some(worker_loop),
+                                        )
+                                    })
+                                },
+                                Arc::clone(&cancellation),
+                                Some(Arc::clone(&loop_window)),
+                                None,
+                            )
+                        }
+                    },
                 }
-                .map_err(|error| match request.source_kind {
-                    PlaybackSourceKind::Local => {
-                        format!("本地音频文件无法播放，可能已被移动或所在设备已断开：{error:#}")
+                .map_err(|error| {
+                    if request.stem_enabled {
+                        format!("实时 STEM 无法启动：{error:#}")
+                    } else {
+                        match request.source_kind {
+                            PlaybackSourceKind::Local => format!(
+                                "本地音频文件无法播放，可能已被移动或所在设备已断开：{error:#}"
+                            ),
+                            PlaybackSourceKind::Remote => format!("在线试听无法播放：{error:#}"),
+                        }
                     }
-                    PlaybackSourceKind::Remote => format!("在线试听无法播放：{error:#}"),
                 });
                 let _ = sender.send(Request::WorkerFinished {
                     deck,
@@ -826,16 +1926,137 @@ impl Actor {
         Ok(())
     }
 
+    fn live_stem_pool(&mut self, model_path: PathBuf) -> Result<Arc<StemInferencePool>, String> {
+        if let Some((loaded_path, pool, _)) = &self.stem_pool {
+            if *loaded_path == model_path {
+                return Ok(Arc::clone(pool));
+            }
+        }
+        let (guard, pool) = acquire_stem_pool(&model_path).map_err(|error| error.to_string())?;
+        self.stem_pool = Some((model_path, Arc::clone(&pool), guard));
+        Ok(pool)
+    }
+
+    fn release_stem_pool_if_idle(&mut self) {
+        let active = self
+            .decks
+            .iter()
+            .flatten()
+            .any(|deck| deck.request.stem_enabled)
+            || self
+                .pending
+                .iter()
+                .flatten()
+                .any(|pending| pending.request.stem_enabled);
+        if !active {
+            self.stem_pool = None;
+        }
+    }
+
+    /// STEM stays in the user's requested mode. An empty ring holds the last sample in the
+    /// callback until the next hop arrives. Restarting the whole worker would open a hole and
+    /// is how seek/underrun became choppy.
+    fn protect_audio_from_stem_underrun(&mut self) {
+        self.observed_stem_underruns = stem_output_underruns_by_deck();
+    }
+
+    fn retry_interrupted_stems(&mut self) {
+        let now = Instant::now();
+        for deck in [DeckId::A, DeckId::B] {
+            let index = deck as usize;
+            let Some(mut recovery) = self.stem_recoveries[index].take() else {
+                continue;
+            };
+            let same_track = self.state.decks[index].track_id == Some(recovery.track_id);
+            if !same_track {
+                continue;
+            }
+            if self.decks[index]
+                .as_ref()
+                .is_some_and(|runtime| runtime.request.stem_enabled)
+            {
+                // The replacement has reached the callback with its startup cushion.
+                continue;
+            }
+            if self.pending[index].is_some() {
+                self.stem_recoveries[index] = Some(recovery);
+                continue;
+            }
+            if recovery.in_flight {
+                // A failed worker has already left the pending slot. Turn it into a bounded
+                // backoff instead of hammering source creation every 10 ms.
+                recovery.in_flight = false;
+                recovery.attempts = recovery.attempts.saturating_add(1);
+                let multiplier = 1u32 << recovery.attempts.min(3);
+                recovery.next_attempt =
+                    now + (STEM_RECOVERY_BASE_DELAY * multiplier).min(STEM_RECOVERY_MAX_DELAY);
+            }
+            if now < recovery.next_attempt {
+                self.stem_recoveries[index] = Some(recovery);
+                continue;
+            }
+            match self.set_deck_stems(
+                recovery.track_id,
+                true,
+                recovery.cache_path.clone(),
+                recovery.mask,
+                recovery.gains,
+            ) {
+                Ok(()) => {
+                    recovery.in_flight = true;
+                    recovery.next_attempt = now + STEM_RECOVERY_MAX_DELAY;
+                }
+                Err(error) => {
+                    recovery.attempts = recovery.attempts.saturating_add(1);
+                    let multiplier = 1u32 << recovery.attempts.min(3);
+                    recovery.next_attempt =
+                        now + (STEM_RECOVERY_BASE_DELAY * multiplier).min(STEM_RECOVERY_MAX_DELAY);
+                    self.state.error = format!(
+                        "Deck {} STEM 自动恢复等待重试：{error}",
+                        if index == 0 { "A" } else { "B" }
+                    );
+                }
+            }
+            self.stem_recoveries[index] = Some(recovery);
+        }
+    }
+
+    fn stem_handoff_for(&self, deck: DeckId, pending: &PendingStream) -> StemHandoff {
+        if !pending.request.stem_enabled {
+            return StemHandoff::Install;
+        }
+        let Some(runtime) = self.decks[deck as usize].as_ref() else {
+            return StemHandoff::Install;
+        };
+        if runtime.request.stem_enabled || !self.manual_desired_playing[deck as usize] {
+            return StemHandoff::Install;
+        }
+        let now = self.state.decks[deck as usize].current_time;
+        let start = pending.request.position;
+        if now + STEM_HANDOFF_EARLY_SEC < start {
+            return StemHandoff::Wait;
+        }
+        let late = now - start;
+        if late <= STEM_HANDOFF_ALIGN_SEC {
+            return StemHandoff::Install;
+        }
+        let rate = f64::from(pending.request.rate).clamp(0.5, 2.0);
+        let skip = ((late / rate) * f64::from(pending.output_sample_rate))
+            .round()
+            .max(0.0) as u64;
+        let keep = pending
+            .startup_buffer_frames
+            .max(u64::from(pending.output_sample_rate) * STEM_HANDOFF_KEEP_MS / 1_000);
+        if pending.source.buffered_frames() > skip.saturating_add(keep) {
+            return StemHandoff::Install;
+        }
+        StemHandoff::Retarget(now + stem_followup_lead_seconds())
+    }
+
     fn promote_ready_streams(&mut self) {
         for deck in [DeckId::A, DeckId::B] {
             let ready = self.pending[deck as usize].as_ref().is_some_and(|pending| {
-                let ready_ms = if matches!(pending.activation, Some(Activation::Seek)) {
-                    SEEK_BUFFER_MS
-                } else {
-                    STARTUP_BUFFER_MS
-                };
-                let threshold = u64::from(pending.output_sample_rate) * ready_ms / 1_000;
-                pending.source.buffered_frames() >= threshold
+                pending.source.buffered_frames() >= pending.startup_buffer_frames
                     || pending.source.ended() && pending.source.buffered_frames() > 0
             });
             if !ready {
@@ -847,16 +2068,76 @@ impl Actor {
             if self.revisions[deck as usize] != pending.revision {
                 continue;
             }
-            let start_frame =
+            match self.stem_handoff_for(deck, &pending) {
+                StemHandoff::Wait => {
+                    self.pending[deck as usize] = Some(pending);
+                    continue;
+                }
+                StemHandoff::Retarget(at) => {
+                    cancel_stream(&pending.cancel);
+                    let mut request = pending.request;
+                    request.position = clamp_position(at, request.duration);
+                    request.autoplay = self.manual_desired_playing[deck as usize];
+                    if let Err(error) = self.start_stream(deck, request, None) {
+                        self.fail(error);
+                    }
+                    continue;
+                }
+                StemHandoff::Install => {}
+            }
+            let playing_original = self.manual_desired_playing[deck as usize]
+                && self.state.decks[deck as usize].is_playing
+                && self.decks[deck as usize].as_ref().is_some_and(|runtime| {
+                    !runtime.request.stem_enabled
+                        && runtime.request.track_id == pending.request.track_id
+                });
+            let mut start_frame =
                 (pending.request.position * f64::from(pending.output_sample_rate)).round() as u64;
+            if pending.request.stem_enabled && playing_original {
+                let now = self.state.decks[deck as usize].current_time;
+                let late = now - pending.request.position;
+                if late > 0.001 {
+                    let rate = f64::from(pending.request.rate).clamp(0.5, 2.0);
+                    let skip = ((late / rate) * f64::from(pending.output_sample_rate))
+                        .round()
+                        .max(0.0) as u64;
+                    pending.source.discard_frames(skip);
+                    start_frame = (now * f64::from(pending.output_sample_rate))
+                        .round()
+                        .max(0.0) as u64;
+                }
+            }
+            // STEM 从暂停的原曲切过去时不能把原曲叠进分轨。若原曲仍在发声（seek
+            // 先跳原曲、STEM 随后接上），保留 replacement 短换手，避免先静音再等推理。
+            let replace_raw_source = pending.request.stem_enabled
+                && self.decks[deck as usize]
+                    .as_ref()
+                    .is_some_and(|previous| !previous.request.stem_enabled)
+                && !self.state.decks[deck as usize].is_playing;
+            // 安装 source 会把它排进 callback 的实时命令队列。把当前 MASTER 值再放在
+            // 它的前面，保证新 Deck 的第一帧也经过全局推子，而不是依赖前端某次异步
+            // setVolume 恰好先抵达。特别是 MASTER=0 时，这条顺序是防止装盘瞬间爆音的
+            // 最后一层保护。
+            if let Err(error) = self.send(RtCommand::SetMasterGain(self.volume)) {
+                self.fail(error);
+                continue;
+            }
             let installed = self
                 .player
                 .as_mut()
                 .ok_or_else(|| "原生音频输出未初始化".to_string())
                 .and_then(|player| {
-                    player
-                        .install_stream(deck, Arc::clone(&pending.source), start_frame)
-                        .map_err(|error| error.to_string())
+                    if replace_raw_source {
+                        player.clear(deck).map_err(|error| error.to_string())?;
+                    }
+                    match &pending.source {
+                        PlaybackStream::Stereo(source) => player
+                            .install_stream(deck, Arc::clone(source), start_frame)
+                            .map_err(|error| error.to_string()),
+                        PlaybackStream::Stems(source) => player
+                            .install_stem_stream(deck, Arc::clone(source), start_frame)
+                            .map_err(|error| error.to_string()),
+                    }
                 });
             let source_id = match installed {
                 Ok(source_id) => source_id,
@@ -865,23 +2146,98 @@ impl Actor {
                     continue;
                 }
             };
+            if let Some(previous) = self.decks[deck as usize].take() {
+                // Ordinary replacements may still crossfade from the old ring. Raw→STEM was
+                // explicitly cleared above, so it has no such audible fallback; either way wait
+                // until the new source is installed before cancelling the old producer.
+                cancel_stream(&previous.cancel);
+            }
             self.decks[deck as usize] = Some(DeckRuntime {
                 source_id,
                 source: pending.source,
                 request: pending.request.clone(),
+                tempo: pending.tempo,
                 output_sample_rate: pending.output_sample_rate,
+                loop_playback: self.loop_windows[deck as usize].snapshot().map(|snap| {
+                    LoopPlayback {
+                        start: snap.start,
+                        length: snap.length,
+                    }
+                }),
+                cancel: pending.cancel,
+                seek: pending.seek,
             });
-            let _ = self.send(RtCommand::SetEq {
+            let _ = self.send(RtCommand::SetRate {
                 deck,
-                low_db: self.eq.0,
-                high_db: self.eq.1,
+                rate: pending.request.rate,
             });
+            if pending.request.stem_enabled {
+                let _ = self.send(RtCommand::SetDeckStemGains {
+                    deck,
+                    gains: effective_stem_gains(
+                        pending.request.stem_mask,
+                        pending.request.stem_gains,
+                    ),
+                });
+            }
+            let mixer = self.deck_mixers[deck as usize];
+            let _ = self.apply_deck_mixer(deck, mixer);
+            let _ = self.apply_engine_loop(deck);
             if let Some(activation) = pending.activation {
                 if let Err(error) = self.activate(deck, activation, pending.request.position) {
                     self.fail(error);
                 }
+            } else if self.manual_mode
+                && self.state.decks[deck as usize].track_id == Some(pending.request.track_id)
+            {
+                let desired = self.manual_desired_playing[deck as usize];
+                let _ = self.send(RtCommand::SetMode(PlayerMode::RealtimeDj));
+                // A scratch-held Deck never left the engine's playing set. Installing its final
+                // source must therefore only release the hold below, not issue a redundant
+                // PlayDeck that turns a platter gesture back into a transport toggle.
+                if !(pending.release_scratch_hold && desired) {
+                    let _ = self.send(RtCommand::SetDeckPlaying {
+                        deck,
+                        playing: desired,
+                    });
+                }
+                let duration = pending.request.duration.unwrap_or(0.0).max(0.0);
+                if !playing_original {
+                    self.state.decks[deck as usize].current_time = pending.request.position;
+                }
+                self.state.decks[deck as usize].duration = duration;
+                self.state.decks[deck as usize].rate = pending.request.rate;
+                self.state.decks[deck as usize].buffering = false;
+                self.state.decks[deck as usize].is_playing = desired;
+                self.state.decks[deck as usize].desired_playing = desired;
+                if desired {
+                    self.front = deck;
+                    self.state.track_id = Some(pending.request.track_id);
+                    self.adopt_metadata(&pending.request);
+                    self.state.current_time = self.state.decks[deck as usize].current_time;
+                    self.state.duration = duration;
+                    self.state.rate = pending.request.rate;
+                }
             } else {
                 self.state.prepared_track_id = Some(pending.request.track_id);
+            }
+            if pending.release_scratch_hold {
+                // The new source now owns the final jog position and has its startup cushion.
+                // Releasing this callback-only hold intentionally does not send PlayDeck: the
+                // logical transport has remained playing for the entire gesture.
+                self.release_scratch_hold(deck);
+            }
+            if pending.followup_stems {
+                let mut stem_request = pending.request.clone();
+                stem_request.stem_enabled = true;
+                if self.manual_desired_playing[deck as usize] {
+                    let now = self.state.decks[deck as usize].current_time;
+                    stem_request.position =
+                        clamp_position(now + stem_followup_lead_seconds(), stem_request.duration);
+                }
+                if let Err(error) = self.start_stream(deck, stem_request, None) {
+                    self.fail(error);
+                }
             }
             self.bump_sequence();
             self.publish(true);
@@ -940,6 +2296,10 @@ impl Actor {
             transition_frames,
             plan,
         })?;
+        self.send(RtCommand::SetRate {
+            deck,
+            rate: runtime.request.rate,
+        })?;
         self.send_playing(self.state.desired_playing)?;
         self.front = deck;
         self.state.track_id = Some(runtime.request.track_id);
@@ -947,7 +2307,7 @@ impl Actor {
         self.state.prepared_track_id = None;
         self.state.current_time = position;
         self.state.duration = runtime.duration();
-        self.state.rate = 1.0;
+        self.state.rate = runtime.request.rate;
         self.state.buffering = false;
         self.state.is_playing = self.state.desired_playing;
         self.state.transitioning = transition_frames > 0;
@@ -976,6 +2336,82 @@ impl Actor {
             Some(player) => player.snapshot(),
             None => return,
         };
+        let mut rewind_ended = [false, false];
+        for deck in [DeckId::A, DeckId::B] {
+            let index = deck as usize;
+            let Some(runtime) = self.decks[index].as_ref() else {
+                continue;
+            };
+            let view = &mut self.state.decks[index];
+            if view.track_id != Some(runtime.request.track_id) {
+                view.track_id = Some(runtime.request.track_id);
+                view.duration = runtime.duration();
+                view.rate = runtime.request.rate;
+            }
+            if audio.deck_source_ids[index] == runtime.source_id {
+                if self.pending[index].as_ref().is_some_and(|pending| {
+                    if runtime.source.drained() {
+                        // EOF rewind (and any other replacement) already published the target
+                        // clock. The drained live decoder is still parked on the last frame.
+                        return true;
+                    }
+                    let same_origin = (pending.request.position - runtime.request.position).abs()
+                        <= LIVE_CLOCK_SAME_ORIGIN_SEC;
+                    let stem_catchup = pending.request.stem_enabled
+                        && !runtime.request.stem_enabled
+                        && pending.request.track_id == runtime.request.track_id;
+                    !same_origin && !stem_catchup
+                }) {
+                    // Live is still the pre-seek decoder. Publishing that clock snaps the
+                    // playhead back, so a click looks like it did nothing.
+                    continue;
+                }
+                let played = runtime.seconds_for_frame(audio.deck_frames[index]);
+                view.current_time = played;
+                view.is_playing = audio.deck_playing[index];
+                view.buffering = self.manual_desired_playing[index]
+                    && runtime.source.buffered_frames() == 0
+                    && !runtime.source.ended();
+                if runtime.source.drained() && self.manual_desired_playing[index] {
+                    if runtime.loop_playback.is_some() {
+                        view.buffering = true;
+                    } else {
+                        self.manual_desired_playing[index] = false;
+                        view.desired_playing = false;
+                        view.is_playing = false;
+                        rewind_ended[index] = self.manual_mode
+                            && self.pending[index].is_none()
+                            && !self.scratch_held[index];
+                    }
+                }
+            }
+        }
+        if self.manual_mode {
+            for (index, should_rewind) in rewind_ended.into_iter().enumerate() {
+                if should_rewind {
+                    // Rebuild at 0 while paused so the waveform can scroll home and Play starts
+                    // from the top. Auto-DJ (non-manual) still uses the Ended → next-track path.
+                    let _ = self.seek_deck(index as u8, 0.0);
+                }
+            }
+            self.state.desired_playing = self.manual_desired_playing.into_iter().any(|value| value);
+            self.state.is_playing = audio.deck_playing.into_iter().any(|value| value);
+            self.state.buffering = self.state.decks.iter().any(|deck| deck.buffering);
+            let front_view = &self.state.decks[self.front as usize];
+            self.state.current_time = front_view.current_time;
+            self.state.duration = front_view.duration;
+            self.state.rate = front_view.rate;
+            self.state.phase = if self.state.buffering && self.state.desired_playing {
+                PlaybackPhase::Loading
+            } else if self.state.is_playing {
+                PlaybackPhase::Playing
+            } else if self.state.track_id.is_some() {
+                PlaybackPhase::Paused
+            } else {
+                PlaybackPhase::Idle
+            };
+            return;
+        }
         if self.state.phase == PlaybackPhase::Seeking
             || self.state.phase == PlaybackPhase::Loading && !self.state.transitioning
         {
@@ -1067,7 +2503,9 @@ impl Actor {
     fn reusable_deck(&self, request: &PlaybackSource) -> Option<DeckId> {
         [DeckId::A, DeckId::B].into_iter().find(|deck| {
             self.decks[*deck as usize].as_ref().is_some_and(|runtime| {
-                same_source(&runtime.request, request) && !runtime.source.drained()
+                runtime.loop_playback.is_none()
+                    && same_source(&runtime.request, request)
+                    && !runtime.source.drained()
             })
         })
     }
@@ -1113,14 +2551,42 @@ impl Actor {
             let _ = player.clear(deck);
         }
         self.decks[deck as usize] = None;
+        self.manual_desired_playing[deck as usize] = false;
+        self.scratch_held[deck as usize] = false;
+        self.state.decks[deck as usize] = crate::contract::PlaybackDeckSnapshot {
+            rate: 1.0,
+            ..crate::contract::PlaybackDeckSnapshot::default()
+        };
     }
 
     fn bump_revision(&mut self, deck: DeckId) -> u64 {
+        self.cancel_deck_workers(deck);
         let revision = self.next_revision;
         self.next_revision = self.next_revision.wrapping_add(1).max(1);
         self.revisions[deck as usize] = revision;
         self.revision_fences[deck as usize].store(revision, Ordering::Release);
         revision
+    }
+
+    /// Start a replacement decoder without silencing the installed one. The live worker keeps
+    /// its own cancel token until `promote_ready_streams` installs the new ring.
+    fn bump_pending_revision(&mut self, deck: DeckId) -> u64 {
+        if let Some(pending) = &self.pending[deck as usize] {
+            cancel_stream(&pending.cancel);
+        }
+        let revision = self.next_revision;
+        self.next_revision = self.next_revision.wrapping_add(1).max(1);
+        self.revisions[deck as usize] = revision;
+        revision
+    }
+
+    fn cancel_deck_workers(&mut self, deck: DeckId) {
+        if let Some(pending) = &self.pending[deck as usize] {
+            cancel_stream(&pending.cancel);
+        }
+        if let Some(runtime) = &self.decks[deck as usize] {
+            cancel_stream(&runtime.cancel);
+        }
     }
 
     fn invalidate(&mut self, deck: DeckId) {
@@ -1133,6 +2599,15 @@ impl Actor {
         self.pending = [None, None];
         self.deferred_stream = None;
         self.decks = [None, None];
+        self.stem_recoveries = [None, None];
+        self.manual_mode = false;
+        self.manual_desired_playing = [false; 2];
+        self.scratch_held = [false; 2];
+        self.deck_mixers = [DeckMixer {
+            low_db: self.eq.0,
+            high_db: self.eq.1,
+            ..DeckMixer::default()
+        }; 2];
         self.player.take();
         let sequence = self.state.sequence;
         let command = self.state.last_command_id;
@@ -1204,11 +2679,64 @@ fn validate_source(source: &PlaybackSource) -> Result<(), String> {
     Ok(())
 }
 
+fn cancel_stream(token: &Arc<AtomicU64>) {
+    token.store(0, Ordering::Release);
+}
+
+fn stem_followup_lead_seconds() -> f64 {
+    let diagnostics = stem_runtime_diagnostics();
+    let ms = diagnostics
+        .p95_block_ms
+        .or(diagnostics.first_block_ms)
+        .unwrap_or(500);
+    (ms as f64 / 1_000.0).clamp(0.08, 1.0)
+}
+
 fn same_source(left: &PlaybackSource, right: &PlaybackSource) -> bool {
     left.track_id == right.track_id
         && left.source_kind == right.source_kind
         && left.path == right.path
+        && left.stem_enabled == right.stem_enabled
+        && left.stem_cache_path == right.stem_cache_path
+        && left.stem_mask == right.stem_mask
+        && (left.rate - right.rate).abs() < 0.000_1
         && (left.position - right.position).abs() < 0.02
+}
+
+/// 渲染线程实际施加的每轨增益：掩码关闭的轨直接为 0，其余取 STEM EQ 线性增益。
+fn effective_stem_gains(mask: u8, gains: [f32; 4]) -> [f32; 4] {
+    std::array::from_fn(|lane| {
+        if mask & (1 << lane) != 0 {
+            finite_clamp(gains[lane], 0.0, STEM_GAIN_MAX, 0.0)
+        } else {
+            0.0
+        }
+    })
+}
+
+fn deck_id(deck: u8) -> Result<DeckId, String> {
+    match deck {
+        0 => Ok(DeckId::A),
+        1 => Ok(DeckId::B),
+        _ => Err("Deck 必须是 0 或 1".into()),
+    }
+}
+
+fn finite_clamp(value: f32, min: f32, max: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        fallback
+    }
+}
+
+fn filter_resonance_q(resonance: FilterResonance) -> f32 {
+    match resonance {
+        // Preserve the former fixed-Q sound as the explicit low setting.
+        FilterResonance::Low => FILTER_RESONANCE_LOW_Q,
+        FilterResonance::Medium => FILTER_RESONANCE_MEDIUM_Q,
+        FilterResonance::High => FILTER_RESONANCE_HIGH_Q,
+    }
 }
 
 /// 进度条最右端换算出的目标常常正好等于时长；精确 seek 到流的末尾会读出
@@ -1312,6 +2840,34 @@ mod tests {
             Ok(source_id)
         }
 
+        fn install_stem_stream(
+            &mut self,
+            deck: DeckId,
+            _source: Arc<StreamSource<StemFrame>>,
+            start_frame: u64,
+        ) -> Result<u64, String> {
+            self.next_source_id += 1;
+            let source_id = self.next_source_id;
+            let mut snapshot = self.knobs.snapshot.lock().unwrap();
+            snapshot.deck_source_ids[deck as usize] = source_id;
+            snapshot.deck_frames[deck as usize] = start_frame;
+            Ok(source_id)
+        }
+
+        fn install_decoded(
+            &mut self,
+            deck: DeckId,
+            _track: Arc<DecodedTrack>,
+            start_frame: u64,
+        ) -> Result<u64, String> {
+            self.next_source_id += 1;
+            let source_id = self.next_source_id;
+            let mut snapshot = self.knobs.snapshot.lock().unwrap();
+            snapshot.deck_source_ids[deck as usize] = source_id;
+            snapshot.deck_frames[deck as usize] = start_frame;
+            Ok(source_id)
+        }
+
         fn clear(&mut self, deck: DeckId) -> Result<(), String> {
             self.knobs.snapshot.lock().unwrap().deck_source_ids[deck as usize] = 0;
             Ok(())
@@ -1327,6 +2883,9 @@ mod tests {
                 }
                 RtCommand::SetPlaying { playing, .. } => {
                     self.knobs.snapshot.lock().unwrap().playing = playing;
+                }
+                RtCommand::SeekPrepared { deck, frame } => {
+                    self.knobs.snapshot.lock().unwrap().deck_frames[deck as usize] = frame;
                 }
                 _ => {}
             }
@@ -1384,6 +2943,10 @@ mod tests {
             duration: Some(180.0),
             rate: 1.0,
             autoplay: false,
+            stem_cache_path: String::new(),
+            stem_enabled: false,
+            stem_mask: 0b1111,
+            stem_gains: [1.0; 4],
         }
     }
 
@@ -1397,6 +2960,31 @@ mod tests {
         assert!(validate_source(&remote).is_err());
     }
 
+    #[test]
+    fn filter_resonance_setting_maps_to_the_expected_realtime_q() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        knobs.sent.lock().unwrap().clear();
+
+        actor
+            .set_filter_resonance(FilterResonance::Low)
+            .expect("低共振命令");
+        actor
+            .set_filter_resonance(FilterResonance::High)
+            .expect("高共振命令");
+
+        assert_eq!(actor.filter_resonance, FILTER_RESONANCE_HIGH_Q);
+        let sent = knobs.sent.lock().unwrap();
+        assert!(matches!(
+            sent[0],
+            RtCommand::SetFilterResonance { q } if (q - FILTER_RESONANCE_LOW_Q).abs() < f32::EPSILON
+        ));
+        assert!(matches!(
+            sent[1],
+            RtCommand::SetFilterResonance { q } if (q - FILTER_RESONANCE_HIGH_Q).abs() < f32::EPSILON
+        ));
+    }
+
     /// 造假一个“仍在发声”的 Deck：writer 故意泄漏，流永远不会 drained，
     /// reusable_deck 才会承认它。
     fn live_runtime(track_id: i64, position: f64) -> DeckRuntime {
@@ -1404,9 +2992,28 @@ mod tests {
         std::mem::forget(writer);
         DeckRuntime {
             source_id: 100 + track_id as u64,
-            source: stream,
+            source: PlaybackStream::Stereo(stream),
             request: source(track_id, position),
+            tempo: TempoControl::new(1.0),
             output_sample_rate: 48_000,
+            loop_playback: None,
+            cancel: Arc::new(AtomicU64::new(1)),
+            seek: StreamSeekControl::new(),
+        }
+    }
+
+    fn drained_runtime(track_id: i64, position: f64) -> DeckRuntime {
+        let (stream, writer) = StreamSource::bounded(48_000);
+        writer.finish();
+        DeckRuntime {
+            source_id: 100 + track_id as u64,
+            source: PlaybackStream::Stereo(stream),
+            request: source(track_id, position),
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            loop_playback: None,
+            cancel: Arc::new(AtomicU64::new(1)),
+            seek: StreamSeekControl::new(),
         }
     }
 
@@ -1635,6 +3242,419 @@ mod tests {
         assert_eq!(actor.front, DeckId::A);
     }
 
+    #[test]
+    fn failed_stem_stream_keeps_the_original_mix_and_transport_running() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.front = DeckId::A;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+        actor.state.track_id = Some(1);
+        actor.state.phase = PlaybackPhase::Playing;
+        actor.state.desired_playing = true;
+        actor.state.decks[DeckId::A as usize].desired_playing = true;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.buffering = true;
+        actor.state.decks[DeckId::A as usize].buffering = true;
+        let (shadow, writer) = StreamSource::bounded(64);
+        std::mem::forget(writer);
+        let mut request = source(1, 12.0);
+        request.stem_enabled = true;
+        request.stem_cache_path = "/missing/stem.kdstem".into();
+        request.stem_mask = 0b0111;
+        actor.revisions[DeckId::A as usize] = 77;
+        actor.pending[DeckId::A as usize] = Some(PendingStream {
+            revision: 77,
+            source: PlaybackStream::Stereo(shadow),
+            request,
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 1,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(77)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            seek: StreamSeekControl::new(),
+        });
+
+        actor.handle(Request::WorkerFinished {
+            deck: DeckId::A,
+            revision: 77,
+            result: Err("cache read failed".into()),
+        });
+
+        assert!(actor.decks[DeckId::A as usize].is_some());
+        assert!(actor.pending[DeckId::A as usize].is_none());
+        assert_eq!(actor.state.phase, PlaybackPhase::Playing);
+        assert!(!actor.state.buffering);
+        assert!(actor.state.error.contains("已保留原曲"));
+        assert!(actor.manual_desired_playing[DeckId::A as usize]);
+        assert!(
+            !knobs.sent.lock().unwrap().iter().any(|command| matches!(
+                command,
+                RtCommand::SetDeckPlaying {
+                    deck: DeckId::A,
+                    playing: false,
+                }
+            )),
+            "a failed optional STEM worker must not pause its Deck"
+        );
+    }
+
+    #[test]
+    fn an_installed_stem_underrun_keeps_the_live_worker() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        let (stems, writer) = StreamSource::<StemFrame>::bounded(48_000);
+        std::mem::forget(writer);
+        let mut runtime = live_runtime(1, 12.0);
+        runtime.source = PlaybackStream::Stems(stems);
+        runtime.request.stem_enabled = true;
+        runtime.request.stem_cache_path = "/model/hs-tasnet.onnx".into();
+        actor.decks[DeckId::A as usize] = Some(runtime);
+        actor.front = DeckId::A;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.decks[DeckId::A as usize].desired_playing = true;
+
+        actor.observed_stem_underruns = stem_output_underruns_by_deck();
+        record_stem_output_underrun();
+        actor.protect_audio_from_stem_underrun();
+
+        assert!(actor.pending[DeckId::A as usize].is_none());
+        assert!(actor.decks[DeckId::A as usize]
+            .as_ref()
+            .is_some_and(|runtime| runtime.request.stem_enabled));
+        assert!(actor.stem_recoveries[DeckId::A as usize].is_none());
+    }
+
+    #[test]
+    fn one_deck_stem_underrun_does_not_tear_down_the_other_deck() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        for (index, deck) in [DeckId::A, DeckId::B].into_iter().enumerate() {
+            let (stems, writer) = StreamSource::<StemFrame>::bounded(48_000);
+            std::mem::forget(writer);
+            let mut runtime = live_runtime(index as i64 + 1, 12.0);
+            runtime.source = PlaybackStream::Stems(stems);
+            runtime.request.stem_enabled = true;
+            runtime.request.stem_cache_path = "/model/scnet.mlmodelc".into();
+            actor.decks[deck as usize] = Some(runtime);
+            actor.state.decks[deck as usize].track_id = Some(index as i64 + 1);
+            actor.state.decks[deck as usize].current_time = 12.0;
+            actor.manual_desired_playing[deck as usize] = true;
+        }
+        actor.manual_mode = true;
+        actor.observed_stem_underruns = stem_output_underruns_by_deck();
+
+        record_stem_output_underrun();
+        actor.protect_audio_from_stem_underrun();
+
+        assert!(actor.pending[DeckId::A as usize].is_none());
+        assert!(actor.pending[DeckId::B as usize].is_none());
+        assert!(actor.decks[DeckId::A as usize]
+            .as_ref()
+            .is_some_and(|runtime| runtime.request.stem_enabled));
+        assert!(actor.decks[DeckId::B as usize]
+            .as_ref()
+            .is_some_and(|runtime| runtime.request.stem_enabled));
+    }
+
+    #[test]
+    fn stem_seek_prepares_original_bridge_before_a_new_scnet_generation() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        let (stems, writer) = StreamSource::<StemFrame>::bounded(48_000);
+        std::mem::forget(writer);
+        let mut runtime = live_runtime(1, 12.0);
+        runtime.source = PlaybackStream::Stems(stems);
+        runtime.request.stem_enabled = true;
+        runtime.request.stem_cache_path = "/model/scnet_coreml.mlpackage".into();
+        let live_cancel = Arc::clone(&runtime.cancel);
+        actor.decks[DeckId::A as usize] = Some(runtime);
+        actor.front = DeckId::A;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.decks[DeckId::A as usize].desired_playing = true;
+
+        actor
+            .seek_deck(DeckId::A as u8, 4.0)
+            .expect("STEM 跳转应建立原曲桥接");
+
+        assert_eq!(live_cancel.load(Ordering::Acquire), 1);
+        let pending = actor.pending[DeckId::A as usize]
+            .as_ref()
+            .expect("ORG bridge should be pending");
+        assert!(!pending.request.stem_enabled);
+        assert!(pending.followup_stems);
+        assert!((pending.request.position - 4.0).abs() < 1e-9);
+        assert!((actor.state.decks[DeckId::A as usize].current_time - 4.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn stem_gain_changes_ride_the_realtime_queue_without_respawning_a_worker() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        let (stream, writer) = StreamSource::<StemFrame>::bounded(48_000);
+        std::mem::forget(writer);
+        let mut runtime = live_runtime(1, 12.0);
+        runtime.source = PlaybackStream::Stems(stream);
+        runtime.request.stem_enabled = true;
+        runtime.request.stem_cache_path = "/cache/a.kdstem".into();
+        runtime.request.stem_mask = 0b1111;
+        actor.decks[DeckId::A as usize] = Some(runtime);
+        actor.front = DeckId::A;
+        actor.state.track_id = Some(1);
+        actor.manual_mode = true;
+
+        actor
+            .set_deck_stems(
+                1,
+                true,
+                "/cache/a.kdstem".into(),
+                0b0111,
+                [1.0, 0.5, 1.0, 1.0],
+            )
+            .expect("同缓存的增益调整走快路径");
+
+        assert!(
+            actor.pending[DeckId::A as usize].is_none(),
+            "增益/静音调整不得重启解码 worker"
+        );
+        let sent = knobs.sent.lock().unwrap();
+        let gains = sent
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                RtCommand::SetDeckStemGains { deck, gains } if *deck == DeckId::A => Some(*gains),
+                _ => None,
+            })
+            .expect("应直接发送实时混音命令");
+        // 掩码关掉的 vocals 为 0，bass 半音量，其余全音量。
+        assert_eq!(gains, [1.0, 0.5, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn stem_eq_boost_is_not_clamped_to_unity() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        let (stream, writer) = StreamSource::<StemFrame>::bounded(48_000);
+        std::mem::forget(writer);
+        let mut runtime = live_runtime(1, 12.0);
+        runtime.source = PlaybackStream::Stems(stream);
+        runtime.request.stem_enabled = true;
+        runtime.request.stem_cache_path = "/cache/a.kdstem".into();
+        runtime.request.stem_mask = 0b1111;
+        actor.decks[DeckId::A as usize] = Some(runtime);
+        actor.front = DeckId::A;
+        actor.state.track_id = Some(1);
+        actor.manual_mode = true;
+
+        actor
+            .set_deck_stems(
+                1,
+                true,
+                "/cache/a.kdstem".into(),
+                0b1111,
+                [1.5, 1.0, 1.0, 2.0],
+            )
+            .expect("STEM EQ 推升应走快路径");
+
+        let sent = knobs.sent.lock().unwrap();
+        let gains = sent
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                RtCommand::SetDeckStemGains { deck, gains } if *deck == DeckId::A => Some(*gains),
+                _ => None,
+            })
+            .expect("应直接发送实时混音命令");
+        assert_eq!(gains, [1.5, 1.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn loop_shares_a_live_stem_deck_without_replacing_the_source() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        let mut runtime = live_runtime(1, 12.0);
+        runtime.request.stem_enabled = true;
+        runtime.request.stem_cache_path = "/models/scnet_cpu.onnx".into();
+        actor.decks[DeckId::A as usize] = Some(runtime);
+        actor.front = DeckId::A;
+        actor.state.track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].duration = 180.0;
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+
+        actor
+            .set_deck_loop(1, 10.0, 1.0)
+            .expect("STEM 台上的 LOOP 应只改走带约束");
+
+        assert!(actor.pending[DeckId::A as usize].is_none());
+        let runtime = actor.decks[DeckId::A as usize]
+            .as_ref()
+            .expect("循环不得换掉当前 STEM 源");
+        assert!(runtime.request.stem_enabled);
+        assert!(runtime.loop_playback.is_some());
+        assert!(matches!(
+            runtime.source,
+            PlaybackStream::Stems(_) | PlaybackStream::Stereo(_)
+        ));
+        assert_eq!(actor.state.decks[DeckId::A as usize].loop_start, Some(10.0));
+        let sent = knobs.sent.lock().unwrap();
+        assert!(sent.iter().any(|command| matches!(
+            command,
+            RtCommand::SetDeckLoop {
+                deck: DeckId::A,
+                looping: true,
+                start_frames: 480_000,
+                frames: 48_000,
+            }
+        )));
+    }
+
+    #[test]
+    fn loop_outside_track_is_rejected_without_touching_playback() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.front = DeckId::A;
+        actor.state.track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].duration = 180.0;
+
+        actor
+            .set_deck_loop(1, 170.0, 20.0)
+            .expect_err("循环区间越界必须拒绝");
+
+        assert!(actor.pending[DeckId::A as usize].is_none());
+        assert!(actor.state.decks[DeckId::A as usize].loop_start.is_none());
+        assert!(actor
+            .clear_deck_loop(1)
+            .is_ok_and(|()| actor.pending[DeckId::A as usize].is_none()));
+    }
+
+    #[test]
+    fn set_deck_loop_keeps_the_current_source_and_mixer() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.front = DeckId::A;
+        actor.state.track_id = Some(1);
+        actor.manual_mode = true;
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].duration = 180.0;
+
+        actor
+            .set_deck_loop(1, 10.0, 0.1)
+            .expect("LOOP 应落在当前源上");
+        actor.set_deck_loop(1, 10.0, 0.2).expect("改拍数只更新窗口");
+
+        assert!(actor.pending[DeckId::A as usize].is_none());
+        let runtime = actor.decks[DeckId::A as usize]
+            .as_ref()
+            .expect("改循环不得换源");
+        assert!(matches!(runtime.source, PlaybackStream::Stereo(_)));
+        assert_eq!(
+            runtime.loop_playback.map(|looping| looping.length),
+            Some(0.2)
+        );
+        let sent = knobs.sent.lock().unwrap();
+        let loops = sent
+            .iter()
+            .filter(|command| matches!(command, RtCommand::SetDeckLoop { looping: true, .. }))
+            .count();
+        assert!(loops >= 2, "改拍数应再次发送走带 LOOP 命令");
+    }
+
+    #[test]
+    fn stale_zero_loop_start_follows_the_live_playhead() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 45.0));
+        actor.front = DeckId::A;
+        actor.state.track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 45.0;
+        actor.state.decks[DeckId::A as usize].duration = 180.0;
+
+        actor
+            .set_deck_loop(1, 0.0, 2.0)
+            .expect("过期的 0 起点应改用当前播放头");
+
+        assert_eq!(actor.state.decks[DeckId::A as usize].loop_start, Some(45.0));
+        assert_eq!(actor.state.decks[DeckId::A as usize].loop_length, Some(2.0));
+        let snap = actor.loop_windows[DeckId::A as usize]
+            .snapshot()
+            .expect("循环窗口应开启");
+        assert!((snap.start - 45.0).abs() < 1e-6);
+        assert!((snap.playhead - 45.0).abs() < 1e-6);
+        assert!((snap.engage_target() - 45.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn loop_in_survives_a_zero_playhead_snapshot() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 45.0));
+        actor.front = DeckId::A;
+        actor.state.track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 0.0;
+        actor.state.decks[DeckId::A as usize].duration = 180.0;
+
+        actor
+            .set_deck_loop(1, 45.0, 2.0)
+            .expect("UI 起点正确时不得被 0 播放头覆盖");
+
+        let snap = actor.loop_windows[DeckId::A as usize]
+            .snapshot()
+            .expect("循环窗口应开启");
+        assert!((snap.start - 45.0).abs() < 1e-6);
+        assert_eq!(snap.engage_target(), 45.0);
+    }
+
+    #[test]
+    fn looping_drained_deck_does_not_rewind_to_start() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        let mut runtime = drained_runtime(1, 45.0);
+        runtime.loop_playback = Some(LoopPlayback {
+            start: 45.0,
+            length: 2.0,
+        });
+        actor.decks[DeckId::A as usize] = Some(runtime);
+        actor.front = DeckId::A;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+        actor.state.track_id = Some(1);
+        actor.state.desired_playing = true;
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 46.0;
+        actor.state.decks[DeckId::A as usize].desired_playing = true;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        {
+            let mut snapshot = knobs.snapshot.lock().unwrap();
+            snapshot.deck_source_ids = [101, 0];
+            snapshot.deck_frames = [48_000 * 46, 0];
+            snapshot.deck_playing = [true, false];
+            snapshot.playing = true;
+        }
+
+        actor.refresh_from_audio();
+
+        assert!(actor.manual_desired_playing[DeckId::A as usize]);
+        assert!(actor.pending[DeckId::A as usize].is_none());
+        assert!(
+            (actor.state.decks[DeckId::A as usize].current_time - 46.0).abs() < 0.001,
+            "LOOP 欠跑不得把播放头拽回曲头"
+        );
+    }
+
     /// 换曲激活未落地时点进度条：跳转折进待激活流，新曲目改从目标位置起播，
     /// 而不是被拒绝后让进度条先跳过去再弹回来。
     #[test]
@@ -1844,6 +3864,934 @@ mod tests {
             .expect("seek 流已登记");
         assert!(matches!(pending.activation, Some(Activation::Seek)));
         assert!((pending.request.position - 30.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn deck_rate_change_inherits_a_playing_deck_before_manual_mode() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.desired_playing = true;
+
+        actor
+            .set_deck_rate(DeckId::A as u8, 0.8)
+            .expect("改变 Deck 速率");
+
+        assert!(actor.manual_mode);
+        assert!(actor.manual_desired_playing[DeckId::A as usize]);
+        assert!(actor.pending[DeckId::A as usize].is_none());
+        assert!(actor.state.decks[DeckId::A as usize].is_playing);
+        assert!(!actor.state.decks[DeckId::A as usize].buffering);
+        assert!(
+            (actor.decks[DeckId::A as usize]
+                .as_ref()
+                .unwrap()
+                .request
+                .rate
+                - 0.8)
+                .abs()
+                < 0.001
+        );
+        assert!(knobs.sent.lock().unwrap().iter().any(|command| {
+            matches!(command, RtCommand::SetRate { deck: DeckId::A, rate } if (*rate - 0.8).abs() < 0.001)
+        }));
+    }
+
+    #[test]
+    fn edge_jog_nudge_is_temporary_and_never_rebuilds_the_deck() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        let mut runtime = live_runtime(1, 12.0);
+        runtime.request.rate = 1.1;
+        actor.decks[DeckId::A as usize] = Some(runtime);
+        actor.state.track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].rate = 1.1;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.desired_playing = true;
+        let source_id = actor.decks[DeckId::A as usize]
+            .as_ref()
+            .expect("Deck A 已装入")
+            .source_id;
+        knobs.sent.lock().unwrap().clear();
+
+        actor
+            .nudge_deck(DeckId::A as u8, 1.0)
+            .expect("边缘缓动应走实时控制通道");
+
+        let runtime = actor.decks[DeckId::A as usize]
+            .as_ref()
+            .expect("缓动不能替换 Deck");
+        assert_eq!(runtime.source_id, source_id);
+        assert!(
+            (runtime.request.rate - 1.1).abs() < 0.001,
+            "TEMPO 不得被缓动写回"
+        );
+        assert!((runtime.tempo.rate() - 1.1 * (1.0 + JOG_NUDGE_MAX_RATE_OFFSET)).abs() < 0.001);
+        assert!(
+            actor.pending[DeckId::A as usize].is_none(),
+            "缓动不得启动新的解码 worker"
+        );
+        assert!((actor.state.decks[DeckId::A as usize].rate - 1.1).abs() < 0.001);
+
+        actor.jog_nudge_until[DeckId::A as usize] = Some(Instant::now() - Duration::from_millis(1));
+        actor.release_expired_jog_nudges();
+
+        let runtime = actor.decks[DeckId::A as usize]
+            .as_ref()
+            .expect("Deck A 保持原样");
+        assert!(
+            (runtime.tempo.rate() - 1.1).abs() < 0.001,
+            "超时后必须回到原 TEMPO"
+        );
+        assert!(knobs.sent.lock().unwrap().iter().any(|command| {
+            matches!(command, RtCommand::SetRate { deck: DeckId::A, rate } if (*rate - 1.1).abs() < 0.001)
+        }));
+    }
+
+    #[test]
+    fn mixer_controls_target_the_physical_deck_even_when_track_ids_are_ambiguous() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        // A seek/handoff can briefly leave the same track installed on both physical Decks.
+        // Mixer controls belong to their channel strip, not to a track ID.
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.decks[DeckId::B as usize] = Some(live_runtime(1, 18.0));
+        knobs.sent.lock().unwrap().clear();
+
+        actor
+            .set_deck_mixer(
+                DeckId::B as u8,
+                DeckMixer {
+                    channel_gain: 0.25,
+                    trim_db: -6.0,
+                    low_db: -12.0,
+                    mid_db: -18.0,
+                    high_db: 3.0,
+                    filter: 0.4,
+                },
+            )
+            .expect("调整 Deck B 混音");
+
+        assert_eq!(actor.deck_mixers[DeckId::A as usize].channel_gain, 1.0);
+        assert_eq!(actor.deck_mixers[DeckId::B as usize].channel_gain, 0.25);
+        let sent = knobs.sent.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert!(matches!(
+            sent[0],
+            RtCommand::SetDeckGain { deck: DeckId::B, gain } if (gain - 0.25).abs() < 0.001
+        ));
+        assert!(matches!(
+            sent[1],
+            RtCommand::SetEq {
+                deck: DeckId::B,
+                trim_db,
+                low_db,
+                mid_db,
+                high_db,
+                filter,
+            } if (trim_db + 6.0).abs() < 0.001
+                && (low_db + 12.0).abs() < 0.001
+                && (mid_db + 18.0).abs() < 0.001
+                && (high_db - 3.0).abs() < 0.001
+                && (filter - 0.4).abs() < 0.001
+        ));
+    }
+
+    #[test]
+    fn transport_controls_target_the_physical_deck_even_when_track_ids_are_ambiguous() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.decks[DeckId::B as usize] = Some(live_runtime(1, 18.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::B as usize].track_id = Some(1);
+        knobs.sent.lock().unwrap().clear();
+
+        actor
+            .set_deck_playing(DeckId::B as u8, true)
+            .expect("播放物理 Deck B");
+
+        assert_eq!(actor.front, DeckId::B);
+        assert!(!actor.state.decks[DeckId::A as usize].desired_playing);
+        assert!(actor.state.decks[DeckId::B as usize].desired_playing);
+        assert!(knobs.sent.lock().unwrap().iter().any(|command| {
+            matches!(
+                command,
+                RtCommand::SetDeckPlaying {
+                    deck: DeckId::B,
+                    playing: true
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn pausing_one_physical_deck_never_starts_the_other() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.decks[DeckId::B as usize] = Some(live_runtime(2, 18.0));
+        actor.front = DeckId::A;
+        actor.state.track_id = Some(1);
+        actor.state.desired_playing = true;
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.decks[DeckId::B as usize].track_id = Some(2);
+        actor.state.decks[DeckId::B as usize].is_playing = false;
+        knobs.sent.lock().unwrap().clear();
+
+        actor
+            .set_deck_playing(DeckId::A as u8, false)
+            .expect("只暂停 A");
+
+        assert_eq!(actor.manual_desired_playing, [false, false]);
+        assert!(!actor.state.decks[DeckId::A as usize].desired_playing);
+        assert!(!actor.state.decks[DeckId::B as usize].desired_playing);
+        let sent = knobs.sent.lock().unwrap();
+        assert!(sent.iter().any(|command| {
+            matches!(
+                command,
+                RtCommand::SetDeckPlaying {
+                    deck: DeckId::A,
+                    playing: false
+                }
+            )
+        }));
+        assert!(!sent.iter().any(|command| {
+            matches!(
+                command,
+                RtCommand::SetDeckPlaying {
+                    deck: DeckId::B,
+                    playing: true
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn explicit_paused_deck_load_keeps_the_other_deck_playing() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.desired_playing = true;
+        let mut dropped = source(2, 3.25);
+        dropped.autoplay = false;
+
+        actor
+            .load_deck(DeckId::B as u8, dropped)
+            .expect("拖放装入 B");
+
+        assert!(actor.manual_desired_playing[DeckId::A as usize]);
+        assert!(!actor.manual_desired_playing[DeckId::B as usize]);
+        assert_eq!(actor.state.decks[DeckId::B as usize].track_id, Some(2));
+        assert!((actor.state.decks[DeckId::B as usize].current_time - 3.25).abs() < 0.001);
+        assert!(!actor.state.decks[DeckId::B as usize].desired_playing);
+        let pending = actor.pending[DeckId::B as usize]
+            .as_ref()
+            .expect("B 的暂停流已登记");
+        assert!(!pending.request.autoplay);
+    }
+
+    #[test]
+    fn playing_a_pending_explicit_deck_adopts_that_deck_without_a_cross_deck_load() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.state.track_id = Some(9);
+        actor
+            .load_deck(DeckId::A as u8, source(11, 3.25))
+            .expect("拖放装入 A");
+
+        actor
+            .set_deck_playing(DeckId::A as u8, true)
+            .expect("播放仍在缓冲的 A");
+
+        assert_eq!(actor.front, DeckId::A);
+        assert_eq!(actor.state.track_id, Some(11));
+        assert!(actor.state.decks[DeckId::A as usize].desired_playing);
+        assert!(actor.state.decks[DeckId::A as usize].buffering);
+        assert!(actor.pending[DeckId::B as usize].is_none());
+    }
+
+    #[test]
+    fn manual_deck_loads_are_isolated_from_recommendation_prepare() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+
+        actor
+            .load_deck(DeckId::A as u8, source(11, 0.0))
+            .expect("显式装入 A");
+        actor
+            .load_deck(DeckId::B as u8, source(22, 0.0))
+            .expect("显式装入 B");
+        let revisions = actor.revisions;
+
+        actor
+            .prepare(source(33, 0.0))
+            .expect("推荐预热在手动模式应为 no-op");
+        actor.queue = vec![source(44, 0.0)];
+        actor.prewarm_queue().expect("队列预热在手动模式应为 no-op");
+
+        assert_eq!(
+            actor.revisions, revisions,
+            "后台预热不能取消任一显式解码 worker"
+        );
+        assert_eq!(
+            actor.pending[DeckId::A as usize]
+                .as_ref()
+                .map(|pending| pending.request.track_id),
+            Some(11)
+        );
+        assert_eq!(
+            actor.pending[DeckId::B as usize]
+                .as_ref()
+                .map(|pending| pending.request.track_id),
+            Some(22)
+        );
+        assert!(actor.manual_mode);
+    }
+
+    #[test]
+    fn ended_manual_deck_rewinds_to_start_and_stays_paused() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(drained_runtime(1, 0.0));
+        actor.decks[DeckId::B as usize] = Some(live_runtime(2, 12.0));
+        actor.front = DeckId::A;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, true];
+        actor.state.track_id = Some(1);
+        actor.state.desired_playing = true;
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 179.5;
+        actor.state.decks[DeckId::A as usize].desired_playing = true;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.decks[DeckId::B as usize].track_id = Some(2);
+        actor.state.decks[DeckId::B as usize].current_time = 12.0;
+        actor.state.decks[DeckId::B as usize].desired_playing = true;
+        actor.state.decks[DeckId::B as usize].is_playing = true;
+        {
+            let mut snapshot = knobs.snapshot.lock().unwrap();
+            snapshot.deck_source_ids = [101, 102];
+            snapshot.deck_frames = [48_000 * 179, 48_000 * 12];
+            snapshot.deck_playing = [false, true];
+            snapshot.playing = true;
+        }
+
+        actor.refresh_from_audio();
+
+        assert!(!actor.manual_desired_playing[DeckId::A as usize]);
+        assert!(actor.manual_desired_playing[DeckId::B as usize]);
+        assert!(!actor.state.decks[DeckId::A as usize].desired_playing);
+        assert!(actor.state.decks[DeckId::B as usize].desired_playing);
+        assert!(
+            actor.state.decks[DeckId::A as usize].current_time.abs() < 0.001,
+            "曲末必须回到 0，波形才能滚回起点"
+        );
+        let pending = actor.pending[DeckId::A as usize]
+            .as_ref()
+            .expect("曲末应在起点重建流");
+        assert!(pending.request.position.abs() < 0.001);
+        assert!(!pending.request.autoplay, "回起点后必须停住，不能自动再放");
+        assert!(actor.pending[DeckId::B as usize].is_none());
+        actor.refresh_from_audio();
+        assert!(
+            actor.state.decks[DeckId::A as usize].current_time.abs() < 0.001,
+            "未 promote 前 drained 时钟不能把播放头弹回曲尾"
+        );
+    }
+
+    #[test]
+    fn ended_manual_deck_keeps_an_in_flight_seek() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(drained_runtime(1, 0.0));
+        actor.front = DeckId::A;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+        actor.state.track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 4.0;
+        let (shadow, writer) = StreamSource::bounded(64);
+        std::mem::forget(writer);
+        actor.pending[DeckId::A as usize] = Some(PendingStream {
+            revision: 3,
+            source: PlaybackStream::Stereo(shadow),
+            request: source(1, 4.0),
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 1,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(3)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            seek: StreamSeekControl::new(),
+        });
+        {
+            let mut snapshot = knobs.snapshot.lock().unwrap();
+            snapshot.deck_source_ids[0] = 101;
+            snapshot.deck_frames[0] = 48_000 * 179;
+            snapshot.deck_playing[0] = false;
+        }
+
+        actor.refresh_from_audio();
+
+        let pending = actor.pending[DeckId::A as usize]
+            .as_ref()
+            .expect("在途 seek 必须保留");
+        assert!((pending.request.position - 4.0).abs() < 0.001);
+        assert!(
+            (actor.state.decks[DeckId::A as usize].current_time - 4.0).abs() < 0.001,
+            "drained 旧时钟不能盖掉已经登记的跳转目标"
+        );
+    }
+
+    #[test]
+    fn auto_dj_ended_deck_does_not_rewind_to_start() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(drained_runtime(1, 0.0));
+        actor.front = DeckId::A;
+        actor.manual_mode = false;
+        actor.state.track_id = Some(1);
+        actor.state.desired_playing = true;
+        actor.state.is_playing = false;
+        actor.state.phase = PlaybackPhase::Playing;
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 179.5;
+        {
+            let mut snapshot = knobs.snapshot.lock().unwrap();
+            snapshot.deck_source_ids[0] = 101;
+            snapshot.deck_frames[0] = 48_000 * 179;
+            snapshot.deck_playing[0] = false;
+            snapshot.playing = false;
+        }
+
+        actor.refresh_from_audio();
+
+        assert_eq!(actor.state.phase, PlaybackPhase::Ended);
+        assert!(actor.pending[DeckId::A as usize].is_none());
+        assert!(
+            actor.state.decks[DeckId::A as usize].current_time > 170.0,
+            "自动接歌路径必须停在曲末，才能走 Ended → 下一首"
+        );
+    }
+
+    #[test]
+    fn paused_scratch_seek_stays_paused() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.desired_playing = true;
+
+        actor
+            .set_deck_playing(DeckId::A as u8, false)
+            .expect("按下波形先暂停");
+        actor
+            .seek_deck(DeckId::A as u8, 9.5)
+            .expect("相对刮擦后跳转");
+
+        assert!(!actor.manual_desired_playing[DeckId::A as usize]);
+        let pending = actor.pending[DeckId::A as usize]
+            .as_ref()
+            .expect("暂停 seek 流已登记");
+        assert!(!pending.request.autoplay, "松开刮擦后不能自动恢复播放");
+        assert!((pending.request.position - 9.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn capacitive_scratch_hold_preserves_play_intent_until_the_final_seek_promotes() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.decks[DeckId::A as usize].desired_playing = true;
+        actor.state.desired_playing = true;
+
+        actor
+            .set_deck_scratch_held(DeckId::A as u8, true)
+            .expect("按住盘面只接管游标");
+        assert!(actor.scratch_held[DeckId::A as usize]);
+        assert!(actor.manual_desired_playing[DeckId::A as usize]);
+        assert!(actor.state.decks[DeckId::A as usize].is_playing);
+        assert!(
+            !knobs.sent.lock().unwrap().iter().any(|command| matches!(
+                command,
+                RtCommand::SetDeckPlaying {
+                    deck: DeckId::A,
+                    ..
+                }
+            )),
+            "touch must not be represented by a real PlayDeck/PauseDeck command",
+        );
+        knobs.sent.lock().unwrap().clear();
+        actor
+            .seek_deck(DeckId::A as u8, 9.5)
+            .expect("松开盘面应预约最终落点");
+
+        assert!(actor.manual_desired_playing[DeckId::A as usize]);
+        let pending = actor.pending[DeckId::A as usize]
+            .as_ref()
+            .expect("最终 seek 流已登记");
+        assert!(
+            pending.request.autoplay,
+            "播放意图在整次手势中必须保持 true"
+        );
+        assert!(pending.release_scratch_hold, "新流有缓冲后才可交还盘面");
+        assert!((pending.request.position - 9.5).abs() < 0.001);
+        assert!(
+            !knobs.sent.lock().unwrap().iter().any(|command| matches!(
+                command,
+                RtCommand::SetDeckPlaying {
+                    deck: DeckId::A,
+                    ..
+                }
+            )),
+            "jog touch/release must never issue a real PlayDeck/PauseDeck command",
+        );
+    }
+
+    #[test]
+    fn capacitive_scratch_ticks_move_the_held_cursor_without_rebuilding() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].duration = 180.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.decks[DeckId::A as usize].desired_playing = true;
+        actor.state.desired_playing = true;
+
+        actor
+            .set_deck_scratch_held(DeckId::A as u8, true)
+            .expect("按住盘面只接管游标");
+        knobs.sent.lock().unwrap().clear();
+        actor
+            .scratch_deck(DeckId::A as u8, -0.01)
+            .expect("按住转动应立刻送给引擎");
+
+        assert!(
+            actor.pending[DeckId::A as usize].is_none(),
+            "刮擦 tick 不得重建 decoder"
+        );
+        assert!((actor.state.decks[DeckId::A as usize].current_time - 11.99).abs() < 0.001);
+        let sent = knobs.sent.lock().unwrap();
+        assert!(
+            sent.iter().any(|command| matches!(
+                command,
+                RtCommand::ScratchDeck {
+                    deck: DeckId::A,
+                    delta_frames,
+                } if (*delta_frames + 480.0).abs() < 0.001
+            )),
+            "held platter motion must become a realtime scratch tick, got {sent:?}",
+        );
+    }
+
+    #[test]
+    fn capacitive_scratch_hold_freezes_a_playing_deck_even_with_stale_manual_intent() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.decks[DeckId::A as usize].desired_playing = true;
+        actor.state.desired_playing = true;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [false, false];
+
+        actor
+            .set_deck_scratch_held(DeckId::A as u8, true)
+            .expect("正在播放的 Deck 即使 manual intent 过期也必须冻结游标");
+        assert!(actor.scratch_held[DeckId::A as usize]);
+        assert!(actor.manual_desired_playing[DeckId::A as usize]);
+        assert!(
+            knobs.sent.lock().unwrap().iter().any(|command| matches!(
+                command,
+                RtCommand::SetDeckScratchHeld {
+                    deck: DeckId::A,
+                    held: true,
+                }
+            )),
+            "stale manual intent must not swallow the callback hold",
+        );
+    }
+
+    #[test]
+    fn scratch_seek_promotion_releases_the_callback_hold_without_play_toggle() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.set_volume(0.0).expect("静音 MASTER");
+        knobs.sent.lock().unwrap().clear();
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.decks[DeckId::A as usize].desired_playing = true;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+        actor.scratch_held = [true, false];
+        let (stream, mut writer) = StreamSource::bounded(64);
+        writer.push([0.0, 0.0], || false).expect("预填 seek ring");
+        std::mem::forget(writer);
+        actor.revisions[DeckId::A as usize] = 17;
+        actor.pending[DeckId::A as usize] = Some(PendingStream {
+            revision: 17,
+            source: PlaybackStream::Stereo(stream),
+            request: source(1, 9.5),
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 1,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(17)),
+            followup_stems: false,
+            release_scratch_hold: true,
+            seek: StreamSeekControl::new(),
+        });
+
+        actor.promote_ready_streams();
+
+        assert!(!actor.scratch_held[DeckId::A as usize]);
+        let commands = knobs.sent.lock().unwrap();
+        assert!(
+            matches!(
+                commands.first(),
+                Some(RtCommand::SetMasterGain(gain)) if *gain == 0.0
+            ),
+            "安装 replacement 前必须重申已静音的 MASTER"
+        );
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            RtCommand::SetDeckScratchHeld {
+                deck: DeckId::A,
+                held: false
+            }
+        )));
+        assert!(
+            !commands.iter().any(|command| matches!(
+                command,
+                RtCommand::SetDeckPlaying {
+                    deck: DeckId::A,
+                    ..
+                }
+            )),
+            "promotion hands the cursor back; it must not synthesize a PlayDeck toggle",
+        );
+    }
+
+    #[test]
+    fn seek_does_not_cancel_the_live_decoder_before_promote() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        let live_cancel = Arc::clone(&actor.decks[DeckId::A as usize].as_ref().unwrap().cancel);
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.desired_playing = true;
+
+        actor
+            .seek_deck(DeckId::A as u8, 4.0)
+            .expect("跳转应登记替换流");
+
+        assert_eq!(
+            live_cancel.load(Ordering::Acquire),
+            1,
+            "正在发声的解码线程必须继续填 ring，直到新流 promote"
+        );
+        assert!(actor.pending[DeckId::A as usize].is_some());
+        assert!(actor.decks[DeckId::A as usize].is_some());
+        assert!(
+            !actor.state.decks[DeckId::A as usize].buffering,
+            "有可听的 live Deck 时 seek 不能把 UI 打成 buffering"
+        );
+        assert!((actor.state.decks[DeckId::A as usize].current_time - 4.0).abs() < 0.001);
+
+        knobs.snapshot.lock().unwrap().deck_source_ids[0] = 101;
+        knobs.snapshot.lock().unwrap().deck_frames[0] = 48_000 * 12;
+        actor.refresh_from_audio();
+        assert!(
+            (actor.state.decks[DeckId::A as usize].current_time - 4.0).abs() < 0.001,
+            "promote 前不能把播放头弹回旧解码时钟"
+        );
+    }
+
+    #[test]
+    fn stem_followup_does_not_freeze_or_rewind_the_seeked_clock() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 4.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 4.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+        let (shadow, writer) = StreamSource::<StemFrame>::bounded(64);
+        std::mem::forget(writer);
+        let mut request = source(1, 7.0);
+        request.stem_enabled = true;
+        request.stem_cache_path = "/tmp/kdj-stem-cache".into();
+        actor.revisions[DeckId::A as usize] = 3;
+        actor.pending[DeckId::A as usize] = Some(PendingStream {
+            revision: 3,
+            source: PlaybackStream::Stems(shadow),
+            request,
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 1,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(3)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            seek: StreamSeekControl::new(),
+        });
+
+        knobs.snapshot.lock().unwrap().deck_source_ids[0] = 101;
+        knobs.snapshot.lock().unwrap().deck_frames[0] = 48_000 * 6;
+        knobs.snapshot.lock().unwrap().deck_playing[0] = true;
+        actor.refresh_from_audio();
+        assert!(
+            (actor.state.decks[DeckId::A as usize].current_time - 6.0).abs() < 0.001,
+            "分轨还在预热时必须跟着已经跳过去的原曲时钟走，不能把波形钉死"
+        );
+
+        match actor.stem_handoff_for(
+            DeckId::A,
+            actor.pending[DeckId::A as usize].as_ref().unwrap(),
+        ) {
+            StemHandoff::Wait => {}
+            other => panic!("分轨起在未来位置时应等待，不能立刻装上，got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stem_handoff_waits_out_a_thirty_millisecond_early_window() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 6.97));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 6.97;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+        let (shadow, writer) = StreamSource::<StemFrame>::bounded(64);
+        std::mem::forget(writer);
+        let mut request = source(1, 7.0);
+        request.stem_enabled = true;
+        request.stem_cache_path = "/tmp/kdj-stem-cache".into();
+        actor.pending[DeckId::A as usize] = Some(PendingStream {
+            revision: 1,
+            source: PlaybackStream::Stems(shadow),
+            request,
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 1,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(1)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            seek: StreamSeekControl::new(),
+        });
+
+        match actor.stem_handoff_for(
+            DeckId::A,
+            actor.pending[DeckId::A as usize].as_ref().unwrap(),
+        ) {
+            StemHandoff::Wait => {}
+            other => panic!("提前 30ms 装上会把播放头向前跳一截，got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stem_promote_over_playing_original_keeps_the_playhead() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 6.12));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 6.12;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+        let (stream, mut writer) = StreamSource::<StemFrame>::bounded(48_000);
+        for _ in 0..20_000 {
+            writer
+                .push(StemFrame::default(), || false)
+                .expect("预填分轨 ring");
+        }
+        std::mem::forget(writer);
+        let mut request = source(1, 6.0);
+        request.stem_enabled = true;
+        request.stem_cache_path = "/tmp/kdj-stem-cache".into();
+        actor.revisions[DeckId::A as usize] = 3;
+        actor.pending[DeckId::A as usize] = Some(PendingStream {
+            revision: 3,
+            source: PlaybackStream::Stems(stream),
+            request,
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 1,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(3)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            seek: StreamSeekControl::new(),
+        });
+
+        actor.promote_ready_streams();
+
+        assert!(
+            (actor.state.decks[DeckId::A as usize].current_time - 6.12).abs() < 0.001,
+            "原曲还在走时不能把播放头拽回分轨起点"
+        );
+        assert_eq!(
+            knobs.snapshot.lock().unwrap().deck_frames[0],
+            (6.12_f64 * 48_000.0).round() as u64,
+            "装上分轨时必须对齐当前播放头，而不是分轨 worker 的起点"
+        );
+    }
+
+    #[test]
+    fn deck_seek_keeps_the_other_deck_and_bridges_scnet_cache_miss_with_original() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        let mut live = live_runtime(1, 12.0);
+        live.request.stem_enabled = true;
+        live.request.stem_cache_path = "/tmp/kdj-stem-cache".into();
+        actor.decks[DeckId::A as usize] = Some(live);
+        let live_cancel = Arc::clone(&actor.decks[DeckId::A as usize].as_ref().unwrap().cancel);
+        actor.decks[DeckId::B as usize] = Some(live_runtime(2, 8.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::B as usize].track_id = Some(2);
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, true];
+
+        actor
+            .seek_deck(DeckId::A as u8, 4.0)
+            .expect("DJ 同台跳转应建立原曲桥接");
+
+        assert!(
+            actor.pending[DeckId::B as usize].is_none(),
+            "不能占用对面正在播放的 Deck 做 shadow seek"
+        );
+        let pending = actor.pending[DeckId::A as usize]
+            .as_ref()
+            .expect("SCNet cache miss must prepare an ORG bridge");
+        assert!(!pending.request.stem_enabled);
+        assert!(pending.followup_stems);
+        assert!((pending.request.position - 4.0).abs() < 0.001);
+        let runtime = actor.decks[DeckId::A as usize]
+            .as_ref()
+            .expect("ORG bridge promotion前旧流仍负责发声");
+        assert!(runtime.request.stem_enabled);
+        assert_eq!(
+            live_cancel.load(Ordering::Acquire),
+            1,
+            "replacement 安装前不能提前切断当前音频"
+        );
+        assert!(
+            actor.awaiting_seek_promotion(),
+            "ORG bridge must promote at the requested playhead before SCNet follows"
+        );
+        assert!(actor.decks[DeckId::B as usize].is_some());
+        assert!(!actor.state.error.contains("原曲"));
+    }
+
+    #[test]
+    fn loading_a_playing_deck_keeps_original_until_scnet_is_ready() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        let mut request = source(9, 0.0);
+        request.autoplay = true;
+        request.stem_enabled = true;
+        request.stem_cache_path = "/tmp/kdj-stem-cache".into();
+        actor
+            .load_deck(DeckId::A as u8, request)
+            .expect("装入 Deck");
+        let pending = actor.pending[DeckId::A as usize]
+            .as_ref()
+            .expect("播放中装入应先登记原曲流");
+        assert!(
+            !pending.request.stem_enabled,
+            "SCNet cache miss must keep ORG audible"
+        );
+        assert!(pending.followup_stems);
+        assert_eq!(pending.request.stem_cache_path, "/tmp/kdj-stem-cache");
+    }
+
+    #[test]
+    fn loading_a_paused_deck_queues_stem_analysis_at_the_drop_position() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        let mut request = source(9, 3.0);
+        request.stem_enabled = true;
+        request.stem_cache_path = "/tmp/kdj-stem-cache".into();
+        actor
+            .load_deck(DeckId::A as u8, request)
+            .expect("装入 Deck");
+        let pending = actor.pending[DeckId::A as usize]
+            .as_ref()
+            .expect("暂停装入也应先登记原曲流");
+        assert!(!pending.request.stem_enabled);
+        assert!(pending.followup_stems);
+        assert!((pending.request.position - 3.0).abs() < 0.001);
+        assert_eq!(pending.request.stem_cache_path, "/tmp/kdj-stem-cache");
+    }
+
+    #[test]
+    fn tempo_does_not_rebuild_the_decoder() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 8.0));
+        let live_cancel = Arc::clone(&actor.decks[DeckId::A as usize].as_ref().unwrap().cancel);
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+
+        actor
+            .set_deck_rate(DeckId::A as u8, 1.25)
+            .expect("TEMPO 只改原子量和时钟");
+
+        assert_eq!(live_cancel.load(Ordering::Acquire), 1);
+        assert!(actor.pending[DeckId::A as usize].is_none());
+        let sent = knobs.sent.lock().unwrap();
+        assert!(
+            sent.iter()
+                .any(|command| matches!(command, RtCommand::SetRate { rate, .. } if (*rate - 1.25).abs() < f32::EPSILON)),
+            "回调只收到 SetRate，不换源"
+        );
     }
 
     #[test]

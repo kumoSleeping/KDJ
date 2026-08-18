@@ -3,12 +3,12 @@
 pub mod bilibili;
 pub mod ffmpeg;
 pub mod net;
-pub mod tags;
-pub mod update;
 pub mod netease;
 pub mod provider;
-pub mod soundcloud;
 pub mod qqmusic;
+pub mod soundcloud;
+pub mod tags;
+pub mod update;
 
 pub use provider::{
     Capabilities, DownloadJob, MusicProvider, ProgressSink, ProviderContext, ProviderLiveSettings,

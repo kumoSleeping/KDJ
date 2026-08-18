@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { waveformEdgeScales } from "../src/lib/waveformRenderPolicy";
+import { waveformEdgeScales, waveformPlaceholderSampleIndex } from "../src/lib/waveformRenderPolicy";
 
 test("progressive waveform tapers only its first and last audible screen columns", () => {
   const amplitudes = [0, 0, 1, 0.8, 0.6, 0.7, 0.9, 0, 0];
@@ -27,4 +27,17 @@ test("unknown buckets remain outside the audible-edge calculation", () => {
 
 test("a single newly sampled bucket stays visible", () => {
   assert.deepEqual(waveformEdgeScales([0, 1, 0], [false, true, false]), [1, 1, 1]);
+});
+
+test("a centered DJ window never projects its placeholder into lead-in or tail blank space", () => {
+  // This is the three-screen canvas at the beginning of a track: -16…0 is
+  // intentionally blank, then the 0…20s source window begins.
+  assert.equal(waveformPlaceholderSampleIndex(0, 360, 640, 217, -16, 20), null);
+  assert.equal(waveformPlaceholderSampleIndex(159, 360, 640, 217, -16, 20), null);
+
+  const firstTrackSample = waveformPlaceholderSampleIndex(160, 360, 640, 217, -16, 20);
+  assert.ok(firstTrackSample !== null && firstTrackSample >= 0 && firstTrackSample < 2);
+
+  // The tail behaves symmetrically: no overview sample may leak into it.
+  assert.equal(waveformPlaceholderSampleIndex(359, 360, 640, 217, 197, 233), null);
 });

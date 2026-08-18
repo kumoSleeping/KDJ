@@ -5,7 +5,6 @@
 
 import { create } from "zustand";
 import { api } from "../lib/api";
-import { continueDataUpgrade } from "../lib/dataUpgrade";
 import { resolveLibraryPasteOp } from "../lib/libraryPaste";
 import { isOutsideFolder } from "../lib/outsideFolder";
 import { cycleTableSort } from "../lib/tableSort";
@@ -778,7 +777,6 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
         });
         if (payload.kind === "folder_metadata" && payload.phase === "done") {
           void get().refreshFolders();
-          continueDataUpgrade();
         }
         return;
       }

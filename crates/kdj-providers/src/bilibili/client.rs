@@ -136,7 +136,10 @@ impl BiliClient {
     // ------------------------------------------------------------ API
 
     async fn get_json(&self, url: &str) -> Result<Value> {
-        let mut request = self.http.get(url).header(reqwest::header::REFERER, "https://www.bilibili.com/");
+        let mut request = self
+            .http
+            .get(url)
+            .header(reqwest::header::REFERER, "https://www.bilibili.com/");
         let cookie = self.cookie_header();
         if !cookie.is_empty() {
             request = request.header(reqwest::header::COOKIE, cookie);
@@ -221,7 +224,6 @@ impl BiliClient {
             .cloned()
             .unwrap_or_default())
     }
-
 }
 
 /// 落盘用小写键（和 v0.1.x 的 `bilibili.json` 一致），发请求时还原成 B 站认的大小写。

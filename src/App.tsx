@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { LoaderCircle, PlugZap, RefreshCw } from "lucide-react";
-import { Button, EmptyState } from "./components/common";
+import { Button, EmptyState, ToastHost } from "./components/common";
 import { Workspace } from "./components/workspace/Workspace";
 import { PlayerBar } from "./components/player/PlayerBar";
 import { VideoPipHost } from "./components/player/VideoPipHost";
@@ -14,6 +14,9 @@ import { bootAll, connectEvents, selectConnected, useAppStore } from "./stores/a
 import { usePlaylistStore } from "./stores/playlistStore";
 import { useLyricsPrefs } from "./lib/lyricsPrefs";
 import { useUpdateStore } from "./stores/updateStore";
+import { readWorkMode, writeWorkMode, type WorkMode } from "./lib/workMode";
+import { STEM_DEBUG_OPEN_EVENT } from "./lib/stemDebug";
+import { StemDebugWorkspace } from "./components/stem-debug/StemDebugWorkspace";
 
 // 只有一个界面：工作台（曲库 + 搜索下载合一）。
 // 登录 / 队列从顶栏专用按钮进入；其余设置仍就地改。
@@ -40,6 +43,9 @@ export default function App() {
   const refreshOneLibraryDevices = usePlaylistStore((state) => state.refreshDevices);
   const { columns, chrome, portrait } = useLayoutSignals();
   const [retrying, setRetrying] = useState(false);
+  const [workMode, setWorkModeState] = useState<WorkMode>(() => readWorkMode());
+  const [djWorkspaceHost, setDjWorkspaceHost] = useState<HTMLDivElement | null>(null);
+  const [stemDebugOpen, setStemDebugOpen] = useState(false);
   const platform = window.kdj?.platform;
   const isMac = platform === "darwin";
   const isMobile = platform === "android" || platform === "ios";
@@ -76,6 +82,15 @@ export default function App() {
 
   // 搜索结果在线试听 → 主播放条（不再开右栏）
   useEffect(() => bindSongPreviewToPlayer(), []);
+
+  useEffect(() => {
+    const open = () => {
+      silenceAllMedia();
+      setStemDebugOpen(true);
+    };
+    window.addEventListener(STEM_DEBUG_OPEN_EVENT, open);
+    return () => window.removeEventListener(STEM_DEBUG_OPEN_EVENT, open);
+  }, []);
 
   // 分析不该由人来推动：选中、播放、以及空闲时的后台补齐都自动排队。
   // 挂在 connected 上而不是无条件挂——后端还没起来时轮询只会打出一串失败请求。
@@ -114,6 +129,11 @@ export default function App() {
     void bootAll().finally(() => setRetrying(false));
   }, []);
 
+  const setWorkMode = useCallback((mode: WorkMode) => {
+    setWorkModeState(mode);
+    writeWorkMode(mode);
+  }, []);
+
   return (
     <div
       className="kd-app"
@@ -122,10 +142,17 @@ export default function App() {
       data-columns={columns}
       data-chrome={chrome}
       data-portrait={portrait ? "true" : undefined}
+      data-work-mode={workMode}
     >
       <div className="kd-body">
-        {connected ? (
-          <Workspace />
+        {connected && stemDebugOpen ? (
+          <StemDebugWorkspace onClose={() => setStemDebugOpen(false)} />
+        ) : connected ? (
+          <Workspace
+            workMode={workMode}
+            onWorkModeChange={setWorkMode}
+            onDjWorkspaceHost={setDjWorkspaceHost}
+          />
         ) : (
           <section className="kd-section">
             {booting || retrying ? (
@@ -153,10 +180,11 @@ export default function App() {
         )}
       </div>
 
+      <ToastHost />
       {/* 没连上时不渲染播放条：没有可播的曲目，留个空条只会占地方 */}
-      {connected && (
+      {connected && !stemDebugOpen && (
         <>
-          <PlayerBar />
+          <PlayerBar workMode={workMode} djWorkspaceHost={djWorkspaceHost} />
           <VideoPipHost />
         </>
       )}

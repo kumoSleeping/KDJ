@@ -31,13 +31,13 @@
 
 ### 波形可靠性
 
-分析完成后的波形预热不再“忙就跳过”。固定一个后台 worker，任务去重后排队，和 BPM 分析共用两个后台计算额度。
+不再在启动、数据升级或全库分析结束后逐首预热波形。完整解码上千首歌只为 640 列概览会运行数小时，还会和当前 Deck 争磁盘与 CPU。现在只请求当前曲和预测下一首；同一首的 640 列概览先到，高密度 master 随后升级。
 
-canonical 波形是 `.kdwave` 小端二进制，带魔数、格式版本、track、时长和列数。读取前会校验总长度和四个通道；写入仍走临时文件加原子提交。旧 v2 JSON 通过结构校验后直接转换，不重新解码，只有新文件重新读回成功才删除旧文件。
+canonical 波形是 `.kdwave` 小端二进制，带魔数、格式版本、track、时长和列数。读取前会校验总长度和四个通道；写入仍走临时文件加原子提交。旧算法文件不迁移成新波形，避免把 31.25 列/秒的数据伪装成高密度 master。
 
-STFT 现在逐帧把频谱归并成低、中、高三个功率值，不再保留 `bins × frames` 完整频谱矩阵。长 Mix 的波形阶段只需保存三条 frame 数组。
+波形路径不再跑整轨 sinc resample 或 STFT。源采样率 PCM 经过 600 Hz / 4 kHz 互补 IIR crossover，一遍生成 200 列/秒峰值 master；Performance 保存 100 列/秒，overview 按时间面积平均高度。
 
-SQLite 的 `waveform_assets` 保存 track、profile、revision、源文件 mtime、生成时间和错误。第一轮会给旧缓存补状态；之后启动只取缺失、失败或过期项，不再遍历整库缓存。旧曲库的补齐和转换进度进入活动栏。后端对文件夹升级和波形升级分别做 singleflight，前端重连或 HMR 不会重复开整库任务。
+SQLite 的 `waveform_assets` 仍保存 track、profile、revision、源文件 mtime、生成时间和错误，但启动不再据此发起整库补齐。v5 新缓存原子写入成功后，才删除同曲 v2/v3/v4 文件；没有装入过 Deck 的曲目不为迁移而解码。
 
 播放器会提前请求当前曲和预测下一曲。前端使用 24 首 LRU 与单飞请求；切到已经预取的 Deck 时只需要画 canvas。
 
@@ -52,7 +52,7 @@ SQLite 的 `waveform_assets` 保存 track、profile、revision、源文件 mtime
 
 ## 下一阶段
 
-1. 解码器增加真正的流式输入，让长 Mix 连整轨重采样后的 samples 也不必全部常驻内存。
+1. 解码器增加真正的流式输入，让长 Mix 的 native-rate samples 也不必全部常驻内存。
 2. 增加 Set 预检：主分析、波形和文件可读性全部通过后才标记“演出就绪”。
 
 ## 回归检查

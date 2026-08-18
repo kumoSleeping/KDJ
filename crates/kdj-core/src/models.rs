@@ -169,6 +169,17 @@ pub enum Theme {
     System,
 }
 
+/// Resonance curve for the Performance channel-filter knob. The persisted representation stays
+/// intentionally semantic so DSP Q values can be tuned without migrating user settings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FilterResonance {
+    Low,
+    Medium,
+    #[default]
+    High,
+}
+
 /// 曲目列表里的调性表示。底层始终保留可互转的音名与 Camelot，不按显示偏好改写数据。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -772,6 +783,14 @@ pub struct Track {
     /// 结束点（毫秒）。与 cue_ms 成对，供导出裁切等使用。
     #[serde(default)]
     pub end_ms: Option<i64>,
+    /// 本地管理的 Memory Cue / Hot Cue / Loop。空数组既可能表示尚未编辑，
+    /// 也可能表示用户明确清空；由 `cue_points_managed` 区分这两种状态。
+    #[serde(default)]
+    pub cue_points: Vec<CuePoint>,
+    /// false = KDJ 从未编辑过本地 Cue，导出时可保留目标曲库已有 Cue；
+    /// true = `cue_points` 是用户确认过的完整状态，空数组也应同步删除。
+    #[serde(default)]
+    pub cue_points_managed: bool,
     #[serde(default = "default_local")]
     pub source_platform: String,
     #[serde(default)]
@@ -1056,6 +1075,8 @@ pub struct TrackPatch {
     pub comment: Option<String>,
     pub cue_ms: Option<i64>,
     pub end_ms: Option<i64>,
+    /// 整体替换本地多 Cue；显式传空数组表示清空，并会把曲目标记为已管理。
+    pub cue_points: Option<Vec<CuePoint>>,
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,

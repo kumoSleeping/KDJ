@@ -113,6 +113,9 @@ mod tests {
             other => panic!("期望 Lagged，实际 {other:?}"),
         }
         let next = slow.recv().await.unwrap();
-        assert!(next.contains("\"done\":3"), "应当续在最新事件上，实际 {next}");
+        assert!(
+            next.contains("\"done\":3"),
+            "应当续在最新事件上，实际 {next}"
+        );
     }
 }

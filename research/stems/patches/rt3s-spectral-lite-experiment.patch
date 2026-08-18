@@ -1,0 +1,124 @@
+--- a/SoundSourceSeparation/rt3s_processor/rt3s_processor/src/Rt3sTaskDescriptors.h
++++ b/SoundSourceSeparation/rt3s_processor/rt3s_processor/src/Rt3sTaskDescriptors.h
+@@ -124,7 +124,7 @@
+ void post_spec_waveform_lstm_task_0(GpuTaskData& gpu_task, gpua::GpuHsTasNet<float>* h_hstasnet) {
+     gpu_task.entry_idx = 10u;
+     gpu_task.thread_count = gpua::PostSpecWaveformLstmParams::BlockSize;
+-    gpu_task.block_count = gpua::PostSpecWaveformLstmParams::Blocks;
++    gpu_task.block_count = gpua::PostSpecWaveformLstmParams::LstmParams::Blocks;
+     gpu_task.shared_mem_size = h_hstasnet->m_post_spec_branch.template SmemSize<gpua::PostSpecWaveformLstmParams::LstmParams::Blocks>();
+     gpu_task.task_param_size = sizeof(gpua::PostSpecWaveformLstmParams);
+     gpu_task.processing_flags = ProcessingFlag::eProcessingFlagDefault;
+@@ -133,7 +133,7 @@
+ void post_spec_waveform_lstm_task_1(GpuTaskData& gpu_task, gpua::GpuHsTasNet<float>* h_hstasnet) {
+     gpu_task.entry_idx = 11u;
+     gpu_task.thread_count = gpua::PostSpecWaveformLstmParams::BlockSize;
+-    gpu_task.block_count = gpua::PostSpecWaveformLstmParams::Blocks;
++    gpu_task.block_count = gpua::PostSpecWaveformLstmParams::LstmParams::Blocks;
+     gpu_task.shared_mem_size = h_hstasnet->m_post_spec_branch.template SmemSize<gpua::PostSpecWaveformLstmParams::LstmParams::Blocks>();
+     gpu_task.task_param_size = sizeof(gpua::PostSpecWaveformLstmParams);
+     gpu_task.processing_flags = ProcessingFlag::eProcessingFlagDefault;
+@@ -143,7 +143,7 @@
+ void spec_waveform_rms_norm_task(GpuTaskData& gpu_task) {
+     gpu_task.entry_idx = 12u;
+     gpu_task.thread_count = 256u;
+-    gpu_task.block_count = 2u;
++    gpu_task.block_count = 1u;
+     gpu_task.shared_mem_size = gpu_task.thread_count / 32u * sizeof(float);
+     gpu_task.task_param_size = sizeof(gpua::SpecWaveformNormParams);
+     gpu_task.processing_flags = ProcessingFlag::eProcessingFlagDefault;
+--- a/SoundSourceSeparation/rt3s_processor/rt3s_processor/src/device/Rt3sProcessor.cuh
++++ b/SoundSourceSeparation/rt3s_processor/rt3s_processor/src/device/Rt3sProcessor.cuh
+@@ -184,6 +184,7 @@
+     // 1.2 waveform pre fusion (task 3)
+     template <typename Context>
+     __device_fct __forceinline_fct void conv_encode_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr ConvEncodeParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
++        return;
+         auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
+         __device_addr auto& ringbuffer = hstasnet->m_input_history;
+ 
+@@ -205,7 +206,7 @@
+         auto vec_out = reinterpret_cast<__device_addr float*>(task_param->p_audio_basis_out);
+         // apply activation: relu[0..1500) * sigmout[1500..3000)
+         for (uint32_t oid {tid}; oid < 1500u; oid += grid_dim) {
+-            vec_out[oid] = ActivationFuncRelu::Eval(vec_in[oid]) * ActivationFuncSigmoid::Eval(vec_in[oid + 1500]);
++            vec_out[oid] = 0.0f;
+         }
+     }
+ 
+@@ -216,7 +217,11 @@
+         // compute linear layer: 500x1500 * 1500x1 -> 500x1
+         auto vec_in = reinterpret_cast<__device_addr decltype(hstasnet->m_basis_to_embed)::InVecType const*>(task_param->p_audio_basis_in);
+         auto vec_out = reinterpret_cast<__device_addr decltype(hstasnet->m_basis_to_embed)::OutVecType*>(task_param->p_waveform_encoded_out);
+-        hstasnet->m_basis_to_embed.Process(context, vec_out, vec_in, task_param->nblocks);
++        uint32_t tid = context.threadId() + context.blockId() * context.blockDim();
++        uint32_t grid_dim = context.blockDim() * task_param->nblocks;
++        for (uint32_t index = tid; index < 500u; index += grid_dim) {
++            (*vec_out)[index] = 0.0f;
++        }
+     }
+ 
+     ////////////////////////////////////////////////////////////////
+@@ -232,8 +237,12 @@
+             general_lstm_task<0>(subcontext, hstasnet->m_pre_spec_branch, processor_param, &task_param->lstm_params[0]);
+         }
+         else {
+-            // waveform branch lstm layer 0
+-            general_lstm_task<0>(subcontext, hstasnet->m_pre_waveform_branch, processor_param, &task_param->lstm_params[1]);
++            constexpr uint32_t outputs_per_block = (500u + blocks_per_branch - 1u) / blocks_per_branch;
++            uint32_t start = subcontext.blockId() * outputs_per_block;
++            auto branch_out = reinterpret_cast<__device_addr float*>(task_param->lstm_params[1].p_out);
++            for (uint32_t index = subcontext.threadId(); index < outputs_per_block && start + index < 500u; index += subcontext.blockDim()) {
++                branch_out[start + index] = 0.0f;
++            }
+         }
+     }
+     // task 7
+@@ -248,8 +257,12 @@
+             general_lstm_task<1>(subcontext, hstasnet->m_pre_spec_branch, processor_param, &task_param->lstm_params[0]);
+         }
+         else {
+-            // waveform branch lstm layer 1
+-            general_lstm_task<1>(subcontext, hstasnet->m_pre_waveform_branch, processor_param, &task_param->lstm_params[1]);
++            constexpr uint32_t outputs_per_block = (500u + blocks_per_branch - 1u) / blocks_per_branch;
++            uint32_t start = subcontext.blockId() * outputs_per_block;
++            auto branch_out = reinterpret_cast<__device_addr float*>(task_param->lstm_params[1].p_out);
++            for (uint32_t index = subcontext.threadId(); index < outputs_per_block && start + index < 500u; index += subcontext.blockDim()) {
++                branch_out[start + index] = 0.0f;
++            }
+         }
+     }
+ 
+@@ -426,6 +439,7 @@
+     // 3.2 waveform post fusion (task 16)
+     template <typename Context>
+     __device_fct __forceinline_fct void waveform_mask_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr WaveformMaskParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
++        return;
+         auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
+ 
+         // normalized output of post-fusion lstm 1x500
+@@ -439,6 +453,7 @@
+     // task 17
+     template <typename Context>
+     __device_fct __forceinline_fct void waveform_mask_apply_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr WaveformMaskApplyParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
++        return;
+         // 4x1500 per source mask
+         auto mask_per_source = reinterpret_cast<__device_addr float const*>(task_param->p_waveform_mask_linear_in);
+         // 1x1500 audio basis of the input
+@@ -457,6 +472,7 @@
+     // task 18
+     template <typename Context>
+     __device_fct __forceinline_fct void conv_decode_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr ConvDecodeParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
++        return;
+         auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
+         __device_addr auto& ringbuffer = hstasnet->m_waveform_output_history;
+ 
+@@ -486,7 +502,7 @@
+         // add [cursor - 512, cursor] from both branches and write the sum into the output to get the final output
+         __device_addr float* recon_out = output[0] + ch * processor_param->buffer_capacity;
+         for (uint32_t sid {context.threadId()}; sid < task_param->buffer_length; sid += context.blockDim()) {
+-            recon_out[sid] = spec_recon_in[sid] + waveform_recon_in[sid];
++            recon_out[sid] = spec_recon_in[sid];
+         }
+     }
+ };

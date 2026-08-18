@@ -46,9 +46,16 @@ import {
 import { api } from "../../lib/api";
 import { formatBytes } from "../../lib/format";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
+import { openStemDebug } from "../../lib/stemDebug";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
-import type { KeyNotation, Quality, StreamCacheStats } from "../../types";
+import type {
+  FilterResonance,
+  KeyNotation,
+  Quality,
+  StemModelStatus,
+  StreamCacheStats,
+} from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { Button, InlineNotice, Panel } from "../common";
@@ -572,16 +579,22 @@ export function SettingsPanel() {
   const [streamCacheStats, setStreamCacheStats] = useState<StreamCacheStats | null>(null);
   const [streamCacheBusy, setStreamCacheBusy] = useState(false);
   const [streamCacheError, setStreamCacheError] = useState("");
+  const [stemModel, setStemModel] = useState<StemModelStatus | null>(null);
+  const [stemModelBusy, setStemModelBusy] = useState(false);
   const transitions = useDjConfig((state) => state.transitions);
   const effects = useDjConfig((state) => state.effects);
   const bars = useDjConfig((state) => state.bars);
   const vocalCut = useDjConfig((state) => state.vocalCut);
   const applyInOutPoints = useDjConfig((state) => state.applyInOutPoints);
+  const autoBeatSync = useDjConfig((state) => state.autoBeatSync);
+  const playOnLoad = useDjConfig((state) => state.playOnLoad);
   const toggleTransition = useDjConfig((state) => state.toggleTransition);
   const toggleEffect = useDjConfig((state) => state.toggleEffect);
   const setBars = useDjConfig((state) => state.setBars);
   const setVocalCut = useDjConfig((state) => state.setVocalCut);
   const setApplyInOutPoints = useDjConfig((state) => state.setApplyInOutPoints);
+  const setAutoBeatSync = useDjConfig((state) => state.setAutoBeatSync);
+  const setPlayOnLoad = useDjConfig((state) => state.setPlayOnLoad);
 
   const widePlay = useTrackClickPrefs((state) => state.widePlay);
   const setWidePlay = useTrackClickPrefs((state) => state.setWidePlay);
@@ -672,6 +685,42 @@ export function SettingsPanel() {
       window.clearInterval(timer);
     };
   }, [settings?.download_dir, settings?.stream_cache_enabled]);
+
+  useEffect(() => {
+    let disposed = false;
+    const refresh = () => {
+      void api.stemModelStatus().then((status) => {
+        if (!disposed) setStemModel(status);
+      }).catch(() => {
+        // The settings panel remains usable if an older local server has no STEM endpoint.
+      });
+    };
+    refresh();
+    const timer = window.setInterval(
+      refresh,
+      stemModel?.state === "downloading" || stemModel?.state === "queued" ? 500 : 5000,
+    );
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [stemModel?.state]);
+
+  const downloadStemModel = async () => {
+    if (stemModelBusy) return;
+    setStemModelBusy(true);
+    try {
+      setStemModel(await api.downloadStemModel());
+    } catch (error) {
+      setStemModel((current) => current ? {
+        ...current,
+        state: "error",
+        error: error instanceof Error ? error.message : String(error),
+      } : current);
+    } finally {
+      setStemModelBusy(false);
+    }
+  };
 
   const toggleStreamCache = async () => {
     if (!settings || streamCacheBusy) return;
@@ -801,6 +850,52 @@ export function SettingsPanel() {
               title="播放时用约 120 毫秒渐入，暂停时用约 120 毫秒渐出；关掉后立即播放或暂停。"
               onChange={() => setTransportFade(!transportFade)}
             />
+            <CycleToggle<FilterResonance>
+              label="FILTER 共振"
+              value={settings?.filter_resonance ?? "high"}
+              options={[
+                { id: "low", text: "低" },
+                { id: "medium", text: "中" },
+                { id: "high", text: "高" },
+              ]}
+              title="Performance 双极 FILTER 的共振强度。高档为默认；低档与此前的固定滤波响应一致。"
+              onChange={(next) => void saveSettings({ filter_resonance: next })}
+            />
+          </div>
+        </Panel>
+
+        <Panel heading="STEM" dense>
+          <div className="kd-stream-cache-row">
+            <span className="kd-muted">
+              {stemModel?.state === "ready"
+                ? `SCNet Small ${stemModel.version} · 已安装`
+                : stemModel?.state === "downloading" || stemModel?.state === "queued"
+                  ? `SCNet Small · ${Math.round(stemModel.progress * 100)}% · ${formatBytes(stemModel.downloadedBytes)}`
+                  : stemModel?.state === "unsupported"
+                    ? "当前平台尚未提供 STEM runtime"
+                    : "SCNet Small · Core ML · 33 MB"}
+            </span>
+            {stemModel?.supported && stemModel.state !== "ready" ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={stemModelBusy || stemModel.state === "downloading" || stemModel.state === "queued"}
+                onClick={() => void downloadStemModel()}
+              >
+                {stemModel.state === "error" ? "重试" : "下载模型"}
+              </Button>
+            ) : null}
+          </div>
+          <InlineNotice
+            text={stemModel?.error ?? ""}
+            block
+            onDismiss={() => setStemModel((current) => current ? { ...current, error: "" } : current)}
+          />
+          <div className="kd-stream-cache-row">
+            <span className="kd-muted">候选分离模型 · 本地调试</span>
+            <Button variant="ghost" size="sm" onClick={openStemDebug}>
+              调试台
+            </Button>
           </div>
         </Panel>
 
@@ -1007,6 +1102,18 @@ export function SettingsPanel() {
                 label="应用开始 / 结束点"
                 title="自动接播与自动续播时：有开始点就从那里起播，有结束点就到点切下一首；关掉则按首拍起播、波形尾段切歌。"
                 onChange={() => setApplyInOutPoints(!applyInOutPoints)}
+              />
+              <Switch
+                checked={autoBeatSync}
+                label="自动对拍"
+                title="开启后：点波形落到被点小节内与当前播放相同的相位；SYNC 锁小节（黄线对齐）；接歌等到下一小节边界。关掉则点击精确落点，SYNC 只锁拍子（灰线对齐）。"
+                onChange={() => setAutoBeatSync(!autoBeatSync)}
+              />
+              <Switch
+                checked={playOnLoad}
+                label="加载后立即播放"
+                title="DJ 模式下把曲目装入 Deck 后立即从首拍起播；关掉则只装盘，停在首拍等你按播放。"
+                onChange={() => setPlayOnLoad(!playOnLoad)}
               />
               {DJ_EFFECTS.map((item) => (
                 <Switch

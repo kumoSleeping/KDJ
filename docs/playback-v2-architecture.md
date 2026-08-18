@@ -55,9 +55,23 @@ The callback is the only consumer and never allocates, locks, decodes or perform
 - Full decoded PCM remains available to specialist/offline paths, but is no longer a prerequisite
   for play, pause, ordinary skip or seek.
 
-Streaming pitch-preserving tempo conversion is the remaining DSP boundary. Playback v2 does not
-silently restore whole-track WSOLA to the interaction path. Until the block processor lands, DJ
-handoff keeps callback-timed transition effects and uses the prepared stream at rate 1.
+Streaming pitch-preserving tempo conversion runs through the vendored Rubber Band 4 R3 engine on a
+bounded worker between the decoder's four-second raw PCM ring and a short callback-facing output
+ring. Tempo faders, BPM Sync and momentary nudges update one atomic target; R3 observes it before its
+next input block while the callback continues to pop one hardware-rate PCM frame with no C++ call,
+allocation, lock, decoder reset, or pitch-changing resample. Real-time start padding, output-delay
+trimming, EOF drain and seek/loop reset are owned by the worker adapter.
+
+Each post-stretch ring packet also carries the source-frame advance represented by that rendered
+PCM frame. The callback advances its published playhead from this value, not from the newest UI
+target, so audio already queued at the previous rate cannot make Sync/beat-grid clocks jump ahead.
+Loop/reset generations invalidate already-rendered packets from before the discontinuity.
+
+Ordinary sources enter one two-channel R3 session. A live STEM source enters one eight-channel R3
+session (Drums/Bass/Other/Vocals × left/right), so all lanes share the same stretch decisions and
+remain phase/time coherent. STEM mute and gain ramps stay in the callback after stretching and do
+not rebuild the processor. The short final ring keeps fader response bounded while the raw ring
+retains disk/network jitter headroom.
 
 ## Platform boundary
 
@@ -89,11 +103,10 @@ coordinator state machine in Kotlin or Swift. Android currently reuses `CpalOutp
 4. Stop Web Audio from owning formal playback in a native shell; keep it only for the standalone browser-development adapter.
 5. Move recommendation/ended policy into the Rust application service when the library service is
    exposed in-process, then delete the remaining PlayerBar policy continuations.
-6. Add block-based pitch-preserving tempo processing before restoring BPM-rate changes in DJ mode.
-7. Implement Android/iOS output and media-session adapters against `PlaybackOutputFactory` without
+6. Implement Android/iOS output and media-session adapters against `PlaybackOutputFactory` without
    copying the coordinator.
 
-Steps 1–4 are the first vertical slice. Steps 5–7 are explicit remaining boundaries, not silent
+Steps 1–4 are the first vertical slice. Steps 5–6 are explicit remaining boundaries, not silent
 fallbacks to the old WebView owner.
 
 ## Frontend boundary

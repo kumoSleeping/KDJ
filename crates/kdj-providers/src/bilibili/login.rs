@@ -93,12 +93,7 @@ mod tests {
     /// 状态码映射写错会让用户卡在"等待扫码"上，所以单独钉住。
     #[test]
     fn poll_codes_map_to_the_right_states() {
-        let cases = [
-            (0i64, true),
-            (86090, false),
-            (86038, false),
-            (86101, false),
-        ];
+        let cases = [(0i64, true), (86090, false), (86038, false), (86101, false)];
         for (code, is_done) in cases {
             let mapped = match code {
                 0 => QrPoll::Done(BTreeMap::new()),

@@ -14,6 +14,7 @@ use super::album::Album;
 use super::artist::{Artist, Composer, Lyricist, OriginalArtist, Remixer};
 use super::color::Color;
 use super::cue::Cue;
+use super::format_datetime;
 use super::genre::Genre;
 use super::history::HistoryContent;
 use super::image::Image;
@@ -24,7 +25,6 @@ use super::playlist::PlaylistContent;
 use super::property::Property;
 use super::recommend_like::RecommendedLike;
 use super::schema::{album, artist, color, content, genre, image, key, label};
-use super::format_datetime;
 use crate::model_traits::{Model, ModelDelete, ModelInsert, ModelUpdate};
 #[cfg(feature = "pyo3")]
 use crate::util::{PyItemsIter, PyObjectIter, PyStrIter};

@@ -1969,6 +1969,10 @@ body[data-kd-track-pointer-source="local"]
   background: var(--kd-panel);
   border-right: none;
 }
+.kd-tree-slot [data-kd-browse-cursor] {
+  background: var(--kd-selected);
+  color: var(--kd-text);
+}
 .kd-tree-slot > .kd-narrow-folder-panel,
 .kd-tree-slot > .kd-narrow-folder-rail {
   flex: 1 1 auto;
@@ -3317,10 +3321,8 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
 /* ============================================================
  * 就地提示（InlineNotice）
  * ------------------------------------------------------------
- * 右下角的浮层通知已经删掉：它盖在内容上、5 秒就自己跑了，
- * 出错时人往往正盯着别处，回头看已经什么都没有了。
- * 失败改成留在**出事的那个地方**——按钮旁边、面板里的一行小字，
- * 不会自己消失，做下一次同样的操作时才清掉。
+ * 面板里、按钮旁边的失败回执仍贴在出事的地方。瞬时消息（播放/STEM）
+ * 走右下角 .kd-toast，10 秒后自己弹回，不再插进播放条。
  *
  * 不用红：红色只给"动作"（加入队列 / 停止分析 / 移出曲库），
  * 一个区域里再多一块红，那个真正要被按的按钮就不显眼了。
@@ -3345,6 +3347,51 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   padding: 0.3rem 0.5rem;
 }
 
+@keyframes kd-toast-in {
+  from { transform: translateY(110%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+@keyframes kd-toast-out {
+  from { transform: translateY(0); opacity: 1; }
+  to { transform: translateY(110%); opacity: 0; }
+}
+.kd-toast {
+  position: fixed;
+  right: 0.7rem;
+  bottom: calc(0.7rem + env(safe-area-inset-bottom, 0px));
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  max-width: min(32rem, calc(100% - 1.1rem));
+  gap: 0.45rem;
+  padding: 0.38rem 0.48rem;
+  border: 1px solid var(--kd-line);
+  background: color-mix(in srgb, var(--kd-panel-raised) 94%, transparent);
+  box-shadow: 0 5px 18px rgba(0,0,0,0.28);
+  color: var(--kd-text);
+  font: 650 var(--kd-size)/1.35 var(--kd-font);
+  animation: kd-toast-in 180ms var(--kd-pop-ease) both;
+}
+.kd-toast[data-leaving="true"] {
+  animation: kd-toast-out 180ms ease-in both;
+}
+.kd-toast > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-toast > button {
+  flex: none;
+  width: 1.1rem;
+  height: 1.1rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+
 /* ============================================================
  * 侧方弹出动画（Sheet / 桌面右栏 / 对话框共用）
  * 只改 :root 的 --kd-pop-* 或下面两段 keyframes，全部弹出一起变。
@@ -3365,7 +3412,9 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
 }
 @media (prefers-reduced-motion: reduce) {
   .kd-pop-panel,
-  .kd-pop-scrim {
+  .kd-pop-scrim,
+  .kd-toast,
+  .kd-toast[data-leaving="true"] {
     animation: none;
   }
 }
@@ -3830,6 +3879,20 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
 .kd-wave-dim {
   z-index: 2;
 }
+.kd-wave-analysis-frontier {
+  position: absolute;
+  z-index: 5;
+  top: 12%;
+  bottom: 12%;
+  width: 1px;
+  pointer-events: none;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 0 5px rgba(110, 177, 255, 0.9);
+  transition: left 220ms linear;
+}
+.kd-wave-analysis-frontier[data-direction="back"] {
+  background: rgba(132, 195, 255, 0.68);
+}
 /* 在线波形的未知区域仍应是一条可读的流媒体进度轨，而不是一根死灰线。
    已缓冲段稍亮；真实 analyser 柱由 canvas 叠在上面。 */
 .kd-wave-stream-bed {
@@ -4177,7 +4240,31 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
     0 0 3px rgba(0, 0, 0, 0.55);
 }
 
-/* OneLibrary Loop 用浅色区间，Cue 起点用顶部旗标；两层都不挡波形跳转。 */
+/* 演出准备波形的拍线：细线是拍，较亮的实线是每四拍的小节起点。 */
+.kd-wave-beat-grid {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.kd-wave-beat-grid > i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: color-mix(in srgb, var(--kd-text) 18%, transparent);
+}
+.kd-wave-beat-grid > i[data-bar="true"] {
+  background: color-mix(in srgb, var(--kd-theme) 72%, transparent);
+}
+.kd-wave-beat-grid > i:not(:empty) {
+  color: color-mix(in srgb, var(--kd-theme) 86%, white);
+  font: 700 8px/1 var(--kd-font-mono);
+  text-indent: 3px;
+}
+
+/* Loop 预览是半透明色块；Cue 是上下三角夹一条竖线，颜色跟 Cue 走。 */
 .kd-wave-cue-loop {
   position: absolute;
   top: 0;
@@ -4185,53 +4272,45 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   z-index: 2;
   min-width: 1px;
   pointer-events: none;
-  background: color-mix(in srgb, var(--kd-cue-color) 18%, transparent);
+  background: color-mix(in srgb, var(--kd-cue-color) 28%, transparent);
   box-shadow:
-    inset 1px 0 color-mix(in srgb, var(--kd-cue-color) 72%, transparent),
-    inset -1px 0 color-mix(in srgb, var(--kd-cue-color) 72%, transparent);
+    inset 2px 0 color-mix(in srgb, var(--kd-cue-color) 82%, transparent),
+    inset -2px 0 color-mix(in srgb, var(--kd-cue-color) 82%, transparent);
+}
+.kd-wave-cue-loop[data-active="true"] {
+  background: color-mix(in srgb, var(--kd-cue-color) 38%, transparent);
 }
 .kd-wave-cue {
   --kd-cue-color: #7d8796;
-  --kd-cue-text: #fff;
   position: absolute;
   top: 0;
+  bottom: 0;
   z-index: 5;
+  width: 2px;
   transform: translateX(-50%);
   pointer-events: none;
-  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.72));
-}
-.kd-wave-cue[data-kind="hot"] {
-  display: grid;
-  place-items: center;
-  min-width: 13px;
-  height: 12px;
-  padding: 0 2px;
-  border-radius: 0 0 3px 3px;
   background: var(--kd-cue-color);
-  color: var(--kd-cue-text);
-  font-size: 8px;
-  font-weight: 800;
-  line-height: 1;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.85));
 }
-.kd-wave-cue[data-kind="hot"]::after {
+.kd-wave-cue::before,
+.kd-wave-cue::after {
   content: "";
   position: absolute;
   left: 50%;
-  bottom: -3px;
-  width: 5px;
-  height: 5px;
-  background: var(--kd-cue-color);
-  transform: translateX(-50%) rotate(45deg);
-}
-.kd-wave-cue[data-kind="memory"] {
   width: 0;
   height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
+  pointer-events: none;
+  transform: translateX(-50%);
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+}
+.kd-wave-cue::before {
+  top: 0;
   border-top: 7px solid var(--kd-cue-color);
 }
-.kd-wave-cue[data-loop="true"][data-kind="hot"] {
-  box-shadow: inset 0 -2px color-mix(in srgb, var(--kd-cue-text) 62%, transparent);
+.kd-wave-cue::after {
+  bottom: 0;
+  border-bottom: 7px solid var(--kd-cue-color);
 }
 
 /* KDJ 裁切起止点：只留顶部主题色三角，不画竖线——竖线会压住下面的波形柱。 */
@@ -4253,6 +4332,265 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   font-size: var(--kd-size-xs);
   color: var(--kd-warn);
   max-width: 12rem;
+}
+
+/* ============================================================
+ * 双轨演出准备
+ * ========================================================== */
+.kd-performance-workspace {
+  position: absolute;
+  z-index: 12;
+  right: 0;
+  bottom: 100%;
+  left: 0;
+  height: clamp(26rem, 52vh, 33rem);
+  display: grid;
+  grid-template-rows: 2.15rem minmax(0, 1fr) auto auto;
+  border-top: 1px solid var(--kd-line);
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel-inset);
+  box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.36);
+  /* DJ 字号层级：锚在曲库字号变量上，随设置字号（根 rem）一起缩放。 */
+  --kd-dj-xs: calc(var(--kd-size-xs) * 0.85);
+  --kd-dj-sm: var(--kd-size-xs);
+  --kd-dj-md: var(--kd-size-sm);
+  --kd-dj-lg: var(--kd-size);
+  --kd-dj-xl: var(--kd-size-lg);
+}
+.kd-performance-head {
+  display: grid;
+  grid-template-columns: minmax(7rem, 1fr) auto minmax(7rem, 1fr);
+  align-items: center;
+  min-width: 0;
+  padding: 0 0.65rem;
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+}
+.kd-performance-head > strong {
+  color: var(--kd-text-body);
+  font-size: var(--kd-size-xs);
+  letter-spacing: 0;
+}
+.kd-performance-mode {
+  display: flex;
+  position: relative;
+  inset: auto;
+  z-index: auto;
+  align-items: center;
+  gap: 0.15rem;
+}
+.kd-performance-mode > button,
+.kd-performance-close {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  height: 1.65rem;
+  min-width: 1.75rem;
+  padding: 0 0.35rem;
+  border: none;
+  background: transparent;
+  color: var(--kd-muted);
+  font: 700 var(--kd-size-xs)/1 var(--kd-font);
+  cursor: pointer;
+}
+.kd-performance-mode > button:hover,
+.kd-performance-close:hover {
+  color: var(--kd-text);
+}
+.kd-performance-mode > button[data-on="true"] {
+  color: var(--kd-theme);
+  box-shadow: inset 0 -2px var(--kd-theme);
+}
+.kd-performance-mode-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: 0.5rem;
+  padding-left: 0.55rem;
+  border-left: 1px solid var(--kd-line);
+  color: var(--kd-faint);
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+}
+.kd-performance-close {
+  justify-self: end;
+  width: 1.75rem;
+  padding: 0;
+}
+.kd-performance-decks {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+.kd-performance-deck {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 1.85rem minmax(5.5rem, 1fr) 1.65rem;
+  border-left: 3px solid transparent;
+  background: var(--kd-panel-inset);
+}
+.kd-performance-deck + .kd-performance-deck {
+  border-top: 1px solid var(--kd-line);
+}
+.kd-performance-deck[data-active="true"] {
+  border-left-color: var(--kd-theme);
+}
+.kd-performance-deck[data-empty="true"] {
+  grid-template-rows: 1fr;
+}
+.kd-performance-deck-head {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 2rem minmax(8rem, 1fr) minmax(6rem, 0.55fr) auto auto auto;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0 0.65rem;
+  border-bottom: 1px solid var(--kd-line-soft);
+  background: var(--kd-panel);
+}
+.kd-performance-deck[data-empty="true"] .kd-performance-deck-head {
+  border-bottom: none;
+}
+.kd-performance-deck-head > strong {
+  color: var(--kd-theme);
+  font: 800 var(--kd-size-lg)/1 var(--kd-font-mono);
+}
+.kd-performance-deck-title,
+.kd-performance-deck-artist {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-performance-deck-title {
+  color: var(--kd-text-body);
+  font-weight: 750;
+}
+.kd-performance-deck-artist,
+.kd-performance-deck-fact {
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+}
+.kd-performance-deck-fact,
+.kd-performance-deck-time {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.kd-performance-deck-time {
+  color: var(--kd-text-body);
+  font: 700 var(--kd-size-sm)/1 var(--kd-font-mono);
+}
+.kd-performance-wave-wrap {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  background: #05070a;
+}
+:root[data-theme="light"] .kd-performance-wave-wrap {
+  background: #eef1f4;
+}
+.kd-performance-wave {
+  width: 100%;
+  height: 100% !important;
+}
+.kd-performance-wave canvas {
+  height: 100% !important;
+}
+.kd-performance-focus .kd-wave-playhead {
+  z-index: 7;
+  width: 2px !important;
+  box-shadow:
+    0 0 0 0.5px color-mix(in srgb, var(--kd-theme) 72%, transparent),
+    0 0 7px color-mix(in srgb, var(--kd-theme) 45%, transparent);
+}
+/* 迷你总览波形较矮，三角收小以免吃掉整条高度。 */
+.kd-performance-overview-wave .kd-wave-cue {
+  width: 1px;
+}
+.kd-performance-overview-wave .kd-wave-cue::before,
+.kd-performance-overview-wave .kd-wave-cue::after {
+  border-left-width: 3px;
+  border-right-width: 3px;
+}
+.kd-performance-overview-wave .kd-wave-cue::before {
+  border-top-width: 4px;
+}
+.kd-performance-overview-wave .kd-wave-cue::after {
+  border-bottom-width: 4px;
+}
+.kd-performance-overviews {
+  display: grid;
+  grid-template-rows: repeat(2, 1.75rem);
+  min-height: 0;
+  border-top: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+}
+.kd-performance-overview {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  align-items: stretch;
+  border-left: 3px solid transparent;
+}
+.kd-performance-overview + .kd-performance-overview {
+  border-top: 1px solid var(--kd-line-soft);
+}
+.kd-performance-overview[data-active="true"] {
+  border-left-color: var(--kd-theme);
+}
+.kd-performance-overview > strong {
+  display: grid;
+  place-items: center;
+  color: var(--kd-muted);
+  font: 800 9px/1 var(--kd-font-mono);
+}
+.kd-performance-overview[data-active="true"] > strong {
+  color: var(--kd-theme);
+}
+.kd-performance-overview-wave {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  background: #05070a;
+}
+:root[data-theme="light"] .kd-performance-overview-wave {
+  background: #eef1f4;
+}
+.kd-performance-overview-wave > div {
+  width: 100%;
+  height: 100% !important;
+}
+.kd-performance-overview-wave canvas {
+  height: 100% !important;
+}
+
+@media (max-width: 760px) {
+  .kd-performance-workspace {
+    height: min(68vh, 35rem);
+  }
+  .kd-performance-head {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+  .kd-performance-mode {
+    justify-content: center;
+    overflow-x: auto;
+  }
+  .kd-performance-mode-label {
+    display: none;
+  }
+  .kd-performance-deck-head {
+    grid-template-columns: 1.5rem minmax(0, 1fr) auto auto;
+    gap: 0.35rem;
+  }
+  .kd-performance-deck-artist,
+  .kd-performance-deck-fact:first-of-type {
+    display: none;
+  }
+  .kd-performance-deck {
+    grid-template-rows: 1.85rem minmax(4.5rem, 1fr) 3rem;
+  }
 }
 
 .kd-vj-export-list {
@@ -6611,6 +6949,41 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   gap: 0.15rem;
   flex: none;
 }
+.kd-work-mode-switch {
+  appearance: none;
+  height: 1.6rem;
+  display: inline-grid;
+  grid-template-columns: repeat(2, auto);
+  align-items: center;
+  gap: 0.1rem;
+  margin-right: 0.35rem;
+  padding: 0.12rem;
+  border: 1px solid var(--kd-line);
+  border-radius: 0.35rem;
+  background: var(--kd-panel-inset);
+  color: var(--kd-faint);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.kd-work-mode-switch > span {
+  height: 1.2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.18rem;
+  padding: 0 0.36rem;
+  border-radius: 0.22rem;
+  font: 700 0.61rem/1 var(--kd-font);
+  white-space: nowrap;
+}
+.kd-work-mode-switch > span[data-active="true"] {
+  background: var(--kd-panel);
+  color: var(--kd-theme);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+.kd-work-mode-switch:hover {
+  border-color: color-mix(in srgb, var(--kd-theme) 45%, var(--kd-line));
+}
 .kd-chrome-btn {
   appearance: none;
   position: relative;
@@ -7001,9 +7374,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 .kd-app[data-portrait="true"] .kd-player-scrub > .kd-player-time {
   display: block;
 }
-.kd-app[data-portrait="true"] .kd-player > .kd-notice {
-  grid-column: 1 / -1;
-}
 
 /* 接近方形的窗口仍保留桌面工作区：三栏和表格在这里比抽屉更有用。但播放器
    的“左右唱盘跨波形行”只适合真正宽的底栏；在平板横竖切换、中等宽桌面窗里，
@@ -7106,9 +7476,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
     grid-area: wave;
     margin-left: 0;
     margin-right: 0;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player > .kd-notice {
-    grid-column: 1 / -1;
   }
 }
 
@@ -7384,6 +7751,12 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 }
 .kd-player-djbtn[data-on="true"]:hover:not(:disabled) {
   color: var(--kd-theme-strong);
+}
+.kd-player-performancebtn {
+  width: 1.45rem;
+}
+.kd-player-performancebtn[data-on="true"] {
+  color: var(--kd-theme);
 }
 .kd-player-lyricsbtn {
   position: relative;
@@ -8078,4 +8451,2123 @@ button.kd-stream-status {
 .kd-stream-inline-action:disabled {
   cursor: wait;
   opacity: 0.65;
+}
+
+/* ============================================================
+ * 主工作模式：DJ 上轨 / 下方曲库
+ * ========================================================== */
+.kd-dj-workspace-host {
+  position: relative;
+  /* 高度由演奏区内容决定：车道增加只把顶区撑高，永不挤压、永不滚动。 */
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel-inset);
+}
+.kd-dj-workspace-host > .kd-performance-workspace[data-embedded="true"] {
+  position: relative;
+  inset: auto;
+  z-index: 0;
+  width: 100%;
+  height: auto;
+  border-top: none;
+  border-bottom: none;
+  box-shadow: none;
+}
+.kd-performance-workspace[data-embedded="true"] .kd-performance-head {
+  grid-template-columns: minmax(7rem, 1fr) auto minmax(7rem, 1fr);
+}
+.kd-app[data-work-mode="dj"] .kd-stage {
+  min-height: 8.5rem;
+}
+.kd-app[data-work-mode="dj"] .kd-player {
+  /* 播放器仍挂载并拥有 transport / portal，只隐藏重复的底栏视觉。 */
+  display: none;
+}
+
+/* 管理模式弹出 DJ 台：收起底栏，演奏区接到窗口底部，播放切到双盘。 */
+.kd-app .kd-player[data-performance-dock="true"] {
+  display: block;
+  min-height: 0;
+  padding: 0 0 0.18rem;
+  row-gap: 0;
+  column-gap: 0;
+}
+.kd-app .kd-player[data-performance-dock="true"]::before,
+.kd-app .kd-player[data-performance-dock="true"] > .kd-player-leading,
+.kd-app .kd-player[data-performance-dock="true"] > .kd-player-transport,
+.kd-app .kd-player[data-performance-dock="true"] > .kd-player-trailing,
+.kd-app .kd-player[data-performance-dock="true"] > .kd-player-scrub {
+  display: none;
+}
+.kd-app .kd-player[data-performance-dock="true"] > .kd-performance-workspace {
+  position: relative;
+  inset: auto;
+  z-index: 0;
+  width: 100%;
+  height: auto;
+  padding-bottom: 0.2rem;
+  border-top: none;
+  box-shadow: none;
+}
+
+@media (max-width: 760px), (max-aspect-ratio: 3 / 4) {
+  .kd-dj-workspace-host > .kd-performance-workspace[data-embedded="true"] {
+    height: auto;
+  }
+  .kd-work-mode-switch > span {
+    padding-inline: 0.22rem;
+  }
+  .kd-work-mode-switch > span svg {
+    display: none;
+  }
+}
+
+/* Performance v2 — 紧凑双 Deck + 固定通道台。旧版浮层选择器保留给历史布局，
+   以下规则只覆盖新组件实际渲染的结构。 */
+.kd-performance-workspace {
+  /* Deck 只靠 A/B 位置和文字识别，不再用蓝/红把整台机器劈成两种主题。 */
+  --kd-deck-a: #8c949f;
+  --kd-deck-b: #8c949f;
+  /* 本区块引用的语义变量在此落地，旧性能浮层维持原样不受影响。 */
+  --kd-border: var(--kd-line);
+  --kd-border-subtle: var(--kd-line-soft);
+  --kd-text-subtle: var(--kd-muted);
+  --kd-text-disabled: var(--kd-faint);
+  /* 推子统一扁平三件：细轨道 + 实心圆钮 + 细边；浅色主题在下方覆写。 */
+  --kd-fader-track: #3a414b;
+  --kd-fader-thumb: #9aa2ae;
+  --kd-fader-thumb-border: rgba(0, 0, 0, 0.55);
+  --kd-knob-boost: #e24b4b;
+  --kd-knob-cut: #4d8af0;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: clamp(22rem, 48vh, 30rem);
+  min-height: 0;
+  overflow: hidden;
+  color: var(--kd-text);
+  background: #090c10;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.kd-performance-workspace[data-embedded="true"] {
+  position: relative;
+  inset: auto;
+  z-index: auto;
+  height: auto;
+  padding-bottom: 0.16rem;
+}
+.kd-performance-toolbar-close { margin-left: 0.15rem; }
+.kd-performance-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.28rem;
+  min-width: 0;
+  min-height: 1.75rem;
+  overflow: hidden;
+  padding: 0.2rem 0.48rem;
+  border-bottom: 1px solid var(--kd-border-subtle);
+  background: color-mix(in srgb, var(--kd-panel-raised) 86%, transparent);
+}
+.kd-performance-toolbar > strong {
+  margin-right: 0.2rem;
+  color: var(--kd-text-subtle);
+  font: 800 0.61rem/1 var(--kd-font-mono);
+  letter-spacing: 0.12em;
+}
+.kd-performance-midi {
+  padding: 0.12rem 0.32rem;
+  border: 1px solid color-mix(in srgb, var(--kd-accent) 55%, var(--kd-border-subtle));
+  border-radius: 999px;
+  color: var(--kd-accent);
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+  letter-spacing: 0.1em;
+}
+.kd-performance-toolbar button {
+  min-height: 1.25rem;
+  padding: 0 0.38rem;
+  border: 0;
+  border-radius: 0.22rem;
+  color: var(--kd-text-subtle);
+  background: transparent;
+  font: 700 var(--kd-dj-md)/1 var(--kd-font-mono);
+}
+.kd-performance-toolbar button:hover { color: var(--kd-text-body); }
+.kd-performance-toolbar button[data-active="true"] {
+  color: var(--kd-text);
+  background: color-mix(in srgb, var(--kd-text) 11%, transparent);
+}
+.kd-performance-module-switches {
+  display: flex;
+  gap: 0.18rem;
+  margin-left: auto;
+}
+.kd-performance-toolbar-waves,
+.kd-performance-output-strips {
+  display: flex;
+  align-items: center;
+  gap: 0.18rem;
+  min-width: 0;
+}
+.kd-performance-toolbar-waves > b {
+  margin: 0 0.08rem 0 0.18rem;
+  color: var(--kd-text-subtle);
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+}
+.kd-performance-toolbar-waves[data-side="b"] > b { color: var(--kd-text-subtle); }
+.kd-performance-output-strips {
+  gap: 0.42rem;
+  margin-left: auto;
+}
+.kd-performance-output-strips label {
+  display: grid;
+  grid-template-columns: auto 4.6rem;
+  align-items: center;
+  gap: 0.22rem;
+  color: var(--kd-text-subtle);
+  font: 700 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  white-space: nowrap;
+}
+.kd-performance-output-strips input { width: 4.6rem; }
+.kd-performance-output-strips input::-webkit-slider-runnable-track {
+  height: 3px;
+  background: var(--kd-fader-track);
+}
+.kd-performance-output-strips input::-webkit-slider-thumb {
+  width: 13px;
+  height: 13px;
+  margin-top: -5px;
+  border: 1px solid var(--kd-fader-thumb-border);
+  border-radius: 50% !important;
+  background: var(--kd-fader-thumb);
+}
+.kd-performance-output-strips + .kd-performance-module-switches { margin-left: 0.38rem; }
+.kd-performance-wave-stack {
+  /* 高度只由用户打开的车道决定；数据未到时仍保留空槽，加载不会改变整组高度。 */
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 1px 0;
+  background: #06080b;
+  border-bottom: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-deck-waves {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.kd-performance-deck-waves + .kd-performance-deck-waves {
+  margin-top: 4px;
+}
+.kd-performance-wave-renderer,
+.kd-performance-wave-gpu,
+.kd-performance-wave-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.kd-performance-wave-renderer {
+  z-index: 2;
+  overflow: hidden;
+}
+.kd-performance-wave-gpu,
+.kd-performance-wave-overlay {
+  display: block;
+}
+.kd-performance-wave-overlay { z-index: 2; }
+.kd-performance-wave-row {
+  position: relative;
+  flex: 0 0 auto;
+  height: 3.15rem;
+  overflow: hidden;
+  background: #090c11;
+}
+/* A/B、BPM、时间不再是侧栏列，全部作为角标叠在满宽波形上。 */
+.kd-performance-wave-id,
+.kd-performance-wave-bpm,
+.kd-performance-wave-time {
+  position: absolute;
+  z-index: 8;
+  top: 0.14rem;
+  display: grid;
+  place-items: center;
+  padding: 0.1rem 0.22rem;
+  border-radius: 0.16rem;
+  color: #aab3c0;
+  background: rgba(8, 11, 16, 0.78);
+  font: 700 var(--kd-dj-md)/1 var(--kd-font-mono);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.kd-performance-wave-id {
+  left: 0.14rem;
+  min-width: 0.92rem;
+  color: var(--kd-deck-a);
+  font-size: var(--kd-dj-lg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-deck-a) 55%, transparent);
+}
+.kd-performance-wave-row[data-side="b"] .kd-performance-wave-id {
+  color: var(--kd-deck-b);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-deck-b) 55%, transparent);
+}
+.kd-performance-wave-bpm { left: 1.22rem; color: #e6edf6; }
+.kd-performance-wave-time { right: 0.14rem; }
+.kd-performance-wave-empty { display: block; height: 100%; }
+[data-wave-seek="off"],
+[data-wave-seek="off"] * {
+  pointer-events: none !important;
+}
+.kd-performance-scratch {
+  position: relative;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.kd-performance-deck-waves > .kd-performance-scratch {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  height: auto;
+}
+.kd-performance-scratch:active { cursor: grabbing; }
+.kd-performance-focus-wave { min-width: 0; }
+.kd-performance-focus-wave .kd-wave-playhead {
+  z-index: 7;
+  width: 2px !important;
+  background: #ff344f;
+  box-shadow: 0 0 0 0.5px rgba(255,255,255,0.72), 0 0 6px rgba(255,52,79,0.62);
+}
+/* 滚动波形的层级：灰色细拍线、黄色双像素小节线、每小节连续编号。 */
+.kd-performance-focus-wave .kd-wave-beat-grid > i {
+  width: 1px;
+  background: rgba(27, 31, 38, 0.3);
+}
+.kd-performance-focus-wave .kd-wave-beat-grid > i[data-bar="true"] {
+  width: 2px;
+  background: #d7b500;
+  box-shadow: 1px 0 rgba(255, 230, 82, 0.28);
+}
+.kd-performance-focus-wave .kd-wave-beat-grid > i:not(:empty) {
+  padding: 2px 0 0 3px;
+  color: #665400;
+  font: 800 0.55rem/1 var(--kd-font-mono);
+  text-indent: 0;
+  text-shadow: 0 1px rgba(255,255,255,0.72);
+}
+:root:not([data-theme="light"]) .kd-performance-focus-wave .kd-wave-beat-grid > i {
+  background: rgba(255,255,255,0.2);
+}
+:root:not([data-theme="light"]) .kd-performance-focus-wave .kd-wave-beat-grid > i[data-bar="true"] {
+  background: #f0cf19;
+}
+:root:not([data-theme="light"]) .kd-performance-focus-wave .kd-wave-beat-grid > i:not(:empty) {
+  color: #f7dd49;
+  text-shadow: 0 1px #000;
+}
+.kd-performance-wave-row[data-playing="true"] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-deck-a) 40%, transparent);
+}
+.kd-performance-wave-row[data-side="b"][data-playing="true"] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-deck-b) 40%, transparent);
+}
+/* STEM 细车道：顺序固定 鼓→贝斯→乐器→人声。车道满宽，图标叠在波形左缘，不再保留左右侧栏。 */
+.kd-performance-stem-lanes {
+  flex: 0 0 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.kd-performance-stem-lane {
+  position: relative;
+  min-width: 0;
+  height: 1.05rem;
+  background: #070a0e;
+}
+/* 图标直接画在波形上，不加底板；用投影保证压过亮色波形时仍可辨。 */
+.kd-performance-stem-lane-icon {
+  position: absolute;
+  z-index: 8;
+  left: 0.14rem;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 0.74rem;
+  height: 0.74rem;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.85));
+}
+/* B 盘车道图标贴右缘，与 A 盘左右呼应。 */
+.kd-performance-deck-waves[data-side="b"] .kd-performance-stem-lane-icon {
+  left: auto;
+  right: 0.14rem;
+}
+.kd-performance-stem-lane[data-stem="drums"] .kd-performance-stem-lane-icon { color: #ffab63; }
+.kd-performance-stem-lane[data-stem="bass"] .kd-performance-stem-lane-icon { color: #ff7d86; }
+.kd-performance-stem-lane[data-stem="other"] .kd-performance-stem-lane-icon { color: #9fb1ff; }
+.kd-performance-stem-lane[data-stem="vocals"] .kd-performance-stem-lane-icon { color: #7ce5ae; }
+.kd-performance-stem-wave { min-width: 0; }
+.kd-performance-stem-wave-empty {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  background: #090c11;
+}
+.kd-performance-stem-wave .kd-wave-playhead {
+  z-index: 7;
+  background: #fff;
+  box-shadow: 0 0 3px #000;
+}
+/* 每台 Deck 的一体式 Beat Grid：普通拍线和黄色小节线只画一份，满宽覆盖 ORG + STEM。 */
+.kd-performance-deck-grid {
+  position: absolute;
+  z-index: 6;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.kd-performance-deck-grid *,
+.kd-performance-deck-grid *::before,
+.kd-performance-deck-grid *::after {
+  pointer-events: none !important;
+}
+.kd-wave-rail {
+  pointer-events: none;
+}
+.kd-performance-deck-grid-rail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  will-change: transform;
+}
+.kd-performance-deck-grid-zoom,
+.kd-wave-rail-zoom {
+  position: absolute;
+  inset: 0;
+}
+.kd-performance-deck-grid-rail > i {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(210, 218, 228, 0.34);
+  box-shadow: 1px 0 rgba(0, 0, 0, 0.22);
+}
+.kd-performance-deck-grid-rail > i[data-bar="true"] {
+  width: 2px;
+  background: #e4c400;
+  box-shadow: 1px 0 rgba(255, 232, 72, 0.28), -1px 0 rgba(0, 0, 0, 0.3);
+}
+.kd-performance-deck-grid .kd-wave-cue {
+  z-index: 5;
+  width: 2px;
+}
+.kd-performance-deck-grid .kd-wave-cue::before,
+.kd-performance-deck-grid .kd-wave-cue::after {
+  border-left-width: 6px;
+  border-right-width: 6px;
+}
+.kd-performance-deck-grid .kd-wave-cue::before {
+  border-top-width: 8px;
+}
+.kd-performance-deck-grid .kd-wave-cue::after {
+  border-bottom-width: 8px;
+}
+.kd-performance-deck-grid-rail > i > b {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  color: #e8edf4;
+  font: 800 0.55rem/1 var(--kd-font-mono);
+  text-shadow: 0 1px 2px #000, 0 0 3px #000;
+}
+.kd-performance-info-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  border-bottom: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-info {
+  display: grid;
+  grid-template-columns: 2.85rem minmax(0, 1fr) auto;
+  min-width: 0;
+  gap: 0.36rem;
+  padding: 0.22rem 0.36rem;
+  border-right: 1px solid var(--kd-border-subtle);
+  background: color-mix(in srgb, var(--kd-panel-raised) 70%, transparent);
+}
+.kd-performance-info:last-child { border-right: 0; }
+.kd-performance-vinyl {
+  width: 2.85rem;
+  height: 2.85rem;
+  display: grid;
+  place-items: center;
+}
+.kd-performance-vinyl-record {
+  width: 2.7rem;
+  height: 2.7rem;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50% !important;
+  background: repeating-radial-gradient(circle, #191a1e 0 1px, #050506 1.5px 3px);
+  box-shadow: 0 2px 5px rgba(0,0,0,0.42), inset 0 0 0 1px rgba(255,255,255,0.06);
+  animation: kd-player-vinyl-spin 2.8s linear infinite paused;
+}
+.kd-performance-vinyl-record[data-spinning="true"] { animation-play-state: running; }
+.kd-performance-vinyl-record img {
+  width: 68%;
+  height: 68%;
+  border-radius: 50% !important;
+  object-fit: cover;
+}
+.kd-performance-info-copy {
+  display: grid;
+  grid-template-rows: auto auto minmax(15px, 1fr);
+  min-width: 0;
+  align-content: center;
+}
+.kd-performance-info-copy strong,
+.kd-performance-info-copy > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.kd-performance-info-copy strong { font-size: var(--kd-dj-lg); }
+.kd-performance-info-copy > span { color: var(--kd-text-subtle); font-size: var(--kd-dj-md); }
+.kd-performance-overview-wave {
+  align-self: end;
+  margin-top: 0.18rem;
+  border-radius: 0.12rem;
+}
+/* 自定义 pointer 拖动与原生 DnD 共用同一组强反馈；波形行和信息栏同步亮起。 */
+.kd-performance-wave-row[data-kd-pointer-track-over="deck"],
+.kd-performance-info[data-kd-pointer-track-over="deck"],
+.kd-performance-scratch[data-kd-pointer-track-over="deck"],
+.kd-performance-wave-row[data-kd-native-track-over="true"],
+.kd-performance-info[data-kd-native-track-over="true"],
+.kd-performance-scratch[data-kd-native-track-over="true"] {
+  z-index: 8;
+  background: color-mix(in srgb, var(--kd-deck-a) 13%, var(--kd-panel));
+  box-shadow: inset 0 0 0 2px var(--kd-deck-a), inset 0 0 18px color-mix(in srgb, var(--kd-deck-a) 20%, transparent);
+}
+.kd-performance-wave-row[data-side="b"][data-kd-pointer-track-over="deck"],
+.kd-performance-info[data-side="b"][data-kd-pointer-track-over="deck"],
+.kd-performance-scratch[data-side="b"][data-kd-pointer-track-over="deck"],
+.kd-performance-wave-row[data-side="b"][data-kd-native-track-over="true"],
+.kd-performance-info[data-side="b"][data-kd-native-track-over="true"],
+.kd-performance-scratch[data-side="b"][data-kd-native-track-over="true"] {
+  background: color-mix(in srgb, var(--kd-deck-b) 13%, var(--kd-panel));
+  box-shadow: inset 0 0 0 2px var(--kd-deck-b), inset 0 0 18px color-mix(in srgb, var(--kd-deck-b) 20%, transparent);
+}
+.kd-performance-metadata {
+  display: grid;
+  grid-auto-flow: column;
+  gap: 0.35rem;
+  margin: 0;
+  align-items: center;
+}
+.kd-performance-metadata div { text-align: center; }
+.kd-performance-metadata dt {
+  color: var(--kd-text-subtle);
+  font: 700 var(--kd-dj-sm)/1 var(--kd-font-mono);
+}
+.kd-performance-metadata dd {
+  margin: 0.18rem 0 0;
+  color: var(--kd-text);
+  font: 800 var(--kd-dj-lg)/1 var(--kd-font-mono);
+}
+.kd-performance-fx-strip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  min-height: 1.58rem;
+  padding: 0.17rem 0.4rem;
+  border-bottom: 1px solid var(--kd-border-subtle);
+  background: var(--kd-panel-inset);
+}
+.kd-performance-fx-strip > span {
+  color: var(--kd-text-body);
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+  margin-right: 0.25rem;
+}
+.kd-performance-console {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding-bottom: 0.16rem;
+}
+.kd-performance-deck-controls {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-items: start;
+  align-content: stretch;
+  column-gap: 0.16rem;
+  row-gap: 0.12rem;
+  min-width: 0;
+  padding: 0.24rem 0.32rem 0.1rem;
+  border-right: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-deck-controls[data-side="b"] {
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 0.24rem 0.32rem 0.1rem;
+  border-right: 0;
+  border-left: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-deck-main {
+  grid-column: 2;
+  grid-row: 1 / 3;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.2rem;
+  min-width: 0;
+}
+/* transport 吃掉主区剩余高度：Cue 垫占满上方，LOOP 收成底栏。 */
+.kd-performance-deck-main > .kd-performance-transport {
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-height: 0;
+}
+.kd-performance-deck-controls[data-side="b"] .kd-performance-deck-main {
+  grid-column: 1;
+  align-items: flex-start;
+}
+.kd-performance-deck-controls[data-playing="true"] {
+  background: rgba(255,255,255,0.025);
+}
+.kd-performance-deck-controls[data-side="b"][data-playing="true"] {
+  background: rgba(255,255,255,0.025);
+}
+.kd-performance-cues {
+  display: flex;
+  align-items: stretch;
+  grid-column: 3;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+  direction: ltr;
+}
+.kd-performance-cues-bank {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+.kd-performance-cues-bank > span {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-rows: 1fr 1fr;
+  min-height: 4.4rem;
+  overflow: hidden;
+  border: 1px solid var(--kd-border-subtle);
+  border-radius: 0.26rem;
+  background: var(--kd-panel-inset);
+}
+.kd-performance-cue-slot {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-items: stretch;
+  min-width: 0;
+  min-height: 0;
+  padding: 0.16rem 0.16rem 0.14rem;
+  border: 0;
+  border-right: 1px solid var(--kd-border-subtle);
+  border-bottom: 1px solid var(--kd-border-subtle);
+  border-radius: 0;
+  color: var(--kd-text-subtle);
+  background: transparent;
+}
+.kd-performance-cue-slot:nth-child(4n) { border-right: 0; }
+.kd-performance-cue-slot:nth-child(n+5) { border-bottom: 0; }
+.kd-performance-cue-slot:not([data-filled="true"]) {
+  grid-template-rows: 1fr;
+  place-items: center;
+  color: color-mix(in srgb, var(--kd-text-subtle) 72%, transparent);
+}
+.kd-performance-cue-slot:not([data-filled="true"]):hover:not(:disabled) {
+  color: var(--kd-text-subtle);
+  background: color-mix(in srgb, var(--kd-text) 6%, transparent);
+}
+.kd-performance-cue-slot:not([data-filled="true"]):disabled { opacity: 0.4; }
+.kd-performance-cue-note {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kd-text-subtle);
+  font: 650 var(--kd-dj-xs)/1.2 var(--kd-font);
+  text-align: start;
+  word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.kd-performance-cue-jump {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  width: 100%;
+  height: 1.05rem;
+  min-height: 1.05rem;
+  padding: 0 0.22rem;
+  border: 0;
+  border-radius: 0.12rem;
+  color: #fff;
+  background: var(--kd-pad);
+}
+.kd-performance-cue-jump:hover {
+  filter: brightness(1.08);
+}
+.kd-performance-cue-jump:active {
+  filter: brightness(0.92);
+}
+.kd-performance-cue-jump svg {
+  display: block;
+  margin-inline-start: 1px;
+}
+/* STEM 垫：图标 + 名称 + 静音开关，四轨一排拉满主区宽度。音量在中央 STEM EQ。 */
+.kd-performance-stem-pads {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 0.16rem;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+.kd-performance-stem-download {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  min-height: 2.34rem;
+  overflow: hidden;
+  border: 1px dashed var(--kd-border);
+  border-radius: 0.22rem;
+  background: var(--kd-panel-inset);
+}
+.kd-performance-stem-download > button {
+  z-index: 1;
+  min-width: 0;
+  border: 0;
+  color: #cbd2dc;
+  background: transparent;
+  font: 750 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  cursor: pointer;
+}
+.kd-performance-stem-download > button:hover:not(:disabled) {
+  color: #f3f6fa;
+  background: rgba(255,255,255,0.04);
+}
+.kd-performance-stem-download > button:disabled {
+  color: #aeb6c2;
+  cursor: progress;
+}
+.kd-performance-stem-download > i {
+  position: absolute;
+  right: 0.28rem;
+  bottom: 0.2rem;
+  left: 0.28rem;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: #272d36;
+}
+.kd-performance-stem-download > i > span {
+  display: block;
+  height: 100%;
+  background: #969eaa;
+  transition: width 160ms linear;
+}
+.kd-performance-stem-pad {
+  display: grid;
+  min-width: 0;
+  min-height: 1.42rem;
+  border: 1px solid var(--kd-border-subtle);
+  border-radius: 0.22rem;
+  background: var(--kd-panel-inset);
+  overflow: hidden;
+}
+.kd-performance-stem-pad-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.14rem;
+  min-width: 0;
+  padding: 0 0.22rem;
+  border: 0;
+  color: var(--kd-text-subtle);
+  background: transparent;
+  font: 750 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  letter-spacing: 0.03em;
+}
+.kd-performance-stem-pad-main > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+.kd-performance-stem-mute { display: grid; place-items: center; opacity: 0.22; }
+.kd-performance-stem-pad[data-audible="true"] .kd-performance-stem-mute { opacity: 0; }
+/* 可听状态用去饱和的分轨色相表达：淡彩文字 + 轻微染色面，不再亮边发光。 */
+.kd-performance-stem-pad[data-stem="drums"] { --kd-stem: #d59d6b; }
+.kd-performance-stem-pad[data-stem="bass"] { --kd-stem: #d08088; }
+.kd-performance-stem-pad[data-stem="other"] { --kd-stem: #93a3d8; }
+.kd-performance-stem-pad[data-stem="vocals"] { --kd-stem: #82c49e; }
+.kd-performance-stem-pad[data-audible="true"] {
+  border-color: color-mix(in srgb, var(--kd-stem) 38%, var(--kd-border-subtle));
+  background: color-mix(in srgb, var(--kd-stem) 7%, var(--kd-panel-inset));
+}
+.kd-performance-stem-pad[data-audible="true"] .kd-performance-stem-pad-main { color: var(--kd-stem); }
+.kd-performance-stem-pad-main:disabled { opacity: 0.5; }
+.kd-performance-stem-pads-status {
+  align-self: center;
+  color: #ffb0ba;
+  font: 750 var(--kd-dj-xs)/1 var(--kd-font-mono);
+}
+.kd-performance-stem-runtime {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kd-text-muted);
+  font: 700 var(--kd-dj-xs)/1.15 var(--kd-font-mono);
+  letter-spacing: 0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-performance-stem-runtime[data-error="true"] { color: #ffb0ba; }
+/* 传输条：PLAY / CUE 与 Cue 垫同行；LOOP 与节拍跳转收在垫下方。 */
+.kd-performance-transport {
+  display: grid;
+  grid-template-columns: 2.55rem 2.9rem minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 0.16rem;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+.kd-performance-transport:not(:has(.kd-performance-cues)) {
+  grid-template-rows: auto;
+}
+.kd-performance-deck-controls[data-side="b"] .kd-performance-transport { direction: rtl; }
+.kd-performance-deck-controls[data-side="b"] .kd-performance-transport > button { direction: ltr; }
+.kd-performance-transport > button {
+  min-height: 1.92rem;
+  border: 1px solid var(--kd-border-subtle);
+  border-radius: 0.26rem;
+  color: var(--kd-text-body);
+  background: var(--kd-panel-raised);
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+  letter-spacing: 0.05em;
+}
+.kd-performance-transport > button:hover:not(:disabled) { color: var(--kd-text); }
+.kd-performance-transport > button:active:not(:disabled) { background: var(--kd-panel-inset); }
+.kd-performance-transport > button:disabled { opacity: 0.42; }
+.kd-performance-play {
+  grid-column: 1;
+  grid-row: 1;
+  width: auto;
+  min-width: 2.4rem;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+.kd-performance-play svg[data-lucide="play"] { margin-inline-start: 1px; }
+/* 功能色只留两个：PLAY 绿、CUE 琥珀；其余激活态一律中性。 */
+.kd-performance-play[data-active="true"] {
+  color: #062b16 !important;
+  border-color: #1f9d55;
+  background: #2fce6b;
+}
+.kd-performance-main-cue {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 2.7rem;
+  padding: 0 0.52rem;
+  font-size: var(--kd-dj-lg);
+  color: #f0b429 !important;
+  border-color: color-mix(in srgb, #f0b429 42%, var(--kd-border-subtle)) !important;
+}
+.kd-performance-sync[data-active="true"] {
+  color: var(--kd-text);
+  border-color: var(--kd-line) !important;
+  background: color-mix(in srgb, var(--kd-text) 12%, transparent) !important;
+}
+.kd-performance-loop {
+  display: flex;
+  grid-column: 3;
+  grid-row: 2;
+  align-items: stretch;
+  gap: 0.18rem;
+  min-width: 0;
+}
+.kd-performance-transport:not(:has(.kd-performance-cues)) .kd-performance-loop {
+  grid-row: 1;
+}
+.kd-performance-deck-controls[data-side="b"] .kd-performance-loop { direction: rtl; }
+.kd-performance-deck-controls[data-side="b"] .kd-performance-loop > * { direction: ltr; }
+.kd-performance-loop-stepper,
+.kd-performance-loop-jump {
+  display: grid;
+  flex: 1 1 0;
+  grid-template-rows: 1.5rem auto;
+  align-items: stretch;
+  width: auto;
+  min-width: 0;
+  background: transparent;
+}
+.kd-performance-loop-stepper > span,
+.kd-performance-loop-jump > span {
+  display: grid;
+  min-height: 1.5rem;
+  overflow: hidden;
+  border: 1px solid var(--kd-border-subtle);
+  border-radius: 0.26rem;
+  background: var(--kd-panel-raised);
+}
+.kd-performance-loop-stepper > span { grid-template-columns: 0.92rem minmax(1.15rem, 1fr) 0.92rem; }
+.kd-performance-loop-jump > span { grid-template-columns: 1fr 1fr; }
+.kd-performance-loop-stepper button,
+.kd-performance-loop-jump button {
+  min-height: 1.5rem;
+  border: 0;
+  border-radius: 0;
+  color: var(--kd-text-subtle);
+  background: transparent;
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+}
+.kd-performance-loop-stepper button:active:not(:disabled),
+.kd-performance-loop-jump button:active:not(:disabled) {
+  background: color-mix(in srgb, var(--kd-text) 8%, transparent);
+}
+.kd-performance-loop-toggle {
+  color: var(--kd-text) !important;
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono) !important;
+  border-inline: 1px solid var(--kd-border-subtle) !important;
+}
+.kd-performance-loop-toggle[data-active="true"] {
+  color: var(--kd-text) !important;
+  background: color-mix(in srgb, var(--kd-text) 12%, transparent);
+}
+.kd-performance-loop-jump button:first-of-type {
+  border-right: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-loop-stepper > em,
+.kd-performance-loop-jump > em {
+  padding: 0.16rem 0 0;
+  color: var(--kd-text-subtle);
+  font: 700 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  font-style: normal;
+  letter-spacing: 0.06em;
+  text-align: center;
+  white-space: nowrap;
+}
+.kd-performance-loop button:disabled { opacity: 0.4; }
+/* 通道条按内容收窄；竖推子放进定宽井，避免 rotate 后仍占横向把 FILTER/GAIN 叠在一起。 */
+.kd-performance-master {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  justify-items: center;
+  gap: 0.14rem;
+  width: max-content;
+  min-width: 0;
+  min-height: 0;
+  padding: 0.22rem 0.42rem 0.16rem;
+  background: color-mix(in srgb, var(--kd-panel-inset) 76%, transparent);
+}
+.kd-performance-mixer-cluster {
+  display: grid;
+  grid-template-columns: max-content max-content max-content max-content;
+  justify-content: center;
+  align-items: start;
+  column-gap: 0.16rem;
+  width: max-content;
+  min-height: 0;
+  height: auto;
+}
+.kd-performance-strip {
+  display: grid;
+  grid-template-columns: 2.2rem 1.72rem;
+  column-gap: 0.08rem;
+  align-items: start;
+  height: auto;
+  width: max-content;
+  min-width: 0;
+  padding: 0.02rem 0.04rem;
+}
+.kd-performance-strip[data-side="a"] { margin-right: 0.12rem; }
+.kd-performance-strip[data-side="b"] {
+  grid-template-columns: 1.72rem 2.2rem;
+  margin-left: 0.12rem;
+}
+.kd-performance-strip[data-side="b"] .kd-performance-strip-knobs { grid-column: 2; grid-row: 1; }
+.kd-performance-strip[data-side="b"] .kd-performance-strip-fader { grid-column: 1; grid-row: 1; }
+.kd-performance-strip-knobs {
+  display: grid;
+  grid-template-rows: repeat(4, 1.92rem);
+  align-content: start;
+  justify-items: center;
+  row-gap: 0.1rem;
+  min-height: 0;
+  height: auto;
+}
+.kd-performance-strip-fader {
+  display: grid;
+  grid-template-rows: auto minmax(2.7rem, 1fr);
+  justify-items: center;
+  row-gap: 0.16rem;
+  min-height: 0;
+  height: auto;
+  padding-inline: 0;
+  padding-top: 2.02rem;
+}
+/* 旋钮：扁平圆盘 + 中性指针，无高光无内圈；尺寸按角色分级——GAIN 略小、FILTER 略大。 */
+.kd-performance-knob {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 0.1rem;
+  min-width: 0;
+}
+.kd-performance-knob > span {
+  --kd-knob-size: 1.18rem;
+  position: relative;
+  display: block;
+  width: var(--kd-knob-size);
+  height: var(--kd-knob-size);
+  border: 1px solid var(--kd-line);
+  border-radius: 50% !important;
+  background: var(--kd-panel-raised);
+  box-shadow: none;
+}
+.kd-performance-knob > span i {
+  position: absolute;
+  left: 50%;
+  top: calc(var(--kd-knob-size) * 0.14);
+  width: 1.5px;
+  height: calc(var(--kd-knob-size) * 0.3);
+  border-radius: 1px;
+  background: #fff;
+  transform-origin: 50% calc(var(--kd-knob-size) * 0.36);
+  transform: translateX(-50%) rotate(var(--kd-knob-angle));
+}
+.kd-performance-strip-knobs > .kd-performance-knob:first-child > span { --kd-knob-size: 0.96rem; }
+.kd-performance-strip-fader > .kd-performance-knob > span { --kd-knob-size: 1.32rem; }
+.kd-performance-knob input {
+  position: absolute;
+  inset: 0 0 0.8rem;
+  z-index: 2;
+  width: 100%;
+  opacity: 0;
+  cursor: grab;
+  touch-action: none;
+}
+.kd-performance-knob input[data-dragging="true"] { cursor: grabbing; }
+.kd-performance-knob b {
+  color: var(--kd-text-subtle);
+  font: 700 var(--kd-dj-xs)/1 var(--kd-font-mono);
+}
+.kd-performance-stem-eq {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  justify-items: center;
+  align-items: start;
+  gap: 0.1rem;
+  min-width: 2.1rem;
+  height: auto;
+  padding: 0.04rem 0.1rem 0.02rem;
+  border-radius: 0.28rem;
+}
+.kd-performance-stem-eq[data-side="a"] {
+  border-right: 1px solid var(--kd-border-subtle);
+  padding-right: 0.28rem;
+  margin-right: 0.08rem;
+}
+.kd-performance-stem-eq[data-side="b"] {
+  border-left: 1px solid var(--kd-border-subtle);
+  padding-left: 0.28rem;
+  margin-left: 0.08rem;
+}
+.kd-performance-stem-eq[data-midi="true"] {
+  background: color-mix(in srgb, var(--kd-text) 6%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-text) 16%, transparent);
+}
+.kd-performance-stem-eq > b {
+  color: var(--kd-text-subtle);
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  letter-spacing: 0.1em;
+}
+.kd-performance-stem-eq[data-midi="true"] > b { color: var(--kd-text); }
+.kd-performance-stem-eq > div {
+  display: grid;
+  grid-template-rows: repeat(4, 1.92rem);
+  align-content: start;
+  justify-items: center;
+  row-gap: 0.1rem;
+  min-height: 0;
+  height: auto;
+}
+.kd-performance-stem-eq-knob {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 0.1rem;
+  min-width: 0;
+}
+.kd-performance-stem-eq-knob[data-stem="drums"] { --kd-stem: #d59d6b; }
+.kd-performance-stem-eq-knob[data-stem="bass"] { --kd-stem: #d08088; }
+.kd-performance-stem-eq-knob[data-stem="other"] { --kd-stem: #93a3d8; }
+.kd-performance-stem-eq-knob[data-stem="vocals"] { --kd-stem: #82c49e; }
+.kd-performance-stem-eq-knob[data-boost="true"] { --kd-stem-eq-fill: var(--kd-stem); }
+.kd-performance-stem-eq-knob[data-cut="true"] {
+  --kd-stem-eq-fill: color-mix(in srgb, var(--kd-stem) 46%, #5a616c);
+}
+.kd-performance-stem-eq-knob > span {
+  --kd-knob-size: 1.28rem;
+  position: relative;
+  display: block;
+  width: var(--kd-knob-size);
+  height: var(--kd-knob-size);
+  border-radius: 50% !important;
+  background: var(--kd-panel-inset);
+  box-shadow: inset 0 0 0 1.5px var(--kd-line);
+}
+.kd-performance-stem-eq-knob > span::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    from var(--kd-eq-start, 0deg),
+    var(--kd-stem-eq-fill, transparent) 0 var(--kd-eq-fill, 0deg),
+    transparent var(--kd-eq-fill, 0deg)
+  );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(62% - 0.5px), #000 calc(62% + 0.5px));
+  mask: radial-gradient(farthest-side, transparent calc(62% - 0.5px), #000 calc(62% + 0.5px));
+}
+.kd-performance-stem-eq-knob > span::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 1.5px;
+  height: 3px;
+  background: var(--kd-text-subtle);
+  transform: translateX(-50%);
+}
+.kd-performance-stem-eq-knob > span i {
+  position: absolute;
+  z-index: 1;
+  left: 50%;
+  top: calc(var(--kd-knob-size) * 0.12);
+  width: 1.5px;
+  height: calc(var(--kd-knob-size) * 0.28);
+  border-radius: 1px;
+  background: #fff;
+  transform-origin: 50% calc(var(--kd-knob-size) * 0.38);
+  transform: translateX(-50%) rotate(var(--kd-knob-angle));
+}
+.kd-performance-stem-eq-knob input {
+  position: absolute;
+  inset: 0 0 0.8rem;
+  z-index: 2;
+  width: 100%;
+  opacity: 0;
+  cursor: grab;
+  touch-action: none;
+}
+.kd-performance-stem-eq-knob input[data-dragging="true"] { cursor: grabbing; }
+.kd-performance-stem-eq-knob input:disabled { cursor: default; }
+.kd-performance-stem-eq-knob b {
+  color: var(--kd-text-subtle);
+  font: 700 var(--kd-dj-xs)/1 var(--kd-font-mono);
+}
+.kd-performance-stem-eq-knob[data-boost="true"] b,
+.kd-performance-stem-eq-knob[data-cut="true"] b { color: var(--kd-stem); }
+.kd-performance-knob[data-boost="true"] > span i,
+.kd-performance-stem-eq-knob[data-boost="true"] > span i {
+  background: var(--kd-knob-boost);
+}
+.kd-performance-knob[data-cut="true"] > span i,
+.kd-performance-stem-eq-knob[data-cut="true"] > span i {
+  background: var(--kd-knob-cut);
+}
+/* TEMPO 竖排面板：竖推子占满控制区全高（跨两行），SYNC / 有效 BPM / 百分比 + 量程 / −/+ 收进推子旁的一列。 */
+.kd-performance-tempo {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  align-self: stretch;
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: stretch;
+  gap: 0.16rem;
+  padding: 0.06rem 0.14rem 0.04rem 0.1rem;
+  border-right: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-deck-controls[data-side="b"] .kd-performance-tempo {
+  grid-column: 2;
+  flex-direction: row-reverse;
+  padding: 0.06rem 0.1rem 0.04rem 0.14rem;
+  border-right: 0;
+  border-left: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-tempo-side {
+  display: grid;
+  align-content: space-between;
+  justify-items: stretch;
+  gap: 0.08rem;
+  min-width: 2.2rem;
+}
+.kd-performance-tempo .kd-performance-sync {
+  height: 1.05rem;
+  border: 1px solid var(--kd-border-subtle);
+  border-radius: 0.2rem;
+  color: var(--kd-text-body);
+  background: var(--kd-panel-raised);
+  font: 800 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  letter-spacing: 0.06em;
+}
+.kd-performance-tempo .kd-performance-sync:active:not(:disabled) { background: var(--kd-panel-inset); }
+.kd-performance-tempo .kd-performance-sync:disabled { opacity: 0.42; }
+.kd-performance-tempo-bpm {
+  color: var(--kd-text);
+  font: 800 calc(var(--kd-dj-xl) * 1.15)/1 var(--kd-font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.kd-performance-tempo-pct {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.1rem;
+  min-width: 0;
+}
+.kd-performance-tempo-pct > output {
+  color: var(--kd-text-subtle);
+  font: 700 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+/* 量程下拉：透明 select 盖在 ▾ 图标上，点击弹出原生菜单。 */
+.kd-performance-tempo-range {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 0.08rem;
+}
+.kd-performance-tempo-range select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.kd-performance-tempo-range > svg { color: var(--kd-text-subtle); pointer-events: none; }
+.kd-performance-tempo-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 1.62rem;
+  min-height: 4.15rem;
+  border-radius: 0.18rem;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+}
+.kd-performance-tempo-body:active { cursor: grabbing; }
+.kd-performance-tempo-body:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--kd-deck-a) 45%, transparent);
+}
+.kd-performance-deck-controls[data-side="b"] .kd-performance-tempo-body:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--kd-deck-b) 45%, transparent);
+}
+/* 刻度缩成轨道旁的短标，不再满宽横贯；0% 档单独一根稍长亮线。 */
+.kd-performance-tempo-body::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  margin-left: -1px;
+  background: color-mix(in srgb, var(--kd-fader-track) 80%, transparent);
+}
+.kd-performance-tempo-ticks { position: absolute; inset: 0; }
+.kd-performance-tempo-ticks > u {
+  position: absolute;
+  left: 50%;
+  width: 0.5rem;
+  margin-left: -0.25rem;
+  height: 1px;
+  background: var(--kd-fader-track);
+}
+.kd-performance-tempo-ticks > u:nth-child(1) { top: 0; }
+.kd-performance-tempo-ticks > u:nth-child(2) { top: 25%; }
+.kd-performance-tempo-ticks > u:nth-child(3) { top: 50%; }
+.kd-performance-tempo-ticks > u:nth-child(4) { top: 75%; }
+.kd-performance-tempo-ticks > u:nth-child(5) { top: 100%; }
+.kd-performance-tempo-zero {
+  position: absolute;
+  left: 50%;
+  width: 0.9rem;
+  margin-left: -0.45rem;
+  height: 2px;
+  margin-bottom: -1px;
+  background: var(--kd-text-subtle);
+}
+.kd-performance-tempo-lock {
+  position: absolute;
+  left: 0.06rem;
+  width: 0.26rem;
+  height: 0.26rem;
+  margin-bottom: -0.13rem;
+  border-radius: 50%;
+  background: #39404a;
+}
+.kd-performance-tempo-lock[data-active="true"] { background: #2fce6b; }
+.kd-performance-tempo-thumb {
+  position: absolute;
+  left: 50%;
+  width: 1.52rem;
+  height: 0.5rem;
+  border: 1px solid var(--kd-fader-thumb-border);
+  border-radius: 0.25rem;
+  background: var(--kd-fader-thumb);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, 50%);
+  pointer-events: none;
+}
+.kd-performance-tempo-thumb::after {
+  content: "";
+  position: absolute;
+  left: 0.12rem;
+  right: 0.12rem;
+  top: 50%;
+  height: 1px;
+  background: rgba(10, 12, 16, 0.55);
+}
+.kd-performance-tempo-thumb[data-center="true"] {
+  border-color: #1f9d55;
+  background: #2fce6b;
+}
+.kd-performance-tempo-takeover {
+  position: absolute;
+  left: 50%;
+  width: 2px;
+  margin-left: -1px;
+  background: color-mix(in srgb, var(--kd-text-subtle) 55%, transparent);
+  pointer-events: none;
+}
+.kd-performance-tempo-thumb[data-hardware="true"] {
+  background: transparent;
+  border-style: dashed;
+  box-shadow: none;
+  opacity: 0.9;
+}
+.kd-performance-tempo-thumb[data-hardware="true"]::after {
+  display: none;
+}
+.kd-performance-tempo-steps {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.12rem;
+}
+.kd-performance-tempo-steps > button {
+  display: grid;
+  place-items: center;
+  height: 0.95rem;
+  border: 1px solid var(--kd-border-subtle);
+  border-radius: 0.18rem;
+  color: var(--kd-text-body);
+  background: transparent;
+}
+.kd-performance-tempo-steps > button:hover:not(:disabled) { background: color-mix(in srgb, var(--kd-text) 8%, transparent); }
+.kd-performance-tempo-steps > button:disabled { opacity: 0.42; }
+.kd-performance-stem-log {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  display: grid;
+  grid-template-rows: 1.05em 1.05em;
+  align-content: center;
+  min-width: 0;
+  min-height: 2.05rem;
+  padding: 0.08rem 0.06rem 0.02rem;
+  border-top: 1px solid var(--kd-border-subtle);
+  color: var(--kd-text-subtle);
+  font: 700 var(--kd-dj-xs)/1.15 var(--kd-font-mono);
+  letter-spacing: 0.02em;
+}
+.kd-performance-stem-log > span {
+  overflow: hidden;
+  min-width: 0;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.kd-performance-stem-log[data-error="true"] { color: #ffb0ba; }
+/* 通道竖推 / 交叉横推：和 TEMPO 同一套槽轨 + 胶囊帽。 */
+.kd-performance-fader {
+  position: relative;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+}
+.kd-performance-fader:active { cursor: grabbing; }
+.kd-performance-fader[data-disabled="true"] {
+  cursor: default;
+  opacity: 0.55;
+  pointer-events: none;
+}
+.kd-performance-fader[data-disabled="true"]:active { cursor: default; }
+.kd-performance-fader:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--kd-text) 28%, transparent);
+}
+.kd-performance-fader[data-axis="vertical"] {
+  width: 1.42rem;
+  min-height: 2.7rem;
+  max-height: 4.2rem;
+  height: 100%;
+  align-self: end;
+}
+.kd-performance-fader[data-axis="horizontal"] {
+  width: 100%;
+  height: 1.38rem;
+}
+.kd-performance-fader::before {
+  content: "";
+  position: absolute;
+  background: color-mix(in srgb, var(--kd-fader-track) 88%, transparent);
+  border-radius: 1px;
+}
+.kd-performance-fader[data-axis="vertical"]::before {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 3px;
+  margin-left: -1.5px;
+}
+.kd-performance-fader[data-axis="horizontal"]::before {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 3px;
+  margin-top: -1.5px;
+}
+.kd-performance-fader-ticks { position: absolute; inset: 0; pointer-events: none; }
+.kd-performance-fader-ticks > u {
+  position: absolute;
+  background: var(--kd-fader-track);
+  text-decoration: none;
+}
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-ticks > u {
+  left: 50%;
+  width: 0.55rem;
+  height: 1px;
+  margin-left: -0.275rem;
+}
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-ticks > u:nth-child(1) { top: 0; }
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-ticks > u:nth-child(2) { top: 25%; }
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-ticks > u:nth-child(3) { top: 50%; }
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-ticks > u:nth-child(4) { top: 75%; }
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-ticks > u:nth-child(5) { top: 100%; }
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-ticks > u {
+  top: 50%;
+  width: 1px;
+  height: 0.55rem;
+  margin-top: -0.275rem;
+}
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-ticks > u:nth-child(1) { left: 0; }
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-ticks > u:nth-child(2) { left: 25%; }
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-ticks > u:nth-child(3) {
+  left: 50%;
+  height: 0.78rem;
+  margin-top: -0.39rem;
+  background: var(--kd-text-subtle);
+}
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-ticks > u:nth-child(4) { left: 75%; }
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-ticks > u:nth-child(5) { left: 100%; }
+.kd-performance-fader-fill {
+  position: absolute;
+  background: color-mix(in srgb, var(--kd-text) 22%, var(--kd-fader-track));
+  pointer-events: none;
+}
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-fill {
+  left: 50%;
+  bottom: 0;
+  width: 3px;
+  margin-left: -1.5px;
+  border-radius: 1px;
+}
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-fill {
+  display: none;
+}
+.kd-performance-fader-thumb {
+  position: absolute;
+  border: 1px solid var(--kd-fader-thumb-border);
+  border-radius: 0.25rem;
+  background: var(--kd-fader-thumb);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+.kd-performance-fader-thumb::after {
+  content: "";
+  position: absolute;
+  background: rgba(10, 12, 16, 0.55);
+}
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-thumb {
+  left: 50%;
+  width: 1.42rem;
+  height: 0.48rem;
+  transform: translate(-50%, 50%);
+}
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-thumb::after {
+  left: 0.12rem;
+  right: 0.12rem;
+  top: 50%;
+  height: 1px;
+}
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-thumb {
+  top: 50%;
+  width: 0.48rem;
+  height: 1.22rem;
+  transform: translate(-50%, -50%);
+}
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-thumb::after {
+  top: 0.12rem;
+  bottom: 0.12rem;
+  left: 50%;
+  width: 1px;
+}
+.kd-performance-fader-thumb[data-center="true"] {
+  border-color: color-mix(in srgb, var(--kd-text) 35%, var(--kd-fader-thumb-border));
+}
+.kd-performance-crossfader {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  width: 100%;
+  align-items: center;
+  gap: 0.22rem;
+  color: var(--kd-text-subtle);
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+}
+.kd-performance-crossfader-toggle,
+.kd-performance-crossfader-spacer {
+  box-sizing: border-box;
+  width: 1.42rem;
+  min-height: 1.22rem;
+}
+.kd-performance-crossfader-toggle {
+  padding: 0;
+  border: 0;
+  border-radius: 0.18rem;
+  color: var(--kd-text-subtle);
+  background: transparent;
+  font: 800 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  letter-spacing: 0.04em;
+}
+.kd-performance-crossfader-toggle:hover { color: var(--kd-text-body); }
+.kd-performance-crossfader-toggle[data-active="true"] {
+  color: var(--kd-text);
+  background: color-mix(in srgb, var(--kd-text) 11%, transparent);
+}
+.kd-performance-crossfader > span[data-side] {
+  display: grid;
+  place-items: center;
+  width: 0.82rem;
+  color: var(--kd-text-subtle);
+}
+.kd-performance-crossfader-body {
+  position: relative;
+  display: grid;
+  grid-template-rows: 0.34rem 1.38rem 0.42rem;
+  min-width: 0;
+  padding: 0 0.12rem;
+}
+.kd-performance-crossfader-scale {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  align-items: end;
+  height: 0.38rem;
+}
+.kd-performance-crossfader-scale u {
+  justify-self: center;
+  width: 1px;
+  height: 0.18rem;
+  background: var(--kd-text-disabled);
+  text-decoration: none;
+}
+.kd-performance-crossfader-scale u:nth-child(3) {
+  height: 0.34rem;
+  background: var(--kd-text);
+}
+.kd-performance-crossfader-body > b {
+  align-self: center;
+  color: var(--kd-text-disabled);
+  font: 700 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  text-align: center;
+  letter-spacing: 0.04em;
+}
+
+.kd-performance-cue-menu {
+  position: fixed;
+  z-index: 1000;
+  display: grid;
+  min-width: 10.5rem;
+  padding: 0.22rem;
+  border: 1px solid var(--kd-border);
+  background: var(--kd-panel-raised);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+}
+.kd-performance-cue-menu > button,
+.kd-performance-cue-menu form button {
+  min-height: 1.65rem;
+  padding: 0 0.48rem;
+  border: 0;
+  color: var(--kd-text);
+  background: transparent;
+  text-align: left;
+  font: 600 var(--kd-dj-lg)/1 var(--kd-font);
+}
+.kd-performance-cue-menu > button:hover { background: var(--kd-hover); }
+.kd-performance-cue-menu > button[data-danger="true"] { color: var(--kd-danger); }
+.kd-performance-cue-menu form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.22rem;
+}
+.kd-performance-cue-menu form input {
+  min-width: 0;
+  height: 1.7rem;
+  padding: 0 0.35rem;
+  border: 1px solid var(--kd-border);
+  color: var(--kd-text);
+  background: var(--kd-panel-inset);
+  font-size: var(--kd-dj-lg);
+}
+.kd-performance-cue-menu form button {
+  color: var(--kd-text-body);
+  border-left: 1px solid var(--kd-border-subtle);
+}
+
+/* —— 日间模式：Performance 控制台不再保留硬件黑，整区换成浅色扁平面。 —— */
+:root[data-theme="light"] .kd-performance-workspace {
+  --kd-line: #c5cad3;
+  --kd-line-soft: #d0d5dd;
+  --kd-fader-track: #9aa3ae;
+  --kd-fader-thumb: #ffffff;
+  --kd-fader-thumb-border: rgba(0, 0, 0, 0.28);
+  --kd-knob-boost: #d1242f;
+  --kd-knob-cut: #1f6feb;
+  --kd-border: #c5cad3;
+  --kd-border-subtle: #d0d5dd;
+  --kd-text-subtle: #5c6370;
+  background: var(--kd-bg);
+}
+/* 波形区在亮色主题下仍保持深色底（rekordbox/djay 浅色模式惯例）：车道、角标、
+   播放头、节拍线全部沿用深色配色，不做亮色覆盖。 */
+:root[data-theme="light"] .kd-performance-tempo-bpm { color: var(--kd-text); }
+:root[data-theme="light"] .kd-performance-tempo-pct > output { color: var(--kd-text-body); }
+:root[data-theme="light"] .kd-performance-tempo .kd-performance-sync {
+  border-color: var(--kd-line);
+  color: var(--kd-text-body);
+  background: var(--kd-panel);
+  box-shadow: none;
+  text-shadow: none;
+}
+:root[data-theme="light"] .kd-performance-tempo-zero { background: #7d858f; }
+:root[data-theme="light"] .kd-performance-tempo-body::before { background: #a8b0ba; }
+:root[data-theme="light"] .kd-performance-tempo-ticks > u { background: #b7bec7; }
+:root[data-theme="light"] .kd-performance-tempo-lock { background: #c3c9d1; }
+:root[data-theme="light"] .kd-performance-tempo-lock[data-active="true"] { background: #1fa957; }
+:root[data-theme="light"] .kd-performance-tempo-thumb {
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+:root[data-theme="light"] .kd-performance-tempo-thumb[data-center="true"] {
+  border-color: #1f9d55;
+  background: #2fce6b;
+}
+:root[data-theme="light"] .kd-performance-tempo-takeover {
+  background: color-mix(in srgb, var(--kd-text-subtle) 45%, transparent);
+}
+:root[data-theme="light"] .kd-performance-tempo-thumb[data-hardware="true"] {
+  background: transparent;
+  border-color: #7d858f;
+}
+:root[data-theme="light"] .kd-performance-fader::before {
+  background: #a8b0ba;
+}
+:root[data-theme="light"] .kd-performance-fader-ticks > u { background: #b7bec7; }
+:root[data-theme="light"] .kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-ticks > u:nth-child(3) {
+  background: #7d858f;
+}
+:root[data-theme="light"] .kd-performance-fader-fill {
+  background: color-mix(in srgb, var(--kd-text) 18%, #c6ccd4);
+}
+:root[data-theme="light"] .kd-performance-fader-thumb {
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+:root[data-theme="light"] .kd-performance-fader-thumb::after { background: rgba(0, 0, 0, 0.22); }
+:root[data-theme="light"] .kd-performance-tempo-steps > button {
+  border-color: var(--kd-line);
+  color: var(--kd-text-body);
+  background: var(--kd-panel);
+}
+:root[data-theme="light"] .kd-performance-tempo-steps > button:hover:not(:disabled) { background: var(--kd-hover); }
+:root[data-theme="light"] .kd-performance-vinyl-record {
+  background: repeating-radial-gradient(circle, #d7dade 0 1px, #f3f4f6 1.5px 3px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.18), inset 0 0 0 1px rgba(0, 0, 0, 0.05);
+}
+:root[data-theme="light"] .kd-performance-deck-controls[data-playing="true"],
+:root[data-theme="light"] .kd-performance-deck-controls[data-side="b"][data-playing="true"] {
+  background: rgba(0, 0, 0, 0.03);
+}
+:root[data-theme="light"] .kd-performance-stem-download {
+  border-color: rgba(0, 0, 0, 0.22);
+  background: var(--kd-panel);
+}
+:root[data-theme="light"] .kd-performance-stem-download > button { color: var(--kd-text-body); }
+:root[data-theme="light"] .kd-performance-stem-download > button:hover:not(:disabled) {
+  color: var(--kd-text);
+  background: var(--kd-hover);
+}
+:root[data-theme="light"] .kd-performance-stem-download > button:disabled { color: var(--kd-muted); }
+:root[data-theme="light"] .kd-performance-stem-download > i { background: var(--kd-line); }
+:root[data-theme="light"] .kd-performance-stem-download > i > span { background: var(--kd-muted); }
+:root[data-theme="light"] .kd-performance-stem-pad {
+  border-color: var(--kd-line);
+  background: var(--kd-panel);
+  box-shadow: none;
+}
+:root[data-theme="light"] .kd-performance-stem-pad-main { color: var(--kd-muted); }
+:root[data-theme="light"] .kd-performance-stem-pad[data-stem="drums"] { --kd-stem: #b25e12; }
+:root[data-theme="light"] .kd-performance-stem-pad[data-stem="bass"] { --kd-stem: #c2333d; }
+:root[data-theme="light"] .kd-performance-stem-pad[data-stem="other"] { --kd-stem: #4557c9; }
+:root[data-theme="light"] .kd-performance-stem-pad[data-stem="vocals"] { --kd-stem: #17703c; }
+:root[data-theme="light"] .kd-performance-stem-pad[data-audible="true"] {
+  border-color: color-mix(in srgb, var(--kd-stem) 42%, var(--kd-line));
+  background: color-mix(in srgb, var(--kd-stem) 8%, #ffffff);
+}
+:root[data-theme="light"] .kd-performance-stem-pads-status { color: var(--kd-danger); }
+:root[data-theme="light"] .kd-performance-transport > button {
+  border-color: var(--kd-line);
+  color: var(--kd-text-body);
+  background: var(--kd-panel);
+  box-shadow: none;
+  text-shadow: none;
+}
+:root[data-theme="light"] .kd-performance-transport > button:active:not(:disabled) {
+  background: var(--kd-hover);
+  box-shadow: none;
+}
+:root[data-theme="light"] .kd-performance-play[data-active="true"] {
+  color: #07130c !important;
+  border-color: #1fa557;
+  background: #4ade80;
+  box-shadow: none;
+}
+:root[data-theme="light"] .kd-performance-main-cue {
+  color: #b45309 !important;
+  border-color: rgba(217, 154, 18, 0.5) !important;
+}
+:root[data-theme="light"] .kd-performance-sync[data-active="true"] {
+  color: var(--kd-text);
+  border-color: var(--kd-line) !important;
+  background: color-mix(in srgb, var(--kd-text) 8%, transparent) !important;
+}
+:root[data-theme="light"] .kd-performance-loop-stepper > span,
+:root[data-theme="light"] .kd-performance-loop-jump > span,
+:root[data-theme="light"] .kd-performance-cues-bank > span {
+  border-color: var(--kd-line);
+  background: var(--kd-panel);
+  box-shadow: none;
+}
+:root[data-theme="light"] .kd-performance-loop-stepper button,
+:root[data-theme="light"] .kd-performance-loop-jump button {
+  color: var(--kd-muted);
+  background: transparent;
+}
+:root[data-theme="light"] .kd-performance-loop-stepper button:active:not(:disabled),
+:root[data-theme="light"] .kd-performance-loop-jump button:active:not(:disabled) {
+  background: var(--kd-hover);
+}
+:root[data-theme="light"] .kd-performance-cue-slot {
+  border-right-color: var(--kd-line);
+  border-bottom-color: var(--kd-line);
+}
+:root[data-theme="light"] .kd-performance-cue-slot:not([data-filled="true"]) {
+  color: var(--kd-muted);
+}
+:root[data-theme="light"] .kd-performance-cue-note {
+  color: var(--kd-muted);
+}
+:root[data-theme="light"] .kd-performance-loop-toggle {
+  color: var(--kd-text) !important;
+  border-inline-color: var(--kd-line) !important;
+}
+:root[data-theme="light"] .kd-performance-loop-toggle[data-active="true"] {
+  background: color-mix(in srgb, var(--kd-text) 8%, transparent);
+}
+:root[data-theme="light"] .kd-performance-loop-jump button:first-of-type {
+  border-right-color: var(--kd-line);
+}
+:root[data-theme="light"] .kd-performance-loop-stepper > em,
+:root[data-theme="light"] .kd-performance-loop-jump > em {
+  color: var(--kd-muted);
+}
+:root[data-theme="light"] .kd-performance-knob > span {
+  border-color: #5c6370;
+  background: #3a414b;
+  box-shadow: none;
+}
+:root[data-theme="light"] .kd-performance-knob > span i { background: #fff; }
+:root[data-theme="light"] .kd-performance-knob[data-boost="true"] > span i,
+:root[data-theme="light"] .kd-performance-stem-eq-knob[data-boost="true"] > span i {
+  background: var(--kd-knob-boost);
+}
+:root[data-theme="light"] .kd-performance-knob[data-cut="true"] > span i,
+:root[data-theme="light"] .kd-performance-stem-eq-knob[data-cut="true"] > span i {
+  background: var(--kd-knob-cut);
+}
+:root[data-theme="light"] .kd-performance-stem-eq[data-midi="true"] {
+  background: color-mix(in srgb, var(--kd-text) 5%, transparent);
+}
+:root[data-theme="light"] .kd-performance-stem-eq-knob[data-stem="drums"] { --kd-stem: #b25e12; }
+:root[data-theme="light"] .kd-performance-stem-eq-knob[data-stem="bass"] { --kd-stem: #c2333d; }
+:root[data-theme="light"] .kd-performance-stem-eq-knob[data-stem="other"] { --kd-stem: #4557c9; }
+:root[data-theme="light"] .kd-performance-stem-eq-knob[data-stem="vocals"] { --kd-stem: #17703c; }
+:root[data-theme="light"] .kd-performance-stem-eq-knob > span {
+  background: #3a414b;
+  box-shadow: inset 0 0 0 1.5px #5c6370;
+}
+:root[data-theme="light"] .kd-performance-stem-eq-knob > span i { background: #fff; }
+:root[data-theme="light"] .kd-performance-stem-log { color: #5c6370; }
+:root[data-theme="light"] .kd-performance-stem-log[data-error="true"] { color: var(--kd-danger); }
+:root[data-theme="light"] .kd-performance-master {
+  background: var(--kd-panel);
+  box-shadow: inset 0 0 0 1px var(--kd-line);
+}
+:root[data-theme="light"] .kd-performance-transport > button:disabled,
+:root[data-theme="light"] .kd-performance-cue-slot:disabled,
+:root[data-theme="light"] .kd-performance-loop button:disabled,
+:root[data-theme="light"] .kd-performance-tempo-steps > button:disabled,
+:root[data-theme="light"] .kd-performance-tempo .kd-performance-sync:disabled {
+  opacity: 0.72;
+}
+
+@media (max-width: 900px) {
+  .kd-performance-console { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
+  .kd-performance-master { width: max-content; min-width: 0; }
+  .kd-performance-knob > span { --kd-knob-size: 1.08rem; }
+  .kd-performance-strip-knobs > .kd-performance-knob:first-child > span { --kd-knob-size: 0.92rem; }
+  .kd-performance-strip-fader > .kd-performance-knob > span { --kd-knob-size: 1.22rem; }
+  .kd-performance-stem-eq-knob > span { --kd-knob-size: 1.18rem; }
+  .kd-performance-metadata { grid-auto-flow: row; gap: 0.18rem; }
+  .kd-performance-output-strips label { grid-template-columns: auto 3.1rem; }
+  .kd-performance-output-strips input { width: 3.1rem; }
+  .kd-performance-toolbar-waves button { padding-inline: 0.22rem; }
+}
+
+@media (max-width: 640px) {
+  .kd-performance-console {
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  }
+  .kd-performance-master { width: max-content; min-width: 0; }
+  .kd-performance-tempo-side { min-width: 1.95rem; }
+  .kd-performance-loop-jump > em {
+    letter-spacing: 0;
+    font-size: var(--kd-dj-xs);
+  }
+}
+
+/* DJ 工作台没有横向浏览这一交互。Performance 固定成完整控制面；下方曲库只
+   保留纵向浏览，列由 TrackTable 的 fitWidth 档位压进当前面板。 */
+.kd-app[data-work-mode="dj"] .kd-scroll {
+  max-width: 100%;
+  overflow-x: hidden;
+  overscroll-behavior-x: none;
+}
+.kd-app[data-work-mode="dj"] .kd-scroll::-webkit-scrollbar {
+  height: 0;
+}
+.kd-app[data-work-mode="dj"] .kd-table[data-fit-width="true"] {
+  width: 100%;
+  min-width: 100% !important;
+  max-width: 100%;
+}
+.kd-app[data-work-mode="dj"] .kd-table[data-fit-width="true"] .kd-col-resize {
+  display: none;
+}
+
+/* ---------------------------------------------------------------- STEM debug workstation */
+.kd-stem-debug {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 2.2rem minmax(0, 1fr);
+  color: var(--kd-text);
+  background: var(--kd-bg);
+}
+.kd-stem-debug-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0 0.7rem;
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  font-family: var(--kd-font-mono);
+  letter-spacing: 0.05em;
+  -webkit-app-region: drag;
+}
+.kd-app[data-mac="true"] .kd-stem-debug-head {
+  padding-left: calc(var(--kd-traffic-pad) + 0.35rem);
+}
+.kd-stem-debug-head > button,
+.kd-stem-debug-transport > button,
+.kd-stem-debug-ab > button,
+.kd-stem-debug-reset {
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--kd-line);
+  color: var(--kd-text-subtle);
+  background: var(--kd-panel-inset);
+}
+.kd-stem-debug-head > button { width: 1.6rem; height: 1.45rem; }
+.kd-stem-debug-head > button { -webkit-app-region: no-drag; }
+.kd-stem-debug-head > strong { font: 800 0.7rem/1 var(--kd-font-mono); }
+.kd-stem-debug-head > span {
+  overflow: hidden;
+  margin-left: auto;
+  color: var(--kd-muted);
+  font: 600 0.58rem/1 var(--kd-font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-stem-debug-body {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.65rem;
+  overflow: hidden;
+}
+.kd-stem-debug-source {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.kd-stem-debug-source > select {
+  width: min(28rem, 38vw);
+  min-width: 10rem;
+  height: 1.85rem;
+  border: 1px solid var(--kd-line);
+  color: var(--kd-text);
+  background: var(--kd-panel-inset);
+  padding: 0 0.45rem;
+}
+.kd-stem-debug-source > select:first-of-type { width: min(22rem, 30vw); }
+.kd-stem-debug-model-meta {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 10rem;
+  font-family: var(--kd-font-mono);
+  white-space: nowrap;
+}
+.kd-stem-debug-model-meta b { color: var(--kd-text-subtle); font-size: 0.56rem; }
+.kd-stem-debug-model-meta i { color: var(--kd-muted); font-size: 0.5rem; font-style: normal; }
+.kd-stem-debug-track {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  overflow: hidden;
+}
+.kd-stem-debug-track b,
+.kd-stem-debug-track i {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-stem-debug-track b { font-size: 0.75rem; }
+.kd-stem-debug-track i { color: var(--kd-muted); font-size: 0.64rem; font-style: normal; }
+.kd-stem-debug-length {
+  display: grid;
+  grid-template-columns: repeat(2, auto);
+  gap: 1px;
+  border: 1px solid var(--kd-line);
+  background: var(--kd-line);
+}
+.kd-stem-debug-length > button {
+  height: 1.55rem;
+  padding: 0 0.45rem;
+  border: 0;
+  color: var(--kd-muted);
+  background: var(--kd-panel-inset);
+  font: 750 0.56rem/1 var(--kd-font-mono);
+}
+.kd-stem-debug-length > button[data-active="true"] { color: var(--kd-theme); }
+.kd-stem-debug-wave-shell {
+  position: relative;
+  flex: 1 1 15rem;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--kd-line);
+  background: #0c0f13;
+}
+.kd-stem-debug-wave-shell:not([data-ready="true"]) { border-color: var(--kd-border-subtle); }
+.kd-stem-debug-wave {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;
+}
+.kd-stem-debug-console {
+  display: grid;
+  grid-template-columns: minmax(15rem, 0.75fr) minmax(22rem, 1fr) minmax(24rem, 1.2fr);
+  gap: 0.65rem;
+  min-height: 7.6rem;
+  padding: 0.55rem;
+  border: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+}
+.kd-stem-debug-transport {
+  display: grid;
+  grid-template-columns: 2rem 2rem minmax(7rem, 1fr);
+  grid-template-rows: 2.15rem 1.65rem;
+  gap: 0.38rem;
+  align-content: center;
+}
+.kd-stem-debug-transport > button { width: 2rem; height: 2rem; }
+.kd-stem-debug-transport > button:disabled,
+.kd-stem-debug-ab > button:disabled,
+.kd-stem-debug-reset:disabled { opacity: 0.38; }
+.kd-stem-debug-play { color: var(--kd-theme) !important; }
+.kd-stem-debug-transport > time {
+  align-self: center;
+  color: var(--kd-text-subtle);
+  font: 700 0.68rem/1 var(--kd-font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.kd-stem-debug-ab {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.25rem;
+}
+.kd-stem-debug-ab > button {
+  height: 1.55rem;
+  font: 800 0.63rem/1 var(--kd-font-mono);
+}
+.kd-stem-debug-ab > button[data-active="true"] {
+  border-color: color-mix(in srgb, var(--kd-theme) 72%, var(--kd-line));
+  color: #fff;
+  background: color-mix(in srgb, var(--kd-theme) 34%, var(--kd-panel-inset));
+}
+.kd-stem-debug-knobs {
+  display: grid;
+  grid-template-columns: repeat(var(--kd-debug-lanes, 4), minmax(3.6rem, 1fr)) 1.8rem;
+  gap: 0.35rem;
+  align-items: center;
+  justify-items: center;
+}
+.kd-stem-debug-knob-wrap {
+  --kd-stem: #aeb6c2;
+  display: grid;
+  justify-items: center;
+  gap: 0.18rem;
+  min-width: 0;
+  color: var(--kd-stem);
+}
+.kd-stem-debug-knob-wrap[data-stem="drums"] { --kd-stem: #d59d6b; }
+.kd-stem-debug-knob-wrap[data-stem="bass"] { --kd-stem: #d08088; }
+.kd-stem-debug-knob-wrap[data-stem="other"] { --kd-stem: #93a3d8; }
+.kd-stem-debug-knob-wrap[data-stem="instrumental"] { --kd-stem: #93a3d8; }
+.kd-stem-debug-knob-wrap[data-stem="vocals"] { --kd-stem: #82c49e; }
+.kd-stem-debug-knob.kd-performance-knob { gap: 0.14rem; color: var(--kd-stem); }
+.kd-stem-debug-knob.kd-performance-knob > span {
+  --kd-knob-size: 2.05rem;
+  border-color: color-mix(in srgb, var(--kd-stem) 48%, var(--kd-line));
+}
+.kd-stem-debug-knob.kd-performance-knob > span i { background: var(--kd-stem); }
+.kd-stem-debug-knob.kd-performance-knob > input { inset: 0 0 1.55rem; }
+.kd-stem-debug-knob.kd-performance-knob > b {
+  color: var(--kd-stem);
+  font: 800 0.56rem/1 var(--kd-font-mono);
+}
+.kd-stem-debug-knob.kd-performance-knob > em {
+  color: var(--kd-text-subtle);
+  font: 650 0.55rem/1 var(--kd-font-mono);
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+.kd-stem-debug-reset { width: 1.65rem; height: 1.65rem; }
+.kd-stem-debug-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(5rem, 1fr));
+  grid-template-rows: repeat(3, 1fr);
+  gap: 1px;
+  margin: 0;
+  background: var(--kd-line);
+  border: 1px solid var(--kd-line);
+}
+.kd-stem-debug-metrics > div {
+  min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 0.18rem;
+  padding: 0.32rem 0.45rem;
+  background: var(--kd-panel-inset);
+}
+.kd-stem-debug-metrics dt {
+  color: var(--kd-muted);
+  font: 700 0.53rem/1 var(--kd-font-mono);
+}
+.kd-stem-debug-metrics dd {
+  overflow: hidden;
+  margin: 0;
+  color: var(--kd-text);
+  font: 800 0.66rem/1 var(--kd-font-mono);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-stem-debug-metrics > div[data-pass="true"] dd { color: #7ce5ae; }
+.kd-stem-debug-metrics > div[data-pass="false"] dd { color: #ff7d86; }
+
+@media (max-width: 940px) {
+  .kd-stem-debug-console {
+    grid-template-columns: minmax(14rem, 0.8fr) minmax(21rem, 1.2fr);
+  }
+  .kd-stem-debug-metrics { grid-column: 1 / -1; min-height: 4.2rem; }
+  .kd-stem-debug-body { overflow: auto; }
 }

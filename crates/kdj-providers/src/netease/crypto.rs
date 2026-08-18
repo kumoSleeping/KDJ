@@ -90,10 +90,18 @@ fn rsa_encrypt(data: &str) -> Vec<u8> {
 pub fn weapi_encrypt(plain: &str, secret: Option<&str>) -> WeapiPayload {
     let key2 = secret.map(str::to_string).unwrap_or_else(random_secret_key);
     // 第一遍：固定密钥
-    let first = encode_bytes_mime(&aes_cbc_encrypt(plain.as_bytes(), WEAPI_AES_KEY, WEAPI_AES_IV));
+    let first = encode_bytes_mime(&aes_cbc_encrypt(
+        plain.as_bytes(),
+        WEAPI_AES_KEY,
+        WEAPI_AES_IV,
+    ));
     // 第二遍：拿第一遍的 base64 文本（含换行）再加密一次
     let key2_bytes: [u8; 16] = key2.as_bytes().try_into().expect("密钥恒为 16 字节");
-    let second = encode_bytes_mime(&aes_cbc_encrypt(first.as_bytes(), &key2_bytes, WEAPI_AES_IV));
+    let second = encode_bytes_mime(&aes_cbc_encrypt(
+        first.as_bytes(),
+        &key2_bytes,
+        WEAPI_AES_IV,
+    ));
     WeapiPayload {
         params: second,
         enc_sec_key: hex::encode(rsa_encrypt(&key2)),

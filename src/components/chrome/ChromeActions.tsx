@@ -1,19 +1,24 @@
 import {
   Columns3,
+  Disc3,
   Download,
   LockKeyhole,
   LockKeyholeOpen,
+  Library,
   PanelRight,
   Settings,
   Upload,
 } from "lucide-react";
 import { useUpdateStore } from "../../stores/updateStore";
+import type { WorkMode } from "../../lib/workMode";
 
 export type AsideToggleState = "open" | "closed" | "locked";
 
 export interface ChromeActionsProps {
   asideState?: AsideToggleState;
   onAsideLock?(): void;
+  workMode: WorkMode;
+  onWorkModeChange(mode: WorkMode): void;
   multiPaneEnabled: boolean;
   onMultiPane(): void;
   settingsOpen: boolean;
@@ -29,6 +34,8 @@ export interface ChromeActionsProps {
 export function ChromeActions({
   asideState,
   onAsideLock,
+  workMode,
+  onWorkModeChange,
   multiPaneEnabled,
   onMultiPane,
   settingsOpen,
@@ -45,6 +52,23 @@ export function ChromeActions({
 
   return (
     <div className="kd-chrome-actions" role="group" aria-label="顶栏工具">
+      <button
+        type="button"
+        className="kd-work-mode-switch"
+        data-mode={workMode}
+        aria-label={workMode === "manager" ? "切换到 DJ 模式" : "切换到管理器模式"}
+        title={workMode === "manager" ? "进入 DJ 模式" : "返回管理器模式"}
+        onClick={() => onWorkModeChange(workMode === "manager" ? "dj" : "manager")}
+      >
+        <span data-active={workMode === "manager" ? "true" : undefined}>
+          <Library size={12} aria-hidden="true" />
+          管理
+        </span>
+        <span data-active={workMode === "dj" ? "true" : undefined}>
+          <Disc3 size={12} aria-hidden="true" />
+          DJ
+        </span>
+      </button>
       {updateReady ? (
         <button
           type="button"

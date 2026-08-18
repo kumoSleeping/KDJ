@@ -85,6 +85,15 @@ function publishedStreamState(value: PublishedStreamPlayback): UnifiedPlayerStat
     transitioning: false,
     rate: value.rate,
     error: "",
+    decks: [0, 1].map((index) => ({
+      trackId: index === 0 ? value.trackId : null,
+      currentTime: index === 0 ? value.position : 0,
+      duration: index === 0 ? value.duration : 0,
+      playing: index === 0 ? value.playing : false,
+      desiredPlaying: index === 0 ? value.playing : false,
+      buffering: false,
+      rate: index === 0 ? value.rate : 1,
+    })) as UnifiedPlayerState["decks"],
   };
 }
 

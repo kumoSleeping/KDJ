@@ -29,6 +29,8 @@ export type FileDisposalMode = "keep" | "trash" | "remove";
 
 export type VideoFormat = "mp4" | "mkv" | "mov";
 export type KeyNotation = "camelot" | "traditional";
+/** Performance 双极滤波器的共振档位；后端将其映射为稳定的 DSP Q。 */
+export type FilterResonance = "low" | "medium" | "high";
 
 export interface Settings {
   download_dir: string;
@@ -68,6 +70,8 @@ export interface Settings {
   auto_start_downloads: boolean;
   /** 播放条使用分析波形；关掉时显示常规进度条。 */
   player_waveform: boolean;
+  /** Performance 双极滤波器的共振强度。 */
+  filter_resonance: FilterResonance;
   /** 本地与 OneLibrary 列表里的调性表示。 */
   key_notation: KeyNotation;
   /** KDJ 虚拟磁盘空间不足时，创建更大的镜像、迁移数据并重试。 */
@@ -426,8 +430,10 @@ export interface Track {
   cue_ms: number | null;
   /** 结束点（毫秒），与 cue_ms 成对。 */
   end_ms: number | null;
-  /** 外置 DJ 曲库带入的只读标准 Cue；本地曲目和在线曲目没有此字段。 */
+  /** Hot Cue / Memory Cue / Loop。外置曲库读取，本地曲目可在演出准备面编辑。 */
   cue_points?: CuePoint[];
+  /** 本地 Cue 是否由 KDJ 显式管理；true 时导出会把清空也同步到目标曲库。 */
+  cue_points_managed?: boolean;
   /** OneLibrary 播放快照所关联的本地曲目，用于复用歌词等本地数据。 */
   local_track_id?: number | null;
   source_platform: string;
@@ -611,6 +617,8 @@ export interface TrackPatch {
   comment?: string;
   cue_ms?: number;
   end_ms?: number;
+  /** 整体替换演出 Cue；空数组表示用户显式清空。 */
+  cue_points?: CuePoint[];
   title?: string;
   artist?: string;
   album?: string;
@@ -650,6 +658,153 @@ export interface Waveform {
   r: number[];
   g: number[];
   b: number[];
+  /** 渐进生成波形中已经真实分析的列；省略表示所有列均已完成。 */
+  known?: boolean[];
+  /** 实时 STEM 扫描起点和当前工作前沿（曲目秒）；普通曲库波形不提供。 */
+  analysis_start?: number;
+  analysis_frontier?: number;
+  analysis_back_frontier?: number;
+}
+
+export type StemName = "vocals" | "drums" | "bass" | "other";
+
+/** A compact, append-only update for the live four-stem performance waveform. */
+export interface LiveStemWaveformPoint {
+  index: number;
+  amp: number;
+  r: number;
+  g: number;
+  b: number;
+}
+
+export interface LiveStemWaveformStem {
+  stem: StemName;
+  points: LiveStemWaveformPoint[];
+}
+
+export interface LiveStemWaveformDelta {
+  track_id: number;
+  /** Playback epoch: changes on seek / new live STEM session, so stale columns can be discarded. */
+  epoch: number;
+  duration: number;
+  columns: number;
+  revision: number;
+  stems: LiveStemWaveformStem[];
+  analysis_start: number;
+  analysis_frontier: number;
+  analysis_back_frontier: number;
+}
+
+export interface StemModelStatus {
+  id: string;
+  version: string;
+  supported: boolean;
+  state: "unsupported" | "missing" | "queued" | "downloading" | "ready" | "error";
+  progress: number;
+  downloadedBytes: number;
+  totalBytes: number;
+  error: string;
+  diagnostics: StemRuntimeDiagnostics;
+}
+
+/** Actual worker observations from the current live STEM runtime. */
+export interface StemRuntimeDiagnostics {
+  runtime: string;
+  provider: string;
+  modelLoadMs: number | null;
+  firstBlockMs: number | null;
+  lastBlockMs: number | null;
+  p95BlockMs: number | null;
+  chunkBudgetMs: number;
+  processedChunks: number;
+  lateChunks: number;
+  outputUnderruns: number;
+  memoryErrors: number;
+  lastError: string;
+}
+
+export interface TrackStemStatus {
+  trackId: number;
+  state:
+    | "missing"
+    | "queued"
+    | "downloadingModel"
+    | "loadingModel"
+    | "separating"
+    | "ready"
+    | "error";
+  progress: number;
+  cachePath: string;
+  duration: number;
+  error: string;
+  phase?: "" | "window" | "fill" | "waiting" | "done" | "error";
+  coveredSeconds?: number;
+  windowStart?: number;
+  windowEnd?: number;
+  windowCoveredSeconds?: number;
+  waitingForDeck?: number | null;
+}
+
+export type StemDebugModelId = "scnet-tran" | "bs-polarformer";
+
+export interface StemDebugLane {
+  id: string;
+  label: string;
+}
+
+export interface StemDebugModelStatus {
+  id: StemDebugModelId;
+  name: string;
+  ready: boolean;
+  sha256: string;
+  bytes: number;
+  path: string;
+  license: string;
+  lanes: StemDebugLane[];
+  error: string;
+}
+
+export interface StemDebugModelCatalog {
+  configured: boolean;
+  root: string;
+  models: StemDebugModelStatus[];
+}
+
+export interface StemDebugWaveforms {
+  original: number[];
+  sum: number[];
+  lanes: Record<string, number[]>;
+}
+
+export interface StemDebugAudioUrls {
+  original: string;
+  lanes: Record<string, string>;
+}
+
+export interface StemDebugRender {
+  sessionId: string;
+  trackId: number;
+  title: string;
+  artist: string;
+  audio: StemDebugAudioUrls;
+  modelId: StemDebugModelId;
+  modelName: string;
+  modelSha256: string;
+  modelLicense: string;
+  lanes: StemDebugLane[];
+  sampleRate: number;
+  frames: number;
+  duration: number;
+  analysisTotalMs: number;
+  realtimeFactor: number;
+  inferenceChunks: number;
+  inferenceTotalMs: number;
+  inferenceMeanMs: number;
+  inferenceP95Ms: number;
+  inferenceMaxMs: number;
+  reconstructionRmsError: number;
+  reconstructionPeakError: number;
+  waveforms: StemDebugWaveforms;
 }
 
 /** 在线缓存已实际解码出的前缀波形。`covered_seconds` 只覆盖从 0 开始的真实 PCM；

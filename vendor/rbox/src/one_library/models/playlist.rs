@@ -678,10 +678,10 @@ impl TreeSeq for PlaylistContent {
             )
             WHERE playlist_id = ?;"#,
         )
-            .bind::<diesel::sql_types::Integer, _>(Self::START_SEQ)
-            .bind::<diesel::sql_types::Integer, _>(parent_id)
-            .bind::<diesel::sql_types::Integer, _>(parent_id)
-            .execute(conn)
+        .bind::<diesel::sql_types::Integer, _>(Self::START_SEQ)
+        .bind::<diesel::sql_types::Integer, _>(parent_id)
+        .bind::<diesel::sql_types::Integer, _>(parent_id)
+        .execute(conn)
     }
 
     #[inline]

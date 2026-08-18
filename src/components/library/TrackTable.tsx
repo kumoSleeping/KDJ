@@ -25,15 +25,18 @@ import { observeTrackScroller } from "../../lib/autoAnalyze";
 import { getBridge } from "../../lib/bridge";
 import { isEditable } from "../../lib/useLibraryClipboard";
 import { tableSortTitle } from "../../lib/tableSort";
+import { DJ_TRACK_TABLE_COLUMN_WIDTHS, fitDjTrackColumns } from "../../lib/djTableLayout";
 import {
   announceTrackDrag,
   claimActiveTrackDragIds,
   dispatchTrackCoverDrop,
+  dispatchTrackDeckDrop,
   finishTrackDrop,
   isTrackDrag,
   readTrackDragIds,
   suppressCoverClickAfterTrackDrop,
   TRACK_COVER_DROP_TARGET_ATTR,
+  TRACK_DECK_DROP_TARGET_ATTR,
   TRACK_TRASH_DROP_EVENT,
   type TrackDragDetail,
 } from "../../lib/trackDrag";
@@ -233,6 +236,8 @@ export interface TrackTableProps {
    * 却退化成手机排版。摆不摆得下长条要看还剩几栏，不看这一栏被挤成多窄。
    */
   layout: LayoutMode;
+  /** DJ 工作台只保留上轨所需列，并在面板宽度内排满，不提供横向滚动。 */
+  fitWidth?: boolean;
   selectedId: number | null;
   selectedIds: number[];
   /** 分屏中只有当前点亮板块可以消费全局删除快捷键。 */
@@ -488,6 +493,7 @@ export function TrackTable({
   tracks,
   loading,
   layout,
+  fitWidth = false,
   selectedId,
   selectedIds,
   sort,
@@ -606,6 +612,14 @@ export function TrackTable({
         return;
       }
       const hit = hitAt(x, y);
+      const deck = hit?.closest<HTMLElement>(`[${TRACK_DECK_DROP_TARGET_ATTR}]`);
+      if (deck) {
+        const side = deck.getAttribute(TRACK_DECK_DROP_TARGET_ATTR);
+        document
+          .querySelectorAll<HTMLElement>(`[${TRACK_DECK_DROP_TARGET_ATTR}="${side}"]`)
+          .forEach((target) => target.setAttribute("data-kd-pointer-track-over", "deck"));
+        return;
+      }
       const oneLibraryCover = hit?.closest<HTMLElement>(`[${ONE_LIBRARY_COVER_TARGET_ATTR}]`);
       if (oneLibraryCover) {
         oneLibraryCover.setAttribute("data-kd-pointer-track-over", "cover");
@@ -668,6 +682,7 @@ export function TrackTable({
       const folder = folderDropElementAt(up.clientX, up.clientY);
       const hit = hitAt(up.clientX, up.clientY);
       const playlist = playlistDropElementAt(up.clientX, up.clientY);
+      const deck = hit?.closest<HTMLElement>(`[${TRACK_DECK_DROP_TARGET_ATTR}]`);
       const trash = hit?.closest<HTMLElement>("[data-kd-track-trash-target]");
       const oneLibraryCover = hit?.closest<HTMLElement>(`[${ONE_LIBRARY_COVER_TARGET_ATTR}]`);
       const cover = hit?.closest<HTMLElement>(`[${TRACK_COVER_DROP_TARGET_ATTR}]`);
@@ -682,6 +697,13 @@ export function TrackTable({
       cleanup();
       if (!dragging) return;
       up.preventDefault();
+
+      if (deck) {
+        const side = Number(deck.getAttribute(TRACK_DECK_DROP_TARGET_ATTR));
+        if (side === 0 || side === 1) dispatchTrackDeckDrop(ids, side);
+        finishTrackDrop();
+        return;
+      }
 
       if (folder) {
         const dest = folder.getAttribute(FOLDER_DROP_PATH_ATTR)?.trim() ?? "";
@@ -1036,17 +1058,26 @@ export function TrackTable({
 
   const orderedColumns = orderByPrefs(COLUMNS, colPrefs.order);
   const colIds = orderedColumns.map((column) => column.key);
-  const visibleColumns = orderedColumns.filter((column) => !colPrefs.hidden.includes(column.key));
+  const configuredVisibleColumns = orderedColumns.filter(
+    (column) => !colPrefs.hidden.includes(column.key),
+  );
+  const visibleColumns = fitWidth
+    ? fitDjTrackColumns(configuredVisibleColumns)
+    : configuredVisibleColumns;
   /** 只有曲库行需要序号列；纯待下载占位时不占左侧空白。 */
   const showIndexCol = tracks.length > 0;
-  const indexWidth = widthFor(INDEX_COL_KEY, INDEX_DEFAULT_WIDTH);
+  const indexWidth = fitWidth ? "10%" : widthFor(INDEX_COL_KEY, INDEX_DEFAULT_WIDTH);
+  const displayWidthFor = (column: Column) => fitWidth
+    ? DJ_TRACK_TABLE_COLUMN_WIDTHS[column.key as keyof typeof DJ_TRACK_TABLE_COLUMN_WIDTHS]
+    : widthFor(column.key, column.width ?? "4rem");
   const tableColSpan = visibleColumns.length + (showIndexCol ? 1 : 0) + 1;
-  const tableMinWidthPx =
-    (showIndexCol ? remStringToPx(indexWidth) : 0) +
-    visibleColumns.reduce(
-      (sum, column) => sum + remStringToPx(widthFor(column.key, column.width ?? "4rem")),
-      0,
-    );
+  const tableMinWidthPx = fitWidth
+    ? "100%"
+    : (showIndexCol ? remStringToPx(indexWidth) : 0) +
+      visibleColumns.reduce(
+        (sum, column) => sum + remStringToPx(displayWidthFor(column)),
+        0,
+      );
 
   /* ---------------------------------------------------- 虚拟滚动 */
   /**
@@ -1197,16 +1228,18 @@ export function TrackTable({
         className="kd-table"
         data-kind="library"
         data-layout={layout}
+        data-fit-width={fitWidth || undefined}
         style={{ minWidth: tableMinWidthPx }}
       >
         {/* 每个真实列由 col 锁住自己的宽度，最后一列只吃剩余空白。
             这样拖标题不会再按比例挤动艺人/BPM；总宽超过视口时由外层横向滚动。 */}
         <colgroup>
-          {showIndexCol ? <col style={{ width: indexWidth }} /> : null}
+          {showIndexCol ? <col data-col="index" style={{ width: indexWidth }} /> : null}
           {visibleColumns.map((column) => (
             <col
               key={column.key}
-              style={{ width: widthFor(column.key, column.width ?? "4rem") }}
+              data-col={column.key}
+              style={{ width: displayWidthFor(column) }}
             />
           ))}
           <col />
@@ -1233,7 +1266,7 @@ export function TrackTable({
               </th>
             ) : null}
             {visibleColumns.map((column) => {
-              const colWidth = widthFor(column.key, column.width ?? "4rem");
+              const colWidth = displayWidthFor(column);
               return (
               <th
                 key={column.key}

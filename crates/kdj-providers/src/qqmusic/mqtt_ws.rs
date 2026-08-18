@@ -28,9 +28,8 @@ pub struct MqttPublish {
     pub user_properties: Vec<(String, String)>,
 }
 
-type WsStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 pub struct MqttWsClient {
     write: futures_util::stream::SplitSink<WsStream, Message>,
@@ -313,8 +312,8 @@ fn decode_publish(flags: u8, payload: &[u8]) -> Result<MqttPublish> {
     anyhow::ensure!(payload.len() >= 2, "PUBLISH 过短");
     let topic_len = u16::from_be_bytes([payload[0], payload[1]]) as usize;
     anyhow::ensure!(payload.len() >= 2 + topic_len, "PUBLISH topic 不完整");
-    let topic =
-        String::from_utf8(payload[2..2 + topic_len].to_vec()).context("PUBLISH topic 不是 UTF-8")?;
+    let topic = String::from_utf8(payload[2..2 + topic_len].to_vec())
+        .context("PUBLISH topic 不是 UTF-8")?;
     let mut offset = 2 + topic_len;
     let qos = (flags >> 1) & 0x03;
     if qos > 0 {
@@ -342,7 +341,8 @@ fn parse_properties(bytes: &[u8]) -> Result<ConnackProps> {
         return Ok(ConnackProps::default());
     }
     let (props_len, header_len) = read_variable_byte_integer(bytes)?;
-    let props = &bytes[header_len..header_len + props_len.min(bytes.len().saturating_sub(header_len))];
+    let props =
+        &bytes[header_len..header_len + props_len.min(bytes.len().saturating_sub(header_len))];
     let mut out = ConnackProps::default();
     let mut i = 0usize;
     while i < props.len() {

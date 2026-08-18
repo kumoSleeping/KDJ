@@ -45,6 +45,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
+midir = "0.11"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # hdiutil / diskutil 的 -plist 输出不受系统显示语言影响；不要解析本地化文本。

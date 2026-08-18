@@ -10,7 +10,7 @@ use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::models::{KeyNotation, Quality, Theme, VideoFormat};
+use crate::models::{FilterResonance, KeyNotation, Quality, Theme, VideoFormat};
 
 pub const SETTINGS_FILENAME: &str = "settings.json";
 // 桌面版历史主库一直叫 kumodeck.db。改名会在同一 data_dir 静默创建一份空库，
@@ -44,6 +44,7 @@ const SETTINGS_FIELDS: &[&str] = &[
     "enabled_platforms",
     "auto_start_downloads",
     "player_waveform",
+    "filter_resonance",
     "key_notation",
     "virtual_disk_auto_grow",
 ];
@@ -108,6 +109,9 @@ pub struct Settings {
     /// 播放条默认展示分析波形；可切回传统进度条，给偏好简洁界面的用户。
     #[serde(default = "yes")]
     pub player_waveform: bool,
+    /// Performance 双极滤波器的共振档位；缺省为高，旧版固定 Q=0.72 对应低档。
+    #[serde(default)]
+    pub filter_resonance: FilterResonance,
     /// 本地与 OneLibrary 曲目列表共用的调性显示方式；数据层始终保留两种表示。
     #[serde(default)]
     pub key_notation: KeyNotation,
@@ -145,6 +149,7 @@ impl Settings {
             enabled_platforms: default_enabled_platforms(),
             auto_start_downloads: false,
             player_waveform: true,
+            filter_resonance: FilterResonance::High,
             key_notation: KeyNotation::Camelot,
             virtual_disk_auto_grow: true,
         }
@@ -508,6 +513,7 @@ mod tests {
         let config = AppConfig::create(dir.join("data"), dir.join("dl"), 0);
         assert_eq!(config.to_settings().default_quality, Quality::Flac);
         assert_eq!(config.to_settings().concurrent_downloads, 3);
+        assert_eq!(config.to_settings().filter_resonance, FilterResonance::High);
         assert_eq!(config.to_settings().key_notation, KeyNotation::Camelot);
         assert!(config.to_settings().virtual_disk_auto_grow);
     }
@@ -520,7 +526,7 @@ mod tests {
         std::fs::create_dir_all(&data).unwrap();
         std::fs::write(
             data.join(SETTINGS_FILENAME),
-            r#"{"default_quality":"ultra-hd-9000","concurrent_downloads":7,"auto_analyze":false}"#,
+            r#"{"default_quality":"ultra-hd-9000","filter_resonance":"unknown","concurrent_downloads":7,"auto_analyze":false}"#,
         )
         .unwrap();
 
@@ -531,6 +537,7 @@ mod tests {
             Quality::Flac,
             "非法字段回落默认值"
         );
+        assert_eq!(settings.filter_resonance, FilterResonance::High);
         assert_eq!(settings.concurrent_downloads, 7, "合法字段必须留下");
         assert!(!settings.auto_analyze, "合法字段必须留下");
     }
@@ -543,6 +550,7 @@ mod tests {
         settings.filename_template = "{artist} - {title}".into();
         settings.platform_priority = vec!["bilibili".into(), "wyy".into()];
         settings.stream_cache_enabled = true;
+        settings.filter_resonance = FilterResonance::Medium;
         config.apply_settings(settings.clone());
 
         let reopened = AppConfig::create(dir.join("data"), dir.join("dl"), 0);

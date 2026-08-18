@@ -11,10 +11,10 @@ use std::sync::OnceLock;
 use kdj_playback::{CommandAck, PlaybackCommand, PlaybackCoordinator, PlaybackSnapshot};
 use tauri::{AppHandle, Emitter};
 
-#[cfg(desktop)]
-use crate::desktop_media::DesktopMediaSession;
 #[cfg(target_os = "android")]
 use crate::android_media::AndroidMediaSession;
+#[cfg(desktop)]
+use crate::desktop_media::DesktopMediaSession;
 
 pub const STATE_EVENT: &str = "playback-state";
 
@@ -99,6 +99,10 @@ impl DesktopPlayerHandle {
         self.coordinator.submit_with_id(command_id, command)
     }
 
+    fn submit_control(&self, command: PlaybackCommand) -> Result<CommandAck, String> {
+        self.coordinator.submit_platform(command)
+    }
+
     fn snapshot(&self) -> Result<PlaybackSnapshot, String> {
         self.coordinator.snapshot()
     }
@@ -122,6 +126,16 @@ pub fn playback_command(
     command: PlaybackCommand,
 ) -> Result<CommandAck, String> {
     player.submit(command_id, command)
+}
+
+/// Continuous TEMPO/mixer controls. They share the actor thread but must not consume frontend
+/// command IDs or wait behind load/seek acknowledgements.
+#[tauri::command]
+pub fn playback_control(
+    player: tauri::State<'_, DesktopPlayerHandle>,
+    command: PlaybackCommand,
+) -> Result<CommandAck, String> {
+    player.submit_control(command)
 }
 
 #[tauri::command]

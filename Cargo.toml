@@ -4,6 +4,7 @@ members = [
     "crates/kdj-core",
     "crates/kdj-providers",
     "crates/kdj-analysis",
+    "crates/kdj-stems",
     "crates/kdj-player",
     "crates/kdj-playback",
     "crates/kdj-library",
@@ -16,7 +17,7 @@ exclude = ["vendor/rbox"]
 version = "0.2.41"
 edition = "2021"
 rust-version = "1.88"
-license = "MIT"
+license = "GPL-3.0-or-later"
 
 [profile.release]
 opt-level = "z"
@@ -31,4 +32,6 @@ strip = true
 [profile.dev.package."*"]
 opt-level = 2
 [profile.dev.package.kdj-analysis]
+opt-level = 2
+[profile.dev.package.kdj-stems]
 opt-level = 2

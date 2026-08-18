@@ -7,6 +7,7 @@ use crate::{DeckId, PlayerMode};
 pub struct TransportSnapshot {
     pub mode: PlayerMode,
     pub playing: bool,
+    pub deck_playing: [bool; 2],
     pub active_deck: DeckId,
     pub transitioning: bool,
     pub transition_to: DeckId,
@@ -19,6 +20,8 @@ pub(crate) struct SharedState {
     generation: AtomicU64,
     mode: AtomicU8,
     playing: AtomicBool,
+    deck_a_playing: AtomicBool,
+    deck_b_playing: AtomicBool,
     active_deck: AtomicU8,
     transitioning: AtomicBool,
     transition_to: AtomicU8,
@@ -35,6 +38,8 @@ impl Default for SharedState {
             generation: AtomicU64::new(0),
             mode: AtomicU8::new(PlayerMode::Continuous as u8),
             playing: AtomicBool::new(false),
+            deck_a_playing: AtomicBool::new(false),
+            deck_b_playing: AtomicBool::new(false),
             active_deck: AtomicU8::new(DeckId::A as u8),
             transitioning: AtomicBool::new(false),
             transition_to: AtomicU8::new(DeckId::A as u8),
@@ -52,6 +57,7 @@ impl SharedState {
         &self,
         mode: PlayerMode,
         playing: bool,
+        deck_playing: [bool; 2],
         active_deck: DeckId,
         transition_to: Option<DeckId>,
         output_frames: u64,
@@ -63,6 +69,10 @@ impl SharedState {
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.mode.store(mode as u8, Ordering::Relaxed);
         self.playing.store(playing, Ordering::Relaxed);
+        self.deck_a_playing
+            .store(deck_playing[0], Ordering::Relaxed);
+        self.deck_b_playing
+            .store(deck_playing[1], Ordering::Relaxed);
         self.active_deck.store(active_deck as u8, Ordering::Relaxed);
         self.transitioning
             .store(transition_to.is_some(), Ordering::Relaxed);
@@ -93,6 +103,10 @@ impl SharedState {
                     _ => PlayerMode::Continuous,
                 },
                 playing: self.playing.load(Ordering::Relaxed),
+                deck_playing: [
+                    self.deck_a_playing.load(Ordering::Relaxed),
+                    self.deck_b_playing.load(Ordering::Relaxed),
+                ],
                 active_deck: match self.active_deck.load(Ordering::Relaxed) {
                     1 => DeckId::B,
                     _ => DeckId::A,

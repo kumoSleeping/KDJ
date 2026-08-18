@@ -60,6 +60,21 @@ import {
   resolveOneLibraryDropTarget,
 } from "../../lib/oneLibraryTrack";
 import {
+  MIDI_BROWSE_CURSOR_ATTR,
+  MIDI_BROWSE_EVENT,
+  MIDI_BROWSE_ID_ATTR,
+  MIDI_BROWSE_ITEM_ATTR,
+  MIDI_BROWSE_PANE_ATTR,
+  MIDI_LOAD_DECK_EVENT,
+  activateBrowseItem,
+  currentBrowseIndex,
+  nextBrowseIndex,
+  paneForSidebarHint,
+  toggleBrowseFocus,
+  type MidiBrowseDetail,
+  type MidiBrowseFocus,
+} from "../../lib/midiLibraryNav";
+import {
   moveWorkspacePane,
   restoreWorkspacePaneState,
   visibleWorkspacePanes,
@@ -105,6 +120,7 @@ import { SearchWorkRail } from "../chrome/SearchWorkRail";
 import { QueuePanel } from "../download/QueuePanel";
 import { isApplyingNav, readPlace, useNavStore } from "../../stores/navStore";
 import { useVideoPip } from "../../lib/videoPip";
+import type { WorkMode } from "../../lib/workMode";
 import { ResultTable, selectableGroups, selectionKey } from "../download/ResultTable";
 import {
   DEFAULT_PRIORITY,
@@ -178,7 +194,13 @@ function loadWorkspacePanes(): WorkspacePaneState {
  * 这么排的理由：找歌 → 下载 → 进曲库 → 排 set 本来就是一条线上的动作，
  * 搜的时候本地还在眼前，也不被队列面板打断。
  */
-export function Workspace() {
+interface WorkspaceProps {
+  workMode: WorkMode;
+  onWorkModeChange(mode: WorkMode): void;
+  onDjWorkspaceHost(node: HTMLDivElement | null): void;
+}
+
+export function Workspace({ workMode, onWorkModeChange, onDjWorkspaceHost }: WorkspaceProps) {
   const selectedOneLibrary = usePlaylistStore((state) => state.selectedTarget);
   const oneLibraryDevices = usePlaylistStore((state) => state.devices);
   const selectedOneLibraryTracks = usePlaylistStore((state) => state.selectedTracks);
@@ -302,6 +324,10 @@ export function Workspace() {
   const [workspacePaneState, setWorkspacePaneState] =
     useState<WorkspacePaneState>(loadWorkspacePanes);
   const [oneLibraryPaneCollapsed, setOneLibraryPaneCollapsed] = useState(false);
+  const [browseFocus, setBrowseFocus] = useState<MidiBrowseFocus>("pane");
+  const browseFocusRef = useRef(browseFocus);
+  browseFocusRef.current = browseFocus;
+  const browseCursorIdRef = useRef<string | null>(null);
   useEffect(() => {
     localStorage.setItem(MULTI_PANE_MODE_KEY, multiPaneEnabled ? "1" : "0");
   }, [multiPaneEnabled]);
@@ -1044,6 +1070,108 @@ export function Workspace() {
     },
     [clearDetailTimer, layout, pinTrackAside, selectedOneLibrary],
   );
+
+  useEffect(() => {
+    const scrollRow = (selector: string) => {
+      requestAnimationFrame(() => {
+        document.querySelector<HTMLElement>(selector)?.scrollIntoView({ block: "center" });
+      });
+    };
+    const sidebarItems = () =>
+      [...document.querySelectorAll<HTMLElement>(`.kd-tree-slot [${MIDI_BROWSE_ITEM_ATTR}]`)];
+    const markSidebarCursor = (items: HTMLElement[], index: number) => {
+      items.forEach((item, itemIndex) => {
+        if (itemIndex === index) item.setAttribute(MIDI_BROWSE_CURSOR_ATTR, "true");
+        else item.removeAttribute(MIDI_BROWSE_CURSOR_ATTR);
+      });
+    };
+    const revealSidebarCursor = (id: string | null) => {
+      const items = sidebarItems();
+      const index = currentBrowseIndex(items, id);
+      if (index < 0) return;
+      markSidebarCursor(items, index);
+      items[index]?.scrollIntoView({ block: "center" });
+    };
+    const stepSidebar = (delta: number) => {
+      const items = sidebarItems();
+      if (items.length === 0) return;
+      const current = currentBrowseIndex(items, browseCursorIdRef.current);
+      const next = nextBrowseIndex(items.length, current, delta);
+      const target = items[next];
+      if (!target) return;
+      browseCursorIdRef.current = target.getAttribute(MIDI_BROWSE_ID_ATTR);
+      markSidebarCursor(items, next);
+      activateBrowseItem(target);
+      requestAnimationFrame(() => revealSidebarCursor(browseCursorIdRef.current));
+    };
+    const stepPane = (delta: number) => {
+      if (activeWorkspacePane === "onelibrary") {
+        const { selectedTracks, focusedContentId, selectTrack: selectOne } = usePlaylistStore.getState();
+        const current = selectedTracks.findIndex((track) => track.content_id === focusedContentId);
+        const next = nextBrowseIndex(selectedTracks.length, current, delta);
+        const track = selectedTracks[next];
+        if (!track) return;
+        selectOne(track.content_id, "replace");
+        inspectOneLibraryTrack(track, 1);
+        scrollRow(`[data-kd-onelibrary-content-id="${track.content_id}"]`);
+        return;
+      }
+      const library = useLibraryStore.getState();
+      const current = library.tracks.findIndex((track) => track.id === library.selectedId);
+      const next = nextBrowseIndex(library.tracks.length, current, delta);
+      const track = library.tracks[next];
+      if (!track) return;
+      selectTrack(track.id, "replace");
+      window.dispatchEvent(new CustomEvent(DETAIL_EVENT, {
+        detail: { source: "midi-browse", trackId: track.id },
+      }));
+    };
+    const playableSelection = () => {
+      const hint = sidebarItems().find(
+        (item) => item.getAttribute(MIDI_BROWSE_ID_ATTR) === browseCursorIdRef.current
+          || item.getAttribute(MIDI_BROWSE_CURSOR_ATTR) === "true",
+      )?.getAttribute(MIDI_BROWSE_PANE_ATTR);
+      const pane = browseFocusRef.current === "sidebar"
+        ? paneForSidebarHint(hint ?? undefined)
+        : activeWorkspacePane;
+      if (pane === "onelibrary") {
+        const { selectedTracks, focusedContentId, selectedContentIds, selectedTarget } =
+          usePlaylistStore.getState();
+        if (!selectedTarget) return null;
+        const id = focusedContentId ?? selectedContentIds[0];
+        const track = selectedTracks.find((item) => item.content_id === id) ?? selectedTracks[0];
+        return track ? oneLibraryPlayableTrack(track, selectedTarget) : null;
+      }
+      return selectSelectedTrack(useLibraryStore.getState());
+    };
+    const onBrowse = (event: Event) => {
+      const detail = (event as CustomEvent<MidiBrowseDetail>).detail;
+      if (!detail) return;
+      if (detail.type === "step") {
+        if (browseFocusRef.current === "sidebar") stepSidebar(detail.delta);
+        else stepPane(detail.delta);
+        return;
+      }
+      if (detail.type === "press") {
+        const next = toggleBrowseFocus(browseFocusRef.current);
+        if (next === "pane") {
+          const hint = sidebarItems().find(
+            (item) => item.getAttribute(MIDI_BROWSE_ID_ATTR) === browseCursorIdRef.current
+              || item.getAttribute(MIDI_BROWSE_CURSOR_ATTR) === "true",
+          )?.getAttribute(MIDI_BROWSE_PANE_ATTR);
+          activateWorkspacePane(paneForSidebarHint(hint ?? undefined));
+        }
+        browseFocusRef.current = next;
+        setBrowseFocus(next);
+        return;
+      }
+      const track = playableSelection();
+      if (!track) return;
+      window.dispatchEvent(new CustomEvent(MIDI_LOAD_DECK_EVENT, { detail: { side: detail.deck, track } }));
+    };
+    window.addEventListener(MIDI_BROWSE_EVENT, onBrowse);
+    return () => window.removeEventListener(MIDI_BROWSE_EVENT, onBrowse);
+  }, [activateWorkspacePane, activeWorkspacePane, inspectOneLibraryTrack, selectTrack]);
 
   /**
    * 在线结果单击只建立一个可供详情栏读取的元数据快照，不解析直链、也不换主唱盘。
@@ -1809,6 +1937,8 @@ export function Workspace() {
             <ChromeActions
               asideState={layout === "wide" ? asideToggleState : undefined}
               onAsideLock={toggleAsideLock}
+              workMode={workMode}
+              onWorkModeChange={onWorkModeChange}
               multiPaneEnabled={multiPaneEnabled}
               onMultiPane={toggleMultiPane}
               settingsOpen={showSettings}
@@ -1820,6 +1950,13 @@ export function Workspace() {
             />
           }
         />
+        {workMode === "dj" ? (
+          <div
+            ref={onDjWorkspaceHost}
+            className="kd-dj-workspace-host"
+            aria-label="DJ 双轨工作区"
+          />
+        ) : null}
         <div className="kd-stage">
         <div
           className="kd-split"
@@ -1835,6 +1972,7 @@ export function Workspace() {
             <div
               className="kd-col-slot kd-tree-slot"
               style={{ minWidth: 0 }}
+              data-kd-browse-focus={browseFocus === "sidebar" ? "sidebar" : undefined}
             >
               <NarrowFolderRail
                 expanded={compactTreeExpanded}
@@ -1883,6 +2021,7 @@ export function Workspace() {
                 className="kd-workspace-panes"
                 data-pane-count={visiblePaneOrder.length}
                 data-pane-dragging={dragWorkspacePane ?? undefined}
+                data-kd-browse-focus={browseFocus === "pane" ? "pane" : undefined}
                 style={{ gridTemplateColumns: workspacePaneGridTemplate }}
                 onDragOverCapture={onWorkspacePaneDragOverCapture}
                 onDropCapture={onWorkspacePaneDropCapture}
@@ -1967,6 +2106,7 @@ export function Workspace() {
                     tracks={tracks}
                     loading={loading}
                     layout={layout}
+                    fitWidth={workMode === "dj"}
                     selectedId={selectedId}
                     selectedIds={selectedIds}
                     shortcutActive={activeWorkspacePane === "local"}

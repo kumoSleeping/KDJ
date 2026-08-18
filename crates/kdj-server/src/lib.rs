@@ -13,6 +13,7 @@ pub mod lyrics;
 mod one_library_analysis;
 pub mod routes;
 pub mod state;
+pub mod stems;
 pub mod stream_cache;
 pub mod stream_waveform;
 pub mod usb_library;
@@ -44,6 +45,41 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     };
 
     routes::router(ctx)
+        .route("/api/stems/model", axum::routing::get(stems::model_status))
+        .route(
+            "/api/stems/model/download",
+            axum::routing::post(stems::download_model),
+        )
+        .route(
+            "/api/stems/debug/model",
+            axum::routing::get(stems::debug_model_status),
+        )
+        .route(
+            "/api/stems/debug",
+            axum::routing::post(stems::debug_separate),
+        )
+        .route(
+            "/api/stems/debug/{session}",
+            axum::routing::delete(stems::debug_release),
+        )
+        .route(
+            "/api/stems/debug/{session}/{lane}",
+            axum::routing::get(stems::debug_audio),
+        )
+        .route(
+            "/api/tracks/{id}/stems",
+            axum::routing::get(stems::track_status)
+                .post(stems::separate_track)
+                .delete(stems::release_track),
+        )
+        .route(
+            "/api/tracks/{id}/stems/waveform/{stem}",
+            axum::routing::get(stems::stem_waveform),
+        )
+        .route(
+            "/api/tracks/{id}/stems/waveform",
+            axum::routing::get(stems::live_stem_waveform),
+        )
         .route("/ws", axum::routing::get(ws::handler))
         // 服务只监听 127.0.0.1；开放 CORS 让 Tauri WebView 和本机浏览器调试都能直连。
         .layer(

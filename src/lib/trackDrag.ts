@@ -1,5 +1,8 @@
 export const TRACK_DRAG_STATE_EVENT = "kd:track-drag-state";
 export const TRACK_TRASH_DROP_EVENT = "kd:track-trash-drop";
+/** Performance A/B Deck 接收曲库曲目的跨组件事件与落点标记。 */
+export const TRACK_DECK_DROP_EVENT = "kd:track-deck-drop";
+export const TRACK_DECK_DROP_TARGET_ATTR = "data-kd-track-deck-drop";
 /** 详情栏封面框接收曲目拖放时的跨组件事件。 */
 export const TRACK_COVER_DROP_EVENT = "kd:track-cover-drop";
 /** 不用字符串散落在 TrackTable 和 TrackDetail 两处，避免拖放目标漂移。 */
@@ -8,6 +11,11 @@ export const TRACK_COVER_DROP_TARGET_ATTR = "data-kd-track-cover-drop";
 export interface TrackCoverDropDetail {
   ids: number[];
   targetTrackId: number;
+}
+
+export interface TrackDeckDropDetail {
+  ids: number[];
+  side: 0 | 1;
 }
 
 /** 与 FolderTree 里的 MIME 保持一致；WebKit 有时在 dragover 不暴露它。 */
@@ -42,6 +50,15 @@ export function dispatchTrackCoverDrop(ids: number[], targetTrackId: number): vo
   window.dispatchEvent(
     new CustomEvent<TrackCoverDropDetail>(TRACK_COVER_DROP_EVENT, {
       detail: { ids: [...ids], targetTrackId },
+    }),
+  );
+}
+
+export function dispatchTrackDeckDrop(ids: number[], side: 0 | 1): void {
+  if (ids.length === 0) return;
+  window.dispatchEvent(
+    new CustomEvent<TrackDeckDropDetail>(TRACK_DECK_DROP_EVENT, {
+      detail: { ids: [...ids], side },
     }),
   );
 }

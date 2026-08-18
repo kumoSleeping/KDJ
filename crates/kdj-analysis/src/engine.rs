@@ -5,6 +5,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::decode::{decode_audio_from, DEFAULT_SR};
+use crate::dj_grid::{fit_dj_grid, GridMode};
 use crate::key::analyze_key;
 use crate::loudness::analyze_loudness;
 use crate::tempo::analyze_tempo;
@@ -62,34 +63,42 @@ fn round_to(value: f64, digits: i32) -> f64 {
 /// 曲库里宁可有一半信息，也不要因为某首怪文件整条记录变空。
 pub fn analyze_samples(samples: &[f32], sr: f64, offset: f64) -> AnalysisResult {
     let mut result = AnalysisResult {
-        duration: offset + if sr > 0.0 { samples.len() as f64 / sr } else { 0.0 },
+        duration: offset
+            + if sr > 0.0 {
+                samples.len() as f64 / sr
+            } else {
+                0.0
+            },
         ..Default::default()
     };
 
     let tempo = analyze_tempo(samples, sr);
     if tempo.bpm > 0.0 {
+        // `beat_times[0] % interval` 会把分析窗中段的一次整数帧误差外推到整首；BPM 只要
+        // 精修了 0.1%，曲首相位就能漂几十毫秒。复用 DJ Grid Fitter 对全部检测拍做
+        // Huber/相位残差验证，只在固定网格成立时发布 first_beat。
+        let grid = fit_dj_grid(&tempo.beat_times, &[], Some(tempo.bpm));
         result.bpm = Some(tempo.bpm);
         result.bpm_raw = Some(tempo.bpm_raw);
-        result.bpm_confidence = Some(tempo.confidence);
+        result.bpm_confidence = Some(tempo.confidence.min(grid.confidence.overall));
         // 拍点换算回全曲绝对时间
         result.beat_times = tempo
             .beat_times
             .iter()
             .map(|t| round_to(offset + t, 4))
             .collect();
-        if let Some(first) = result.beat_times.first().copied() {
-            let interval = if tempo.beat_interval > 0.0 {
-                tempo.beat_interval
+        let stable_phase = tempo.confidence >= 0.70
+            && (grid.grid_mode == GridMode::Constant || grid.confidence.overall >= 0.45);
+        if stable_phase && tempo.beat_interval > 0.0 {
+            // 首个拟合拍锚住分析窗的相位。折进整小节（4 拍）而不是一拍，才能保留
+            // “这一拍是小节里的第几拍”；只折一拍会把 downbeat 错标成 beat 2/3/4。
+            let grid_phase = if grid.beat_interval_seconds.is_some() {
+                grid.first_beat_seconds
             } else {
-                60.0 / tempo.bpm
+                tempo.first_beat.rem_euclid(tempo.beat_interval)
             };
-            // first_beat 表达的是"网格相位"：按恒定速度把首拍外推回 [0, 一拍) 区间，
-            // 这样即使分析窗从曲子中段开始，DJ 也能用它对齐整首的网格。
-            let phase = if interval > 0.0 {
-                first - interval * (first / interval).floor()
-            } else {
-                first
-            };
+            let bar_interval = tempo.beat_interval * 4.0;
+            let phase = (offset + grid_phase).rem_euclid(bar_interval);
             result.first_beat = Some(round_to(phase, 4));
         }
     }
@@ -141,7 +150,9 @@ pub fn analyze_file(path: &Path, duration_limit: f64) -> AnalysisResult {
 
     let mut result = analyze_samples(&decoded.samples, decoded.sample_rate as f64, offset);
     result.duration = round_to(
-        probed_duration.or(decoded.duration).unwrap_or(result.duration),
+        probed_duration
+            .or(decoded.duration)
+            .unwrap_or(result.duration),
         3,
     );
     result
@@ -180,11 +191,12 @@ mod tests {
     }
 
     #[test]
-    fn first_beat_is_wrapped_into_one_beat_period() {
+    fn first_beat_is_wrapped_into_one_bar_period() {
         // 分析窗从 45 秒开始时，首拍的绝对时间可能是 45.3；
-        // first_beat 要表达"网格相位"，必须折回 [0, 一拍) 内
+        // first_beat 要表达小节相位，必须折回 [0, 一小节) 内，不能只折一拍。
         let sr = 22050.0;
         let period = 60.0 / 120.0;
+        let bar = period * 4.0;
         let n = (sr * 20.0) as usize;
         let mut samples = vec![0.0f32; n];
         let step = (period * sr) as usize;
@@ -192,19 +204,55 @@ mod tests {
             for i in 0..(0.005 * sr) as usize {
                 if start + i < n {
                     let t = i as f64 / sr;
-                    samples[start + i] =
-                        ((-t * 600.0).exp() * (2.0 * std::f64::consts::PI * 180.0 * t).sin()) as f32;
+                    samples[start + i] = ((-t * 600.0).exp()
+                        * (2.0 * std::f64::consts::PI * 180.0 * t).sin())
+                        as f32;
                 }
             }
         }
         let result = analyze_samples(&samples, sr, 45.0);
         let first = result.first_beat.expect("应当有首拍");
         assert!(
-            (0.0..period).contains(&first),
-            "first_beat={first} 应当落在 [0, {period})"
+            (0.0..bar).contains(&first),
+            "first_beat={first} 应当落在 [0, {bar})"
         );
-        // 拍点本身仍然是绝对时间
+        // 拍点本身仍然是绝对时间，且 first_beat 必须落在同一套拍网格上。
         assert!(result.beat_times[0] >= 45.0);
+        let residual = (result.beat_times[0] - first).rem_euclid(period);
+        let folded = residual.min(period - residual);
+        assert!(
+            folded < 0.08,
+            "first_beat={first} 应与检测拍 {detected} 共网格，残差 {folded}",
+            detected = result.beat_times[0]
+        );
+    }
+
+    #[test]
+    fn tempo_transition_does_not_publish_a_fake_fixed_phase() {
+        let sr = 22_050.0;
+        let seconds = 36.0;
+        let mut samples = vec![0.0f32; (seconds * sr) as usize];
+        let mut at = 0.15;
+        while at < seconds {
+            let bpm = if at < seconds / 2.0 { 120.0 } else { 145.0 };
+            let start = (at * sr) as usize;
+            for index in 0..(0.005 * sr) as usize {
+                if start + index >= samples.len() {
+                    break;
+                }
+                let time = index as f64 / sr;
+                samples[start + index] = ((-time * 600.0).exp()
+                    * (2.0 * std::f64::consts::PI * 180.0 * time).sin())
+                    as f32;
+            }
+            at += 60.0 / bpm;
+        }
+
+        let result = analyze_samples(&samples, sr, 0.0);
+        assert!(
+            result.first_beat.is_none() || result.bpm_confidence.unwrap_or(0.0) < 0.45,
+            "变速曲不能以高置信度发布固定相位：{result:#?}"
+        );
     }
 
     #[test]

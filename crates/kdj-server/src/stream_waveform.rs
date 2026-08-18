@@ -1115,8 +1115,7 @@ async fn create_ephemeral_file(
 }
 
 fn decode_cached_prefix(path: &Path) -> Option<(Waveform, f64)> {
-    let decoded =
-        kdj_analysis::decode::decode_audio(path, kdj_analysis::waveform::WAVEFORM_SR, None).ok()?;
+    let decoded = kdj_analysis::decode::decode_audio_native(path, None).ok()?;
     let covered_seconds =
         ((decoded.samples.len() as f64 / decoded.sample_rate as f64) * 1000.0).round() / 1000.0;
     if covered_seconds <= 0.0 {

@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { DJ_TRACK_TABLE_COLUMN_WIDTHS, fitDjTrackColumns } from "../src/lib/djTableLayout";
 import { cycleTableSort } from "../src/lib/tableSort";
+
+test("DJ track table keeps performance columns inside one fixed-width row", () => {
+  const columns = ["title", "artist", "album", "bpm", "camelot", "energy", "duration", "format", "rating"]
+    .map((key) => ({ key }));
+  assert.deepEqual(
+    fitDjTrackColumns(columns).map((column) => column.key),
+    ["title", "artist", "bpm", "camelot", "duration"],
+  );
+  const allocated = Object.values(DJ_TRACK_TABLE_COLUMN_WIDTHS)
+    .reduce((sum, width) => sum + Number.parseFloat(width), 0);
+  assert.equal(allocated, 90, "the fixed index column owns the remaining 10%");
+});
 
 test("track table sorting releases to source order and preserves secondary promotion", () => {
   const source = { sort: "custom", order: "asc", sort2: null, order2: "asc" } as const;

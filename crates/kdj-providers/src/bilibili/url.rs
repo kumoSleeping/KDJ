@@ -7,7 +7,12 @@
 use anyhow::{bail, Context, Result};
 
 /// 允许出现在分享链接里的域名。
-const ALLOWED_HOSTS: [&str; 4] = ["b23.tv", "bilibili.com", "www.bilibili.com", "m.bilibili.com"];
+const ALLOWED_HOSTS: [&str; 4] = [
+    "b23.tv",
+    "bilibili.com",
+    "www.bilibili.com",
+    "m.bilibili.com",
+];
 
 /// 请求 UA。
 ///
@@ -61,9 +66,8 @@ pub fn normalize_bvid(text: &str) -> String {
 /// 「转自 t.cn/xxx 原视频 bilibili.com/xxx」整条会被拒。
 pub fn pick_bilibili_url(text: &str) -> String {
     for candidate in extract_urls(text) {
-        let cleaned = candidate.trim_end_matches(|c: char| {
-            "。，、；：！？,.!?;:)]}>'\"".contains(c)
-        });
+        let cleaned =
+            candidate.trim_end_matches(|c: char| "。，、；：！？,.!?;:)]}>'\"".contains(c));
         if let Ok(parsed) = url::Url::parse(cleaned) {
             if host_allowed(parsed.host_str().unwrap_or_default()) {
                 return cleaned.to_string();
@@ -79,7 +83,9 @@ fn extract_urls(text: &str) -> Vec<&str> {
     let mut index = 0;
     while index < bytes.len() {
         let rest = &text[index..];
-        let Some(offset) = rest.find("http") else { break };
+        let Some(offset) = rest.find("http") else {
+            break;
+        };
         let start = index + offset;
         if !text[start..].starts_with("http://") && !text[start..].starts_with("https://") {
             index = start + 4;
@@ -144,11 +150,10 @@ pub async fn resolve_video_target(http: &reqwest::Client, source: &str) -> Resul
                 resolved_url: shared_url,
             });
         }
-        let resolved = crate::net::expand_short_link(http, &shared_url, 3, &|host| {
-            host_allowed(host)
-        })
-        .await
-        .context("展开哔哩哔哩短链失败")?;
+        let resolved =
+            crate::net::expand_short_link(http, &shared_url, 3, &|host| host_allowed(host))
+                .await
+                .context("展开哔哩哔哩短链失败")?;
         let resolved_host = url::Url::parse(&resolved)
             .ok()
             .and_then(|parsed| parsed.host_str().map(str::to_string))
@@ -323,12 +328,9 @@ mod tests {
     async fn plain_links_with_a_bvid_do_not_hit_the_network() {
         // 没有网络也必须能解析：直链里已经有 BV 号，不该去展开
         let http = reqwest::Client::new();
-        let target = resolve_video_target(
-            &http,
-            "https://www.bilibili.com/video/BV1L94y1H7CV?p=2",
-        )
-        .await
-        .unwrap();
+        let target = resolve_video_target(&http, "https://www.bilibili.com/video/BV1L94y1H7CV?p=2")
+            .await
+            .unwrap();
         assert_eq!(target.bvid, "BV1L94y1H7CV");
         assert_eq!(target.page_index, 1);
     }

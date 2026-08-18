@@ -9,7 +9,7 @@
   </h1>
 
   <p>
-    <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="License">
+    <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-lightgrey?style=flat-square" alt="License">
     <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/github/v/release/kumoSleeping/KDJ?style=flat-square&label=release&color=orange" alt="Release"></a>
     <img src="https://img.shields.io/badge/Rust-dea584?style=flat-square&logo=rust&logoColor=black" alt="Rust">
     <img src="https://img.shields.io/badge/Tauri-24C8DB?style=flat-square&logo=tauri&logoColor=white" alt="Tauri">
@@ -69,6 +69,7 @@ KDJ packs cross-platform search, download, local library management, and music a
 > Portable OneLibrary export copies the audio files to the drive; a playlist that only references files on the current computer cannot work elsewhere. Tracks with complete KDJ analysis also export BPM, key, beatgrid, and OneLibrary waveform data. The target DJ app fills in tracks that are still missing analysis. KDJ keeps a portable waveform cache under `.kdj` on the drive so remounting the virtual disk does not decode the same tracks again.
 - Playback
   - System-level audio output and volume control
+  - Rubber Band R3 pitch-preserving Tempo/BPM Sync for stereo and eight-channel STEM playback
   - rkb-style waveform preview
   - Multiple transition effects (crossfade / bass swap / filter / FX)
   - Video floating window and system picture-in-picture; remux and audio extract
@@ -107,4 +108,7 @@ KDJ provides media management and technical tools only. When using search, previ
 
 ## License
 
-KDJ is released under the [MIT](https://opensource.org/license/mit) license.
+KDJ is released under [GNU GPL 3.0 or later](LICENSE). Release builds statically link the
+GPL-2.0-or-later Rubber Band Library. Its corresponding source and license are kept in
+[`crates/kdj-player/vendor/rubberband`](crates/kdj-player/vendor/rubberband); see
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for details.

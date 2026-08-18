@@ -431,6 +431,21 @@ fn wait_if_interactive_yield(cancel: &CancellationToken) {
     }
 }
 
+fn wait_if_live_stem_audio(cancel: &CancellationToken) {
+    while kdj_stems::any_live_audio_lease_held() {
+        if cancel.is_cancelled() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+pub(crate) fn wait_for_live_stem_audio() {
+    while kdj_stems::any_live_audio_lease_held() {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
 // ---------------------------------------------------------------- 停止分析
 
 /// 一个正在跑的分析批次。`done` 这个计数器和干活的线程是同一份，
@@ -589,6 +604,7 @@ fn spawn_analysis_target(
                 let updated = updated.clone();
                 let cancel = cancel.clone();
                 scope.spawn(move || {
+                    kdj_core::thread_qos::prefer_background();
                     for track_id in chunk {
                         // 先排队拿全局额度，**拿到之后**再看取消：闸门里等了
                         // 半分钟才轮到的线程，看到的必须是最新的取消状态
@@ -606,7 +622,18 @@ fn spawn_analysis_target(
                                 break;
                             }
                         }
+                        // "正在播放的这一首" may jump the library queue, but its BPM/key FFT
+                        // still cannot run beside an audible STEM deadline. Priority controls
+                        // ordering, not permission to starve the live Deck.
+                        wait_if_live_stem_audio(&cancel);
+                        if cancel.is_cancelled() {
+                            break;
+                        }
                         let _permit = (!priority).then(|| ANALYSIS_GATE.acquire());
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        wait_if_live_stem_audio(&cancel);
                         if cancel.is_cancelled() {
                             break;
                         }
@@ -645,16 +672,8 @@ fn spawn_analysis_target(
                                 let _ = state.library.sync_file_stat(track_id);
                             }
                         }
-                        // 固定单 worker 预热默认波形。必须排在标签写入之后，否则缓存
-                        // 会绑定旧 mtime，下一步便携导出就找不到刚分析好的波形。
-                        if target == AnalysisWriteTarget::V1 {
-                            state.waveforms.enqueue_default(
-                                track_id,
-                                path.clone(),
-                                state.config.data_dir.join("waveform"),
-                                false,
-                            );
-                        }
+                        // 波形不再随全库分析逐首预热。只有当前/下一 Deck 按需请求；否则
+                        // 大曲库会在分析结束后继续完整解码数小时，还会抢装轨时的高密度波形。
                         updated.lock().unwrap().push(track_id);
 
                         let current = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;

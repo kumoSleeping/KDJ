@@ -254,12 +254,7 @@ fn onsets_per_beat(env: &[f64], fps: f64, bpm: f64) -> f64 {
 ///
 /// Our Chant：raw 92、次峰 184（2×）、第三峰 123（4/3）；梳状分 123 最高 → 123。
 /// 只有当 4/3 峰的梳状分不弱于 raw **且不弱于 2×** 才升，避免和真倍速抢。
-fn promote_four_three(
-    env: &[f64],
-    fps: f64,
-    bpm_raw: f64,
-    candidates: &[f64],
-) -> Option<f64> {
+fn promote_four_three(env: &[f64], fps: f64, bpm_raw: f64, candidates: &[f64]) -> Option<f64> {
     // 只修「主峰偏慢」：raw 已在常见舞曲区就别再抬（Sky High 128 不该→172）。
     if bpm_raw >= 110.0 {
         return None;
@@ -292,12 +287,7 @@ fn promote_four_three(
 ///   （Full Glory 梳状站 99、Summersong 梳状站 199，真相相反）。
 ///   用「每拍起音数」辅助：raw 上每拍 >~1.4 个起音 → 网格偏慢，抬到 2×；
 ///   每拍 ≤1 且只是梳状略偏 2× → 保持 raw（Summersong ~100）。
-fn promote_double_tempo(
-    env: &[f64],
-    fps: f64,
-    bpm_raw: f64,
-    candidates: &[f64],
-) -> Option<f64> {
+fn promote_double_tempo(env: &[f64], fps: f64, bpm_raw: f64, candidates: &[f64]) -> Option<f64> {
     let fast = find_double_peak(bpm_raw, candidates)?;
     let allow_unconditional = bpm_raw < 75.0 || (85.0..90.0).contains(&bpm_raw);
     if allow_unconditional {
@@ -341,12 +331,7 @@ fn promote_double_tempo(
 /// - `bpm_raw ≥ 100`：必须 1.5× 已是自相关峰，且梳状对比**不弱于**主峰才升。
 ///   Sing Alive 官方 195：主峰 129（=195×⅔），次峰 195，梳状分 195≥129 → 提升；
 ///   对正确的 120 不会仅仅因为存在弱 180 峰就被拉走。
-fn promote_three_two(
-    env: &[f64],
-    fps: f64,
-    bpm_raw: f64,
-    candidates: &[f64],
-) -> Option<f64> {
+fn promote_three_two(env: &[f64], fps: f64, bpm_raw: f64, candidates: &[f64]) -> Option<f64> {
     let fast = find_ratio_peak(bpm_raw, candidates, 1.45, 1.55)?;
     if bpm_raw < 100.0 {
         return Some(fast);
@@ -678,12 +663,13 @@ pub fn analyze_tempo(samples: &[f32], sr: f64) -> TempoResult {
     let frames = beat_track_dp(&env, period);
     let beat_times: Vec<f64> = frames.iter().map(|f| *f as f64 / fps).collect();
     if frames.len() < 3 {
+        let interval = 60.0 / bpm_guess;
         return TempoResult {
             bpm: round_to(bpm_guess, 2),
             bpm_raw: round_to(bpm_raw, 2),
             confidence: 0.0,
             first_beat: beat_times.first().copied().unwrap_or(0.0),
-            beat_interval: 60.0 / bpm_guess,
+            beat_interval: interval,
             beat_times,
         };
     }
@@ -695,12 +681,13 @@ pub fn analyze_tempo(samples: &[f32], sr: f64) -> TempoResult {
         bpm = bpm_guess;
     }
 
+    let beat_interval = 60.0 / bpm;
     TempoResult {
         bpm: round_to(bpm, 2),
         bpm_raw: round_to(bpm_raw, 2),
         confidence: round_to(confidence, 3),
         first_beat: round_to(beat_times[0], 4),
-        beat_interval: round_to(60.0 / bpm, 6),
+        beat_interval: round_to(beat_interval, 6),
         beat_times: beat_times.iter().map(|t| round_to(*t, 4)).collect(),
     }
 }
