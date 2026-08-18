@@ -57,14 +57,14 @@ pub use manager::{ModelStatus, StemCoordinator, TrackStemStatus};
 pub use scan::{next_scan_work, ScanJobView, ScanWork, StemScanStatus, SCAN_VIEWPORT_SECONDS};
 
 pub const MODEL_ID: &str = "classical-vocal-hpss";
-pub const MODEL_VERSION: &str = "dsp-v2";
+pub const MODEL_VERSION: &str = "dsp-v2.1";
 /// Stable non-file identity passed through the legacy `cachePath` transport field. The playback
 /// actor uses this only to key and reuse the live DSP pool; the model-free runtime never opens it.
-pub const RUNTIME_KEY: &str = "builtin://classical-vocal-hpss/dsp-v2";
+pub const RUNTIME_KEY: &str = "builtin://classical-vocal-hpss/dsp-v2.1";
 pub const MODEL_ARCHIVE_BYTES: u64 = 0;
 /// Algorithm/cache identity, not a downloadable artifact hash.
 pub const MODEL_ARCHIVE_SHA256: &str =
-    "3b945613d5438502c966ea32618aa6853e398417defa77fd286d06ff85cb45e4";
+    "0e8753c00bb5ab754f0c693cb725b11399d87104fe4c9ee7906f58a8fa72a6cb";
 pub const MODEL_ARCHIVE_URL: &str = "";
 pub const MODEL_DIRECTORY: &str = "";
 pub const SAMPLE_RATE: u32 = 44_100;

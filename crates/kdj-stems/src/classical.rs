@@ -18,7 +18,7 @@ pub(crate) const FFT_SIZE: usize = 4_096;
 pub(crate) const HOP_SIZE: usize = 512;
 const MEDIAN_KERNEL: usize = 17;
 const EPSILON: f32 = 1.0e-12;
-const VOCAL_SPECTRAL_DECAY: f32 = 0.92;
+const VOCAL_SPECTRAL_DECAY: f32 = 0.97;
 
 type Stereo = Vec<[f32; 2]>;
 
@@ -228,14 +228,15 @@ struct VocalSpectra {
 
 /// Estimate the complex component shared by both stereo channels. This follows the documented
 /// behaviour of classic Center Channel Extractors: a voice-band selector plus phase and amplitude
-/// discrimination, spectral-bandwidth smoothing, and temporal spectral decay. Unlike plain M/S,
-/// the minimum-magnitude common component preserves unmatched energy in the louder channel.
+/// discrimination, spectral-bandwidth smoothing, and temporal spectral decay. This production
+/// preset deliberately favours vocal removal over centre-instrument preservation: bins classified
+/// as vocal-like contribute their full Mid projection instead of a conservative minimum magnitude.
 fn extract_vocal_spectra(left: &DebugSpectrum, right: &DebugSpectrum) -> VocalSpectra {
     let mut evidence = vec![0.0_f32; left.values.len()];
     for frequency in 0..left.bins {
         let hz = frequency as f32 * SAMPLE_RATE as f32 / FFT_SIZE as f32;
-        let low_edge = smooth_step(80.0, 140.0, hz);
-        let high_edge = 1.0 - smooth_step(9_000.0, 12_000.0, hz);
+        let low_edge = smooth_step(55.0, 110.0, hz);
+        let high_edge = 1.0 - smooth_step(12_000.0, 16_000.0, hz);
         let vocal_band = low_edge * high_edge;
         for time in 0..left.frames {
             let index = frequency * left.frames + time;
@@ -248,9 +249,11 @@ fn extract_vocal_spectra(left: &DebugSpectrum, right: &DebugSpectrum) -> VocalSp
                 continue;
             }
             let phase_cosine = (l * r.conj()).re / (l_mag * r_mag + EPSILON);
-            let phase_match = smooth_step(0.70, 0.995, phase_cosine);
+            // Vocal doubles, chorus and early reflections are not perfectly in phase. A broad
+            // removal preset must accept those near-centre bins instead of only exact mono.
+            let phase_match = smooth_step(0.30, 0.95, phase_cosine);
             let amplitude_balance = l_mag.min(r_mag) / maximum;
-            let amplitude_match = smooth_step(0.25, 0.90, amplitude_balance);
+            let amplitude_match = smooth_step(0.05, 0.55, amplitude_balance);
             evidence[index] = (vocal_band * phase_match * amplitude_match).clamp(0.0, 1.0);
         }
     }
@@ -263,14 +266,23 @@ fn extract_vocal_spectra(left: &DebugSpectrum, right: &DebugSpectrum) -> VocalSp
         for time in 0..left.frames {
             let mut weighted = 0.0_f32;
             let mut weight_sum = 0.0_f32;
+            let mut neighbourhood_peak = 0.0_f32;
             for (offset, weight) in (-2_isize..=2).zip(WEIGHTS) {
                 let candidate = frequency as isize + offset;
                 if (0..left.bins as isize).contains(&candidate) {
-                    weighted += evidence[candidate as usize * left.frames + time] * weight;
+                    let value = evidence[candidate as usize * left.frames + time];
+                    weighted += value * weight;
                     weight_sum += weight;
+                    neighbourhood_peak = neighbourhood_peak.max(value);
                 }
             }
-            smoothed[frequency * left.frames + time] = weighted / weight_sum.max(1.0);
+            let index = frequency * left.frames + time;
+            let average = weighted / weight_sum.max(1.0);
+            // Averaging alone weakened narrow consonant/formant bins in the first version. Keep
+            // direct evidence and mildly dilate strong neighbours to close those audible holes.
+            smoothed[index] = evidence[index]
+                .max(0.45 * neighbourhood_peak + 0.55 * average)
+                .clamp(0.0, 1.0);
         }
     }
 
@@ -285,19 +297,11 @@ fn extract_vocal_spectra(left: &DebugSpectrum, right: &DebugSpectrum) -> VocalSp
             decayed = smoothed[index].max(decayed * VOCAL_SPECTRAL_DECAY);
             let l = left.values[index];
             let r = right.values[index];
-            let l_mag = l.norm();
-            let r_mag = r.norm();
-            let aligned = if l_mag > EPSILON && r_mag > EPSILON {
-                l * (1.0 / l_mag) + r * (1.0 / r_mag)
-            } else {
-                Complex32::default()
-            };
-            let aligned_mag = aligned.norm();
-            let common = if aligned_mag > EPSILON {
-                aligned * (l_mag.min(r_mag) * decayed / aligned_mag)
-            } else {
-                Complex32::default()
-            };
+            // The orthogonal stereo-centre projection is the full Mid component. Once a bin has
+            // passed the broader vocal discrimination, subtracting Mid leaves only antisymmetric
+            // Side energy and therefore suppresses centre vocals more strongly than min-magnitude
+            // extraction. This intentionally also removes more centred drums/bass/instruments.
+            let common = (l + r) * (0.5 * decayed);
             center_left[index] = common;
             center_right[index] = common;
             residual_left[index] = l - common;
@@ -524,6 +528,37 @@ mod tests {
         assert!(
             extraction_db < -30.0,
             "vocal estimate error={extraction_db:.2} dB"
+        );
+    }
+
+    #[test]
+    fn aggressive_preset_removes_the_mid_projection_of_near_center_vocals() {
+        let frames = 24_576;
+        let phase = 30.0_f32.to_radians();
+        let mut left = Vec::with_capacity(frames);
+        let mut right = Vec::with_capacity(frames);
+        for index in 0..frames {
+            let angle = std::f32::consts::TAU * 440.0 * index as f32 / SAMPLE_RATE as f32;
+            let side =
+                0.12 * (std::f32::consts::TAU * 1_250.0 * index as f32 / SAMPLE_RATE as f32).sin();
+            left.push(0.35 * angle.sin() + side);
+            right.push(0.35 * 0.72 * (angle + phase).sin() - side);
+        }
+        let [transient, _compatibility, tonal, _vocal] = separate_live(&left, &right).unwrap();
+        let guard = FFT_SIZE;
+        let mut original_mid_energy = 0.0_f64;
+        let mut residual_mid_energy = 0.0_f64;
+        for index in guard..frames - guard {
+            let original_mid = 0.5 * (left[index] + right[index]);
+            let residual_mid = 0.5
+                * (transient[index][0] + transient[index][1] + tonal[index][0] + tonal[index][1]);
+            original_mid_energy += f64::from(original_mid).powi(2);
+            residual_mid_energy += f64::from(residual_mid).powi(2);
+        }
+        let residual_db = 10.0 * ((residual_mid_energy + 1.0e-12) / original_mid_energy).log10();
+        assert!(
+            residual_db < -20.0,
+            "near-center vocal mid residual={residual_db:.2} dB"
         );
     }
 

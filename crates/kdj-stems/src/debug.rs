@@ -51,7 +51,7 @@ const PROFILES: &[DebugProfile] = &[
     DebugProfile {
         id: StemDebugModel::HybridCenterHpss,
         name: "Adobe-style Vocal Extractor + Median HPSS (Production)",
-        identity: "dsp-v2-adobe-vocal-hpss",
+        identity: "dsp-v2.1-aggressive-adobe-vocal-hpss",
         lanes: HYBRID_LANES,
     },
     DebugProfile {
@@ -69,7 +69,7 @@ const PROFILES: &[DebugProfile] = &[
     DebugProfile {
         id: StemDebugModel::StereoCenter,
         name: "Adobe-style Vocal Extract / Remove",
-        identity: "dsp-v2-adobe-vocal-extract",
+        identity: "dsp-v2.1-aggressive-adobe-vocal-extract",
         lanes: CENTER_LANES,
     },
     DebugProfile {

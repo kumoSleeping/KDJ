@@ -18,12 +18,13 @@
 
 1. 以 4,096-point Hann STFT、512-sample hop（8 倍 overlap）分析左右声道。Adobe 官方
    文档给 Center Channel Extractor 的建议范围是 4,096–8,192 FFT、3–9 overlap。
-2. 在 80–12,000 Hz 软人声频带内，逐频点比较 L/R 的复数相位与幅度。相位余弦和幅度
-   平衡分别形成 discrimination；5-bin 三角平滑对应 amplitude bandwidth，92% 时间保持
-   对应 spectral decay，用于抑制孤立的 musical-noise bin。
-3. 对通过判别的频点，取 L/R 中较小的幅度和两者平均相位作为公共 `VOCAL` 分量，并从
-   两个声道分别相减。严格同相等幅的人声会完整进入 `VOCAL`，而不是像 v1 一样受 0.96
-   上限和 harmonic 偏置限制。
+2. 在 55–16,000 Hz 软人声频带内，逐频点比较 L/R 的复数相位与幅度。相位余弦和幅度
+   平衡分别形成 discrimination；5-bin 三角平滑和邻频轻微扩张对应 amplitude bandwidth，
+   97% 时间保持对应 spectral decay，用于补齐辅音、formant 和早期反射留下的窄洞。
+3. v2.1 的生产预设按用户听感反馈选择“优先去人声”：降低相位/幅度门槛，对通过判别的
+   频点提取完整 `Mid=(L+R)/2` 作为公共 `VOCAL` 分量，再从两个声道分别相减。它比 v2
+   的最小幅度公共分量明显更激进；严格中置人声完整进入 `VOCAL`，近中置人声也会更多地
+   被带走，代价是中置军鼓、贝斯和主奏损失增加。
 4. 对相减后的 residual 做 17 帧时间中值和 17 bin 频率中值 HPSS，得到 `TONAL` 和
    `TRANSIENT`。频域上 `TRANSIENT + TONAL + VOCAL = L/R`；iSTFT 浮点尾差归入最后一轨。
 
