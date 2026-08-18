@@ -1,4 +1,7 @@
-# Native STEM runtime
+# Native STEM runtime（旧 SCNet 设计，已停用）
+
+> 当前实现见 [`classical-stem-runtime.md`](./classical-stem-runtime.md)。本文件只保留为
+> AI 路径拆除前的架构记录；默认构建不会下载、加载或链接这里描述的模型。
 
 KDJ's normal Performance path uses **SCNet Small**, not StemgenRT/HS-TasNet. It does not launch
 Python, Electron, or a sidecar. Decode, 4096-point normalized STFT/iSTFT, fixed-tile scheduling,

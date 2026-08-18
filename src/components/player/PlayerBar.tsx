@@ -4001,7 +4001,7 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
       const prior = priorTrackIds[side];
       if (prior !== null && prior !== nextTrackIds[side] && !nextTrackIds.includes(prior)) {
         // Whole-track display fill is intentionally lease-bound. Releasing an old Deck must
-        // cancel it immediately instead of letting hidden SCNet work compete with the live Deck.
+        // cancel it immediately instead of letting hidden DSP work compete with the live Deck.
         void api.releaseTrackStems(prior).catch(() => undefined);
       }
     });

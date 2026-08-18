@@ -868,12 +868,12 @@ export function SettingsPanel() {
           <div className="kd-stream-cache-row">
             <span className="kd-muted">
               {stemModel?.state === "ready"
-                ? `SCNet Small ${stemModel.version} · 已安装`
+                ? `Classical DSP ${stemModel.version} · 可用`
                 : stemModel?.state === "downloading" || stemModel?.state === "queued"
-                  ? `SCNet Small · ${Math.round(stemModel.progress * 100)}% · ${formatBytes(stemModel.downloadedBytes)}`
+                  ? `Legacy AI · ${Math.round(stemModel.progress * 100)}% · ${formatBytes(stemModel.downloadedBytes)}`
                   : stemModel?.state === "unsupported"
                     ? "当前平台尚未提供 STEM runtime"
-                    : "SCNet Small · Core ML · 33 MB"}
+                    : "Classical DSP"}
             </span>
             {stemModel?.supported && stemModel.state !== "ready" ? (
               <Button
@@ -882,7 +882,7 @@ export function SettingsPanel() {
                 disabled={stemModelBusy || stemModel.state === "downloading" || stemModel.state === "queued"}
                 onClick={() => void downloadStemModel()}
               >
-                {stemModel.state === "error" ? "重试" : "下载模型"}
+                {stemModel.state === "error" ? "重试" : "准备"}
               </Button>
             ) : null}
           </div>
@@ -892,7 +892,7 @@ export function SettingsPanel() {
             onDismiss={() => setStemModel((current) => current ? { ...current, error: "" } : current)}
           />
           <div className="kd-stream-cache-row">
-            <span className="kd-muted">候选分离模型 · 本地调试</span>
+            <span className="kd-muted">分离算法 · 本地调试</span>
             <Button variant="ghost" size="sm" onClick={openStemDebug}>
               调试台
             </Button>

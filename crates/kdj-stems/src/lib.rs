@@ -1,40 +1,45 @@
-//! Native four-stem separation and cache ownership.
+//! Native, model-free four-stem approximation and cache ownership.
 //!
-//! Model inference never runs in the audio callback. Desktop live STEM uses the fixed-shape
-//! SCNet Small spectral core through Core ML on macOS and ONNX Runtime on Windows. The public
-//! cache reader stays independent of that backend.
+//! The default desktop path is pure Rust classical DSP. It combines a stereo centre mask with
+//! median-filter HPSS on short streaming chunks and never downloads or loads an AI model.
 
 mod audio;
 mod cache;
-#[cfg(target_os = "macos")]
+mod classical;
+#[cfg(all(feature = "ai-stem-legacy", target_os = "macos"))]
 mod coreml;
-#[cfg(feature = "stem-debug-onnx")]
 mod debug;
 mod debug_dsp;
-#[cfg(not(feature = "stem-debug-onnx"))]
-mod debug_stub;
 mod dj;
+#[cfg(feature = "ai-stem-legacy")]
 mod dsp;
 mod live;
 mod manager;
+#[cfg(feature = "ai-stem-legacy")]
 mod model;
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "ai-stem-legacy", target_os = "windows"))]
 mod onnx;
 mod runtime;
 mod scan;
+
+// Preserved only as one deletion-ready boundary while the classical replacement is evaluated.
+// Nothing in the default runtime references these modules or their external artifacts.
+#[cfg(feature = "ai-stem-legacy")]
+#[path = "debug_ai.rs"]
+mod legacy_ai_debug;
+#[cfg(feature = "ai-stem-legacy")]
+#[path = "manager_ai.rs"]
+mod legacy_ai_manager;
+#[cfg(feature = "ai-stem-legacy")]
+#[path = "runtime_ai.rs"]
+mod legacy_ai_runtime;
 
 pub use audio::StemWindowCursor;
 pub use cache::{
     read_cache_header, seek_cache_frame, stem_cache_waveform, StemCacheHeader, StemKind,
     StemWaveform, ALL_STEM_MASK, BYTES_PER_FRAME, HEADER_BYTES,
 };
-#[cfg(feature = "stem-debug-onnx")]
 pub use debug::{
-    render_stem_debug, stem_debug_model_catalog, StemDebugLane, StemDebugModel,
-    StemDebugModelCatalog, StemDebugModelStatus, StemDebugRender,
-};
-#[cfg(not(feature = "stem-debug-onnx"))]
-pub use debug_stub::{
     render_stem_debug, stem_debug_model_catalog, StemDebugLane, StemDebugModel,
     StemDebugModelCatalog, StemDebugModelStatus, StemDebugRender,
 };
@@ -51,26 +56,22 @@ pub use live::{
 pub use manager::{ModelStatus, StemCoordinator, TrackStemStatus};
 pub use scan::{next_scan_work, ScanJobView, ScanWork, StemScanStatus, SCAN_VIEWPORT_SECONDS};
 
-/// Stable model family/version identifiers used by installation and cache ownership. The
-/// deployment artifacts were exported from tensors byte-identical to ZFTurbo's v1.0.6 checkpoint
-/// (`1bc0…2aa`); Core ML/ONNX package hashes are verified separately in `model.rs`.
-pub const MODEL_ID: &str = "scnet-small";
-pub const MODEL_VERSION: &str = "ZF-v1.0.6+deploy-v0.1.2";
-pub const MODEL_ARCHIVE_BYTES: u64 = 34_543_230;
-/// Weight identity in cache headers, deliberately independent of Core ML versus ONNX packaging.
+pub const MODEL_ID: &str = "classical-vocal-hpss";
+pub const MODEL_VERSION: &str = "dsp-v2";
+pub const MODEL_ARCHIVE_BYTES: u64 = 0;
+/// Algorithm/cache identity, not a downloadable artifact hash.
 pub const MODEL_ARCHIVE_SHA256: &str =
-    "1bc0d1abb20bfdf966dcd07637bafd03e4bc13653d09ef18bc9b3e342eafe2aa";
-pub const MODEL_ARCHIVE_URL: &str = "https://github.com/demixr/scnet-executorch/releases/download/v0.1.2/scnet_coreml.mlpackage.zip";
-pub const MODEL_DIRECTORY: &str = "scnet_coreml.mlpackage";
+    "3b945613d5438502c966ea32618aa6853e398417defa77fd286d06ff85cb45e4";
+pub const MODEL_ARCHIVE_URL: &str = "";
+pub const MODEL_DIRECTORY: &str = "";
 pub const SAMPLE_RATE: u32 = 44_100;
-/// Fixed 7.8-second deployment shape: 1.95 s left context + 3.9 s retained core + 1.95 s right
-/// context. Adjacent requests overlap by 50%; only their context-safe centre enters playback.
-pub const SEGMENT_SAMPLES: usize = 343_980;
-pub const SEGMENT_CONTEXT_SAMPLES: usize = 85_995;
-pub const SEGMENT_CORE_SAMPLES: usize = 171_990;
-/// A 100 ms linear handoff between two highly correlated SCNet estimates avoids both clicks and
-/// the +3 dB lift that an equal-power blend caused for phase-aligned outputs.
-pub const SEGMENT_HANDOFF_SAMPLES: usize = 4_410;
+/// 557 ms input chunk: 93 ms context + 371 ms published core + 93 ms context. The context covers
+/// the ±8-frame median window while keeping cache-miss work small enough for a live stream.
+pub const SEGMENT_SAMPLES: usize = 24_576;
+pub const SEGMENT_CONTEXT_SAMPLES: usize = 4_096;
+pub const SEGMENT_CORE_SAMPLES: usize = 16_384;
+/// A short complementary-mask handoff suppresses boundary zipper noise.
+pub const SEGMENT_HANDOFF_SAMPLES: usize = 1_024;
 /// Waveform publication uses exactly the retained context-safe core.
 pub const SEGMENT_WAVEFORM_GUARD_SAMPLES: usize = SEGMENT_CONTEXT_SAMPLES;
 /// Compatibility name for consumers that describe the discarded edge context.

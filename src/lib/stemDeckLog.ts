@@ -71,13 +71,13 @@ export function stemJobLine(
   return "";
 }
 
-/** 第二行：模型名 + 实际选中的 runtime / CPU·GPU。pending 不当作成绩。 */
+/** 第二行：算法名 + 实际 runtime。pending 不当作成绩。 */
 export function stemRuntimeLine(model: StemModelStatus | null): { text: string; title: string; error: boolean } {
   if (!model?.supported || model.state === "unsupported") {
     return { text: "", title: "", error: false };
   }
   const diagnostic = model.diagnostics;
-  const name = ["SCNet Small", model.version].filter(Boolean).join(" ");
+  const name = ["Classical DSP", model.version].filter(Boolean).join(" ");
   const runtime = diagnostic?.runtime && diagnostic.runtime !== "unsupported" ? diagnostic.runtime : "";
   const provider = diagnostic?.provider && diagnostic.provider !== "pending" ? diagnostic.provider : "";
   const timings = [
@@ -92,7 +92,7 @@ export function stemRuntimeLine(model: StemModelStatus | null): { text: string; 
     runtime ? `runtime: ${runtime}` : "",
     provider ? `provider: ${provider}` : "",
     diagnostic?.chunkBudgetMs ? `tile budget: ${diagnostic.chunkBudgetMs}ms` : "",
-    diagnostic?.modelLoadMs == null ? "" : `model load: ${diagnostic.modelLoadMs}ms`,
+    diagnostic?.modelLoadMs == null ? "" : `DSP init: ${diagnostic.modelLoadMs}ms`,
     diagnostic?.firstBlockMs == null ? "" : `first block: ${diagnostic.firstBlockMs}ms`,
     diagnostic?.lastBlockMs == null ? "" : `last block: ${diagnostic.lastBlockMs}ms`,
     diagnostic?.p95BlockMs == null ? "" : `p95: ${diagnostic.p95BlockMs}ms`,

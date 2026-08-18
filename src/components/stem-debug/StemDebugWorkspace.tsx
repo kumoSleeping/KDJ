@@ -60,7 +60,7 @@ export function StemDebugWorkspace({ onClose }: { onClose(): void }) {
   const selected = useLibraryStore(selectSelectedTrack);
   const [trackId, setTrackId] = useState<number | null>(() => selected?.id ?? null);
   const [catalog, setCatalog] = useState<StemDebugModelCatalog | null>(null);
-  const [modelId, setModelId] = useState<StemDebugModelId>("scnet-tran");
+  const [modelId, setModelId] = useState<StemDebugModelId>("hybrid-center-hpss");
   const [result, setResult] = useState<StemDebugRender | null>(null);
   const [busy, setBusy] = useState(false);
   const [loadingAudio, setLoadingAudio] = useState(false);
@@ -92,7 +92,7 @@ export function StemDebugWorkspace({ onClose }: { onClose(): void }) {
     void api.stemDebugModelCatalog().then((status) => {
       if (!active) return;
       setCatalog(status);
-      if (!status.models.some((candidate) => candidate.id === "scnet-tran" && candidate.ready)) {
+      if (!status.models.some((candidate) => candidate.id === "hybrid-center-hpss" && candidate.ready)) {
         const ready = status.models.find((candidate) => candidate.ready);
         if (ready) setModelId(ready.id);
       }
@@ -224,7 +224,7 @@ export function StemDebugWorkspace({ onClose }: { onClose(): void }) {
       <div className="kd-stem-debug-body">
         <div className="kd-stem-debug-source">
           <select
-            aria-label="分离模型"
+            aria-label="分离算法"
             value={modelId}
             disabled={processing}
             onChange={(event) => {
@@ -384,8 +384,8 @@ export function StemDebugWorkspace({ onClose }: { onClose(): void }) {
             </div>
             <div><dt>RMS ERROR</dt><dd>{result ? statusText(result.reconstructionRmsError) : "—"}</dd></div>
             <div><dt>PEAK ERROR</dt><dd>{result ? statusText(result.reconstructionPeakError) : "—"}</dd></div>
-            <div><dt>ORT TOTAL</dt><dd>{result ? `${(result.inferenceTotalMs / 1000).toFixed(2)} s` : "—"}</dd></div>
-            <div><dt>ORT P95</dt><dd>{result ? `${result.inferenceP95Ms.toFixed(2)} ms` : "—"}</dd></div>
+            <div><dt>DSP TOTAL</dt><dd>{result ? `${(result.inferenceTotalMs / 1000).toFixed(2)} s` : "—"}</dd></div>
+            <div><dt>DSP P95</dt><dd>{result ? `${result.inferenceP95Ms.toFixed(2)} ms` : "—"}</dd></div>
             <div><dt>CHUNKS</dt><dd>{result?.inferenceChunks ?? "—"}</dd></div>
           </dl>
         </div>
@@ -511,7 +511,7 @@ function StemDebugWaveCanvas({
     <canvas
       ref={canvasRef}
       className="kd-stem-debug-wave"
-      aria-label="原曲、模型输出轨道与 Unity 和波形"
+      aria-label="原曲、算法输出轨道与 Unity 和波形"
       onPointerDown={(event) => {
         const rect = event.currentTarget.getBoundingClientRect();
         const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left - 42) / Math.max(1, rect.width - 48)));
@@ -585,10 +585,10 @@ function drawStemDebugWave(
 }
 
 function stemLaneColor(lane: string): string {
-  if (lane === "drums") return "#d59d6b";
+  if (lane === "drums" || lane === "transient" || lane === "percussive") return "#d59d6b";
   if (lane === "bass") return "#d08088";
-  if (lane === "other" || lane === "instrumental") return "#93a3d8";
-  if (lane === "vocals") return "#82c49e";
+  if (lane === "other" || lane === "instrumental" || lane === "tonal" || lane === "steady" || lane === "harmonic") return "#93a3d8";
+  if (lane === "vocals" || lane === "vocal" || lane === "center") return "#82c49e";
   return "#b7bec9";
 }
 

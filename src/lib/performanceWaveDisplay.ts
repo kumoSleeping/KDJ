@@ -7,10 +7,11 @@ export const STEM_WAVE_BITS: Record<StemName, number> = {
   other: 4,
   vocals: 8,
 };
-export const ALL_PERFORMANCE_WAVE_BITS = 31;
+export const ALL_PERFORMANCE_WAVE_BITS = 29;
 /** STEM display is opt-in. The original mix is the permanent visual reference rail. */
 export const DEFAULT_PERFORMANCE_WAVE_MASK = ORIGINAL_WAVE_BIT;
-export const STEM_LANE_BITS = 0b1111;
+/** Visible classical lanes: transient (legacy drums), tonal (other), vocal (legacy vocals). */
+export const STEM_LANE_BITS = 0b1101;
 // v2 made all four STEM rails the default and coupled that preference to live inference.  Do not
 // carry that implicit performance cost forward for existing users.
 export const PERFORMANCE_WAVE_DISPLAY_STORAGE_KEY = "kd-performance-wave-display-v3";

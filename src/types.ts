@@ -745,7 +745,12 @@ export interface TrackStemStatus {
   waitingForDeck?: number | null;
 }
 
-export type StemDebugModelId = "scnet-tran" | "bs-polarformer";
+export type StemDebugModelId =
+  | "hybrid-center-hpss"
+  | "transient-steady"
+  | "median-hpss"
+  | "stereo-center"
+  | "mid-side";
 
 export interface StemDebugLane {
   id: string;

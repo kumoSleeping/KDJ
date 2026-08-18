@@ -8782,7 +8782,7 @@ button.kd-stream-status {
 .kd-performance-wave-row[data-side="b"][data-playing="true"] {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-deck-b) 40%, transparent);
 }
-/* STEM 细车道：顺序固定 鼓→贝斯→乐器→人声。车道满宽，图标叠在波形左缘，不再保留左右侧栏。 */
+/* 算法分解细车道：瞬态→稳定音→中置。车道满宽，图标叠在波形左缘。 */
 .kd-performance-stem-lanes {
   flex: 0 0 auto;
   min-height: 0;
@@ -9521,7 +9521,7 @@ button.kd-stream-status {
 .kd-performance-stem-eq[data-midi="true"] > b { color: var(--kd-text); }
 .kd-performance-stem-eq > div {
   display: grid;
-  grid-template-rows: repeat(4, 1.92rem);
+  grid-template-rows: repeat(3, 1.92rem);
   align-content: start;
   justify-items: center;
   row-gap: 0.1rem;

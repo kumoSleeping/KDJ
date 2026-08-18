@@ -1,15 +1,4 @@
-//! Runtime-neutral entry point for one fixed-shape SCNet Small worker.
-
-use std::path::Path;
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-use anyhow::bail;
-use anyhow::Result;
-
-#[cfg(target_os = "macos")]
-use crate::coreml::CoreMlEngine;
-#[cfg(target_os = "windows")]
-use crate::onnx::OnnxEngine;
+//! Runtime identity for the default model-free separator.
 
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeInfo {
@@ -19,74 +8,21 @@ pub(crate) struct RuntimeInfo {
 
 impl RuntimeInfo {
     pub(crate) fn planned() -> Self {
-        if let Some(artifact) = crate::model::platform_model_artifact() {
-            Self {
-                runtime: artifact.runtime.into(),
-                provider: "pending".into(),
-            }
-        } else {
-            Self {
-                runtime: "unsupported".into(),
-                provider: String::new(),
-            }
+        Self {
+            runtime: "Classical DSP".into(),
+            provider: "Rust FFT · Adobe-style Vocal Extractor + Median HPSS".into(),
         }
     }
 }
 
-pub(crate) enum PlatformEngine {
-    #[cfg(target_os = "macos")]
-    CoreMl(CoreMlEngine),
-    #[cfg(target_os = "windows")]
-    Onnx(OnnxEngine),
-}
-
-impl PlatformEngine {
-    pub(crate) fn load(path: &Path) -> Result<Self> {
-        #[cfg(target_os = "macos")]
-        {
-            return Ok(Self::CoreMl(CoreMlEngine::load(path)?));
-        }
-        #[cfg(target_os = "windows")]
-        {
-            return Ok(Self::Onnx(OnnxEngine::load(path)?));
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            let _ = path;
-            bail!("当前平台尚未接入 SCNet Small runtime");
-        }
-    }
-
-    pub(crate) fn predict(&mut self, input: &[f32]) -> Result<Vec<f32>> {
-        match self {
-            #[cfg(target_os = "macos")]
-            Self::CoreMl(engine) => engine.predict(input),
-            #[cfg(target_os = "windows")]
-            Self::Onnx(engine) => engine.predict(input),
-        }
-    }
-
-    pub(crate) fn info(&self) -> RuntimeInfo {
-        match self {
-            #[cfg(target_os = "macos")]
-            Self::CoreMl(engine) => engine.info(),
-            #[cfg(target_os = "windows")]
-            Self::Onnx(engine) => engine.info(),
-        }
-    }
-}
-
-/// Native accelerator queues are device-global. One owner shares immutable weights and serializes
-/// fixed tiles while per-Deck generations/rings remain independent.
+/// Two Decks may decompose independent short chunks concurrently. The work is CPU-only and has no
+/// device-global model queue, but keeping this bound at two avoids optional waveform scans taking
+/// every core from the audio engine.
 pub(crate) fn recommended_worker_count() -> usize {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        1
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        0
-    }
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .clamp(1, 2)
 }
 
 #[cfg(test)]
@@ -94,10 +30,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accelerator_inference_has_one_owner() {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        assert_eq!(recommended_worker_count(), 1);
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        assert_eq!(recommended_worker_count(), 0);
+    fn classical_runtime_is_available_on_every_platform() {
+        assert!((1..=2).contains(&recommended_worker_count()));
+        let info = RuntimeInfo::planned();
+        assert_eq!(info.runtime, "Classical DSP");
     }
 }

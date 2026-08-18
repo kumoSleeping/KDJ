@@ -3,7 +3,7 @@
 //! Every mounted Deck only paints the current 12-second viewport. Tiles live in the live
 //! waveform session, stay bounded to that window, and are dropped as soon as the track leaves
 //! the Deck. Playback inference always wins: the scanner never opens a file or occupies the
-//! model while the audible path is already late.
+//! DSP workers while the audible path is already late.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,8 +24,8 @@ use crate::{SAMPLE_RATE, SEGMENT_CONTEXT_SAMPLES, SEGMENT_CORE_SAMPLES, SEGMENT_
 
 /// Same visible window as the performance waveform rail (12 seconds, playhead-centred).
 pub const SCAN_VIEWPORT_SECONDS: f64 = 12.0;
-/// Unique context-safe audio published per fixed SCNet tile. Adjacent model requests overlap by
-/// 50%; the 1.95-second edge on each side never enters the waveform or audible cache.
+/// Unique context-safe audio published per fixed DSP tile. Adjacent requests overlap; the edge
+/// context on each side never enters the waveform or audible cache.
 const SCAN_STRIDE_SAMPLES: usize = SEGMENT_CORE_SAMPLES;
 const SCAN_EDGE_SAMPLES: usize = SEGMENT_CONTEXT_SAMPLES;
 
@@ -472,8 +472,8 @@ fn run_one_tile(
     Ok(())
 }
 
-/// Display scan feeds SCNet one fixed 7.8-second window centred on the retained 3.9-second tile,
-/// then publishes only that context-safe interior.
+/// Display scan feeds the classical separator one fixed context window and publishes only its
+/// context-safe interior.
 fn decode_scan_window(
     decoder: &mut Option<StereoRegionDecoder>,
     path: &Path,

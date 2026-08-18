@@ -6,20 +6,21 @@ rust-version.workspace = true
 license.workspace = true
 
 [build-dependencies]
-cc = "=1.4.0"
+cc = { version = "=1.4.0", optional = true }
 
 [features]
 default = []
-# The isolated candidate workstation is research-only. Normal macOS playback is native Core ML
-# and must not drag the large ORT static archive into the Tauri executable.
-stem-debug-onnx = ["dep:ort"]
+# Disabled preservation boundary. Delete this feature and the `*_ai.rs`, Core ML/ONNX/model files
+# once the classical path has completed its evaluation period.
+ai-stem-legacy = ["dep:cc", "dep:ort", "dep:reqwest", "dep:zip"]
+stem-debug-onnx = ["ai-stem-legacy"]
 
 [dependencies]
 anyhow = "1.0.104"
 hex = "0.4.3"
 kdj-analysis = { version = "0.2.41", path = "../kdj-analysis" }
 kdj-core = { version = "0.2.41", path = "../kdj-core" }
-reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.12.28", optional = true, default-features = false, features = ["blocking", "rustls-tls"] }
 rustfft = "6.4.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -27,10 +28,9 @@ sha2 = "0.10.9"
 symphonia = { version = "0.5.5", features = ["aac", "alac", "mp3", "isomp4", "ogg", "vorbis", "flac", "wav", "pcm"] }
 thiserror = "2.0.19"
 tracing = "0.1.44"
-zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "4.6.1", optional = true, default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
-# The isolated Stem workstation still uses `ort` for research candidates on macOS. The normal
-# Deck path uses native Core ML there; Windows uses the matching SCNet spectral ONNX export.
+# ORT exists only behind `ai-stem-legacy`; default builds do not resolve or link its runtime.
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = [
     "std",
@@ -41,7 +41,7 @@ ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, fea
 ] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-ort = { version = "=2.0.0-rc.13", default-features = false, features = [
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = [
     "std",
     "api-27",
     "download-binaries",

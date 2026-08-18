@@ -13,12 +13,12 @@ use rustfft::{Fft, FftPlanner};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::dsp::{apply_soft_gate, pack_model_input, unpack_model_output};
-use crate::runtime::{recommended_worker_count, PlatformEngine, RuntimeInfo};
+use crate::classical::separate_live;
+use crate::runtime::{recommended_worker_count, RuntimeInfo};
 use crate::{StemKind, StemWaveform, SAMPLE_RATE, SEGMENT_CORE_SAMPLES, SEGMENT_SAMPLES};
 
 const LIVE_WAVE_COLUMNS_PER_SECOND: usize = 100;
-/// Keep the 12-second performance rail plus adjacent SCNet tiles.
+/// Keep the 12-second performance rail plus adjacent DSP tiles.
 /// whole-track PCM/RGB session while the playhead walks the song.
 const LIVE_WAVE_RETAIN_SECONDS: f64 = 20.0;
 /// The audio worker can finish while its bounded ring still plays the final seconds. Keep the
@@ -26,7 +26,7 @@ const LIVE_WAVE_RETAIN_SECONDS: f64 = 20.0;
 /// instead of deleting the song tail before it can be painted.
 const LIVE_WAVE_COMPLETION_RETENTION: Duration = Duration::from_secs(60);
 /// One 46 ms Hann window per 10 ms display column. This follows the same STFT + frequency-colour
-/// gradient family used by DJ waveform tools, but runs only on completed SCNet PCM in memory.
+/// gradient family used by DJ waveform tools, but runs only on completed DSP PCM in memory.
 const LIVE_STEM_COLOR_FFT_SIZE: usize = 2_048;
 const LIVE_STEM_COLOR_MIN_HZ: f32 = 35.0;
 const LIVE_STEM_COLOR_MAX_HZ: f32 = 16_000.0;
@@ -34,7 +34,7 @@ const LIVE_STEM_COLOR_MAX_HZ: f32 = 16_000.0;
 const LIVE_AMP_GAMMA: f32 = 0.72;
 /// Same floor as `kdj_analysis::waveform::COLOR_FLOOR` so STEM rails are not a grey wash.
 const LIVE_COLOR_FLOOR: f32 = 0.12;
-/// One fixed SCNet tile produces this much retained source. This is a background-cache budget,
+/// One fixed DSP tile produces this much retained source. This is a background-cache budget,
 /// not callback latency or a promise that a cache miss is instantaneous.
 const LIVE_STEM_CHUNK_BUDGET_MS: u64 = (SEGMENT_CORE_SAMPLES as u64 * 1_000) / SAMPLE_RATE as u64;
 const DIAGNOSTIC_HISTORY: usize = 64;
@@ -235,7 +235,7 @@ impl LiveWaveSession {
 
 /// Incremental waveform payload for the performance UI. Sending a complete 24,000-column RGB
 /// waveform every 200ms made JSON parsing and canvas redraws compete with the compositor. A
-/// point is therefore sent only once, when its real SCNet tile is published.
+/// point is therefore sent only once, when its real DSP tile is published.
 #[derive(Clone, Debug, Serialize)]
 pub struct LiveStemWaveformDelta {
     pub track_id: i64,
@@ -616,7 +616,7 @@ fn prune_distant_live_wave_blocks(session: &mut LiveWaveSession, around: f64) {
         .retain(|block| block.start + block.duration >= keep_start && block.start <= keep_end);
 }
 
-/// Return the contiguous regions actually backed by completed SCNet tiles. These bounds must
+/// Return the contiguous regions actually backed by completed DSP tiles. These bounds must
 /// come from published blocks rather than elapsed wall-clock time: a slow model must leave the
 /// frontier where data really ends instead of making the UI advertise an empty future as loaded.
 fn live_waveform_frontiers(session: &LiveWaveSession) -> (f64, f64) {
@@ -798,7 +798,7 @@ fn spectral_gradient(frequency: f32) -> [f32; 3] {
 
 /// Return only blocks that were published since `after_revision`. Unlike the legacy full
 /// waveform endpoint this has a bounded payload even for a long track: an ordinary 200ms poll
-/// is empty, and a completed SCNet tile contributes only its own timeline columns.
+/// is empty, and a completed DSP tile contributes only its own timeline columns.
 pub fn live_stem_waveform_delta(
     track_id: i64,
     columns: usize,
@@ -959,7 +959,7 @@ fn display_live_amplitude(value: f32, scale: f32) -> f32 {
     (value / scale).clamp(0.0, 1.0).powf(LIVE_AMP_GAMMA)
 }
 
-/// One fixed SCNet output tile in stable `Drums / Bass / Other / Vocals` order.
+/// One DSP output tile in the legacy ABI order `Transient / Silence / Tonal / Vocal`.
 pub struct StemChunk {
     stems: [Vec<[f32; 2]>; 4],
     reconstruction_gain: f32,
@@ -1006,8 +1006,8 @@ struct InferenceReceivers {
     fill: Mutex<Receiver<InferenceJob>>,
 }
 
-/// Result handle lets a playback worker submit overlapping chunks to two persistent model workers
-/// before waiting. Model load and inference remain completely outside the audio callback.
+/// Result handle lets a playback worker submit overlapping chunks to two persistent DSP workers
+/// before waiting. Analysis remains completely outside the audio callback.
 pub struct StemInferenceTicket {
     receiver: Receiver<Result<Arc<StemChunk>>>,
 }
@@ -1017,20 +1017,18 @@ impl StemInferenceTicket {
         match self.receiver.try_recv() {
             Ok(result) => result.map(Some),
             Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => bail!("SCNet 后台推理 worker 已退出"),
+            Err(TryRecvError::Disconnected) => bail!("STEM DSP worker 已退出"),
         }
     }
 
     pub fn wait(self) -> Result<Arc<StemChunk>> {
-        self.receiver
-            .recv()
-            .context("SCNet 后台推理 worker 已退出")?
+        self.receiver.recv().context("STEM DSP worker 已退出")?
     }
 }
 
 /// Small persistent worker pool owned only while one or more live STEM streams exist. Dropping the
-/// final pool handle closes the queue; worker-local native models and their GPU resources then
-/// leave memory instead of becoming an application-lifetime cache.
+/// final pool handle closes the queue and releases worker-local FFT state instead of creating an
+/// application-lifetime cache.
 pub struct StemInferencePool {
     audio_sender: SyncSender<InferenceJob>,
     look_ahead_sender: SyncSender<InferenceJob>,
@@ -1078,15 +1076,12 @@ impl StemInferencePool {
         recommended_worker_count()
     }
 
-    pub fn new(model_path: &Path, workers: usize) -> Result<Arc<Self>> {
-        if crate::model::platform_model_artifact().is_none() {
-            bail!("当前平台尚未接入 SCNet Small runtime");
-        }
+    pub fn new(_model_path: &Path, workers: usize) -> Result<Arc<Self>> {
         if workers == 0 {
-            bail!("SCNet 后台推理 worker 数量必须大于 0");
+            bail!("STEM DSP worker 数量必须大于 0");
         }
         reset_stem_runtime_diagnostics();
-        // Queue capacities are bounded because each fixed SCNet tile is large. Audible cache
+        // Queue capacities are bounded because each fixed DSP tile owns several spectra. Audible
         // requests always overtake optional waveform preparation.
         let (audio_sender, audio_receiver) =
             mpsc::sync_channel::<InferenceJob>(workers.saturating_mul(8));
@@ -1099,18 +1094,16 @@ impl StemInferencePool {
             fill: Mutex::new(fill_receiver),
         });
         let cache = Arc::new(Mutex::new(TileCache::default()));
-        let model_path = model_path.to_path_buf();
         for index in 0..workers {
             let receivers = Arc::clone(&receivers);
             let cache = Arc::clone(&cache);
-            let model_path = model_path.clone();
             std::thread::Builder::new()
                 .name(format!("kdj-live-stem-{index}"))
                 .spawn(move || {
                     kdj_core::thread_qos::prefer_live_audio();
-                    run_worker(model_path, receivers, cache)
+                    run_worker(receivers, cache)
                 })
-                .context("启动 SCNet 后台推理 worker")?;
+                .context("启动 classical STEM DSP worker")?;
         }
         Ok(Arc::new(Self {
             audio_sender,
@@ -1146,7 +1139,7 @@ impl StemInferencePool {
             expected_epoch,
             InferencePriority::Audio,
         )
-        .and_then(|ticket| ticket.context("SCNet 可听缓存推理已取消"))
+        .and_then(|ticket| ticket.context("STEM 可听 DSP 已取消"))
     }
 
     /// Submit one best-effort future chunk. This is deliberately separate from [`Self::submit`]:
@@ -1221,7 +1214,7 @@ impl StemInferencePool {
         priority: InferencePriority,
     ) -> Result<Option<StemInferenceTicket>> {
         if left.len() != SEGMENT_SAMPLES || right.len() != SEGMENT_SAMPLES {
-            bail!("SCNet 固定输入必须是 {SEGMENT_SAMPLES} stereo frames");
+            bail!("STEM DSP 固定输入必须是 {SEGMENT_SAMPLES} stereo frames");
         }
         if epoch.load(Ordering::Acquire) != expected_epoch {
             return Ok(None);
@@ -1229,7 +1222,7 @@ impl StemInferencePool {
         let (reply, receiver) = mpsc::sync_channel(1);
         if let Some(chunk) = self.cache.lock().unwrap().get(&key) {
             let _ = reply.send(Ok(chunk));
-            tracing::debug!("SCNet tile cache hit");
+            tracing::debug!("classical STEM tile cache hit");
             return Ok(Some(StemInferenceTicket { receiver }));
         }
         let mut job = InferenceJob {
@@ -1253,31 +1246,28 @@ impl StemInferencePool {
                         thread::sleep(Duration::from_millis(1));
                     }
                     Err(TrySendError::Disconnected(_)) => {
-                        bail!("SCNet 后台推理 worker 已退出");
+                        bail!("STEM DSP worker 已退出");
                     }
                 }
             },
             InferencePriority::LookAhead => match self.look_ahead_sender.try_send(job) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => return Ok(None),
-                Err(TrySendError::Disconnected(_)) => bail!("SCNet 后台推理 worker 已退出"),
+                Err(TrySendError::Disconnected(_)) => bail!("STEM DSP worker 已退出"),
             },
             InferencePriority::Fill => match self.fill_sender.try_send(job) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => return Ok(None),
-                Err(TrySendError::Disconnected(_)) => bail!("SCNet 后台推理 worker 已退出"),
+                Err(TrySendError::Disconnected(_)) => bail!("STEM DSP worker 已退出"),
             },
         }
         Ok(Some(StemInferenceTicket { receiver }))
     }
 }
 
-fn run_worker(
-    model_path: PathBuf,
-    receivers: Arc<InferenceReceivers>,
-    cache: Arc<Mutex<TileCache>>,
-) {
-    let mut engine: Option<PlatformEngine> = None;
+fn run_worker(receivers: Arc<InferenceReceivers>, cache: Arc<Mutex<TileCache>>) {
+    let runtime = RuntimeInfo::planned();
+    record_model_loaded(runtime.clone(), Duration::ZERO);
     loop {
         let Some(job) = next_inference_job(&receivers) else {
             return;
@@ -1292,35 +1282,23 @@ fn run_worker(
             reply,
         } = job;
         if epoch.load(Ordering::Acquire) != expected_epoch {
-            let _ = reply.send(Err(anyhow::anyhow!("SCNet 后台推理已取消")));
+            let _ = reply.send(Err(anyhow::anyhow!("STEM DSP 已取消")));
             continue;
         }
         if let Some(chunk) = cache.lock().unwrap().get(&key) {
             let _ = reply.send(Ok(chunk));
-            tracing::debug!("SCNet queued tile reused cached PCM");
+            tracing::debug!("classical STEM queued tile reused cached PCM");
             continue;
         }
         let started_at = Instant::now();
         let mut infer_elapsed = Duration::ZERO;
         let result = (|| -> Result<Arc<StemChunk>> {
-            if engine.is_none() {
-                let load_started = Instant::now();
-                let loaded = PlatformEngine::load(&model_path)?;
-                record_model_loaded(loaded.info(), load_started.elapsed());
-                engine = Some(loaded);
-            }
             let infer_started = Instant::now();
-            let packed = pack_model_input(&left, &right)?;
-            let output = engine
-                .as_mut()
-                .expect("SCNet cache engine")
-                .predict(&packed.values)?;
+            let stems = separate_live(&left, &right)?;
             infer_elapsed = infer_started.elapsed();
             if epoch.load(Ordering::Acquire) != expected_epoch {
-                bail!("SCNet 后台推理已取消");
+                bail!("classical STEM 后台处理已取消");
             }
-            let mut stems = unpack_model_output(&output, packed.mean, packed.std)?;
-            apply_soft_gate(&left, &right, &mut stems);
             Ok(Arc::new(StemChunk {
                 stems,
                 reconstruction_gain: 1.0,
@@ -1332,19 +1310,13 @@ fn run_worker(
             }
         }
         match &result {
-            Ok(_) => record_completed_block(
-                engine
-                    .as_ref()
-                    .map(PlatformEngine::info)
-                    .unwrap_or_else(RuntimeInfo::planned),
-                infer_elapsed,
-            ),
+            Ok(_) => record_completed_block(runtime.clone(), infer_elapsed),
             Err(error) => record_runtime_error(error),
         }
         tracing::debug!(
             queue_and_work_ms = submitted_at.elapsed().as_millis(),
             worker_ms = started_at.elapsed().as_millis(),
-            "SCNet background tile completed"
+            "classical STEM background tile completed"
         );
         let _ = reply.send(result);
     }

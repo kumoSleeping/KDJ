@@ -114,6 +114,7 @@ pub(crate) fn istft(
         .collect()
 }
 
+#[cfg_attr(not(feature = "ai-stem-legacy"), allow(dead_code))]
 pub(crate) fn reflect_pad(signal: &[f32], pad: usize) -> Vec<f32> {
     (-(pad as isize)..signal.len() as isize + pad as isize)
         .map(|index| reflected_sample(signal, index))

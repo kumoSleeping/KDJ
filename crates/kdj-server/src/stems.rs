@@ -161,7 +161,22 @@ pub async fn debug_audio(
     if !valid_debug_token(&session)
         || !matches!(
             lane.as_str(),
-            "original" | "drums" | "bass" | "other" | "vocals" | "instrumental"
+            "original"
+                | "transient"
+                | "tonal"
+                | "center"
+                | "vocal"
+                | "steady"
+                | "harmonic"
+                | "percussive"
+                | "background"
+                | "sides"
+                // Kept while the isolated AI debug source files remain deletion-ready.
+                | "drums"
+                | "bass"
+                | "other"
+                | "vocals"
+                | "instrumental"
         )
     {
         return Err(ApiError::not_found("Stem 调试音频不存在"));

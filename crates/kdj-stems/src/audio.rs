@@ -303,7 +303,7 @@ pub(crate) fn decode_stereo_region_cached(
     }
 }
 
-/// Sequential fixed-shape SCNet windows. A seek reopens the decoder; a context-safe core advance
+/// Sequential fixed-shape DSP windows. A seek reopens the decoder; a context-safe core advance
 /// only reads the new tail instead of re-parsing the file from the playhead each time.
 pub struct StemWindowCursor {
     decoder: Option<StereoRegionDecoder>,

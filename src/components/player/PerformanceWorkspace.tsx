@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { AudioLines, ChevronDown, Drum, Guitar, Mic, Minus, Pause, Play, Plus, VolumeX } from "lucide-react";
+import { AudioLines, ChevronDown, Drum, Mic, Minus, Pause, Play, Plus, VolumeX } from "lucide-react";
 import {
   channelFaderGain,
   crossfaderChannelGains,
@@ -348,20 +348,18 @@ const STEM_OPTIONS: {
   gainIndex: 0 | 1 | 2 | 3;
   icon: typeof Drum;
 }[] = [
-  { stem: "drums", label: "DRUMS", short: "D", shortcut: "D", bit: STEM_WAVE_BITS.drums, gainIndex: 0, icon: Drum },
-  { stem: "bass", label: "BASS", short: "B", shortcut: "B", bit: STEM_WAVE_BITS.bass, gainIndex: 1, icon: Guitar },
-  { stem: "other", label: "OTHER", short: "O", shortcut: "O", bit: STEM_WAVE_BITS.other, gainIndex: 2, icon: AudioLines },
-  { stem: "vocals", label: "VOCALS", short: "V", shortcut: "V", bit: STEM_WAVE_BITS.vocals, gainIndex: 3, icon: Mic },
+  { stem: "drums", label: "TRANSIENT", short: "X", shortcut: "X", bit: STEM_WAVE_BITS.drums, gainIndex: 0, icon: Drum },
+  { stem: "other", label: "TONAL", short: "T", shortcut: "T", bit: STEM_WAVE_BITS.other, gainIndex: 2, icon: AudioLines },
+  { stem: "vocals", label: "VOCAL", short: "V", shortcut: "V", bit: STEM_WAVE_BITS.vocals, gainIndex: 3, icon: Mic },
 ];
 
 const STEM_EQ_KNOBS: { stem: StemName; label: string; gainIndex: 0 | 1 | 2 | 3 }[] = [
-  { stem: "vocals", label: "VOCALS", gainIndex: 3 },
-  { stem: "other", label: "OTHER", gainIndex: 2 },
-  { stem: "bass", label: "BASS", gainIndex: 1 },
-  { stem: "drums", label: "DRUMS", gainIndex: 0 },
+  { stem: "vocals", label: "VOCAL", gainIndex: 3 },
+  { stem: "other", label: "TONAL", gainIndex: 2 },
+  { stem: "drums", label: "TRANSIENT", gainIndex: 0 },
 ];
 
-/** 低于这个幅度就当作底噪留空（后端 amp 已归一化到 0..1；SCNet 串音底噪约在 5% 上下）。 */
+/** 低于这个幅度就当作底噪留空（后端 amp 已归一化到 0..1）。 */
 const STEM_SILENCE_THRESHOLD = 0.06;
 
 /** 主轨道（ORG）波形，同时作为尚未发布 STEM 列的低透明占位。 */
@@ -716,12 +714,12 @@ function ToolbarWaveChannels({ displayMask, onDisplayMask }: {
       >
         ORG
       </button>
-      {STEM_OPTIONS.map(({ stem, short, bit }) => (
+      {STEM_OPTIONS.map(({ stem, label, short, bit }) => (
         <button
           type="button"
           key={stem}
           data-active={(displayMask & bit) !== 0 || undefined}
-          title={`${stem.toUpperCase()} 波形`}
+          title={`${label} 波形`}
           onClick={() => onDisplayMask(displayMask ^ bit)}
         >
           {short}
@@ -1135,7 +1133,7 @@ function StemPads({ deck, stemState, stemModel, side, onDownloadStemModel, onTog
   const job = stemJobLine(stemState.status, stemModel);
   return (
     <div className="kd-performance-stem-pads" data-side={side === 0 ? "a" : "b"} data-enabled={stemState.enabled || undefined}>
-      {STEM_OPTIONS.map(({ stem, label, bit, icon: Icon }) => {
+      {STEM_OPTIONS.map(({ stem, label, shortcut, bit, icon: Icon }) => {
         const audible = stemState.enabled && (stemState.mask & bit) !== 0;
         return (
           <div
@@ -1151,7 +1149,7 @@ function StemPads({ deck, stemState, stemModel, side, onDownloadStemModel, onTog
               disabled={busy}
               title={
                 ready
-                  ? `${label} ${audible ? "静音" : "启用"} · Shift+${label[0]}`
+                  ? `${label} ${audible ? "静音" : "启用"} · Shift+${shortcut}`
                   : busy
                     ? job
                     : `生成并启用 ${label}`
@@ -2266,7 +2264,7 @@ export function PerformanceWorkspace({
             waveform.b[index] = Math.round(Math.min(255, Math.max(0, b)));
             if (waveform.known) waveform.known[index] = true;
           });
-          // A fresh wrapper makes Waveform repaint only when a real SCNet block changed. Its
+          // A fresh wrapper makes Waveform repaint only when a real DSP block changed. Its
           // large typed timeline arrays stay shared; copying them on every visual update would
           // merely move the old polling bottleneck from JSON parsing into the JS heap.
           next[side][stem] = {
