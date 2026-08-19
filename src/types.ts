@@ -1,6 +1,6 @@
 /**
- * 前后端契约（对应 sidecar/kdj/models.py）。
- * 改这里必须同步改 models.py 和 docs/00-architecture.md。
+ * 前后端契约（Rust 侧对应 crates/kdj-core/src/models.rs）。
+ * 改这里必须同步改 models.rs 和 docs/00-architecture.md。
  */
 
 export type Platform = "wyy" | "qqm" | "soundcloud" | "ytm" | "bilibili" | "local";
@@ -101,8 +101,8 @@ export interface Account {
   detail: string;
   /** false = 该平台当前没有可用登录方式，前端不要显示登录入口。 */
   supports_login: boolean;
-  /** qr = 扫码，oauth = 系统浏览器 OAuth。旧后端缺字段时按 qr 处理。 */
-  login_method?: "qr" | "oauth";
+  /** qr = 扫码，oauth = 系统浏览器 OAuth，device = 设备码登录（YouTube Music）。旧后端缺字段时按 qr 处理。 */
+  login_method?: "qr" | "oauth" | "device";
 }
 
 /** 同一登录会话下的一张可选二维码（QQ 音乐会同时给 QQ 音乐 / QQ 两张）。 */
@@ -144,6 +144,19 @@ export interface SoundCloudOAuthStatus {
 export interface SoundCloudOAuthCallback {
   state: string;
   code: string;
+}
+
+export interface YtmDeviceLogin {
+  device_code: string;
+  user_code: string;
+  verification_url: string;
+  expires_in: number;
+}
+
+export interface YtmDeviceStatus {
+  status: "pending" | "done" | "error" | string;
+  message: string;
+  account?: Account | null;
 }
 
 export interface SongSource {

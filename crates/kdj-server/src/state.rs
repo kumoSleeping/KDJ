@@ -184,6 +184,8 @@ pub struct AppState {
     pub bilibili: Arc<BilibiliProvider>,
     /// SoundCloud OAuth 回调需要访问具体 provider 的短期 PKCE 会话。
     pub soundcloud: Arc<SoundCloudProvider>,
+    /// YouTube Music 设备码登录需要访问具体 provider 的在途设备码会话。
+    pub youtubemusic: Arc<YoutubeMusicProvider>,
     /// 所有 provider 共享的 live 设置句柄；`PUT /api/settings` 后刷这份即可。
     provider_ctx: ProviderContext,
     /// 在线歌曲试听的短期代理票据：浏览器只拿本地 URL，不直接碰各平台 CDN。
@@ -223,7 +225,7 @@ impl AppState {
         providers.insert(Platform::Wyy, netease);
         providers.insert(Platform::Qqm, qqmusic);
         providers.insert(Platform::Soundcloud, soundcloud.clone());
-        providers.insert(Platform::Ytm, youtubemusic);
+        providers.insert(Platform::Ytm, youtubemusic.clone());
         providers.insert(Platform::Bilibili, bilibili.clone());
 
         let waveforms = crate::waveform::WaveformCoordinator::new(library.clone());
@@ -236,6 +238,7 @@ impl AppState {
             providers,
             bilibili,
             soundcloud,
+            youtubemusic,
             provider_ctx: ctx,
             song_previews: Mutex::new(SongPreviewTickets::default()),
             stream_cache,

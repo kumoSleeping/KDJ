@@ -55,6 +55,14 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
             "/api/accounts/soundcloud/login/oauth/callback",
             post(soundcloud_oauth_callback),
         )
+        .route(
+            "/api/accounts/ytm/login/device",
+            get(ytm_device_start),
+        )
+        .route(
+            "/api/accounts/ytm/login/device/{device_code}",
+            get(ytm_device_status),
+        )
         .route("/api/search", post(search))
         .route("/api/search/cover", post(search_cover))
         .route("/api/search/capabilities", get(search_capabilities))
@@ -366,6 +374,19 @@ async fn soundcloud_oauth_callback(
     let account = state.soundcloud.account().await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
+}
+
+/// 发起一次 YouTube Music 设备码登录：返回 user_code / 激活地址 / 有效期。
+async fn ytm_device_start(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(state.youtubemusic.begin_device_login().await?))
+}
+
+/// 查一次设备码登录状态；成功时登录态已落盘，响应里带上新账号。
+async fn ytm_device_status(
+    State(state): State<Arc<AppState>>,
+    AxumPath(device_code): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    Json(state.youtubemusic.poll_device_login(&device_code).await)
 }
 
 // ---------------------------------------------------------------- 搜索

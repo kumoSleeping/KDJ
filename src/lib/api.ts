@@ -34,6 +34,8 @@ import type {
   SoundCloudOAuthStart,
   SoundCloudOAuthStatus,
   SoundCloudOAuthCallback,
+  YtmDeviceLogin,
+  YtmDeviceStatus,
   ResolveResponse,
   CollectionResult,
   ScanResponseLike,
@@ -156,6 +158,9 @@ export const api = {
     request<SoundCloudOAuthStatus>(`/accounts/soundcloud/login/oauth/${encodeURIComponent(state)}`),
   soundcloudOAuthCallback: (body: SoundCloudOAuthCallback) =>
     post<Account>("/accounts/soundcloud/login/oauth/callback", body),
+  ytmDeviceLoginStart: () => request<YtmDeviceLogin>("/accounts/ytm/login/device"),
+  ytmDeviceLoginStatus: (deviceCode: string) =>
+    request<YtmDeviceStatus>(`/accounts/ytm/login/device/${encodeURIComponent(deviceCode)}`),
 
   search: (body: SearchRequest) => post<SearchResponse>("/search", body),
   searchCapabilities: () => request<SearchCapabilities>("/search/capabilities"),

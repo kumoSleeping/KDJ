@@ -71,6 +71,9 @@ pub struct YtmClient {
     http: reqwest::Client,
     innertube_key: String,
     script: ScriptCache,
+    /// 登录后的 access token；有值时所有请求都带 `Authorization: Bearer`。
+    /// YouTube 对登录态客户端放宽播放流限制（会员直接放行自适应流）。
+    access_token: RwLock<Option<String>>,
 }
 
 impl YtmClient {
@@ -87,7 +90,13 @@ impl YtmClient {
             http,
             innertube_key: env_or("KDJ_YTM_INNERTUBE_KEY", DEFAULT_INNERTUBE_KEY),
             script: RwLock::new(ScriptState::None),
+            access_token: RwLock::new(None),
         })
+    }
+
+    /// provider 登录/登出后同步登录态到这里。
+    pub fn set_access_token(&self, token: Option<String>) {
+        *self.access_token.write().unwrap() = token;
     }
 
     fn web_remix_context() -> Value {
@@ -125,10 +134,11 @@ impl YtmClient {
             "{BASE}/{endpoint}?key={}&prettyPrint=false",
             self.innertube_key
         );
-        let response = self
-            .http
-            .post(&url)
-            .json(&body)
+        let mut request = self.http.post(&url).json(&body);
+        if let Some(token) = self.access_token.read().unwrap().clone() {
+            request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = request
             .send()
             .await
             .with_context(|| format!("YouTube Music 请求失败：{endpoint}"))?;
@@ -163,8 +173,14 @@ impl YtmClient {
     }
 
     /// 取视频的播放信息（流、标题、艺人、封面）。
-    pub async fn player(&self, video_id: &str) -> Result<Value> {
-        let mut body = Self::android_context();
+    /// 未登录时用 ANDROID（匿名也能拿元数据和播放状态）；登录后用
+    /// `WEB_REMIX`（YouTube 对带登录态的网页客户端放宽播放流限制）。
+    pub async fn player(&self, video_id: &str, use_web: bool) -> Result<Value> {
+        let mut body = if use_web {
+            Self::web_remix_context()
+        } else {
+            Self::android_context()
+        };
         let map = body.as_object_mut().expect("context 一定是对象");
         map.insert("videoId".into(), Value::String(video_id.to_string()));
         let payload = self.post("player", body).await?;

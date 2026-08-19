@@ -1,13 +1,18 @@
 //! YouTube Music provider。
 //!
-//! 和 SoundCloud 一样是**免登录可用**的音乐平台：搜索 → 拿自适应音频流 → 下载。
-//! 音质档映射：YouTube Music 免费流最高约 128k opus、会员约 256k AAC，
-//! 没有无损，所以 Flac 请求按"能拿到的最高码率"处理。
+//! 匿名可用：搜索 / 歌单 / 链接解析全都不需要账号。**播放流**则是另一回事——
+//! YouTube 从 2024 年起对匿名播放强制 botguard / PO token 质询，匿名拿到的
+//! 自适应流全被剥掉 URL；而**带 Google 登录态**的请求（`Authorization: Bearer`）
+//! 被视作可信客户端：会员直接放行自适应流，普通账号至少放行 HLS。
+//! 所以登录（设备码 OAuth，见 [`super::auth`]）是拿到播放流的关键路径。
 //!
-//! 流地址里的签名由 [`super::decipher`] 用播放器脚本还原；YouTube 不提供
-//! 稳定 API，脚本形状随时会变，解析失败时报错比猜错后静默 403 更可查。
+//! 音质档映射：免费流最高约 128k opus、会员约 256k AAC，没有无损，
+//! 所以 Flac 请求按"能拿到的最高码率"处理。流地址里的签名由
+//! [`super::decipher`] 用播放器脚本还原；HLS 回退交给 FFmpeg 提取音轨。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, RwLock};
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -20,6 +25,7 @@ use kdj_core::paths::render_filename;
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt as _;
 
+use super::auth::{self, DeviceCode, DevicePoll, OAuthSession};
 use super::client::YtmClient;
 use crate::net::{create_download_writer, host_is, AtomicDownload};
 use crate::provider::{
@@ -30,6 +36,8 @@ use crate::tags;
 
 const LABEL: &str = "YouTube Music";
 const DISABLED_MESSAGE: &str = "未启用，在「下载」里打开开关";
+/// 设备码登录会话的进程内保留时长。
+const DEVICE_ATTEMPT_TTL_SECS: u64 = 20 * 60;
 
 /// 契约音质 → YouTube Music 现实里最接近的码率目标。
 /// 平台没有无损档：flac 和 320 都对准会员上限（约 256k AAC）。
@@ -40,16 +48,47 @@ fn target_bitrate(quality: Quality) -> i64 {
     }
 }
 
+/// 一条在途的设备码登录尝试。
+struct DeviceAttempt {
+    code: DeviceCode,
+}
+
+/// 解析出来的音频流形态：直链（可试听/下载）或 HLS（只能下载，交给 FFmpeg）。
+enum StreamSource {
+    Direct { url: String, ext: String },
+    Hls { url: String },
+}
+
 pub struct YoutubeMusicProvider {
     ctx: ProviderContext,
     client: YtmClient,
+    session: RwLock<Option<OAuthSession>>,
+    devices: Mutex<HashMap<String, DeviceAttempt>>,
+    /// refresh token 并发共享：所有请求共用一次刷新（single-flight）。
+    refresh: tokio::sync::Mutex<()>,
 }
 
 impl YoutubeMusicProvider {
     pub fn new(ctx: ProviderContext) -> Result<Self> {
+        let client = YtmClient::new()?;
+        let session_path = ctx.session_file("ytmusic.json");
+        let session = std::fs::read_to_string(&session_path)
+            .ok()
+            .and_then(|text| match serde_json::from_str::<OAuthSession>(&text) {
+                Ok(session) if !session.access_token.is_empty() => Some(session),
+                Ok(_) => None,
+                Err(err) => {
+                    tracing::warn!("解析 YouTube Music 登录态失败：{err}");
+                    None
+                }
+            });
+        client.set_access_token(session.as_ref().map(|s| s.access_token.clone()));
         Ok(YoutubeMusicProvider {
             ctx,
-            client: YtmClient::new()?,
+            client,
+            session: RwLock::new(session),
+            devices: Mutex::new(HashMap::new()),
+            refresh: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -64,32 +103,239 @@ impl YoutubeMusicProvider {
         Ok(key)
     }
 
-    /// 解析音频流地址。返回 (url, 容器扩展名)。
-    async fn stream_url(
+    // ------------------------------------------------------------ 登录态
+
+    fn oauth_credentials(&self) -> Result<(String, String)> {
+        let client_id = std::env::var("KDJ_YTM_OAUTH_CLIENT_ID")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let client_secret = std::env::var("KDJ_YTM_OAUTH_CLIENT_SECRET")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        anyhow::ensure!(
+            !client_id.is_empty() && !client_secret.is_empty(),
+            "KDJ 尚未配置 YouTube Music 登录服务（需要 KDJ_YTM_OAUTH_CLIENT_ID / \
+             KDJ_YTM_OAUTH_CLIENT_SECRET 环境变量）"
+        );
+        Ok((client_id, client_secret))
+    }
+
+    fn session_path(&self) -> PathBuf {
+        self.ctx.session_file("ytmusic.json")
+    }
+
+    fn save_session(&self, session: &OAuthSession) -> Result<()> {
+        let path = self.session_path();
+        let tmp = path.with_extension("json.tmp");
+        let body = serde_json::to_vec_pretty(session).context("序列化 YouTube Music 登录态失败")?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).context("创建 YouTube Music 会话目录失败")?;
+        }
+        std::fs::write(&tmp, body).context("保存 YouTube Music 登录态失败")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+                .context("保护 YouTube Music 登录态失败")?;
+        }
+        std::fs::rename(&tmp, &path).context("写入 YouTube Music 登录态失败")?;
+        Ok(())
+    }
+
+    fn session_snapshot(&self) -> Option<OAuthSession> {
+        self.session.read().unwrap().clone()
+    }
+
+    fn set_session(&self, session: OAuthSession) -> Result<()> {
+        self.client
+            .set_access_token(Some(session.access_token.clone()));
+        self.save_session(&session)?;
+        *self.session.write().unwrap() = Some(session);
+        Ok(())
+    }
+
+    fn clear_session(&self) {
+        self.client.set_access_token(None);
+        *self.session.write().unwrap() = None;
+        let _ = std::fs::remove_file(self.session_path());
+    }
+
+    /// 当前可用的 access token；临过期时 single-flight 刷新一次。
+    async fn access_token(&self) -> Result<String> {
+        let current = self.session_snapshot().context("YouTube Music 尚未登录")?;
+        if !current.expiring() {
+            return Ok(current.access_token);
+        }
+        let _single_flight = self.refresh.lock().await;
+        // 等锁期间别的请求可能已经刷完
+        let current = self.session_snapshot().context("YouTube Music 尚未登录")?;
+        if !current.expiring() {
+            return Ok(current.access_token);
+        }
+        anyhow::ensure!(
+            !current.refresh_token.is_empty(),
+            "YouTube Music 登录已过期，请重新登录"
+        );
+        let (client_id, client_secret) = self.oauth_credentials()?;
+        let next = auth::refresh_token(
+            self.client.http(),
+            &client_id,
+            &client_secret,
+            &current.refresh_token,
+        )
+        .await
+        .context("YouTube Music 登录已过期，请重新登录")?;
+        let token = next.access_token.clone();
+        self.set_session(next)?;
+        Ok(token)
+    }
+
+    fn prune_devices(&self) {
+        self.devices.lock().unwrap().retain(|_, attempt| {
+            attempt.code.created_at.elapsed().as_secs() <= DEVICE_ATTEMPT_TTL_SECS
+        });
+    }
+
+    // ------------------------------------------------------------ 设备码登录
+
+    /// 发起一次设备码登录。返回给前端的展示信息。
+    pub async fn begin_device_login(&self) -> Result<Value> {
+        self.ensure_enabled()?;
+        let (client_id, _) = self.oauth_credentials()?;
+        let code = auth::begin_device_code(self.client.http(), &client_id).await?;
+        self.prune_devices();
+        let response = json!({
+            "device_code": code.device_code,
+            "user_code": code.user_code,
+            "verification_url": code.verification_url,
+            "expires_in": code.expires_in,
+        });
+        self.devices.lock().unwrap().insert(
+            code.device_code.clone(),
+            DeviceAttempt { code },
+        );
+        Ok(response)
+    }
+
+    /// 查一次设备码登录状态；成功时落盘会话。
+    pub async fn poll_device_login(&self, device_code: &str) -> Value {
+        let attempt = {
+            self.prune_devices();
+            let devices = self.devices.lock().unwrap();
+            devices.get(device_code).map(|attempt| attempt.code.clone())
+        };
+        let Some(code) = attempt else {
+            return json!({
+                "status": "error",
+                "message": "登录会话不存在或已过期，请重新发起",
+                "account": Value::Null,
+            });
+        };
+        if code.expired() {
+            self.devices.lock().unwrap().remove(device_code);
+            return json!({
+                "status": "error",
+                "message": "登录码已过期，请重新发起",
+                "account": Value::Null,
+            });
+        }
+        let (client_id, client_secret) = match self.oauth_credentials() {
+            Ok(credentials) => credentials,
+            Err(err) => {
+                return json!({ "status": "error", "message": err.to_string(), "account": Value::Null })
+            }
+        };
+        match auth::poll_device_code(
+            self.client.http(),
+            &client_id,
+            &client_secret,
+            device_code,
+        )
+        .await
+        {
+            Ok(DevicePoll::Done(session)) => {
+                if let Err(err) = self.set_session(session) {
+                    self.devices.lock().unwrap().remove(device_code);
+                    return json!({
+                        "status": "error",
+                        "message": format!("登录成功但保存登录态失败：{err:#}"),
+                        "account": Value::Null,
+                    });
+                }
+                self.devices.lock().unwrap().remove(device_code);
+                json!({
+                    "status": "done",
+                    "message": "YouTube Music 登录成功",
+                    "account": serde_json::to_value(self.account().await).unwrap_or(Value::Null),
+                })
+            }
+            Ok(DevicePoll::Pending) | Ok(DevicePoll::SlowDown) => json!({
+                "status": "pending",
+                "message": "等待在浏览器里完成授权",
+                "account": Value::Null,
+            }),
+            Ok(DevicePoll::Failed(message)) => {
+                self.devices.lock().unwrap().remove(device_code);
+                json!({ "status": "error", "message": message, "account": Value::Null })
+            }
+            Err(err) => json!({
+                "status": "error",
+                "message": format!("检查登录状态失败：{err:#}"),
+                "account": Value::Null,
+            }),
+        }
+    }
+
+    // ------------------------------------------------------------ 流解析
+
+    /// 解析音频流。返回直链（可试听/下载）或 HLS（下载用）。
+    async fn stream_source(
         &self,
         video_id: &str,
         quality: Quality,
         lowest: bool,
-    ) -> Result<(String, String)> {
-        let player = self.client.player(video_id).await?;
+    ) -> Result<StreamSource> {
+        // 登录态先确保 token 新鲜：过期的 Bearer 会让 player 请求直接 401
+        let logged_in = self.session_snapshot().is_some();
+        if logged_in {
+            self.access_token().await?;
+        }
+        let player = self.client.player(video_id, logged_in).await?;
         ensure_playable(&player)?;
         let formats = audio_formats(&player);
-        anyhow::ensure!(
-            !formats.is_empty(),
-            "YouTube Music 没有返回匿名可用的音频流（YouTube 限制未登录播放；会员/登录态可解除，或稍后重试）"
-        );
-        let format = if lowest {
-            formats
-                .iter()
-                .filter(|format| format.bitrate > 0)
-                .min_by_key(|format| format.bitrate)
-                .or_else(|| formats.first())
-                .expect("上面已确认非空")
-        } else {
-            pick_format(&formats, quality)
-        };
-        let url = self.format_url(format).await?;
-        Ok((url, ext_of(format)))
+        if !formats.is_empty() {
+            let format = if lowest {
+                formats
+                    .iter()
+                    .filter(|format| format.bitrate > 0)
+                    .min_by_key(|format| format.bitrate)
+                    .or_else(|| formats.first())
+                    .expect("上面已确认非空")
+            } else {
+                pick_format(&formats, quality)
+            };
+            let url = self.format_url(format).await?;
+            return Ok(StreamSource::Direct {
+                url,
+                ext: ext_of(format),
+            });
+        }
+        // 自适应流没有（匿名被剥 URL / 免费账号只给 HLS）时退回 HLS。
+        if let Some(hls) = player
+            .pointer("/streamingData/hlsManifestUrl")
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())
+        {
+            return Ok(StreamSource::Hls {
+                url: hls.to_string(),
+            });
+        }
+        if self.session_snapshot().is_some() {
+            bail!("YouTube Music 没有返回可用音频流（会员可解锁更高码率的自适应流）")
+        }
+        bail!("YouTube Music 没有返回匿名可用的音频流（YouTube 限制未登录播放；请先登录，或稍后重试）")
     }
 
     /// 直链直接用；签名串走播放器脚本解密。
@@ -137,7 +383,8 @@ impl YoutubeMusicProvider {
     }
 
     async fn resolve_song(&self, video_id: &str) -> Result<SongSource> {
-        let player = self.client.player(video_id).await?;
+        // 解析元数据用 ANDROID：匿名也返回完整的 videoDetails
+        let player = self.client.player(video_id, false).await?;
         ensure_playable(&player)?;
         let details = player
             .get("videoDetails")
@@ -159,6 +406,39 @@ impl YoutubeMusicProvider {
             playlist_from_browse(&body).context("YouTube Music 歌单里没有可用歌曲")?;
         Ok((title, sources.into_iter().take(limit).collect()))
     }
+
+    /// HLS 音频轨提取：`-vn -c:a copy` 把 TS 里的 AAC 原样装进 m4a。
+    /// HLS 是按分片拉取的，没有逐字节进度；跑完一次性报总量。
+    async fn download_hls(
+        &self,
+        url: &str,
+        output: &std::path::Path,
+        job: &DownloadJob<'_>,
+    ) -> Result<()> {
+        anyhow::ensure!(crate::ffmpeg::available(), "需要 FFmpeg 才能下载 HLS 音频流");
+        let log_path = self.ctx.data_dir.join("ytm-hls-ffmpeg.log");
+        let args = vec![
+            "-y".to_string(),
+            "-i".to_string(),
+            url.to_string(),
+            "-vn".to_string(),
+            "-c:a".to_string(),
+            "copy".to_string(),
+            "-f".to_string(),
+            "ipod".to_string(),
+            output.to_string_lossy().into_owned(),
+        ];
+        job.report(0, 0);
+        crate::ffmpeg::run(&args, &log_path, &job.cancel)
+            .await
+            .context("FFmpeg 提取 HLS 音轨失败")?;
+        job.check_canceled()?;
+        let size = std::fs::metadata(output)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        job.report(size, size);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -172,14 +452,35 @@ impl MusicProvider for YoutubeMusicProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::ANONYMOUS_MUSIC
+        Capabilities::MUSIC
     }
 
     async fn account(&self) -> Account {
-        let mut account = Account::new(Platform::Ytm, LABEL, AccountState::Missing, "免登录");
-        account.supports_login = false;
+        let mut account = Account::new(Platform::Ytm, LABEL, AccountState::Missing, "未登录");
+        account.login_method = "device".into();
         if !self.ctx.ytm_enabled() {
             account.detail = DISABLED_MESSAGE.into();
+            return account;
+        }
+        let Some(session) = self.session_snapshot() else {
+            // AccountRow 已单独显示「未登录」，这里只补一句说明，
+            // 避免界面出现「未登录 · 未登录 · …」的重复文案。
+            account.detail = "可匿名搜索；登录后解锁播放流".into();
+            return account;
+        };
+        match self.access_token().await {
+            Ok(_) => {
+                account.state = AccountState::Valid;
+                account.detail = "已登录".into();
+            }
+            Err(err) => {
+                account.state = if session.expiring() {
+                    AccountState::Expired
+                } else {
+                    AccountState::Unknown
+                };
+                account.detail = truncate(&format!("登录态检查失败：{err:#}"), 160);
+            }
         }
         account
     }
@@ -193,6 +494,8 @@ impl MusicProvider for YoutubeMusicProvider {
     }
 
     async fn logout(&self) -> Result<()> {
+        self.clear_session();
+        self.devices.lock().unwrap().clear();
         Ok(())
     }
 
@@ -242,12 +545,16 @@ impl MusicProvider for YoutubeMusicProvider {
         }
     }
 
-    /// 试听 = 最低码率那一档。
+    /// 试听 = 最低码率那一档。HLS 形态没法直接给 `<audio>` 用，试听跳过。
     async fn preview_url(&self, source: &SongSource) -> Result<Option<String>> {
         self.ensure_enabled()?;
         let key = Self::video_id(source)?;
-        let (url, _) = self.stream_url(&key, Quality::Q128, true).await?;
-        Ok(Some(url))
+        match self.stream_source(&key, Quality::Q128, true).await? {
+            StreamSource::Direct { url, .. } => Ok(Some(url)),
+            StreamSource::Hls { .. } => {
+                bail!("YouTube Music 只提供了 HLS 流，试听暂不可用（下载仍可）")
+            }
+        }
     }
 
     async fn preview_url_at_quality(
@@ -257,8 +564,12 @@ impl MusicProvider for YoutubeMusicProvider {
     ) -> Result<Option<String>> {
         self.ensure_enabled()?;
         let key = Self::video_id(source)?;
-        let (url, _) = self.stream_url(&key, quality, false).await?;
-        Ok(Some(url))
+        match self.stream_source(&key, quality, false).await? {
+            StreamSource::Direct { url, .. } => Ok(Some(url)),
+            StreamSource::Hls { .. } => {
+                bail!("YouTube Music 只提供了 HLS 流，试听暂不可用（下载仍可）")
+            }
+        }
     }
 
     async fn download(&self, job: DownloadJob<'_>) -> Result<PathBuf> {
@@ -266,9 +577,14 @@ impl MusicProvider for YoutubeMusicProvider {
         job.check_canceled()?;
         let source = job.source;
         let key = Self::video_id(source)?;
-        let (url, ext) = self.stream_url(&key, job.quality, false).await?;
+        let stream = self.stream_source(&key, job.quality, false).await?;
         job.check_canceled()?;
 
+        let ext = match &stream {
+            StreamSource::Direct { ext, .. } => ext.clone(),
+            // HLS 交给 FFmpeg 提取音轨，产物统一 m4a（TS 里的 AAC 原样封装）
+            StreamSource::Hls { .. } => "m4a".to_string(),
+        };
         let output_dir = self.ctx.platform_dir(Platform::Ytm)?;
         let filename = render_filename(
             &self.ctx.filename_template(),
@@ -281,34 +597,42 @@ impl MusicProvider for YoutubeMusicProvider {
         let final_path = unique_download_path(&output_dir, &filename);
 
         let guard = AtomicDownload::new(&final_path);
-        let response = self
-            .client
-            .http()
-            .get(&url)
-            .send()
-            .await
-            .context("YouTube Music 音频下载失败")?;
-        if response.status() == reqwest::StatusCode::FORBIDDEN {
-            bail!("YouTube Music 拒绝了音频请求（签名可能已失效，稍后重试）");
-        }
-        let response = response.error_for_status().context("YouTube Music 音频下载失败")?;
-        let total = response.content_length().unwrap_or(0);
-        job.report(0, total);
+        match stream {
+            StreamSource::Direct { url, .. } => {
+                let response = self
+                    .client
+                    .http()
+                    .get(&url)
+                    .send()
+                    .await
+                    .context("YouTube Music 音频下载失败")?;
+                if response.status() == reqwest::StatusCode::FORBIDDEN {
+                    bail!("YouTube Music 拒绝了音频请求（签名可能已失效，稍后重试）");
+                }
+                let response =
+                    response.error_for_status().context("YouTube Music 音频下载失败")?;
+                let total = response.content_length().unwrap_or(0);
+                job.report(0, total);
 
-        let mut file = create_download_writer(guard.partial())
-            .await
-            .context("创建下载临时文件失败")?;
-        let mut downloaded = 0u64;
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            job.check_canceled()?;
-            let chunk = chunk.context("YouTube Music 音频流中断")?;
-            file.write_all(&chunk).await.context("写入下载文件失败")?;
-            downloaded += chunk.len() as u64;
-            job.report(downloaded, total.max(downloaded));
+                let mut file = create_download_writer(guard.partial())
+                    .await
+                    .context("创建下载临时文件失败")?;
+                let mut downloaded = 0u64;
+                let mut stream = response.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    job.check_canceled()?;
+                    let chunk = chunk.context("YouTube Music 音频流中断")?;
+                    file.write_all(&chunk).await.context("写入下载文件失败")?;
+                    downloaded += chunk.len() as u64;
+                    job.report(downloaded, total.max(downloaded));
+                }
+                file.flush().await.context("提交下载缓冲失败")?;
+                drop(file);
+            }
+            StreamSource::Hls { url } => {
+                self.download_hls(&url, guard.partial(), &job).await?;
+            }
         }
-        file.flush().await.context("提交下载缓冲失败")?;
-        drop(file);
         let path = guard.commit()?;
 
         let cover = self.fetch_cover(&source.cover).await;
@@ -696,6 +1020,16 @@ fn playlist_from_browse(body: &Value) -> Option<(String, Vec<SongSource>)> {
         return None;
     }
     Some((title, sources))
+}
+
+fn truncate(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let result: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{result}…")
+    } else {
+        result
+    }
 }
 
 #[cfg(test)]

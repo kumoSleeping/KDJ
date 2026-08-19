@@ -113,7 +113,7 @@ fn extract_functions(js: &str) -> (HashMap<String, FunctionDef>, Vec<String>) {
             continue;
         }
         let params: Vec<String> = caps
-            .get(3)
+            .get(2)
             .map(|m| {
                 m.as_str()
                     .split(',')
@@ -322,9 +322,11 @@ fn exec_rotate(
     rounds %= arr.len().max(1);
     for _ in 0..rounds {
         if right {
-            let last = arr.pop().expect("旋转时空数组");
+            let Some(last) = arr.pop() else {
+                bail!("签名脚本试图旋转空数组");
+            };
             arr.insert(0, last);
-        } else {
+        } else if !arr.is_empty() {
             let first = arr.remove(0);
             arr.push(first);
         }
@@ -358,20 +360,43 @@ fn exec_splice(
 
 fn splice(arr: &mut Vec<char>, start: i64, count: Option<i64>) -> Result<()> {
     let len = arr.len() as i64;
-    let start = normalize_index(start, len);
+    let start = splice_start(start, len)?;
     let count = match count {
-        None => len - start,
+        None => len - start as i64,
         Some(count) => {
             if count <= 0 {
                 return Ok(());
             }
-            count.min(len - start)
+            count.min(len - start as i64)
         }
     };
     for _ in 0..count {
         arr.remove(start as usize);
     }
     Ok(())
+}
+
+/// JS `Array.splice` 的起点语义：负数从尾部数（回绕），大于长度夹到末尾。
+fn splice_start(index: i64, len: i64) -> Result<i64> {
+    if len == 0 {
+        anyhow::ensure!(index <= 0, "签名脚本对空数组 splice 了正下标");
+        return Ok(0);
+    }
+    if index < 0 {
+        Ok(((index % len) + len) % len)
+    } else {
+        Ok(index.min(len))
+    }
+}
+
+/// JS `a[I]` 的下标语义：必须落在 `[0, len)`，越界（例如 `a[a.length]`）报可读错误。
+fn array_index(index: i64, len: usize) -> Result<usize> {
+    anyhow::ensure!(len > 0, "签名脚本对空数组取了下标");
+    anyhow::ensure!(
+        (0..len as i64).contains(&index),
+        "签名脚本下标越界（index={index}, len={len}）"
+    );
+    Ok(index as usize)
 }
 
 /// 形如 `a[I]=a[J]` / `a[I]=c` 的赋值语句。
@@ -390,11 +415,11 @@ fn exec_array_assign(
     };
     let value = rest.trim();
     let index = eval_expr(index_expr, arr.len(), vars)?;
-    let index = normalize_index(index, arr.len() as i64) as usize;
+    let index = array_index(index, arr.len())?;
     if let Some(_inner) = value.strip_prefix("a[") {
         let inner_close = find_matching(value, 1, '[', ']').context("数组下标不闭合")?;
         let source = eval_expr(&value[2..inner_close], arr.len(), vars)?;
-        let source = normalize_index(source, arr.len() as i64) as usize;
+        let source = array_index(source, arr.len())?;
         arr[index] = arr[source];
         return Ok(());
     }
@@ -424,7 +449,7 @@ fn exec_var_assign(
     if let Some(_inner) = value.strip_prefix("a[") {
         let close = find_matching(value, 1, '[', ']').context("数组下标不闭合")?;
         let index = eval_expr(&value[2..close], arr.len(), vars)?;
-        let index = normalize_index(index, arr.len() as i64) as usize;
+        let index = array_index(index, arr.len())?;
         vars.insert(name, TempValue::Chr(arr[index]));
         return Ok(());
     }
@@ -614,17 +639,6 @@ fn skip_ws(text: &str, mut at: usize) -> usize {
     at
 }
 
-fn normalize_index(index: i64, len: i64) -> i64 {
-    if len <= 0 {
-        return 0;
-    }
-    if index < 0 {
-        ((index % len) + len) % len
-    } else {
-        index.min(len)
-    }
-}
-
 /// 从 `open` 处的括号开始配对，返回内部文本（不含两端括号）。
 fn find_matching(text: &str, open: usize, open_ch: char, close_ch: char) -> Option<usize> {
     let mut depth = 0i32;
@@ -767,6 +781,20 @@ mod tests {
         let parsed = PlayerScript::parse(&js).unwrap();
         let error = parsed.decipher("abc").unwrap_err().to_string();
         assert!(error.contains("无法识别"), "要报清楚哪句不认识：{error}");
+    }
+
+    #[test]
+    fn out_of_bounds_index_fails_with_an_error_not_a_panic() {
+        // a[a.length] 在 JS 里是 undefined；播放器脚本真出现这种形状时，
+        // 必须给可读错误而不是越界 panic。
+        let js = script(
+            "",
+            "var en=function(a){a=a.split(\"\");var c=a[a.length];return a.join(\"\")};",
+            "d.set(\"signature\",en(x))",
+        );
+        let parsed = PlayerScript::parse(&js).unwrap();
+        let error = parsed.decipher("abc").unwrap_err().to_string();
+        assert!(error.contains("下标越界"), "{error}");
     }
 
     #[test]
