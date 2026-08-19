@@ -14,6 +14,7 @@ pub enum Platform {
     Wyy,
     Qqm,
     Soundcloud,
+    Ytm,
     Bilibili,
     Local,
 }
@@ -24,6 +25,7 @@ impl Platform {
             Platform::Wyy => "wyy",
             Platform::Qqm => "qqm",
             Platform::Soundcloud => "soundcloud",
+            Platform::Ytm => "ytm",
             Platform::Bilibili => "bilibili",
             Platform::Local => "local",
         }
@@ -34,6 +36,7 @@ impl Platform {
             "wyy" => Some(Platform::Wyy),
             "qqm" => Some(Platform::Qqm),
             "soundcloud" => Some(Platform::Soundcloud),
+            "ytm" => Some(Platform::Ytm),
             "bilibili" => Some(Platform::Bilibili),
             "local" => Some(Platform::Local),
             _ => None,
@@ -47,6 +50,7 @@ impl Platform {
             Platform::Wyy => "netease",
             Platform::Qqm => "qqmusic",
             Platform::Soundcloud => "soundcloud",
+            Platform::Ytm => "youtubemusic",
             Platform::Bilibili => "bilibili",
             Platform::Local => "local",
         }
@@ -1372,7 +1376,7 @@ mod tests {
     #[test]
     fn platform_roundtrips_through_the_wire_names() {
         // 前端发来的就是这些字面量，改了就是契约破坏
-        for name in ["wyy", "qqm", "soundcloud", "bilibili", "local"] {
+        for name in ["wyy", "qqm", "soundcloud", "ytm", "bilibili", "local"] {
             let parsed: Platform = serde_json::from_str(&format!("\"{name}\"")).unwrap();
             assert_eq!(
                 serde_json::to_string(&parsed).unwrap(),

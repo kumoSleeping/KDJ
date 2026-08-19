@@ -9,6 +9,7 @@ pub mod netease;
 pub mod provider;
 pub mod soundcloud;
 pub mod qqmusic;
+pub mod youtubemusic;
 
 pub use provider::{
     Capabilities, DownloadJob, MusicProvider, ProgressSink, ProviderContext, ProviderLiveSettings,

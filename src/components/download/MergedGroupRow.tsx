@@ -17,6 +17,7 @@ export const PLATFORM_LABEL: Record<Platform, string> = {
   wyy: "网易云",
   qqm: "QQ",
   soundcloud: "SC",
+  ytm: "YTM",
   bilibili: "B站",
   local: "本地",
 };

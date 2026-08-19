@@ -14,13 +14,15 @@ use kdj_providers::bilibili::BilibiliProvider;
 use kdj_providers::netease::NeteaseProvider;
 use kdj_providers::qqmusic::QqMusicProvider;
 use kdj_providers::soundcloud::SoundCloudProvider;
+use kdj_providers::youtubemusic::YoutubeMusicProvider;
 use kdj_providers::{MusicProvider, ProviderContext, ProviderLiveSettings};
 
 /// 账号页和搜索页的平台顺序。`local` 不是真的 provider，不在这里。
-pub const PLATFORMS: [Platform; 4] = [
+pub const PLATFORMS: [Platform; 5] = [
     Platform::Wyy,
     Platform::Qqm,
     Platform::Soundcloud,
+    Platform::Ytm,
     Platform::Bilibili,
 ];
 
@@ -214,12 +216,14 @@ impl AppState {
         let netease = Arc::new(NeteaseProvider::new(ctx.clone())?);
         let qqmusic = Arc::new(QqMusicProvider::new(ctx.clone())?);
         let soundcloud = Arc::new(SoundCloudProvider::new(ctx.clone())?);
+        let youtubemusic = Arc::new(YoutubeMusicProvider::new(ctx.clone())?);
         let bilibili = Arc::new(BilibiliProvider::new(ctx.clone())?);
 
         let mut providers: BTreeMap<Platform, Arc<dyn MusicProvider>> = BTreeMap::new();
         providers.insert(Platform::Wyy, netease);
         providers.insert(Platform::Qqm, qqmusic);
         providers.insert(Platform::Soundcloud, soundcloud.clone());
+        providers.insert(Platform::Ytm, youtubemusic);
         providers.insert(Platform::Bilibili, bilibili.clone());
 
         let waveforms = crate::waveform::WaveformCoordinator::new(library.clone());
@@ -303,6 +307,10 @@ fn provider_live_settings(config: &AppConfig) -> ProviderLiveSettings {
         // 开发/打包环境负责注入，正式发布则应由 KDJ 的 OAuth broker 托管 secret。
         soundcloud_client_id: std::env::var("KDJ_SOUNDCLOUD_CLIENT_ID").unwrap_or_default(),
         soundcloud_client_secret: std::env::var("KDJ_SOUNDCLOUD_CLIENT_SECRET").unwrap_or_default(),
+        ytm_enabled: settings
+            .enabled_platforms
+            .iter()
+            .any(|id| id == Platform::Ytm.as_str()),
         video_dir: Some(config.video_dir()),
         video_format: settings.video_format.ext().to_string(),
     }

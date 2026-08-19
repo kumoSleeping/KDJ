@@ -32,6 +32,9 @@ pub struct ProviderLiveSettings {
     pub soundcloud_enabled: bool,
     pub soundcloud_client_id: String,
     pub soundcloud_client_secret: String,
+    /// YouTube Music 是否在「下载源」里开启。和 SoundCloud 一样是 opt-in 平台，
+    /// 关着时 provider 拒绝解析 / 下载 / 试听。
+    pub ytm_enabled: bool,
     /// 视频单独的落盘目录。None = 跟随 download_dir。
     pub video_dir: Option<PathBuf>,
     pub video_format: String,
@@ -94,6 +97,10 @@ impl ProviderContext {
 
     pub fn soundcloud_client_secret(&self) -> String {
         self.live().soundcloud_client_secret.clone()
+    }
+
+    pub fn ytm_enabled(&self) -> bool {
+        self.live().ytm_enabled
     }
 
     pub fn video_format(&self) -> String {
@@ -574,6 +581,7 @@ mod tests {
                 soundcloud_enabled: false,
                 soundcloud_client_id: String::new(),
                 soundcloud_client_secret: String::new(),
+                ytm_enabled: false,
                 video_dir: None,
                 video_format: "mp4".into(),
             },
@@ -615,6 +623,7 @@ mod tests {
         assert_eq!(Platform::Qqm.download_dir_name(), "qqmusic");
         assert_eq!(Platform::Bilibili.download_dir_name(), "bilibili");
         assert_eq!(Platform::Soundcloud.download_dir_name(), "soundcloud");
+        assert_eq!(Platform::Ytm.download_dir_name(), "youtubemusic");
     }
 
     #[test]

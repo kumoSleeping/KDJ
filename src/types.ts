@@ -3,7 +3,7 @@
  * 改这里必须同步改 models.py 和 docs/00-architecture.md。
  */
 
-export type Platform = "wyy" | "qqm" | "soundcloud" | "bilibili" | "local";
+export type Platform = "wyy" | "qqm" | "soundcloud" | "ytm" | "bilibili" | "local";
 export type Quality = "flac" | "320" | "128";
 export type SearchKind = "song" | "playlist" | "artist" | "album";
 export type TaskState = "queued" | "running" | "processing" | "done" | "failed" | "canceled";

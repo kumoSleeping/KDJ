@@ -5,10 +5,17 @@ export const SEARCH_PLATFORMS: ReadonlyArray<{ id: Platform; label: string; vide
   { id: "wyy", label: "网易云" },
   { id: "qqm", label: "QQ 音乐" },
   { id: "soundcloud", label: "SOUNDCLOUD" },
+  { id: "ytm", label: "YouTube Music" },
   { id: "bilibili", label: "哔哩哔哩", video: true },
 ];
 
-export const DEFAULT_PRIORITY: readonly string[] = ["wyy", "qqm", "soundcloud", "bilibili"];
+export const DEFAULT_PRIORITY: readonly string[] = [
+  "wyy",
+  "qqm",
+  "soundcloud",
+  "ytm",
+  "bilibili",
+];
 /** 默认开启 / 勾选：仅网易云与 QQ。 */
 export const DEFAULT_SEARCH_PLATFORMS: readonly Platform[] = ["wyy", "qqm"];
 
