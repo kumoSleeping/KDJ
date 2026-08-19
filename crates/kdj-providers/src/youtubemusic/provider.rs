@@ -105,19 +105,27 @@ impl YoutubeMusicProvider {
 
     // ------------------------------------------------------------ 登录态
 
+    /// OAuth client 凭据的取值顺序：
+    /// 1. 运行时环境变量（调试/自托管换号）；
+    /// 2. 打包时注入的编译期默认值（`option_env!`，发布构建开箱即用）。
+    ///
+    /// 「电视和有限输入设备」client 在 Google 眼里是公开客户端：secret 封进
+    /// 二进制是设计允许的——拿它只能发起登录，不能替用户授权；用户 token
+    /// 只落在用户自己机器上。真正的风险是 client 被滥用后遭 Google 停用，
+    /// 所以每个发布渠道用一个独立 client，别在公开文档里贴 secret。
     fn oauth_credentials(&self) -> Result<(String, String)> {
-        let client_id = std::env::var("KDJ_YTM_OAUTH_CLIENT_ID")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let client_secret = std::env::var("KDJ_YTM_OAUTH_CLIENT_SECRET")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        let client_id = runtime_or_baked(
+            "KDJ_YTM_OAUTH_CLIENT_ID",
+            option_env!("KDJ_YTM_OAUTH_CLIENT_ID"),
+        );
+        let client_secret = runtime_or_baked(
+            "KDJ_YTM_OAUTH_CLIENT_SECRET",
+            option_env!("KDJ_YTM_OAUTH_CLIENT_SECRET"),
+        );
         anyhow::ensure!(
             !client_id.is_empty() && !client_secret.is_empty(),
             "KDJ 尚未配置 YouTube Music 登录服务（需要 KDJ_YTM_OAUTH_CLIENT_ID / \
-             KDJ_YTM_OAUTH_CLIENT_SECRET 环境变量）"
+             KDJ_YTM_OAUTH_CLIENT_SECRET，发布构建需在打包时注入）"
         );
         Ok((client_id, client_secret))
     }
@@ -1032,6 +1040,16 @@ fn truncate(text: &str, max_chars: usize) -> String {
     }
 }
 
+/// 运行时环境变量优先；没有就用打包时烧进二进制的默认值（`option_env!`）。
+fn runtime_or_baked(name: &str, baked: Option<&str>) -> String {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| baked.map(|value| value.trim().to_string()))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1233,5 +1251,16 @@ mod tests {
     #[test]
     fn empty_browse_is_rejected() {
         assert!(playlist_from_browse(&json!({})).is_none());
+    }
+
+    #[test]
+    fn baked_credentials_fall_back_cleanly() {
+        // 打包时没注入 → 空串；注入了 → 用注入值（运行时覆盖依赖真实环境变量，不在此测）
+        assert_eq!(runtime_or_baked("KDJ_YTM_OAUTH_CLIENT_ID", None), "");
+        assert_eq!(
+            runtime_or_baked("KDJ_YTM_OAUTH_CLIENT_ID", Some("abc.apps.googleusercontent.com")),
+            "abc.apps.googleusercontent.com"
+        );
+        assert_eq!(runtime_or_baked("KDJ_YTM_OAUTH_CLIENT_ID", Some("  ")), "");
     }
 }

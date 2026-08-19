@@ -7,10 +7,12 @@
 //!   不需要回调 URL、不需要注册自定义协议——桌面和安卓壳都能用；
 //! - 这就是 ytmusicapi `setup_oauth()` 与 yt-dlp `--username oauth` 的做法。
 //!
-//! OAuth client 凭据由环境变量注入（和 SoundCloud 同一条规则）：
+//! OAuth client 凭据由开发/打包环境提供（和 SoundCloud 同一条规则）：
 //! 应用凭据不是用户偏好，不能写进 settings.json，更不能跟着
-//! GET /api/settings 回到 WebView。`KDJ_YTM_OAUTH_CLIENT_ID` /
-//! `KDJ_YTM_OAUTH_CLIENT_SECRET` 由开发/打包环境提供。
+//! GET /api/settings 回到 WebView。发布构建可在打包时注入
+//! `KDJ_YTM_OAUTH_CLIENT_ID` / `KDJ_YTM_OAUTH_CLIENT_SECRET`
+//! 烧进二进制作为默认值（见 provider 的 `oauth_credentials`），
+//! 运行时环境变量仍可覆盖。
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
