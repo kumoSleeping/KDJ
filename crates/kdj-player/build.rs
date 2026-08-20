@@ -15,7 +15,9 @@ fn main() {
         .warnings(false)
         .flag_if_supported("-std=c++11")
         .flag_if_supported("/std:c++14")
-        .define("RUBBERBAND_STATIC", None);
+        .define("RUBBERBAND_STATIC", None)
+        // Windows SDK headers otherwise expand `std::min`/`std::max` inside Rubber Band.
+        .define("NOMINMAX", None);
     build.compile("kdj_rubberband");
 
     if env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {

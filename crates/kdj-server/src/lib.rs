@@ -44,8 +44,12 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         downloads,
     };
 
-    routes::router(ctx)
+    let router = routes::router(ctx)
         .route("/api/stems/model", axum::routing::get(stems::model_status))
+        .route(
+            "/api/stems/runtime",
+            axum::routing::post(stems::activate_runtime),
+        )
         .route(
             "/api/stems/model/download",
             axum::routing::post(stems::download_model),
@@ -65,7 +69,24 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route(
             "/api/stems/debug/{session}/{lane}",
             axum::routing::get(stems::debug_audio),
+        );
+    // SeekLab 依赖平台 ONNX 后端，仅在 macOS / Windows / Android 提供。
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "android"))]
+    let router = router
+        .route(
+            "/api/stems/lab/catalog",
+            axum::routing::get(stems::lab_catalog),
         )
+        .route("/api/stems/lab/seek", axum::routing::post(stems::lab_seek))
+        .route(
+            "/api/stems/lab/{session}/{name}",
+            axum::routing::get(stems::lab_audio),
+        )
+        .route(
+            "/api/stems/lab/{session}",
+            axum::routing::delete(stems::lab_release),
+        );
+    router
         .route(
             "/api/tracks/{id}/stems",
             axum::routing::get(stems::track_status)

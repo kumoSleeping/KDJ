@@ -61,6 +61,9 @@ ring. Tempo faders, BPM Sync and momentary nudges update one atomic target; R3 o
 next input block while the callback continues to pop one hardware-rate PCM frame with no C++ call,
 allocation, lock, decoder reset, or pitch-changing resample. Real-time start padding, output-delay
 trimming, EOF drain and seek/loop reset are owned by the worker adapter.
+The two physical Deck targets and background-analysis admission are coordinated by
+[`work-scheduler.md`](work-scheduler.md). Dense MIDI/slider changes are latest-value coalesced, and
+crossing the unity detent does not repeatedly reset an already-engaged R3 stream.
 
 Each post-stretch ring packet also carries the source-frame advance represented by that rendered
 PCM frame. The callback advances its published playhead from this value, not from the newest UI

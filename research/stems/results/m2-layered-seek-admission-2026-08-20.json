@@ -1,0 +1,34 @@
+{
+  "capturedAt": "2026-08-20T07:09:05Z",
+  "machine": {
+    "chip": "Apple M2",
+    "os": "macOS 26.5"
+  },
+  "command": "cargo run -p kdj-stems --release --example layered_seek_bench -- <full-track>",
+  "scheduler": {
+    "instantPermits": 1,
+    "secondDeckRejected": true,
+    "secondDeckFallback": "dry PCM lanes -> FIFO Spleeter4 refinement"
+  },
+  "track": {
+    "label": "EDM",
+    "durationSeconds": 278.58666666666664,
+    "pcmPreloadMs": 1057.570375
+  },
+  "runtime": {
+    "model": "StemgenRT eaaba4f HS-TasNet ONNX",
+    "provider": "ONNX Runtime CPU",
+    "intraOpThreads": 4,
+    "interOpThreads": 1,
+    "workersReadyMsAfterPcm": 144.008
+  },
+  "admittedDeck100Hops": {
+    "hopFrames": 512,
+    "hopBudgetMs": 11.609977324263038,
+    "firstHopMs": 8.590209,
+    "meanHopMs": 9.401234600000002,
+    "p95HopMs": 10.590166,
+    "maxHopMs": 11.15475,
+    "deadlineMisses": 0
+  }
+}

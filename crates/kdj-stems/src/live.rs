@@ -1,32 +1,41 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use kdj_core::work_scheduler::{work_scheduler, QueuedWork, WorkClass};
+use kdj_core::{StemCompute, StemMode};
 use rustfft::num_complex::Complex32;
 use rustfft::{Fft, FftPlanner};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::dsp::{apply_soft_gate, pack_model_input, unpack_model_output};
-use crate::runtime::{recommended_worker_count, PlatformEngine, RuntimeInfo};
-use crate::{StemKind, StemWaveform, SAMPLE_RATE, SEGMENT_CORE_SAMPLES, SEGMENT_SAMPLES};
+use crate::dsp::{apply_soft_gate, pack_model_input_for_mode, unpack_model_output};
+use crate::instant::{instant_admission_active, instant_model_directory};
+use crate::runtime::{
+    configure_stem_runtime, recommended_worker_count, PlatformEngine, RuntimeInfo,
+};
+use crate::runtime::{stem_runtime_preference, StemRuntimePreference};
+use crate::{
+    StemKind, StemWaveform, SAMPLE_RATE, SEGMENT_CONTEXT_SAMPLES, SEGMENT_CORE_SAMPLES,
+    SEGMENT_HANDOFF_SAMPLES, SEGMENT_SAMPLES,
+};
 
 const LIVE_WAVE_COLUMNS_PER_SECOND: usize = 100;
-/// Keep the 12-second performance rail plus adjacent SCNet tiles.
-/// whole-track PCM/RGB session while the playhead walks the song.
-const LIVE_WAVE_RETAIN_SECONDS: f64 = 20.0;
+/// Keep the 30-second performance rail while the playhead walks the song; never retain a
+/// whole-track PCM/RGB session.
+const LIVE_WAVE_RETAIN_SECONDS: f64 = 30.0;
 /// The audio worker can finish while its bounded ring still plays the final seconds. Keep the
 /// compact completed session long enough for the next UI delta poll (and a quick panel remount)
 /// instead of deleting the song tail before it can be painted.
 const LIVE_WAVE_COMPLETION_RETENTION: Duration = Duration::from_secs(60);
 /// One 46 ms Hann window per 10 ms display column. This follows the same STFT + frequency-colour
-/// gradient family used by DJ waveform tools, but runs only on completed SCNet PCM in memory.
+/// gradient family used by DJ waveform tools, but runs only on completed Spleeter4 PCM in memory.
 const LIVE_STEM_COLOR_FFT_SIZE: usize = 2_048;
 const LIVE_STEM_COLOR_MIN_HZ: f32 = 35.0;
 const LIVE_STEM_COLOR_MAX_HZ: f32 = 16_000.0;
@@ -34,9 +43,8 @@ const LIVE_STEM_COLOR_MAX_HZ: f32 = 16_000.0;
 const LIVE_AMP_GAMMA: f32 = 0.72;
 /// Same floor as `kdj_analysis::waveform::COLOR_FLOOR` so STEM rails are not a grey wash.
 const LIVE_COLOR_FLOOR: f32 = 0.12;
-/// One fixed SCNet tile produces this much retained source. This is a background-cache budget,
+/// One fixed Spleeter4 tile produces this much retained source. This is a background-cache budget,
 /// not callback latency or a promise that a cache miss is instantaneous.
-const LIVE_STEM_CHUNK_BUDGET_MS: u64 = (SEGMENT_CORE_SAMPLES as u64 * 1_000) / SAMPLE_RATE as u64;
 const DIAGNOSTIC_HISTORY: usize = 64;
 
 /// Bounded, user-visible observations from the actual inference workers. These values are
@@ -58,8 +66,20 @@ pub struct StemRuntimeDiagnostics {
     pub output_underruns: u64,
     pub memory_errors: u64,
     pub last_error: String,
+    pub instant_available: bool,
+    pub instant_ready_decks: u8,
+    pub instant_pcm_preload_ms: Option<u64>,
+    pub instant_pcm_cache_hits: u64,
+    pub instant_first_hop_ms: Option<u64>,
+    pub instant_last_hop_ms: Option<u64>,
+    pub instant_p95_hop_ms: Option<u64>,
+    pub instant_late_hops: u64,
+    pub instant_failures: u64,
+    pub refinement_deferred: u64,
     #[serde(skip)]
     recent_block_ms: VecDeque<u64>,
+    #[serde(skip)]
+    recent_instant_hop_ms: VecDeque<u64>,
 }
 
 impl StemRuntimeDiagnostics {
@@ -72,13 +92,24 @@ impl StemRuntimeDiagnostics {
             first_block_ms: None,
             last_block_ms: None,
             p95_block_ms: None,
-            chunk_budget_ms: LIVE_STEM_CHUNK_BUDGET_MS,
+            chunk_budget_ms: (crate::stem_tile_geometry().core as u64 * 1_000) / SAMPLE_RATE as u64,
             processed_chunks: 0,
             late_chunks: 0,
             output_underruns: 0,
             memory_errors: 0,
             last_error: String::new(),
+            instant_available: false,
+            instant_ready_decks: 0,
+            instant_pcm_preload_ms: None,
+            instant_pcm_cache_hits: 0,
+            instant_first_hop_ms: None,
+            instant_last_hop_ms: None,
+            instant_p95_hop_ms: None,
+            instant_late_hops: 0,
+            instant_failures: 0,
+            refinement_deferred: 0,
             recent_block_ms: VecDeque::new(),
+            recent_instant_hop_ms: VecDeque::new(),
         }
     }
 
@@ -93,6 +124,19 @@ impl StemRuntimeDiagnostics {
             .saturating_sub(1)
             .min(samples.len() - 1);
         self.p95_block_ms = Some(samples[index]);
+    }
+
+    fn update_instant_p95(&mut self) {
+        if self.recent_instant_hop_ms.is_empty() {
+            self.instant_p95_hop_ms = None;
+            return;
+        }
+        let mut samples: Vec<_> = self.recent_instant_hop_ms.iter().copied().collect();
+        samples.sort_unstable();
+        let index = ((samples.len() as f64 * 0.95).ceil() as usize)
+            .saturating_sub(1)
+            .min(samples.len() - 1);
+        self.instant_p95_hop_ms = Some(samples[index]);
     }
 }
 
@@ -113,11 +157,16 @@ pub fn stem_runtime_diagnostics() -> StemRuntimeDiagnostics {
 }
 
 pub fn any_live_audio_lease_held() -> bool {
+    live_audio_lease_count() > 0
+}
+
+pub fn live_audio_lease_count() -> usize {
     live_waves()
         .lock()
         .unwrap()
         .values()
-        .any(|session| session.audio_lease)
+        .filter(|session| session.audio_lease)
+        .count()
 }
 
 pub fn stem_output_underruns() -> u64 {
@@ -197,6 +246,55 @@ fn record_runtime_error(error: &anyhow::Error) {
     }
 }
 
+pub(crate) fn record_instant_available(available: bool) {
+    diagnostics_state().lock().unwrap().instant_available = available;
+}
+
+pub(crate) fn record_instant_worker_ready(deck: usize) {
+    if deck >= 8 {
+        return;
+    }
+    let mut diagnostics = diagnostics_state().lock().unwrap();
+    diagnostics.instant_available = true;
+    diagnostics.instant_ready_decks |= 1 << deck;
+}
+
+pub(crate) fn record_instant_pcm_preload(elapsed: Duration) {
+    diagnostics_state().lock().unwrap().instant_pcm_preload_ms =
+        Some(elapsed.as_millis().min(u128::from(u64::MAX)) as u64);
+}
+
+pub(crate) fn record_instant_pcm_cache_hit() {
+    let mut diagnostics = diagnostics_state().lock().unwrap();
+    diagnostics.instant_pcm_cache_hits = diagnostics.instant_pcm_cache_hits.saturating_add(1);
+}
+
+pub(crate) fn record_instant_hop(elapsed: Duration) {
+    let elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+    let mut diagnostics = diagnostics_state().lock().unwrap();
+    diagnostics.instant_first_hop_ms.get_or_insert(elapsed_ms);
+    diagnostics.instant_last_hop_ms = Some(elapsed_ms);
+    if elapsed_ms > crate::INSTANT_HOP_BUDGET_MS {
+        diagnostics.instant_late_hops = diagnostics.instant_late_hops.saturating_add(1);
+    }
+    diagnostics.recent_instant_hop_ms.push_back(elapsed_ms);
+    if diagnostics.recent_instant_hop_ms.len() > DIAGNOSTIC_HISTORY {
+        diagnostics.recent_instant_hop_ms.pop_front();
+    }
+    diagnostics.update_instant_p95();
+}
+
+pub(crate) fn record_instant_failure(error: &str) {
+    let mut diagnostics = diagnostics_state().lock().unwrap();
+    diagnostics.instant_failures = diagnostics.instant_failures.saturating_add(1);
+    diagnostics.last_error = error.to_string();
+}
+
+fn record_refinement_deferred() {
+    let mut diagnostics = diagnostics_state().lock().unwrap();
+    diagnostics.refinement_deferred = diagnostics.refinement_deferred.saturating_add(1);
+}
+
 struct LiveWaveBlock {
     revision: u64,
     start: f64,
@@ -235,7 +333,7 @@ impl LiveWaveSession {
 
 /// Incremental waveform payload for the performance UI. Sending a complete 24,000-column RGB
 /// waveform every 200ms made JSON parsing and canvas redraws compete with the compositor. A
-/// point is therefore sent only once, when its real SCNet tile is published.
+/// point is therefore sent only once, when its real Spleeter4 tile is published.
 #[derive(Clone, Debug, Serialize)]
 pub struct LiveStemWaveformDelta {
     pub track_id: i64,
@@ -269,6 +367,35 @@ fn live_waves() -> &'static Mutex<HashMap<i64, LiveWaveSession>> {
     WAVES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+static NEXT_LIVE_WAVE_EPOCH: AtomicU64 = AtomicU64::new(1);
+static NEXT_SCAN_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_live_wave_epoch() -> u64 {
+    NEXT_LIVE_WAVE_EPOCH.fetch_add(1, Ordering::AcqRel).max(1)
+}
+
+fn next_scan_generation() -> u64 {
+    NEXT_SCAN_GENERATION.fetch_add(1, Ordering::AcqRel).max(1)
+}
+
+/// A model switch changes the meaning and number of every published lane. Retaining blocks across
+/// that boundary makes the new scanner treat old-model coverage as completed work, so invalidate
+/// the complete public timeline and force mounted clients onto a fresh epoch.
+pub(crate) fn invalidate_live_stem_waveforms(reason: &'static str) {
+    let mut sessions = live_waves().lock().unwrap();
+    let count = sessions.len();
+    sessions.clear();
+    drop(sessions);
+    work_scheduler().set_live_stem_decks(0);
+    tracing::info!(
+        target: "kdj_stem_lifecycle",
+        event = "waveform_sessions_invalidated",
+        count,
+        reason,
+        "old-model STEM waveform blocks and coverage were invalidated"
+    );
+}
+
 fn prune_finished_live_wave_sessions(sessions: &mut HashMap<i64, LiveWaveSession>) {
     sessions.retain(|_, session| {
         session.held()
@@ -295,6 +422,12 @@ impl Drop for LiveStemWaveGuard {
                 session.finished_at = Some(Instant::now());
             }
         }
+        let decks = sessions
+            .values()
+            .filter(|session| session.audio_lease)
+            .count();
+        drop(sessions);
+        work_scheduler().set_live_stem_decks(decks);
     }
 }
 
@@ -341,7 +474,7 @@ pub fn begin_live_stem_waveform(
         sessions.insert(
             track_id,
             LiveWaveSession {
-                epoch,
+                epoch: next_live_wave_epoch(),
                 worker_epoch: epoch,
                 revision: 0,
                 start,
@@ -354,6 +487,12 @@ pub fn begin_live_stem_waveform(
             },
         );
     }
+    let decks = sessions
+        .values()
+        .filter(|session| session.audio_lease)
+        .count();
+    drop(sessions);
+    work_scheduler().set_live_stem_decks(decks);
     LiveStemWaveGuard {
         track_id,
         worker_epoch: epoch,
@@ -369,7 +508,7 @@ pub fn begin_scan_stem_waveform(track_id: i64, duration: f64) -> StemScanGuard {
     if let Some(session) = sessions.get_mut(&track_id) {
         session.duration = duration.max(session.duration);
         if !session.scan_lease {
-            session.scan_generation = session.scan_generation.saturating_add(1).max(1);
+            session.scan_generation = next_scan_generation();
         }
         session.scan_lease = true;
         session.finished_at = None;
@@ -381,21 +520,25 @@ pub fn begin_scan_stem_waveform(track_id: i64, duration: f64) -> StemScanGuard {
         sessions.insert(
             track_id,
             LiveWaveSession {
-                epoch: 1,
+                epoch: next_live_wave_epoch(),
                 worker_epoch: 0,
                 revision: 0,
                 start: 0.0,
                 duration,
                 audio_lease: false,
                 scan_lease: true,
-                scan_generation: 1,
+                scan_generation: next_scan_generation(),
                 finished_at: None,
                 blocks: VecDeque::new(),
             },
         );
+        let scan_generation = sessions
+            .get(&track_id)
+            .expect("scan session inserted")
+            .scan_generation;
         StemScanGuard {
             track_id,
-            scan_generation: 1,
+            scan_generation,
         }
     }
 }
@@ -422,7 +565,7 @@ fn release_scan_generation(track_id: i64, scan_generation: u64, immediate: bool)
         return;
     }
     session.scan_lease = false;
-    session.scan_generation = session.scan_generation.saturating_add(1);
+    session.scan_generation = next_scan_generation();
     if session.audio_lease {
         prune_distant_live_wave_blocks(session, session.start);
         return;
@@ -616,7 +759,7 @@ fn prune_distant_live_wave_blocks(session: &mut LiveWaveSession, around: f64) {
         .retain(|block| block.start + block.duration >= keep_start && block.start <= keep_end);
 }
 
-/// Return the contiguous regions actually backed by completed SCNet tiles. These bounds must
+/// Return the contiguous regions actually backed by completed Spleeter4 tiles. These bounds must
 /// come from published blocks rather than elapsed wall-clock time: a slow model must leave the
 /// frontier where data really ends instead of making the UI advertise an empty future as loaded.
 fn live_waveform_frontiers(session: &LiveWaveSession) -> (f64, f64) {
@@ -798,7 +941,7 @@ fn spectral_gradient(frequency: f32) -> [f32; 3] {
 
 /// Return only blocks that were published since `after_revision`. Unlike the legacy full
 /// waveform endpoint this has a bounded payload even for a long track: an ordinary 200ms poll
-/// is empty, and a completed SCNet tile contributes only its own timeline columns.
+/// is empty, and a completed Spleeter4 tile contributes only its own timeline columns.
 pub fn live_stem_waveform_delta(
     track_id: i64,
     columns: usize,
@@ -959,7 +1102,9 @@ fn display_live_amplitude(value: f32, scale: f32) -> f32 {
     (value / scale).clamp(0.0, 1.0).powf(LIVE_AMP_GAMMA)
 }
 
-/// One fixed SCNet output tile in stable `Drums / Bass / Other / Vocals` order.
+/// One fixed Spleeter output tile in stable `Drums / Bass / Other / Vocals` slots. Model-only
+/// left/right context is removed before caching; each lane retains the audible core plus the short
+/// successor handoff tail.
 pub struct StemChunk {
     stems: [Vec<[f32; 2]>; 4],
     reconstruction_gain: f32,
@@ -987,17 +1132,27 @@ struct InferenceJob {
     key: [u8; 32],
     epoch: Arc<AtomicU64>,
     expected_epoch: u64,
+    cancelled: Arc<AtomicBool>,
+    work: QueuedWork,
     submitted_at: Instant,
     reply: SyncSender<Result<Arc<StemChunk>>>,
 }
 
 /// Audio-bound chunks must never queue behind optional waveform work. Fill is the current
 /// viewport display scan: it yields to both audible tiles and the one-block look-ahead cushion.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum InferencePriority {
     Audio,
     LookAhead,
     Fill,
+}
+
+fn inference_work_class(priority: InferencePriority) -> WorkClass {
+    match priority {
+        InferencePriority::Audio => WorkClass::StemAudible,
+        InferencePriority::LookAhead => WorkClass::StemLookAhead,
+        InferencePriority::Fill => WorkClass::StemViewport,
+    }
 }
 
 struct InferenceReceivers {
@@ -1010,6 +1165,7 @@ struct InferenceReceivers {
 /// before waiting. Model load and inference remain completely outside the audio callback.
 pub struct StemInferenceTicket {
     receiver: Receiver<Result<Arc<StemChunk>>>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl StemInferenceTicket {
@@ -1017,14 +1173,46 @@ impl StemInferenceTicket {
         match self.receiver.try_recv() {
             Ok(result) => result.map(Some),
             Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => bail!("SCNet 后台推理 worker 已退出"),
+            Err(TryRecvError::Disconnected) => bail!("STEM 后台推理 worker 已退出"),
         }
     }
 
     pub fn wait(self) -> Result<Arc<StemChunk>> {
         self.receiver
             .recv()
-            .context("SCNet 后台推理 worker 已退出")?
+            .context("STEM 后台推理 worker 已退出")?
+    }
+
+    /// Wait for at most `timeout` without losing the ticket. Display work uses this to re-check
+    /// its scan generation and shutdown state instead of becoming an unbounded `recv()`.
+    pub fn wait_timeout(&self, timeout: Duration) -> Result<Option<Arc<StemChunk>>> {
+        match self.receiver.recv_timeout(timeout) {
+            Ok(result) => result.map(Some),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => bail!("STEM 后台推理 worker 已退出"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pair() -> (SyncSender<Result<Arc<StemChunk>>>, Self) {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        (
+            sender,
+            Self {
+                receiver,
+                cancelled,
+            },
+        )
+    }
+}
+
+impl Drop for StemInferenceTicket {
+    fn drop(&mut self) {
+        // A queued optional ticket that timed out or whose Deck was unmounted must not consume a
+        // later inference slot. Native inference itself is not pre-emptible, but its stale result
+        // is discarded at the next cancellation fence.
+        self.cancelled.store(true, Ordering::Release);
     }
 }
 
@@ -1032,13 +1220,188 @@ impl StemInferenceTicket {
 /// final pool handle closes the queue; worker-local native models and their GPU resources then
 /// leave memory instead of becoming an application-lifetime cache.
 pub struct StemInferencePool {
+    id: u64,
     audio_sender: SyncSender<InferenceJob>,
     look_ahead_sender: SyncSender<InferenceJob>,
     fill_sender: SyncSender<InferenceJob>,
     cache: Arc<Mutex<TileCache>>,
+    preference: StemRuntimePreference,
+    instant: Option<Arc<crate::InstantStemPool>>,
+    shutdown: Arc<AtomicBool>,
+    workers: Mutex<Vec<thread::JoinHandle<()>>>,
 }
 
-const TILE_CACHE_CAPACITY: usize = 6;
+// Two 30-second Deck viewports need about eight retained cores each, plus immediate future/audio
+// tiles. Twenty immutable results keep that rolling safety window useful without becoming a
+// whole-track cache; cancellation still drops each Deck's lease immediately.
+const TILE_CACHE_CAPACITY: usize = 20;
+
+static NEXT_POOL_ID: AtomicU64 = AtomicU64::new(1);
+static ACTIVE_POOL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static RESOURCE_SAMPLER_STARTED: AtomicBool = AtomicBool::new(false);
+static ALLOCATOR_RELIEF_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn effective_worker_count(requested: usize, mode: StemMode, instant: bool) -> usize {
+    if cfg!(target_os = "macos") || mode == StemMode::MobileNetTwo || instant {
+        1
+    } else {
+        requested.max(1)
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ProcessResourceSnapshot {
+    resident_bytes: u64,
+    physical_footprint_bytes: u64,
+    user_cpu_ns: u64,
+    system_cpu_ns: u64,
+}
+
+#[cfg(target_os = "macos")]
+fn process_resource_snapshot() -> ProcessResourceSnapshot {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage_info_v2>::uninit();
+    // SAFETY: proc_pid_rusage writes one rusage_info_v2 for the current PID when it returns 0.
+    let result = unsafe {
+        libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V2,
+            usage.as_mut_ptr() as _,
+        )
+    };
+    if result != 0 {
+        return ProcessResourceSnapshot::default();
+    }
+    // SAFETY: the successful call above initialized the complete structure.
+    let usage = unsafe { usage.assume_init() };
+    ProcessResourceSnapshot {
+        resident_bytes: usage.ri_resident_size,
+        physical_footprint_bytes: usage.ri_phys_footprint,
+        user_cpu_ns: usage.ri_user_time,
+        system_cpu_ns: usage.ri_system_time,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_resource_snapshot() -> ProcessResourceSnapshot {
+    ProcessResourceSnapshot::default()
+}
+
+#[cfg(target_os = "macos")]
+fn release_allocator_pages() -> usize {
+    unsafe extern "C" {
+        fn malloc_zone_pressure_relief(
+            zone: *mut libc::malloc_zone_t,
+            goal: libc::size_t,
+        ) -> libc::size_t;
+    }
+    // SAFETY: NULL asks the system allocator to examine every malloc zone; a zero goal requests
+    // maximal best-effort relief. This runs after native workers have joined, never in callback.
+    unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn release_allocator_pages() -> usize {
+    0
+}
+
+fn log_pool_resource(event: &'static str, pool_id: u64) {
+    let resource = process_resource_snapshot();
+    tracing::info!(
+        target: "kdj_stem_lifecycle",
+        event,
+        pool_id,
+        active_pools = ACTIVE_POOL_COUNT.load(Ordering::Acquire),
+        rss_mib = resource.resident_bytes as f64 / 1_048_576.0,
+        footprint_mib = resource.physical_footprint_bytes as f64 / 1_048_576.0,
+        process_user_cpu_ms = resource.user_cpu_ns / 1_000_000,
+        process_system_cpu_ms = resource.system_cpu_ns / 1_000_000,
+        gpu_telemetry = if cfg!(target_os = "macos") {
+            "unavailable (CoreML disabled; ORT CPU path)"
+        } else {
+            "unavailable"
+        },
+        "STEM lifecycle resource snapshot"
+    );
+}
+
+fn schedule_allocator_pressure_relief(pool_id: u64) {
+    let generation = ALLOCATOR_RELIEF_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    let _ = thread::Builder::new()
+        .name("kdj-stem-memory-relief".into())
+        .spawn(move || {
+            // Deck replacement workers can briefly retain the final published tile after the
+            // native session has dropped. Let those Arcs retire before asking macOS to unmap empty
+            // large malloc regions. A newer shutdown supersedes this best-effort pass.
+            thread::sleep(Duration::from_secs(1));
+            if ALLOCATOR_RELIEF_GENERATION.load(Ordering::Acquire) != generation {
+                return;
+            }
+            let before = process_resource_snapshot();
+            let released = release_allocator_pages();
+            let after = process_resource_snapshot();
+            tracing::info!(
+                target: "kdj_stem_lifecycle",
+                event = "delayed_allocator_relief",
+                pool_id,
+                generation,
+                active_pools = ACTIVE_POOL_COUNT.load(Ordering::Acquire),
+                allocator_released_mib = released as f64 / 1_048_576.0,
+                footprint_before_mib = before.physical_footprint_bytes as f64 / 1_048_576.0,
+                footprint_after_mib = after.physical_footprint_bytes as f64 / 1_048_576.0,
+                "delayed STEM allocator pressure relief completed"
+            );
+        });
+}
+
+fn note_pool_started() {
+    ACTIVE_POOL_COUNT.fetch_add(1, Ordering::AcqRel);
+    if RESOURCE_SAMPLER_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let _ = thread::Builder::new()
+        .name("kdj-stem-resource-log".into())
+        .spawn(|| {
+            kdj_core::thread_qos::prefer_background();
+            let mut previous: Option<(Instant, ProcessResourceSnapshot)> = None;
+            loop {
+                thread::sleep(Duration::from_secs(5));
+                let active_pools = ACTIVE_POOL_COUNT.load(Ordering::Acquire);
+                if active_pools == 0 {
+                    previous = None;
+                    continue;
+                }
+                let now = Instant::now();
+                let resource = process_resource_snapshot();
+                let process_cpu_percent = previous
+                    .map(|(at, before)| {
+                        let cpu_ns = resource
+                            .user_cpu_ns
+                            .saturating_add(resource.system_cpu_ns)
+                            .saturating_sub(
+                                before.user_cpu_ns.saturating_add(before.system_cpu_ns),
+                            );
+                        cpu_ns as f64 / now.saturating_duration_since(at).as_nanos().max(1) as f64
+                            * 100.0
+                    })
+                    .unwrap_or(0.0);
+                previous = Some((now, resource));
+                tracing::info!(
+                    target: "kdj_stem_lifecycle",
+                    event = "resource_sample",
+                    active_pools,
+                    process_cpu_percent,
+                    rss_mib = resource.resident_bytes as f64 / 1_048_576.0,
+                    footprint_mib = resource.physical_footprint_bytes as f64 / 1_048_576.0,
+                    gpu_telemetry = if cfg!(target_os = "macos") {
+                        "unavailable (CoreML disabled; ORT CPU path)"
+                    } else {
+                        "unavailable"
+                    },
+                    "STEM process resource sample"
+                );
+            }
+        });
+}
 
 #[derive(Default)]
 struct TileCache {
@@ -1073,25 +1436,46 @@ impl TileCache {
 }
 
 impl StemInferencePool {
-    /// One accelerator owner avoids concurrent model jobs multiplying latency and starving audio.
+    /// Two workers overlap future tiles. Audible jobs still jump the look-ahead queue.
     pub fn recommended_workers() -> usize {
         recommended_worker_count()
     }
 
     pub fn new(model_path: &Path, workers: usize) -> Result<Arc<Self>> {
-        if crate::model::platform_model_artifact().is_none() {
-            bail!("当前平台尚未接入 SCNet Small runtime");
+        let preference = stem_runtime_preference();
+        let id = NEXT_POOL_ID.fetch_add(1, Ordering::Relaxed);
+        if crate::model::platform_model_artifact(preference.mode).is_none() {
+            bail!("STEM 已关闭或当前平台尚未接入所选 runtime");
         }
         if workers == 0 {
-            bail!("SCNet 后台推理 worker 数量必须大于 0");
+            bail!("STEM 后台推理 worker 数量必须大于 0");
         }
         reset_stem_runtime_diagnostics();
-        // Queue capacities are bounded because each fixed SCNet tile is large. Audible cache
+        let instant = if preference.mode == StemMode::Four {
+            instant_model_directory(model_path).and_then(|directory| {
+                match crate::InstantStemPool::new_for_parent(&directory, id) {
+                    Ok(pool) => Some(pool),
+                    Err(error) => {
+                        record_instant_failure(&format!("HS-TasNet disabled: {error:#}"));
+                        None
+                    }
+                }
+            })
+        } else {
+            None
+        };
+        // macOS production is deliberately ORT CPU-only. A second session duplicates native
+        // arena/thread-pool memory without being required for the two-Deck retained-core rate.
+        // Keep one shared FIFO worker for every macOS mode.
+        // Other platforms retain their two-worker accelerator path unless HS layering reserves the
+        // CPU budget.
+        let workers = effective_worker_count(workers, preference.mode, instant.is_some());
+        // Queue capacities are bounded because each fixed Spleeter4 tile is large. Audible cache
         // requests always overtake optional waveform preparation.
         let (audio_sender, audio_receiver) =
             mpsc::sync_channel::<InferenceJob>(workers.saturating_mul(8));
         let (look_ahead_sender, look_ahead_receiver) =
-            mpsc::sync_channel::<InferenceJob>(workers.saturating_mul(16));
+            mpsc::sync_channel::<InferenceJob>(workers.max(1));
         let (fill_sender, fill_receiver) = mpsc::sync_channel::<InferenceJob>(1);
         let receivers = Arc::new(InferenceReceivers {
             audio: Mutex::new(audio_receiver),
@@ -1099,25 +1483,113 @@ impl StemInferencePool {
             fill: Mutex::new(fill_receiver),
         });
         let cache = Arc::new(Mutex::new(TileCache::default()));
+        let shutdown = Arc::new(AtomicBool::new(false));
         let model_path = model_path.to_path_buf();
+        let mut worker_handles = Vec::with_capacity(workers);
         for index in 0..workers {
             let receivers = Arc::clone(&receivers);
             let cache = Arc::clone(&cache);
             let model_path = model_path.clone();
-            std::thread::Builder::new()
+            let worker_preference = preference;
+            let worker_shutdown = Arc::clone(&shutdown);
+            let handle = std::thread::Builder::new()
                 .name(format!("kdj-live-stem-{index}"))
                 .spawn(move || {
                     kdj_core::thread_qos::prefer_live_audio();
-                    run_worker(model_path, receivers, cache)
+                    run_worker(
+                        id,
+                        index,
+                        model_path,
+                        worker_preference,
+                        receivers,
+                        cache,
+                        worker_shutdown,
+                    )
                 })
-                .context("启动 SCNet 后台推理 worker")?;
+                .context("启动 STEM 后台推理 worker")?;
+            worker_handles.push(handle);
         }
+        note_pool_started();
+        tracing::info!(
+            target: "kdj_stem_lifecycle",
+            event = "pool_created",
+            pool_id = id,
+            mode = ?preference.mode,
+            compute = ?preference.compute,
+            workers,
+            model_path = %model_path.display(),
+            instant = instant.is_some(),
+            "STEM inference pool created"
+        );
+        log_pool_resource("pool_created_resource", id);
         Ok(Arc::new(Self {
+            id,
             audio_sender,
             look_ahead_sender,
             fill_sender,
             cache,
+            preference,
+            instant,
+            shutdown,
+            workers: Mutex::new(worker_handles),
         }))
+    }
+
+    pub fn shutdown(&self, reason: &'static str) {
+        if self.shutdown.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        tracing::info!(
+            target: "kdj_stem_lifecycle",
+            event = "pool_shutdown_begin",
+            pool_id = self.id,
+            mode = ?self.preference.mode,
+            compute = ?self.preference.compute,
+            reason,
+            cache_entries = self.cache.lock().unwrap().entries.len(),
+            "STEM inference pool shutdown begins"
+        );
+        self.cache.lock().unwrap().entries.clear();
+        if let Some(instant) = &self.instant {
+            instant.shutdown(reason);
+        }
+        let handles = std::mem::take(&mut *self.workers.lock().unwrap());
+        for handle in handles {
+            if handle.join().is_err() {
+                tracing::warn!(
+                    target: "kdj_stem_lifecycle",
+                    event = "worker_join_panic",
+                    pool_id = self.id,
+                    "STEM inference worker panicked during shutdown"
+                );
+            }
+        }
+        let allocator_released_bytes = release_allocator_pages();
+        ACTIVE_POOL_COUNT.fetch_sub(1, Ordering::AcqRel);
+        tracing::info!(
+            target: "kdj_stem_lifecycle",
+            event = "pool_shutdown_complete",
+            pool_id = self.id,
+            reason,
+            allocator_released_mib = allocator_released_bytes as f64 / 1_048_576.0,
+            "STEM inference pool sessions unloaded"
+        );
+        log_pool_resource("pool_shutdown_resource", self.id);
+        schedule_allocator_pressure_relief(self.id);
+    }
+
+    pub fn matches_current_preference(&self) -> bool {
+        self.preference == stem_runtime_preference()
+    }
+
+    pub fn instant_pool(&self) -> Option<Arc<crate::InstantStemPool>> {
+        self.instant.as_ref().map(Arc::clone)
+    }
+
+    pub fn instant_ready(&self, deck: usize) -> bool {
+        self.instant
+            .as_ref()
+            .is_some_and(|instant| instant.is_ready(deck))
     }
 
     pub fn submit(
@@ -1128,6 +1600,13 @@ impl StemInferencePool {
         expected_epoch: u64,
     ) -> Result<StemInferenceTicket> {
         self.submit_for(tile_key(&left, &right), left, right, epoch, expected_epoch)
+    }
+
+    /// Reuse PCM already paid for by the visible viewport. This is intentionally an exact-key
+    /// lookup: callers may offset inside the retained core, but must never treat a nearby model
+    /// window as if it represented different source samples.
+    pub fn cached_for_key(&self, key: &[u8; 32]) -> Option<Arc<StemChunk>> {
+        self.cache.lock().unwrap().get(key)
     }
 
     pub fn submit_for(
@@ -1146,7 +1625,7 @@ impl StemInferencePool {
             expected_epoch,
             InferencePriority::Audio,
         )
-        .and_then(|ticket| ticket.context("SCNet 可听缓存推理已取消"))
+        .and_then(|ticket| ticket.context("STEM 可听缓存推理已取消"))
     }
 
     /// Submit one best-effort future chunk. This is deliberately separate from [`Self::submit`]:
@@ -1220,17 +1699,25 @@ impl StemInferencePool {
         expected_epoch: u64,
         priority: InferencePriority,
     ) -> Result<Option<StemInferenceTicket>> {
-        if left.len() != SEGMENT_SAMPLES || right.len() != SEGMENT_SAMPLES {
-            bail!("SCNet 固定输入必须是 {SEGMENT_SAMPLES} stereo frames");
+        if self.shutdown.load(Ordering::Acquire) {
+            bail!("STEM inference pool is shutting down");
+        }
+        let expected = crate::stem_tile_geometry().samples;
+        if left.len() != expected || right.len() != expected {
+            bail!("STEM 固定输入必须是 {expected} stereo frames");
         }
         if epoch.load(Ordering::Acquire) != expected_epoch {
             return Ok(None);
         }
         let (reply, receiver) = mpsc::sync_channel(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
         if let Some(chunk) = self.cache.lock().unwrap().get(&key) {
             let _ = reply.send(Ok(chunk));
-            tracing::debug!("SCNet tile cache hit");
-            return Ok(Some(StemInferenceTicket { receiver }));
+            tracing::debug!("STEM tile cache hit");
+            return Ok(Some(StemInferenceTicket {
+                receiver,
+                cancelled,
+            }));
         }
         let mut job = InferenceJob {
             left,
@@ -1238,13 +1725,33 @@ impl StemInferencePool {
             key,
             epoch,
             expected_epoch,
+            cancelled: Arc::clone(&cancelled),
+            work: work_scheduler().queued(inference_work_class(priority)),
             submitted_at: Instant::now(),
             reply,
         };
+        tracing::debug!(
+            target: "kdj_stem_lifecycle",
+            event = "job_submit",
+            pool_id = self.id,
+            priority = ?priority,
+            expected_epoch,
+            current_epoch = job.epoch.load(Ordering::Acquire),
+            "STEM inference job submitted"
+        );
+        if matches!(priority, InferencePriority::Audio)
+            && instant_admission_active()
+            && REFINEMENT_RUNNING.load(Ordering::Acquire)
+        {
+            record_refinement_deferred();
+        }
         match priority {
             InferencePriority::Audio => loop {
                 if job.epoch.load(Ordering::Acquire) != job.expected_epoch {
                     return Ok(None);
+                }
+                if self.shutdown.load(Ordering::Acquire) {
+                    bail!("STEM inference pool is shutting down");
                 }
                 match self.audio_sender.try_send(job) {
                     Ok(()) => break,
@@ -1253,81 +1760,142 @@ impl StemInferencePool {
                         thread::sleep(Duration::from_millis(1));
                     }
                     Err(TrySendError::Disconnected(_)) => {
-                        bail!("SCNet 后台推理 worker 已退出");
+                        bail!("STEM 后台推理 worker 已退出");
                     }
                 }
             },
             InferencePriority::LookAhead => match self.look_ahead_sender.try_send(job) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => return Ok(None),
-                Err(TrySendError::Disconnected(_)) => bail!("SCNet 后台推理 worker 已退出"),
+                Err(TrySendError::Disconnected(_)) => bail!("STEM 后台推理 worker 已退出"),
             },
             InferencePriority::Fill => match self.fill_sender.try_send(job) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => return Ok(None),
-                Err(TrySendError::Disconnected(_)) => bail!("SCNet 后台推理 worker 已退出"),
+                Err(TrySendError::Disconnected(_)) => bail!("STEM 后台推理 worker 已退出"),
             },
         }
-        Ok(Some(StemInferenceTicket { receiver }))
+        Ok(Some(StemInferenceTicket {
+            receiver,
+            cancelled,
+        }))
+    }
+}
+
+impl Drop for StemInferencePool {
+    fn drop(&mut self) {
+        self.shutdown("last_pool_owner_dropped");
     }
 }
 
 fn run_worker(
+    pool_id: u64,
+    worker_index: usize,
     model_path: PathBuf,
+    preference: StemRuntimePreference,
     receivers: Arc<InferenceReceivers>,
     cache: Arc<Mutex<TileCache>>,
+    shutdown: Arc<AtomicBool>,
 ) {
+    tracing::info!(
+        target: "kdj_stem_lifecycle",
+        event = "worker_started",
+        pool_id,
+        worker_index,
+        mode = ?preference.mode,
+        compute = ?preference.compute,
+        "STEM inference worker started"
+    );
     let mut engine: Option<PlatformEngine> = None;
     loop {
-        let Some(job) = next_inference_job(&receivers) else {
-            return;
+        let Some(scheduled) = next_inference_job_until(&receivers, Some(&shutdown)) else {
+            break;
         };
+        let ScheduledInference { job, _slot } = scheduled;
         let InferenceJob {
             left,
             right,
             key,
             epoch,
             expected_epoch,
+            cancelled,
+            work,
             submitted_at,
             reply,
         } = job;
-        if epoch.load(Ordering::Acquire) != expected_epoch {
-            let _ = reply.send(Err(anyhow::anyhow!("SCNet 后台推理已取消")));
+        if cancelled.load(Ordering::Acquire) || epoch.load(Ordering::Acquire) != expected_epoch {
+            tracing::debug!(
+                target: "kdj_stem_lifecycle",
+                event = "job_cancelled_before_inference",
+                pool_id,
+                worker_index,
+                expected_epoch,
+                current_epoch = epoch.load(Ordering::Acquire),
+                "stale STEM job cancelled"
+            );
+            let _ = reply.send(Err(anyhow::anyhow!("STEM 后台推理已取消")));
             continue;
+        }
+        if shutdown.load(Ordering::Acquire) {
+            let _ = reply.send(Err(anyhow::anyhow!("STEM inference pool is shutting down")));
+            break;
         }
         if let Some(chunk) = cache.lock().unwrap().get(&key) {
             let _ = reply.send(Ok(chunk));
-            tracing::debug!("SCNet queued tile reused cached PCM");
+            tracing::debug!("STEM queued tile reused cached PCM");
             continue;
         }
+        let _work = work.start();
         let started_at = Instant::now();
         let mut infer_elapsed = Duration::ZERO;
         let result = (|| -> Result<Arc<StemChunk>> {
             if engine.is_none() {
                 let load_started = Instant::now();
-                let loaded = PlatformEngine::load(&model_path)?;
+                tracing::info!(
+                    target: "kdj_stem_lifecycle",
+                    event = "session_load_begin",
+                    pool_id,
+                    worker_index,
+                    mode = ?preference.mode,
+                    compute = ?preference.compute,
+                    "STEM native session load begins"
+                );
+                let loaded = PlatformEngine::load(&model_path, preference)?;
                 record_model_loaded(loaded.info(), load_started.elapsed());
+                tracing::info!(
+                    target: "kdj_stem_lifecycle",
+                    event = "session_load_complete",
+                    pool_id,
+                    worker_index,
+                    elapsed_ms = load_started.elapsed().as_millis(),
+                    runtime = %loaded.info().runtime,
+                    provider = %loaded.info().provider,
+                    "STEM native session loaded"
+                );
                 engine = Some(loaded);
             }
             let infer_started = Instant::now();
-            let packed = pack_model_input(&left, &right)?;
+            let packed = pack_model_input_for_mode(preference.mode, &left, &right)?;
             let output = engine
                 .as_mut()
-                .expect("SCNet cache engine")
+                .expect("STEM cache engine")
                 .predict(&packed.values)?;
-            infer_elapsed = infer_started.elapsed();
-            if epoch.load(Ordering::Acquire) != expected_epoch {
-                bail!("SCNet 后台推理已取消");
+            if cancelled.load(Ordering::Acquire) || epoch.load(Ordering::Acquire) != expected_epoch
+            {
+                bail!("STEM 后台推理已取消");
             }
-            let mut stems = unpack_model_output(&output, packed.mean, packed.std)?;
+            let mut stems = unpack_model_output(&output, &packed)?;
             apply_soft_gate(&left, &right, &mut stems);
+            retain_stem_core_and_handoff(&mut stems);
+            infer_elapsed = infer_started.elapsed();
             Ok(Arc::new(StemChunk {
                 stems,
                 reconstruction_gain: 1.0,
             }))
         })();
         if let Ok(chunk) = &result {
-            if epoch.load(Ordering::Acquire) == expected_epoch {
+            if !cancelled.load(Ordering::Acquire) && epoch.load(Ordering::Acquire) == expected_epoch
+            {
                 cache.lock().unwrap().insert(key, Arc::clone(chunk));
             }
         }
@@ -1344,9 +1912,43 @@ fn run_worker(
         tracing::debug!(
             queue_and_work_ms = submitted_at.elapsed().as_millis(),
             worker_ms = started_at.elapsed().as_millis(),
-            "SCNet background tile completed"
+            "STEM background tile completed"
         );
         let _ = reply.send(result);
+    }
+    let had_engine = engine.is_some();
+    drop(engine);
+    tracing::info!(
+        target: "kdj_stem_lifecycle",
+        event = "worker_exited",
+        pool_id,
+        worker_index,
+        session_unloaded = had_engine,
+        shutdown = shutdown.load(Ordering::Acquire),
+        "STEM inference worker exited and native session was dropped"
+    );
+}
+
+static REFINEMENT_RUNNING: AtomicBool = AtomicBool::new(false);
+
+struct RefinementSlot;
+
+impl Drop for RefinementSlot {
+    fn drop(&mut self) {
+        REFINEMENT_RUNNING.store(false, Ordering::Release);
+    }
+}
+
+struct ScheduledInference {
+    job: InferenceJob,
+    _slot: Option<RefinementSlot>,
+}
+
+fn retain_stem_core_and_handoff(stems: &mut [Vec<[f32; 2]>; 4]) {
+    let geometry = crate::stem_tile_geometry();
+    for stem in stems {
+        let end = (geometry.context + geometry.core + geometry.handoff).min(stem.len());
+        *stem = stem[geometry.context.min(end)..end].to_vec();
     }
 }
 
@@ -1385,19 +1987,74 @@ fn tile_key(left: &[f32], right: &[f32]) -> [u8; 32] {
 /// Workers always take ready audio work before look-ahead work. We intentionally poll instead of
 /// holding either receiver mutex in `recv`: two model workers must be able to claim separate Deck
 /// jobs, and a new seek must not sit behind an idle worker waiting on the low-priority lane.
-fn next_inference_job(receivers: &InferenceReceivers) -> Option<InferenceJob> {
+#[cfg(test)]
+fn next_inference_job(receivers: &InferenceReceivers) -> Option<ScheduledInference> {
+    next_inference_job_until(receivers, None)
+}
+
+fn next_inference_job_until(
+    receivers: &InferenceReceivers,
+    shutdown: Option<&AtomicBool>,
+) -> Option<ScheduledInference> {
     loop {
+        if shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
+            return None;
+        }
+        if instant_admission_active() {
+            let slot = REFINEMENT_RUNNING
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .ok()
+                .map(|_| RefinementSlot);
+            if let Some(slot) = slot {
+                let audio = receivers.audio.lock().unwrap().try_recv();
+                match audio {
+                    Ok(job) => {
+                        return Some(ScheduledInference {
+                            job,
+                            _slot: Some(slot),
+                        });
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        drop(slot);
+                        let look_ahead_disconnected = matches!(
+                            receivers.look_ahead.lock().unwrap().try_recv(),
+                            Err(TryRecvError::Disconnected)
+                        );
+                        let fill_disconnected = matches!(
+                            receivers.fill.lock().unwrap().try_recv(),
+                            Err(TryRecvError::Disconnected)
+                        );
+                        if look_ahead_disconnected && fill_disconnected {
+                            return None;
+                        }
+                    }
+                    Err(TryRecvError::Empty) => drop(slot),
+                }
+            }
+            thread::sleep(Duration::from_millis(1));
+            continue;
+        }
         let audio = receivers.audio.lock().unwrap().try_recv();
         if let Ok(job) = audio {
-            return Some(job);
+            return Some(ScheduledInference { job, _slot: None });
+        }
+        // A lease means a Deck may need another tile soon; it does not mean that work is queued.
+        // Give an active Deck one short admission grace period, then keep the worker useful by
+        // draining optional work. The old `audio_leases == recommended_workers` fence could hold a
+        // submitted fill forever even though the effective macOS pool had one idle worker.
+        if live_audio_lease_count() > 0 && !matches!(audio, Err(TryRecvError::Disconnected)) {
+            thread::sleep(Duration::from_millis(1));
+            if let Ok(job) = receivers.audio.lock().unwrap().try_recv() {
+                return Some(ScheduledInference { job, _slot: None });
+            }
         }
         let look_ahead = receivers.look_ahead.lock().unwrap().try_recv();
         if let Ok(job) = look_ahead {
-            return Some(job);
+            return Some(ScheduledInference { job, _slot: None });
         }
         let fill = receivers.fill.lock().unwrap().try_recv();
         if let Ok(job) = fill {
-            return Some(job);
+            return Some(ScheduledInference { job, _slot: None });
         }
         if matches!(audio, Err(TryRecvError::Disconnected))
             && matches!(look_ahead, Err(TryRecvError::Disconnected))
@@ -1411,6 +2068,7 @@ fn next_inference_job(receivers: &InferenceReceivers) -> Option<InferenceJob> {
 
 struct SharedStemPool {
     path: PathBuf,
+    preference: StemRuntimePreference,
     pool: Arc<StemInferencePool>,
     leases: usize,
 }
@@ -1420,64 +2078,155 @@ fn shared_stem_pool() -> &'static Mutex<Option<SharedStemPool>> {
     POOL.get_or_init(|| Mutex::new(None))
 }
 
-/// Process-wide inference pool so display scan and live playback share one model copy.
+fn stem_pool_transition() -> &'static Mutex<()> {
+    static TRANSITION: OnceLock<Mutex<()>> = OnceLock::new();
+    TRANSITION.get_or_init(|| Mutex::new(()))
+}
+
+/// Process-wide inference pool so display scan and live playback share the same worker set.
 pub struct StemPoolGuard {
+    pool_id: u64,
     path: PathBuf,
+    preference: StemRuntimePreference,
 }
 
 impl Drop for StemPoolGuard {
     fn drop(&mut self) {
+        let _transition = stem_pool_transition().lock().unwrap();
         let mut registry = shared_stem_pool().lock().unwrap();
         let Some(entry) = registry.as_mut() else {
             return;
         };
-        if entry.path != self.path {
+        if entry.pool.id != self.pool_id
+            || entry.path != self.path
+            || entry.preference != self.preference
+        {
+            tracing::debug!(
+                target: "kdj_stem_lifecycle",
+                event = "stale_pool_lease_ignored",
+                pool_id = self.pool_id,
+                registered_pool_id = entry.pool.id,
+                "stale STEM pool guard cannot release a replacement pool"
+            );
             return;
         }
         entry.leases = entry.leases.saturating_sub(1);
+        tracing::debug!(
+            target: "kdj_stem_lifecycle",
+            event = "pool_lease_released",
+            pool_id = entry.pool.id,
+            leases = entry.leases,
+            "STEM pool lease released"
+        );
         if entry.leases == 0 {
-            *registry = None;
+            let retired = registry.take();
+            drop(registry);
+            if let Some(retired) = retired {
+                retired.pool.shutdown("last_registry_lease_released");
+            }
         }
     }
 }
 
 pub fn acquire_stem_pool(path: &Path) -> Result<(StemPoolGuard, Arc<StemInferencePool>)> {
+    let _transition = stem_pool_transition().lock().unwrap();
+    let preference = stem_runtime_preference();
     let mut registry = shared_stem_pool().lock().unwrap();
     if let Some(entry) = registry.as_mut() {
-        if entry.path == path {
+        if entry.path == path && entry.preference == preference {
             entry.leases = entry.leases.saturating_add(1);
+            tracing::debug!(
+                target: "kdj_stem_lifecycle",
+                event = "pool_lease_acquired",
+                pool_id = entry.pool.id,
+                leases = entry.leases,
+                reused = true,
+                "existing STEM pool reused"
+            );
             return Ok((
                 StemPoolGuard {
+                    pool_id: entry.pool.id,
                     path: path.to_path_buf(),
+                    preference,
                 },
                 Arc::clone(&entry.pool),
             ));
         }
-        if entry.leases == 0 {
-            *registry = None;
-        }
-    }
-    if registry.is_some() {
-        let pool = StemInferencePool::new(path, StemInferencePool::recommended_workers())?;
-        return Ok((
-            StemPoolGuard {
-                path: path.to_path_buf(),
-            },
-            pool,
-        ));
+        let retired = registry.take().expect("registry entry inspected");
+        tracing::warn!(
+            target: "kdj_stem_lifecycle",
+            event = "incompatible_pool_retired",
+            pool_id = retired.pool.id,
+            old_mode = ?retired.preference.mode,
+            new_mode = ?preference.mode,
+            outstanding_leases = retired.leases,
+            "retiring incompatible STEM pool before loading another model"
+        );
+        drop(registry);
+        retired.pool.shutdown("incompatible_runtime_requested");
+        registry = shared_stem_pool().lock().unwrap();
     }
     let pool = StemInferencePool::new(path, StemInferencePool::recommended_workers())?;
     *registry = Some(SharedStemPool {
         path: path.to_path_buf(),
+        preference,
         pool: Arc::clone(&pool),
         leases: 1,
     });
+    tracing::debug!(
+        target: "kdj_stem_lifecycle",
+        event = "pool_lease_acquired",
+        pool_id = pool.id,
+        leases = 1,
+        reused = false,
+        "new STEM pool registered"
+    );
     Ok((
         StemPoolGuard {
+            pool_id: pool.id,
             path: path.to_path_buf(),
+            preference,
         },
         pool,
     ))
+}
+
+/// Retire the old pool and publish the new preference under one process-wide transition lock.
+/// `acquire_stem_pool` cannot observe the old preference after its registry entry disappeared (or
+/// the new preference while the old pool is still registered), which closes the model-switch gap
+/// between playback recovery and viewport scan requests.
+pub(crate) fn switch_current_stem_runtime(
+    mode: StemMode,
+    compute: StemCompute,
+    reason: &'static str,
+) -> bool {
+    let _transition = stem_pool_transition().lock().unwrap();
+    let previous = stem_runtime_preference();
+    let next = StemRuntimePreference { mode, compute };
+    if previous == next {
+        return false;
+    }
+
+    let retired = shared_stem_pool().lock().unwrap().take();
+    if let Some(retired) = retired {
+        tracing::info!(
+            target: "kdj_stem_lifecycle",
+            event = "registry_pool_retired",
+            pool_id = retired.pool.id,
+            mode = ?retired.preference.mode,
+            compute = ?retired.preference.compute,
+            leases = retired.leases,
+            reason,
+            "current STEM pool removed from registry during atomic runtime switch"
+        );
+        // Keep the old geometry/preference visible until its native workers have fully exited.
+        // New acquisitions are blocked by `_transition` throughout this join.
+        retired.pool.shutdown(reason);
+    }
+    let changed = configure_stem_runtime(mode, compute);
+    debug_assert!(changed);
+    invalidate_live_stem_waveforms(reason);
+    true
 }
 
 #[cfg(test)]
@@ -1485,7 +2234,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scnet_stems_keep_the_models_absolute_level() {
+    fn mobilenet_and_instant_cpu_paths_never_duplicate_native_sessions() {
+        assert_eq!(effective_worker_count(2, StemMode::MobileNetTwo, false), 1);
+        assert_eq!(effective_worker_count(2, StemMode::Four, true), 1);
+        #[cfg(target_os = "macos")]
+        assert_eq!(effective_worker_count(2, StemMode::MobileNetTwo, false), 1);
+    }
+
+    #[test]
+    #[ignore = "requires KDJ_STEM_TEST_MODEL_DIR pointing at the locked MobileNet ONNX directory"]
+    fn configured_mobilenet_runs_the_production_pool_and_reconstructs_two_lanes() {
+        let path = std::env::var("KDJ_STEM_TEST_MODEL_DIR")
+            .expect("set KDJ_STEM_TEST_MODEL_DIR to the MobileNet model directory");
+        crate::runtime::configure_stem_runtime(StemMode::MobileNetTwo, kdj_core::StemCompute::Cpu);
+        let geometry = crate::stem_tile_geometry();
+        let mut left = vec![0.0; geometry.samples];
+        let mut right = vec![0.0; geometry.samples];
+        for frame in 0..geometry.samples {
+            left[frame] = (std::f32::consts::TAU * 440.0 * frame as f32 / 44_100.0).sin() * 0.1;
+            right[frame] = (std::f32::consts::TAU * 660.0 * frame as f32 / 44_100.0).sin() * 0.1;
+        }
+        let pool = StemInferencePool::new(Path::new(&path), 2).unwrap();
+        let epoch = Arc::new(AtomicU64::new(1));
+        let ticket = pool
+            .submit_for(
+                tile_key(&left, &right),
+                left.clone(),
+                right.clone(),
+                Arc::clone(&epoch),
+                1,
+            )
+            .unwrap();
+        let started = Instant::now();
+        let chunk = ticket.wait().unwrap();
+        assert_eq!(chunk.frames(), geometry.core + geometry.handoff);
+        assert!(chunk.stems()[0].iter().all(|frame| *frame == [0.0, 0.0]));
+        assert!(chunk.stems()[1].iter().all(|frame| *frame == [0.0, 0.0]));
+        for frame in 0..chunk.frames() {
+            for channel in 0..2 {
+                let source = if channel == 0 {
+                    left[geometry.context + frame]
+                } else {
+                    right[geometry.context + frame]
+                };
+                let reconstructed =
+                    chunk.stems()[2][frame][channel] + chunk.stems()[3][frame][channel];
+                assert!((source - reconstructed).abs() < 1e-6);
+            }
+        }
+        eprintln!(
+            "mobilenet production pool first tile including load: {:.1} ms",
+            started.elapsed().as_secs_f64() * 1_000.0
+        );
+
+        // Regression for the dual-Deck starvation path: production macOS has one effective
+        // worker even though two workers are recommended at acquisition. Two leases must not be
+        // mistaken for two queued audio jobs; an idle worker still completes viewport fill.
+        let _deck_a = begin_live_stem_waveform(-92_001, 1, 0.0, 120.0);
+        let _deck_b = begin_live_stem_waveform(-92_002, 1, 0.0, 120.0);
+        let mut fill_left = left.clone();
+        fill_left[0] = 0.25;
+        let fill_ticket = pool
+            .submit_fill(fill_left, right, Arc::clone(&epoch), 1)
+            .unwrap()
+            .expect("dual-Deck viewport fill should be admitted");
+        let fill_started = Instant::now();
+        let fill_chunk = loop {
+            if let Some(chunk) = fill_ticket.wait_timeout(Duration::from_millis(20)).unwrap() {
+                break chunk;
+            }
+            assert!(
+                fill_started.elapsed() < Duration::from_secs(2),
+                "dual-Deck viewport fill starved behind idle audio leases"
+            );
+        };
+        assert_eq!(fill_chunk.frames(), geometry.core + geometry.handoff);
+        pool.shutdown("production_test_complete");
+    }
+
+    #[test]
+    fn spleeter4_stems_keep_the_models_absolute_level() {
         let chunk = StemChunk {
             stems: std::array::from_fn(|_| vec![[0.09, 0.045], [-0.09, -0.045]]),
             reconstruction_gain: 1.0,
@@ -1494,7 +2322,26 @@ mod tests {
     }
 
     #[test]
-    fn completed_scnet_tiles_are_shared_as_immutable_cache_entries() {
+    fn cached_tiles_drop_model_context_but_keep_the_handoff_tail() {
+        let mut stems = std::array::from_fn(|stem| {
+            (0..SEGMENT_SAMPLES)
+                .map(|frame| [frame as f32, stem as f32])
+                .collect::<Vec<_>>()
+        });
+        retain_stem_core_and_handoff(&mut stems);
+        assert_eq!(
+            stems[0].len(),
+            SEGMENT_CORE_SAMPLES + SEGMENT_HANDOFF_SAMPLES
+        );
+        assert_eq!(stems[0][0][0], SEGMENT_CONTEXT_SAMPLES as f32);
+        assert_eq!(
+            stems[0][SEGMENT_CORE_SAMPLES][0],
+            (SEGMENT_CONTEXT_SAMPLES + SEGMENT_CORE_SAMPLES) as f32
+        );
+    }
+
+    #[test]
+    fn completed_spleeter4_tiles_are_shared_as_immutable_cache_entries() {
         let key = tile_key(&[0.1, 0.2], &[0.3, 0.4]);
         let chunk = Arc::new(StemChunk {
             stems: std::array::from_fn(|stem| vec![[stem as f32, -(stem as f32)]]),
@@ -1515,9 +2362,21 @@ mod tests {
             key: [0; 32],
             epoch: Arc::new(AtomicU64::new(expected_epoch)),
             expected_epoch,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            work: work_scheduler().queued(WorkClass::StemAudible),
             submitted_at: Instant::now(),
             reply,
         }
+    }
+
+    #[test]
+    fn recommended_pool_uses_two_workers_on_supported_platforms() {
+        assert_eq!(
+            StemInferencePool::recommended_workers(),
+            recommended_worker_count()
+        );
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "android"))]
+        assert_eq!(StemInferencePool::recommended_workers(), 2);
     }
 
     #[test]
@@ -1537,9 +2396,73 @@ mod tests {
         let first = next_inference_job(&receivers).expect("queued job");
         let second = next_inference_job(&receivers).expect("queued job");
         let third = next_inference_job(&receivers).expect("queued job");
-        assert_eq!(first.expected_epoch, 11);
-        assert_eq!(second.expected_epoch, 10);
-        assert_eq!(third.expected_epoch, 9);
+        assert_eq!(first.job.expected_epoch, 11);
+        assert_eq!(second.job.expected_epoch, 10);
+        assert_eq!(third.job.expected_epoch, 9);
+    }
+
+    #[test]
+    fn audio_jobs_from_two_decks_remain_fifo_ahead_of_display_fill() {
+        let (audio_sender, audio_receiver) = mpsc::sync_channel(2);
+        let (_look_ahead_sender, look_ahead_receiver) = mpsc::sync_channel(1);
+        let (fill_sender, fill_receiver) = mpsc::sync_channel(1);
+        let receivers = InferenceReceivers {
+            audio: Mutex::new(audio_receiver),
+            look_ahead: Mutex::new(look_ahead_receiver),
+            fill: Mutex::new(fill_receiver),
+        };
+        audio_sender.send(queued_job(101)).unwrap();
+        audio_sender.send(queued_job(202)).unwrap();
+        fill_sender.send(queued_job(303)).unwrap();
+
+        assert_eq!(
+            next_inference_job(&receivers).unwrap().job.expected_epoch,
+            101
+        );
+        assert_eq!(
+            next_inference_job(&receivers).unwrap().job.expected_epoch,
+            202
+        );
+        assert_eq!(
+            next_inference_job(&receivers).unwrap().job.expected_epoch,
+            303
+        );
+    }
+
+    #[test]
+    fn display_fill_runs_when_two_audio_leases_are_idle() {
+        let _guard_a = begin_live_stem_waveform(-91_001, 1, 0.0, 120.0);
+        let _guard_b = begin_live_stem_waveform(-91_002, 1, 0.0, 120.0);
+        assert!(live_audio_lease_count() >= 2);
+
+        let (_audio_sender, audio_receiver) = mpsc::sync_channel(1);
+        let (_look_ahead_sender, look_ahead_receiver) = mpsc::sync_channel(1);
+        let (fill_sender, fill_receiver) = mpsc::sync_channel(1);
+        let receivers = InferenceReceivers {
+            audio: Mutex::new(audio_receiver),
+            look_ahead: Mutex::new(look_ahead_receiver),
+            fill: Mutex::new(fill_receiver),
+        };
+        fill_sender.send(queued_job(303)).unwrap();
+
+        let started = Instant::now();
+        let scheduled = next_inference_job(&receivers).expect("idle worker should drain fill");
+        assert_eq!(scheduled.job.expected_epoch, 303);
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn inference_ticket_timeout_is_bounded_and_drop_cancels_the_job() {
+        let (_sender, ticket) = StemInferenceTicket::test_pair();
+        let cancelled = Arc::clone(&ticket.cancelled);
+        let started = Instant::now();
+        assert!(ticket
+            .wait_timeout(Duration::from_millis(10))
+            .unwrap()
+            .is_none());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        drop(ticket);
+        assert!(cancelled.load(Ordering::Acquire));
     }
 
     #[test]
@@ -1560,7 +2483,7 @@ mod tests {
 
     #[test]
     fn live_pool_rejects_wrong_chunk_lengths_before_queueing() {
-        let Ok(model) = std::env::var("KDJ_SCNET_COREML_MODEL") else {
+        let Ok(model) = std::env::var("KDJ_SPLEETER4_MODEL_DIR") else {
             return;
         };
         let pool = StemInferencePool::new(Path::new(&model), 1).unwrap();
@@ -1613,6 +2536,31 @@ mod tests {
             live_stem_waveform(track_id, StemKind::Vocals, 100).is_none(),
             "switching songs must free the display scan instead of retaining it"
         );
+    }
+
+    #[test]
+    fn recreated_waveform_session_rejects_late_old_scan_publication() {
+        let track_id = -88_044;
+        let stems: [Vec<[f32; 2]>; 4] = std::array::from_fn(|_| vec![[0.2, 0.2]]);
+        let first = begin_scan_stem_waveform(track_id, 12.0);
+        let first_generation = first.generation();
+        let first_epoch = live_stem_waveform_delta(track_id, 100, 0, None)
+            .expect("first session")
+            .epoch;
+        drop(first);
+
+        let second = begin_scan_stem_waveform(track_id, 12.0);
+        let second_epoch = live_stem_waveform_delta(track_id, 100, 0, None)
+            .expect("replacement session")
+            .epoch;
+        assert_ne!(first_epoch, second_epoch);
+        assert_ne!(first_generation, second.generation());
+
+        publish_scan_stem_waveform_block(track_id, first_generation, 0.0, &stems, 0, 1);
+        assert_eq!(live_stem_coverage(track_id).unwrap().covered_seconds, 0.0);
+        publish_scan_stem_waveform_block(track_id, second.generation(), 0.0, &stems, 0, 1);
+        assert!(live_stem_coverage(track_id).unwrap().covered_seconds > 0.0);
+        drop(second);
     }
 
     #[test]
@@ -1727,7 +2675,7 @@ mod tests {
     }
 
     #[test]
-    fn live_waveform_delta_sends_each_scnet_block_once_and_recovers_after_an_epoch_change() {
+    fn live_waveform_delta_sends_each_spleeter4_block_once_and_recovers_after_an_epoch_change() {
         let track_id = -88_002;
         let guard = begin_live_stem_waveform(track_id, 11, 3.0, 20.0);
         let stems: [Vec<[f32; 2]>; 4] =
@@ -1735,7 +2683,7 @@ mod tests {
         publish_live_stem_waveform_block(track_id, 11, 3.0, &stems, 0, SAMPLE_RATE as usize);
 
         let initial = live_stem_waveform_delta(track_id, 2_000, 0, None).unwrap();
-        assert_eq!(initial.epoch, 11);
+        assert!(initial.epoch > 0);
         assert_eq!(initial.revision, 1);
         assert!(initial.stems.iter().all(|stem| !stem.points.is_empty()));
         assert!(initial
@@ -1750,7 +2698,8 @@ mod tests {
         assert!(unchanged.stems.iter().all(|stem| stem.points.is_empty()));
 
         publish_live_stem_waveform_block(track_id, 11, 4.0, &stems, 0, SAMPLE_RATE as usize);
-        let next = live_stem_waveform_delta(track_id, 2_000, initial.revision, Some(11)).unwrap();
+        let next = live_stem_waveform_delta(track_id, 2_000, initial.revision, Some(initial.epoch))
+            .unwrap();
         assert_eq!(next.revision, 2);
         assert!(next.stems.iter().all(|stem| !stem.points.is_empty()));
 
@@ -1759,9 +2708,9 @@ mod tests {
         let next_guard = begin_live_stem_waveform(track_id, 12, 8.0, 20.0);
         publish_live_stem_waveform_block(track_id, 12, 8.0, &stems, 0, SAMPLE_RATE as usize);
         let after_seek =
-            live_stem_waveform_delta(track_id, 2_000, next.revision, Some(11)).unwrap();
+            live_stem_waveform_delta(track_id, 2_000, next.revision, Some(initial.epoch)).unwrap();
         assert_eq!(
-            after_seek.epoch, 11,
+            after_seek.epoch, initial.epoch,
             "a seek must retain the public timeline epoch"
         );
         assert_eq!(

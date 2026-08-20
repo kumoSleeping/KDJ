@@ -109,7 +109,7 @@ export interface WaveformProps {
   /** 曲目时间相对墙钟的推进倍率。仅在局部波形走带时使用。 */
   playbackRate?: number;
   className?: string;
-  /** Precomputed alternate lane (for example one SCNet stem); bypasses the library waveform API. */
+  /** Precomputed alternate lane (for example one Spleeter4 stem); bypasses the library waveform API. */
   waveform?: WaveformData;
   /** Empty vertical space reserved above and below the rendered columns (0..0.45 each side). */
   verticalInsetRatio?: number;

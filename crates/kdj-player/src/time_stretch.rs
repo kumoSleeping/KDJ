@@ -4,14 +4,12 @@
 //! already-rendered PCM from a bounded ring and therefore never enters C++, allocates, locks, or
 //! blocks on the time-stretch engine.
 
+use anyhow::{bail, Result};
+use kdj_core::work_scheduler::{work_scheduler, TempoLane, WorkActivityGuard, WorkClass};
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-
-use anyhow::{bail, Result};
 
 /// The public performance control and DSP both use this deliberately bounded interval.
 pub const MIN_TEMPO_RATE: f32 = 0.5;
@@ -21,14 +19,22 @@ pub const MAX_TEMPO_RATE: f32 = 2.0;
 /// has to resize. This is preparation-worker state, not a hardware callback block size.
 const MAX_PROCESS_FRAMES: usize = 4_096;
 const RETRIEVE_FRAMES: usize = 4_096;
+/// Rubber Band R3 accepts dynamic ratios, but rebuilding its analysis plan for every MIDI/slider
+/// sample can discard more output than the callback ring can hide. Keep latest-value semantics and
+/// apply at most one ratio update per bounded source window (about 85 ms at 48 kHz). A single SYNC
+/// change therefore lands promptly, while dense control streams are coalesced.
+const MIN_RATE_UPDATE_SOURCE_FRAMES: usize = 4_096;
 /// Below this, Rubber Band R3 is an identity with hop-rate phase artifacts. Pass PCM through.
 const UNITY_RATE_EPSILON: f32 = 0.0005;
 
 const OPTION_PROCESS_REAL_TIME: i32 = 0x0000_0001;
 const OPTION_CHANNELS_TOGETHER: i32 = 0x1000_0000;
 const OPTION_ENGINE_FINER: i32 = 0x2000_0000;
-const RUBBER_BAND_OPTIONS: i32 =
-    OPTION_PROCESS_REAL_TIME | OPTION_CHANNELS_TOGETHER | OPTION_ENGINE_FINER;
+const OPTION_THREADING_NEVER: i32 = 0x0001_0000;
+const RUBBER_BAND_OPTIONS: i32 = OPTION_PROCESS_REAL_TIME
+    | OPTION_CHANNELS_TOGETHER
+    | OPTION_ENGINE_FINER
+    | OPTION_THREADING_NEVER;
 
 type RubberBandState = *mut c_void;
 
@@ -63,22 +69,40 @@ unsafe extern "C" {
 /// Slider and SYNC updates overwrite one atomic value rather than queuing obsolete intermediate
 /// positions. Rubber Band observes it immediately before its next input block.
 #[derive(Clone, Debug)]
-pub struct TempoControl(Arc<AtomicU32>);
+pub struct TempoControl {
+    lane: TempoLane,
+    deck: Option<usize>,
+}
 
 impl TempoControl {
     pub fn new(rate: f32) -> Self {
-        let control = Self(Arc::new(AtomicU32::new(1.0f32.to_bits())));
-        control.set(rate);
-        control
+        Self {
+            lane: TempoLane::standalone(normalize_rate(rate)),
+            deck: None,
+        }
+    }
+
+    /// All workers for one physical Deck share the process-wide latest-value lane. A SYNC update
+    /// therefore reaches the audible and shadow streams without queueing stale intermediate BPMs.
+    pub fn for_deck(deck: usize, rate: f32) -> Self {
+        let rate = normalize_rate(rate);
+        work_scheduler().publish_deck_tempo(deck, rate);
+        Self {
+            lane: TempoLane::standalone(rate),
+            deck: Some(deck),
+        }
     }
 
     pub fn set(&self, rate: f32) {
-        self.0
-            .store(normalize_rate(rate).to_bits(), Ordering::Release);
+        let rate = normalize_rate(rate);
+        self.lane.set(rate);
+        if let Some(deck) = self.deck {
+            work_scheduler().publish_deck_tempo(deck, rate);
+        }
     }
 
     pub fn rate(&self) -> f32 {
-        normalize_rate(f32::from_bits(self.0.load(Ordering::Acquire)))
+        normalize_rate(self.lane.rate())
     }
 
     pub fn is_unity(&self) -> bool {
@@ -134,10 +158,14 @@ pub struct PitchPreservingStretcher<F: TimeStretchFrame> {
     zero_ptrs: Vec<*const f32>,
     next_required: usize,
     applied_rate: f32,
+    engine_engaged: bool,
+    tempo_engaged: bool,
+    source_frames_since_rate_update: usize,
     remaining_start_delay: usize,
     expected_output_frames: f64,
     emitted_output_frames: usize,
     rate_spans: VecDeque<RateSpan>,
+    realtime_activity: Option<WorkActivityGuard>,
     finished: bool,
     marker: PhantomData<F>,
 }
@@ -186,10 +214,15 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
             zero_ptrs: vec![std::ptr::null(); F::CHANNELS],
             next_required: 1,
             applied_rate: rate,
+            engine_engaged: !is_unity_rate(rate) || Self::keep_engine_primed(),
+            tempo_engaged: !is_unity_rate(rate),
+            source_frames_since_rate_update: 0,
             remaining_start_delay: 0,
             expected_output_frames: 0.0,
             emitted_output_frames: 0,
             rate_spans: VecDeque::new(),
+            realtime_activity: (!is_unity_rate(rate))
+                .then(|| work_scheduler().activity(WorkClass::TempoStretch)),
             finished: false,
             marker: PhantomData,
         };
@@ -197,12 +230,19 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
             processor.output_ptrs[channel] = processor.output[channel].as_mut_ptr();
             processor.zero_ptrs[channel] = processor.zeroes.as_ptr();
         }
-        if is_unity_rate(rate) {
+        if !processor.engine_engaged {
             processor.applied_rate = 1.0;
         } else {
             processor.configure_and_prime()?;
         }
         Ok(processor)
+    }
+
+    /// Eight-lane STEM primes Rubber Band at construction so the first TEMPO/SYNC move can
+    /// `set_time_ratio` without `reset()`. Unity playback still passthroughs to avoid burning a
+    /// core on R3 while the separator is already on the CPU.
+    fn keep_engine_primed() -> bool {
+        F::CHANNELS > 2
     }
 
     pub fn engine_version(&self) -> i32 {
@@ -218,8 +258,13 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
         self.expected_output_frames = 0.0;
         self.emitted_output_frames = 0;
         self.rate_spans.clear();
+        self.source_frames_since_rate_update = 0;
         self.finished = false;
-        if is_unity_rate(self.control.rate()) {
+        let rate = self.control.rate();
+        self.engine_engaged = !is_unity_rate(rate) || Self::keep_engine_primed();
+        self.tempo_engaged = !is_unity_rate(rate);
+        self.sync_realtime_activity(rate);
+        if !self.engine_engaged {
             self.applied_rate = 1.0;
             self.remaining_start_delay = 0;
             self.next_required = 1;
@@ -239,16 +284,22 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
             return Ok(());
         }
         let rate = self.control.rate();
-        if is_unity_rate(rate) {
-            if !is_unity_rate(self.applied_rate) {
-                self.reset()?;
-            }
+        if !is_unity_rate(rate) {
+            self.tempo_engaged = true;
+        }
+        self.sync_realtime_activity(rate);
+        if is_unity_rate(rate) && !self.tempo_engaged {
             self.applied_rate = 1.0;
             sink(frame, 1.0)?;
             return Ok(());
         }
-        if is_unity_rate(self.applied_rate) {
-            self.reset()?;
+        if !self.engine_engaged {
+            // The first non-unity TEMPO/SYNC request pays one priming transition. From this point
+            // onward ratio 1.0 also flows through the same R3 state; bouncing across the centre
+            // detent must not repeatedly reset analysis and punch holes in the output ring.
+            self.engine_engaged = true;
+            unsafe { rubberband_reset(self.state.as_ptr()) };
+            self.configure_and_prime()?;
         }
         frame.push_planar(&mut self.input);
         if self.input_len() >= self.next_required {
@@ -267,7 +318,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
         if self.finished {
             return Ok(());
         }
-        if is_unity_rate(self.applied_rate) && self.input_len() == 0 {
+        if !self.tempo_engaged && self.input_len() == 0 {
             self.finished = true;
             return Ok(());
         }
@@ -281,6 +332,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
     fn configure_and_prime(&mut self) -> Result<()> {
         let rate = self.control.rate();
         self.applied_rate = rate;
+        self.source_frames_since_rate_update = 0;
         // SAFETY: all calls occur before this state's next real input block and on one thread.
         unsafe {
             rubberband_set_max_process_size(self.state.as_ptr(), MAX_PROCESS_FRAMES as u32);
@@ -316,20 +368,35 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
         self.input.first().map_or(0, Vec::len)
     }
 
-    fn update_rate(&mut self) {
+    fn update_rate(&mut self, incoming_frames: usize) {
         let rate = self.control.rate();
-        if (rate - self.applied_rate).abs() > f32::EPSILON {
+        self.sync_realtime_activity(rate);
+        self.source_frames_since_rate_update = self
+            .source_frames_since_rate_update
+            .saturating_add(incoming_frames);
+        if (rate - self.applied_rate).abs() > f32::EPSILON
+            && self.source_frames_since_rate_update >= MIN_RATE_UPDATE_SOURCE_FRAMES
+        {
             // SAFETY: target updates are applied from the same worker that calls process().
             unsafe {
                 rubberband_set_time_ratio(self.state.as_ptr(), 1.0 / f64::from(rate));
             }
             self.applied_rate = rate;
+            self.source_frames_since_rate_update = 0;
+        }
+    }
+
+    fn sync_realtime_activity(&mut self, rate: f32) {
+        if (!is_unity_rate(rate) || self.tempo_engaged) && self.realtime_activity.is_none() {
+            self.realtime_activity = Some(work_scheduler().activity(WorkClass::TempoStretch));
+        } else if is_unity_rate(rate) && !self.tempo_engaged {
+            self.realtime_activity = None;
         }
     }
 
     fn process_input(&mut self, final_block: bool) -> Result<()> {
-        self.update_rate();
         let frames = self.input_len();
+        self.update_rate(frames);
         if frames > MAX_PROCESS_FRAMES {
             bail!("Rubber Band input block exceeded its preallocated maximum");
         }
@@ -605,9 +672,28 @@ mod tests {
             })
             .unwrap();
 
-        assert!(output.len() > input.len() * 3 / 4);
+        assert!(
+            output.len() > input.len() * 3 / 4,
+            "continuous rate updates emitted {} frames for {} input frames",
+            output.len(),
+            input.len()
+        );
         assert!(output.len() < input.len() * 3 / 2);
         assert!(output.iter().flatten().all(|sample| sample.is_finite()));
+        let mut silent_run = 0usize;
+        let mut max_silent_run = 0usize;
+        for frame in &output {
+            if frame[0].abs() < 1e-4 && frame[1].abs() < 1e-4 {
+                silent_run += 1;
+                max_silent_run = max_silent_run.max(silent_run);
+            } else {
+                silent_run = 0;
+            }
+        }
+        assert!(
+            max_silent_run < sample_rate as usize / 50,
+            "continuous BPM updates opened a {max_silent_run}-frame output hole"
+        );
     }
 
     #[test]
@@ -658,6 +744,72 @@ mod tests {
         assert!(output
             .iter()
             .all(|frame| (frame.reconstruction_gain - 1.0).abs() < f32::EPSILON));
+    }
+
+    fn stem_unity_passthrough_keeps_eight_lane_samples() {
+        let control = TempoControl::new(1.0);
+        let mut processor = PitchPreservingStretcher::<StemFrame>::new(control, 48_000).unwrap();
+        let lanes = [0.11, -0.12, 0.21, -0.22, 0.31, -0.32, 0.41, -0.42];
+        let mut output = Vec::new();
+        processor
+            .push(StemFrame::separated(lanes), |frame, _| {
+                output.push(frame);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].lanes, lanes);
+    }
+
+    #[test]
+    fn stem_tempo_leaves_unity_without_repriming_rubber_band() {
+        let sample_rate = 48_000;
+        let control = TempoControl::new(1.0);
+        let mut processor =
+            PitchPreservingStretcher::<StemFrame>::new(control.clone(), sample_rate).unwrap();
+        let mut output = Vec::new();
+        for frame in 0..sample_rate as usize / 4 {
+            if frame == sample_rate as usize / 8 {
+                control.set(1.25);
+            }
+            let signal =
+                (std::f32::consts::TAU * 220.0 * frame as f32 / sample_rate as f32).sin() * 0.2;
+            let mut lanes = [0.0; 8];
+            lanes[0] = signal;
+            lanes[1] = signal;
+            processor
+                .push(StemFrame::separated(lanes), |frame, _| {
+                    output.push(frame);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        processor
+            .finish(|frame, _| {
+                output.push(frame);
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(!output.is_empty());
+        assert!(output
+            .iter()
+            .flat_map(|frame| frame.lanes)
+            .all(|sample| sample.is_finite()));
+        let mut silent_run = 0usize;
+        let mut max_silent_run = 0usize;
+        for frame in &output {
+            if frame.lanes[0].abs() < 1e-4 && frame.lanes[1].abs() < 1e-4 {
+                silent_run += 1;
+                max_silent_run = max_silent_run.max(silent_run);
+            } else {
+                silent_run = 0;
+            }
+        }
+        assert!(
+            max_silent_run < sample_rate as usize / 50,
+            "leaving 0% TEMPO must not dump an unprimed 8-channel R3 session: {max_silent_run} silent frames"
+        );
     }
 
     #[test]

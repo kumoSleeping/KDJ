@@ -123,6 +123,42 @@ export interface BarPhaseLockInput {
 }
 
 /**
+ * The deck SYNC button is stronger than the automatic-transition preference: it always means
+ * "put the yellow 4/4 lines together". Keeping this constructor outside React prevents a saved
+ * auto-mix preference from quietly downgrading a manual SYNC press to beat-only alignment.
+ */
+export function manualSyncBarInput(
+  input: Omit<BarPhaseLockInput, "beatsPerCell">,
+): BarPhaseLockInput {
+  return { ...input, beatsPerCell: BEATS_PER_BAR };
+}
+
+/**
+ * TEMPO and seek use different native command lanes. A SYNC seek must not start its decoder or
+ * STEM shadow until the new rate has actually reached the Deck, otherwise the prepared source is
+ * anchored against the old clock and leaves a fixed phase offset after promotion.
+ */
+export async function applySyncRateBeforePhase(
+  applyRate: () => boolean | Promise<boolean>,
+  alignPhase: () => void,
+): Promise<boolean> {
+  if (!await applyRate()) return false;
+  alignPhase();
+  return true;
+}
+
+/** One bounded post-promotion check; never the old 100ms continuous rate feedback loop. */
+export function syncPhaseConfirmationDelayMs(
+  stemEnabled: boolean,
+  p95BlockMs: number | null | undefined,
+): number {
+  if (!stemEnabled) return 350;
+  const measured = Number.isFinite(p95BlockMs) ? Math.max(0, p95BlockMs ?? 0) : 0;
+  // Two Decks may serialize two model calls even though diagnostics report worker time only.
+  return Math.min(3_500, Math.max(900, measured * 2 + 500));
+}
+
+/**
  * 从台相对主台的墙钟网格相位误差（秒）。
  * `multiple` 与 `deckSyncRate` 一致：主台有效 BPM = multiple × 从台有效 BPM。
  */
@@ -181,11 +217,21 @@ export function phaseAlignedFollowerPosition(
 
 /** 小于这个墙钟误差就不必再 seek：听感上已经锁住，解码器重启才是更贵的。 */
 const PHASE_SEEK_MIN_ERROR_SEC = 0.012;
+/** Final manual-SYNC acceptance tolerance; also used by bounded post-promotion confirmation. */
+export const SYNC_PHASE_TOLERANCE_SEC = 0.003;
 /**
  * Native Rubber Band R3 replacement is audible after the ~80ms startup cushion.
  * Align the follower to where the master will be when that cushion reaches the speaker.
  */
 export const SYNC_SEEK_LEAD_SEC = 0.08;
+
+/**
+ * The native coordinator now owns the audible promotion clock for both decoded and STEM shadows.
+ * Frontend lead would be counted a second time and become a permanent yellow-line offset.
+ */
+export function syncSeekLeadSeconds(_stemEnabled: boolean): number {
+  return 0;
+}
 
 /** 对拍落点；相位已经够近时返回 null，避免无意义的流重建。 */
 export function syncFollowerSeekPosition(

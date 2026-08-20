@@ -25,11 +25,13 @@ import {
 import type {
   CuePoint,
   StemModelStatus,
+  StemMode,
   StemName,
   Track,
   TrackStemStatus,
   Waveform as WaveformData,
 } from "../../types";
+import { stemModeLaneKind, stemModeUsesFourLanes, stemModeUsesTwoLanes } from "../../lib/stemMode";
 import {
   detailWaveformBuckets,
   performanceWaveformViewportSeconds,
@@ -45,15 +47,17 @@ import {
 } from "../../lib/performanceWaveDisplay";
 import { useDjConfig } from "../../lib/djMix";
 import {
-  BEATS_PER_BAR,
   ENGINE_TEMPO_MAX,
   ENGINE_TEMPO_MIN,
+  applySyncRateBeforePhase,
   barPhaseLock,
   deckSyncRate,
+  manualSyncBarInput,
   shouldQuantizeSyncOnPlay,
   scratchSnappedPosition,
-  SYNC_SEEK_LEAD_SEC,
-  syncFollowerSeekPosition,
+  SYNC_PHASE_TOLERANCE_SEC,
+  syncPhaseConfirmationDelayMs,
+  syncSeekLeadSeconds,
   syncFollowerSeekPositionWithLead,
 } from "../../lib/beatGridSync";
 import { LatestTempoCommandLane } from "../../lib/tempoCommandLane";
@@ -97,8 +101,6 @@ const TEMPO_STEP = 0.001;
 // A streamed seek needs a small initial output cushion. Sending another target before that
 // cushion exists simply cancels the last worker, so keep hardware jog seeks deliberately bounded.
 const MIDI_JOG_SEEK_INTERVAL_MS = 80;
-const SYNC_ALIGN_HOLD_MS = 280;
-const SYNC_ALIGN_FOLLOWUP_MS = 280;
 
 function deckTempoRange(side: 0 | 1): { id: TempoRangeId; label: string; min: number; max: number } {
   const id = readTempoRanges()[side];
@@ -158,6 +160,7 @@ export interface PerformanceWorkspaceProps {
   decks: [PerformanceDeckModel, PerformanceDeckModel];
   stems: [PerformanceStemDeckModel, PerformanceStemDeckModel];
   stemModel: StemModelStatus | null;
+  stemMode: StemMode;
   masterVolume: number;
   embedded?: boolean;
   onClose?: () => void;
@@ -180,7 +183,7 @@ export interface PerformanceWorkspaceProps {
   onTrackDrop: (side: 0 | 1, ids: number[]) => void;
   onTogglePlay: (side: 0 | 1) => void;
   onMainCue: (side: 0 | 1, position: number) => void;
-  onRateChange: (side: 0 | 1, rate: number) => void;
+  onRateChange: (side: 0 | 1, rate: number) => boolean | Promise<boolean>;
   onMixerChange: (
     side: 0 | 1,
     values: PerformanceMixerValues,
@@ -339,7 +342,7 @@ function beatSeconds(track: Track | null): number | null {
   return track?.bpm ? 60 / track.bpm : null;
 }
 
-const STEM_OPTIONS: {
+type StemOption = {
   stem: StemName;
   label: string;
   short: string;
@@ -347,24 +350,44 @@ const STEM_OPTIONS: {
   bit: number;
   gainIndex: 0 | 1 | 2 | 3;
   icon: typeof Drum;
-}[] = [
+};
+
+const FOUR_STEM_OPTIONS: StemOption[] = [
   { stem: "drums", label: "DRUMS", short: "D", shortcut: "D", bit: STEM_WAVE_BITS.drums, gainIndex: 0, icon: Drum },
   { stem: "bass", label: "BASS", short: "B", shortcut: "B", bit: STEM_WAVE_BITS.bass, gainIndex: 1, icon: Guitar },
   { stem: "other", label: "OTHER", short: "O", shortcut: "O", bit: STEM_WAVE_BITS.other, gainIndex: 2, icon: AudioLines },
   { stem: "vocals", label: "VOCALS", short: "V", shortcut: "V", bit: STEM_WAVE_BITS.vocals, gainIndex: 3, icon: Mic },
 ];
 
-const STEM_EQ_KNOBS: { stem: StemName; label: string; gainIndex: 0 | 1 | 2 | 3 }[] = [
+const TWO_STEM_OPTIONS: StemOption[] = [
+  { stem: "other", label: "INSTRUMENTAL", short: "I", shortcut: "I", bit: STEM_WAVE_BITS.other, gainIndex: 2, icon: AudioLines },
+  { stem: "vocals", label: "VOCALS", short: "V", shortcut: "V", bit: STEM_WAVE_BITS.vocals, gainIndex: 3, icon: Mic },
+];
+
+const FOUR_STEM_EQ_KNOBS: { stem: StemName; label: string; gainIndex: 0 | 1 | 2 | 3 }[] = [
   { stem: "vocals", label: "VOCALS", gainIndex: 3 },
   { stem: "other", label: "OTHER", gainIndex: 2 },
   { stem: "bass", label: "BASS", gainIndex: 1 },
   { stem: "drums", label: "DRUMS", gainIndex: 0 },
 ];
 
-/** 低于这个幅度就当作底噪留空（后端 amp 已归一化到 0..1；SCNet 串音底噪约在 5% 上下）。 */
+const TWO_STEM_EQ_KNOBS: { stem: StemName; label: string; gainIndex: 0 | 1 | 2 | 3 }[] = [
+  { stem: "vocals", label: "VOCALS", gainIndex: 3 },
+  { stem: "other", label: "INSTRUMENTAL", gainIndex: 2 },
+];
+
+function stemOptions(mode: StemMode): StemOption[] {
+  return stemModeUsesFourLanes(mode) ? FOUR_STEM_OPTIONS : stemModeUsesTwoLanes(mode) ? TWO_STEM_OPTIONS : [];
+}
+
+function stemEqKnobs(mode: StemMode) {
+  return stemModeUsesFourLanes(mode) ? FOUR_STEM_EQ_KNOBS : stemModeUsesTwoLanes(mode) ? TWO_STEM_EQ_KNOBS : [];
+}
+
+/** 低于这个幅度就当作底噪留空（后端 amp 已归一化到 0..1）。 */
 const STEM_SILENCE_THRESHOLD = 0.06;
 
-/** 主轨道（ORG）波形，同时作为尚未发布 STEM 列的低透明占位。 */
+/** 主轨道（ORG）波形；显示开关与四条 STEM 车道完全独立。 */
 function useMainWaveform(track: Track | null, buckets: number): WaveformData | null {
   const trackId = track?.id ?? null;
   const [wave, setWave] = useState<WaveformData | null>(() => (
@@ -697,8 +720,9 @@ function DeckWave({
 }
 
 /** 顶栏硬件式按键：A/B 共用可见车道，与 STEM 声音掩码完全独立。 */
-function ToolbarWaveChannels({ displayMask, onDisplayMask }: {
+function ToolbarWaveChannels({ displayMask, stemMode, onDisplayMask }: {
   displayMask: number;
+  stemMode: StemMode;
   onDisplayMask: (mask: number) => void;
 }) {
   return (
@@ -710,13 +734,13 @@ function ToolbarWaveChannels({ displayMask, onDisplayMask }: {
       <b>WAVES</b>
       <button
         type="button"
-        data-active
-        title="仅显示原曲波形"
-        onClick={() => onDisplayMask(ORIGINAL_WAVE_BIT)}
+        data-active={(displayMask & ORIGINAL_WAVE_BIT) !== 0 || undefined}
+        title="原曲波形"
+        onClick={() => onDisplayMask(displayMask ^ ORIGINAL_WAVE_BIT)}
       >
         ORG
       </button>
-      {STEM_OPTIONS.map(({ stem, short, bit }) => (
+      {stemOptions(stemMode).map(({ stem, short, bit }) => (
         <button
           type="button"
           key={stem}
@@ -733,12 +757,14 @@ function ToolbarWaveChannels({ displayMask, onDisplayMask }: {
 
 function StemWaveLanes({
   displayMask,
+  stemMode,
 }: {
   displayMask: number;
+  stemMode: StemMode;
 }) {
   // 车道数量只由用户按键决定。波形响应到达前保留同高空槽，加载/换歌不会把
   // STEM 区先清零再逐条撑开。
-  const visibleLanes = STEM_OPTIONS.filter(({ bit }) => (displayMask & bit) !== 0);
+  const visibleLanes = stemOptions(stemMode).filter(({ bit }) => (displayMask & bit) !== 0);
   if (visibleLanes.length === 0) return null;
   return (
     <div className="kd-performance-stem-lanes">
@@ -763,6 +789,7 @@ function PerformanceDeckWaves({
   deck,
   other,
   stemState,
+  stemMode,
   side,
   position,
   interactiveScrub,
@@ -781,6 +808,7 @@ function PerformanceDeckWaves({
   deck: PerformanceDeckModel;
   other: PerformanceDeckModel;
   stemState: PerformanceStemDeckModel;
+  stemMode: StemMode;
   side: 0 | 1;
   position: number;
   interactiveScrub: boolean;
@@ -808,7 +836,7 @@ function PerformanceDeckWaves({
   );
   const laneSources = useMemo<PerformanceWaveLaneSource[]>(() => {
     const result: PerformanceWaveLaneSource[] = [];
-    for (const { stem, bit, gainIndex } of STEM_OPTIONS) {
+    for (const { stem, bit, gainIndex } of stemOptions(stemMode)) {
       if ((displayMask & bit) === 0) continue;
       const waveform = track && waveforms[stem]?.track_id === track.id ? waveforms[stem] ?? null : null;
       const gain = !stemState.enabled
@@ -835,11 +863,11 @@ function PerformanceDeckWaves({
       });
     }
     return result;
-  }, [displayMask, mainWaveform, pendingWave, stemState, track?.id, waveforms]);
+  }, [displayMask, mainWaveform, pendingWave, stemMode, stemState, track?.id, waveforms]);
 
   return (
     <div className="kd-performance-deck-waves" data-side={side === 0 ? "a" : "b"}>
-      <StemWaveLanes displayMask={displayMask} />
+      <StemWaveLanes displayMask={displayMask} stemMode={stemMode} />
       {(displayMask & ORIGINAL_WAVE_BIT) !== 0 ? (
         <StableDeckWave
           deck={deck}
@@ -1097,10 +1125,11 @@ function HotCuePads({ deck, side, quantize, onSeek, onSaveCuePoints }: {
 }
 
 /** STEM 垫只负责开关；音量改由中央外侧的 STEM EQ 旋钮控制。 */
-function StemPads({ deck, stemState, stemModel, side, onDownloadStemModel, onToggleStem }: {
+function StemPads({ deck, stemState, stemModel, stemMode, side, onDownloadStemModel, onToggleStem }: {
   deck: PerformanceDeckModel;
   stemState: PerformanceStemDeckModel;
   stemModel: StemModelStatus | null;
+  stemMode: StemMode;
   side: 0 | 1;
   onDownloadStemModel: PerformanceWorkspaceProps["onDownloadStemModel"];
   onToggleStem: PerformanceWorkspaceProps["onToggleStem"];
@@ -1120,7 +1149,7 @@ function StemPads({ deck, stemState, stemModel, side, onDownloadStemModel, onTog
         >
           {downloading
             ? `正在下载分轨模型 ${progress}%`
-            : "点击此处下载分轨模型（需要连接 GitHub）"}
+            : "点击此处下载分轨模型（需要连接 Hugging Face）"}
         </button>
         {downloading ? (
           <i aria-hidden="true"><span style={{ width: `${progress}%` }} /></i>
@@ -1134,8 +1163,8 @@ function StemPads({ deck, stemState, stemModel, side, onDownloadStemModel, onTog
   );
   const job = stemJobLine(stemState.status, stemModel);
   return (
-    <div className="kd-performance-stem-pads" data-side={side === 0 ? "a" : "b"} data-enabled={stemState.enabled || undefined}>
-      {STEM_OPTIONS.map(({ stem, label, bit, icon: Icon }) => {
+    <div className="kd-performance-stem-pads" data-mode={stemModeLaneKind(stemMode)} data-side={side === 0 ? "a" : "b"} data-enabled={stemState.enabled || undefined}>
+      {stemOptions(stemMode).map(({ stem, label, bit, icon: Icon }) => {
         const audible = stemState.enabled && (stemState.mask & bit) !== 0;
         return (
           <div
@@ -1800,25 +1829,30 @@ function MixerStrip({ side, mixer, setMixer }: {
 function StemEqStrip({
   side,
   gains,
+  stemMode,
   midiActive,
   ready,
   onChange,
 }: {
   side: 0 | 1;
   gains: PerformanceStemGains;
+  stemMode: StemMode;
   midiActive: boolean;
   ready: boolean;
   onChange: (stem: StemName, gain: number) => void;
 }) {
+  const knobs = stemEqKnobs(stemMode);
+  if (knobs.length === 0) return null;
   return (
     <div
       className="kd-performance-stem-eq"
+      data-mode={stemModeLaneKind(stemMode)}
       data-side={side === 0 ? "a" : "b"}
       data-midi={midiActive || undefined}
     >
       <b>STEM EQ</b>
       <div>
-        {STEM_EQ_KNOBS.map(({ stem, label, gainIndex }) => (
+        {knobs.map(({ stem, label, gainIndex }) => (
           <Knob
             key={stem}
             variant="ring"
@@ -1841,6 +1875,7 @@ function DeckControls({
   deck,
   stemState,
   stemModel,
+  stemMode,
   side,
   modules,
   quantize,
@@ -1867,6 +1902,7 @@ function DeckControls({
   deck: PerformanceDeckModel;
   stemState: PerformanceStemDeckModel;
   stemModel: StemModelStatus | null;
+  stemMode: StemMode;
   side: 0 | 1;
   modules: Set<ModuleId>;
   quantize: boolean;
@@ -1900,14 +1936,17 @@ function DeckControls({
   return (
     <section className="kd-performance-deck-controls" data-side={side === 0 ? "a" : "b"} data-playing={deck.playing || undefined}>
       <div className="kd-performance-deck-main">
-        <StemPads
-          deck={deck}
-          stemState={stemState}
-          stemModel={stemModel}
-          side={side}
-          onDownloadStemModel={onDownloadStemModel}
-          onToggleStem={onToggleStem}
-        />
+        {stemMode !== "none" ? (
+          <StemPads
+            deck={deck}
+            stemState={stemState}
+            stemModel={stemModel}
+            stemMode={stemMode}
+            side={side}
+            onDownloadStemModel={onDownloadStemModel}
+            onToggleStem={onToggleStem}
+          />
+        ) : null}
         <div className="kd-performance-transport">
           <button type="button" className="kd-performance-play" data-active={deck.playing || undefined} onClick={() => onTogglePlay(side)} disabled={!track} aria-label={deck.playing ? "暂停" : "播放"}>
             {deck.playing ? <Pause size={18} /> : <Play size={18} />}
@@ -1953,6 +1992,7 @@ export function PerformanceWorkspace({
   decks,
   stems,
   stemModel,
+  stemMode,
   masterVolume,
   embedded = false,
   onClose,
@@ -2020,6 +2060,12 @@ export function PerformanceWorkspace({
   // Fast Refresh can retain a pre-v3 mask with ORG turned off. Normalize at the render boundary,
   // not only while reading localStorage, so an already-open Performance view recovers immediately.
   const stemDisplayMask = normalizePerformanceWaveMask(storedStemDisplayMask);
+  const allowedStemDisplayMask = stemModeUsesFourLanes(stemMode)
+    ? 0b1111
+    : stemModeUsesTwoLanes(stemMode)
+      ? STEM_WAVE_BITS.other | STEM_WAVE_BITS.vocals
+      : 0;
+  const activeStemDisplayMask = stemDisplayMask & (ORIGINAL_WAVE_BIT | allowedStemDisplayMask);
   const setStemDisplayMask = useCallback((mask: number) => {
     setStoredStemDisplayMask(normalizePerformanceWaveMask(mask));
   }, []);
@@ -2062,8 +2108,16 @@ export function PerformanceWorkspace({
   const jogTouchRef = useRef<[boolean, boolean]>([false, false]);
   const decksRef = useRef(decks);
   decksRef.current = decks;
-  const autoBeatSyncRef = useRef(autoBeatSync);
-  autoBeatSyncRef.current = autoBeatSync;
+  const stemsRef = useRef(stems);
+  stemsRef.current = stems;
+  const stemModelRef = useRef(stemModel);
+  stemModelRef.current = stemModel;
+  const syncLockRef = useRef(syncLock);
+  syncLockRef.current = syncLock;
+  const scratchPreviewsRef = useRef(scratchPreviews);
+  scratchPreviewsRef.current = scratchPreviews;
+  const syncConfirmationTimerRef = useRef<number | null>(null);
+  const syncInteractionRevisionRef = useRef(0);
   const jogAtRef = useRef<[
     { trackId: number; position: number; at: number } | null,
     { trackId: number; position: number; at: number } | null,
@@ -2078,9 +2132,6 @@ export function PerformanceWorkspace({
   const scratchPreviewFrameRef = useRef<number | null>(null);
   const syncPlayingRef = useRef<[boolean, boolean] | null>(null);
   const syncTrackIdsRef = useRef<[number | null, number | null]>([null, null]);
-  const syncAlignGenRef = useRef(0);
-  const syncHoldTimersRef = useRef<[number | null, number | null]>([null, null]);
-  const [syncHolds, setSyncHolds] = useState<[number | null, number | null]>([null, null]);
   const mixerTimerRef = useRef<number | null>(null);
   const mixerDispatchRef = useRef({
     mixers,
@@ -2091,6 +2142,12 @@ export function PerformanceWorkspace({
   });
   const mixerSignatureRef = useRef<[string, string]>(["", ""]);
   const modules = useMemo(() => new Set(visible), [visible]);
+
+  useEffect(() => () => {
+    if (syncConfirmationTimerRef.current !== null) {
+      window.clearTimeout(syncConfirmationTimerRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(MODULE_STORAGE_KEY, JSON.stringify(visible));
@@ -2197,14 +2254,14 @@ export function PerformanceWorkspace({
     ];
     // 任一台换歌后旧的对齐关系不再成立，解除 SYNC 锁定（重新点 SYNC 即可）。
     setSyncLock(null);
-  }, [decks[0].track?.id, decks[1].track?.id]);
+  }, [decks[0].track?.id, decks[1].track?.id, stemMode]);
 
   useEffect(() => {
     let alive = true;
     const running = [false, false];
     const sync = async (side: 0 | 1) => {
       const track = decks[side].track;
-      const lanesVisible = performanceStemLanesVisible(stemDisplayMask);
+      const lanesVisible = performanceStemLanesVisible(activeStemDisplayMask);
       const scanMounted = Boolean(stems[side].status?.phase);
       if (!track || !lanesVisible || (!stems[side].enabled && !scanMounted) || running[side]) {
         return;
@@ -2245,7 +2302,9 @@ export function PerformanceWorkspace({
         // still the same song. Keep already published columns instead of blanking every STEM rail
         // and making a jog/SYNC look like a whole-track re-analysis.
         delta.stems.forEach(({ stem, points }) => {
-          const prior = next[side][stem];
+          // Runtime/model changes create a new public epoch. Never merge that first payload into
+          // old-model arrays: their lane meaning and coverage are no longer compatible.
+          const prior = isNewEpoch ? undefined : next[side][stem];
           const waveform = prior
             && prior.track_id === track.id
             && prior.amp.length === delta.columns
@@ -2266,7 +2325,7 @@ export function PerformanceWorkspace({
             waveform.b[index] = Math.round(Math.min(255, Math.max(0, b)));
             if (waveform.known) waveform.known[index] = true;
           });
-          // A fresh wrapper makes Waveform repaint only when a real SCNet block changed. Its
+          // A fresh wrapper makes Waveform repaint only when a real Spleeter4 block changed. Its
           // large typed timeline arrays stay shared; copying them on every visual update would
           // merely move the old polling bottleneck from JSON parsing into the JS heap.
           next[side][stem] = {
@@ -2280,7 +2339,7 @@ export function PerformanceWorkspace({
       });
     };
     ([0, 1] as const).forEach((side) => {
-      const shouldPoll = performanceStemLanesVisible(stemDisplayMask)
+      const shouldPoll = performanceStemLanesVisible(activeStemDisplayMask)
         && (stems[side].enabled || Boolean(stems[side].status?.phase));
       if (!shouldPoll || decks[side].track?.id !== stemWaveCursorRef.current[side].trackId) {
         stemWaveCursorRef.current[side] = {
@@ -2288,7 +2347,7 @@ export function PerformanceWorkspace({
           epoch: null,
           revision: 0,
         };
-        if (!performanceStemLanesVisible(stemDisplayMask)) {
+        if (!performanceStemLanesVisible(activeStemDisplayMask)) {
           setStemWaveforms((current) => {
             const next = [{ ...current[0] }, { ...current[1] }] as [
               Partial<Record<StemName, WaveformData>>,
@@ -2314,7 +2373,7 @@ export function PerformanceWorkspace({
     decks[1].track?.id,
     decks[0].duration,
     decks[1].duration,
-    stemDisplayMask,
+    activeStemDisplayMask,
     stems[0].enabled,
     stems[1].enabled,
     stems[0].status?.phase,
@@ -2343,6 +2402,7 @@ export function PerformanceWorkspace({
     const pending = jogSeekPendingRef.current[side];
     jogSeekPendingRef.current[side] = null;
     if (!pending || deckTrackIdsRef.current[side] !== pending.trackId) return;
+    cancelPendingSyncCorrection();
     jogSeekSentAtRef.current[side] = performance.now();
     onJogSeekRef.current(side, pending.position);
   }, []);
@@ -2373,6 +2433,7 @@ export function PerformanceWorkspace({
   };
 
   const startMidiJogScratch = (side: 0 | 1) => {
+    cancelPendingSyncCorrection();
     if (jogTouchRef.current[side]) return;
     jogTouchRef.current[side] = true;
     // A capacitive platter owns the Deck cursor without toggling Play/Pause. Ticks go to the
@@ -2392,24 +2453,13 @@ export function PerformanceWorkspace({
       next[side] = true;
       return next;
     });
-    syncAlignGenRef.current += 1;
-    const holdTimer = syncHoldTimersRef.current[side];
-    if (holdTimer !== null) {
-      window.clearTimeout(holdTimer);
-      syncHoldTimersRef.current[side] = null;
-    }
-    setSyncHolds((current) => {
-      if (current[side] === null) return current;
-      const next: [number | null, number | null] = [current[0], current[1]];
-      next[side] = null;
-      return next;
-    });
     // Touch is a momentary platter hold for a Deck that is actually playing now, rather than a
     // stale visual row turning into an implicit load/focus request or a hidden PauseDeck.
     onJogScratchStartRef.current(side);
   };
 
   const finishMidiJogScratch = (side: 0 | 1) => {
+    cancelPendingSyncCorrection();
     if (!jogTouchRef.current[side]) return;
     jogTouchRef.current[side] = false;
     const position = jogAtRef.current[side]?.position
@@ -2435,8 +2485,6 @@ export function PerformanceWorkspace({
     ([0, 1] as const).forEach((side) => {
       const timer = jogSeekTimerRef.current[side];
       if (timer !== null) window.clearTimeout(timer);
-      const holdTimer = syncHoldTimersRef.current[side];
-      if (holdTimer !== null) window.clearTimeout(holdTimer);
     });
   }, []);
 
@@ -2449,11 +2497,7 @@ export function PerformanceWorkspace({
     jogTouchRef.current = [false, false];
     setMidiScratchActive([false, false]);
     jogAtRef.current = [null, null];
-    syncAlignGenRef.current += 1;
     ([0, 1] as const).forEach((side) => {
-      const holdTimer = syncHoldTimersRef.current[side];
-      if (holdTimer !== null) window.clearTimeout(holdTimer);
-      syncHoldTimersRef.current[side] = null;
       const timer = jogSeekTimerRef.current[side];
       if (timer !== null) window.clearTimeout(timer);
       jogSeekTimerRef.current[side] = null;
@@ -2461,7 +2505,6 @@ export function PerformanceWorkspace({
     });
     updateScratchPreview(0, null);
     updateScratchPreview(1, null);
-    setSyncHolds([null, null]);
   }, [decks[0].track?.id, decks[1].track?.id, updateScratchPreview]);
 
   useEffect(() => {
@@ -2502,7 +2545,7 @@ export function PerformanceWorkspace({
         onStartStems(side);
         return;
       }
-      const stem = STEM_OPTIONS.find((option) => option.shortcut.toLowerCase() === key)?.stem;
+      const stem = stemOptions(stemMode).find((option) => option.shortcut.toLowerCase() === key)?.stem;
       if (stem) {
         event.preventDefault();
         onToggleStem(side, stem);
@@ -2510,7 +2553,7 @@ export function PerformanceWorkspace({
     };
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
-  }, [decks[0].active, decks[1].active, onStartStems, onToggleStem]);
+  }, [decks[0].active, decks[1].active, onStartStems, onToggleStem, stemMode]);
 
   const viewDecks = useMemo<[PerformanceDeckModel, PerformanceDeckModel]>(
     () => [
@@ -2560,47 +2603,6 @@ export function PerformanceWorkspace({
     return follow;
   };
 
-  const clearSyncHold = (side: 0 | 1) => {
-    const timer = syncHoldTimersRef.current[side];
-    if (timer !== null) {
-      window.clearTimeout(timer);
-      syncHoldTimersRef.current[side] = null;
-    }
-    setSyncHolds((current) => {
-      if (current[side] === null) return current;
-      const next: [number | null, number | null] = [current[0], current[1]];
-      next[side] = null;
-      return next;
-    });
-  };
-
-  const cancelSyncAlign = () => {
-    syncAlignGenRef.current += 1;
-    clearSyncHold(0);
-    clearSyncHold(1);
-  };
-
-  const pinSyncHold = (side: 0 | 1, position: number, generation: number) => {
-    const existing = syncHoldTimersRef.current[side];
-    if (existing !== null) window.clearTimeout(existing);
-    setSyncHolds((current) => {
-      if (current[side] === position) return current;
-      const next: [number | null, number | null] = [current[0], current[1]];
-      next[side] = position;
-      return next;
-    });
-    syncHoldTimersRef.current[side] = window.setTimeout(() => {
-      syncHoldTimersRef.current[side] = null;
-      if (generation !== syncAlignGenRef.current) return;
-      setSyncHolds((current) => {
-        if (current[side] === null) return current;
-        const next: [number | null, number | null] = [current[0], current[1]];
-        next[side] = null;
-        return next;
-      });
-    }, SYNC_ALIGN_HOLD_MS);
-  };
-
   const barPhaseInput = (
     side: 0 | 1,
     masterSide: 0 | 1,
@@ -2621,7 +2623,7 @@ export function PerformanceWorkspace({
     ) {
       return null;
     }
-    return {
+    return manualSyncBarInput({
       followerPositionSec: follower.position,
       followerBpm,
       followerFirstBeatSec: follower.track.first_beat,
@@ -2631,8 +2633,7 @@ export function PerformanceWorkspace({
       masterFirstBeatSec: master.track.first_beat,
       masterRate: master.rate,
       multiple,
-      beatsPerCell: autoBeatSyncRef.current ? BEATS_PER_BAR : 1,
-    };
+    });
   };
 
   const syncPhysicalDeck = (
@@ -2640,45 +2641,127 @@ export function PerformanceWorkspace({
     masterSide: 0 | 1,
     multiple: number,
     followerRate: number,
-  ) => {
+  ): boolean => {
     const lockInput = barPhaseInput(side, masterSide, multiple, followerRate);
-    if (!lockInput) return;
+    if (!lockInput) return false;
     const lock = barPhaseLock(lockInput);
-    if (!lock || Math.abs(lock.errorSec) <= 0.003) return;
-    const generation = ++syncAlignGenRef.current;
-    const seekTo = syncFollowerSeekPositionWithLead(lockInput, SYNC_SEEK_LEAD_SEC);
-    if (seekTo != null) {
-      pinSyncHold(side, seekTo, generation);
-      onJogSeekRef.current(side, seekTo);
-    }
-    // At most one follow-up after the replacement is audible. A 45ms jog-nudge loop used to
-    // chase 100ms-old snapshots and reverse the rail under the centered playhead.
-    window.setTimeout(() => {
-      if (generation !== syncAlignGenRef.current) return;
-      if (jogTouchRef.current[side]) return;
-      const followInput = barPhaseInput(side, masterSide, multiple, decksRef.current[side].rate);
-      if (!followInput) return;
-      const followTo = syncFollowerSeekPosition(followInput, 0.02);
-      if (followTo == null) return;
-      pinSyncHold(side, followTo, generation);
-      onJogSeekRef.current(side, followTo);
-    }, SYNC_ALIGN_FOLLOWUP_MS);
+    if (!lock || Math.abs(lock.errorSec) <= SYNC_PHASE_TOLERANCE_SEC) return false;
+    const seekTo = syncFollowerSeekPositionWithLead(
+      lockInput,
+      syncSeekLeadSeconds(stemsRef.current[side].enabled),
+      SYNC_PHASE_TOLERANCE_SEC,
+    );
+    if (seekTo == null) return false;
+    onJogSeekRef.current(side, seekTo);
+    return true;
+  };
+
+  const clearSyncConfirmation = () => {
+    if (syncConfirmationTimerRef.current === null) return;
+    window.clearTimeout(syncConfirmationTimerRef.current);
+    syncConfirmationTimerRef.current = null;
+  };
+
+  const cancelPendingSyncCorrection = () => {
+    syncInteractionRevisionRef.current += 1;
+    clearSyncConfirmation();
+  };
+
+  const handleManualSeek: PerformanceWorkspaceProps["onSeek"] = (side, detail) => {
+    cancelPendingSyncCorrection();
+    onSeek(side, detail);
+  };
+  const handleManualSetLoop: PerformanceWorkspaceProps["onSetLoop"] = (side, start, length) => {
+    cancelPendingSyncCorrection();
+    onSetLoop(side, start, length);
+  };
+  const handleManualClearLoop: PerformanceWorkspaceProps["onClearLoop"] = (side) => {
+    cancelPendingSyncCorrection();
+    onClearLoop(side);
+  };
+  const handleManualScratchHold: PerformanceWorkspaceProps["onScratchHold"] = (side) => {
+    cancelPendingSyncCorrection();
+    onScratchHold(side);
+  };
+  const handleManualScratchRelease: PerformanceWorkspaceProps["onScratchRelease"] = (
+    side,
+    position,
+    resume,
+  ) => {
+    cancelPendingSyncCorrection();
+    onScratchRelease(side, position, resume);
+  };
+  const handleManualTogglePlay: PerformanceWorkspaceProps["onTogglePlay"] = (side) => {
+    cancelPendingSyncCorrection();
+    onTogglePlay(side);
+  };
+  const handleManualMainCue: PerformanceWorkspaceProps["onMainCue"] = (side, position) => {
+    cancelPendingSyncCorrection();
+    onMainCue(side, position);
+  };
+  const handleManualTrackDrop: PerformanceWorkspaceProps["onTrackDrop"] = (side, ids) => {
+    cancelPendingSyncCorrection();
+    onTrackDrop(side, ids);
+  };
+
+  const scheduleSyncConfirmation = (
+    side: 0 | 1,
+    masterSide: 0 | 1,
+    multiple: number,
+    followerRate: number,
+    remainingChecks = 2,
+  ) => {
+    clearSyncConfirmation();
+    const interactionRevision = syncInteractionRevisionRef.current;
+    const trackIds = deckTrackIdsRef.current;
+    const delay = syncPhaseConfirmationDelayMs(
+      stemsRef.current[side].enabled,
+      stemModelRef.current?.diagnostics.p95BlockMs,
+    );
+    syncConfirmationTimerRef.current = window.setTimeout(() => {
+      syncConfirmationTimerRef.current = null;
+      const lock = syncLockRef.current;
+      const currentIds = deckTrackIdsRef.current;
+      const expectedMultiple = lock?.base === side
+        ? lock.multiple
+        : lock
+          ? 1 / lock.multiple
+          : null;
+      if (
+        expectedMultiple == null
+        || Math.abs(expectedMultiple - multiple) > 1e-6
+        || currentIds[0] !== trackIds[0]
+        || currentIds[1] !== trackIds[1]
+        || syncInteractionRevisionRef.current !== interactionRevision
+        || !decksRef.current[side].playing
+        || !decksRef.current[masterSide].playing
+        || scratchPreviewsRef.current[0] != null
+        || scratchPreviewsRef.current[1] != null
+      ) {
+        return;
+      }
+      // The first authoritative snapshot after a seek acknowledgement can still describe the
+      // outgoing source. Re-check only after the decoded/STEM shadow's measured promotion window,
+      // and cap retries so SYNC can never become a 100ms feedback loop again.
+      const corrected = syncPhysicalDeck(side, masterSide, multiple, followerRate);
+      if (corrected && remainingChecks > 1) {
+        scheduleSyncConfirmation(side, masterSide, multiple, followerRate, remainingChecks - 1);
+      }
+    }, delay);
   };
 
   const toggleSyncLock = (side: 0 | 1) => {
     if (syncLock?.base === side) {
       // 再点一次只解除锁定、保持当前速度——与 DJ 台的 SYNC off 一致。
+      clearSyncConfirmation();
+      syncLockRef.current = null;
       setSyncLock(null);
-      cancelSyncAlign();
       return;
     }
     const other = (1 - side) as 0 | 1;
     const baseBpm = decks[side].track?.bpm;
     const otherDeck = decks[other];
     if (!baseBpm || !otherDeck.track?.bpm) return;
-    // A new SYNC gesture establishes a new master/follower relationship; never let the short
-    // convergence lane from the previous relationship bend either Deck underneath it.
-    cancelSyncAlign();
     // 把按下的这台对齐到另一台的有效 BPM（先试半倍/原倍/双倍取最近档）。
     // 推子量程只钉拇指；真实速率按引擎 0.5–2.0 走，机体推子仍停在原位，走软接管。
     const plan = deckSyncRate(
@@ -2694,24 +2777,52 @@ export function PerformanceWorkspace({
       next[side] = plan.rate;
       return next;
     });
-    onRateChange(side, plan.rate);
-    setSyncLock({ base: side, multiple: plan.multiple });
+    const nextLock = { base: side, multiple: plan.multiple } as const;
+    clearSyncConfirmation();
+    syncLockRef.current = nextLock;
+    setSyncLock(nextLock);
     const follower = decks[side];
-    // 暂停台留给起播边沿对拍。SYNC 当下就 seek 再立刻 Play，会把同一台重建两次。
-    if (!follower.playing) return;
-    syncPhysicalDeck(side, other, plan.multiple, plan.rate);
+    void applySyncRateBeforePhase(
+      () => onRateChange(side, plan.rate),
+      () => {
+        const activeLock = syncLockRef.current;
+        if (
+          activeLock?.base !== nextLock.base
+          || activeLock.multiple !== nextLock.multiple
+          || !follower.playing
+        ) return;
+        if (syncPhysicalDeck(side, other, plan.multiple, plan.rate)) {
+          scheduleSyncConfirmation(side, other, plan.multiple, plan.rate);
+        }
+      },
+    ).then((applied) => {
+      const activeLock = syncLockRef.current;
+      if (
+        applied
+        || activeLock?.base !== nextLock.base
+        || activeLock.multiple !== nextLock.multiple
+      ) return;
+      syncLockRef.current = null;
+      setSyncLock(null);
+      setVisualRates((current) => {
+        const next: [number | null, number | null] = [current[0], current[1]];
+        next[side] = null;
+        return next;
+      });
+    });
   };
   const handleDeckRateChange = (side: 0 | 1, rate: number) => {
-    // A fader move while SYNC is locked must not keep hunting a pre-fader phase error.
-    cancelSyncAlign();
+    cancelPendingSyncCorrection();
     const other = (1 - side) as 0 | 1;
     const follow = previewDeckRate(side, rate);
-    onRateChange(side, rate);
+    const ownApplied = Promise.resolve(onRateChange(side, rate));
     if (follow != null) {
-      onRateChange(other, follow);
+      const otherApplied = Promise.resolve(onRateChange(other, follow));
       const hardware = tempoTakeoverRef.current.hardwareUnit[other];
       if (hardware != null) showTempoHardware(other, hardware);
+      return Promise.all([ownApplied, otherApplied]).then((applied) => applied.every(Boolean));
     }
+    return ownApplied;
   };
 
   useEffect(() => {
@@ -2736,12 +2847,15 @@ export function PerformanceWorkspace({
       const started = decks[side];
       const reference = decks[other];
       if (!started.track || !reference.track) return;
-      syncPhysicalDeck(
+      const multiple = syncLock.base === side ? syncLock.multiple : 1 / syncLock.multiple;
+      if (syncPhysicalDeck(
         side,
         other,
-        syncLock.base === side ? syncLock.multiple : 1 / syncLock.multiple,
+        multiple,
         started.rate,
-      );
+      )) {
+        scheduleSyncConfirmation(side, other, multiple, started.rate);
+      }
     });
   }, [
     syncLock,
@@ -2751,7 +2865,6 @@ export function PerformanceWorkspace({
     decks[1].playing,
     decks[0].track?.id,
     decks[1].track?.id,
-    autoBeatSync,
   ]);
 
   const scratchMultiple = (side: 0 | 1) =>
@@ -2794,6 +2907,7 @@ export function PerformanceWorkspace({
     wholeTrack: boolean,
     commitToTransport = true,
   ) => {
+    cancelPendingSyncCorrection();
     const deck = decksRef.current[side];
     const trackId = deck.track?.id;
     if (trackId == null || delta === 0) return;
@@ -2822,12 +2936,12 @@ export function PerformanceWorkspace({
   const applyMidiAction = (action: MidiResolvedAction) => {
     switch (action.type) {
       case "playToggle":
-        onTogglePlay(action.deck);
+        handleManualTogglePlay(action.deck);
         return;
       case "cue": {
         const deck = decks[action.deck];
         const cue = deck.track?.cue_ms != null ? deck.track.cue_ms / 1000 : (deck.track?.first_beat ?? 0);
-        onMainCue(action.deck, cue);
+        handleManualMainCue(action.deck, cue);
         return;
       }
       case "sync":
@@ -2883,20 +2997,24 @@ export function PerformanceWorkspace({
         toggleStemLayer(action.deck);
         return;
       case "stemGain":
-        for (const stem of action.stems) onStemGain(action.deck, stem, stemEqToGain(action.value));
+        for (const stem of action.stems) {
+          if (stemOptions(stemMode).some((option) => option.stem === stem)) {
+            onStemGain(action.deck, stem, stemEqToGain(action.value));
+          }
+        }
         return;
       case "loopToggle": {
         const deck = decks[action.deck];
         const beat = beatSeconds(deck.track);
         if (!deck.track || !beat) return;
         if (deck.loopStart !== null && deck.loopLength !== null) {
-          onClearLoop(action.deck);
+          handleManualClearLoop(action.deck);
           return;
         }
         const start = snapCueSeconds(deck.position, deck.track.bpm, deck.track.first_beat, quantize);
         const length = loopBeats[action.deck] * beat;
         if (start + length > deck.duration + 0.05) return;
-        onSetLoop(action.deck, start, length);
+        handleManualSetLoop(action.deck, start, length);
         return;
       }
       case "loopSize": {
@@ -2908,7 +3026,9 @@ export function PerformanceWorkspace({
         });
         const deck = decks[action.deck];
         const beat = beatSeconds(deck.track);
-        if (deck.loopStart !== null && beat) onSetLoop(action.deck, deck.loopStart, beats * beat);
+        if (deck.loopStart !== null && beat) {
+          handleManualSetLoop(action.deck, deck.loopStart, beats * beat);
+        }
         return;
       }
       case "jogTouch":
@@ -2923,6 +3043,7 @@ export function PerformanceWorkspace({
         } else if (jogTouchRef.current[action.deck]) {
           moveJogPosition(action.deck, action.delta, false, false);
         } else {
+          cancelPendingSyncCorrection();
           onJogNudgeRef.current(action.deck, midiJogNudgeAmount(action.delta));
         }
         return;
@@ -2944,6 +3065,7 @@ export function PerformanceWorkspace({
           // Older mappings expose only a rotary "scratch" message and have no reliable release
           // edge. Treat that as an edge pitch-bend; pausing it here would have no matching resume
           // command and left the Deck permanently stopped.
+          cancelPendingSyncCorrection();
           onJogNudgeRef.current(action.deck, midiJogNudgeAmount(action.delta));
         }
         return;
@@ -3040,7 +3162,8 @@ export function PerformanceWorkspace({
         {midiPort ? <span className="kd-performance-midi" data-active title={midiPort}>MIDI</span> : null}
         <button type="button" data-active={quantize || undefined} onClick={() => setQuantize((value) => !value)}>QNT</button>
         <ToolbarWaveChannels
-          displayMask={stemDisplayMask}
+          displayMask={activeStemDisplayMask}
+          stemMode={stemMode}
           onDisplayMask={setStemDisplayMask}
         />
         {modules.has("monitor") ? (
@@ -3058,9 +3181,8 @@ export function PerformanceWorkspace({
       {modules.has("wave") ? (
         <div className="kd-performance-wave-stack">
           {([0, 1] as const).map((side) => {
-            const position = scratchPreviews[side] ?? syncHolds[side] ?? decks[side].position;
+            const position = scratchPreviews[side] ?? decks[side].position;
             const interactiveScrub = midiScratchActive[side] || scratchPreviews[side] != null;
-            const snapRail = scratchPreviews[side] == null && syncHolds[side] != null;
             const other = (1 - side) as 0 | 1;
             return (
               <PerformanceDeckWaves
@@ -3068,20 +3190,21 @@ export function PerformanceWorkspace({
               deck={viewDecks[side]}
                 other={viewDecks[other]}
               stemState={stems[side]}
+              stemMode={stemMode}
                 side={side}
               position={position}
               interactiveScrub={interactiveScrub}
-              snapRail={snapRail}
-              displayMask={stemDisplayMask}
+              snapRail={false}
+              displayMask={activeStemDisplayMask}
               waveforms={stemWaveforms[side]}
                 autoBeatSync={autoBeatSync}
                 syncMultiple={scratchMultiple(side)}
-                onSeek={onSeek}
-                onScratchHold={onScratchHold}
-                onScratchRelease={onScratchRelease}
+                onSeek={handleManualSeek}
+                onScratchHold={handleManualScratchHold}
+                onScratchRelease={handleManualScratchRelease}
                 onScratchPreview={updateScratchPreview}
                 onScratchTick={onJogScratchTick}
-                onTrackDrop={onTrackDrop}
+                onTrackDrop={handleManualTrackDrop}
               />
             );
           })}
@@ -3090,8 +3213,8 @@ export function PerformanceWorkspace({
 
       {modules.has("info") ? (
         <div className="kd-performance-info-grid">
-          <StableDeckInfo deck={decks[0]} side={0} preserveBarPhase={autoBeatSync} onSeek={onSeek} onTrackDrop={onTrackDrop} />
-          <StableDeckInfo deck={decks[1]} side={1} preserveBarPhase={autoBeatSync} onSeek={onSeek} onTrackDrop={onTrackDrop} />
+          <StableDeckInfo deck={decks[0]} side={0} preserveBarPhase={autoBeatSync} onSeek={handleManualSeek} onTrackDrop={handleManualTrackDrop} />
+          <StableDeckInfo deck={decks[1]} side={1} preserveBarPhase={autoBeatSync} onSeek={handleManualSeek} onTrackDrop={handleManualTrackDrop} />
         </div>
       ) : null}
 
@@ -3099,7 +3222,7 @@ export function PerformanceWorkspace({
         <DeckControls
           deck={viewDecks[0]} stemState={stems[0]} stemModel={stemModel} side={0} modules={modules} quantize={quantize}
           loopBeats={loopBeats[0]} setLoopBeats={(beats) => setLoopBeats((current) => [beats, current[1]])}
-          onSeek={onSeek} onTogglePlay={onTogglePlay} onMainCue={onMainCue}
+          onSeek={handleManualSeek} onTogglePlay={handleManualTogglePlay} onMainCue={handleManualMainCue}
           syncLocked={syncLock !== null}
           syncEnabled={syncEnabled}
           onToggleSync={toggleSyncLock}
@@ -3109,9 +3232,10 @@ export function PerformanceWorkspace({
           onSoftwareTempoOverride={armTempoTakeover}
           onDownloadStemModel={onDownloadStemModel}
           onToggleStem={onToggleStem}
-          onSetLoop={onSetLoop} onClearLoop={onClearLoop}
+          onSetLoop={handleManualSetLoop} onClearLoop={handleManualClearLoop}
           onSaveCuePoints={onSaveCuePoints} onSaveMainCue={onSaveMainCue}
-          stemLanesVisible={performanceStemLanesVisible(stemDisplayMask)}
+          stemMode={stemMode}
+          stemLanesVisible={performanceStemLanesVisible(activeStemDisplayMask)}
         />
         <section className="kd-performance-master">
           {modules.has("mixer") ? (
@@ -3120,6 +3244,7 @@ export function PerformanceWorkspace({
                 <StemEqStrip
                   side={0}
                   gains={stems[0].gains}
+                  stemMode={stemMode}
                   midiActive={eqStemMode[0] === "stems"}
                   ready={stemModel?.state === "ready" && Boolean(decks[0].track && usesLocalLibraryRecord(decks[0].track))}
                   onChange={(stem, gain) => onStemGain(0, stem, gain)}
@@ -3137,6 +3262,7 @@ export function PerformanceWorkspace({
                 <StemEqStrip
                   side={1}
                   gains={stems[1].gains}
+                  stemMode={stemMode}
                   midiActive={eqStemMode[1] === "stems"}
                   ready={stemModel?.state === "ready" && Boolean(decks[1].track && usesLocalLibraryRecord(decks[1].track))}
                   onChange={(stem, gain) => onStemGain(1, stem, gain)}
@@ -3175,7 +3301,7 @@ export function PerformanceWorkspace({
         <DeckControls
           deck={viewDecks[1]} stemState={stems[1]} stemModel={stemModel} side={1} modules={modules} quantize={quantize}
           loopBeats={loopBeats[1]} setLoopBeats={(beats) => setLoopBeats((current) => [current[0], beats])}
-          onSeek={onSeek} onTogglePlay={onTogglePlay} onMainCue={onMainCue}
+          onSeek={handleManualSeek} onTogglePlay={handleManualTogglePlay} onMainCue={handleManualMainCue}
           syncLocked={syncLock !== null}
           syncEnabled={syncEnabled}
           onToggleSync={toggleSyncLock}
@@ -3185,9 +3311,10 @@ export function PerformanceWorkspace({
           onSoftwareTempoOverride={armTempoTakeover}
           onDownloadStemModel={onDownloadStemModel}
           onToggleStem={onToggleStem}
-          onSetLoop={onSetLoop} onClearLoop={onClearLoop}
+          onSetLoop={handleManualSetLoop} onClearLoop={handleManualClearLoop}
           onSaveCuePoints={onSaveCuePoints} onSaveMainCue={onSaveMainCue}
-          stemLanesVisible={performanceStemLanesVisible(stemDisplayMask)}
+          stemMode={stemMode}
+          stemLanesVisible={performanceStemLanesVisible(activeStemDisplayMask)}
         />
       </div>
     </div>

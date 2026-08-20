@@ -31,6 +31,8 @@ export type VideoFormat = "mp4" | "mkv" | "mov";
 export type KeyNotation = "camelot" | "traditional";
 /** Performance 双极滤波器的共振档位；后端将其映射为稳定的 DSP Q。 */
 export type FilterResonance = "low" | "medium" | "high";
+export type StemMode = "none" | "four" | "mobile_net_two";
+export type StemCompute = "auto" | "gpu" | "cpu";
 
 export interface Settings {
   download_dir: string;
@@ -72,6 +74,10 @@ export interface Settings {
   player_waveform: boolean;
   /** Performance 双极滤波器的共振强度。 */
   filter_resonance: FilterResonance;
+  /** 全局 STEM 轨数；none 时 Deck 不挂载模型或扫描任务。 */
+  stem_mode: StemMode;
+  /** STEM execution provider 偏好；auto 优先平台加速器。 */
+  stem_compute: StemCompute;
   /** 本地与 OneLibrary 列表里的调性表示。 */
   key_notation: KeyNotation;
   /** KDJ 虚拟磁盘空间不足时，创建更大的镜像、迁移数据并重试。 */
@@ -684,7 +690,7 @@ export interface LiveStemWaveformStem {
 
 export interface LiveStemWaveformDelta {
   track_id: number;
-  /** Playback epoch: changes on seek / new live STEM session, so stale columns can be discarded. */
+  /** Public waveform epoch: changes for a new song/model session, but remains stable across seeks. */
   epoch: number;
   duration: number;
   columns: number;
@@ -721,6 +727,16 @@ export interface StemRuntimeDiagnostics {
   outputUnderruns: number;
   memoryErrors: number;
   lastError: string;
+  instantAvailable: boolean;
+  instantReadyDecks: number;
+  instantPcmPreloadMs: number | null;
+  instantPcmCacheHits: number;
+  instantFirstHopMs: number | null;
+  instantLastHopMs: number | null;
+  instantP95HopMs: number | null;
+  instantLateHops: number;
+  instantFailures: number;
+  refinementDeferred: number;
 }
 
 export interface TrackStemStatus {
@@ -769,6 +785,73 @@ export interface StemDebugModelCatalog {
   root: string;
   models: StemDebugModelStatus[];
 }
+
+export type StemLabBackend = "cpu" | "coreml-gpu" | "coreml-all";
+
+export interface StemLabModelInfo {
+  id: string;
+  role: string;
+  path: string | null;
+  ready: boolean;
+  note: string;
+}
+
+export interface StemLabCatalog {
+  sampleRate: number;
+  spleeterTileSeconds: number;
+  spleeterCoreSeconds: number;
+  hstasnetHopMs: number;
+  hstasnet: StemLabModelInfo;
+  spleeter4: StemLabModelInfo;
+}
+
+export interface StemLabStageReport {
+  stage: string;
+  model: string;
+  backend: string;
+  contextSeconds: number;
+  wallMs: number;
+  wallMeanMs: number;
+  wallP95Ms: number | null;
+  audioSeconds: number;
+  rtf: number;
+  cpuRatio: number;
+  firstOutputMs: number | null;
+  snrDb: [number, number, number, number] | null;
+  snrReference: string | null;
+}
+
+export interface StemLabSchedule {
+  firstOutputMs: number;
+  firstTileWallMs: number;
+  streamHopMs: number;
+  streamStepMeanMs: number;
+  streamStepP95Ms: number;
+  refinedTileWallMs: number;
+  refinedCoreSeconds: number;
+  replaceMarginMs: number;
+  notes: string[];
+}
+
+export interface StemLabTrialReport {
+  source: string;
+  seekSeconds: number;
+  backend: string;
+  stemMapping: [number, number, number, number];
+  mappingConfidenceDb: [number, number, number, number];
+  stages: StemLabStageReport[];
+  schedule: StemLabSchedule;
+}
+
+export interface StemLabSeekResponse {
+  sessionId: string;
+  trackId: number;
+  title: string;
+  durationSeconds: number;
+  report: StemLabTrialReport;
+  audio: StemDebugAudioUrls;
+}
+
 
 export interface StemDebugWaveforms {
   original: number[];

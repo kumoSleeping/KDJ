@@ -138,7 +138,8 @@ import {
   type PerformanceStemDeckModel,
 } from "./PerformanceWorkspace";
 import { eqBandDb, nextLoadedDeckIndex, performanceLoadDeckIndex } from "../../lib/performanceCues";
-import { clampStemGain } from "../../lib/stemEq";
+import { clampStemGain, stemGainRequestReady } from "../../lib/stemEq";
+import { allStemMask as stemMaskForMode } from "../../lib/stemMode";
 import {
   beginMidiScratchHold,
   canResumeMidiScratchHold,
@@ -459,6 +460,10 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
   const openQueuePanel = useAppStore((state) => state.openQueuePanel);
   const defaultQuality = useAppStore((state) => state.settings?.default_quality ?? null);
   const filterResonance = useAppStore((state) => state.settings?.filter_resonance ?? "high");
+  const stemMode = useAppStore((state) => state.settings?.stem_mode ?? "none");
+  const stemCompute = useAppStore((state) => state.settings?.stem_compute ?? "auto");
+  const desiredStemRuntimeKey = `${stemMode}:${stemCompute}`;
+  const allStemMask = stemMaskForMode(stemMode);
   const enqueueDownload = useDownloadStore((state) => state.enqueue);
   const [enqueueBusy, setEnqueueBusy] = useState(false);
   const desktopLyricsOn = useLyricsPrefs((state) => state.desktopEnabled);
@@ -592,16 +597,18 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     PerformanceStemDeckModel,
     PerformanceStemDeckModel,
   ]>([
-    { status: null, enabled: false, mask: 0b1111, gains: [1, 1, 1, 1] },
-    { status: null, enabled: false, mask: 0b1111, gains: [1, 1, 1, 1] },
+    { status: null, enabled: false, mask: allStemMask, gains: [1, 1, 1, 1] },
+    { status: null, enabled: false, mask: allStemMask, gains: [1, 1, 1, 1] },
   ]);
   const [performanceStemModel, setPerformanceStemModel] = useState<StemModelStatus | null>(null);
+  const [stemRuntimeReadyKey, setStemRuntimeReadyKey] = useState<string | null>(null);
   const reportedStemModelErrorRef = useRef("");
   const reportedStemTrackErrorsRef = useRef<[string, string]>(["", ""]);
   const pendingStemActionRef = useRef<[
     StemName | "all" | null,
     StemName | "all" | null,
   ]>([null, null]);
+  const pendingStemGainTrackRef = useRef<[number | null, number | null]>([null, null]);
   const stemDeckTrackIdsRef = useRef<[number | null, number | null]>([null, null]);
   /** Loop 只能走原曲切片；开着时保留原曲，直到用户明确退出 Loop 或重新启用 STEM。 */
   const loopHoldsOriginalRef = useRef<[boolean, boolean]>([false, false]);
@@ -3719,10 +3726,14 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
   performanceStemModelRef.current = performanceStemModel;
 
   useEffect(() => {
-    if (!dualDeck) return;
+    if (!dualDeck || stemRuntimeReadyKey !== desiredStemRuntimeKey || stemMode === "none") {
+      setPerformanceStemModel(null);
+      return;
+    }
     let alive = true;
+    let timer: number | null = null;
     const refresh = () => {
-      void api.stemModelStatus().then((status) => {
+      void api.stemModelStatus(stemMode, stemCompute).then((status) => {
         if (!alive) return;
         setPerformanceStemModel(status);
         if (status.state === "error" && status.error) {
@@ -3733,6 +3744,8 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
         } else if (status.state !== "error") {
           reportedStemModelErrorRef.current = "";
         }
+        const fast = status.state === "queued" || status.state === "downloading";
+        timer = window.setTimeout(refresh, fast ? 500 : 5000);
       }).catch((error: unknown) => {
         if (!alive) return;
         const message = error instanceof Error ? error.message : String(error);
@@ -3740,18 +3753,18 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
           reportedStemModelErrorRef.current = message;
           setNotice(`读取 STEM 模型状态失败：${message}`);
         }
+        timer = window.setTimeout(refresh, 1000);
       });
     };
     refresh();
-    const fast = performanceStemModel?.state === "queued" || performanceStemModel?.state === "downloading";
-    const timer = window.setInterval(refresh, fast ? 500 : 5000);
     return () => {
       alive = false;
-      window.clearInterval(timer);
+      if (timer !== null) window.clearTimeout(timer);
     };
-  }, [dualDeck, performanceStemModel?.state]);
+  }, [desiredStemRuntimeKey, dualDeck, stemCompute, stemMode, stemRuntimeReadyKey]);
 
   const downloadPerformanceStemModel = () => {
+    if (stemMode === "none") return;
     if (!performanceStemModel?.supported) {
       setNotice("当前平台暂不支持分轨");
       return;
@@ -3759,7 +3772,7 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     if (performanceStemModel.state === "queued" || performanceStemModel.state === "downloading") return;
     reportedStemModelErrorRef.current = "";
     setNotice("");
-    void api.downloadStemModel().then(setPerformanceStemModel).catch((error: unknown) => {
+    void api.downloadStemModel(stemMode, stemCompute).then(setPerformanceStemModel).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       reportedStemModelErrorRef.current = message;
       setNotice(`STEM 模型下载失败：${message}`);
@@ -3781,6 +3794,7 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     Promise.resolve(),
     Promise.resolve(),
   ]);
+  const stemAutoArmRef = useRef<[boolean, boolean]>([true, true]);
   const applyStemModeNow = async (
     side: 0 | 1,
     trackId: number,
@@ -3792,7 +3806,13 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     if (!deckTrack || deckTrack.id !== trackId) return;
     let status = performanceStemsRef.current[side].status;
     if (!status || status.trackId !== deckTrack.id || status.state !== "ready" || !status.cachePath) {
-      const fetched = await api.trackStemStatus(deckTrack.id, deck.position, deck.playing);
+      const fetched = await api.trackStemStatus(
+        deckTrack.id,
+        stemMode,
+        stemCompute,
+        deck.position,
+        deck.playing,
+      );
       if (performanceDecksRef.current[side].track?.id !== trackId) return;
       status = fetched;
       setPerformanceStems((current) => {
@@ -3808,12 +3828,41 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     if (!status || status.trackId !== deckTrack.id || status.state !== "ready" || !status.cachePath) {
       throw new Error("STEM 尚未就绪");
     }
+    const nextGains = [...stemGainDraftRef.current[side]] as [number, number, number, number];
+    if (enabled) {
+      setPerformanceStems((current) => {
+        const next: [PerformanceStemDeckModel, PerformanceStemDeckModel] = [
+          { ...current[0] },
+          { ...current[1] },
+        ];
+        next[side].enabled = true;
+        next[side].mask = mask & 0b1111;
+        if (stemGainTimersRef.current[side] === null) {
+          next[side].gains = nextGains;
+        }
+        return next;
+      });
+    }
     await ensurePerformanceDeck(side, deck.playing);
     if (performanceDecksRef.current[side].track?.id !== trackId) return;
     // 读取即时 draft，而非排队前的 React state 快照。这样在 STEM 流准备期间发生的
     // 第一次 EQ 拧动会随流的首次安装一起交给渲染线程。
-    const nextGains = [...stemGainDraftRef.current[side]] as [number, number, number, number];
-    await playerRuntime.setDeckStems(deckTrack.id, enabled, status.cachePath, mask, nextGains);
+    const liveGains = [...stemGainDraftRef.current[side]] as [number, number, number, number];
+    try {
+      await playerRuntime.setDeckStems(deckTrack.id, enabled, status.cachePath, mask, liveGains);
+    } catch (error) {
+      if (enabled) {
+        setPerformanceStems((current) => {
+          const next: [PerformanceStemDeckModel, PerformanceStemDeckModel] = [
+            { ...current[0] },
+            { ...current[1] },
+          ];
+          next[side].enabled = false;
+          return next;
+        });
+      }
+      throw error;
+    }
     if (performanceDecksRef.current[side].track?.id !== trackId) return;
     setPerformanceStems((current) => {
       const next: [PerformanceStemDeckModel, PerformanceStemDeckModel] = [
@@ -3823,7 +3872,7 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
       next[side].enabled = enabled;
       next[side].mask = mask & 0b1111;
       if (stemGainTimersRef.current[side] === null) {
-        next[side].gains = nextGains;
+        next[side].gains = liveGains;
       }
       return next;
     });
@@ -3861,6 +3910,7 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     )] as [number, number, number, number];
     gains[stemGainIndex(stem)] = clampStemGain(value);
     stemGainDraftRef.current[side] = gains;
+    pendingStemGainTrackRef.current[side] = deckTrack.id;
     // STEM EQ 旋钮以指针速度更新本地控件；IPC 合并成 50ms 尾随一次。
     // 引擎在渲染线程直接混音，这个频率下的听觉依然是无级连续的。
     setPerformanceStems((states) => {
@@ -3884,9 +3934,16 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     stemGainTimersRef.current[side] = window.setTimeout(() => {
       stemGainTimersRef.current[side] = null;
       const live = performanceStemsRef.current[side];
-      void applyStemModeRef.current(side, true, live.mask).catch((error: unknown) => {
-        setNotice(`STEM EQ 失败：${error instanceof Error ? error.message : String(error)}`);
-      });
+      if (!stemGainRequestReady(live.status, deckTrack.id)) return;
+      void applyStemModeRef.current(side, true, live.mask)
+        .then(() => {
+          if (pendingStemGainTrackRef.current[side] === deckTrack.id) {
+            pendingStemGainTrackRef.current[side] = null;
+          }
+        })
+        .catch((error: unknown) => {
+          setNotice(`STEM EQ 失败：${error instanceof Error ? error.message : String(error)}`);
+        });
     }, 50);
   };
 
@@ -3913,6 +3970,7 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
   };
 
   const startPerformanceStems = (side: 0 | 1) => {
+    if (stemMode === "none") return;
     if (performanceStemModel?.state !== "ready") {
       downloadPerformanceStemModel();
       return;
@@ -3920,17 +3978,22 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     const deckTrack = performanceDecks[side].track;
     if (!deckTrack || !usesLocalLibraryRecord(deckTrack)) {
       setNotice("STEM 仅支持本机曲库文件");
+      return;
+    }
+    if (!stemGainRequestReady(performanceStemsRef.current[side].status, deckTrack.id)) {
+      pendingStemActionRef.current[side] = "all";
       return;
     }
     loopHoldsOriginalRef.current[side] = false;
     // The audible worker publishes the same separated blocks used by the rails. Starting an
     // additional display scan first wastes an accelerator tile and can delay the first audio job.
-    void applyStemMode(side, true, 0b1111).catch((error: unknown) => {
+    void applyStemMode(side, true, allStemMask).catch((error: unknown) => {
       setNotice(`STEM 切换失败：${error instanceof Error ? error.message : String(error)}`);
     });
   };
 
   const togglePerformanceStem = (side: 0 | 1, stem: StemName) => {
+    if (stemMode === "none") return;
     if (performanceStemModel?.state !== "ready") {
       downloadPerformanceStemModel();
       return;
@@ -3941,8 +4004,12 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
       setNotice("STEM 仅支持本机曲库文件");
       return;
     }
+    if (!stemGainRequestReady(performanceStemsRef.current[side].status, deckTrack.id)) {
+      pendingStemActionRef.current[side] = stem;
+      return;
+    }
     const current = performanceStems[side];
-    const baseMask = current.enabled ? current.mask : 0b1111;
+    const baseMask = current.enabled ? current.mask : allStemMask;
     const nextMask = baseMask ^ stemBit(stem);
     void applyStemMode(side, true, nextMask).catch((error: unknown) => {
       setNotice(`STEM 切换失败：${error instanceof Error ? error.message : String(error)}`);
@@ -3951,21 +4018,32 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
 
   const restorePerformanceOriginal = (side: 0 | 1) => {
     if (!performanceStems[side].enabled) return;
+    stemAutoArmRef.current[side] = false;
     void applyStemMode(side, false, performanceStems[side].mask).catch((error: unknown) => {
       setNotice(`原曲切换失败：${error instanceof Error ? error.message : String(error)}`);
     });
   };
 
   const ensurePerformanceStemWaveScan = useCallback((side: 0 | 1) => {
-    if (performanceStemModel?.state !== "ready") return;
+    if (
+      stemMode === "none"
+      || performanceStemModel?.state !== "ready"
+      || stemRuntimeReadyKey !== desiredStemRuntimeKey
+    ) return;
+    const requestMode = stemMode;
+    const requestCompute = stemCompute;
     const deck = performanceDecksRef.current[side];
     const deckTrack = deck.track;
     if (!deckTrack || !usesLocalLibraryRecord(deckTrack)) return;
     void api.separateTrackStems(deckTrack.id, deck.position, {
+      mode: stemMode,
+      compute: stemCompute,
       duration: deck.duration || deckTrack.duration || 0,
       deck: side,
       playing: deck.playing,
     }).then((status) => {
+      const selected = stemPreferenceRef.current;
+      if (selected?.mode !== requestMode || selected.compute !== requestCompute) return;
       if (performanceDecksRef.current[side].track?.id !== deckTrack.id) return;
       setPerformanceStems((current) => {
         if (sameStemStatus(current[side].status, status)) return current;
@@ -3977,20 +4055,130 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
         return next;
       });
     }).catch((error: unknown) => {
+      const selected = stemPreferenceRef.current;
+      if (selected?.mode !== requestMode || selected.compute !== requestCompute) return;
       if (performanceDecksRef.current[side].track?.id !== deckTrack.id) return;
       const message = error instanceof Error ? error.message : String(error);
       if (reportedStemTrackErrorsRef.current[side] === message) return;
       reportedStemTrackErrorsRef.current[side] = message;
       setNotice(`Deck ${side === 0 ? "A" : "B"} 自动 STEM 准备失败：${message}`);
     });
-  }, [performanceStemModel?.state]);
+  }, [
+    desiredStemRuntimeKey,
+    performanceStemModel?.state,
+    stemCompute,
+    stemMode,
+    stemRuntimeReadyKey,
+  ]);
 
   const releasePerformanceStemWaveScan = useCallback((trackId: number) => {
     void api.releaseTrackStems(trackId).catch(() => undefined);
   }, []);
 
+  const stemPreferenceRef = useRef<{ mode: typeof stemMode; compute: typeof stemCompute } | null>(null);
+  const stemRuntimeTailRef = useRef<Promise<void>>(Promise.resolve());
+  const stemRuntimeGenerationRef = useRef(0);
   useEffect(() => {
     if (!dualDeck) return;
+    const previous = stemPreferenceRef.current;
+    if (previous?.mode === stemMode && previous.compute === stemCompute) return;
+    stemPreferenceRef.current = { mode: stemMode, compute: stemCompute };
+    const generation = ++stemRuntimeGenerationRef.current;
+    const deckSnapshots = ([0, 1] as const).map((side) => ({
+      side,
+      stem: performanceStemsRef.current[side],
+      trackId: performanceDecksRef.current[side].track?.id,
+    }));
+    const priorDeckTails = [...stemModeTailsRef.current] as [Promise<void>, Promise<void>];
+    const priorRuntime = stemRuntimeTailRef.current;
+
+    setStemRuntimeReadyKey(null);
+    setPerformanceStemModel(null);
+    deckSnapshots.forEach(({ side }) => {
+      pendingStemActionRef.current[side] = null;
+      pendingStemGainTrackRef.current[side] = null;
+      loopHoldsOriginalRef.current[side] = false;
+      stemAutoArmRef.current[side] = true;
+      stemGainDraftRef.current[side] = [1, 1, 1, 1];
+      if (stemGainTimersRef.current[side] !== null) {
+        window.clearTimeout(stemGainTimersRef.current[side]!);
+        stemGainTimersRef.current[side] = null;
+      }
+    });
+    setPerformanceStems([
+      { status: null, enabled: false, mask: allStemMask, gains: [1, 1, 1, 1] },
+      { status: null, enabled: false, mask: allStemMask, gains: [1, 1, 1, 1] },
+    ]);
+
+    const waitForInstalledOriginal = async (side: 0 | 1, trackId: number) => {
+      const deadline = Date.now() + 3_000;
+      while (Date.now() < deadline) {
+        const deck = playerRuntime.state().decks[side];
+        if (deck.trackId !== trackId || !deck.stemEnabled) return;
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 20));
+      }
+      throw new Error(`Deck ${side === 0 ? "A" : "B"} 未能安全切回原曲`);
+    };
+
+    const deckRetirements = deckSnapshots.map(({ side, stem, trackId }) => {
+      const retirement = priorRuntime
+        .then(() => priorDeckTails[side])
+        .then(async () => {
+          if (trackId === undefined) return;
+          const installed = playerRuntime.state().decks[side];
+          if (stem.enabled || (installed.trackId === trackId && installed.stemEnabled)) {
+            await playerRuntime.setDeckStems(
+              trackId,
+              false,
+              stem.status?.cachePath ?? "",
+              stem.mask,
+              stem.gains,
+            );
+            await waitForInstalledOriginal(side, trackId);
+          }
+        });
+      stemModeTailsRef.current[side] = retirement.then(
+        () => undefined,
+        () => undefined,
+      );
+      return retirement;
+    });
+
+    const operation = Promise.all(deckRetirements)
+      .then(async () => {
+        const trackIds = [...new Set(
+          deckSnapshots
+            .map(({ trackId }) => trackId)
+            .filter((trackId): trackId is number => trackId !== undefined),
+        )];
+        await Promise.all(trackIds.map((trackId) => api.releaseTrackStems(trackId)));
+        return api.activateStemRuntime(stemMode, stemCompute);
+      })
+      .then((status) => {
+        if (stemRuntimeGenerationRef.current !== generation) return;
+        setStemRuntimeReadyKey(desiredStemRuntimeKey);
+        setPerformanceStemModel(stemMode === "none" ? null : status);
+      })
+      .catch((error: unknown) => {
+        if (stemRuntimeGenerationRef.current !== generation) return;
+        stemPreferenceRef.current = null;
+        setStemRuntimeReadyKey(null);
+        setPerformanceStemModel(null);
+        setNotice(`切换 STEM runtime 失败：${error instanceof Error ? error.message : String(error)}`);
+      });
+    stemRuntimeTailRef.current = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+  }, [allStemMask, desiredStemRuntimeKey, dualDeck, playerRuntime, stemCompute, stemMode]);
+
+  useEffect(() => {
+    if (
+      !dualDeck
+      || stemMode === "none"
+      || stemRuntimeReadyKey !== desiredStemRuntimeKey
+      || performanceStemModel?.state !== "ready"
+    ) return;
     let alive = true;
     const nextTrackIds: [number | null, number | null] = [
       performanceDecks[0].track?.id ?? null,
@@ -4001,7 +4189,7 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
       const prior = priorTrackIds[side];
       if (prior !== null && prior !== nextTrackIds[side] && !nextTrackIds.includes(prior)) {
         // Whole-track display fill is intentionally lease-bound. Releasing an old Deck must
-        // cancel it immediately instead of letting hidden SCNet work compete with the live Deck.
+        // cancel it immediately instead of letting hidden Spleeter4 work compete with the live Deck.
         void api.releaseTrackStems(prior).catch(() => undefined);
       }
     });
@@ -4012,13 +4200,15 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
       ];
       ([0, 1] as const).forEach((side) => {
         if (stemDeckTrackIdsRef.current[side] === nextTrackIds[side]) return;
-        next[side] = { status: null, enabled: false, mask: 0b1111, gains: [1, 1, 1, 1] };
+        next[side] = { status: null, enabled: false, mask: allStemMask, gains: [1, 1, 1, 1] };
         pendingStemActionRef.current[side] = null;
+        pendingStemGainTrackRef.current[side] = null;
         loopHoldsOriginalRef.current[side] = false;
+        stemAutoArmRef.current[side] = true;
         reportedStemTrackErrorsRef.current[side] = "";
         stemGainDraftRef.current[side] = [1, 1, 1, 1];
-        // 不让上一首歌的异步 STEM 状态查询拖住新 Deck 的首次 EQ。
-        stemModeTailsRef.current[side] = Promise.resolve();
+        // Keep the tail itself: late work checks track identity before publishing, while replacing
+        // the Promise here would let an old enable/disable overtake a model-switch retirement.
         if (stemGainTimersRef.current[side] !== null) {
           window.clearTimeout(stemGainTimersRef.current[side]!);
           stemGainTimersRef.current[side] = null;
@@ -4032,7 +4222,13 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
         const deck = performanceDecksRef.current[side];
         const deckTrack = deck.track;
         if (!deckTrack || !usesLocalLibraryRecord(deckTrack)) return;
-        void api.trackStemStatus(deckTrack.id, deck.position, deck.playing).then((status) => {
+        void api.trackStemStatus(
+          deckTrack.id,
+          stemMode,
+          stemCompute,
+          deck.position,
+          deck.playing,
+        ).then((status) => {
           if (!alive) return;
           if (status.state === "error" && status.error) {
             if (reportedStemTrackErrorsRef.current[side] !== status.error) {
@@ -4067,6 +4263,10 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     performanceDecks[0].track?.id,
     performanceDecks[1].track?.id,
     performanceStemModel?.state,
+    desiredStemRuntimeKey,
+    stemCompute,
+    stemMode,
+    stemRuntimeReadyKey,
   ]);
 
   useEffect(() => {
@@ -4085,17 +4285,44 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
       const pending = pendingStemActionRef.current[side];
       const status = performanceStems[side].status;
       const deckTrack = performanceDecks[side].track;
-      if (!pending || status?.state !== "ready" || status.trackId !== deckTrack?.id) return;
+      const pendingGain = pendingStemGainTrackRef.current[side] === deckTrack?.id;
+      const shouldAutoEnable = stemAutoArmRef.current[side]
+        && !pending
+        && !pendingGain
+        && !performanceStems[side].enabled
+        && stemMode !== "none"
+        && stemRuntimeReadyKey === desiredStemRuntimeKey;
+      if ((!pending && !pendingGain && !shouldAutoEnable) || status?.state !== "ready" || status.trackId !== deckTrack?.id) return;
       if (loopHoldsOriginalRef.current[side]) return;
-      pendingStemActionRef.current[side] = null;
-      const mask = pending === "all" ? 0b1111 : 0b1111 ^ stemBit(pending);
-      void applyStemMode(side, true, mask).catch((error: unknown) => {
-        setNotice(`STEM 切换失败：${error instanceof Error ? error.message : String(error)}`);
-      });
+      const mask = pending === "all"
+        ? allStemMask
+        : pending
+          ? allStemMask ^ stemBit(pending)
+          : shouldAutoEnable
+            ? allStemMask
+            : performanceStemsRef.current[side].mask;
+      if (shouldAutoEnable) stemAutoArmRef.current[side] = false;
+      void applyStemMode(side, true, mask)
+        .then(() => {
+          if (pendingStemActionRef.current[side] === pending) pendingStemActionRef.current[side] = null;
+          if (pendingStemGainTrackRef.current[side] === deckTrack.id) {
+            pendingStemGainTrackRef.current[side] = null;
+          }
+        })
+        .catch((error: unknown) => {
+          if (shouldAutoEnable) stemAutoArmRef.current[side] = true;
+          setNotice(`STEM 切换失败：${error instanceof Error ? error.message : String(error)}`);
+        });
     });
   }, [
+    allStemMask,
+    desiredStemRuntimeKey,
+    stemMode,
+    stemRuntimeReadyKey,
     performanceDecks[0].track?.id,
     performanceDecks[1].track?.id,
+    performanceStems[0].enabled,
+    performanceStems[1].enabled,
     performanceStems[0].status?.state,
     performanceStems[1].status?.state,
     performanceStems[0].status?.trackId,
@@ -4275,6 +4502,7 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
       decks={performanceDecks}
       stems={performanceStems}
       stemModel={performanceStemModel}
+      stemMode={stemMode}
       masterVolume={playerVolume}
       embedded={workMode === "dj"}
       onClose={() => {
@@ -4429,9 +4657,13 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
       }}
       onRateChange={(side, rate) => {
         const deckTrack = performanceDecks[side].track;
-        if (!deckTrack) return;
-        void playerRuntime.setDeckRate(side, Math.min(2, Math.max(0.5, rate)))
-          .catch((error: unknown) => setNotice(`TEMPO 调整失败：${error instanceof Error ? error.message : String(error)}`));
+        if (!deckTrack) return false;
+        return playerRuntime.setDeckRate(side, Math.min(2, Math.max(0.5, rate)))
+          .then(() => true)
+          .catch((error: unknown) => {
+            setNotice(`TEMPO 调整失败：${error instanceof Error ? error.message : String(error)}`);
+            return false;
+          });
       }}
       onMixerChange={(side, values, channelGain) => {
         performanceChannelGainsRef.current[side] = channelGain;

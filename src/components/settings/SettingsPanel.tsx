@@ -47,15 +47,18 @@ import { api } from "../../lib/api";
 import { formatBytes } from "../../lib/format";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { openStemDebug } from "../../lib/stemDebug";
+import { openStemLab } from "../../lib/stemLab";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
 import type {
   FilterResonance,
   KeyNotation,
   Quality,
+  StemCompute,
   StemModelStatus,
   StreamCacheStats,
 } from "../../types";
+import { stemModeLabel } from "../../lib/stemMode";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { Button, InlineNotice, Panel } from "../common";
@@ -687,9 +690,16 @@ export function SettingsPanel() {
   }, [settings?.download_dir, settings?.stream_cache_enabled]);
 
   useEffect(() => {
+    if ((settings?.stem_mode ?? "none") === "none") {
+      setStemModel(null);
+      return;
+    }
     let disposed = false;
     const refresh = () => {
-      void api.stemModelStatus().then((status) => {
+      void api.stemModelStatus(
+        settings?.stem_mode ?? "none",
+        settings?.stem_compute ?? "auto",
+      ).then((status) => {
         if (!disposed) setStemModel(status);
       }).catch(() => {
         // The settings panel remains usable if an older local server has no STEM endpoint.
@@ -704,13 +714,16 @@ export function SettingsPanel() {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [stemModel?.state]);
+  }, [settings?.stem_compute, settings?.stem_mode, stemModel?.state]);
 
   const downloadStemModel = async () => {
     if (stemModelBusy) return;
     setStemModelBusy(true);
     try {
-      setStemModel(await api.downloadStemModel());
+      setStemModel(await api.downloadStemModel(
+        settings?.stem_mode ?? "none",
+        settings?.stem_compute ?? "auto",
+      ));
     } catch (error) {
       setStemModel((current) => current ? {
         ...current,
@@ -865,36 +878,56 @@ export function SettingsPanel() {
         </Panel>
 
         <Panel heading="STEM" dense>
-          <div className="kd-stream-cache-row">
-            <span className="kd-muted">
-              {stemModel?.state === "ready"
-                ? `SCNet Small ${stemModel.version} · 已安装`
-                : stemModel?.state === "downloading" || stemModel?.state === "queued"
-                  ? `SCNet Small · ${Math.round(stemModel.progress * 100)}% · ${formatBytes(stemModel.downloadedBytes)}`
-                  : stemModel?.state === "unsupported"
-                    ? "当前平台尚未提供 STEM runtime"
-                    : "SCNet Small · Core ML · 33 MB"}
-            </span>
-            {stemModel?.supported && stemModel.state !== "ready" ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={stemModelBusy || stemModel.state === "downloading" || stemModel.state === "queued"}
-                onClick={() => void downloadStemModel()}
-              >
-                {stemModel.state === "error" ? "重试" : "下载模型"}
-              </Button>
-            ) : null}
+          <div className="kd-djp-switch-list" aria-label="STEM 选项">
+            <CycleToggle<StemCompute>
+              label="运算设备"
+              value={settings?.stem_compute ?? "auto"}
+              options={[
+                { id: "auto", text: "自动" },
+                { id: "gpu", text: "GPU" },
+                { id: "cpu", text: "CPU" },
+              ]}
+              title="自动优先 CoreML、DirectML 或 NNAPI；不可用时回退 CPU。强制 GPU 不会静默回退。"
+              onChange={(next) => void saveSettings({ stem_compute: next })}
+            />
           </div>
-          <InlineNotice
-            text={stemModel?.error ?? ""}
-            block
-            onDismiss={() => setStemModel((current) => current ? { ...current, error: "" } : current)}
-          />
+          {(settings?.stem_mode ?? "none") !== "none" ? (
+            <>
+              <div className="kd-stream-cache-row">
+                <span className="kd-muted">
+                  {stemModel?.state === "ready"
+                    ? `${stemModeLabel(settings?.stem_mode ?? "none")} ${stemModel.version} · 已安装${stemModel.diagnostics.provider ? ` · ${stemModel.diagnostics.provider}` : ""}`
+                    : stemModel?.state === "downloading" || stemModel?.state === "queued"
+                      ? `${stemModeLabel(settings?.stem_mode ?? "none")} · ${Math.round(stemModel.progress * 100)}% · ${formatBytes(stemModel.downloadedBytes)}`
+                      : stemModel?.state === "unsupported"
+                        ? "当前平台尚未提供 STEM runtime"
+                        : `${stemModeLabel(settings?.stem_mode ?? "none")} · ${formatBytes(stemModel?.totalBytes ?? 0)}`}
+                </span>
+                {stemModel?.supported && stemModel.state !== "ready" ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={stemModelBusy || stemModel.state === "downloading" || stemModel.state === "queued"}
+                    onClick={() => void downloadStemModel()}
+                  >
+                    {stemModel.state === "error" ? "重试" : "下载模型"}
+                  </Button>
+                ) : null}
+              </div>
+              <InlineNotice
+                text={stemModel?.error ?? ""}
+                block
+                onDismiss={() => setStemModel((current) => current ? { ...current, error: "" } : current)}
+              />
+            </>
+          ) : null}
           <div className="kd-stream-cache-row">
             <span className="kd-muted">候选分离模型 · 本地调试</span>
             <Button variant="ghost" size="sm" onClick={openStemDebug}>
               调试台
+            </Button>
+            <Button variant="ghost" size="sm" onClick={openStemLab}>
+              跳转实验台
             </Button>
           </div>
         </Panel>

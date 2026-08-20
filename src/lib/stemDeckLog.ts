@@ -1,4 +1,5 @@
 import type { StemModelStatus, TrackStemStatus } from "../types";
+import { stemModelStatusLabel } from "./stemMode";
 
 /**
  * 中位死区：半行程的 ±1%。Pioneer 台子靠实体卡口回中；软件没有卡口时，
@@ -77,13 +78,15 @@ export function stemRuntimeLine(model: StemModelStatus | null): { text: string; 
     return { text: "", title: "", error: false };
   }
   const diagnostic = model.diagnostics;
-  const name = ["SCNet Small", model.version].filter(Boolean).join(" ");
+  const modelName = stemModelStatusLabel(model.id);
+  const name = [modelName, model.version].filter(Boolean).join(" ");
   const runtime = diagnostic?.runtime && diagnostic.runtime !== "unsupported" ? diagnostic.runtime : "";
   const provider = diagnostic?.provider && diagnostic.provider !== "pending" ? diagnostic.provider : "";
   const timings = [
     diagnostic?.firstBlockMs == null ? "" : `F ${diagnostic.firstBlockMs}ms`,
     diagnostic?.lastBlockMs == null ? "" : `B ${diagnostic.lastBlockMs}ms`,
     diagnostic?.p95BlockMs == null ? "" : `P95 ${diagnostic.p95BlockMs}ms`,
+    diagnostic?.instantP95HopMs == null ? "" : `I95 ${diagnostic.instantP95HopMs}ms`,
   ].filter(Boolean);
   const error = Boolean(diagnostic?.lastError.trim() || (model.state === "error" && model.error.trim()));
   const text = [name, runtime, provider, ...timings, error ? "ERR" : ""].filter(Boolean).join(" · ");
@@ -96,6 +99,14 @@ export function stemRuntimeLine(model: StemModelStatus | null): { text: string; 
     diagnostic?.firstBlockMs == null ? "" : `first block: ${diagnostic.firstBlockMs}ms`,
     diagnostic?.lastBlockMs == null ? "" : `last block: ${diagnostic.lastBlockMs}ms`,
     diagnostic?.p95BlockMs == null ? "" : `p95: ${diagnostic.p95BlockMs}ms`,
+    diagnostic?.instantAvailable ? `instant ready Deck mask: ${diagnostic.instantReadyDecks}` : "",
+    diagnostic?.instantPcmPreloadMs == null ? "" : `instant PCM preload: ${diagnostic.instantPcmPreloadMs}ms`,
+    diagnostic?.instantFirstHopMs == null ? "" : `instant first hop: ${diagnostic.instantFirstHopMs}ms`,
+    diagnostic?.instantLastHopMs == null ? "" : `instant last hop: ${diagnostic.instantLastHopMs}ms`,
+    diagnostic?.instantP95HopMs == null ? "" : `instant p95: ${diagnostic.instantP95HopMs}ms`,
+    diagnostic?.instantLateHops ? `instant late: ${diagnostic.instantLateHops}` : "",
+    diagnostic?.instantFailures ? `instant failures: ${diagnostic.instantFailures}` : "",
+    diagnostic?.refinementDeferred ? `refinement deferred: ${diagnostic.refinementDeferred}` : "",
     diagnostic?.processedChunks ? `processed: ${diagnostic.processedChunks}` : "",
     diagnostic?.lateChunks ? `late: ${diagnostic.lateChunks}` : "",
     diagnostic?.outputUnderruns ? `output gaps: ${diagnostic.outputUnderruns}` : "",

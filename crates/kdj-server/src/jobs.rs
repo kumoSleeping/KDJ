@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use kdj_analysis::engine::analyze_file;
+use kdj_core::work_scheduler::{
+    work_scheduler, WorkAcquireError, WorkActivityGuard, WorkClass, WorkRequest,
+};
 use serde::Serialize;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -343,107 +346,12 @@ pub fn spawn_waveform_backfill(state: Arc<AppState>) -> String {
     job_id
 }
 
-/// 分析会顺序读完整媒体再做 FFT。Windows 上很多曲库位于 USB 盘，且低配机器的
-/// Defender/索引器会同时读新文件；单 worker 避免两条整轨读取互相寻道和抢闪存。
-/// 其它平台保留两个 worker，仍受下面的进程级总闸门约束。
-#[cfg(target_os = "windows")]
-const ANALYSIS_WORKERS: usize = 1;
-#[cfg(not(target_os = "windows"))]
-const ANALYSIS_WORKERS: usize = 2;
-
-/// 全局分析并发闸门。
-///
-/// `ANALYSIS_WORKERS` 原来只限**一个批次内**的线程数：3 个下载同时完成
-/// 加上后台补齐，就是 4 个批次 × 2 线程 = 8 条分析线程同时在跑，
-/// 正是上面注释想避免的场面（实测「停止」一次取消掉 3 个批次）。
-/// v0.1.0 的做法是所有非插队批次共用一个小线程池；这里等价地
-/// 用平台对应数量的 permit：**每首歌**取一次 permit，批次之间自然交错，
-/// 不会出现"先来的批次把闸门占到跑完"的饥饿。
-///
-/// 插队批次（`priority = true`，正在播放的那一首）**不走闸门**——
-/// Python 版单独给它开池子也是同一个理由：它等的每一秒用户都盯着看。
-struct AnalysisGate {
-    permits: Mutex<usize>,
-    cv: std::sync::Condvar,
-}
-
-/// 闸门的凭证。拿在手里代表占着一个并发额度，drop 即归还。
-struct AnalysisPermit<'a>(&'a AnalysisGate);
-
-impl AnalysisGate {
-    const fn new(permits: usize) -> Self {
-        AnalysisGate {
-            permits: Mutex::new(permits),
-            cv: std::sync::Condvar::new(),
-        }
-    }
-
-    fn acquire(&self) -> AnalysisPermit<'_> {
-        let mut permits = self.permits.lock().unwrap();
-        while *permits == 0 {
-            permits = self.cv.wait(permits).unwrap();
-        }
-        *permits -= 1;
-        AnalysisPermit(self)
-    }
-}
-
-impl Drop for AnalysisPermit<'_> {
-    fn drop(&mut self) {
-        *self.0.permits.lock().unwrap() += 1;
-        self.0.cv.notify_one();
-    }
-}
-
-static ANALYSIS_GATE: AnalysisGate = AnalysisGate::new(ANALYSIS_WORKERS);
-
-/// 波形预热也属于后台 FFT 工作，必须和 BPM 分析共用这两个额度；否则“分析 2 条”
-/// 之外再偷偷跑一条波形，原本的全局上限就失效了。交互波形不走这里。
-pub(crate) fn acquire_background_analysis_permit() -> impl Drop {
-    ANALYSIS_GATE.acquire()
-}
-
-/// 交互路径（波形）占用时 > 0。分析线程在**歌与歌之间**看到它就让路，
-/// 不会去抢分析闸门（抢闸门会把自己堵在当前那两首的长解码后面）。
-static INTERACTIVE_YIELD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// 标记「交互优先」：后台分析暂停接下一首，正在解的那一两首跑完即可。
-pub fn yield_analysis_permits() -> AnalysisYield {
-    INTERACTIVE_YIELD.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    AnalysisYield
-}
-
-/// 见 [`yield_analysis_permits`]。
-pub struct AnalysisYield;
-
-impl Drop for AnalysisYield {
-    fn drop(&mut self) {
-        INTERACTIVE_YIELD.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-    }
-}
-
-fn wait_if_interactive_yield(cancel: &CancellationToken) {
-    while INTERACTIVE_YIELD.load(std::sync::atomic::Ordering::Acquire) > 0 {
-        if cancel.is_cancelled() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-}
-
-fn wait_if_live_stem_audio(cancel: &CancellationToken) {
-    while kdj_stems::any_live_audio_lease_held() {
-        if cancel.is_cancelled() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-}
-
-pub(crate) fn wait_for_live_stem_audio() {
-    while kdj_stems::any_live_audio_lease_held() {
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
+/// Shared admission wrapper used by waveform and stream-analysis owners. Execution stays in each
+/// specialist worker; only policy, priority, cancellation and the heavy-work budget are central.
+pub(crate) fn acquire_scheduled_work(class: WorkClass) -> WorkActivityGuard {
+    work_scheduler()
+        .acquire(WorkRequest::new(class), || false)
+        .expect("non-cancellable DJ work admission")
 }
 
 // ---------------------------------------------------------------- 停止分析
@@ -590,8 +498,9 @@ fn spawn_analysis_target(
         let updated: Arc<std::sync::Mutex<Vec<i64>>> = Default::default();
 
         // 手工分块而不是拉 rayon：只有这一处需要并行，一个依赖不值得
+        let analysis_workers = work_scheduler().snapshot().heavy_limit;
         let chunks: Vec<Vec<i64>> = track_ids
-            .chunks(track_ids.len().div_ceil(ANALYSIS_WORKERS).max(1))
+            .chunks(track_ids.len().div_ceil(analysis_workers).max(1))
             .map(<[i64]>::to_vec)
             .collect();
 
@@ -613,30 +522,20 @@ fn spawn_analysis_target(
                         if cancel.is_cancelled() {
                             break;
                         }
-                        // 播放条在算波形时让路：必须在拿闸门**之前**等，
-                        // 否则两个 worker 占着 permit 睡大觉，波形还是抢不到 CPU。
-                        // 插队分析（正在播的那首）不让。
-                        if !priority {
-                            wait_if_interactive_yield(&cancel);
-                            if cancel.is_cancelled() {
-                                break;
+                        let class = if priority {
+                            WorkClass::NowPlayingAnalysis
+                        } else {
+                            WorkClass::LibraryAnalysis
+                        };
+                        let _permit = match work_scheduler()
+                            .acquire(WorkRequest::new(class), || cancel.is_cancelled())
+                        {
+                            Ok(permit) => permit,
+                            Err(WorkAcquireError::Cancelled) => break,
+                            Err(WorkAcquireError::DeadlineExceeded) => {
+                                unreachable!("analysis admission has no deadline")
                             }
-                        }
-                        // "正在播放的这一首" may jump the library queue, but its BPM/key FFT
-                        // still cannot run beside an audible STEM deadline. Priority controls
-                        // ordering, not permission to starve the live Deck.
-                        wait_if_live_stem_audio(&cancel);
-                        if cancel.is_cancelled() {
-                            break;
-                        }
-                        let _permit = (!priority).then(|| ANALYSIS_GATE.acquire());
-                        if cancel.is_cancelled() {
-                            break;
-                        }
-                        wait_if_live_stem_audio(&cancel);
-                        if cancel.is_cancelled() {
-                            break;
-                        }
+                        };
                         let Ok(Some(track)) = state.library.get(track_id) else {
                             continue;
                         };
@@ -906,42 +805,5 @@ mod tests {
         assert!(event["error"].is_null());
         assert_eq!(event["done"], 7);
         assert_eq!(event["total"], 7);
-    }
-
-    #[test]
-    fn the_gate_caps_concurrency_across_batches_not_within_one() {
-        // 模拟 4 个批次同时开工：不管来了多少批，闸门里同时最多 2 个。
-        // 用自建实例而不是那个 static，免得和真在跑的分析互相干扰。
-        let gate = Arc::new(AnalysisGate::new(2));
-        let running = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
-
-        let handles: Vec<_> = (0..4)
-            .map(|_| {
-                let gate = gate.clone();
-                let running = running.clone();
-                let peak = peak.clone();
-                std::thread::spawn(move || {
-                    for _ in 0..3 {
-                        let _permit = gate.acquire();
-                        let now = running.fetch_add(1, Ordering::SeqCst) + 1;
-                        peak.fetch_max(now, Ordering::SeqCst);
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                        running.fetch_sub(1, Ordering::SeqCst);
-                    }
-                })
-            })
-            .collect();
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        assert!(
-            peak.load(Ordering::SeqCst) <= 2,
-            "峰值 {}",
-            peak.load(Ordering::SeqCst)
-        );
-        // 全部归还之后额度要回到满值，不然闸门会越用越窄
-        assert_eq!(*gate.permits.lock().unwrap(), 2);
     }
 }

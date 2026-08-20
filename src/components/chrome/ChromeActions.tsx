@@ -11,6 +11,8 @@ import {
 } from "lucide-react";
 import { useUpdateStore } from "../../stores/updateStore";
 import type { WorkMode } from "../../lib/workMode";
+import type { StemMode } from "../../types";
+import { stemModeLabel } from "../../lib/stemMode";
 
 export type AsideToggleState = "open" | "closed" | "locked";
 
@@ -19,6 +21,8 @@ export interface ChromeActionsProps {
   onAsideLock?(): void;
   workMode: WorkMode;
   onWorkModeChange(mode: WorkMode): void;
+  stemMode: StemMode;
+  onStemModeChange(mode: StemMode): void;
   multiPaneEnabled: boolean;
   onMultiPane(): void;
   settingsOpen: boolean;
@@ -36,6 +40,8 @@ export function ChromeActions({
   onAsideLock,
   workMode,
   onWorkModeChange,
+  stemMode,
+  onStemModeChange,
   multiPaneEnabled,
   onMultiPane,
   settingsOpen,
@@ -52,6 +58,26 @@ export function ChromeActions({
 
   return (
     <div className="kd-chrome-actions" role="group" aria-label="顶栏工具">
+      <div className="kd-stem-mode-switch" role="radiogroup" aria-label="STEM 模式">
+        <span aria-hidden="true">STEM</span>
+        {([
+          ["none", "无"],
+          ["four", "Spleeter-4-FP16"],
+          ["mobile_net_two", "ByteDance-MobileNet-2-FP32"],
+        ] as const).map(([mode, label]) => (
+          <button
+            type="button"
+            role="radio"
+            aria-checked={stemMode === mode}
+            data-active={stemMode === mode ? "true" : undefined}
+            key={mode}
+            title={`STEM：${stemModeLabel(mode)}`}
+            onClick={() => onStemModeChange(mode)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <button
         type="button"
         className="kd-work-mode-switch"

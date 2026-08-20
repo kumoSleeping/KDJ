@@ -8,7 +8,7 @@ export const STEM_WAVE_BITS: Record<StemName, number> = {
   vocals: 8,
 };
 export const ALL_PERFORMANCE_WAVE_BITS = 31;
-/** STEM display is opt-in. The original mix is the permanent visual reference rail. */
+/** STEM display is opt-in. The original mix starts visible but can be hidden independently. */
 export const DEFAULT_PERFORMANCE_WAVE_MASK = ORIGINAL_WAVE_BIT;
 export const STEM_LANE_BITS = 0b1111;
 // v2 made all four STEM rails the default and coupled that preference to live inference.  Do not
@@ -31,17 +31,14 @@ export function readPerformanceWaveMask(): number {
 }
 
 /**
- * A/B 共用一套波形显示偏好。ORG 是永久参考车道，不能被旧存档或组合按键隐藏；
- * 否则未显式启动 STEM 的 Deck 只剩四条空槽，看起来像整个波形渲染器坏了。
- * 旧版存的是两台 Deck 的数组；迁移时沿用 A 侧的 STEM 选择。
+ * A/B 共用一套波形显示偏好。旧版存的是两台 Deck 的数组；迁移时沿用 A 侧选择。
  *
  * 打开分轨车道只改变布局；它既不启动扫描，也不切换可听音频。显式启动 STEM
  * 音频后，实时 worker 发布到达的分轨波形块。
  */
 export function normalizePerformanceWaveMask(value: unknown): number {
   const stored = Array.isArray(value) && value.length === 2 ? value[0] : value;
-  const stemBits = typeof stored === "number" && Number.isInteger(stored)
-    ? stored & STEM_LANE_BITS
-    : 0;
-  return ORIGINAL_WAVE_BIT | stemBits;
+  return typeof stored === "number" && Number.isInteger(stored)
+    ? stored & ALL_PERFORMANCE_WAVE_BITS
+    : DEFAULT_PERFORMANCE_WAVE_MASK;
 }

@@ -10,9 +10,9 @@ cc = "=1.4.0"
 
 [features]
 default = []
-# The isolated candidate workstation is research-only. Normal macOS playback is native Core ML
-# and must not drag the large ORT static archive into the Tauri executable.
-stem-debug-onnx = ["dep:ort"]
+# The isolated candidate workstation remains research-only. The active Deck path now also uses
+# ONNX Runtime, so this feature gates only the workstation UI and candidate code.
+stem-debug-onnx = []
 
 [dependencies]
 anyhow = "1.0.104"
@@ -27,16 +27,16 @@ sha2 = "0.10.9"
 symphonia = { version = "0.5.5", features = ["aac", "alac", "mp3", "isomp4", "ogg", "vorbis", "flac", "wav", "pcm"] }
 thiserror = "2.0.19"
 tracing = "0.1.44"
-zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
-# The isolated Stem workstation still uses `ort` for research candidates on macOS. The normal
-# Deck path uses native Core ML there; Windows uses the matching SCNet spectral ONNX export.
+# macOS can select CoreML or CPU for either locked Spleeter model set.
 [target.'cfg(target_os = "macos")'.dependencies]
-ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = [
+libc = "0.2.189"
+ort = { version = "=2.0.0-rc.13", default-features = false, features = [
     "std",
     "api-27",
     "download-binaries",
     "copy-dylibs",
+    "coreml",
     "tls-rustls",
 ] }
 
@@ -47,5 +47,15 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = [
     "download-binaries",
     "copy-dylibs",
     "directml",
+    "tls-rustls",
+] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+ort = { version = "=2.0.0-rc.13", default-features = false, features = [
+    "std",
+    "api-27",
+    "download-binaries",
+    "copy-dylibs",
+    "nnapi",
     "tls-rustls",
 ] }

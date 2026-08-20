@@ -131,10 +131,24 @@ impl StereoRegionDecoder {
         Ok(())
     }
 
-    fn read_samples(&mut self, max_frames: Option<usize>) -> Result<StereoAudio> {
+    pub(crate) fn read_samples(&mut self, max_frames: Option<usize>) -> Result<StereoAudio> {
+        self.read_samples_with_cancel(max_frames, || false)
+    }
+
+    pub(crate) fn read_samples_with_cancel<F>(
+        &mut self,
+        max_frames: Option<usize>,
+        cancelled: F,
+    ) -> Result<StereoAudio>
+    where
+        F: Fn() -> bool,
+    {
         let mut left = Vec::new();
         let mut right = Vec::new();
         loop {
+            if cancelled() {
+                bail!("STEM PCM decode cancelled");
+            }
             let remaining = max_frames
                 .map(|limit| limit.saturating_sub(left.len().min(right.len())))
                 .unwrap_or(usize::MAX);
@@ -262,6 +276,7 @@ impl StereoRegionDecoder {
     }
 }
 
+#[cfg(feature = "stem-debug-onnx")]
 pub(crate) fn decode_stereo(path: &Path) -> Result<StereoAudio> {
     let mut decoder = StereoRegionDecoder::open(path)?;
     decoder.read_samples(None)
@@ -303,7 +318,7 @@ pub(crate) fn decode_stereo_region_cached(
     }
 }
 
-/// Sequential fixed-shape SCNet windows. A seek reopens the decoder; a context-safe core advance
+/// Sequential fixed-shape Spleeter4 windows. A seek reopens the decoder; a context-safe core advance
 /// only reads the new tail instead of re-parsing the file from the playhead each time.
 pub struct StemWindowCursor {
     decoder: Option<StereoRegionDecoder>,
@@ -337,10 +352,11 @@ impl StemWindowCursor {
         path: &Path,
         core_start: f64,
     ) -> Result<(Vec<f32>, Vec<f32>)> {
+        let geometry = crate::stem_tile_geometry();
         let sr = f64::from(SAMPLE_RATE);
-        let window_start = core_start - SEGMENT_CONTEXT_SAMPLES as f64 / sr;
-        self.fill(path, window_start, SEGMENT_SAMPLES)?;
-        Ok(self.slice(window_start, SEGMENT_SAMPLES))
+        let window_start = core_start - geometry.context as f64 / sr;
+        self.fill(path, window_start, geometry.samples)?;
+        Ok(self.slice(window_start, geometry.samples))
     }
 
     fn fill(&mut self, path: &Path, start: f64, frames: usize) -> Result<()> {

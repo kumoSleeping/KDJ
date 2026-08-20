@@ -12,6 +12,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use anyhow::{Context, Result};
 use kdj_analysis::waveform::detail_waveform_buckets;
 use kdj_core::models::Waveform;
+use kdj_core::work_scheduler::WorkClass;
 
 pub const MAX_WAVEFORM_BUCKETS: usize = kdj_analysis::waveform::MAX_WAVEFORM_BUCKETS;
 use kdj_library::LibraryService;
@@ -170,7 +171,7 @@ impl WaveformCoordinator {
 
         // 等后台额度时先不要占 inflight：播放器若在这时要同一首，可以直接成为
         // 交互 leader；拿到额度后再查一次缓存，就不会重复解码。
-        let _permit = jobs::acquire_background_analysis_permit();
+        let _permit = jobs::acquire_scheduled_work(WorkClass::Maintenance);
         if let Some((_, canonical)) = read_cached(&request.cache_dir, request.key) {
             if canonical {
                 self.record_status(request.key, None);
@@ -364,9 +365,11 @@ impl WaveformCoordinator {
         let outcome = tokio::task::spawn_blocking(move || {
             kdj_core::thread_qos::prefer_background();
             let _decode_permit = decode_permit;
-            let _yield = interactive.then(jobs::yield_analysis_permits);
-            let _background_permit = (!interactive).then(jobs::acquire_background_analysis_permit);
-            jobs::wait_for_live_stem_audio();
+            let _work = jobs::acquire_scheduled_work(if interactive {
+                WorkClass::InteractiveWaveform
+            } else {
+                WorkClass::Maintenance
+            });
             if let Some(cached) = resolve_from_cache(&cache_dir, key) {
                 let published =
                     detail_from_cache(&cache_dir, key.track_id, key.mtime).unwrap_or(cached);

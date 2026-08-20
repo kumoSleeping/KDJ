@@ -42,9 +42,14 @@ import type {
   StreamCacheStats,
   StreamWaveformProgress,
   StemModelStatus,
+  StemCompute,
+  StemMode,
   StemDebugModelCatalog,
   StemDebugModelId,
   StemDebugRender,
+  StemLabBackend,
+  StemLabCatalog,
+  StemLabSeekResponse,
   StemName,
   LiveStemWaveformDelta,
   TrackStemStatus,
@@ -421,8 +426,12 @@ export const api = {
   writeTags: (id: number) => post<Track>(`/library/tracks/${id}/write-tags`),
   waveform: (id: number, buckets = 640) =>
     request<Waveform>(`/library/waveform/${id}?buckets=${buckets}`),
-  stemModelStatus: () => request<StemModelStatus>("/stems/model"),
-  downloadStemModel: () => post<StemModelStatus>("/stems/model/download", {}),
+  stemModelStatus: (mode: StemMode, compute: StemCompute) =>
+    request<StemModelStatus>(`/stems/model?mode=${mode}&compute=${compute}`),
+  activateStemRuntime: (mode: StemMode, compute: StemCompute) =>
+    post<StemModelStatus>(`/stems/runtime?mode=${mode}&compute=${compute}`, {}),
+  downloadStemModel: (mode: StemMode, compute: StemCompute) =>
+    post<StemModelStatus>(`/stems/model/download?mode=${mode}&compute=${compute}`, {}),
   stemDebugModelCatalog: () => request<StemDebugModelCatalog>("/stems/debug/model"),
   renderStemDebug: async (trackId: number, model: StemDebugModelId, duration = 30) => {
     const result = await post<StemDebugRender>("/stems/debug", { trackId, model, duration });
@@ -441,24 +450,60 @@ export const api = {
     request<{ released: boolean }>(`/stems/debug/${encodeURIComponent(sessionId)}`, {
       method: "DELETE",
     }),
-  trackStemStatus: (id: number, position?: number, playing = false) =>
+  stemLabCatalog: () => request<StemLabCatalog>("/stems/lab/catalog"),
+  runStemLabSeek: async (trackId: number, seekSeconds: number, backend: StemLabBackend) => {
+    const result = await post<StemLabSeekResponse>("/stems/lab/seek", {
+      trackId,
+      seekSeconds,
+      backend,
+    });
+    const baseUrl = bridge().baseUrl;
+    return {
+      ...result,
+      audio: {
+        original: `${baseUrl}${result.audio.original}`,
+        lanes: Object.fromEntries(
+          Object.entries(result.audio.lanes).map(([lane, url]) => [lane, `${baseUrl}${url}`]),
+        ),
+      },
+    };
+  },
+  releaseStemLab: (sessionId: string) =>
+    request<{ released: boolean }>(`/stems/lab/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE",
+    }),
+  trackStemStatus: (
+    id: number,
+    mode: StemMode,
+    compute: StemCompute,
+    position?: number,
+    playing = false,
+  ) =>
     request<TrackStemStatus>(
-      `/tracks/${id}/stems${
+      `/tracks/${id}/stems?mode=${mode}&compute=${compute}${
         position === undefined || !Number.isFinite(position)
           ? ""
-          : `?position=${Math.max(0, position)}&playing=${playing ? "true" : "false"}`
+          : `&position=${Math.max(0, position)}&playing=${playing ? "true" : "false"}`
       }`,
     ),
   separateTrackStems: (
     id: number,
     position = 0,
-    options?: { duration?: number; deck?: 0 | 1; playing?: boolean },
+    options: {
+      mode: StemMode;
+      compute: StemCompute;
+      duration?: number;
+      deck?: 0 | 1;
+      playing?: boolean;
+    },
   ) =>
     post<TrackStemStatus>(`/tracks/${id}/stems`, {
       position: Number.isFinite(position) ? Math.max(0, position) : 0,
       duration: Number.isFinite(options?.duration) ? Math.max(0, options?.duration ?? 0) : 0,
       deck: options?.deck === 1 ? 1 : 0,
       playing: options?.playing === true,
+      mode: options.mode,
+      compute: options.compute,
     }),
   releaseTrackStems: (id: number) =>
     request<{ released: boolean }>(`/tracks/${id}/stems`, { method: "DELETE" }),

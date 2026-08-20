@@ -18,7 +18,7 @@ test("DJ canvas bakes three screens and reuses the window while the playhead sta
   const first = waveformBakeWindow(180, 90, 12, null);
   assert.equal(first.widthScale, 3);
   assert.equal(first.translatePercent, 50);
-  assert.ok(Math.abs(first.endSec - first.startSec - 36) < 1e-9);
+  assert.ok(Math.abs(first.endSec - first.startSec - 90) < 1e-9);
 
   const inside = waveformBakeWindow(180, 91, 12, first);
   assert.equal(inside.startSec, first.startSec);
@@ -31,9 +31,9 @@ test("DJ canvas bakes three screens and reuses the window while the playhead sta
 
 test("a rebaked DJ canvas is distinguished from ordinary rail movement", () => {
   const first = waveformBakeWindow(180, 90, 12, null);
-  // The 0.96s guard lets the old 36s canvas reach just over 80% before it is replaced.
-  const moved = waveformBakeWindow(180, 101, 12, first);
-  const rebaked = waveformBakeWindow(180, 102, 12, moved);
+  // The 2.4s guard lets the 90s canvas reach 90% before it is replaced.
+  const moved = waveformBakeWindow(180, 126, 12, first);
+  const rebaked = waveformBakeWindow(180, 127, 12, moved);
 
   assert.equal(waveformBakeRangeChanged(first, moved), false);
   assert.equal(waveformBakeRangeChanged(moved, rebaked), true);
@@ -118,9 +118,9 @@ test("Performance tempo changes resize beat cells while preserving screen speed"
 
   assert.deepEqual(
     rates.map(performanceWaveformViewportSeconds),
-    [6, 12, 15, 24],
+    [15, 30, 37.5, 60],
   );
-  assert.ok(screenSpeeds.every((speed) => Math.abs(speed - 1 / 12) < 1e-12));
+  assert.ok(screenSpeeds.every((speed) => Math.abs(speed - 1 / 30) < 1e-12));
   // 同一曲目的源拍间隔不变；升速后每一拍占据的屏幕宽度应按倍率缩短。
   const beatSeconds = 60 / 120;
   const normalBeatWidth = beatSeconds / performanceWaveformViewportSeconds(1);
@@ -174,15 +174,15 @@ test("forward playback suppresses only tiny backwards decoder-clock corrections"
 });
 
 test("TEMPO zoom scales around the playhead without changing the translating rail", () => {
-  const normal = waveformViewportLayout(180, 90, 12);
-  const fast = waveformViewportLayout(180, 90, 15);
+  const normal = waveformViewportLayout(180, 90, 30);
+  const fast = waveformViewportLayout(180, 90, 37.5);
 
-  assert.equal(normal.baseRailScale, 15);
-  assert.equal(fast.baseRailScale, 15);
+  assert.equal(normal.baseRailScale, 6);
+  assert.equal(fast.baseRailScale, 6);
   assert.equal(normal.railTranslatePercent, 50);
   assert.equal(fast.railTranslatePercent, 50);
   assert.equal(normal.tempoScaleX, 1);
-  assert.ok(Math.abs(fast.tempoScaleX - 12 / 15) < 1e-12);
+  assert.ok(Math.abs(fast.tempoScaleX - 30 / 37.5) < 1e-12);
   assert.ok(Math.abs(fast.baseRailScale * fast.tempoScaleX - fast.railScale) < 1e-12);
   assert.equal(shouldAnimateWaveformRail(true, 7, 7, 10, 10.1), true);
 });

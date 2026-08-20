@@ -3,7 +3,7 @@ import type { Waveform } from "../types";
 const WAVEFORM_COLUMNS_PER_SECOND = 100;
 const MIN_DETAIL_WAVEFORM_BUCKETS = 2_000;
 const MAX_DETAIL_WAVEFORM_BUCKETS = 24_000;
-export const PERFORMANCE_WAVEFORM_SECONDS_PER_SCREEN = 12;
+export const PERFORMANCE_WAVEFORM_SECONDS_PER_SCREEN = 30;
 /** Baked DJ canvas covers this many screens so CSS can interpolate between 100ms snapshots. */
 export const PERFORMANCE_WAVEFORM_BAKE_SCREENS = 3;
 /**
@@ -153,7 +153,7 @@ export interface WaveformViewportLayout {
    */
   baseRailScale: number;
   /**
-   * Horizontal zoom around the playhead (`12 / viewportSeconds` = `1 / rate`).
+   * Horizontal zoom around the playhead (`30 / viewportSeconds` = `1 / rate`).
    * Applied on an inner layer; never mixed into the translating transform.
    */
   tempoScaleX: number;

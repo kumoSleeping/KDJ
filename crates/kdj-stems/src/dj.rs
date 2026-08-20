@@ -1,6 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use anyhow::Result;
+
+use crate::audio::StereoRegionDecoder;
 use crate::SAMPLE_RATE;
 
 /// Immutable 44.1 kHz stereo PCM used by stateful streaming separators.
@@ -14,6 +17,21 @@ pub struct PcmRandomAccessCache {
 }
 
 impl PcmRandomAccessCache {
+    /// Decode and resample one complete local track on a preparation worker. Callers retain the
+    /// immutable allocation for random seek windows; this must never run in an audio callback.
+    pub fn decode(path: &std::path::Path) -> Result<Self> {
+        Self::decode_with_cancel(path, || false)
+    }
+
+    pub fn decode_with_cancel<F>(path: &std::path::Path, cancelled: F) -> Result<Self>
+    where
+        F: Fn() -> bool,
+    {
+        let mut decoder = StereoRegionDecoder::open(path)?;
+        let decoded = decoder.read_samples_with_cancel(None, cancelled)?;
+        Ok(Self::from_planar(&decoded.left, &decoded.right))
+    }
+
     pub fn from_interleaved(frames: Vec<[f32; 2]>) -> Self {
         Self {
             frames: frames.into(),
@@ -42,6 +60,24 @@ impl PcmRandomAccessCache {
             .ok()
             .and_then(|index| self.frames.get(index))
             .copied()
+    }
+
+    /// Copies a planar random-access window and zero-pads both song edges. `start` is signed so a
+    /// model can ask for left context before frame zero without a separate edge branch.
+    pub fn stereo_window(&self, start: i128, frames: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut left = vec![0.0; frames];
+        let mut right = vec![0.0; frames];
+        for offset in 0..frames {
+            let Some(frame) = u64::try_from(start + offset as i128)
+                .ok()
+                .and_then(|index| self.frame(index))
+            else {
+                continue;
+            };
+            left[offset] = frame[0];
+            right[offset] = frame[1];
+        }
+        (left, right)
     }
 
     /// Copies one RT3S single-frame input: the previous 512 samples followed by the 512 new
@@ -215,5 +251,13 @@ mod tests {
     fn non_finite_pcm_is_sanitized_before_inference() {
         let cache = PcmRandomAccessCache::from_planar(&[f32::NAN], &[f32::INFINITY]);
         assert_eq!(cache.frame(0), Some([0.0, 0.0]));
+    }
+
+    #[test]
+    fn signed_model_window_zero_pads_both_song_edges() {
+        let cache = PcmRandomAccessCache::from_interleaved(vec![[1.0, -1.0], [2.0, -2.0]]);
+        let (left, right) = cache.stereo_window(-1, 4);
+        assert_eq!(left, [0.0, 1.0, 2.0, 0.0]);
+        assert_eq!(right, [0.0, -1.0, -2.0, 0.0]);
     }
 }

@@ -8,11 +8,15 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+#[cfg(test)]
+use kdj_stems::SEGMENT_CONTEXT_SAMPLES;
 use kdj_stems::{
     begin_live_stem_waveform, publish_live_stem_waveform_block, read_cache_header,
-    seek_cache_frame, stem_tile_cache_key, StemChunk, StemInferencePool, StemKind,
-    StemWindowCursor, BYTES_PER_FRAME, SAMPLE_RATE as STEM_SAMPLE_RATE, SEGMENT_CONTEXT_SAMPLES,
-    SEGMENT_CORE_SAMPLES, SEGMENT_HANDOFF_SAMPLES, SEGMENT_SAMPLES, SEGMENT_WAVEFORM_GUARD_SAMPLES,
+    seek_cache_frame, stem_tile_cache_key, stem_tile_geometry, try_acquire_instant_admission,
+    InstantAdmissionGuard, InstantStemChunk, InstantStemPool, InstantTrack, StemChunk,
+    StemInferencePool, StemKind, StemWindowCursor, BYTES_PER_FRAME, INSTANT_HANDOFF_FRAMES,
+    INSTANT_HOP_BUDGET_MS, INSTANT_HOP_FRAMES, SAMPLE_RATE as STEM_SAMPLE_RATE,
+    SEGMENT_CORE_SAMPLES, SEGMENT_HANDOFF_SAMPLES, SEGMENT_SAMPLES,
 };
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use symphonia::core::audio::SampleBuffer;
@@ -30,17 +34,25 @@ use crate::time_stretch::{PitchPreservingStretcher, TempoControl, TimeStretchFra
 /// Default read-ahead owned by one streaming Deck. The queue stores stereo output frames, so its
 /// memory is fixed regardless of track length (four seconds at 48 kHz is about 1.5 MiB).
 pub const DEFAULT_STREAM_BUFFER_SECONDS: usize = 4;
-/// Publish each completed SCNet tile to the waveform immediately; the audible ring is filled next.
+/// Publish each completed Spleeter4 tile to the waveform immediately; the audible ring is filled next.
 const LIVE_STEM_WAVEFORM_PUBLISH_LEAD_MS: u64 = 0;
-/// A fixed SCNet tile is prepared far outside the callback. One second leaves room for a cold
-/// successor while a healthy ring lets optional display work use the shared model.
-const LIVE_STEM_LOOKAHEAD_CUSHION_MS: u64 = 1_000;
+/// How many successor tiles stay in flight besides the tile currently being pushed into the ring.
+const LIVE_STEM_LOOKAHEAD_TILES: usize = 2;
+/// A seek invalidates both the raw and post-tempo generations. Refill the destination with dry
+/// source PCM before making HS-TasNet part of the producer clock; one 11.6 ms hop is not enough to
+/// absorb its measured tail latency or a scheduler pre-emption.
+const LIVE_STEM_SEEK_PREFILL_MS: u64 = 250;
 
-/// One in-memory future SCNet tile. The worker that publishes its waveform also hands the exact
+/// One in-memory future Spleeter4 tile. The worker that publishes its waveform also hands the exact
 /// same PCM to playback, so a visual prefetch is never inferred a second time.
 struct LiveStemLookAhead {
     start: f64,
     result: Arc<Mutex<Option<Result<Arc<StemChunk>>>>>,
+}
+
+struct LayeredInstant {
+    pool: Arc<InstantStemPool>,
+    track: Arc<InstantTrack>,
 }
 
 impl LiveStemLookAhead {
@@ -203,9 +215,10 @@ impl Default for LoopWindow {
         Self::new()
     }
 }
-/// One live STEM frame. Prepared SCNet streams always emit `blend=1`: raw source audio never enters
-/// the STEM ring while model work is pending. `original` is the reconstructed four-lane mix used
-/// only by the generic renderer's interpolation contract, not an unseparated fallback.
+/// One live STEM frame. Prepared Spleeter4 and seek-bridge streams emit `blend=1`; an overloaded
+/// seek folds its source equally into four temporary lanes so non-unity Rubber Band retains it.
+/// `original` is normally the reconstructed four-lane mix used by the renderer's interpolation
+/// contract.
 #[derive(Clone, Copy, Debug)]
 pub struct StemFrame {
     pub lanes: [f32; STEM_LANES * 2],
@@ -228,6 +241,17 @@ impl Default for StemFrame {
 }
 
 impl StemFrame {
+    /// Temporary unseparated seek audio folded equally into the four lane channels. Encoding the
+    /// bridge as lanes (rather than `blend=0` metadata) keeps it audible through non-unity
+    /// eight-channel Rubber Band, which intentionally transports audio channels only.
+    fn dry_bridge(frame: [f32; 2]) -> Self {
+        let quarter = [frame[0] * 0.25, frame[1] * 0.25];
+        Self::separated([
+            quarter[0], quarter[1], quarter[0], quarter[1], quarter[0], quarter[1], quarter[0],
+            quarter[1],
+        ])
+    }
+
     pub fn separated(lanes: [f32; STEM_LANES * 2]) -> Self {
         Self::separated_with_gain(lanes, 1.0)
     }
@@ -364,14 +388,23 @@ impl<F: Copy> StreamSource<F> {
     /// Drop already-rendered output before the stream is installed. Safe only while this
     /// source is still pending: the audio callback is the sole consumer after promote.
     pub fn discard_frames(&self, frames: u64) -> u64 {
+        self.discard_frames_with_media_advance(frames).0
+    }
+
+    /// The native Deck clock advances by packet media time, not by output-frame count. Shadow
+    /// seek catch-up needs both values so a non-1x Rubber Band stream lands on the same clock the
+    /// callback would have published after consuming these packets.
+    pub fn discard_frames_with_media_advance(&self, frames: u64) -> (u64, f64) {
         let mut dropped = 0;
+        let mut media_advance = 0.0;
         while dropped < frames {
-            if self.pop_consumer().is_none() {
+            let Some((_, advance)) = self.pop_consumer_timed() else {
                 break;
-            }
+            };
             dropped += 1;
+            media_advance += f64::from(advance);
         }
-        dropped
+        (dropped, media_advance)
     }
 
     fn pop_consumer_timed(&self) -> Option<(F, f32)> {
@@ -526,7 +559,9 @@ pub struct StreamSeekControl {
 #[derive(Debug)]
 struct StreamSeekState {
     generation: AtomicU64,
+    pipeline_generation: AtomicU64,
     position_bits: AtomicU64,
+    clock_bits: AtomicU64,
 }
 
 impl Default for StreamSeekControl {
@@ -540,7 +575,9 @@ impl StreamSeekControl {
         Self {
             inner: Arc::new(StreamSeekState {
                 generation: AtomicU64::new(0),
+                pipeline_generation: AtomicU64::new(0),
                 position_bits: AtomicU64::new(0f64.to_bits()),
+                clock_bits: AtomicU64::new((-1.0f64).to_bits()),
             }),
         }
     }
@@ -565,6 +602,24 @@ impl StreamSeekControl {
         f64::from_bits(self.inner.position_bits.load(Ordering::Acquire))
     }
 
+    /// Authoritative Deck clock for a live STEM producer. Unlike [`Self::request`], this does not
+    /// reset Rubber Band; the hop loop jumps only when a whole tile has fallen behind the needle.
+    pub fn publish_clock(&self, position: f64) {
+        let position = if position.is_finite() {
+            position.max(0.0)
+        } else {
+            -1.0
+        };
+        self.inner
+            .clock_bits
+            .store(position.to_bits(), Ordering::Release);
+    }
+
+    pub fn clock(&self) -> Option<f64> {
+        let position = f64::from_bits(self.inner.clock_bits.load(Ordering::Acquire));
+        (position.is_finite() && position >= 0.0).then_some(position)
+    }
+
     /// Returns the latest landing position when `seen` is behind this control.
     pub fn observe(&self, seen: &mut u64) -> Option<f64> {
         let generation = self.generation();
@@ -574,6 +629,16 @@ impl StreamSeekControl {
             *seen = generation;
             Some(self.position())
         }
+    }
+
+    fn acknowledge_pipeline(&self, generation: u64) {
+        self.inner
+            .pipeline_generation
+            .store(generation, Ordering::Release);
+    }
+
+    fn pipeline_acknowledged(&self, generation: u64) -> bool {
+        self.inner.pipeline_generation.load(Ordering::Acquire) == generation
     }
 }
 
@@ -680,6 +745,7 @@ where
                 while raw.pop_consumer().is_some() {}
                 output_writer.begin_discontinuity();
                 stretcher.reset()?;
+                control.acknowledge_pipeline(seen_seek);
                 continue;
             }
         }
@@ -1227,7 +1293,7 @@ fn initial_stem_frames_before_waveform_publish(
     source_frames.min(available_source_frames)
 }
 
-/// Runs the SCNet background-cache path ahead of one live Deck.
+/// Runs the Spleeter4 background-cache path ahead of one live Deck.
 ///
 /// Cache misses are handled by the coordinator: original audio remains audible until this worker
 /// has a context-safe separated cushion, then the prepared stream replaces it at a block boundary.
@@ -1235,6 +1301,7 @@ fn initial_stem_frames_before_waveform_publish(
 pub fn decode_live_stem_streaming<F>(
     path: &Path,
     track_id: i64,
+    deck: usize,
     position: f64,
     duration: f64,
     output_sample_rate: u32,
@@ -1263,34 +1330,85 @@ where
         .map(StreamSeekControl::generation)
         .unwrap_or(0);
     let mut cursor = StemWindowCursor::new();
-    let mut chunk_start = position.max(0.0);
-    let (left, right) = cursor.window_for_core(path, chunk_start)?;
-    let ticket = pool.submit_for(
-        stem_tile_cache_key(path, chunk_start),
-        left,
-        right,
-        Arc::clone(&hop_epoch),
-        hop_expected,
-    )?;
-    let mut current = await_stem_ticket(
-        &ticket,
-        Arc::clone(&hop_epoch),
-        hop_expected,
-        cancelled,
-        || false,
-    )?;
+    let instant_pool = pool.instant_pool();
+    let instant_preparation =
+        instant_pool
+            .as_ref()
+            .and_then(|instant| match instant.prepare_track(path) {
+                Ok(ticket) => Some(ticket),
+                Err(error) => {
+                    tracing::warn!(error = %error, "instant STEM PCM preload unavailable");
+                    None
+                }
+            });
+    let requested_start = position.max(0.0);
+    let requested_frame = (requested_start * f64::from(STEM_SAMPLE_RATE)).round() as u64;
+    let cached_core_frame = requested_frame / stride as u64 * stride as u64;
+    let cached_core_start = cached_core_frame as f64 / f64::from(STEM_SAMPLE_RATE);
+    let cached_offset = requested_frame.saturating_sub(cached_core_frame) as usize;
+    let cached = (cached_offset < stride)
+        .then(|| stem_tile_cache_key(path, cached_core_start))
+        .and_then(|key| pool.cached_for_key(&key));
+    let (mut chunk_start, first_offset, mut current) = if let Some(chunk) = cached {
+        tracing::debug!(
+            requested_start,
+            cached_core_start,
+            cached_offset,
+            "live STEM reused a completed viewport tile"
+        );
+        (cached_core_start, cached_offset, chunk)
+    } else {
+        let (left, right) = cursor.window_for_core(path, requested_start)?;
+        let ticket = pool.submit_for(
+            stem_tile_cache_key(path, requested_start),
+            left,
+            right,
+            Arc::clone(&hop_epoch),
+            hop_expected,
+        )?;
+        let chunk = await_stem_ticket(
+            &ticket,
+            Arc::clone(&hop_epoch),
+            hop_expected,
+            cancelled,
+            || false,
+        )?;
+        (requested_start, 0, chunk)
+    };
+    // First enablement is still bridged by ORG in the coordinator. Do not promote that refined
+    // stream until its whole-track random PCM and physical-Deck HS session are warm; after
+    // promotion every ordinary seek can take the low-latency path without paying decode/session
+    // startup in the transport gesture.
+    let layered_instant = match (instant_pool, instant_preparation) {
+        (Some(instant), Some(preparation)) => {
+            match preparation
+                .wait(cancelled)
+                .and_then(|track| instant.wait_ready(deck, cancelled).map(|_| track))
+            {
+                Ok(track) => Some(LayeredInstant {
+                    pool: instant,
+                    track,
+                }),
+                Err(error) => {
+                    tracing::warn!(error = %error, "instant STEM warm-up unavailable; using refinement bridge");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
     let mut resampler = LiveStemResampler::new(output_sample_rate);
     let mut remaining_source_frames = if duration.is_finite() && duration > 0.0 {
-        ((duration - chunk_start).max(0.0) * f64::from(STEM_SAMPLE_RATE)).ceil() as u64
+        ((duration - requested_start).max(0.0) * f64::from(STEM_SAMPLE_RATE)).ceil() as u64
     } else {
         u64::MAX
     };
     let mut seen_loop_generation = loop_window.as_ref().map(|window| window.generation());
     if let Some(snap) = loop_window.as_ref().and_then(|window| window.snapshot()) {
         remaining_source_frames =
-            remaining_source_frames.min(loop_source_frames_remaining(snap, chunk_start));
+            remaining_source_frames.min(loop_source_frames_remaining(snap, requested_start));
     }
-    let first_frames = remaining_source_frames.min(stride as u64) as usize;
+    let first_frames = remaining_source_frames.min((stride - first_offset) as u64) as usize;
     // Previously this pushed the entire first model tile before publishing it. On a paused Deck
     // the four-second ring fills and `StreamWriter::push` waits forever, so the visual lanes did
     // not exist until the user pressed Play. Fill a safe audio cushion, publish the already-ready
@@ -1301,11 +1419,11 @@ where
         first_frames,
     );
     let mut hold_chunk_start = false;
-    let mut look_ahead = None;
+    let mut look_aheads = Vec::new();
     if audio_prefix > 0 {
         let (_, outcome) = push_stem_range(
             &current,
-            0,
+            first_offset,
             audio_prefix,
             chunk_start,
             loop_window.as_ref(),
@@ -1323,7 +1441,7 @@ where
                 outcome,
                 &mut chunk_start,
                 &mut remaining_source_frames,
-                &mut look_ahead,
+                &mut look_aheads,
                 &mut resampler,
                 duration,
             );
@@ -1340,10 +1458,29 @@ where
             duration,
             current.stems(),
         );
+        if loop_window
+            .as_ref()
+            .and_then(|window| window.snapshot())
+            .is_none()
+        {
+            keep_live_stem_look_ahead(
+                path,
+                track_id,
+                expected_epoch,
+                chunk_start,
+                stride_seconds,
+                duration,
+                Arc::clone(&pool),
+                Arc::clone(&hop_epoch),
+                hop_expected,
+                cancelled,
+                &mut look_aheads,
+            )?;
+        }
         if audio_prefix < first_frames {
             let (pushed, outcome) = push_stem_range(
                 &current,
-                audio_prefix,
+                first_offset + audio_prefix,
                 first_frames - audio_prefix,
                 chunk_start,
                 loop_window.as_ref(),
@@ -1361,7 +1498,7 @@ where
                     outcome,
                     &mut chunk_start,
                     &mut remaining_source_frames,
-                    &mut look_ahead,
+                    &mut look_aheads,
                     &mut resampler,
                     duration,
                 );
@@ -1374,25 +1511,6 @@ where
         } else {
             remaining_source_frames = remaining_source_frames.saturating_sub(first_frames as u64);
         }
-        if !hold_chunk_start
-            && live_stem_needs_look_ahead(&writer, output_sample_rate)
-            && loop_window
-                .as_ref()
-                .and_then(|window| window.snapshot())
-                .is_none()
-        {
-            look_ahead = prefetch_live_stem_waveform_block(
-                path,
-                track_id,
-                expected_epoch,
-                chunk_start + stride_seconds,
-                duration,
-                Arc::clone(&pool),
-                Arc::clone(&hop_epoch),
-                hop_expected,
-                cancelled,
-            )?;
-        }
     }
 
     while remaining_source_frames > 0 {
@@ -1403,9 +1521,12 @@ where
             if let Some(at) = control.observe(&mut seen_seek) {
                 hop_expected = hop_expected.wrapping_add(1);
                 hop_epoch.store(hop_expected, Ordering::Release);
-                look_ahead = None;
+                look_aheads.clear();
                 resampler.reset();
                 writer.begin_discontinuity();
+                wait_for_pipeline_seek_ack(seek.as_ref(), seen_seek, cancelled, || {
+                    stem_seek_pending(seek.as_ref(), seen_seek)
+                })?;
                 cursor = StemWindowCursor::new();
                 chunk_start = at.max(0.0);
                 remaining_source_frames = if duration.is_finite() && duration > 0.0 {
@@ -1417,44 +1538,127 @@ where
                     remaining_source_frames = remaining_source_frames
                         .min(loop_source_frames_remaining(snap, chunk_start));
                 }
-                let (left, right) = match cursor.window_for_core(path, chunk_start) {
-                    Ok(chunk) => chunk,
-                    Err(error) => return Err(error),
-                };
-                let ticket = pool.submit_for(
-                    stem_tile_cache_key(path, chunk_start),
-                    left,
-                    right,
-                    Arc::clone(&hop_epoch),
-                    hop_expected,
-                )?;
-                current = match await_stem_ticket(
-                    &ticket,
-                    Arc::clone(&hop_epoch),
-                    hop_expected,
-                    cancelled,
-                    || stem_seek_pending(seek.as_ref(), seen_seek),
-                ) {
-                    Ok(chunk) => chunk,
-                    Err(_error) if !cancelled() && stem_seek_pending(seek.as_ref(), seen_seek) => {
-                        hold_chunk_start = true;
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
                 let frames = remaining_source_frames.min(stride as u64) as usize;
-                let (pushed, outcome) = push_stem_range(
-                    &current,
-                    0,
-                    frames,
-                    chunk_start,
-                    loop_window.as_ref(),
-                    seen_loop_generation,
-                    &mut resampler,
-                    &mut writer,
-                    cancelled,
-                    || stem_seek_pending(seek.as_ref(), seen_seek),
-                )?;
+                let key = stem_tile_cache_key(path, chunk_start);
+                let cached_refinement = pool.cached_for_key(&key);
+                let bridge = if let Some(chunk) = cached_refinement {
+                    SeekBridgeResult {
+                        refined: chunk,
+                        pushed: 0,
+                        outcome: StemPushOutcome::Complete,
+                    }
+                } else {
+                    let (left, right) = match cursor.window_for_core(path, chunk_start) {
+                        Ok(chunk) => chunk,
+                        Err(error) => return Err(error),
+                    };
+                    let admission = layered_instant
+                        .as_ref()
+                        .and_then(|_| try_acquire_instant_admission(deck));
+                    let ticket =
+                        pool.submit_for(key, left, right, Arc::clone(&hop_epoch), hop_expected)?;
+                    if let Some(layered) = layered_instant.as_ref() {
+                        match push_seek_bridge_until_refined(
+                            layered,
+                            admission,
+                            &ticket,
+                            chunk_start,
+                            frames,
+                            loop_window.as_ref(),
+                            seen_loop_generation,
+                            &mut resampler,
+                            &mut writer,
+                            Arc::clone(&hop_epoch),
+                            hop_expected,
+                            cancelled,
+                            || stem_seek_pending(seek.as_ref(), seen_seek),
+                            deck,
+                        ) {
+                            Ok(result) => result,
+                            Err(_error)
+                                if !cancelled() && stem_seek_pending(seek.as_ref(), seen_seek) =>
+                            {
+                                hold_chunk_start = true;
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    } else {
+                        let refined = match await_stem_ticket(
+                            &ticket,
+                            Arc::clone(&hop_epoch),
+                            hop_expected,
+                            cancelled,
+                            || stem_seek_pending(seek.as_ref(), seen_seek),
+                        ) {
+                            Ok(chunk) => chunk,
+                            Err(_error)
+                                if !cancelled() && stem_seek_pending(seek.as_ref(), seen_seek) =>
+                            {
+                                hold_chunk_start = true;
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        SeekBridgeResult {
+                            refined,
+                            pushed: 0,
+                            outcome: StemPushOutcome::Complete,
+                        }
+                    }
+                };
+                current = bridge.refined;
+                if matches!(bridge.outcome, StemPushOutcome::Interrupted) {
+                    hold_chunk_start = true;
+                    continue;
+                }
+                if !matches!(bridge.outcome, StemPushOutcome::Complete) {
+                    hold_chunk_start = live_stem_apply_loop_outcome(
+                        loop_window.as_ref(),
+                        bridge.outcome,
+                        &mut chunk_start,
+                        &mut remaining_source_frames,
+                        &mut look_aheads,
+                        &mut resampler,
+                        duration,
+                    );
+                    continue;
+                }
+                if loop_window
+                    .as_ref()
+                    .and_then(|window| window.snapshot())
+                    .is_none()
+                {
+                    keep_live_stem_look_ahead(
+                        path,
+                        track_id,
+                        expected_epoch,
+                        chunk_start,
+                        stride_seconds,
+                        duration,
+                        Arc::clone(&pool),
+                        Arc::clone(&hop_epoch),
+                        hop_expected,
+                        cancelled,
+                        &mut look_aheads,
+                    )?;
+                }
+                let (refined_pushed, outcome) = if bridge.pushed < frames {
+                    push_stem_range(
+                        &current,
+                        bridge.pushed,
+                        frames - bridge.pushed,
+                        chunk_start,
+                        loop_window.as_ref(),
+                        seen_loop_generation,
+                        &mut resampler,
+                        &mut writer,
+                        cancelled,
+                        || stem_seek_pending(seek.as_ref(), seen_seek),
+                    )?
+                } else {
+                    (0, StemPushOutcome::Complete)
+                };
                 if matches!(outcome, StemPushOutcome::Interrupted) {
                     hold_chunk_start = true;
                     continue;
@@ -1466,26 +1670,9 @@ where
                     duration,
                     current.stems(),
                 );
-                remaining_source_frames = remaining_source_frames.saturating_sub(pushed as u64);
+                remaining_source_frames =
+                    remaining_source_frames.saturating_sub((bridge.pushed + refined_pushed) as u64);
                 hold_chunk_start = false;
-                if live_stem_needs_look_ahead(&writer, output_sample_rate)
-                    && loop_window
-                        .as_ref()
-                        .and_then(|window| window.snapshot())
-                        .is_none()
-                {
-                    look_ahead = prefetch_live_stem_waveform_block(
-                        path,
-                        track_id,
-                        expected_epoch,
-                        chunk_start + stride_seconds,
-                        duration,
-                        Arc::clone(&pool),
-                        Arc::clone(&hop_epoch),
-                        hop_expected,
-                        cancelled,
-                    )?;
-                }
                 continue;
             }
         }
@@ -1503,7 +1690,7 @@ where
                         StemPushOutcome::LoopEnd,
                         &mut chunk_start,
                         &mut remaining_source_frames,
-                        &mut look_ahead,
+                        &mut look_aheads,
                         &mut resampler,
                         duration,
                     ) || hold_chunk_start;
@@ -1515,7 +1702,7 @@ where
                 let next_start = chunk_start + stride as f64 / f64::from(STEM_SAMPLE_RATE);
                 if next_start + 1e-4 >= snap.end() {
                     chunk_start = snap.start;
-                    look_ahead = None;
+                    look_aheads.clear();
                     remaining_source_frames = loop_source_frames_remaining(snap, snap.start).max(1);
                     resampler.reset();
                     if let Some(window) = loop_window.as_ref() {
@@ -1529,13 +1716,45 @@ where
             }
         }
         hold_chunk_start = false;
+        if let Some(at) = live_stem_skip_behind_start(
+            chunk_start,
+            seek.as_ref()
+                .and_then(StreamSeekControl::clock)
+                .unwrap_or(chunk_start),
+            stride_seconds,
+            duration,
+        ) {
+            publish_cached_skipped_stem_waveforms(
+                path,
+                track_id,
+                expected_epoch,
+                chunk_start,
+                at,
+                stride_seconds,
+                duration,
+                &pool,
+            );
+            hop_expected = hop_expected.wrapping_add(1);
+            hop_epoch.store(hop_expected, Ordering::Release);
+            look_aheads.clear();
+            resampler.reset();
+            writer.begin_discontinuity();
+            cursor = StemWindowCursor::new();
+            chunk_start = at;
+            remaining_source_frames = if duration.is_finite() && duration > 0.0 {
+                ((duration - chunk_start).max(0.0) * f64::from(STEM_SAMPLE_RATE)).ceil() as u64
+            } else {
+                u64::MAX
+            };
+            if let Some(snap) = loop_window.as_ref().and_then(|window| window.snapshot()) {
+                remaining_source_frames =
+                    remaining_source_frames.min(loop_source_frames_remaining(snap, chunk_start));
+            }
+        }
         let next_frames = remaining_source_frames.min(stride as u64) as usize;
-        let next = if look_ahead
-            .as_ref()
-            .is_some_and(|tile| tile.is_for(chunk_start))
-        {
+        let next = if let Some(tile) = take_look_ahead_for(&mut look_aheads, chunk_start) {
             match await_prefetched_stem_chunk(
-                look_ahead.take().expect("look-ahead checked above"),
+                tile,
                 Arc::clone(&hop_epoch),
                 hop_expected,
                 cancelled,
@@ -1583,6 +1802,21 @@ where
             .as_ref()
             .and_then(|window| window.snapshot())
             .is_some();
+        if !looping {
+            keep_live_stem_look_ahead(
+                path,
+                track_id,
+                expected_epoch,
+                chunk_start,
+                stride_seconds,
+                duration,
+                Arc::clone(&pool),
+                Arc::clone(&hop_epoch),
+                hop_expected,
+                cancelled,
+                &mut look_aheads,
+            )?;
+        }
         let (pushed, outcome) = push_stem_overlap_range(
             &current,
             &next,
@@ -1608,13 +1842,12 @@ where
             next.stems(),
         );
         current = next;
-        look_ahead = None;
         if live_stem_apply_loop_outcome(
             loop_window.as_ref(),
             outcome,
             &mut chunk_start,
             &mut remaining_source_frames,
-            &mut look_ahead,
+            &mut look_aheads,
             &mut resampler,
             duration,
         ) {
@@ -1623,24 +1856,11 @@ where
             continue;
         }
         remaining_source_frames = remaining_source_frames.saturating_sub(pushed as u64);
-        if !looping && live_stem_needs_look_ahead(&writer, output_sample_rate) {
-            look_ahead = prefetch_live_stem_waveform_block(
-                path,
-                track_id,
-                expected_epoch,
-                chunk_start + stride_seconds,
-                duration,
-                Arc::clone(&pool),
-                Arc::clone(&hop_epoch),
-                hop_expected,
-                cancelled,
-            )?;
-        }
         if remaining_source_frames == 0 {
             if let Some(snap) = loop_window.as_ref().and_then(|window| window.snapshot()) {
                 chunk_start = snap.start;
                 remaining_source_frames = loop_source_frames_remaining(snap, snap.start).max(1);
-                look_ahead = None;
+                look_aheads.clear();
                 resampler.reset();
                 if let Some(window) = loop_window.as_ref() {
                     window.note_wrap();
@@ -1662,9 +1882,129 @@ where
     })
 }
 
-/// Prepare exactly one audible successor and retain it for the streaming handoff. It also
-/// publishes its waveform, but it is deliberately queued as audio work: this single tile is the
-/// bounded cushion that protects the next segment boundary without scanning the song.
+/// Keep the next [`LIVE_STEM_LOOKAHEAD_TILES`] successor windows on the look-ahead lane.
+/// Two workers can then infer future slices while this thread still pushes the current tile.
+fn live_stem_look_ahead_starts(from: f64, stride: f64, duration: f64) -> Vec<f64> {
+    (1..=LIVE_STEM_LOOKAHEAD_TILES)
+        .map(|index| from + stride * index as f64)
+        .filter(|start| {
+            start.is_finite()
+                && *start >= 0.0
+                && !(duration.is_finite() && duration > 0.0 && *start >= duration)
+        })
+        .collect()
+}
+
+fn live_stem_core_start(position: f64, stride_seconds: f64) -> f64 {
+    if !position.is_finite()
+        || position <= 0.0
+        || !stride_seconds.is_finite()
+        || stride_seconds <= 0.0
+    {
+        return position.max(0.0);
+    }
+    (position / stride_seconds).floor() * stride_seconds
+}
+
+fn publish_cached_skipped_stem_waveforms(
+    path: &Path,
+    track_id: i64,
+    epoch: u64,
+    from: f64,
+    until: f64,
+    stride_seconds: f64,
+    duration: f64,
+    pool: &StemInferencePool,
+) {
+    if stride_seconds <= 0.0 {
+        return;
+    }
+    let mut start = from;
+    while start + 1e-3 < until {
+        if let Some(chunk) = pool.cached_for_key(&stem_tile_cache_key(path, start)) {
+            publish_live_stem_hop_waveform(track_id, epoch, start, duration, chunk.stems());
+        }
+        start += stride_seconds;
+    }
+}
+
+/// A tile whose retained core is already behind the audible needle must not occupy the
+/// accelerator. Inference slower than realtime used to walk the already-played intro while the
+/// playhead (and the 30s rail) had moved tens of seconds ahead.
+fn live_stem_skip_behind_start(
+    chunk_start: f64,
+    clock: f64,
+    stride_seconds: f64,
+    duration: f64,
+) -> Option<f64> {
+    if !clock.is_finite() || clock < 0.0 || stride_seconds <= 0.0 {
+        return None;
+    }
+    if chunk_start + stride_seconds + 1e-3 >= clock {
+        return None;
+    }
+    let aligned = live_stem_core_start(clock, stride_seconds);
+    if aligned <= chunk_start + 1e-6 {
+        return None;
+    }
+    if duration.is_finite() && duration > 0.0 && aligned >= duration {
+        return None;
+    }
+    Some(aligned)
+}
+
+fn take_look_ahead_for(
+    tiles: &mut Vec<LiveStemLookAhead>,
+    start: f64,
+) -> Option<LiveStemLookAhead> {
+    let index = tiles.iter().position(|tile| tile.is_for(start))?;
+    Some(tiles.remove(index))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn keep_live_stem_look_ahead<F>(
+    path: &Path,
+    track_id: i64,
+    waveform_epoch: u64,
+    current_start: f64,
+    stride_seconds: f64,
+    duration: f64,
+    pool: Arc<StemInferencePool>,
+    hop_epoch: Arc<AtomicU64>,
+    hop_expected: u64,
+    cancelled: F,
+    tiles: &mut Vec<LiveStemLookAhead>,
+) -> Result<()>
+where
+    F: Fn() -> bool + Copy,
+{
+    let epsilon = 1.0 / f64::from(STEM_SAMPLE_RATE);
+    tiles.retain(|tile| tile.start + epsilon >= current_start);
+    for start in live_stem_look_ahead_starts(current_start, stride_seconds, duration) {
+        if tiles.iter().any(|tile| tile.is_for(start)) {
+            continue;
+        }
+        match prefetch_live_stem_waveform_block(
+            path,
+            track_id,
+            waveform_epoch,
+            start,
+            duration,
+            Arc::clone(&pool),
+            Arc::clone(&hop_epoch),
+            hop_expected,
+            cancelled,
+        )? {
+            Some(tile) => tiles.push(tile),
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+/// Queue one future Spleeter4 tile on the look-ahead lane and publish its waveform when ready.
+/// A full look-ahead queue means audio still owns both workers; this Deck retries later or submits
+/// the same window as mandatory audio when it becomes the audible boundary.
 #[allow(clippy::too_many_arguments)]
 fn prefetch_live_stem_waveform_block<F>(
     path: &Path,
@@ -1695,11 +2035,9 @@ where
             return Ok(None);
         }
     }
-    // A future block is useful, but it is not allowed to sit ahead of the other physical Deck's
-    // currently audible block. The old hard-audio submission let Deck A continuously enqueue its
-    // successor before Deck B could claim the single accelerator owner; under SYNC one side then
-    // filled while the other repeatedly starved. A full look-ahead lane simply means this Deck
-    // will submit the block as mandatory audio when it reaches the boundary.
+    // Future tiles stay on the look-ahead lane so they cannot jump ahead of the other Deck's
+    // currently audible block. Two workers can still run two successors at once; a full queue
+    // means this Deck will submit the window as mandatory audio when it reaches the boundary.
     let Some(ticket) = pool.submit_look_ahead_for(
         stem_tile_cache_key(path, start),
         left,
@@ -1765,6 +2103,409 @@ where
         }
         thread::sleep(Duration::from_millis(1));
     }
+}
+
+struct SeekBridgeResult {
+    refined: Arc<StemChunk>,
+    pushed: usize,
+    outcome: StemPushOutcome,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_seek_bridge_until_refined<F, I>(
+    layered: &LayeredInstant,
+    admission: Option<InstantAdmissionGuard>,
+    ticket: &kdj_stems::StemInferenceTicket,
+    chunk_start: f64,
+    frames: usize,
+    loop_window: Option<&Arc<LoopWindow>>,
+    seen_loop_generation: Option<u64>,
+    resampler: &mut LiveStemResampler,
+    writer: &mut StreamWriter<StemFrame>,
+    epoch: Arc<AtomicU64>,
+    expected_epoch: u64,
+    cancelled: F,
+    interrupted: I,
+    deck: usize,
+) -> Result<SeekBridgeResult>
+where
+    F: Fn() -> bool + Copy,
+    I: Fn() -> bool + Copy,
+{
+    let started = std::time::Instant::now();
+    let mut pushed = 0usize;
+    let mut instant_active = admission.is_some();
+    if let Some(refined) = ticket.try_wait()? {
+        return Ok(SeekBridgeResult {
+            refined,
+            pushed: 0,
+            outcome: StemPushOutcome::Complete,
+        });
+    }
+    // Dry PCM is deliberately independent from model throughput. Rebuild a bounded destination
+    // cushion first, then let HS-TasNet replace only future hops when it meets the audio deadline.
+    // This preserves the immediate target-position jump without exposing callback starvation as
+    // periodic silence/rebuffer pulses.
+    if frames > 0 {
+        let prefill = seek_bridge_prefill_frames(frames);
+        let source_frame = (chunk_start * f64::from(STEM_SAMPLE_RATE)).round() as u64;
+        let dry = dry_bridge_frames(&layered.track, source_frame, prefill);
+        let outcome = push_seek_bridge_frames(
+            &dry,
+            0,
+            chunk_start,
+            loop_window,
+            seen_loop_generation,
+            resampler,
+            writer,
+            cancelled,
+            interrupted,
+        )?;
+        pushed = prefill;
+        if !matches!(outcome, StemPushOutcome::Complete) {
+            let refined = await_stem_ticket(
+                ticket,
+                Arc::clone(&epoch),
+                expected_epoch,
+                cancelled,
+                interrupted,
+            )?;
+            return Ok(SeekBridgeResult {
+                refined,
+                pushed,
+                outcome,
+            });
+        }
+    }
+    let mut instant_started = false;
+    while pushed < frames {
+        if cancelled() {
+            bail!("STEM live stream preparation cancelled");
+        }
+        if interrupted() || epoch.load(Ordering::Acquire) != expected_epoch {
+            bail!("STEM hop retargeted");
+        }
+        let ready_before = ticket.try_wait()?;
+        if let Some(refined) = ready_before.as_ref().filter(|_| pushed == 0) {
+            return Ok(SeekBridgeResult {
+                refined: Arc::clone(refined),
+                pushed: 0,
+                outcome: StemPushOutcome::Complete,
+            });
+        }
+        let hop_frames = (frames - pushed).min(INSTANT_HOP_FRAMES);
+        let source_frame = ((chunk_start * f64::from(STEM_SAMPLE_RATE)).round() as u64)
+            .saturating_add(pushed as u64);
+        let bridge = if instant_active {
+            match instant_bridge_frames(
+                layered,
+                deck,
+                source_frame,
+                Arc::clone(&epoch),
+                expected_epoch,
+                hop_frames,
+                cancelled,
+                interrupted,
+            ) {
+                Ok(mut frames) => {
+                    if !instant_started {
+                        let dry = dry_bridge_frames(&layered.track, source_frame, frames.len());
+                        let handoff = frames.len().min(INSTANT_HANDOFF_FRAMES);
+                        for offset in 0..handoff {
+                            frames[offset] = refinement_handoff_frame(
+                                dry[offset],
+                                frames[offset],
+                                offset,
+                                handoff,
+                            );
+                        }
+                        instant_started = true;
+                    }
+                    frames
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, deck, "instant STEM missed its hard deadline; switching to dry bridge");
+                    // Keep the admission guard until this refinement bridge ends: the timed-out
+                    // native call is not pre-emptible, so admitting the other Deck immediately
+                    // would briefly recreate the proven dual-session overload.
+                    instant_active = false;
+                    dry_bridge_frames(&layered.track, source_frame, hop_frames)
+                }
+            }
+        } else {
+            dry_bridge_frames(&layered.track, source_frame, hop_frames)
+        };
+        let ready_after = if ready_before.is_some() {
+            ready_before
+        } else {
+            ticket.try_wait()?
+        };
+        if let Some(refined) = ready_after {
+            let handoff = bridge
+                .len()
+                .min(INSTANT_HANDOFF_FRAMES)
+                .min(refined.frames().saturating_sub(pushed));
+            let outcome = push_refinement_handoff(
+                &bridge,
+                &refined,
+                pushed,
+                handoff,
+                chunk_start,
+                loop_window,
+                seen_loop_generation,
+                resampler,
+                writer,
+                cancelled,
+                interrupted,
+            )?;
+            return Ok(SeekBridgeResult {
+                refined,
+                pushed: pushed + handoff,
+                outcome,
+            });
+        }
+        let outcome = push_seek_bridge_frames(
+            &bridge,
+            pushed,
+            chunk_start,
+            loop_window,
+            seen_loop_generation,
+            resampler,
+            writer,
+            cancelled,
+            interrupted,
+        )?;
+        pushed += bridge.len();
+        if !matches!(outcome, StemPushOutcome::Complete) {
+            let refined = await_stem_ticket(
+                ticket,
+                Arc::clone(&epoch),
+                expected_epoch,
+                cancelled,
+                interrupted,
+            )?;
+            return Ok(SeekBridgeResult {
+                refined,
+                pushed,
+                outcome,
+            });
+        }
+        if !instant_active {
+            // Dry PCM can be generated much faster than playback. Pace it to the source clock so
+            // an eventual refinement replaces future samples instead of sitting behind seconds of
+            // already-buffered fallback audio.
+            let deadline =
+                started + Duration::from_secs_f64(pushed as f64 / f64::from(STEM_SAMPLE_RATE));
+            while std::time::Instant::now() < deadline {
+                if cancelled() || interrupted() || epoch.load(Ordering::Acquire) != expected_epoch {
+                    bail!("STEM hop retargeted");
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+    let refined = await_stem_ticket(ticket, epoch, expected_epoch, cancelled, interrupted)?;
+    Ok(SeekBridgeResult {
+        refined,
+        pushed,
+        outcome: StemPushOutcome::Complete,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn instant_bridge_frames<F, I>(
+    layered: &LayeredInstant,
+    deck: usize,
+    source_frame: u64,
+    epoch: Arc<AtomicU64>,
+    expected_epoch: u64,
+    frames: usize,
+    cancelled: F,
+    interrupted: I,
+) -> Result<Vec<StemFrame>>
+where
+    F: Fn() -> bool + Copy,
+    I: Fn() -> bool + Copy,
+{
+    let started = std::time::Instant::now();
+    let ticket = layered.pool.submit(
+        deck,
+        Arc::clone(&layered.track),
+        source_frame,
+        Arc::clone(&epoch),
+        expected_epoch,
+    )?;
+    let chunk = loop {
+        match ticket.try_wait()? {
+            Some(chunk) => break chunk,
+            None => {}
+        }
+        if cancelled() || interrupted() || epoch.load(Ordering::Acquire) != expected_epoch {
+            bail!("HS-TasNet hop retargeted");
+        }
+        if started.elapsed() >= Duration::from_millis(INSTANT_HOP_BUDGET_MS) {
+            bail!(
+                "HS-TasNet hop exceeded the {} ms audio deadline",
+                INSTANT_HOP_BUDGET_MS
+            );
+        }
+        thread::sleep(Duration::from_millis(1));
+    };
+    Ok((0..frames.min(chunk.frames()))
+        .map(|frame| instant_chunk_frame(&chunk, frame))
+        .collect())
+}
+
+fn seek_bridge_prefill_frames(available: usize) -> usize {
+    let target = (u64::from(STEM_SAMPLE_RATE) * LIVE_STEM_SEEK_PREFILL_MS / 1_000) as usize;
+    available.min(target.max(INSTANT_HOP_FRAMES))
+}
+
+fn instant_chunk_frame(chunk: &InstantStemChunk, frame: usize) -> StemFrame {
+    let stems = chunk.stems();
+    StemFrame::separated([
+        stems[0][frame][0],
+        stems[0][frame][1],
+        stems[1][frame][0],
+        stems[1][frame][1],
+        stems[2][frame][0],
+        stems[2][frame][1],
+        stems[3][frame][0],
+        stems[3][frame][1],
+    ])
+}
+
+fn dry_bridge_frames(track: &InstantTrack, source_frame: u64, frames: usize) -> Vec<StemFrame> {
+    (0..frames)
+        .map(|offset| {
+            StemFrame::dry_bridge(
+                track
+                    .frame(source_frame.saturating_add(offset as u64))
+                    .unwrap_or([0.0; 2]),
+            )
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_seek_bridge_frames<F, I>(
+    bridge: &[StemFrame],
+    source_offset: usize,
+    chunk_start: f64,
+    loop_window: Option<&Arc<LoopWindow>>,
+    seen_loop_generation: Option<u64>,
+    resampler: &mut LiveStemResampler,
+    writer: &mut StreamWriter<StemFrame>,
+    cancelled: F,
+    interrupted: I,
+) -> Result<StemPushOutcome>
+where
+    F: Fn() -> bool + Copy,
+    I: Fn() -> bool + Copy,
+{
+    for (offset, frame) in bridge.iter().copied().enumerate() {
+        if let Some(outcome) = seek_bridge_loop_outcome(
+            loop_window,
+            seen_loop_generation,
+            chunk_start,
+            source_offset + offset,
+        ) {
+            return Ok(outcome);
+        }
+        if !resampler.push(frame, writer, cancelled, interrupted)? {
+            return Ok(StemPushOutcome::Interrupted);
+        }
+    }
+    Ok(StemPushOutcome::Complete)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_refinement_handoff<F, I>(
+    bridge: &[StemFrame],
+    refined: &StemChunk,
+    source_offset: usize,
+    frames: usize,
+    chunk_start: f64,
+    loop_window: Option<&Arc<LoopWindow>>,
+    seen_loop_generation: Option<u64>,
+    resampler: &mut LiveStemResampler,
+    writer: &mut StreamWriter<StemFrame>,
+    cancelled: F,
+    interrupted: I,
+) -> Result<StemPushOutcome>
+where
+    F: Fn() -> bool + Copy,
+    I: Fn() -> bool + Copy,
+{
+    for offset in 0..frames {
+        if let Some(outcome) = seek_bridge_loop_outcome(
+            loop_window,
+            seen_loop_generation,
+            chunk_start,
+            source_offset + offset,
+        ) {
+            return Ok(outcome);
+        }
+        let from = bridge[offset];
+        let to = chunk_frame(refined, source_offset + offset);
+        let frame = refinement_handoff_frame(from, to, offset, frames);
+        if !resampler.push(frame, writer, cancelled, interrupted)? {
+            return Ok(StemPushOutcome::Interrupted);
+        }
+    }
+    Ok(StemPushOutcome::Complete)
+}
+
+fn refinement_handoff_frame(
+    from: StemFrame,
+    to: StemFrame,
+    offset: usize,
+    frames: usize,
+) -> StemFrame {
+    let linear = if frames <= 1 {
+        1.0
+    } else {
+        offset.min(frames - 1) as f32 / (frames - 1) as f32
+    };
+    let blend = linear * linear * (3.0 - 2.0 * linear);
+    from.lerp(to, blend)
+}
+
+fn seek_bridge_loop_outcome(
+    loop_window: Option<&Arc<LoopWindow>>,
+    seen_generation: Option<u64>,
+    chunk_start: f64,
+    source_offset: usize,
+) -> Option<StemPushOutcome> {
+    let window = loop_window?;
+    if Some(window.generation()) != seen_generation {
+        return Some(StemPushOutcome::LoopChanged);
+    }
+    let snap = window.snapshot()?;
+    let time = stem_frame_time(chunk_start, source_offset);
+    (!snap.contains(time)).then_some(StemPushOutcome::LoopEnd)
+}
+
+fn wait_for_pipeline_seek_ack<F, I>(
+    seek: Option<&StreamSeekControl>,
+    generation: u64,
+    cancelled: F,
+    interrupted: I,
+) -> Result<()>
+where
+    F: Fn() -> bool + Copy,
+    I: Fn() -> bool + Copy,
+{
+    let Some(seek) = seek else {
+        return Ok(());
+    };
+    while !seek.pipeline_acknowledged(generation) {
+        if cancelled() || interrupted() {
+            bail!("STEM hop retargeted");
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    Ok(())
 }
 
 fn await_stem_ticket<F, R>(
@@ -1861,10 +2602,9 @@ fn publish_live_stem_hop_waveform(
     duration: f64,
     stems: &[Vec<[f32; 2]>; 4],
 ) {
-    let guard = SEGMENT_WAVEFORM_GUARD_SAMPLES;
-    let interior = SEGMENT_SAMPLES.saturating_sub(guard.saturating_mul(2));
-    let start = chunk_start
-        - (SEGMENT_CONTEXT_SAMPLES.saturating_sub(guard)) as f64 / f64::from(STEM_SAMPLE_RATE);
+    let guard = 0;
+    let interior = stems[0].len();
+    let start = chunk_start;
     let frames = if duration.is_finite() && duration > 0.0 {
         ((duration - start).max(0.0) * f64::from(STEM_SAMPLE_RATE))
             .ceil()
@@ -1913,7 +2653,7 @@ fn live_stem_apply_loop_outcome(
     outcome: StemPushOutcome,
     chunk_start: &mut f64,
     remaining_source_frames: &mut u64,
-    look_ahead: &mut Option<LiveStemLookAhead>,
+    look_aheads: &mut Vec<LiveStemLookAhead>,
     resampler: &mut LiveStemResampler,
     duration: f64,
 ) -> bool {
@@ -1923,7 +2663,7 @@ fn live_stem_apply_loop_outcome(
             if let Some(snap) = loop_window.and_then(|window| window.snapshot()) {
                 *chunk_start = snap.start;
                 *remaining_source_frames = loop_source_frames_remaining(snap, snap.start).max(1);
-                *look_ahead = None;
+                look_aheads.clear();
                 resampler.reset();
                 true
             } else if duration.is_finite() && duration > 0.0 {
@@ -2026,12 +2766,7 @@ where
             Ok(index) => index,
             Err(outcome) => return Ok((offset, outcome)),
         };
-        if !resampler.push(
-            chunk_frame(chunk, SEGMENT_CONTEXT_SAMPLES + index),
-            writer,
-            cancelled,
-            interrupted,
-        )? {
+        if !resampler.push(chunk_frame(chunk, index), writer, cancelled, interrupted)? {
             return Ok((offset, StemPushOutcome::Interrupted));
         }
     }
@@ -2068,15 +2803,12 @@ where
         };
         let frame = if index == requested && index < stem_segment_handoff_frames() {
             guarded_stem_handoff_frame(
-                chunk_frame(
-                    previous,
-                    SEGMENT_CONTEXT_SAMPLES + live_stem_output_stride_frames() + index,
-                ),
-                chunk_frame(current, SEGMENT_CONTEXT_SAMPLES + index),
+                chunk_frame(previous, live_stem_output_stride_frames() + index),
+                chunk_frame(current, index),
                 index,
             )
         } else {
-            chunk_frame(current, SEGMENT_CONTEXT_SAMPLES + index)
+            chunk_frame(current, index)
         };
         if !resampler.push(frame, writer, cancelled, interrupted)? {
             return Ok((offset, StemPushOutcome::Interrupted));
@@ -2097,7 +2829,7 @@ fn guarded_stem_handoff_frame(
         return current;
     }
     let linear = overlap_index as f32 / (handoff_frames - 1) as f32;
-    // Adjacent SCNet estimates are phase-aligned because both see the same real PCM context. A
+    // Adjacent Spleeter4 estimates are phase-aligned because both see the same real PCM context. A
     // smooth linear partition keeps identical signals at unity; the old equal-power blend raised
     // the complete mix by up to +3 dB through every handoff.
     let current_gain = linear * linear * (3.0 - 2.0 * linear);
@@ -2110,18 +2842,14 @@ fn guarded_stem_handoff_frame(
 }
 
 fn stem_segment_handoff_frames() -> usize {
-    SEGMENT_HANDOFF_SAMPLES.min(SEGMENT_CORE_SAMPLES.max(1))
+    let geometry = stem_tile_geometry();
+    geometry.handoff.min(geometry.core.max(1))
 }
 
-/// New context-safe material per fixed SCNet call. The short handoff uses the previous window's
+/// New context-safe material per model call. The short handoff uses the previous window's
 /// right-hand context rather than shrinking this stride.
 fn live_stem_output_stride_frames() -> usize {
-    SEGMENT_CORE_SAMPLES.max(1)
-}
-
-fn live_stem_needs_look_ahead(writer: &StreamWriter<StemFrame>, output_sample_rate: u32) -> bool {
-    let cushion = u64::from(output_sample_rate.max(1)) * LIVE_STEM_LOOKAHEAD_CUSHION_MS / 1_000;
-    writer.buffered_frames() < cushion
+    stem_tile_geometry().core.max(1)
 }
 
 fn stem_seek_pending(seek: Option<&StreamSeekControl>, seen: u64) -> bool {
@@ -2321,20 +3049,39 @@ mod tests {
         seek.request(12.5);
         seek.request(4.0);
         assert!((seek.observe(&mut decode_seen).unwrap() - 4.0).abs() < 1e-9);
+        assert!(!seek.pipeline_acknowledged(decode_seen));
         assert!((seek.observe(&mut stretch_seen).unwrap() - 4.0).abs() < 1e-9);
+        seek.acknowledge_pipeline(stretch_seen);
+        assert!(seek.pipeline_acknowledged(decode_seen));
+        assert!(seek.observe(&mut decode_seen).is_none());
+        seek.publish_clock(48.0);
+        assert!((seek.clock().unwrap() - 48.0).abs() < 1e-9);
         assert!(seek.observe(&mut decode_seen).is_none());
     }
 
     #[test]
-    fn live_stem_look_ahead_only_runs_when_the_raw_ring_is_thin() {
-        let rate = 48_000;
-        let (_source, mut writer) = StreamSource::<StemFrame>::bounded(rate as usize);
-        assert!(live_stem_needs_look_ahead(&writer, rate));
-        let cushion = u64::from(rate) * LIVE_STEM_LOOKAHEAD_CUSHION_MS / 1_000;
-        for _ in 0..cushion {
-            writer.push(StemFrame::default(), || false).unwrap();
-        }
-        assert!(!live_stem_needs_look_ahead(&writer, rate));
+    fn live_stem_look_ahead_covers_two_successor_tiles() {
+        let stride = live_stem_output_stride_frames() as f64 / f64::from(STEM_SAMPLE_RATE);
+        assert_eq!(
+            live_stem_look_ahead_starts(12.0, stride, 180.0),
+            vec![12.0 + stride, 12.0 + stride * 2.0]
+        );
+        assert_eq!(
+            live_stem_look_ahead_starts(12.0, stride, 12.0 + stride * 1.5),
+            vec![12.0 + stride]
+        );
+        assert!(live_stem_look_ahead_starts(12.0, stride, 12.0 + stride / 2.0).is_empty());
+    }
+
+    #[test]
+    fn live_stem_skips_tiles_that_are_already_behind_the_playhead() {
+        let stride = live_stem_output_stride_frames() as f64 / f64::from(STEM_SAMPLE_RATE);
+        assert!(live_stem_skip_behind_start(0.0, 0.5, stride, 180.0).is_none());
+        let skipped = live_stem_skip_behind_start(0.0, 50.0, stride, 180.0)
+            .expect("a 50s playhead must abandon the intro tile");
+        assert!(skipped >= 50.0 - stride);
+        assert!(skipped <= 50.0);
+        assert!(live_stem_skip_behind_start(skipped, 50.0, stride, 180.0).is_none());
     }
 
     #[test]
@@ -2407,13 +3154,20 @@ mod tests {
     #[test]
     fn look_ahead_tile_is_consumed_only_at_its_exact_successor_start() {
         let stride = live_stem_output_stride_frames() as f64 / f64::from(STEM_SAMPLE_RATE);
-        let tile = LiveStemLookAhead {
+        let first = LiveStemLookAhead {
             start: 12.0 + stride,
             result: Arc::new(Mutex::new(None)),
         };
-        assert!(tile.is_for(12.0 + stride));
-        assert!(!tile.is_for(12.0));
-        assert!(!tile.is_for(12.0 + stride * 2.0));
+        let second = LiveStemLookAhead {
+            start: 12.0 + stride * 2.0,
+            result: Arc::new(Mutex::new(None)),
+        };
+        let mut tiles = vec![first, second];
+        assert!(take_look_ahead_for(&mut tiles, 12.0).is_none());
+        let taken = take_look_ahead_for(&mut tiles, 12.0 + stride).expect("first successor");
+        assert!(taken.is_for(12.0 + stride));
+        assert_eq!(tiles.len(), 1);
+        assert!(tiles[0].is_for(12.0 + stride * 2.0));
     }
 
     #[test]
@@ -2521,22 +3275,48 @@ mod tests {
     }
 
     #[test]
-    fn emitted_core_is_buffered_away_from_every_model_window_edge() {
+    fn seek_refinement_handoff_has_exact_dry_and_stem_endpoints() {
+        let dry = StemFrame::dry_bridge([0.4, -0.4]);
+        let refined = StemFrame::separated([0.1; STEM_LANES * 2]);
+        let first = refinement_handoff_frame(dry, refined, 0, INSTANT_HANDOFF_FRAMES);
+        let last = refinement_handoff_frame(
+            dry,
+            refined,
+            INSTANT_HANDOFF_FRAMES - 1,
+            INSTANT_HANDOFF_FRAMES,
+        );
+
+        assert_eq!(first.blend, 1.0);
+        assert_eq!(first.original, [0.4, -0.4]);
+        assert_eq!(last.blend, 1.0);
+        assert_eq!(last.lanes, refined.lanes);
+    }
+
+    #[test]
+    fn seek_bridge_prefills_a_quarter_second_before_model_hops() {
+        let expected = STEM_SAMPLE_RATE as usize * LIVE_STEM_SEEK_PREFILL_MS as usize / 1_000;
+        assert_eq!(seek_bridge_prefill_frames(SEGMENT_CORE_SAMPLES), expected);
+        assert!(expected >= INSTANT_HOP_FRAMES * 20);
+        assert_eq!(seek_bridge_prefill_frames(123), 123);
+    }
+
+    #[test]
+    fn cached_tile_keeps_only_the_context_safe_core_and_handoff_tail() {
         let stride = live_stem_output_stride_frames();
         let handoff = stem_segment_handoff_frames();
-        let first = SEGMENT_CONTEXT_SAMPLES;
-        let previous_seam = SEGMENT_CONTEXT_SAMPLES + stride;
-        let next_seam = SEGMENT_CONTEXT_SAMPLES;
+        let cached_frames = stride + handoff;
 
-        assert_eq!(first, SEGMENT_CONTEXT_SAMPLES);
         assert_eq!(stride, SEGMENT_CORE_SAMPLES);
-        assert!(previous_seam + handoff <= SEGMENT_SAMPLES);
-        assert!(next_seam >= SEGMENT_CONTEXT_SAMPLES);
+        assert_eq!(
+            cached_frames,
+            SEGMENT_CORE_SAMPLES + SEGMENT_HANDOFF_SAMPLES
+        );
+        assert!(SEGMENT_CONTEXT_SAMPLES + cached_frames <= SEGMENT_SAMPLES);
         assert!(SEGMENT_CORE_SAMPLES > handoff);
     }
 
     #[test]
-    fn first_scnet_core_fits_in_the_output_ring() {
+    fn first_spleeter4_core_fits_in_the_output_ring() {
         let output_rate = 48_000u32;
         let tile_frames = live_stem_output_stride_frames();
         assert_eq!(tile_frames, SEGMENT_CORE_SAMPLES);
@@ -2612,19 +3392,103 @@ mod tests {
     }
 
     #[test]
-    fn live_stem_stream_waits_for_model_then_emits_only_model_lanes_when_fixtures_exist() {
-        const FIXTURE_SECONDS: f64 = 20.0;
-        const FIXTURE_POSITION: f64 = 2.0;
-        const FIXTURE_STARTUP_BUFFER_MS: u64 = 250;
+    fn live_stem_start_reuses_a_ready_viewport_tile_when_fixtures_exist() {
         let (Ok(model), Ok(audio)) = (
-            std::env::var("KDJ_SCNET_COREML_MODEL"),
-            std::env::var("KDJ_STEM_TEST_AUDIO").or_else(|_| std::env::var("KDJ_SCNET_TEST_AUDIO")),
+            std::env::var("KDJ_SPLEETER4_MODEL_DIR"),
+            std::env::var("KDJ_STEM_TEST_AUDIO")
+                .or_else(|_| std::env::var("KDJ_SPLEETER4_TEST_AUDIO")),
         ) else {
             return;
         };
+        let requested = std::env::var("KDJ_SPLEETER4_TEST_POSITION")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(60.0);
+        let stride = live_stem_output_stride_frames();
+        let requested_frame = (requested * f64::from(STEM_SAMPLE_RATE)).round() as u64;
+        let core_frame = requested_frame / stride as u64 * stride as u64;
+        let core_start = core_frame as f64 / f64::from(STEM_SAMPLE_RATE);
+        let pool = StemInferencePool::new(Path::new(&model), 1).unwrap();
+        let epoch = Arc::new(AtomicU64::new(1));
+        let (left, right) = StemWindowCursor::new()
+            .window_for_core(Path::new(&audio), core_start)
+            .unwrap();
+        pool.submit_for(
+            stem_tile_cache_key(Path::new(&audio), core_start),
+            left,
+            right,
+            Arc::clone(&epoch),
+            1,
+        )
+        .unwrap()
+        .wait()
+        .unwrap();
+        assert_eq!(kdj_stems::stem_runtime_diagnostics().processed_chunks, 1);
+
+        let worker_audio = audio.clone();
+        let worker_pool = Arc::clone(&pool);
+        let worker_epoch = Arc::clone(&epoch);
+        let (source, writer) = StreamSource::<StemFrame>::bounded(44_100 * 4);
+        let started = std::time::Instant::now();
+        let handle = std::thread::spawn(move || {
+            decode_live_stem_streaming(
+                Path::new(&worker_audio),
+                -91_338,
+                0,
+                requested,
+                requested + 8.0,
+                44_100,
+                worker_pool,
+                Arc::clone(&worker_epoch),
+                1,
+                writer,
+                || worker_epoch.load(Ordering::Acquire) != 1,
+                None,
+                None,
+            )
+        });
+        let startup_frames = 44_100 / 4;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline
+            && source.buffered_frames() < startup_frames
+            && !source.ended()
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(source.buffered_frames() >= startup_frames);
+        assert!(
+            started.elapsed() < Duration::from_millis(700),
+            "ready viewport tile still paid model latency: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            kdj_stems::stem_runtime_diagnostics().processed_chunks,
+            1,
+            "audible startup reran a tile that the viewport had already completed"
+        );
+        epoch.store(2, Ordering::Release);
+        drop(source);
+        assert!(handle.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn live_stem_stream_waits_for_model_then_emits_only_model_lanes_when_fixtures_exist() {
+        const FIXTURE_SECONDS: f64 = 20.0;
+        const FIXTURE_STARTUP_BUFFER_MS: u64 = 250;
+        let (Ok(model), Ok(audio)) = (
+            std::env::var("KDJ_SPLEETER4_MODEL_DIR"),
+            std::env::var("KDJ_STEM_TEST_AUDIO")
+                .or_else(|_| std::env::var("KDJ_SPLEETER4_TEST_AUDIO")),
+        ) else {
+            return;
+        };
+        let fixture_position = std::env::var("KDJ_SPLEETER4_TEST_POSITION")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2.0);
         let original = decode_file_region(
             Path::new(&audio),
-            FIXTURE_POSITION,
+            fixture_position,
             FIXTURE_SECONDS,
             44_100,
             || false,
@@ -2639,8 +3503,9 @@ mod tests {
             decode_live_stem_streaming(
                 Path::new(&worker_audio),
                 -91_337,
-                FIXTURE_POSITION,
-                FIXTURE_SECONDS,
+                0,
+                fixture_position,
+                fixture_position + FIXTURE_SECONDS,
                 44_100,
                 pool,
                 Arc::clone(&worker_epoch),
@@ -2729,7 +3594,7 @@ mod tests {
         );
         assert!(
             saw_stems,
-            "SCNet lanes did not arrive before the preparation deadline"
+            "Spleeter4 lanes did not arrive before the preparation deadline"
         );
         assert_eq!(
             empty_batches_after_start, 0,
@@ -2737,7 +3602,7 @@ mod tests {
         );
         assert!(
             full_stem_frames >= separated_frames_for_handoff,
-            "did not cross a real SCNet tile handoff in separated fixture audio"
+            "did not cross a real Spleeter4 tile handoff in separated fixture audio"
         );
         let level_ratio = (stem_energy / original_energy).sqrt();
         let lane_rms = std::array::from_fn::<_, { STEM_LANES * 2 }, _>(|lane| {
@@ -2760,7 +3625,7 @@ mod tests {
                     / 44_100.0;
                 assert!(
                     difference.sqrt() > 1e-4,
-                    "SCNet lanes {left} and {right} collapsed to the same signal"
+                    "Spleeter4 lanes {left} and {right} collapsed to the same signal"
                 );
             }
         }
@@ -2795,7 +3660,7 @@ mod tests {
             "model-hop stitching still has periodic lane discontinuities: worst boundary/internal delta ratio={worst_boundary_ratio:.3}"
         );
         eprintln!(
-            "cold SCNet buffered first separated frame: {:?}; full-mix level ratio: {level_ratio:.3}; lane RMS: {lane_rms:?}; worst seam ratio: {worst_boundary_ratio:.3}",
+            "cold Spleeter4 buffered first separated frame: {:?}; full-mix level ratio: {level_ratio:.3}; lane RMS: {lane_rms:?}; worst seam ratio: {worst_boundary_ratio:.3}",
             first_stem_at.expect("saw_stems guarantees a first separated frame"),
         );
         epoch.store(2, Ordering::Release);

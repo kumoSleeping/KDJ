@@ -16,7 +16,9 @@ import { useLyricsPrefs } from "./lib/lyricsPrefs";
 import { useUpdateStore } from "./stores/updateStore";
 import { readWorkMode, writeWorkMode, type WorkMode } from "./lib/workMode";
 import { STEM_DEBUG_OPEN_EVENT } from "./lib/stemDebug";
+import { STEM_LAB_OPEN_EVENT } from "./lib/stemLab";
 import { StemDebugWorkspace } from "./components/stem-debug/StemDebugWorkspace";
+import { StemSeekLab } from "./components/stem-lab/StemSeekLab";
 
 // 只有一个界面：工作台（曲库 + 搜索下载合一）。
 // 登录 / 队列从顶栏专用按钮进入；其余设置仍就地改。
@@ -46,6 +48,7 @@ export default function App() {
   const [workMode, setWorkModeState] = useState<WorkMode>(() => readWorkMode());
   const [djWorkspaceHost, setDjWorkspaceHost] = useState<HTMLDivElement | null>(null);
   const [stemDebugOpen, setStemDebugOpen] = useState(false);
+  const [stemLabOpen, setStemLabOpen] = useState(false);
   const platform = window.kdj?.platform;
   const isMac = platform === "darwin";
   const isMobile = platform === "android" || platform === "ios";
@@ -90,6 +93,15 @@ export default function App() {
     };
     window.addEventListener(STEM_DEBUG_OPEN_EVENT, open);
     return () => window.removeEventListener(STEM_DEBUG_OPEN_EVENT, open);
+  }, []);
+
+  useEffect(() => {
+    const open = () => {
+      silenceAllMedia();
+      setStemLabOpen(true);
+    };
+    window.addEventListener(STEM_LAB_OPEN_EVENT, open);
+    return () => window.removeEventListener(STEM_LAB_OPEN_EVENT, open);
   }, []);
 
   // 分析不该由人来推动：选中、播放、以及空闲时的后台补齐都自动排队。
@@ -147,6 +159,8 @@ export default function App() {
       <div className="kd-body">
         {connected && stemDebugOpen ? (
           <StemDebugWorkspace onClose={() => setStemDebugOpen(false)} />
+        ) : connected && stemLabOpen ? (
+          <StemSeekLab onClose={() => setStemLabOpen(false)} />
         ) : connected ? (
           <Workspace
             workMode={workMode}
@@ -182,7 +196,7 @@ export default function App() {
 
       <ToastHost />
       {/* 没连上时不渲染播放条：没有可播的曲目，留个空条只会占地方 */}
-      {connected && !stemDebugOpen && (
+      {connected && !stemDebugOpen && !stemLabOpen && (
         <>
           <PlayerBar workMode={workMode} djWorkspaceHost={djWorkspaceHost} />
           <VideoPipHost />

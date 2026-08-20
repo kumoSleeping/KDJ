@@ -735,7 +735,9 @@ impl StreamWaveformCoordinator {
         let coordinator = self.clone();
         tokio::task::spawn_blocking(move || {
             // 渐进波形属于后台分析，不得绕过整库分析的并发上限。
-            let _permit = crate::jobs::acquire_background_analysis_permit();
+            let _permit = crate::jobs::acquire_scheduled_work(
+                kdj_core::work_scheduler::WorkClass::LibraryAnalysis,
+            );
             let waveform = decode_cached_prefix(&job.path);
             let (analysis, analysis_error) = if job.complete {
                 analyze_complete_stream(&job.path, job.analysis_duration)

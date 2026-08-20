@@ -1,0 +1,50 @@
+{
+  "date": "2026-08-20",
+  "machine": "Apple M2",
+  "reference": {
+    "repository": "https://github.com/bytedance/music_source_separation",
+    "commit": "e64b858cd14c3cc974826c51390399eef623dd2a",
+    "checkpointRecord": "https://doi.org/10.5281/zenodo.5804160",
+    "sourceLicense": "Apache-2.0",
+    "checkpointLicense": "CC-BY-4.0"
+  },
+  "contract": {
+    "sampleRate": 44100,
+    "inputShape": [1, 2, 132300],
+    "outputShape": [1, 2, 132300],
+    "windowSeconds": 3.0,
+    "retainedCoreSeconds": 1.5,
+    "onnxPrecision": "FP32"
+  },
+  "officialCheckpoints": {
+    "vocals": {
+      "bytes": 4621773,
+      "md5": "197abd4c514fcc92bd22fb1fe77d5f3a",
+      "publishedSdrDb": 7.2,
+      "onnxSha256": "eae30fd93a524820b191d755b527c0ac84f7d51a1675a1d7f88c061ceaf88ded",
+      "ortCpuMs": [93.2323, 95.5507, 79.5870, 81.6117]
+    },
+    "accompaniment": {
+      "bytes": 4621773,
+      "md5": "adde001a988ed60211a5c265d40576ef",
+      "publishedSdrDb": 14.6,
+      "onnxSha256": "999ba99f306f09c9a35a18fe0007b53f8ad2c3cb5bb9d638128bf7257cd8e991",
+      "onnxBytes": 6414644,
+      "ortCpuMs": [90.6140, 89.8095, 80.3809, 82.3950]
+    }
+  },
+  "comparison": {
+    "probeAudio": "local KDJ library track, 20s..23s",
+    "independentTargetsSumErrorDbVsMix": -35.1609,
+    "selectedCheckpoint": "accompaniment",
+    "selectionReason": "same measured cost, higher published target SDR, residual vocals closely match the independent vocals estimate, and instrumental + residual vocals reconstruct the mix exactly"
+  },
+  "productionRustProbe": {
+    "runtime": "ONNX Runtime CPU",
+    "workers": 1,
+    "firstTileIncludingSessionLoadAndWarmupMs": 238.1,
+    "laneMapping": ["zero", "zero", "instrumental-direct", "vocals-residual"],
+    "reconstructionTolerance": 0.000001
+  },
+  "capability": "background two-stem model; measured faster than retained-core consumption, but not the hard-realtime HS-TasNet seek layer"
+}

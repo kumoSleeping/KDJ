@@ -10,7 +10,9 @@ use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::models::{FilterResonance, KeyNotation, Quality, Theme, VideoFormat};
+use crate::models::{
+    FilterResonance, KeyNotation, Quality, StemCompute, StemMode, Theme, VideoFormat,
+};
 
 pub const SETTINGS_FILENAME: &str = "settings.json";
 // 桌面版历史主库一直叫 kumodeck.db。改名会在同一 data_dir 静默创建一份空库，
@@ -45,6 +47,8 @@ const SETTINGS_FIELDS: &[&str] = &[
     "auto_start_downloads",
     "player_waveform",
     "filter_resonance",
+    "stem_mode",
+    "stem_compute",
     "key_notation",
     "virtual_disk_auto_grow",
 ];
@@ -112,6 +116,12 @@ pub struct Settings {
     /// Performance 双极滤波器的共振档位；缺省为高，旧版固定 Q=0.72 对应低档。
     #[serde(default)]
     pub filter_resonance: FilterResonance,
+    /// Global Deck STEM mode. Missing/legacy settings stay off until the user opts in.
+    #[serde(default)]
+    pub stem_mode: StemMode,
+    /// Automatic prefers the platform accelerator and falls back to CPU.
+    #[serde(default)]
+    pub stem_compute: StemCompute,
     /// 本地与 OneLibrary 曲目列表共用的调性显示方式；数据层始终保留两种表示。
     #[serde(default)]
     pub key_notation: KeyNotation,
@@ -150,6 +160,8 @@ impl Settings {
             auto_start_downloads: false,
             player_waveform: true,
             filter_resonance: FilterResonance::High,
+            stem_mode: StemMode::None,
+            stem_compute: StemCompute::Auto,
             key_notation: KeyNotation::Camelot,
             virtual_disk_auto_grow: true,
         }
@@ -514,6 +526,8 @@ mod tests {
         assert_eq!(config.to_settings().default_quality, Quality::Flac);
         assert_eq!(config.to_settings().concurrent_downloads, 3);
         assert_eq!(config.to_settings().filter_resonance, FilterResonance::High);
+        assert_eq!(config.to_settings().stem_mode, StemMode::None);
+        assert_eq!(config.to_settings().stem_compute, StemCompute::Auto);
         assert_eq!(config.to_settings().key_notation, KeyNotation::Camelot);
         assert!(config.to_settings().virtual_disk_auto_grow);
     }
@@ -551,6 +565,8 @@ mod tests {
         settings.platform_priority = vec!["bilibili".into(), "wyy".into()];
         settings.stream_cache_enabled = true;
         settings.filter_resonance = FilterResonance::Medium;
+        settings.stem_mode = StemMode::MobileNetTwo;
+        settings.stem_compute = StemCompute::Cpu;
         config.apply_settings(settings.clone());
 
         let reopened = AppConfig::create(dir.join("data"), dir.join("dl"), 0);

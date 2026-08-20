@@ -247,6 +247,9 @@ pub struct PlaybackDeckSnapshot {
     pub is_playing: bool,
     pub rate: f32,
     pub buffering: bool,
+    /// Installed callback source kind. Pending replacements do not change this until promotion,
+    /// allowing runtime switches to wait until ORG actually owns the Deck.
+    pub stem_enabled: bool,
     /// Active engine loop window in track seconds; `None` when the deck plays linearly.
     pub loop_start: Option<f64>,
     pub loop_length: Option<f64>,

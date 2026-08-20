@@ -28,6 +28,15 @@ export function stemGainToEq(gain: number): number {
   return clampStemEq(clampStemGain(gain) - STEM_GAIN_UNITY);
 }
 
+/** A first knob move is retained while viewport separation is still running, then applied once
+ * the matching track exposes its live model path. */
+export function stemGainRequestReady(
+  status: { trackId: number; state: string } | null | undefined,
+  trackId: number,
+): boolean {
+  return status?.trackId === trackId && status.state === "ready";
+}
+
 /** CSS 0° 在 12 点，顺时针为正，和 STEM EQ 指针一致。 */
 export function stemEqPointerAngle(eq: number): number {
   return -135 + (clampStemEq(eq) + 1) / 2 * 270;

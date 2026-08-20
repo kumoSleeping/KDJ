@@ -38,10 +38,10 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const TEMPO_OUTPUT_BUFFER_MS: u64 = 160;
 const STARTUP_BUFFER_MS: u64 = 120;
 const SEEK_BUFFER_MS: u64 = 120;
-// SCNet inference and tile assembly stay outside the callback. Once a fixed tile is ready, this
+// Spleeter4 inference and tile assembly stay outside the callback. Once a fixed tile is ready, this
 // short post-tempo ring absorbs scheduler jitter without retaining seconds of stale controls.
 const STEM_TEMPO_OUTPUT_BUFFER_MS: u64 = 640;
-/// ORG remains audible throughout a cache miss. Replace it only after SCNet has produced a bounded
+/// ORG remains audible throughout a cache miss. Replace it only after Spleeter4 has produced a bounded
 /// quarter-second cushion from the context-safe centre of its fixed tile.
 const STEM_STARTUP_BUFFER_MS: u64 = 250;
 const STEM_SEEK_STARTUP_BUFFER_MS: u64 = 250;
@@ -61,6 +61,9 @@ const JOG_NUDGE_MAX_RATE_OFFSET: f32 = 0.18;
 const STEM_HANDOFF_EARLY_SEC: f64 = 0.002;
 const STEM_HANDOFF_ALIGN_SEC: f64 = 0.02;
 const STEM_HANDOFF_KEEP_MS: u64 = 80;
+/// After discarding a late tile down to the keep floor, wait this long for the stretch worker to
+/// refill from the same model window. A longer wait used to chase the next Spleeter tile forever.
+const STEM_SEEK_CATCHUP_STALL: Duration = Duration::from_millis(40);
 const STEM_RECOVERY_BASE_DELAY: Duration = Duration::from_millis(900);
 const STEM_RECOVERY_MAX_DELAY: Duration = Duration::from_secs(8);
 
@@ -223,7 +226,7 @@ struct DeckRuntime {
     /// Per-worker cancel epoch. Seek/STEM replacements create a new pending worker without
     /// storing 0 here, so the audible decoder keeps filling its ring until promote.
     cancel: Arc<AtomicU64>,
-    /// Deck seek. A SCNet cache miss lands on ORG first and publishes only the latest prepared tile.
+    /// Deck seek. First enablement may bridge through ORG; an active STEM seek uses a shadow stream.
     seek: StreamSeekControl,
 }
 
@@ -266,7 +269,25 @@ enum Activation {
 enum StemHandoff {
     Install,
     Wait,
-    Retarget(f64),
+    RetargetClocked(ClockedDeckSeek),
+    RetargetFollowing(f64),
+}
+
+/// A playing same-track seek is prepared in shadow, but its destination belongs to the command
+/// clock rather than to the outgoing (possibly off-grid) Deck clock. At `promote_at`, `position`
+/// is the exact media position that should become audible. A late promotion skips output-time
+/// frames from that anchor instead of snapping back to the old Deck's fixed phase error.
+#[derive(Clone, Copy, Debug)]
+struct ClockedDeckSeek {
+    requested_at: Instant,
+    requested_position: f64,
+    promote_at: Instant,
+    position: f64,
+    rate: f32,
+    advancing: bool,
+    skipped_output_frames: u64,
+    skipped_media_frames: f64,
+    catchup_progress_at: Option<Instant>,
 }
 
 struct PendingStream {
@@ -283,6 +304,7 @@ struct PendingStream {
     /// A moved capacitive platter keeps the outgoing source frozen until this replacement has a
     /// decoded cushion. Promotion releases it without changing logical Play/Pause intent.
     release_scratch_hold: bool,
+    clocked_seek: Option<ClockedDeckSeek>,
     seek: StreamSeekControl,
 }
 
@@ -798,7 +820,7 @@ impl Actor {
         view.is_playing = false;
         view.rate = source.rate;
         view.buffering = true;
-        // SCNet is a background tile model. Even an explicit STEM load starts with ORG and records
+        // Spleeter4 is a background tile model. Even an explicit STEM load starts with ORG and records
         // a follow-up request; only a context-safe prepared cushion may replace it.
         self.start_original_with_optional_stem_followup(deck, source, None, true)
     }
@@ -807,6 +829,7 @@ impl Actor {
         let deck = deck_id(deck)?;
         if !playing {
             self.clear_jog_nudge(deck);
+            self.cancel_clocked_deck_seek(deck);
         }
         let request = self
             .source_for_deck(deck)
@@ -860,6 +883,7 @@ impl Actor {
         if self.decks[index].is_none() {
             return Err("目标 Deck 尚未装入曲目".to_string());
         }
+        self.cancel_clocked_deck_seek(deck);
         // A jog touch is a source-cursor hold, not a hidden PauseDeck command.
         self.enter_manual_mode();
         // `enter_manual_mode` is a no-op when already manual, so a stale false intent must not
@@ -929,11 +953,69 @@ impl Actor {
         // Keep the live decoder audible while the new position buffers. Marking buffering here
         // used to freeze the transport UI for the whole time-stretcher startup window.
         view.buffering = self.decks[deck as usize].is_none();
-        // SCNet is non-causal and needs a complete context tile. A seek outside the prepared ring
-        // must never fade into silence while that tile runs: install ORG at the target first, then
-        // let the normal follow-up handoff publish only the latest generation.
+        // Keep an already-separated Deck separated across Hot Cue/SYNC. Its current STEM source
+        // remains audible while a shadow Spleeter4 stream prepares near the future handoff point.
+        // Routing this case through ORG made STEM EQ appear reset and doubled SYNC model work.
+        let replacing_live_stems = source.stem_enabled
+            && self.decks[index].as_ref().is_some_and(|runtime| {
+                runtime.request.stem_enabled && runtime.request.track_id == source.track_id
+            });
+        if replacing_live_stems && self.live_stem_instant_ready(deck) {
+            let result = self
+                .retarget_live_stems(deck, source.track_id, source.position)
+                .and_then(|retargeted| {
+                    if retargeted {
+                        Ok(())
+                    } else {
+                        Err("活动 STEM Deck 无法原地跳转".to_string())
+                    }
+                });
+            if release_scratch_hold {
+                self.release_scratch_hold(deck);
+            }
+            return result;
+        }
+        if replacing_live_stems {
+            let clocked_seek = clocked_deck_seek(
+                source.position,
+                source.rate,
+                source.duration,
+                self.manual_desired_playing[index],
+                true,
+            );
+            source.position = clocked_seek.position;
+            let result = self.start_stream(deck, source, None);
+            if result.is_ok() {
+                if let Some(pending) = self.pending[index].as_mut() {
+                    pending.clocked_seek = Some(clocked_seek);
+                }
+            }
+            if result.is_ok() && release_scratch_hold {
+                if let Some(pending) = self.pending[index].as_mut() {
+                    pending.release_scratch_hold = true;
+                }
+            } else if result.is_err() && release_scratch_hold {
+                self.release_scratch_hold(deck);
+            }
+            return result;
+        }
+        // A first STEM start still uses ORG as its audible bridge. Only a Deck that already owns
+        // a live four-lane stream takes the shadow STEM→STEM path above.
         if source.stem_enabled {
+            let clocked_seek = clocked_deck_seek(
+                source.position,
+                source.rate,
+                source.duration,
+                self.manual_desired_playing[index],
+                false,
+            );
+            source.position = clocked_seek.position;
             let result = self.start_original_with_optional_stem_followup(deck, source, None, true);
+            if result.is_ok() {
+                if let Some(pending) = self.pending[index].as_mut() {
+                    pending.clocked_seek = Some(clocked_seek);
+                }
+            }
             if result.is_ok() && release_scratch_hold {
                 if let Some(pending) = self.pending[index].as_mut() {
                     pending.release_scratch_hold = true;
@@ -949,9 +1031,20 @@ impl Actor {
             }
             return Ok(());
         }
+        let clocked_seek = clocked_deck_seek(
+            source.position,
+            source.rate,
+            source.duration,
+            self.manual_desired_playing[index],
+            false,
+        );
+        source.position = clocked_seek.position;
         let result = self.start_original_with_optional_stem_followup(deck, source, None, true);
         match result {
             Ok(()) => {
+                if let Some(pending) = self.pending[index].as_mut() {
+                    pending.clocked_seek = Some(clocked_seek);
+                }
                 if release_scratch_hold {
                     if let Some(pending) = self.pending[index].as_mut() {
                         pending.release_scratch_hold = true;
@@ -1096,6 +1189,7 @@ impl Actor {
         }
         let deck = deck_id(deck)?;
         self.clear_jog_nudge(deck);
+        self.cancel_clocked_deck_seek(deck);
         if self.decks[deck as usize].is_none() && self.pending[deck as usize].is_none() {
             return Err("目标曲目尚未装入 Deck".to_string());
         }
@@ -1198,6 +1292,23 @@ impl Actor {
         source.stem_gains = gains;
         source.position = self.state.decks[deck as usize].current_time;
         source.autoplay = self.manual_desired_playing[deck as usize];
+        tracing::info!(
+            target: "kdj_stem_lifecycle",
+            event = "deck_stem_replacement_requested",
+            deck = deck as u8,
+            track_id,
+            enabled,
+            previous_stem = self.decks[index]
+                .as_ref()
+                .is_some_and(|runtime| runtime.request.stem_enabled),
+            pending_stem = self.pending[index]
+                .as_ref()
+                .is_some_and(|pending| pending.request.stem_enabled),
+            cache_path = %source.stem_cache_path,
+            position = source.position,
+            desired_playing = source.autoplay,
+            "Deck STEM source replacement requested"
+        );
         if enabled {
             // The worker may take a while to fill its first live STEM buffer. Seed the callback
             // before that wait instead of relying only on the post-install command below: an
@@ -1225,6 +1336,7 @@ impl Actor {
         let deck = self
             .deck_for_track(track_id)
             .ok_or_else(|| "目标曲目尚未装入 Deck".to_string())?;
+        self.cancel_clocked_deck_seek(deck);
         self.enter_manual_mode();
         let duration = self.state.decks[deck as usize].duration;
         if duration > 0.0 && start + length > duration + 0.05 {
@@ -1263,6 +1375,7 @@ impl Actor {
         let deck = self
             .deck_for_track(track_id)
             .ok_or_else(|| "目标曲目尚未装入 Deck".to_string())?;
+        self.cancel_clocked_deck_seek(deck);
         self.enter_manual_mode();
         self.invalidate_loop(deck)
     }
@@ -1391,6 +1504,28 @@ impl Actor {
                     .as_ref()
                     .map(|runtime| runtime.request.clone())
             })
+    }
+
+    fn cancel_clocked_deck_seek(&mut self, deck: DeckId) {
+        let index = deck as usize;
+        if !self.pending[index]
+            .as_ref()
+            .is_some_and(|pending| pending.clocked_seek.is_some())
+        {
+            return;
+        }
+        let live_position = self.live_deck_seconds(deck);
+        if let Some(pending) = self.pending[index].take() {
+            cancel_stream(&pending.cancel);
+        }
+        // Fence the worker-finished message without cancelling the source that is still audible.
+        self.bump_pending_revision(deck);
+        self.state.decks[index].current_time = live_position;
+        self.state.decks[index].buffering = false;
+        if self.front == deck {
+            self.state.current_time = live_position;
+            self.state.buffering = false;
+        }
     }
 
     fn apply_deck_mixer(&mut self, deck: DeckId, mixer: DeckMixer) -> Result<(), String> {
@@ -1539,6 +1674,19 @@ impl Actor {
         let mut source = current;
         source.position = clamp_position(position, source.duration);
         source.autoplay = self.state.desired_playing;
+        if source.stem_enabled && self.live_stem_instant_ready(self.front) {
+            let retargeted =
+                self.retarget_live_stems(self.front, source.track_id, source.position)?;
+            if retargeted {
+                self.state.phase = if self.state.desired_playing {
+                    PlaybackPhase::Playing
+                } else {
+                    PlaybackPhase::Paused
+                };
+                self.state.buffering = false;
+                return Ok(());
+            }
+        }
         // 与 load 同理：登记失败不能把状态留在 Seeking。
         let checkpoint = self.state.clone();
         self.state.phase = PlaybackPhase::Seeking;
@@ -1739,19 +1887,8 @@ impl Actor {
         } else {
             None
         };
-        if request.stem_enabled {
-            // A prepared SCNet replacement owns a new generation. Stop an outgoing separated
-            // producer only after its ORG bridge has kept the transport audible.
-            if let Some(runtime) = self.decks[deck as usize].as_ref() {
-                if runtime.request.stem_enabled {
-                    cancel_stream(&runtime.cancel);
-                    let buffered = runtime.source.buffered_frames();
-                    if buffered > 0 {
-                        runtime.source.discard_frames(buffered);
-                    }
-                }
-            }
-        }
+        // Do not cancel an outgoing separated producer here. A Hot Cue/SYNC replacement prepares
+        // in shadow; promotion retires the old generation only after the new stream has a cushion.
         let (source, writer) = if request.stem_enabled {
             let (source, writer) = StreamSource::<StemFrame>::bounded(capacity);
             (
@@ -1766,6 +1903,21 @@ impl Actor {
             )
         };
         let revision = self.bump_pending_revision(deck);
+        tracing::info!(
+            target: "kdj_stem_lifecycle",
+            event = "deck_stream_worker_spawn",
+            deck = deck as u8,
+            track_id = request.track_id,
+            revision,
+            stem_enabled = request.stem_enabled,
+            activation = match activation {
+                Some(Activation::Hard) => "hard",
+                Some(Activation::Seek) => "seek",
+                Some(Activation::Transition(_)) => "transition",
+                None => "shadow",
+            },
+            "Deck stream worker generation created"
+        );
         let same_track = self.state.decks[deck as usize].track_id == Some(request.track_id)
             || self.decks[deck as usize]
                 .as_ref()
@@ -1774,7 +1926,7 @@ impl Actor {
             let _ = self.invalidate_loop(deck);
         }
         let loop_window = Arc::clone(&self.loop_windows[deck as usize]);
-        let tempo = TempoControl::new(request.rate);
+        let tempo = TempoControl::for_deck(deck as usize, request.rate);
         let cancel = Arc::new(AtomicU64::new(revision));
         let seek = StreamSeekControl::new();
         self.pending[deck as usize] = Some(PendingStream {
@@ -1788,6 +1940,7 @@ impl Actor {
             cancel: Arc::clone(&cancel),
             followup_stems: false,
             release_scratch_hold: false,
+            clocked_seek: None,
             seek: seek.clone(),
         });
         let sender = self.sender.clone();
@@ -1823,6 +1976,7 @@ impl Actor {
                                     decode_live_stem_streaming(
                                         &path,
                                         track_id,
+                                        deck as usize,
                                         position,
                                         duration,
                                         output_rate,
@@ -1928,13 +2082,19 @@ impl Actor {
 
     fn live_stem_pool(&mut self, model_path: PathBuf) -> Result<Arc<StemInferencePool>, String> {
         if let Some((loaded_path, pool, _)) = &self.stem_pool {
-            if *loaded_path == model_path {
+            if *loaded_path == model_path && pool.matches_current_preference() {
                 return Ok(Arc::clone(pool));
             }
         }
         let (guard, pool) = acquire_stem_pool(&model_path).map_err(|error| error.to_string())?;
         self.stem_pool = Some((model_path, Arc::clone(&pool), guard));
         Ok(pool)
+    }
+
+    fn live_stem_instant_ready(&self, deck: DeckId) -> bool {
+        self.stem_pool
+            .as_ref()
+            .is_some_and(|(_, pool, _)| pool.instant_ready(deck as usize))
     }
 
     fn release_stem_pool_if_idle(&mut self) {
@@ -2022,13 +2182,31 @@ impl Actor {
     }
 
     fn stem_handoff_for(&self, deck: DeckId, pending: &PendingStream) -> StemHandoff {
+        if let Some(clocked) = pending.clocked_seek {
+            if Instant::now() < clocked.promote_at {
+                return StemHandoff::Wait;
+            }
+            // Spleeter4 tiles often land after `promote_at`. Requiring the full late window
+            // before install made every Hot Cue chase a new model window and never replace
+            // the audible stream. Once the startup cushion exists, skip what we can and jump.
+            if pending.source.buffered_frames() == 0 && pending.source.ended() {
+                return StemHandoff::RetargetClocked(retarget_clocked_deck_seek(
+                    clocked,
+                    pending.request.duration,
+                    pending.request.stem_enabled,
+                ));
+            }
+            return StemHandoff::Install;
+        }
         if !pending.request.stem_enabled {
             return StemHandoff::Install;
         }
         let Some(runtime) = self.decks[deck as usize].as_ref() else {
             return StemHandoff::Install;
         };
-        if runtime.request.stem_enabled || !self.manual_desired_playing[deck as usize] {
+        if !self.manual_desired_playing[deck as usize]
+            || runtime.request.track_id != pending.request.track_id
+        {
             return StemHandoff::Install;
         }
         let now = self.state.decks[deck as usize].current_time;
@@ -2044,36 +2222,108 @@ impl Actor {
         let skip = ((late / rate) * f64::from(pending.output_sample_rate))
             .round()
             .max(0.0) as u64;
-        let keep = pending
-            .startup_buffer_frames
-            .max(u64::from(pending.output_sample_rate) * STEM_HANDOFF_KEEP_MS / 1_000);
+        // `promote_ready_streams` already proved the startup threshold. After discarding the
+        // elapsed prefix, only the short callback cushion must remain; requiring a second full
+        // startup buffer turned a viewport-cache hit into another model retarget.
+        let keep = u64::from(pending.output_sample_rate) * STEM_HANDOFF_KEEP_MS / 1_000;
         if pending.source.buffered_frames() > skip.saturating_add(keep) {
             return StemHandoff::Install;
         }
-        StemHandoff::Retarget(now + stem_followup_lead_seconds())
+        // A live producer may have crossed the small startup threshold while the first full model
+        // tile is still moving through Rubber Band. Retargeting at that point cancels useful work
+        // every ~tile latency and can create an unbounded chain of replacement stream threads.
+        // Keep the original audible and let this one generation finish filling enough catch-up
+        // audio. Only an ended producer needs a fresh window.
+        if !pending.source.ended() {
+            return StemHandoff::Wait;
+        }
+        StemHandoff::RetargetFollowing(now + stem_followup_lead_seconds())
     }
 
     fn promote_ready_streams(&mut self) {
         for deck in [DeckId::A, DeckId::B] {
             let ready = self.pending[deck as usize].as_ref().is_some_and(|pending| {
-                pending.source.buffered_frames() >= pending.startup_buffer_frames
-                    || pending.source.ended() && pending.source.buffered_frames() > 0
+                let buffered = pending.source.buffered_frames();
+                buffered >= pending.startup_buffer_frames
+                    || pending.source.ended() && buffered > 0
+                    // Catch-up discards down to the keep floor, which is below the startup
+                    // cushion. Requiring the cushion again left STEM Hot Cue sitting on the
+                    // outgoing song forever.
+                    || pending
+                        .clocked_seek
+                        .is_some_and(|clocked| clocked.skipped_output_frames > 0)
+                        && buffered > 0
             });
             if !ready {
                 continue;
             }
-            let Some(pending) = self.pending[deck as usize].take() else {
+            let Some(mut pending) = self.pending[deck as usize].take() else {
                 continue;
             };
             if self.revisions[deck as usize] != pending.revision {
                 continue;
+            }
+            if let Some(mut clocked) = pending.clocked_seek {
+                let desired_skip = if clocked.advancing {
+                    (Instant::now()
+                        .saturating_duration_since(clocked.promote_at)
+                        .as_secs_f64()
+                        * f64::from(pending.output_sample_rate))
+                    .round()
+                    .max(0.0) as u64
+                } else {
+                    0
+                };
+                let remaining = desired_skip.saturating_sub(clocked.skipped_output_frames);
+                if remaining > 0 {
+                    let keep = if pending.request.stem_enabled {
+                        u64::from(pending.output_sample_rate) * STEM_HANDOFF_KEEP_MS / 1_000
+                    } else {
+                        1
+                    };
+                    let available = pending.source.buffered_frames().saturating_sub(keep);
+                    let dropped = pending.source.discard_frames(remaining.min(available));
+                    clocked.skipped_output_frames =
+                        clocked.skipped_output_frames.saturating_add(dropped);
+                    let now = Instant::now();
+                    if dropped > 0 {
+                        clocked.catchup_progress_at = Some(now);
+                    }
+                    pending.clocked_seek = Some(clocked);
+                    if clocked.skipped_output_frames < desired_skip && !pending.source.ended() {
+                        let waiting_for_refill = dropped > 0
+                            || clocked.catchup_progress_at.is_some_and(|at| {
+                                now.saturating_duration_since(at) < STEM_SEEK_CATCHUP_STALL
+                            });
+                        if waiting_for_refill {
+                            // Drain the already-decoded tile in bounded ring-sized steps. The
+                            // worker refills the freed space without another model call.
+                            self.pending[deck as usize] = Some(pending);
+                            continue;
+                        }
+                        // The current window is exhausted. Install what we have instead of
+                        // chasing another Spleeter tile while the outgoing song keeps playing.
+                    }
+                }
             }
             match self.stem_handoff_for(deck, &pending) {
                 StemHandoff::Wait => {
                     self.pending[deck as usize] = Some(pending);
                     continue;
                 }
-                StemHandoff::Retarget(at) => {
+                StemHandoff::RetargetClocked(clocked) => {
+                    cancel_stream(&pending.cancel);
+                    let mut request = pending.request;
+                    request.position = clocked.position;
+                    request.autoplay = self.manual_desired_playing[deck as usize];
+                    if let Err(error) = self.start_stream(deck, request, None) {
+                        self.fail(error);
+                    } else if let Some(replacement) = self.pending[deck as usize].as_mut() {
+                        replacement.clocked_seek = Some(clocked);
+                    }
+                    continue;
+                }
+                StemHandoff::RetargetFollowing(at) => {
                     cancel_stream(&pending.cancel);
                     let mut request = pending.request;
                     request.position = clamp_position(at, request.duration);
@@ -2085,15 +2335,47 @@ impl Actor {
                 }
                 StemHandoff::Install => {}
             }
-            let playing_original = self.manual_desired_playing[deck as usize]
+            let playing_same_track = self.manual_desired_playing[deck as usize]
                 && self.state.decks[deck as usize].is_playing
-                && self.decks[deck as usize].as_ref().is_some_and(|runtime| {
-                    !runtime.request.stem_enabled
-                        && runtime.request.track_id == pending.request.track_id
-                });
+                && self.decks[deck as usize]
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.request.track_id == pending.request.track_id);
             let mut start_frame =
                 (pending.request.position * f64::from(pending.output_sample_rate)).round() as u64;
-            if pending.request.stem_enabled && playing_original {
+            let mut clocked_position = None;
+            if let Some(mut clocked) = pending.clocked_seek {
+                let desired_skip = if clocked.advancing {
+                    (Instant::now()
+                        .saturating_duration_since(clocked.promote_at)
+                        .as_secs_f64()
+                        * f64::from(pending.output_sample_rate))
+                    .round()
+                    .max(0.0) as u64
+                } else {
+                    0
+                };
+                let remaining = desired_skip.saturating_sub(clocked.skipped_output_frames);
+                let keep = if pending.request.stem_enabled {
+                    u64::from(pending.output_sample_rate) * STEM_HANDOFF_KEEP_MS / 1_000
+                } else {
+                    1
+                };
+                let available = pending.source.buffered_frames().saturating_sub(keep);
+                let dropped = pending.source.discard_frames(remaining.min(available));
+                clocked.skipped_output_frames =
+                    clocked.skipped_output_frames.saturating_add(dropped);
+                let position = clamp_position(
+                    clocked.position
+                        + clocked.skipped_output_frames as f64
+                            / f64::from(pending.output_sample_rate)
+                            * f64::from(clocked.rate).clamp(0.5, 2.0),
+                    pending.request.duration,
+                );
+                start_frame = (position * f64::from(pending.output_sample_rate))
+                    .round()
+                    .max(0.0) as u64;
+                clocked_position = Some(position);
+            } else if pending.request.stem_enabled && playing_same_track {
                 let now = self.state.decks[deck as usize].current_time;
                 let late = now - pending.request.position;
                 if late > 0.001 {
@@ -2151,6 +2433,16 @@ impl Actor {
                 // explicitly cleared above, so it has no such audible fallback; either way wait
                 // until the new source is installed before cancelling the old producer.
                 cancel_stream(&previous.cancel);
+                tracing::info!(
+                    target: "kdj_stem_lifecycle",
+                    event = "deck_stream_generation_retired",
+                    deck = deck as u8,
+                    old_track_id = previous.request.track_id,
+                    old_stem_enabled = previous.request.stem_enabled,
+                    new_track_id = pending.request.track_id,
+                    new_stem_enabled = pending.request.stem_enabled,
+                    "old Deck producer cancelled after replacement installation"
+                );
             }
             self.decks[deck as usize] = Some(DeckRuntime {
                 source_id,
@@ -2167,6 +2459,7 @@ impl Actor {
                 cancel: pending.cancel,
                 seek: pending.seek,
             });
+            self.state.decks[deck as usize].stem_enabled = pending.request.stem_enabled;
             let _ = self.send(RtCommand::SetRate {
                 deck,
                 rate: pending.request.rate,
@@ -2202,7 +2495,9 @@ impl Actor {
                     });
                 }
                 let duration = pending.request.duration.unwrap_or(0.0).max(0.0);
-                if !playing_original {
+                if let Some(position) = clocked_position {
+                    self.state.decks[deck as usize].current_time = position;
+                } else if !playing_same_track {
                     self.state.decks[deck as usize].current_time = pending.request.position;
                 }
                 self.state.decks[deck as usize].duration = duration;
@@ -2342,6 +2637,7 @@ impl Actor {
             let Some(runtime) = self.decks[index].as_ref() else {
                 continue;
             };
+            let stem_clock = runtime.request.stem_enabled.then(|| runtime.seek.clone());
             let view = &mut self.state.decks[index];
             if view.track_id != Some(runtime.request.track_id) {
                 view.track_id = Some(runtime.request.track_id);
@@ -2372,6 +2668,11 @@ impl Actor {
                 view.buffering = self.manual_desired_playing[index]
                     && runtime.source.buffered_frames() == 0
                     && !runtime.source.ended();
+                if let Some(seek) = stem_clock.as_ref() {
+                    if self.pending[index].is_none() {
+                        seek.publish_clock(played);
+                    }
+                }
                 if runtime.source.drained() && self.manual_desired_playing[index] {
                     if runtime.loop_playback.is_some() {
                         view.buffering = true;
@@ -2692,6 +2993,66 @@ fn stem_followup_lead_seconds() -> f64 {
     (ms as f64 / 1_000.0).clamp(0.08, 1.0)
 }
 
+fn clocked_deck_seek(
+    requested_position: f64,
+    rate: f32,
+    duration: Option<f64>,
+    playing: bool,
+    stems: bool,
+) -> ClockedDeckSeek {
+    let requested_at = Instant::now();
+    let lead = if !playing {
+        0.0
+    } else if stems {
+        stem_followup_lead_seconds()
+    } else {
+        SEEK_BUFFER_MS as f64 / 1_000.0
+    };
+    let position = clamp_position(
+        requested_position + lead * f64::from(rate).clamp(0.5, 2.0),
+        duration,
+    );
+    ClockedDeckSeek {
+        requested_at,
+        requested_position,
+        promote_at: requested_at + Duration::from_secs_f64(lead),
+        position,
+        rate,
+        advancing: playing,
+        skipped_output_frames: 0,
+        skipped_media_frames: 0.0,
+        catchup_progress_at: None,
+    }
+}
+
+fn retarget_clocked_deck_seek(
+    anchor: ClockedDeckSeek,
+    duration: Option<f64>,
+    stems: bool,
+) -> ClockedDeckSeek {
+    let now = Instant::now();
+    let lead = if stems {
+        stem_followup_lead_seconds()
+    } else {
+        SEEK_BUFFER_MS as f64 / 1_000.0
+    };
+    let promote_at = now + Duration::from_secs_f64(lead);
+    let elapsed = promote_at
+        .saturating_duration_since(anchor.requested_at)
+        .as_secs_f64();
+    ClockedDeckSeek {
+        promote_at,
+        position: clamp_position(
+            anchor.requested_position + elapsed * f64::from(anchor.rate).clamp(0.5, 2.0),
+            duration,
+        ),
+        skipped_output_frames: 0,
+        skipped_media_frames: 0.0,
+        catchup_progress_at: None,
+        ..anchor
+    }
+}
+
 fn same_source(left: &PlaybackSource, right: &PlaybackSource) -> bool {
     left.track_id == right.track_id
         && left.source_kind == right.source_kind
@@ -2792,9 +3153,11 @@ fn realtime_plan(plan: PlaybackTransitionPlan, sample_rate: u32) -> TransitionPl
 mod tests {
     use super::*;
     use crate::platform::PlaybackOutputSpec;
+    use kdj_core::{StemCompute, StemMode};
     use kdj_player::TransportSnapshot;
+    use kdj_stems::StemCoordinator;
     use std::sync::atomic::AtomicBool;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
 
     /// 不起真实声卡的输出替身：记录发送、按开关注入失败，快照由测试直接摆弄。
     struct FakeKnobs {
@@ -2928,6 +3291,14 @@ mod tests {
             taken: Mutex::new(false),
         };
         Actor::new(sender, receiver, emit, Arc::new(factory))
+    }
+
+    fn enable_four_stem_runtime_for_test() {
+        static MANAGER: OnceLock<StemCoordinator> = OnceLock::new();
+        let manager = MANAGER.get_or_init(|| {
+            StemCoordinator::new(&std::env::temp_dir().join("kdj-playback-runtime-tests"))
+        });
+        manager.activate_runtime(StemMode::Four, StemCompute::Cpu);
     }
 
     fn source(track_id: i64, position: f64) -> PlaybackSource {
@@ -3275,6 +3646,7 @@ mod tests {
             cancel: Arc::new(AtomicU64::new(77)),
             followup_stems: false,
             release_scratch_hold: false,
+            clocked_seek: None,
             seek: StreamSeekControl::new(),
         });
 
@@ -3342,7 +3714,7 @@ mod tests {
             let mut runtime = live_runtime(index as i64 + 1, 12.0);
             runtime.source = PlaybackStream::Stems(stems);
             runtime.request.stem_enabled = true;
-            runtime.request.stem_cache_path = "/model/scnet.mlmodelc".into();
+            runtime.request.stem_cache_path = "/model/spleeter4-fp16-onnx".into();
             actor.decks[deck as usize] = Some(runtime);
             actor.state.decks[deck as usize].track_id = Some(index as i64 + 1);
             actor.state.decks[deck as usize].current_time = 12.0;
@@ -3365,7 +3737,8 @@ mod tests {
     }
 
     #[test]
-    fn stem_seek_prepares_original_bridge_before_a_new_scnet_generation() {
+    fn stem_seek_prepares_a_shadow_stem_generation_without_falling_back_to_original() {
+        enable_four_stem_runtime_for_test();
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
         actor.open_output().expect("打开测试输出");
@@ -3374,7 +3747,9 @@ mod tests {
         let mut runtime = live_runtime(1, 12.0);
         runtime.source = PlaybackStream::Stems(stems);
         runtime.request.stem_enabled = true;
-        runtime.request.stem_cache_path = "/model/scnet_coreml.mlpackage".into();
+        runtime.request.stem_cache_path = "/model/spleeter4-fp16-onnx".into();
+        runtime.request.stem_mask = 0b1010;
+        runtime.request.stem_gains = [0.25, 0.5, 0.75, 1.25];
         let live_cancel = Arc::clone(&runtime.cancel);
         actor.decks[DeckId::A as usize] = Some(runtime);
         actor.front = DeckId::A;
@@ -3386,15 +3761,18 @@ mod tests {
 
         actor
             .seek_deck(DeckId::A as u8, 4.0)
-            .expect("STEM 跳转应建立原曲桥接");
+            .expect("STEM 跳转应建立分轨 shadow");
 
         assert_eq!(live_cancel.load(Ordering::Acquire), 1);
         let pending = actor.pending[DeckId::A as usize]
             .as_ref()
-            .expect("ORG bridge should be pending");
-        assert!(!pending.request.stem_enabled);
-        assert!(pending.followup_stems);
-        assert!((pending.request.position - 4.0).abs() < 1e-9);
+            .expect("shadow STEM should be pending");
+        assert!(pending.request.stem_enabled);
+        assert!(!pending.followup_stems);
+        assert!(pending.clocked_seek.is_some());
+        assert_eq!(pending.request.stem_mask, 0b1010);
+        assert_eq!(pending.request.stem_gains, [0.25, 0.5, 0.75, 1.25]);
+        assert!(pending.request.position > 4.0);
         assert!((actor.state.decks[DeckId::A as usize].current_time - 4.0).abs() < 0.001);
     }
 
@@ -3485,7 +3863,7 @@ mod tests {
         let mut actor = test_actor(&knobs);
         let mut runtime = live_runtime(1, 12.0);
         runtime.request.stem_enabled = true;
-        runtime.request.stem_cache_path = "/models/scnet_cpu.onnx".into();
+        runtime.request.stem_cache_path = "/models/spleeter4-fp16-onnx".into();
         actor.decks[DeckId::A as usize] = Some(runtime);
         actor.front = DeckId::A;
         actor.state.track_id = Some(1);
@@ -4240,6 +4618,7 @@ mod tests {
             cancel: Arc::new(AtomicU64::new(3)),
             followup_stems: false,
             release_scratch_hold: false,
+            clocked_seek: None,
             seek: StreamSeekControl::new(),
         });
         {
@@ -4361,7 +4740,11 @@ mod tests {
             "播放意图在整次手势中必须保持 true"
         );
         assert!(pending.release_scratch_hold, "新流有缓冲后才可交还盘面");
-        assert!((pending.request.position - 9.5).abs() < 0.001);
+        assert_eq!(
+            pending.clocked_seek.map(|seek| seek.requested_position),
+            Some(9.5),
+            "shadow may start ahead, but the platter's requested cursor remains the clock anchor",
+        );
         assert!(
             !knobs.sent.lock().unwrap().iter().any(|command| matches!(
                 command,
@@ -4474,11 +4857,10 @@ mod tests {
             cancel: Arc::new(AtomicU64::new(17)),
             followup_stems: false,
             release_scratch_hold: true,
+            clocked_seek: None,
             seek: StreamSeekControl::new(),
         });
-
         actor.promote_ready_streams();
-
         assert!(!actor.scratch_held[DeckId::A as usize]);
         let commands = knobs.sent.lock().unwrap();
         assert!(
@@ -4545,6 +4927,42 @@ mod tests {
     }
 
     #[test]
+    fn pause_cancels_a_clocked_sync_seek_and_keeps_the_audible_deck_clock() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.decks[DeckId::A as usize].desired_playing = true;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+        {
+            let mut snapshot = knobs.snapshot.lock().unwrap();
+            snapshot.deck_source_ids[DeckId::A as usize] = 101;
+            snapshot.deck_frames[DeckId::A as usize] = 48_000 * 12;
+            snapshot.deck_playing[DeckId::A as usize] = true;
+        }
+
+        actor
+            .seek_deck(DeckId::A as u8, 4.0)
+            .expect("SYNC seek should prepare in shadow");
+        assert!(actor.pending[DeckId::A as usize]
+            .as_ref()
+            .is_some_and(|pending| pending.clocked_seek.is_some()));
+
+        actor
+            .set_deck_playing(DeckId::A as u8, false)
+            .expect("pause should cancel the correction safely");
+
+        assert!(actor.pending[DeckId::A as usize].is_none());
+        assert!(actor.decks[DeckId::A as usize].is_some());
+        assert!((actor.state.decks[DeckId::A as usize].current_time - 12.0).abs() < 0.001);
+        assert!(!actor.state.decks[DeckId::A as usize].is_playing);
+    }
+
+    #[test]
     fn stem_followup_does_not_freeze_or_rewind_the_seeked_clock() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
@@ -4572,6 +4990,7 @@ mod tests {
             cancel: Arc::new(AtomicU64::new(3)),
             followup_stems: false,
             release_scratch_hold: false,
+            clocked_seek: None,
             seek: StreamSeekControl::new(),
         });
 
@@ -4619,6 +5038,7 @@ mod tests {
             cancel: Arc::new(AtomicU64::new(1)),
             followup_stems: false,
             release_scratch_hold: false,
+            clocked_seek: None,
             seek: StreamSeekControl::new(),
         });
 
@@ -4629,6 +5049,346 @@ mod tests {
             StemHandoff::Wait => {}
             other => panic!("提前 30ms 装上会把播放头向前跳一截，got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ready_viewport_stem_tile_skips_elapsed_prefix_without_a_second_retarget() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 6.15));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 6.15;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+        let (stream, mut writer) = StreamSource::<StemFrame>::bounded(16_000);
+        for _ in 0..12_000 {
+            writer.push(StemFrame::default(), || false).unwrap();
+        }
+        let mut request = source(1, 6.0);
+        request.stem_enabled = true;
+        request.stem_cache_path = "/tmp/spleeter4-fp16-onnx".into();
+        let pending = PendingStream {
+            revision: 1,
+            source: PlaybackStream::Stems(stream),
+            request,
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 12_000,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(1)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            clocked_seek: None,
+            seek: StreamSeekControl::new(),
+        };
+
+        assert!(matches!(
+            actor.stem_handoff_for(DeckId::A, &pending),
+            StemHandoff::Install
+        ));
+        drop(writer);
+    }
+
+    #[test]
+    fn live_stem_handoff_waits_for_catchup_instead_of_spawning_replacement_generations() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 7.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 7.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+        let (stream, mut writer) = StreamSource::<StemFrame>::bounded(16_000);
+        for _ in 0..3_000 {
+            writer.push(StemFrame::default(), || false).unwrap();
+        }
+        let mut request = source(1, 6.0);
+        request.stem_enabled = true;
+        request.stem_cache_path = "/tmp/spleeter4-fp16-onnx".into();
+        let pending = PendingStream {
+            revision: 1,
+            source: PlaybackStream::Stems(stream),
+            request,
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 2_000,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(1)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            clocked_seek: None,
+            seek: StreamSeekControl::new(),
+        };
+
+        assert!(matches!(
+            actor.stem_handoff_for(DeckId::A, &pending),
+            StemHandoff::Wait
+        ));
+        drop(writer);
+    }
+
+    #[test]
+    fn playing_stem_sync_promotes_from_the_command_clock_not_the_old_fixed_phase() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        let mut live = live_runtime(1, 12.4);
+        live.request.stem_enabled = true;
+        actor.decks[DeckId::A as usize] = Some(live);
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.4;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+
+        let (stream, mut writer) = StreamSource::<StemFrame>::bounded(16_000);
+        for _ in 0..12_000 {
+            writer.push(StemFrame::default(), || false).unwrap();
+        }
+        let promote_at = Instant::now() - Duration::from_millis(50);
+        let mut request = source(1, 20.0);
+        request.rate = 1.25;
+        request.stem_enabled = true;
+        request.stem_cache_path = "/tmp/spleeter4-fp16-onnx".into();
+        actor.revisions[DeckId::A as usize] = 9;
+        actor.pending[DeckId::A as usize] = Some(PendingStream {
+            revision: 9,
+            source: PlaybackStream::Stems(stream),
+            request,
+            tempo: TempoControl::new(1.25),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 12_000,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(9)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            clocked_seek: Some(ClockedDeckSeek {
+                requested_at: promote_at - Duration::from_secs(1),
+                requested_position: 18.75,
+                promote_at,
+                position: 20.0,
+                rate: 1.25,
+                advancing: true,
+                skipped_output_frames: 0,
+                skipped_media_frames: 0.0,
+                catchup_progress_at: None,
+            }),
+            seek: StreamSeekControl::new(),
+        });
+
+        let before = Instant::now();
+        actor.promote_ready_streams();
+        let after = Instant::now();
+        let installed =
+            knobs.snapshot.lock().unwrap().deck_frames[DeckId::A as usize] as f64 / 48_000.0;
+        let earliest = 20.0 + before.duration_since(promote_at).as_secs_f64() * 1.25;
+        let latest = 20.0 + after.duration_since(promote_at).as_secs_f64() * 1.25;
+        assert!(
+            installed >= earliest - 0.001 && installed <= latest + 0.001,
+            "clocked seek should install {earliest:.6}..{latest:.6}, got {installed:.6}",
+        );
+        assert!(
+            (installed - 12.4).abs() > 1.0,
+            "the outgoing Deck clock must not erase the requested SYNC correction",
+        );
+        assert!(
+            (actor.state.decks[DeckId::A as usize].current_time - installed).abs() < 0.001,
+            "published Deck clock must match the frame installed into the callback",
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn clocked_stem_seek_installs_a_late_tile_instead_of_chasing_another_model_window() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        let mut live = live_runtime(1, 12.0);
+        live.request.stem_enabled = true;
+        actor.decks[DeckId::A as usize] = Some(live);
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+
+        let (stream, mut writer) = StreamSource::<StemFrame>::bounded(16_000);
+        for _ in 0..8_000 {
+            writer.push(StemFrame::default(), || false).unwrap();
+        }
+        let promote_at = Instant::now() - Duration::from_millis(200);
+        let mut request = source(1, 4.5);
+        request.stem_enabled = true;
+        request.stem_cache_path = "/tmp/spleeter4-fp16-onnx".into();
+        actor.revisions[DeckId::A as usize] = 11;
+        actor.pending[DeckId::A as usize] = Some(PendingStream {
+            revision: 11,
+            source: PlaybackStream::Stems(stream),
+            request,
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 8_000,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(11)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            clocked_seek: Some(ClockedDeckSeek {
+                requested_at: promote_at - Duration::from_millis(250),
+                requested_position: 4.0,
+                promote_at,
+                position: 4.5,
+                rate: 1.0,
+                advancing: true,
+                skipped_output_frames: 0,
+                skipped_media_frames: 0.0,
+                catchup_progress_at: None,
+            }),
+            seek: StreamSeekControl::new(),
+        });
+
+        actor.promote_ready_streams();
+        assert!(
+            actor.pending[DeckId::A as usize].is_some(),
+            "the same pending worker should remain while its freed ring refills"
+        );
+        assert_eq!(actor.revisions[DeckId::A as usize], 11);
+        for _ in 0..8_000 {
+            writer.push(StemFrame::default(), || false).unwrap();
+        }
+        actor.promote_ready_streams();
+        assert!(actor.pending[DeckId::A as usize].is_none());
+        assert!(actor.decks[DeckId::A as usize]
+            .as_ref()
+            .is_some_and(|runtime| runtime.request.stem_enabled));
+        let installed =
+            knobs.snapshot.lock().unwrap().deck_frames[DeckId::A as usize] as f64 / 48_000.0;
+        assert!(
+            (installed - 4.7).abs() < 0.02,
+            "late ring catch-up must land on the command clock, got {installed:.6}"
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn clocked_stem_seek_installs_once_the_keep_floor_stops_refilling() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        let mut live = live_runtime(1, 50.0);
+        live.request.stem_enabled = true;
+        actor.decks[DeckId::A as usize] = Some(live);
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 50.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+
+        let (stream, mut writer) = StreamSource::<StemFrame>::bounded(16_000);
+        for _ in 0..12_000 {
+            writer.push(StemFrame::default(), || false).unwrap();
+        }
+        let promote_at = Instant::now() - Duration::from_secs(2);
+        let mut request = source(1, 30.0);
+        request.stem_enabled = true;
+        request.stem_cache_path = "/tmp/spleeter4-fp16-onnx".into();
+        actor.revisions[DeckId::A as usize] = 12;
+        actor.pending[DeckId::A as usize] = Some(PendingStream {
+            revision: 12,
+            source: PlaybackStream::Stems(stream),
+            request,
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 12_000,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(12)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            clocked_seek: Some(ClockedDeckSeek {
+                requested_at: promote_at - Duration::from_millis(250),
+                requested_position: 29.75,
+                promote_at,
+                position: 30.0,
+                rate: 1.0,
+                advancing: true,
+                skipped_output_frames: 0,
+                skipped_media_frames: 0.0,
+                catchup_progress_at: None,
+            }),
+            seek: StreamSeekControl::new(),
+        });
+
+        actor.promote_ready_streams();
+        assert!(
+            actor.pending[DeckId::A as usize].is_some(),
+            "first drain leaves the keep floor below the startup cushion"
+        );
+        std::thread::sleep(STEM_SEEK_CATCHUP_STALL + Duration::from_millis(10));
+        actor.promote_ready_streams();
+        assert!(
+            actor.pending[DeckId::A as usize].is_none(),
+            "a stalled keep floor must install instead of waiting for another model window"
+        );
+        let installed =
+            knobs.snapshot.lock().unwrap().deck_frames[DeckId::A as usize] as f64 / 48_000.0;
+        assert!(
+            (installed - 50.0).abs() > 1.0,
+            "installed clock must leave the pre-seek playhead, got {installed:.6}"
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn playing_original_sync_uses_the_same_command_clock_contract() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 42.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 42.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, false];
+
+        let (stream, mut writer) = StreamSource::bounded(4_000);
+        for _ in 0..3_000 {
+            writer.push([0.0, 0.0], || false).unwrap();
+        }
+        let promote_at = Instant::now() - Duration::from_millis(10);
+        actor.revisions[DeckId::A as usize] = 10;
+        actor.pending[DeckId::A as usize] = Some(PendingStream {
+            revision: 10,
+            source: PlaybackStream::Stereo(stream),
+            request: source(1, 20.0),
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 1,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(10)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            clocked_seek: Some(ClockedDeckSeek {
+                requested_at: promote_at - Duration::from_millis(SEEK_BUFFER_MS),
+                requested_position: 19.88,
+                promote_at,
+                position: 20.0,
+                rate: 1.0,
+                advancing: true,
+                skipped_output_frames: 0,
+                skipped_media_frames: 0.0,
+                catchup_progress_at: None,
+            }),
+            seek: StreamSeekControl::new(),
+        });
+
+        actor.promote_ready_streams();
+
+        let installed =
+            knobs.snapshot.lock().unwrap().deck_frames[DeckId::A as usize] as f64 / 48_000.0;
+        assert!((installed - 20.01).abs() < 0.005, "got {installed:.6}");
+        assert!((installed - 42.0).abs() > 1.0);
+        drop(writer);
     }
 
     #[test]
@@ -4664,10 +5424,19 @@ mod tests {
             cancel: Arc::new(AtomicU64::new(3)),
             followup_stems: false,
             release_scratch_hold: false,
+            clocked_seek: None,
             seek: StreamSeekControl::new(),
         });
+        assert!(
+            !actor.state.decks[DeckId::A as usize].stem_enabled,
+            "a pending STEM worker must not claim callback ownership before promotion"
+        );
 
         actor.promote_ready_streams();
+        assert!(
+            actor.state.decks[DeckId::A as usize].stem_enabled,
+            "the snapshot must expose installed STEM ownership for safe runtime retirement"
+        );
 
         assert!(
             (actor.state.decks[DeckId::A as usize].current_time - 6.12).abs() < 0.001,
@@ -4681,7 +5450,8 @@ mod tests {
     }
 
     #[test]
-    fn deck_seek_keeps_the_other_deck_and_bridges_scnet_cache_miss_with_original() {
+    fn deck_seek_keeps_the_other_deck_and_prepares_stems_without_an_original_bridge() {
+        enable_four_stem_runtime_for_test();
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
         actor.open_output().expect("打开测试输出");
@@ -4699,7 +5469,7 @@ mod tests {
 
         actor
             .seek_deck(DeckId::A as u8, 4.0)
-            .expect("DJ 同台跳转应建立原曲桥接");
+            .expect("DJ 同台跳转应建立分轨 shadow");
 
         assert!(
             actor.pending[DeckId::B as usize].is_none(),
@@ -4707,13 +5477,13 @@ mod tests {
         );
         let pending = actor.pending[DeckId::A as usize]
             .as_ref()
-            .expect("SCNet cache miss must prepare an ORG bridge");
-        assert!(!pending.request.stem_enabled);
-        assert!(pending.followup_stems);
-        assert!((pending.request.position - 4.0).abs() < 0.001);
+            .expect("Spleeter4 shadow stream must be pending");
+        assert!(pending.request.stem_enabled);
+        assert!(!pending.followup_stems);
+        assert!(pending.request.position > 4.0);
         let runtime = actor.decks[DeckId::A as usize]
             .as_ref()
-            .expect("ORG bridge promotion前旧流仍负责发声");
+            .expect("shadow promotion前旧分轨仍负责发声");
         assert!(runtime.request.stem_enabled);
         assert_eq!(
             live_cancel.load(Ordering::Acquire),
@@ -4722,14 +5492,14 @@ mod tests {
         );
         assert!(
             actor.awaiting_seek_promotion(),
-            "ORG bridge must promote at the requested playhead before SCNet follows"
+            "shadow STEM must promote only after its startup cushion is ready"
         );
         assert!(actor.decks[DeckId::B as usize].is_some());
         assert!(!actor.state.error.contains("原曲"));
     }
 
     #[test]
-    fn loading_a_playing_deck_keeps_original_until_scnet_is_ready() {
+    fn loading_a_playing_deck_keeps_original_until_spleeter4_is_ready() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
         actor.open_output().expect("打开测试输出");
@@ -4745,7 +5515,7 @@ mod tests {
             .expect("播放中装入应先登记原曲流");
         assert!(
             !pending.request.stem_enabled,
-            "SCNet cache miss must keep ORG audible"
+            "Spleeter4 cache miss must keep ORG audible"
         );
         assert!(pending.followup_stems);
         assert_eq!(pending.request.stem_cache_path, "/tmp/kdj-stem-cache");

@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  BEATS_PER_BAR,
+  applySyncRateBeforePhase,
   barPhase,
   barPhaseAlignedSeek,
   barPhaseLock,
   deckSyncRate,
   ENGINE_TEMPO_MAX,
   ENGINE_TEMPO_MIN,
+  manualSyncBarInput,
   msUntilNextBoundary,
   nearestGridSnap,
   phaseAlignedFollowerPosition,
@@ -14,9 +17,12 @@ import {
   scratchSnapAdjustment,
   scratchVelocityRate,
   shouldQuantizeSyncOnPlay,
+  syncSeekLeadSeconds,
+  syncPhaseConfirmationDelayMs,
   SYNC_SEEK_LEAD_SEC,
   syncFollowerSeekPosition,
   syncFollowerSeekPositionWithLead,
+  SYNC_PHASE_TOLERANCE_SEC,
   wrapSigned,
 } from "../src/lib/beatGridSync";
 
@@ -194,6 +200,24 @@ test("sync target accounts for the decoded seek cushion without moving an alread
   assert.equal(syncFollowerSeekPositionWithLead({ ...input, followerPositionSec: 10 }, SYNC_SEEK_LEAD_SEC), null);
 });
 
+test("native promotion owns seek lead for both original and STEM followers", () => {
+  assert.equal(syncSeekLeadSeconds(true), 0);
+  assert.equal(syncSeekLeadSeconds(false), 0);
+  const input = {
+    followerPositionSec: 10.2,
+    followerBpm: 120,
+    followerFirstBeatSec: 0,
+    followerRate: 1,
+    masterPositionSec: 10,
+    masterBpm: 120,
+    masterFirstBeatSec: 0,
+    masterRate: 1,
+    multiple: 1,
+  };
+  almost(syncFollowerSeekPositionWithLead(input, syncSeekLeadSeconds(true)) ?? -1, 10);
+  almost(syncFollowerSeekPositionWithLead(input, syncSeekLeadSeconds(false)) ?? -1, 10);
+});
+
 test("manual SYNC matches 80.9 to 128.4 as half-time without pinning to a ±10% fader", () => {
   const plan = deckSyncRate(128.4, 80.9, ENGINE_TEMPO_MIN, ENGINE_TEMPO_MAX);
   assert.ok(plan);
@@ -223,6 +247,70 @@ test("beat lock treats a one-beat offset as already aligned; bar lock does not",
   assert.ok(bar);
   almost(beat.errorSec, 0);
   almost(bar.errorSec, 0.5);
+});
+
+test("manual SYNC always locks the four-beat yellow line, independent of auto-mix preferences", () => {
+  const input = manualSyncBarInput({
+    followerPositionSec: 0.6,
+    followerBpm: 120,
+    followerFirstBeatSec: 0.1,
+    followerRate: 1,
+    masterPositionSec: 0.1,
+    masterBpm: 120,
+    masterFirstBeatSec: 0.1,
+    masterRate: 1,
+    multiple: 1,
+  });
+  assert.equal(input.beatsPerCell, BEATS_PER_BAR);
+  almost(barPhaseLock(input)?.errorSec ?? -1, 0.5);
+});
+
+test("manual SYNC waits for native TEMPO acknowledgement before starting phase alignment", async () => {
+  const order: string[] = [];
+  let releaseRate!: () => void;
+  const rateApplied = new Promise<void>((resolve) => {
+    releaseRate = resolve;
+  });
+  const operation = applySyncRateBeforePhase(
+    async () => {
+      order.push("rate-requested");
+      await rateApplied;
+      order.push("rate-applied");
+      return true;
+    },
+    () => order.push("phase-seek"),
+  );
+  await Promise.resolve();
+  assert.deepEqual(order, ["rate-requested"]);
+  releaseRate();
+  assert.equal(await operation, true);
+  assert.deepEqual(order, ["rate-requested", "rate-applied", "phase-seek"]);
+});
+
+test("SYNC confirmation is delayed through shadow promotion and remains bounded", () => {
+  assert.equal(syncPhaseConfirmationDelayMs(false, 2_000), 350);
+  assert.equal(syncPhaseConfirmationDelayMs(true, null), 900);
+  assert.equal(syncPhaseConfirmationDelayMs(true, 1_122), 2_744);
+  assert.equal(syncPhaseConfirmationDelayMs(true, 5_000), 3_500);
+});
+
+test("manual SYNC corrects residual offsets above 3ms even below the generic 12ms seek guard", () => {
+  const input = manualSyncBarInput({
+    followerPositionSec: 10.008,
+    followerBpm: 120,
+    followerFirstBeatSec: 0,
+    followerRate: 1,
+    masterPositionSec: 10,
+    masterBpm: 120,
+    masterFirstBeatSec: 0,
+    masterRate: 1,
+    multiple: 1,
+  });
+  assert.equal(syncFollowerSeekPositionWithLead(input, 0), null);
+  almost(
+    syncFollowerSeekPositionWithLead(input, 0, SYNC_PHASE_TOLERANCE_SEC) ?? -1,
+    10,
+  );
 });
 
 test("half-time bar lock prefers the downbeat over the follower's third beat", () => {

@@ -7,6 +7,7 @@ import {
   stemEqPointerAngle,
   stemEqRingFillPath,
   stemEqToGain,
+  stemGainRequestReady,
   stemGainToEq,
 } from "../src/lib/stemEq";
 
@@ -27,6 +28,13 @@ test("invalid or out-of-range gains fall back to a usable mix", () => {
   assert.equal(clampStemGain(-4), 0);
   assert.equal(clampStemGain(9), STEM_GAIN_MAX);
   assert.equal(stemEqToGain(Number.POSITIVE_INFINITY), STEM_GAIN_UNITY);
+});
+
+test("the first STEM EQ move waits for the matching track and applies when it becomes ready", () => {
+  assert.equal(stemGainRequestReady(null, 7), false);
+  assert.equal(stemGainRequestReady({ trackId: 7, state: "separating" }, 7), false);
+  assert.equal(stemGainRequestReady({ trackId: 8, state: "ready" }, 7), false);
+  assert.equal(stemGainRequestReady({ trackId: 7, state: "ready" }, 7), true);
 });
 
 test("STEM EQ 填充从 12 点跟到指针，切除走左侧", () => {

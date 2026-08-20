@@ -1,13 +1,10 @@
 //! Native four-stem separation and cache ownership.
 //!
-//! Model inference never runs in the audio callback. Desktop live STEM uses the fixed-shape
-//! SCNet Small spectral core through Core ML on macOS and ONNX Runtime on Windows. The public
-//! cache reader stays independent of that backend.
+//! Model inference never runs in the audio callback. Desktop live STEM uses four Spleeter4 FP16
+//! ONNX U-Nets behind ONNX Runtime. The public cache reader stays independent of that backend.
 
 mod audio;
 mod cache;
-#[cfg(target_os = "macos")]
-mod coreml;
 #[cfg(feature = "stem-debug-onnx")]
 mod debug;
 mod debug_dsp;
@@ -15,13 +12,16 @@ mod debug_dsp;
 mod debug_stub;
 mod dj;
 mod dsp;
+mod instant;
 mod live;
 mod manager;
 mod model;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "android"))]
 mod onnx;
 mod runtime;
 mod scan;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "android"))]
+pub mod seeklab;
 
 pub use audio::StemWindowCursor;
 pub use cache::{
@@ -39,6 +39,11 @@ pub use debug_stub::{
     StemDebugModelCatalog, StemDebugModelStatus, StemDebugRender,
 };
 pub use dj::{DeckStemSeekControl, DualDeckStemSeekControl, PcmRandomAccessCache, StemSeekRequest};
+pub use instant::{
+    try_acquire_instant_admission, InstantAdmissionGuard, InstantStemChunk, InstantStemPool,
+    InstantStemTicket, InstantTrack, InstantTrackTicket, INSTANT_CONTEXT_FRAMES,
+    INSTANT_HANDOFF_FRAMES, INSTANT_HOP_BUDGET_MS, INSTANT_HOP_FRAMES, INSTANT_INPUT_FRAMES,
+};
 pub use live::{
     acquire_stem_pool, any_live_audio_lease_held, begin_live_stem_waveform,
     begin_scan_stem_waveform, live_stem_coverage, live_stem_range_covered, live_stem_waveform,
@@ -51,27 +56,70 @@ pub use live::{
 pub use manager::{ModelStatus, StemCoordinator, TrackStemStatus};
 pub use scan::{next_scan_work, ScanJobView, ScanWork, StemScanStatus, SCAN_VIEWPORT_SECONDS};
 
-/// Stable model family/version identifiers used by installation and cache ownership. The
-/// deployment artifacts were exported from tensors byte-identical to ZFTurbo's v1.0.6 checkpoint
-/// (`1bc0…2aa`); Core ML/ONNX package hashes are verified separately in `model.rs`.
-pub const MODEL_ID: &str = "scnet-small";
-pub const MODEL_VERSION: &str = "ZF-v1.0.6+deploy-v0.1.2";
-pub const MODEL_ARCHIVE_BYTES: u64 = 34_543_230;
-/// Weight identity in cache headers, deliberately independent of Core ML versus ONNX packaging.
+/// Stable model family/version identifiers used by installation and cache ownership.
+pub const MODEL_ID: &str = "spleeter4-fp16-onnx";
+pub const MODEL_VERSION: &str = "Best-Practice-87c5b6d";
+pub const MODEL_ARCHIVE_BYTES: u64 = 78_856_560;
+/// SHA-256 of the four model files concatenated in Drums / Bass / Other / Vocals order. This is
+/// the cache identity; every individual artifact hash is also locked in `model.rs`.
 pub const MODEL_ARCHIVE_SHA256: &str =
-    "1bc0d1abb20bfdf966dcd07637bafd03e4bc13653d09ef18bc9b3e342eafe2aa";
-pub const MODEL_ARCHIVE_URL: &str = "https://github.com/demixr/scnet-executorch/releases/download/v0.1.2/scnet_coreml.mlpackage.zip";
-pub const MODEL_DIRECTORY: &str = "scnet_coreml.mlpackage";
+    "a9ef9575560b0d224dde174e886a09ee9b4e2b7fe537b040697446c5f8c8cf8f";
+pub const MODEL_ARCHIVE_URL: &str = "https://huggingface.co/Best-Practice/spleeter-4stems-onnx";
+pub const MODEL_DIRECTORY: &str = "spleeter4-fp16-onnx";
 pub const SAMPLE_RATE: u32 = 44_100;
-/// Fixed 7.8-second deployment shape: 1.95 s left context + 3.9 s retained core + 1.95 s right
-/// context. Adjacent requests overlap by 50%; only their context-safe centre enters playback.
-pub const SEGMENT_SAMPLES: usize = 343_980;
-pub const SEGMENT_CONTEXT_SAMPLES: usize = 85_995;
-pub const SEGMENT_CORE_SAMPLES: usize = 171_990;
-/// A 100 ms linear handoff between two highly correlated SCNet estimates avoids both clicks and
+/// One model tile contains exactly 512 periodic-Hann STFT frames. We keep the centre 169 hops and
+/// discard 173 hops on each edge. The 3.92-second retained core still fits the bounded four-second
+/// Deck ring while the generous overlap keeps model-window edges out of playback.
+pub const SEGMENT_SAMPLES: usize = 527_360;
+pub const SEGMENT_CONTEXT_SAMPLES: usize = 177_152;
+pub const SEGMENT_CORE_SAMPLES: usize = 173_056;
+/// A 100 ms linear handoff between two highly correlated Spleeter4 estimates avoids both clicks and
 /// the +3 dB lift that an equal-power blend caused for phase-aligned outputs.
 pub const SEGMENT_HANDOFF_SAMPLES: usize = 4_410;
 /// Waveform publication uses exactly the retained context-safe core.
 pub const SEGMENT_WAVEFORM_GUARD_SAMPLES: usize = SEGMENT_CONTEXT_SAMPLES;
 /// Compatibility name for consumers that describe the discarded edge context.
 pub const SEGMENT_OVERLAP: usize = SEGMENT_CONTEXT_SAMPLES * 2;
+
+/// ByteDance MobileNet_Subbandtime was trained on three-second stereo windows. Its reference
+/// separator advances by half a window and keeps the middle 50%, so production discards 750 ms on
+/// each edge and retains a 1.5-second core plus KDJ's 100 ms successor handoff tail.
+pub const MOBILENET_SEGMENT_SAMPLES: usize = 132_300;
+pub const MOBILENET_SEGMENT_CONTEXT_SAMPLES: usize = 33_075;
+pub const MOBILENET_SEGMENT_CORE_SAMPLES: usize = 66_150;
+pub const MOBILENET_SEGMENT_HANDOFF_SAMPLES: usize = SEGMENT_HANDOFF_SAMPLES;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StemTileGeometry {
+    pub samples: usize,
+    pub context: usize,
+    pub core: usize,
+    pub handoff: usize,
+}
+
+impl StemTileGeometry {
+    pub const fn spleeter() -> Self {
+        Self {
+            samples: SEGMENT_SAMPLES,
+            context: SEGMENT_CONTEXT_SAMPLES,
+            core: SEGMENT_CORE_SAMPLES,
+            handoff: SEGMENT_HANDOFF_SAMPLES,
+        }
+    }
+
+    pub const fn mobilenet() -> Self {
+        Self {
+            samples: MOBILENET_SEGMENT_SAMPLES,
+            context: MOBILENET_SEGMENT_CONTEXT_SAMPLES,
+            core: MOBILENET_SEGMENT_CORE_SAMPLES,
+            handoff: MOBILENET_SEGMENT_HANDOFF_SAMPLES,
+        }
+    }
+}
+
+pub fn stem_tile_geometry() -> StemTileGeometry {
+    match crate::runtime::stem_runtime_preference().mode {
+        kdj_core::StemMode::MobileNetTwo => StemTileGeometry::mobilenet(),
+        _ => StemTileGeometry::spleeter(),
+    }
+}

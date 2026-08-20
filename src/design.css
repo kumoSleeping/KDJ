@@ -6949,6 +6949,50 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   gap: 0.15rem;
   flex: none;
 }
+.kd-stem-mode-switch {
+  height: auto;
+  min-height: 1.6rem;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.08rem;
+  margin-right: 0.25rem;
+  padding: 0.08rem;
+  max-width: min(100%, 46rem);
+  border: 1px solid var(--kd-line);
+  border-radius: 0.35rem;
+  background: var(--kd-panel-inset);
+  -webkit-app-region: no-drag;
+}
+.kd-stem-mode-switch > span,
+.kd-stem-mode-switch > button {
+  height: 1.12rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0.22rem;
+  border: 0;
+  border-radius: 0.22rem;
+  background: transparent;
+  color: var(--kd-faint);
+  font: 700 0.5rem/1 var(--kd-font);
+  white-space: nowrap;
+}
+.kd-stem-mode-switch > span {
+  color: var(--kd-muted);
+  letter-spacing: 0.04em;
+}
+.kd-stem-mode-switch > button {
+  cursor: pointer;
+}
+.kd-stem-mode-switch > button[data-active="true"] {
+  background: var(--kd-panel);
+  color: var(--kd-theme);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+.kd-stem-mode-switch > button:hover:not([data-active="true"]) {
+  color: var(--kd-text-body);
+}
 .kd-work-mode-switch {
   appearance: none;
   height: 1.6rem;
@@ -8523,6 +8567,12 @@ button.kd-stream-status {
   .kd-work-mode-switch > span svg {
     display: none;
   }
+  .kd-stem-mode-switch > span {
+    display: none;
+  }
+  .kd-stem-mode-switch > button {
+    padding-inline: 0.22rem;
+  }
 }
 
 /* Performance v2 — 紧凑双 Deck + 固定通道台。旧版浮层选择器保留给历史布局，
@@ -9155,6 +9205,9 @@ button.kd-stream-status {
   max-width: 100%;
   min-width: 0;
 }
+.kd-performance-stem-pads[data-mode="two"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
 .kd-performance-stem-download {
   position: relative;
   display: grid;
@@ -9527,6 +9580,9 @@ button.kd-stream-status {
   row-gap: 0.1rem;
   min-height: 0;
   height: auto;
+}
+.kd-performance-stem-eq[data-mode="two"] > div {
+  grid-template-rows: repeat(2, 1.92rem);
 }
 .kd-performance-stem-eq-knob {
   position: relative;
@@ -10570,4 +10626,102 @@ button.kd-stream-status {
   }
   .kd-stem-debug-metrics { grid-column: 1 / -1; min-height: 4.2rem; }
   .kd-stem-debug-body { overflow: auto; }
+}
+
+/* Stem 跳转实验台（SeekLab，类 Neural Mix 调度研究） */
+.kd-stem-lab {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 2.2rem minmax(0, 1fr);
+  color: var(--kd-text);
+  background: var(--kd-bg);
+}
+.kd-stem-lab-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0 0.7rem;
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+  -webkit-app-region: drag;
+}
+.kd-app[data-mac="true"] .kd-stem-lab-head {
+  padding-left: calc(var(--kd-traffic-pad) + 0.35rem);
+}
+.kd-stem-lab-head > button { -webkit-app-region: no-drag; }
+.kd-stem-lab-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+  font: 800 0.72rem/1 var(--kd-font-mono);
+  letter-spacing: 0.05em;
+}
+.kd-stem-lab-head > span { margin-left: auto; }
+.kd-stem-lab-body {
+  min-height: 0;
+  padding: 0.8rem 1rem 1.4rem;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+.kd-lab-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
+.kd-lab-controls select,
+.kd-lab-controls input {
+  height: 1.7rem;
+  padding: 0 0.4rem;
+  border: 1px solid var(--kd-line);
+  border-radius: 4px;
+  color: var(--kd-text);
+  background: var(--kd-panel-inset);
+  font: 600 0.66rem/1 var(--kd-font-mono);
+}
+.kd-lab-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.5rem;
+}
+.kd-lab-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--kd-line);
+  border-radius: 6px;
+  background: var(--kd-panel);
+}
+.kd-lab-card-value {
+  font: 800 1.02rem/1.1 var(--kd-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.kd-lab-card .kd-muted { font-size: 0.62rem; line-height: 1.35; }
+.kd-lab-table {
+  width: 100%;
+  border-collapse: collapse;
+  font: 600 0.64rem/1.5 var(--kd-font-mono);
+}
+.kd-lab-table th,
+.kd-lab-table td {
+  padding: 0.22rem 0.5rem;
+  border-bottom: 1px solid var(--kd-line);
+  text-align: left;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.kd-lab-table th { color: var(--kd-muted); font-weight: 700; }
+.kd-lab-audition {
+  padding: 0.6rem 0.65rem;
+  border: 1px solid var(--kd-line);
+  border-radius: 6px;
+  background: var(--kd-panel);
 }

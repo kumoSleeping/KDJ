@@ -180,6 +180,46 @@ pub enum FilterResonance {
     High,
 }
 
+/// Global source-separation policy. `None` is deliberately the persisted default so loading a
+/// Deck never spends model/CPU/GPU resources until the user opts in from the app chrome.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StemMode {
+    #[default]
+    None,
+    Four,
+    #[serde(alias = "two", alias = "two_int8")]
+    MobileNetTwo,
+}
+
+impl StemMode {
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    pub fn uses_two_lanes(self) -> bool {
+        matches!(self, Self::MobileNetTwo)
+    }
+
+    pub fn uses_four_lanes(self) -> bool {
+        matches!(self, Self::Four)
+    }
+
+    pub fn shares_artifact_with(self, other: Self) -> bool {
+        self == other
+    }
+}
+
+/// Execution-provider preference for the selected STEM model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StemCompute {
+    #[default]
+    Auto,
+    Gpu,
+    Cpu,
+}
+
 /// 曲目列表里的调性表示。底层始终保留可互转的音名与 Camelot，不按显示偏好改写数据。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1400,6 +1440,32 @@ mod tests {
                 format!("\"{name}\"")
             );
             assert_eq!(parsed.as_str(), name);
+        }
+    }
+
+    #[test]
+    fn stem_mode_uses_snake_case_wire_names() {
+        for (mode, name) in [
+            (StemMode::None, "none"),
+            (StemMode::Four, "four"),
+            (StemMode::MobileNetTwo, "mobile_net_two"),
+        ] {
+            assert_eq!(serde_json::to_string(&mode).unwrap(), format!("\"{name}\""));
+            let parsed: StemMode = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert_eq!(parsed, mode);
+        }
+        assert!(!StemMode::Four.shares_artifact_with(StemMode::MobileNetTwo));
+    }
+
+    #[test]
+    fn retired_two_stem_settings_migrate_to_mobilenet() {
+        for retired in ["two", "two_int8"] {
+            let parsed: StemMode = serde_json::from_str(&format!("\"{retired}\"")).unwrap();
+            assert_eq!(parsed, StemMode::MobileNetTwo);
+            assert_eq!(
+                serde_json::to_string(&parsed).unwrap(),
+                "\"mobile_net_two\""
+            );
         }
     }
 
