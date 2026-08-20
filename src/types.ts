@@ -31,7 +31,7 @@ export type VideoFormat = "mp4" | "mkv" | "mov";
 export type KeyNotation = "camelot" | "traditional";
 /** Performance 双极滤波器的共振档位；后端将其映射为稳定的 DSP Q。 */
 export type FilterResonance = "low" | "medium" | "high";
-export type StemMode = "none" | "four" | "mobile_net_two";
+export type StemMode = "none" | "mobile_net_two";
 export type StemCompute = "auto" | "gpu" | "cpu";
 
 export interface Settings {
@@ -74,7 +74,7 @@ export interface Settings {
   player_waveform: boolean;
   /** Performance 双极滤波器的共振强度。 */
   filter_resonance: FilterResonance;
-  /** 全局 STEM 轨数；none 时 Deck 不挂载模型或扫描任务。 */
+  /** 固定 ByteDance STEM 模型；是否启用由每个 Deck 的 EQ 控件决定。 */
   stem_mode: StemMode;
   /** STEM execution provider 偏好；auto 优先平台加速器。 */
   stem_compute: StemCompute;
@@ -674,7 +674,7 @@ export interface Waveform {
 
 export type StemName = "vocals" | "drums" | "bass" | "other";
 
-/** A compact, append-only update for the live four-stem performance waveform. */
+/** A compact, append-only update for the optional live vocal performance waveform. */
 export interface LiveStemWaveformPoint {
   index: number;
   amp: number;
@@ -759,135 +759,6 @@ export interface TrackStemStatus {
   windowEnd?: number;
   windowCoveredSeconds?: number;
   waitingForDeck?: number | null;
-}
-
-export type StemDebugModelId = "scnet-tran" | "bs-polarformer";
-
-export interface StemDebugLane {
-  id: string;
-  label: string;
-}
-
-export interface StemDebugModelStatus {
-  id: StemDebugModelId;
-  name: string;
-  ready: boolean;
-  sha256: string;
-  bytes: number;
-  path: string;
-  license: string;
-  lanes: StemDebugLane[];
-  error: string;
-}
-
-export interface StemDebugModelCatalog {
-  configured: boolean;
-  root: string;
-  models: StemDebugModelStatus[];
-}
-
-export type StemLabBackend = "cpu" | "coreml-gpu" | "coreml-all";
-
-export interface StemLabModelInfo {
-  id: string;
-  role: string;
-  path: string | null;
-  ready: boolean;
-  note: string;
-}
-
-export interface StemLabCatalog {
-  sampleRate: number;
-  spleeterTileSeconds: number;
-  spleeterCoreSeconds: number;
-  hstasnetHopMs: number;
-  hstasnet: StemLabModelInfo;
-  spleeter4: StemLabModelInfo;
-}
-
-export interface StemLabStageReport {
-  stage: string;
-  model: string;
-  backend: string;
-  contextSeconds: number;
-  wallMs: number;
-  wallMeanMs: number;
-  wallP95Ms: number | null;
-  audioSeconds: number;
-  rtf: number;
-  cpuRatio: number;
-  firstOutputMs: number | null;
-  snrDb: [number, number, number, number] | null;
-  snrReference: string | null;
-}
-
-export interface StemLabSchedule {
-  firstOutputMs: number;
-  firstTileWallMs: number;
-  streamHopMs: number;
-  streamStepMeanMs: number;
-  streamStepP95Ms: number;
-  refinedTileWallMs: number;
-  refinedCoreSeconds: number;
-  replaceMarginMs: number;
-  notes: string[];
-}
-
-export interface StemLabTrialReport {
-  source: string;
-  seekSeconds: number;
-  backend: string;
-  stemMapping: [number, number, number, number];
-  mappingConfidenceDb: [number, number, number, number];
-  stages: StemLabStageReport[];
-  schedule: StemLabSchedule;
-}
-
-export interface StemLabSeekResponse {
-  sessionId: string;
-  trackId: number;
-  title: string;
-  durationSeconds: number;
-  report: StemLabTrialReport;
-  audio: StemDebugAudioUrls;
-}
-
-
-export interface StemDebugWaveforms {
-  original: number[];
-  sum: number[];
-  lanes: Record<string, number[]>;
-}
-
-export interface StemDebugAudioUrls {
-  original: string;
-  lanes: Record<string, string>;
-}
-
-export interface StemDebugRender {
-  sessionId: string;
-  trackId: number;
-  title: string;
-  artist: string;
-  audio: StemDebugAudioUrls;
-  modelId: StemDebugModelId;
-  modelName: string;
-  modelSha256: string;
-  modelLicense: string;
-  lanes: StemDebugLane[];
-  sampleRate: number;
-  frames: number;
-  duration: number;
-  analysisTotalMs: number;
-  realtimeFactor: number;
-  inferenceChunks: number;
-  inferenceTotalMs: number;
-  inferenceMeanMs: number;
-  inferenceP95Ms: number;
-  inferenceMaxMs: number;
-  reconstructionRmsError: number;
-  reconstructionPeakError: number;
-  waveforms: StemDebugWaveforms;
 }
 
 /** 在线缓存已实际解码出的前缀波形。`covered_seconds` 只覆盖从 0 开始的真实 PCM；

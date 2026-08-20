@@ -7,10 +7,13 @@ export const STEM_WAVE_BITS: Record<StemName, number> = {
   other: 4,
   vocals: 8,
 };
-export const ALL_PERFORMANCE_WAVE_BITS = 31;
-/** STEM display is opt-in. The original mix starts visible but can be hidden independently. */
+/** Performance exposes the original mix plus one optional vocal rail. Other STEM lanes remain
+ * audio-only internals and must never re-enter the waveform preference through old storage. */
+export const VOCAL_WAVE_BIT = STEM_WAVE_BITS.vocals;
+export const ALL_PERFORMANCE_WAVE_BITS = ORIGINAL_WAVE_BIT | VOCAL_WAVE_BIT;
+/** The original mix is mandatory; the vocal rail remains opt-in. */
 export const DEFAULT_PERFORMANCE_WAVE_MASK = ORIGINAL_WAVE_BIT;
-export const STEM_LANE_BITS = 0b1111;
+export const STEM_LANE_BITS = VOCAL_WAVE_BIT;
 // v2 made all four STEM rails the default and coupled that preference to live inference.  Do not
 // carry that implicit performance cost forward for existing users.
 export const PERFORMANCE_WAVE_DISPLAY_STORAGE_KEY = "kd-performance-wave-display-v3";
@@ -38,7 +41,8 @@ export function readPerformanceWaveMask(): number {
  */
 export function normalizePerformanceWaveMask(value: unknown): number {
   const stored = Array.isArray(value) && value.length === 2 ? value[0] : value;
-  return typeof stored === "number" && Number.isInteger(stored)
-    ? stored & ALL_PERFORMANCE_WAVE_BITS
-    : DEFAULT_PERFORMANCE_WAVE_MASK;
+  const optional = typeof stored === "number" && Number.isInteger(stored)
+    ? stored & VOCAL_WAVE_BIT
+    : 0;
+  return ORIGINAL_WAVE_BIT | optional;
 }

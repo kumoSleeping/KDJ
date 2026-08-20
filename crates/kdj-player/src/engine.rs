@@ -261,6 +261,8 @@ pub struct AudioRenderer {
     transport_ramp: Option<TransportRamp>,
     active_deck: DeckId,
     output_frames: u64,
+    deck_output_underruns: [u64; 2],
+    deck_min_buffered_frames: [u64; 2],
     deck_positions: [f64; 2],
     deck_gains: [f32; 2],
     deck_rates: [f64; 2],
@@ -337,6 +339,8 @@ fn make_channels(
             transport_ramp: None,
             active_deck: DeckId::A,
             output_frames: 0,
+            deck_output_underruns: [0; 2],
+            deck_min_buffered_frames: [u64::MAX; 2],
             deck_positions: [0.0; 2],
             deck_gains: [1.0; 2],
             deck_rates: [1.0; 2],
@@ -449,7 +453,6 @@ impl AudioRenderer {
         self.ensure_eq_sample_rate();
         self.drain_commands();
         self.arm_scratch_velocity();
-
         let complete_len = output.len() - output.len() % output_channels;
         for frame in output[..complete_len].chunks_mut(output_channels) {
             let required = self.required_decks();
@@ -578,6 +581,17 @@ impl AudioRenderer {
         ];
         self.ensure_eq_sample_rate();
         self.arm_scratch_velocity();
+        let required_at_boundary = self.required_decks();
+        if self.playing {
+            for index in 0..2 {
+                if required_at_boundary[index] {
+                    if let Some(buffered) = callback_source_buffered_frames(sources[index]) {
+                        self.deck_min_buffered_frames[index] =
+                            self.deck_min_buffered_frames[index].min(buffered);
+                    }
+                }
+            }
+        }
 
         let complete_len = output.len() - output.len() % output_channels;
         for frame in output[..complete_len].chunks_mut(output_channels) {
@@ -966,13 +980,21 @@ impl AudioRenderer {
                     true,
                 )
             }
-            Some(CallbackSource::Stream(stream)) => stream_output_frame(
-                &mut self.stream_playback[index],
-                stream,
-                self.output_sample_rate,
-                self.deck_looping[index],
-                StreamRecoverPolicy::PacketCushion,
-            ),
+            Some(CallbackSource::Stream(stream)) => {
+                let was_rebuffering = self.stream_playback[index].rebuffering;
+                let result = stream_output_frame(
+                    &mut self.stream_playback[index],
+                    stream,
+                    self.output_sample_rate,
+                    self.deck_looping[index],
+                    StreamRecoverPolicy::PacketCushion,
+                );
+                if !result.1 && !was_rebuffering && !stream.ended() {
+                    self.deck_output_underruns[index] =
+                        self.deck_output_underruns[index].saturating_add(1);
+                }
+                result
+            }
             Some(CallbackSource::StemStream(stream)) => {
                 let was_rebuffering = self.stem_stream_playback[index].rebuffering;
                 let (raw, advanced) = stream_output_frame(
@@ -984,6 +1006,8 @@ impl AudioRenderer {
                 );
                 if !advanced {
                     if !was_rebuffering && !stream.ended() {
+                        self.deck_output_underruns[index] =
+                            self.deck_output_underruns[index].saturating_add(1);
                         record_stem_output_underrun_for_deck(index);
                     }
                     return ([0.0; 2], false);
@@ -1099,6 +1123,8 @@ impl AudioRenderer {
         self.stream_last_frames[index] = [0.0; 2];
         self.stream_playback[index] = StreamPlaybackState::default();
         self.stem_stream_playback[index] = StreamPlaybackState::default();
+        self.deck_output_underruns[index] = 0;
+        self.deck_min_buffered_frames[index] = u64::MAX;
     }
 
     fn clear_prepared(&mut self, deck: DeckId) {
@@ -1122,6 +1148,8 @@ impl AudioRenderer {
         self.replacement_stem_playback[index] = StreamPlaybackState::default();
         self.replacement_remaining[index] = 0;
         self.replacement_total[index] = 0;
+        self.deck_output_underruns[index] = 0;
+        self.deck_min_buffered_frames[index] = u64::MAX;
         if deck == self.active_deck && self.mode == PlayerMode::Continuous {
             self.stop_transport();
             self.transition = None;
@@ -1464,6 +1492,9 @@ impl AudioRenderer {
             self.output_frames,
             [self.deck_positions[0] as u64, self.deck_positions[1] as u64],
             [self.deck_sources[0].id, self.deck_sources[1].id],
+            self.deck_output_underruns,
+            self.deck_min_buffered_frames
+                .map(|frames| if frames == u64::MAX { 0 } else { frames }),
         );
     }
 }
@@ -1511,6 +1542,14 @@ fn callback_source_ratio(source: Option<CallbackSource>, output_sample_rate: u32
             f64::from(track.sample_rate()) / f64::from(output_sample_rate)
         }
         Some(CallbackSource::Stream(_)) | Some(CallbackSource::StemStream(_)) | None => 1.0,
+    }
+}
+
+fn callback_source_buffered_frames(source: Option<CallbackSource>) -> Option<u64> {
+    match source {
+        Some(CallbackSource::Stream(stream)) => Some(stream.buffered_frames()),
+        Some(CallbackSource::StemStream(stream)) => Some(stream.buffered_frames()),
+        _ => None,
     }
 }
 
@@ -2174,6 +2213,11 @@ mod tests {
             controller.snapshot().deck_frames[0],
             241,
             "starvation keeps the wall clock moving so the waveform does not freeze"
+        );
+        assert_eq!(controller.snapshot().deck_output_underruns[0], 1);
+        assert!(
+            controller.snapshot().deck_min_buffered_frames[0] <= 2,
+            "callback-boundary minimum should expose the exhausted cushion"
         );
 
         // A decoder that trickles back one frame must not repeatedly wake the Deck and create a

@@ -1939,8 +1939,6 @@ export function Workspace({ workMode, onWorkModeChange, onDjWorkspaceHost }: Wor
               onAsideLock={toggleAsideLock}
               workMode={workMode}
               onWorkModeChange={onWorkModeChange}
-              stemMode={settings?.stem_mode ?? "none"}
-              onStemModeChange={(stemMode) => void saveSettings({ stem_mode: stemMode })}
               multiPaneEnabled={multiPaneEnabled}
               onMultiPane={toggleMultiPane}
               settingsOpen={showSettings}

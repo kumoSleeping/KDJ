@@ -1,4 +1,4 @@
-//! Runtime-neutral entry point for one fixed-shape Spleeter worker.
+//! Runtime-neutral entry point for one fixed-shape ByteDance worker.
 
 use std::path::Path;
 use std::sync::{OnceLock, RwLock};
@@ -18,7 +18,7 @@ pub(crate) struct StemRuntimePreference {
 impl Default for StemRuntimePreference {
     fn default() -> Self {
         Self {
-            mode: StemMode::None,
+            mode: StemMode::MobileNetTwo,
             compute: StemCompute::Auto,
         }
     }

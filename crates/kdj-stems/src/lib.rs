@@ -1,15 +1,11 @@
-//! Native four-stem separation and cache ownership.
+//! Native ByteDance two-stem separation and cache ownership.
 //!
-//! Model inference never runs in the audio callback. Desktop live STEM uses four Spleeter4 FP16
-//! ONNX U-Nets behind ONNX Runtime. The public cache reader stays independent of that backend.
+//! Model inference never runs in the audio callback. The live path uses the locked ByteDance
+//! MobileNet_Subbandtime FP32 ONNX model behind ONNX Runtime. The public cache reader stays
+//! independent of that backend.
 
 mod audio;
 mod cache;
-#[cfg(feature = "stem-debug-onnx")]
-mod debug;
-mod debug_dsp;
-#[cfg(not(feature = "stem-debug-onnx"))]
-mod debug_stub;
 mod dj;
 mod dsp;
 mod instant;
@@ -20,23 +16,11 @@ mod model;
 mod onnx;
 mod runtime;
 mod scan;
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "android"))]
-pub mod seeklab;
 
 pub use audio::StemWindowCursor;
 pub use cache::{
     read_cache_header, seek_cache_frame, stem_cache_waveform, StemCacheHeader, StemKind,
     StemWaveform, ALL_STEM_MASK, BYTES_PER_FRAME, HEADER_BYTES,
-};
-#[cfg(feature = "stem-debug-onnx")]
-pub use debug::{
-    render_stem_debug, stem_debug_model_catalog, StemDebugLane, StemDebugModel,
-    StemDebugModelCatalog, StemDebugModelStatus, StemDebugRender,
-};
-#[cfg(not(feature = "stem-debug-onnx"))]
-pub use debug_stub::{
-    render_stem_debug, stem_debug_model_catalog, StemDebugLane, StemDebugModel,
-    StemDebugModelCatalog, StemDebugModelStatus, StemDebugRender,
 };
 pub use dj::{DeckStemSeekControl, DualDeckStemSeekControl, PcmRandomAccessCache, StemSeekRequest};
 pub use instant::{
@@ -57,36 +41,31 @@ pub use manager::{ModelStatus, StemCoordinator, TrackStemStatus};
 pub use scan::{next_scan_work, ScanJobView, ScanWork, StemScanStatus, SCAN_VIEWPORT_SECONDS};
 
 /// Stable model family/version identifiers used by installation and cache ownership.
-pub const MODEL_ID: &str = "spleeter4-fp16-onnx";
-pub const MODEL_VERSION: &str = "Best-Practice-87c5b6d";
-pub const MODEL_ARCHIVE_BYTES: u64 = 78_856_560;
-/// SHA-256 of the four model files concatenated in Drums / Bass / Other / Vocals order. This is
-/// the cache identity; every individual artifact hash is also locked in `model.rs`.
+pub const MODEL_ID: &str = "bytedance-mobilenet-subbandtime-2-fp32-onnx";
+pub const MODEL_VERSION: &str = "zenodo-5804160-kdj-3s-v1";
+pub const MODEL_ARCHIVE_BYTES: u64 = 6_414_644;
+/// SHA-256 of the single locked ByteDance model file.
 pub const MODEL_ARCHIVE_SHA256: &str =
-    "a9ef9575560b0d224dde174e886a09ee9b4e2b7fe537b040697446c5f8c8cf8f";
-pub const MODEL_ARCHIVE_URL: &str = "https://huggingface.co/Best-Practice/spleeter-4stems-onnx";
-pub const MODEL_DIRECTORY: &str = "spleeter4-fp16-onnx";
+    "999ba99f306f09c9a35a18fe0007b53f8ad2c3cb5bb9d638128bf7257cd8e991";
+pub const MODEL_ARCHIVE_URL: &str = "https://github.com/bytedance/music_source_separation";
+pub const MODEL_DIRECTORY: &str = "bytedance-mobilenet-subbandtime-2-fp32-onnx";
 pub const SAMPLE_RATE: u32 = 44_100;
-/// One model tile contains exactly 512 periodic-Hann STFT frames. We keep the centre 169 hops and
-/// discard 173 hops on each edge. The 3.92-second retained core still fits the bounded four-second
-/// Deck ring while the generous overlap keeps model-window edges out of playback.
-pub const SEGMENT_SAMPLES: usize = 527_360;
-pub const SEGMENT_CONTEXT_SAMPLES: usize = 177_152;
-pub const SEGMENT_CORE_SAMPLES: usize = 173_056;
-/// A 100 ms linear handoff between two highly correlated Spleeter4 estimates avoids both clicks and
-/// the +3 dB lift that an equal-power blend caused for phase-aligned outputs.
+/// ByteDance uses a three-second stereo window, retaining the middle 1.5 seconds after discarding
+/// 750 ms of context on either edge. These names remain stable for the player stream contract.
+pub const SEGMENT_SAMPLES: usize = 132_300;
+pub const SEGMENT_CONTEXT_SAMPLES: usize = 33_075;
+pub const SEGMENT_CORE_SAMPLES: usize = 66_150;
+/// A 100 ms linear handoff between adjacent ByteDance estimates avoids boundary clicks.
 pub const SEGMENT_HANDOFF_SAMPLES: usize = 4_410;
 /// Waveform publication uses exactly the retained context-safe core.
 pub const SEGMENT_WAVEFORM_GUARD_SAMPLES: usize = SEGMENT_CONTEXT_SAMPLES;
 /// Compatibility name for consumers that describe the discarded edge context.
 pub const SEGMENT_OVERLAP: usize = SEGMENT_CONTEXT_SAMPLES * 2;
 
-/// ByteDance MobileNet_Subbandtime was trained on three-second stereo windows. Its reference
-/// separator advances by half a window and keeps the middle 50%, so production discards 750 ms on
-/// each edge and retains a 1.5-second core plus KDJ's 100 ms successor handoff tail.
-pub const MOBILENET_SEGMENT_SAMPLES: usize = 132_300;
-pub const MOBILENET_SEGMENT_CONTEXT_SAMPLES: usize = 33_075;
-pub const MOBILENET_SEGMENT_CORE_SAMPLES: usize = 66_150;
+/// Explicit aliases for callers that name the ByteDance architecture.
+pub const MOBILENET_SEGMENT_SAMPLES: usize = SEGMENT_SAMPLES;
+pub const MOBILENET_SEGMENT_CONTEXT_SAMPLES: usize = SEGMENT_CONTEXT_SAMPLES;
+pub const MOBILENET_SEGMENT_CORE_SAMPLES: usize = SEGMENT_CORE_SAMPLES;
 pub const MOBILENET_SEGMENT_HANDOFF_SAMPLES: usize = SEGMENT_HANDOFF_SAMPLES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,15 +77,6 @@ pub struct StemTileGeometry {
 }
 
 impl StemTileGeometry {
-    pub const fn spleeter() -> Self {
-        Self {
-            samples: SEGMENT_SAMPLES,
-            context: SEGMENT_CONTEXT_SAMPLES,
-            core: SEGMENT_CORE_SAMPLES,
-            handoff: SEGMENT_HANDOFF_SAMPLES,
-        }
-    }
-
     pub const fn mobilenet() -> Self {
         Self {
             samples: MOBILENET_SEGMENT_SAMPLES,
@@ -118,8 +88,5 @@ impl StemTileGeometry {
 }
 
 pub fn stem_tile_geometry() -> StemTileGeometry {
-    match crate::runtime::stem_runtime_preference().mode {
-        kdj_core::StemMode::MobileNetTwo => StemTileGeometry::mobilenet(),
-        _ => StemTileGeometry::spleeter(),
-    }
+    StemTileGeometry::mobilenet()
 }

@@ -8,12 +8,6 @@ license.workspace = true
 [build-dependencies]
 cc = "=1.4.0"
 
-[features]
-default = []
-# The isolated candidate workstation remains research-only. The active Deck path now also uses
-# ONNX Runtime, so this feature gates only the workstation UI and candidate code.
-stem-debug-onnx = []
-
 [dependencies]
 anyhow = "1.0.104"
 hex = "0.4.3"
@@ -28,7 +22,7 @@ symphonia = { version = "0.5.5", features = ["aac", "alac", "mp3", "isomp4", "og
 thiserror = "2.0.19"
 tracing = "0.1.44"
 
-# macOS can select CoreML or CPU for either locked Spleeter model set.
+# macOS uses the locked ByteDance model through the safe ONNX Runtime CPU path.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2.189"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = [

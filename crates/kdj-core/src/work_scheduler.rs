@@ -7,7 +7,7 @@
 //! Nothing in the hardware audio callback may wait on this scheduler.
 
 use std::cmp::Ordering as CmpOrdering;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,19 @@ use serde::Serialize;
 
 const CLASS_COUNT: usize = 9;
 const WAIT_POLL: Duration = Duration::from_millis(20);
+
+/// Process-wide output-ring pressure published by the playback coordinator. The hardware callback
+/// never touches this scheduler; control/background workers use it only to avoid starting optional
+/// work while an audible Deck has little rendered PCM left.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum AudioPressure {
+    #[default]
+    Normal = 0,
+    Low = 1,
+    Critical = 2,
+}
 
 /// Stable task classes shared by playback, STEM and server analysis. Lower `priority()` values
 /// are admitted first; the enum order is also the diagnostics order.
@@ -113,6 +126,7 @@ pub struct WorkSchedulerSnapshot {
     pub heavy_limit: usize,
     pub heavy_in_use: usize,
     pub live_stem_decks: usize,
+    pub audio_pressure: AudioPressure,
     pub classes: Vec<WorkClassSnapshot>,
     pub tempo: [TempoLaneSnapshot; 2],
 }
@@ -169,6 +183,7 @@ struct SchedulerState {
     heavy_limit: usize,
     heavy_in_use: usize,
     live_stem_decks: usize,
+    audio_pressure: AudioPressure,
     active: [usize; CLASS_COUNT],
     queued: [usize; CLASS_COUNT],
     waiting: Vec<Pending>,
@@ -179,6 +194,7 @@ pub struct WorkScheduler {
     wakeup: Condvar,
     tempo: [TempoLane; 2],
     live_stem_decks: AtomicUsize,
+    audio_pressure: AtomicU8,
 }
 
 impl WorkScheduler {
@@ -189,6 +205,7 @@ impl WorkScheduler {
                 heavy_limit: heavy_limit.max(1),
                 heavy_in_use: 0,
                 live_stem_decks: 0,
+                audio_pressure: AudioPressure::Normal,
                 active: [0; CLASS_COUNT],
                 queued: [0; CLASS_COUNT],
                 waiting: Vec::new(),
@@ -196,6 +213,7 @@ impl WorkScheduler {
             wakeup: Condvar::new(),
             tempo: [TempoLane::standalone(1.0), TempoLane::standalone(1.0)],
             live_stem_decks: AtomicUsize::new(0),
+            audio_pressure: AtomicU8::new(AudioPressure::Normal as u8),
         })
     }
 
@@ -216,6 +234,28 @@ impl WorkScheduler {
         state.live_stem_decks = decks;
         drop(state);
         self.wakeup.notify_all();
+    }
+
+    pub fn set_audio_pressure(&self, pressure: AudioPressure) {
+        if self.audio_pressure.swap(pressure as u8, Ordering::AcqRel) == pressure as u8 {
+            return;
+        }
+        self.state.lock().unwrap().audio_pressure = pressure;
+        self.wakeup.notify_all();
+    }
+
+    pub fn audio_pressure(&self) -> AudioPressure {
+        match self.audio_pressure.load(Ordering::Acquire) {
+            2 => AudioPressure::Critical,
+            1 => AudioPressure::Low,
+            _ => AudioPressure::Normal,
+        }
+    }
+
+    /// Dedicated owners such as the STEM inference pool do not pass through `acquire`; they use
+    /// this non-blocking policy check before dequeuing optional work.
+    pub fn allows(&self, class: WorkClass) -> bool {
+        pressure_allows(self.audio_pressure(), class)
     }
 
     pub fn activity(self: &Arc<Self>, class: WorkClass) -> WorkActivityGuard {
@@ -313,6 +353,7 @@ impl WorkScheduler {
             heavy_limit: state.heavy_limit,
             heavy_in_use: state.heavy_in_use,
             live_stem_decks: self.live_stem_decks.load(Ordering::Acquire),
+            audio_pressure: self.audio_pressure(),
             classes: WorkClass::ALL
                 .into_iter()
                 .map(|class| WorkClassSnapshot {
@@ -333,6 +374,9 @@ fn policy_allows(state: &SchedulerState, class: WorkClass) -> bool {
         || active(WorkClass::StemAudible)
         || queued(WorkClass::StemInstant)
         || queued(WorkClass::StemAudible);
+    if !pressure_allows(state.audio_pressure, class) {
+        return false;
+    }
     match class {
         WorkClass::LibraryAnalysis | WorkClass::Maintenance => {
             state.live_stem_decks == 0
@@ -349,6 +393,24 @@ fn policy_allows(state: &SchedulerState, class: WorkClass) -> bool {
             !active(WorkClass::TempoStretch) && !immediate_model_pressure
         }
         _ => true,
+    }
+}
+
+fn pressure_allows(pressure: AudioPressure, class: WorkClass) -> bool {
+    match pressure {
+        AudioPressure::Normal => true,
+        AudioPressure::Low => !matches!(
+            class,
+            WorkClass::StemViewport
+                | WorkClass::InteractiveWaveform
+                | WorkClass::NowPlayingAnalysis
+                | WorkClass::LibraryAnalysis
+                | WorkClass::Maintenance
+        ),
+        AudioPressure::Critical => matches!(
+            class,
+            WorkClass::TempoStretch | WorkClass::StemInstant | WorkClass::StemAudible
+        ),
     }
 }
 
@@ -478,6 +540,34 @@ mod tests {
         });
         assert!(matches!(result, Err(WorkAcquireError::Cancelled)));
         assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn low_audio_buffer_blocks_optional_work_but_keeps_audible_work_available() {
+        let scheduler = WorkScheduler::new(2);
+        scheduler.set_audio_pressure(AudioPressure::Low);
+        assert!(!scheduler.allows(WorkClass::StemViewport));
+        assert!(!scheduler.allows(WorkClass::InteractiveWaveform));
+        assert!(scheduler.allows(WorkClass::StemAudible));
+
+        let result = scheduler.acquire(
+            WorkRequest::new(WorkClass::InteractiveWaveform).with_timeout(Duration::from_millis(5)),
+            || false,
+        );
+        assert!(matches!(result, Err(WorkAcquireError::DeadlineExceeded)));
+        scheduler.set_audio_pressure(AudioPressure::Normal);
+        assert!(scheduler
+            .acquire(WorkRequest::new(WorkClass::InteractiveWaveform), || false)
+            .is_ok());
+    }
+
+    #[test]
+    fn critical_audio_buffer_defers_lookahead_but_not_current_audio() {
+        let scheduler = WorkScheduler::new(1);
+        scheduler.set_audio_pressure(AudioPressure::Critical);
+        assert!(!scheduler.allows(WorkClass::StemLookAhead));
+        assert!(scheduler.allows(WorkClass::TempoStretch));
+        assert!(scheduler.allows(WorkClass::StemAudible));
     }
 
     #[test]

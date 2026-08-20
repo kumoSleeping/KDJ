@@ -72,7 +72,7 @@ impl StemCoordinator {
     pub fn new(data_dir: &Path) -> Self {
         let root = data_dir.join("stems");
         let model_statuses = Arc::new(Mutex::new(
-            [StemMode::Four, StemMode::MobileNetTwo]
+            [StemMode::MobileNetTwo]
                 .into_iter()
                 .map(|mode| (mode, initial_model_status(&root, mode)))
                 .collect(),
@@ -117,7 +117,7 @@ impl StemCoordinator {
                     "stem-unsupported".into()
                 },
                 version: String::new(),
-                supported: mode == StemMode::None,
+                supported: false,
                 state: "unsupported".into(),
                 progress: 0.0,
                 downloaded_bytes: 0,
@@ -495,17 +495,12 @@ fn update_status(
 }
 
 fn mark_ready(statuses: &Arc<Mutex<HashMap<StemMode, ModelStatus>>>, artifact: &ModelArtifact) {
-    let modes = [StemMode::Four, StemMode::MobileNetTwo];
-    for mode in modes {
-        if artifact.mode.shares_artifact_with(mode) || artifact.mode == mode {
-            update_status(statuses, mode, |status| {
-                status.state = "ready".into();
-                status.progress = 1.0;
-                status.downloaded_bytes = artifact.bytes();
-                status.error.clear();
-            });
-        }
-    }
+    update_status(statuses, StemMode::MobileNetTwo, |status| {
+        status.state = "ready".into();
+        status.progress = 1.0;
+        status.downloaded_bytes = artifact.bytes();
+        status.error.clear();
+    });
 }
 
 fn local_model_dirs(artifact: &ModelArtifact) -> Vec<PathBuf> {
@@ -657,11 +652,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn model_paths_and_markers_are_isolated_by_mode() {
+    fn model_path_and_marker_use_the_locked_bytedance_artifact() {
         let root = Path::new("/tmp/kdj-stem-manager-contract");
-        let two = platform_model_artifact(StemMode::MobileNetTwo).unwrap();
-        let four = platform_model_artifact(StemMode::Four).unwrap();
-        assert_ne!(model_path(root, two), model_path(root, four));
-        assert_ne!(model_marker(root, two), model_marker(root, four));
+        let model = platform_model_artifact(StemMode::MobileNetTwo).unwrap();
+        assert!(model_path(root, model).ends_with(model.directory));
+        assert!(model_marker(root, model).ends_with("verified.sha256"));
     }
 }

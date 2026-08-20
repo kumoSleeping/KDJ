@@ -16,15 +16,12 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::dsp::{apply_soft_gate, pack_model_input_for_mode, unpack_model_output};
-use crate::instant::{instant_admission_active, instant_model_directory};
+use crate::instant::instant_admission_active;
 use crate::runtime::{
     configure_stem_runtime, recommended_worker_count, PlatformEngine, RuntimeInfo,
 };
 use crate::runtime::{stem_runtime_preference, StemRuntimePreference};
-use crate::{
-    StemKind, StemWaveform, SAMPLE_RATE, SEGMENT_CONTEXT_SAMPLES, SEGMENT_CORE_SAMPLES,
-    SEGMENT_HANDOFF_SAMPLES, SEGMENT_SAMPLES,
-};
+use crate::{StemKind, StemWaveform, SAMPLE_RATE};
 
 const LIVE_WAVE_COLUMNS_PER_SECOND: usize = 100;
 /// Keep the 30-second performance rail while the playhead walks the song; never retain a
@@ -35,7 +32,7 @@ const LIVE_WAVE_RETAIN_SECONDS: f64 = 30.0;
 /// instead of deleting the song tail before it can be painted.
 const LIVE_WAVE_COMPLETION_RETENTION: Duration = Duration::from_secs(60);
 /// One 46 ms Hann window per 10 ms display column. This follows the same STFT + frequency-colour
-/// gradient family used by DJ waveform tools, but runs only on completed Spleeter4 PCM in memory.
+/// gradient family used by DJ waveform tools, but runs only on completed ByteDance PCM in memory.
 const LIVE_STEM_COLOR_FFT_SIZE: usize = 2_048;
 const LIVE_STEM_COLOR_MIN_HZ: f32 = 35.0;
 const LIVE_STEM_COLOR_MAX_HZ: f32 = 16_000.0;
@@ -43,7 +40,7 @@ const LIVE_STEM_COLOR_MAX_HZ: f32 = 16_000.0;
 const LIVE_AMP_GAMMA: f32 = 0.72;
 /// Same floor as `kdj_analysis::waveform::COLOR_FLOOR` so STEM rails are not a grey wash.
 const LIVE_COLOR_FLOOR: f32 = 0.12;
-/// One fixed Spleeter4 tile produces this much retained source. This is a background-cache budget,
+/// One fixed ByteDance tile produces this much retained source. This is a background-cache budget,
 /// not callback latency or a promise that a cache miss is instantaneous.
 const DIAGNOSTIC_HISTORY: usize = 64;
 
@@ -299,8 +296,10 @@ struct LiveWaveBlock {
     revision: u64,
     start: f64,
     duration: f64,
-    amp: [Vec<f32>; 4],
-    rgb: [Vec<[u8; 3]>; 4],
+    /// Performance only exposes the vocal separation beside the mandatory original waveform.
+    /// Keeping the other three display envelopes would run three unnecessary FFT passes per tile.
+    vocals_amp: Vec<f32>,
+    vocals_rgb: Vec<[u8; 3]>,
 }
 
 struct LiveWaveSession {
@@ -333,7 +332,7 @@ impl LiveWaveSession {
 
 /// Incremental waveform payload for the performance UI. Sending a complete 24,000-column RGB
 /// waveform every 200ms made JSON parsing and canvas redraws compete with the compositor. A
-/// point is therefore sent only once, when its real Spleeter4 tile is published.
+/// point is therefore sent only once, when its real ByteDance tile is published.
 #[derive(Clone, Debug, Serialize)]
 pub struct LiveStemWaveformDelta {
     pub track_id: i64,
@@ -341,7 +340,7 @@ pub struct LiveStemWaveformDelta {
     pub duration: f64,
     pub columns: usize,
     pub revision: u64,
-    pub stems: [LiveStemWaveformStem; 4],
+    pub stems: Vec<LiveStemWaveformStem>,
     pub analysis_start: f64,
     pub analysis_frontier: f64,
     pub analysis_back_frontier: f64,
@@ -694,28 +693,23 @@ fn publish_stem_waveform_block(
     }
     let wave_frames = (SAMPLE_RATE as usize / LIVE_WAVE_COLUMNS_PER_SECOND).max(1);
     let columns = frames.div_ceil(wave_frames);
-    let mut amp: [Vec<f32>; 4] = std::array::from_fn(|_| vec![0.0; columns]);
+    let mut vocals_amp = vec![0.0f32; columns];
     for offset in 0..frames {
         let column = offset / wave_frames;
-        for stem in 0..4 {
-            if let Some(frame) = stems[stem].get(frame_start + offset) {
-                amp[stem][column] = amp[stem][column].max(frame[0].abs()).max(frame[1].abs());
-            }
+        if let Some(frame) = stems[StemKind::Vocals.index()].get(frame_start + offset) {
+            vocals_amp[column] = vocals_amp[column].max(frame[0].abs()).max(frame[1].abs());
         }
     }
-    // This runs on the decode/inference worker, never in the audio callback. Every stem feeds the
-    // same spectrum-to-colour transform: their different colours arise from their different audio
-    // spectra, not a drums/vocals source label.
-    let mut mono = Vec::with_capacity(frames);
-    let rgb = std::array::from_fn(|stem| {
-        mono.clear();
-        mono.extend((0..frames).map(|offset| {
-            stems[stem]
+    // Display analysis is worker-only, but it still competes for CPU with the live producer. One
+    // vocal FFT pass replaces the former four-lane pass now that non-vocal rails are not public.
+    let vocals_mono = (0..frames)
+        .map(|offset| {
+            stems[StemKind::Vocals.index()]
                 .get(frame_start + offset)
                 .map_or(0.0, |frame| (frame[0] + frame[1]) * 0.5)
-        }));
-        live_stem_waveform_colours(&mono, columns)
-    });
+        })
+        .collect::<Vec<_>>();
+    let vocals_rgb = live_stem_waveform_colours(&vocals_mono, columns);
     let mut sessions = live_waves().lock().unwrap();
     prune_finished_live_wave_sessions(&mut sessions);
     let Some(session) = sessions
@@ -739,8 +733,8 @@ fn publish_stem_waveform_block(
         revision: session.revision,
         start,
         duration,
-        amp,
-        rgb,
+        vocals_amp,
+        vocals_rgb,
     });
     if !session.scan_lease {
         prune_distant_live_wave_blocks(session, start);
@@ -759,7 +753,7 @@ fn prune_distant_live_wave_blocks(session: &mut LiveWaveSession, around: f64) {
         .retain(|block| block.start + block.duration >= keep_start && block.start <= keep_end);
 }
 
-/// Return the contiguous regions actually backed by completed Spleeter4 tiles. These bounds must
+/// Return the contiguous regions actually backed by completed ByteDance tiles. These bounds must
 /// come from published blocks rather than elapsed wall-clock time: a slow model must leave the
 /// frontier where data really ends instead of making the UI advertise an empty future as loaded.
 fn live_waveform_frontiers(session: &LiveWaveSession) -> (f64, f64) {
@@ -941,7 +935,7 @@ fn spectral_gradient(frequency: f32) -> [f32; 3] {
 
 /// Return only blocks that were published since `after_revision`. Unlike the legacy full
 /// waveform endpoint this has a bounded payload even for a long track: an ordinary 200ms poll
-/// is empty, and a completed Spleeter4 tile contributes only its own timeline columns.
+/// is empty, and a completed ByteDance tile contributes only its own timeline columns.
 pub fn live_stem_waveform_delta(
     track_id: i64,
     columns: usize,
@@ -953,7 +947,7 @@ pub fn live_stem_waveform_delta(
     let session = sessions.get(&track_id)?;
     let columns = columns.clamp(64, 24_000);
     let duration = session.duration.max(0.001);
-    let mut stems: [Vec<LiveStemWaveformPoint>; 4] = std::array::from_fn(|_| Vec::new());
+    let mut vocals = Vec::new();
     // Transport seeks advance only the private worker epoch; the public timeline epoch and append
     // revision remain stable. A mounted client therefore receives just the newly separated block
     // instead of replaying a whole song or clearing its STEM rails.
@@ -971,37 +965,20 @@ pub fn live_stem_waveform_delta(
         .collect();
     let delivered_revision = blocks.last().map_or(after_revision, |block| block.revision);
     for block in blocks {
-        // One scale for all four lanes preserves real inter-stem level. The old per-lane P99.5
-        // made a tiny leaked residual look as tall as the dominant source and visually hid bad
-        // separation.
-        let shared_values = block
-            .amp
-            .iter()
-            .flat_map(|values| values.iter().copied())
-            .collect::<Vec<_>>();
-        let scale = block_amplitude_scale(&shared_values);
-        for stem in StemKind::ALL {
-            let values = &block.amp[stem.index()];
-            for (index, value) in values.iter().enumerate() {
-                let time = block.start
-                    + (index as f64 + 0.5) * block.duration / values.len().max(1) as f64;
-                let output = ((time / duration) * columns as f64)
-                    .floor()
-                    .clamp(0.0, (columns - 1) as f64) as usize;
-                stems[stem.index()].push(LiveStemWaveformPoint {
-                    index: output,
-                    amp: display_live_amplitude(*value, scale),
-                    r: block.rgb[stem.index()]
-                        .get(index)
-                        .map_or(31, |color| color[0]),
-                    g: block.rgb[stem.index()]
-                        .get(index)
-                        .map_or(31, |color| color[1]),
-                    b: block.rgb[stem.index()]
-                        .get(index)
-                        .map_or(31, |color| color[2]),
-                });
-            }
+        let scale = block_amplitude_scale(&block.vocals_amp);
+        for (index, value) in block.vocals_amp.iter().enumerate() {
+            let time = block.start
+                + (index as f64 + 0.5) * block.duration / block.vocals_amp.len().max(1) as f64;
+            let output = ((time / duration) * columns as f64)
+                .floor()
+                .clamp(0.0, (columns - 1) as f64) as usize;
+            vocals.push(LiveStemWaveformPoint {
+                index: output,
+                amp: display_live_amplitude(*value, scale),
+                r: block.vocals_rgb.get(index).map_or(31, |color| color[0]),
+                g: block.vocals_rgb.get(index).map_or(31, |color| color[1]),
+                b: block.vocals_rgb.get(index).map_or(31, |color| color[2]),
+            });
         }
     }
     let (analysis_frontier, analysis_back_frontier) = live_waveform_frontiers(session);
@@ -1014,10 +991,10 @@ pub fn live_stem_waveform_delta(
         // after idle whole-track preparation catches up over several small polls instead of
         // parsing several megabytes of points in one compositor-blocking response.
         revision: delivered_revision,
-        stems: StemKind::ALL.map(|stem| LiveStemWaveformStem {
-            stem,
-            points: std::mem::take(&mut stems[stem.index()]),
-        }),
+        stems: vec![LiveStemWaveformStem {
+            stem: StemKind::Vocals,
+            points: vocals,
+        }],
         analysis_start: session.start,
         analysis_frontier,
         analysis_back_frontier,
@@ -1025,6 +1002,9 @@ pub fn live_stem_waveform_delta(
 }
 
 pub fn live_stem_waveform(track_id: i64, stem: StemKind, columns: usize) -> Option<StemWaveform> {
+    if stem != StemKind::Vocals {
+        return None;
+    }
     let mut sessions = live_waves().lock().unwrap();
     prune_finished_live_wave_sessions(&mut sessions);
     let session = sessions.get(&track_id)?;
@@ -1039,12 +1019,11 @@ pub fn live_stem_waveform(track_id: i64, stem: StemKind, columns: usize) -> Opti
     let shared_values = session
         .blocks
         .iter()
-        .flat_map(|block| block.amp.iter())
-        .flat_map(|values| values.iter().copied())
+        .flat_map(|block| block.vocals_amp.iter().copied())
         .collect::<Vec<_>>();
     let shared_scale = block_amplitude_scale(&shared_values);
     for block in &session.blocks {
-        let values = &block.amp[stem.index()];
+        let values = &block.vocals_amp;
         for (index, value) in values.iter().enumerate() {
             let time =
                 block.start + (index as f64 + 0.5) * block.duration / values.len().max(1) as f64;
@@ -1053,10 +1032,7 @@ pub fn live_stem_waveform(track_id: i64, stem: StemKind, columns: usize) -> Opti
                 .clamp(0.0, (requested - 1) as f64) as usize;
             if !known[output] || *value > amp[output] {
                 amp[output] = *value;
-                let colour = block.rgb[stem.index()]
-                    .get(index)
-                    .copied()
-                    .unwrap_or([31, 31, 31]);
+                let colour = block.vocals_rgb.get(index).copied().unwrap_or([31, 31, 31]);
                 r[output] = colour[0];
                 g[output] = colour[1];
                 b[output] = colour[2];
@@ -1102,7 +1078,7 @@ fn display_live_amplitude(value: f32, scale: f32) -> f32 {
     (value / scale).clamp(0.0, 1.0).powf(LIVE_AMP_GAMMA)
 }
 
-/// One fixed Spleeter output tile in stable `Drums / Bass / Other / Vocals` slots. Model-only
+/// One fixed ByteDance output tile in stable `Drums / Bass / Other / Vocals` slots. Model-only
 /// left/right context is removed before caching; each lane retains the audible core plus the short
 /// successor handoff tail.
 pub struct StemChunk {
@@ -1451,26 +1427,16 @@ impl StemInferencePool {
             bail!("STEM 后台推理 worker 数量必须大于 0");
         }
         reset_stem_runtime_diagnostics();
-        let instant = if preference.mode == StemMode::Four {
-            instant_model_directory(model_path).and_then(|directory| {
-                match crate::InstantStemPool::new_for_parent(&directory, id) {
-                    Ok(pool) => Some(pool),
-                    Err(error) => {
-                        record_instant_failure(&format!("HS-TasNet disabled: {error:#}"));
-                        None
-                    }
-                }
-            })
-        } else {
-            None
-        };
+        // ByteDance is the sole production path. The retired instant layer is not
+        // created, so it cannot load a second model or compete with the live separator.
+        let instant: Option<Arc<crate::InstantStemPool>> = None;
         // macOS production is deliberately ORT CPU-only. A second session duplicates native
         // arena/thread-pool memory without being required for the two-Deck retained-core rate.
         // Keep one shared FIFO worker for every macOS mode.
         // Other platforms retain their two-worker accelerator path unless HS layering reserves the
         // CPU budget.
         let workers = effective_worker_count(workers, preference.mode, instant.is_some());
-        // Queue capacities are bounded because each fixed Spleeter4 tile is large. Audible cache
+        // Queue capacities are bounded because each fixed ByteDance tile is large. Audible cache
         // requests always overtake optional waveform preparation.
         let (audio_sender, audio_receiver) =
             mpsc::sync_channel::<InferenceJob>(workers.saturating_mul(8));
@@ -2048,11 +2014,19 @@ fn next_inference_job_until(
                 return Some(ScheduledInference { job, _slot: None });
             }
         }
-        let look_ahead = receivers.look_ahead.lock().unwrap().try_recv();
+        let look_ahead = if work_scheduler().allows(WorkClass::StemLookAhead) {
+            receivers.look_ahead.lock().unwrap().try_recv()
+        } else {
+            Err(TryRecvError::Empty)
+        };
         if let Ok(job) = look_ahead {
             return Some(ScheduledInference { job, _slot: None });
         }
-        let fill = receivers.fill.lock().unwrap().try_recv();
+        let fill = if work_scheduler().allows(WorkClass::StemViewport) {
+            receivers.fill.lock().unwrap().try_recv()
+        } else {
+            Err(TryRecvError::Empty)
+        };
         if let Ok(job) = fill {
             return Some(ScheduledInference { job, _slot: None });
         }
@@ -2232,11 +2206,14 @@ pub(crate) fn switch_current_stem_runtime(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        SEGMENT_CONTEXT_SAMPLES, SEGMENT_CORE_SAMPLES, SEGMENT_HANDOFF_SAMPLES, SEGMENT_SAMPLES,
+    };
 
     #[test]
     fn mobilenet_and_instant_cpu_paths_never_duplicate_native_sessions() {
         assert_eq!(effective_worker_count(2, StemMode::MobileNetTwo, false), 1);
-        assert_eq!(effective_worker_count(2, StemMode::Four, true), 1);
+        assert_eq!(effective_worker_count(2, StemMode::MobileNetTwo, true), 1);
         #[cfg(target_os = "macos")]
         assert_eq!(effective_worker_count(2, StemMode::MobileNetTwo, false), 1);
     }
@@ -2313,7 +2290,7 @@ mod tests {
     }
 
     #[test]
-    fn spleeter4_stems_keep_the_models_absolute_level() {
+    fn bytedance_stems_keep_the_models_absolute_level() {
         let chunk = StemChunk {
             stems: std::array::from_fn(|_| vec![[0.09, 0.045], [-0.09, -0.045]]),
             reconstruction_gain: 1.0,
@@ -2341,7 +2318,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_spleeter4_tiles_are_shared_as_immutable_cache_entries() {
+    fn completed_bytedance_tiles_are_shared_as_immutable_cache_entries() {
         let key = tile_key(&[0.1, 0.2], &[0.3, 0.4]);
         let chunk = Arc::new(StemChunk {
             stems: std::array::from_fn(|stem| vec![[stem as f32, -(stem as f32)]]),
@@ -2675,7 +2652,7 @@ mod tests {
     }
 
     #[test]
-    fn live_waveform_delta_sends_each_spleeter4_block_once_and_recovers_after_an_epoch_change() {
+    fn live_waveform_delta_sends_each_bytedance_block_once_and_recovers_after_an_epoch_change() {
         let track_id = -88_002;
         let guard = begin_live_stem_waveform(track_id, 11, 3.0, 20.0);
         let stems: [Vec<[f32; 2]>; 4] =
@@ -2744,7 +2721,7 @@ mod tests {
     }
 
     #[test]
-    fn live_waveform_delta_preserves_inter_stem_level() {
+    fn live_waveform_delta_exposes_only_vocals() {
         let track_id = -88_021;
         let guard = begin_live_stem_waveform(track_id, 21, 0.0, 1.0);
         let stems: [Vec<[f32; 2]>; 4] = std::array::from_fn(|stem| {
@@ -2759,26 +2736,23 @@ mod tests {
         });
         publish_live_stem_waveform_block(track_id, 21, 0.0, &stems, 0, SAMPLE_RATE as usize);
         let delta = live_stem_waveform_delta(track_id, 200, 0, Some(21)).unwrap();
-        let drums_peak = delta.stems[0]
+        assert_eq!(delta.stems.len(), 1);
+        assert_eq!(delta.stems[0].stem, StemKind::Vocals);
+        let vocals_peak = delta.stems[0]
             .points
             .iter()
             .map(|point| point.amp)
             .fold(0.0f32, f32::max);
-        let vocals_peak = delta.stems[3]
-            .points
-            .iter()
-            .map(|point| point.amp)
-            .fold(0.0f32, f32::max);
-        assert!(drums_peak > 0.9, "dominant stem peak={drums_peak}");
         assert!(
-            vocals_peak < drums_peak * 0.35,
-            "quiet residual must not fill its lane: drums={drums_peak} vocals={vocals_peak}"
+            vocals_peak > 0.9,
+            "vocal rail should normalize its visible signal"
         );
+        assert!(live_stem_waveform(track_id, StemKind::Other, 200).is_none());
         drop(guard);
     }
 
     #[test]
-    fn live_waveform_delta_carries_each_stems_own_frequency_colours() {
+    fn live_waveform_delta_carries_vocal_frequency_colours() {
         let track_id = -88_003;
         let guard = begin_live_stem_waveform(track_id, 13, 0.0, 4.0);
         let stems: [Vec<[f32; 2]>; 4] = std::array::from_fn(|stem| {

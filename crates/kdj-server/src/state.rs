@@ -195,7 +195,8 @@ pub struct AppState {
     pub analysis: crate::jobs::AnalysisRegistry,
     /// 波形单飞：同一首歌的并发请求共享一次解码。
     pub waveforms: Arc<crate::waveform::WaveformCoordinator>,
-    /// HS-TasNet owns one persistent worker; inference never enters playback/audio threads.
+    /// The fixed ByteDance STEM coordinator owns background inference; it never enters playback
+    /// or audio callback threads.
     pub stems: kdj_stems::StemCoordinator,
     /// 文件夹与波形升级各自只允许一个实例；前端重连/HMR 不会重复开整库任务。
     pub maintenance: crate::jobs::MaintenanceRegistry,

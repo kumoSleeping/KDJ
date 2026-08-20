@@ -44,12 +44,6 @@ import type {
   StemModelStatus,
   StemCompute,
   StemMode,
-  StemDebugModelCatalog,
-  StemDebugModelId,
-  StemDebugRender,
-  StemLabBackend,
-  StemLabCatalog,
-  StemLabSeekResponse,
   StemName,
   LiveStemWaveformDelta,
   TrackStemStatus,
@@ -432,46 +426,6 @@ export const api = {
     post<StemModelStatus>(`/stems/runtime?mode=${mode}&compute=${compute}`, {}),
   downloadStemModel: (mode: StemMode, compute: StemCompute) =>
     post<StemModelStatus>(`/stems/model/download?mode=${mode}&compute=${compute}`, {}),
-  stemDebugModelCatalog: () => request<StemDebugModelCatalog>("/stems/debug/model"),
-  renderStemDebug: async (trackId: number, model: StemDebugModelId, duration = 30) => {
-    const result = await post<StemDebugRender>("/stems/debug", { trackId, model, duration });
-    const baseUrl = bridge().baseUrl;
-    return {
-      ...result,
-      audio: {
-        original: `${baseUrl}${result.audio.original}`,
-        lanes: Object.fromEntries(
-          Object.entries(result.audio.lanes).map(([lane, url]) => [lane, `${baseUrl}${url}`]),
-        ),
-      },
-    };
-  },
-  releaseStemDebug: (sessionId: string) =>
-    request<{ released: boolean }>(`/stems/debug/${encodeURIComponent(sessionId)}`, {
-      method: "DELETE",
-    }),
-  stemLabCatalog: () => request<StemLabCatalog>("/stems/lab/catalog"),
-  runStemLabSeek: async (trackId: number, seekSeconds: number, backend: StemLabBackend) => {
-    const result = await post<StemLabSeekResponse>("/stems/lab/seek", {
-      trackId,
-      seekSeconds,
-      backend,
-    });
-    const baseUrl = bridge().baseUrl;
-    return {
-      ...result,
-      audio: {
-        original: `${baseUrl}${result.audio.original}`,
-        lanes: Object.fromEntries(
-          Object.entries(result.audio.lanes).map(([lane, url]) => [lane, `${baseUrl}${url}`]),
-        ),
-      },
-    };
-  },
-  releaseStemLab: (sessionId: string) =>
-    request<{ released: boolean }>(`/stems/lab/${encodeURIComponent(sessionId)}`, {
-      method: "DELETE",
-    }),
   trackStemStatus: (
     id: number,
     mode: StemMode,

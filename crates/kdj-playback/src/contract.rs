@@ -247,6 +247,12 @@ pub struct PlaybackDeckSnapshot {
     pub is_playing: bool,
     pub rate: f32,
     pub buffering: bool,
+    /// Current callback-facing PCM cushion in milliseconds.
+    pub output_buffer_ms: u64,
+    /// Lowest callback-boundary cushion observed for the installed source.
+    pub minimum_output_buffer_ms: u64,
+    /// Number of transitions into an empty output ring for the installed source.
+    pub output_underruns: u64,
     /// Installed callback source kind. Pending replacements do not change this until promotion,
     /// allowing runtime switches to wait until ORG actually owns the Deck.
     pub stem_enabled: bool,

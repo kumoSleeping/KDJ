@@ -4,6 +4,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use kdj_core::work_scheduler::{work_scheduler, AudioPressure};
 use kdj_core::FilterResonance;
 #[cfg(test)]
 use kdj_player::DecodedTrack;
@@ -38,10 +39,10 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const TEMPO_OUTPUT_BUFFER_MS: u64 = 160;
 const STARTUP_BUFFER_MS: u64 = 120;
 const SEEK_BUFFER_MS: u64 = 120;
-// Spleeter4 inference and tile assembly stay outside the callback. Once a fixed tile is ready, this
+// ByteDance inference and tile assembly stay outside the callback. Once a fixed tile is ready, this
 // short post-tempo ring absorbs scheduler jitter without retaining seconds of stale controls.
 const STEM_TEMPO_OUTPUT_BUFFER_MS: u64 = 640;
-/// ORG remains audible throughout a cache miss. Replace it only after Spleeter4 has produced a bounded
+/// ORG remains audible throughout a cache miss. Replace it only after ByteDance has produced a bounded
 /// quarter-second cushion from the context-safe centre of its fixed tile.
 const STEM_STARTUP_BUFFER_MS: u64 = 250;
 const STEM_SEEK_STARTUP_BUFFER_MS: u64 = 250;
@@ -66,6 +67,11 @@ const STEM_HANDOFF_KEEP_MS: u64 = 80;
 const STEM_SEEK_CATCHUP_STALL: Duration = Duration::from_millis(40);
 const STEM_RECOVERY_BASE_DELAY: Duration = Duration::from_millis(900);
 const STEM_RECOVERY_MAX_DELAY: Duration = Duration::from_secs(8);
+const AUDIO_CRITICAL_BUFFER_MS: u64 = 30;
+const AUDIO_LOW_BUFFER_MS: u64 = 90;
+const STEM_AUDIO_LOW_BUFFER_MS: u64 = 300;
+const AUDIO_RECOVER_BUFFER_MS: u64 = 130;
+const STEM_AUDIO_RECOVER_BUFFER_MS: u64 = 450;
 
 type CommandReply = SyncSender<Result<CommandAck, String>>;
 type StateReply = SyncSender<PlaybackSnapshot>;
@@ -442,6 +448,7 @@ impl Actor {
             self.promote_ready_streams();
             self.release_stem_pool_if_idle();
             self.refresh_from_audio();
+            self.publish_audio_pressure();
             self.protect_audio_from_stem_underrun();
             self.retry_interrupted_stems();
             self.publish(false);
@@ -449,6 +456,7 @@ impl Actor {
         self.invalidate(DeckId::A);
         self.invalidate(DeckId::B);
         self.player.take();
+        work_scheduler().set_audio_pressure(AudioPressure::Normal);
     }
 
     fn awaiting_seek_promotion(&self) -> bool {
@@ -820,7 +828,7 @@ impl Actor {
         view.is_playing = false;
         view.rate = source.rate;
         view.buffering = true;
-        // Spleeter4 is a background tile model. Even an explicit STEM load starts with ORG and records
+        // ByteDance is a background tile model. Even an explicit STEM load starts with ORG and records
         // a follow-up request; only a context-safe prepared cushion may replace it.
         self.start_original_with_optional_stem_followup(deck, source, None, true)
     }
@@ -954,7 +962,7 @@ impl Actor {
         // used to freeze the transport UI for the whole time-stretcher startup window.
         view.buffering = self.decks[deck as usize].is_none();
         // Keep an already-separated Deck separated across Hot Cue/SYNC. Its current STEM source
-        // remains audible while a shadow Spleeter4 stream prepares near the future handoff point.
+        // remains audible while a shadow ByteDance stream prepares near the future handoff point.
         // Routing this case through ORG made STEM EQ appear reset and doubled SYNC model work.
         let replacing_live_stems = source.stem_enabled
             && self.decks[index].as_ref().is_some_and(|runtime| {
@@ -2186,7 +2194,7 @@ impl Actor {
             if Instant::now() < clocked.promote_at {
                 return StemHandoff::Wait;
             }
-            // Spleeter4 tiles often land after `promote_at`. Requiring the full late window
+            // ByteDance tiles often land after `promote_at`. Requiring the full late window
             // before install made every Hot Cue chase a new model window and never replace
             // the audible stream. Once the startup cushion exists, skip what we can and jump.
             if pending.source.buffered_frames() == 0 && pending.source.ended() {
@@ -2668,6 +2676,13 @@ impl Actor {
                 view.buffering = self.manual_desired_playing[index]
                     && runtime.source.buffered_frames() == 0
                     && !runtime.source.ended();
+                view.output_buffer_ms =
+                    frames_to_ms(runtime.source.buffered_frames(), runtime.output_sample_rate);
+                view.minimum_output_buffer_ms = frames_to_ms(
+                    audio.deck_min_buffered_frames[index],
+                    runtime.output_sample_rate,
+                );
+                view.output_underruns = audio.deck_output_underruns[index];
                 if let Some(seek) = stem_clock.as_ref() {
                     if self.pending[index].is_none() {
                         seek.publish_clock(played);
@@ -2799,6 +2814,48 @@ impl Actor {
                 };
             }
         }
+    }
+
+    fn publish_audio_pressure(&self) {
+        let mut pressure = AudioPressure::Normal;
+        let prior = work_scheduler().audio_pressure();
+        for index in 0..2 {
+            let Some(runtime) = self.decks[index].as_ref() else {
+                continue;
+            };
+            let wants_audio = if self.manual_mode {
+                self.manual_desired_playing[index]
+            } else {
+                self.state.decks[index].is_playing
+                    || (index == self.front as usize && self.state.desired_playing)
+            };
+            if !wants_audio || runtime.source.ended() {
+                continue;
+            }
+            let buffered_ms =
+                frames_to_ms(runtime.source.buffered_frames(), runtime.output_sample_rate);
+            let low_ms = if runtime.request.stem_enabled {
+                STEM_AUDIO_LOW_BUFFER_MS
+            } else {
+                AUDIO_LOW_BUFFER_MS
+            };
+            let recover_ms = if runtime.request.stem_enabled {
+                STEM_AUDIO_RECOVER_BUFFER_MS
+            } else {
+                AUDIO_RECOVER_BUFFER_MS
+            };
+            let deck_pressure = if buffered_ms <= AUDIO_CRITICAL_BUFFER_MS {
+                AudioPressure::Critical
+            } else if buffered_ms < low_ms
+                || (prior != AudioPressure::Normal && buffered_ms < recover_ms)
+            {
+                AudioPressure::Low
+            } else {
+                AudioPressure::Normal
+            };
+            pressure = pressure.max(deck_pressure);
+        }
+        work_scheduler().set_audio_pressure(pressure);
     }
 
     fn reusable_deck(&self, request: &PlaybackSource) -> Option<DeckId> {
@@ -3091,6 +3148,13 @@ fn finite_clamp(value: f32, min: f32, max: f32, fallback: f32) -> f32 {
     }
 }
 
+fn frames_to_ms(frames: u64, sample_rate: u32) -> u64 {
+    if sample_rate == 0 {
+        return 0;
+    }
+    frames.saturating_mul(1_000) / u64::from(sample_rate)
+}
+
 fn filter_resonance_q(resonance: FilterResonance) -> f32 {
     match resonance {
         // Preserve the former fixed-Q sound as the explicit low setting.
@@ -3293,12 +3357,12 @@ mod tests {
         Actor::new(sender, receiver, emit, Arc::new(factory))
     }
 
-    fn enable_four_stem_runtime_for_test() {
+    fn enable_bytedance_stem_runtime_for_test() {
         static MANAGER: OnceLock<StemCoordinator> = OnceLock::new();
         let manager = MANAGER.get_or_init(|| {
             StemCoordinator::new(&std::env::temp_dir().join("kdj-playback-runtime-tests"))
         });
-        manager.activate_runtime(StemMode::Four, StemCompute::Cpu);
+        manager.activate_runtime(StemMode::MobileNetTwo, StemCompute::Cpu);
     }
 
     fn source(track_id: i64, position: f64) -> PlaybackSource {
@@ -3714,7 +3778,8 @@ mod tests {
             let mut runtime = live_runtime(index as i64 + 1, 12.0);
             runtime.source = PlaybackStream::Stems(stems);
             runtime.request.stem_enabled = true;
-            runtime.request.stem_cache_path = "/model/spleeter4-fp16-onnx".into();
+            runtime.request.stem_cache_path =
+                "/model/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
             actor.decks[deck as usize] = Some(runtime);
             actor.state.decks[deck as usize].track_id = Some(index as i64 + 1);
             actor.state.decks[deck as usize].current_time = 12.0;
@@ -3738,7 +3803,7 @@ mod tests {
 
     #[test]
     fn stem_seek_prepares_a_shadow_stem_generation_without_falling_back_to_original() {
-        enable_four_stem_runtime_for_test();
+        enable_bytedance_stem_runtime_for_test();
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
         actor.open_output().expect("打开测试输出");
@@ -3747,7 +3812,8 @@ mod tests {
         let mut runtime = live_runtime(1, 12.0);
         runtime.source = PlaybackStream::Stems(stems);
         runtime.request.stem_enabled = true;
-        runtime.request.stem_cache_path = "/model/spleeter4-fp16-onnx".into();
+        runtime.request.stem_cache_path =
+            "/model/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
         runtime.request.stem_mask = 0b1010;
         runtime.request.stem_gains = [0.25, 0.5, 0.75, 1.25];
         let live_cancel = Arc::clone(&runtime.cancel);
@@ -3863,7 +3929,8 @@ mod tests {
         let mut actor = test_actor(&knobs);
         let mut runtime = live_runtime(1, 12.0);
         runtime.request.stem_enabled = true;
-        runtime.request.stem_cache_path = "/models/spleeter4-fp16-onnx".into();
+        runtime.request.stem_cache_path =
+            "/models/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
         actor.decks[DeckId::A as usize] = Some(runtime);
         actor.front = DeckId::A;
         actor.state.track_id = Some(1);
@@ -5067,7 +5134,7 @@ mod tests {
         }
         let mut request = source(1, 6.0);
         request.stem_enabled = true;
-        request.stem_cache_path = "/tmp/spleeter4-fp16-onnx".into();
+        request.stem_cache_path = "/tmp/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
         let pending = PendingStream {
             revision: 1,
             source: PlaybackStream::Stems(stream),
@@ -5106,7 +5173,7 @@ mod tests {
         }
         let mut request = source(1, 6.0);
         request.stem_enabled = true;
-        request.stem_cache_path = "/tmp/spleeter4-fp16-onnx".into();
+        request.stem_cache_path = "/tmp/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
         let pending = PendingStream {
             revision: 1,
             source: PlaybackStream::Stems(stream),
@@ -5151,7 +5218,7 @@ mod tests {
         let mut request = source(1, 20.0);
         request.rate = 1.25;
         request.stem_enabled = true;
-        request.stem_cache_path = "/tmp/spleeter4-fp16-onnx".into();
+        request.stem_cache_path = "/tmp/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
         actor.revisions[DeckId::A as usize] = 9;
         actor.pending[DeckId::A as usize] = Some(PendingStream {
             revision: 9,
@@ -5221,7 +5288,7 @@ mod tests {
         let promote_at = Instant::now() - Duration::from_millis(200);
         let mut request = source(1, 4.5);
         request.stem_enabled = true;
-        request.stem_cache_path = "/tmp/spleeter4-fp16-onnx".into();
+        request.stem_cache_path = "/tmp/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
         actor.revisions[DeckId::A as usize] = 11;
         actor.pending[DeckId::A as usize] = Some(PendingStream {
             revision: 11,
@@ -5292,7 +5359,7 @@ mod tests {
         let promote_at = Instant::now() - Duration::from_secs(2);
         let mut request = source(1, 30.0);
         request.stem_enabled = true;
-        request.stem_cache_path = "/tmp/spleeter4-fp16-onnx".into();
+        request.stem_cache_path = "/tmp/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
         actor.revisions[DeckId::A as usize] = 12;
         actor.pending[DeckId::A as usize] = Some(PendingStream {
             revision: 12,
@@ -5451,7 +5518,7 @@ mod tests {
 
     #[test]
     fn deck_seek_keeps_the_other_deck_and_prepares_stems_without_an_original_bridge() {
-        enable_four_stem_runtime_for_test();
+        enable_bytedance_stem_runtime_for_test();
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
         actor.open_output().expect("打开测试输出");
@@ -5477,7 +5544,7 @@ mod tests {
         );
         let pending = actor.pending[DeckId::A as usize]
             .as_ref()
-            .expect("Spleeter4 shadow stream must be pending");
+            .expect("ByteDance shadow stream must be pending");
         assert!(pending.request.stem_enabled);
         assert!(!pending.followup_stems);
         assert!(pending.request.position > 4.0);
@@ -5499,7 +5566,7 @@ mod tests {
     }
 
     #[test]
-    fn loading_a_playing_deck_keeps_original_until_spleeter4_is_ready() {
+    fn loading_a_playing_deck_keeps_original_until_bytedance_is_ready() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
         actor.open_output().expect("打开测试输出");
@@ -5515,7 +5582,7 @@ mod tests {
             .expect("播放中装入应先登记原曲流");
         assert!(
             !pending.request.stem_enabled,
-            "Spleeter4 cache miss must keep ORG audible"
+            "ByteDance cache miss must keep ORG audible"
         );
         assert!(pending.followup_stems);
         assert_eq!(pending.request.stem_cache_path, "/tmp/kdj-stem-cache");

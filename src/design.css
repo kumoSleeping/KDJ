@@ -4232,12 +4232,23 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   );
 }
 .kd-wave-playhead {
+  position: absolute;
+  left: 0;
   top: -5px;
   bottom: -5px;
+  width: 1px;
   z-index: 3;
   background: var(--kd-theme);
   box-shadow: 0 0 0 0.5px color-mix(in srgb, var(--kd-theme) 55%, transparent),
     0 0 3px rgba(0, 0, 0, 0.55);
+}
+.kd-wave-playhead-motion {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  width: 100%;
+  pointer-events: none;
+  will-change: transform;
 }
 
 /* 演出准备波形的拍线：细线是拍，较亮的实线是每四拍的小节起点。 */
@@ -6949,50 +6960,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   gap: 0.15rem;
   flex: none;
 }
-.kd-stem-mode-switch {
-  height: auto;
-  min-height: 1.6rem;
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.08rem;
-  margin-right: 0.25rem;
-  padding: 0.08rem;
-  max-width: min(100%, 46rem);
-  border: 1px solid var(--kd-line);
-  border-radius: 0.35rem;
-  background: var(--kd-panel-inset);
-  -webkit-app-region: no-drag;
-}
-.kd-stem-mode-switch > span,
-.kd-stem-mode-switch > button {
-  height: 1.12rem;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 0.22rem;
-  border: 0;
-  border-radius: 0.22rem;
-  background: transparent;
-  color: var(--kd-faint);
-  font: 700 0.5rem/1 var(--kd-font);
-  white-space: nowrap;
-}
-.kd-stem-mode-switch > span {
-  color: var(--kd-muted);
-  letter-spacing: 0.04em;
-}
-.kd-stem-mode-switch > button {
-  cursor: pointer;
-}
-.kd-stem-mode-switch > button[data-active="true"] {
-  background: var(--kd-panel);
-  color: var(--kd-theme);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
-}
-.kd-stem-mode-switch > button:hover:not([data-active="true"]) {
-  color: var(--kd-text-body);
-}
 .kd-work-mode-switch {
   appearance: none;
   height: 1.6rem;
@@ -8567,12 +8534,6 @@ button.kd-stream-status {
   .kd-work-mode-switch > span svg {
     display: none;
   }
-  .kd-stem-mode-switch > span {
-    display: none;
-  }
-  .kd-stem-mode-switch > button {
-    padding-inline: 0.22rem;
-  }
 }
 
 /* Performance v2 — 紧凑双 Deck + 固定通道台。旧版浮层选择器保留给历史布局，
@@ -8792,7 +8753,12 @@ button.kd-stream-status {
   height: auto;
 }
 .kd-performance-scratch:active { cursor: grabbing; }
-.kd-performance-focus-wave { min-width: 0; }
+.kd-performance-focus-wave,
+.kd-performance-stem-wave {
+  width: 100%;
+  height: 100% !important;
+  min-width: 0;
+}
 .kd-performance-focus-wave .kd-wave-playhead {
   z-index: 7;
   width: 2px !important;
@@ -8832,7 +8798,7 @@ button.kd-stream-status {
 .kd-performance-wave-row[data-side="b"][data-playing="true"] {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-deck-b) 40%, transparent);
 }
-/* STEM 细车道：顺序固定 鼓→贝斯→乐器→人声。车道满宽，图标叠在波形左缘，不再保留左右侧栏。 */
+/* 唯一可选的 VOCALS 细车道。主波形始终存在，图标叠在波形左缘。 */
 .kd-performance-stem-lanes {
   flex: 0 0 auto;
   min-height: 0;
@@ -8864,9 +8830,6 @@ button.kd-stream-status {
   left: auto;
   right: 0.14rem;
 }
-.kd-performance-stem-lane[data-stem="drums"] .kd-performance-stem-lane-icon { color: #ffab63; }
-.kd-performance-stem-lane[data-stem="bass"] .kd-performance-stem-lane-icon { color: #ff7d86; }
-.kd-performance-stem-lane[data-stem="other"] .kd-performance-stem-lane-icon { color: #9fb1ff; }
 .kd-performance-stem-lane[data-stem="vocals"] .kd-performance-stem-lane-icon { color: #7ce5ae; }
 .kd-performance-stem-wave { min-width: 0; }
 .kd-performance-stem-wave-empty {
@@ -9195,119 +9158,6 @@ button.kd-stream-status {
   display: block;
   margin-inline-start: 1px;
 }
-/* STEM 垫：图标 + 名称 + 静音开关，四轨一排拉满主区宽度。音量在中央 STEM EQ。 */
-.kd-performance-stem-pads {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  align-items: stretch;
-  gap: 0.16rem;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-}
-.kd-performance-stem-pads[data-mode="two"] {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-.kd-performance-stem-download {
-  position: relative;
-  display: grid;
-  min-width: 0;
-  min-height: 2.34rem;
-  overflow: hidden;
-  border: 1px dashed var(--kd-border);
-  border-radius: 0.22rem;
-  background: var(--kd-panel-inset);
-}
-.kd-performance-stem-download > button {
-  z-index: 1;
-  min-width: 0;
-  border: 0;
-  color: #cbd2dc;
-  background: transparent;
-  font: 750 var(--kd-dj-sm)/1 var(--kd-font-mono);
-  cursor: pointer;
-}
-.kd-performance-stem-download > button:hover:not(:disabled) {
-  color: #f3f6fa;
-  background: rgba(255,255,255,0.04);
-}
-.kd-performance-stem-download > button:disabled {
-  color: #aeb6c2;
-  cursor: progress;
-}
-.kd-performance-stem-download > i {
-  position: absolute;
-  right: 0.28rem;
-  bottom: 0.2rem;
-  left: 0.28rem;
-  height: 2px;
-  overflow: hidden;
-  border-radius: 2px;
-  background: #272d36;
-}
-.kd-performance-stem-download > i > span {
-  display: block;
-  height: 100%;
-  background: #969eaa;
-  transition: width 160ms linear;
-}
-.kd-performance-stem-pad {
-  display: grid;
-  min-width: 0;
-  min-height: 1.42rem;
-  border: 1px solid var(--kd-border-subtle);
-  border-radius: 0.22rem;
-  background: var(--kd-panel-inset);
-  overflow: hidden;
-}
-.kd-performance-stem-pad-main {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.14rem;
-  min-width: 0;
-  padding: 0 0.22rem;
-  border: 0;
-  color: var(--kd-text-subtle);
-  background: transparent;
-  font: 750 var(--kd-dj-sm)/1 var(--kd-font-mono);
-  letter-spacing: 0.03em;
-}
-.kd-performance-stem-pad-main > span {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  text-align: left;
-}
-.kd-performance-stem-mute { display: grid; place-items: center; opacity: 0.22; }
-.kd-performance-stem-pad[data-audible="true"] .kd-performance-stem-mute { opacity: 0; }
-/* 可听状态用去饱和的分轨色相表达：淡彩文字 + 轻微染色面，不再亮边发光。 */
-.kd-performance-stem-pad[data-stem="drums"] { --kd-stem: #d59d6b; }
-.kd-performance-stem-pad[data-stem="bass"] { --kd-stem: #d08088; }
-.kd-performance-stem-pad[data-stem="other"] { --kd-stem: #93a3d8; }
-.kd-performance-stem-pad[data-stem="vocals"] { --kd-stem: #82c49e; }
-.kd-performance-stem-pad[data-audible="true"] {
-  border-color: color-mix(in srgb, var(--kd-stem) 38%, var(--kd-border-subtle));
-  background: color-mix(in srgb, var(--kd-stem) 7%, var(--kd-panel-inset));
-}
-.kd-performance-stem-pad[data-audible="true"] .kd-performance-stem-pad-main { color: var(--kd-stem); }
-.kd-performance-stem-pad-main:disabled { opacity: 0.5; }
-.kd-performance-stem-pads-status {
-  align-self: center;
-  color: #ffb0ba;
-  font: 750 var(--kd-dj-xs)/1 var(--kd-font-mono);
-}
-.kd-performance-stem-runtime {
-  grid-column: 1 / -1;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--kd-text-muted);
-  font: 700 var(--kd-dj-xs)/1.15 var(--kd-font-mono);
-  letter-spacing: 0.01em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.kd-performance-stem-runtime[data-error="true"] { color: #ffb0ba; }
 /* 传输条：PLAY / CUE 与 Cue 垫同行；LOOP 与节拍跳转收在垫下方。 */
 .kd-performance-transport {
   display: grid;
@@ -9571,10 +9421,41 @@ button.kd-stream-status {
   font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
   letter-spacing: 0.1em;
 }
-.kd-performance-stem-eq[data-midi="true"] > b { color: var(--kd-text); }
+.kd-performance-stem-eq > header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.22rem;
+}
+.kd-performance-stem-eq > header > b {
+  color: var(--kd-text-subtle);
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  letter-spacing: 0.1em;
+}
+.kd-performance-stem-eq[data-midi="true"] > header > b { color: var(--kd-text); }
+.kd-performance-stem-toggle {
+  --kd-stem: #82c49e;
+  min-width: 2.3rem;
+  min-height: 1.05rem;
+  padding: 0.08rem 0.2rem;
+  border: 1px solid var(--kd-border-subtle);
+  border-radius: 0.18rem;
+  color: var(--kd-text-subtle);
+  background: var(--kd-panel-inset);
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  letter-spacing: 0.04em;
+}
+.kd-performance-stem-toggle:hover:not(:disabled) { color: var(--kd-text); }
+.kd-performance-stem-toggle[data-active="true"] {
+  color: var(--kd-stem);
+  border-color: color-mix(in srgb, var(--kd-stem) 48%, var(--kd-border-subtle));
+  background: color-mix(in srgb, var(--kd-stem) 10%, var(--kd-panel-inset));
+}
+.kd-performance-stem-toggle[data-loading="true"] { cursor: progress; }
+.kd-performance-stem-toggle:disabled { opacity: 0.48; }
 .kd-performance-stem-eq > div {
   display: grid;
-  grid-template-rows: repeat(4, 1.92rem);
+  grid-template-rows: 1.92rem;
   align-content: start;
   justify-items: center;
   row-gap: 0.1rem;
@@ -9582,7 +9463,7 @@ button.kd-stream-status {
   height: auto;
 }
 .kd-performance-stem-eq[data-mode="two"] > div {
-  grid-template-rows: repeat(2, 1.92rem);
+  grid-template-rows: 1.92rem;
 }
 .kd-performance-stem-eq-knob {
   position: relative;
@@ -10201,33 +10082,6 @@ button.kd-stream-status {
 :root[data-theme="light"] .kd-performance-deck-controls[data-side="b"][data-playing="true"] {
   background: rgba(0, 0, 0, 0.03);
 }
-:root[data-theme="light"] .kd-performance-stem-download {
-  border-color: rgba(0, 0, 0, 0.22);
-  background: var(--kd-panel);
-}
-:root[data-theme="light"] .kd-performance-stem-download > button { color: var(--kd-text-body); }
-:root[data-theme="light"] .kd-performance-stem-download > button:hover:not(:disabled) {
-  color: var(--kd-text);
-  background: var(--kd-hover);
-}
-:root[data-theme="light"] .kd-performance-stem-download > button:disabled { color: var(--kd-muted); }
-:root[data-theme="light"] .kd-performance-stem-download > i { background: var(--kd-line); }
-:root[data-theme="light"] .kd-performance-stem-download > i > span { background: var(--kd-muted); }
-:root[data-theme="light"] .kd-performance-stem-pad {
-  border-color: var(--kd-line);
-  background: var(--kd-panel);
-  box-shadow: none;
-}
-:root[data-theme="light"] .kd-performance-stem-pad-main { color: var(--kd-muted); }
-:root[data-theme="light"] .kd-performance-stem-pad[data-stem="drums"] { --kd-stem: #b25e12; }
-:root[data-theme="light"] .kd-performance-stem-pad[data-stem="bass"] { --kd-stem: #c2333d; }
-:root[data-theme="light"] .kd-performance-stem-pad[data-stem="other"] { --kd-stem: #4557c9; }
-:root[data-theme="light"] .kd-performance-stem-pad[data-stem="vocals"] { --kd-stem: #17703c; }
-:root[data-theme="light"] .kd-performance-stem-pad[data-audible="true"] {
-  border-color: color-mix(in srgb, var(--kd-stem) 42%, var(--kd-line));
-  background: color-mix(in srgb, var(--kd-stem) 8%, #ffffff);
-}
-:root[data-theme="light"] .kd-performance-stem-pads-status { color: var(--kd-danger); }
 :root[data-theme="light"] .kd-performance-transport > button {
   border-color: var(--kd-line);
   color: var(--kd-text-body);
@@ -10315,6 +10169,7 @@ button.kd-stream-status {
 :root[data-theme="light"] .kd-performance-stem-eq-knob[data-stem="bass"] { --kd-stem: #c2333d; }
 :root[data-theme="light"] .kd-performance-stem-eq-knob[data-stem="other"] { --kd-stem: #4557c9; }
 :root[data-theme="light"] .kd-performance-stem-eq-knob[data-stem="vocals"] { --kd-stem: #17703c; }
+:root[data-theme="light"] .kd-performance-stem-toggle { --kd-stem: #17703c; }
 :root[data-theme="light"] .kd-performance-stem-eq-knob > span {
   background: #3a414b;
   box-shadow: inset 0 0 0 1.5px #5c6370;
@@ -10376,352 +10231,4 @@ button.kd-stream-status {
 }
 .kd-app[data-work-mode="dj"] .kd-table[data-fit-width="true"] .kd-col-resize {
   display: none;
-}
-
-/* ---------------------------------------------------------------- STEM debug workstation */
-.kd-stem-debug {
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-rows: 2.2rem minmax(0, 1fr);
-  color: var(--kd-text);
-  background: var(--kd-bg);
-}
-.kd-stem-debug-head {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  min-width: 0;
-  padding: 0 0.7rem;
-  border-bottom: 1px solid var(--kd-line);
-  background: var(--kd-panel);
-  font-family: var(--kd-font-mono);
-  letter-spacing: 0.05em;
-  -webkit-app-region: drag;
-}
-.kd-app[data-mac="true"] .kd-stem-debug-head {
-  padding-left: calc(var(--kd-traffic-pad) + 0.35rem);
-}
-.kd-stem-debug-head > button,
-.kd-stem-debug-transport > button,
-.kd-stem-debug-ab > button,
-.kd-stem-debug-reset {
-  display: inline-grid;
-  place-items: center;
-  border: 1px solid var(--kd-line);
-  color: var(--kd-text-subtle);
-  background: var(--kd-panel-inset);
-}
-.kd-stem-debug-head > button { width: 1.6rem; height: 1.45rem; }
-.kd-stem-debug-head > button { -webkit-app-region: no-drag; }
-.kd-stem-debug-head > strong { font: 800 0.7rem/1 var(--kd-font-mono); }
-.kd-stem-debug-head > span {
-  overflow: hidden;
-  margin-left: auto;
-  color: var(--kd-muted);
-  font: 600 0.58rem/1 var(--kd-font-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.kd-stem-debug-body {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.55rem;
-  padding: 0.65rem;
-  overflow: hidden;
-}
-.kd-stem-debug-source {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem;
-  min-width: 0;
-}
-.kd-stem-debug-source > select {
-  width: min(28rem, 38vw);
-  min-width: 10rem;
-  height: 1.85rem;
-  border: 1px solid var(--kd-line);
-  color: var(--kd-text);
-  background: var(--kd-panel-inset);
-  padding: 0 0.45rem;
-}
-.kd-stem-debug-source > select:first-of-type { width: min(22rem, 30vw); }
-.kd-stem-debug-model-meta {
-  display: grid;
-  gap: 0.12rem;
-  min-width: 10rem;
-  font-family: var(--kd-font-mono);
-  white-space: nowrap;
-}
-.kd-stem-debug-model-meta b { color: var(--kd-text-subtle); font-size: 0.56rem; }
-.kd-stem-debug-model-meta i { color: var(--kd-muted); font-size: 0.5rem; font-style: normal; }
-.kd-stem-debug-track {
-  min-width: 0;
-  display: flex;
-  align-items: baseline;
-  gap: 0.45rem;
-  overflow: hidden;
-}
-.kd-stem-debug-track b,
-.kd-stem-debug-track i {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.kd-stem-debug-track b { font-size: 0.75rem; }
-.kd-stem-debug-track i { color: var(--kd-muted); font-size: 0.64rem; font-style: normal; }
-.kd-stem-debug-length {
-  display: grid;
-  grid-template-columns: repeat(2, auto);
-  gap: 1px;
-  border: 1px solid var(--kd-line);
-  background: var(--kd-line);
-}
-.kd-stem-debug-length > button {
-  height: 1.55rem;
-  padding: 0 0.45rem;
-  border: 0;
-  color: var(--kd-muted);
-  background: var(--kd-panel-inset);
-  font: 750 0.56rem/1 var(--kd-font-mono);
-}
-.kd-stem-debug-length > button[data-active="true"] { color: var(--kd-theme); }
-.kd-stem-debug-wave-shell {
-  position: relative;
-  flex: 1 1 15rem;
-  min-width: 0;
-  min-height: 0;
-  border: 1px solid var(--kd-line);
-  background: #0c0f13;
-}
-.kd-stem-debug-wave-shell:not([data-ready="true"]) { border-color: var(--kd-border-subtle); }
-.kd-stem-debug-wave {
-  display: block;
-  width: 100%;
-  height: 100%;
-  cursor: crosshair;
-  touch-action: none;
-}
-.kd-stem-debug-console {
-  display: grid;
-  grid-template-columns: minmax(15rem, 0.75fr) minmax(22rem, 1fr) minmax(24rem, 1.2fr);
-  gap: 0.65rem;
-  min-height: 7.6rem;
-  padding: 0.55rem;
-  border: 1px solid var(--kd-line);
-  background: var(--kd-panel);
-}
-.kd-stem-debug-transport {
-  display: grid;
-  grid-template-columns: 2rem 2rem minmax(7rem, 1fr);
-  grid-template-rows: 2.15rem 1.65rem;
-  gap: 0.38rem;
-  align-content: center;
-}
-.kd-stem-debug-transport > button { width: 2rem; height: 2rem; }
-.kd-stem-debug-transport > button:disabled,
-.kd-stem-debug-ab > button:disabled,
-.kd-stem-debug-reset:disabled { opacity: 0.38; }
-.kd-stem-debug-play { color: var(--kd-theme) !important; }
-.kd-stem-debug-transport > time {
-  align-self: center;
-  color: var(--kd-text-subtle);
-  font: 700 0.68rem/1 var(--kd-font-mono);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.kd-stem-debug-ab {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 0.25rem;
-}
-.kd-stem-debug-ab > button {
-  height: 1.55rem;
-  font: 800 0.63rem/1 var(--kd-font-mono);
-}
-.kd-stem-debug-ab > button[data-active="true"] {
-  border-color: color-mix(in srgb, var(--kd-theme) 72%, var(--kd-line));
-  color: #fff;
-  background: color-mix(in srgb, var(--kd-theme) 34%, var(--kd-panel-inset));
-}
-.kd-stem-debug-knobs {
-  display: grid;
-  grid-template-columns: repeat(var(--kd-debug-lanes, 4), minmax(3.6rem, 1fr)) 1.8rem;
-  gap: 0.35rem;
-  align-items: center;
-  justify-items: center;
-}
-.kd-stem-debug-knob-wrap {
-  --kd-stem: #aeb6c2;
-  display: grid;
-  justify-items: center;
-  gap: 0.18rem;
-  min-width: 0;
-  color: var(--kd-stem);
-}
-.kd-stem-debug-knob-wrap[data-stem="drums"] { --kd-stem: #d59d6b; }
-.kd-stem-debug-knob-wrap[data-stem="bass"] { --kd-stem: #d08088; }
-.kd-stem-debug-knob-wrap[data-stem="other"] { --kd-stem: #93a3d8; }
-.kd-stem-debug-knob-wrap[data-stem="instrumental"] { --kd-stem: #93a3d8; }
-.kd-stem-debug-knob-wrap[data-stem="vocals"] { --kd-stem: #82c49e; }
-.kd-stem-debug-knob.kd-performance-knob { gap: 0.14rem; color: var(--kd-stem); }
-.kd-stem-debug-knob.kd-performance-knob > span {
-  --kd-knob-size: 2.05rem;
-  border-color: color-mix(in srgb, var(--kd-stem) 48%, var(--kd-line));
-}
-.kd-stem-debug-knob.kd-performance-knob > span i { background: var(--kd-stem); }
-.kd-stem-debug-knob.kd-performance-knob > input { inset: 0 0 1.55rem; }
-.kd-stem-debug-knob.kd-performance-knob > b {
-  color: var(--kd-stem);
-  font: 800 0.56rem/1 var(--kd-font-mono);
-}
-.kd-stem-debug-knob.kd-performance-knob > em {
-  color: var(--kd-text-subtle);
-  font: 650 0.55rem/1 var(--kd-font-mono);
-  font-style: normal;
-  font-variant-numeric: tabular-nums;
-}
-.kd-stem-debug-reset { width: 1.65rem; height: 1.65rem; }
-.kd-stem-debug-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(5rem, 1fr));
-  grid-template-rows: repeat(3, 1fr);
-  gap: 1px;
-  margin: 0;
-  background: var(--kd-line);
-  border: 1px solid var(--kd-line);
-}
-.kd-stem-debug-metrics > div {
-  min-width: 0;
-  display: grid;
-  align-content: center;
-  gap: 0.18rem;
-  padding: 0.32rem 0.45rem;
-  background: var(--kd-panel-inset);
-}
-.kd-stem-debug-metrics dt {
-  color: var(--kd-muted);
-  font: 700 0.53rem/1 var(--kd-font-mono);
-}
-.kd-stem-debug-metrics dd {
-  overflow: hidden;
-  margin: 0;
-  color: var(--kd-text);
-  font: 800 0.66rem/1 var(--kd-font-mono);
-  font-variant-numeric: tabular-nums;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.kd-stem-debug-metrics > div[data-pass="true"] dd { color: #7ce5ae; }
-.kd-stem-debug-metrics > div[data-pass="false"] dd { color: #ff7d86; }
-
-@media (max-width: 940px) {
-  .kd-stem-debug-console {
-    grid-template-columns: minmax(14rem, 0.8fr) minmax(21rem, 1.2fr);
-  }
-  .kd-stem-debug-metrics { grid-column: 1 / -1; min-height: 4.2rem; }
-  .kd-stem-debug-body { overflow: auto; }
-}
-
-/* Stem 跳转实验台（SeekLab，类 Neural Mix 调度研究） */
-.kd-stem-lab {
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-rows: 2.2rem minmax(0, 1fr);
-  color: var(--kd-text);
-  background: var(--kd-bg);
-}
-.kd-stem-lab-head {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  min-width: 0;
-  padding: 0 0.7rem;
-  border-bottom: 1px solid var(--kd-line);
-  background: var(--kd-panel);
-  -webkit-app-region: drag;
-}
-.kd-app[data-mac="true"] .kd-stem-lab-head {
-  padding-left: calc(var(--kd-traffic-pad) + 0.35rem);
-}
-.kd-stem-lab-head > button { -webkit-app-region: no-drag; }
-.kd-stem-lab-head h2 {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  margin: 0;
-  font: 800 0.72rem/1 var(--kd-font-mono);
-  letter-spacing: 0.05em;
-}
-.kd-stem-lab-head > span { margin-left: auto; }
-.kd-stem-lab-body {
-  min-height: 0;
-  padding: 0.8rem 1rem 1.4rem;
-  overflow: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 0.7rem;
-}
-.kd-lab-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.45rem;
-  align-items: center;
-}
-.kd-lab-controls select,
-.kd-lab-controls input {
-  height: 1.7rem;
-  padding: 0 0.4rem;
-  border: 1px solid var(--kd-line);
-  border-radius: 4px;
-  color: var(--kd-text);
-  background: var(--kd-panel-inset);
-  font: 600 0.66rem/1 var(--kd-font-mono);
-}
-.kd-lab-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
-  gap: 0.5rem;
-}
-.kd-lab-card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  padding: 0.55rem 0.65rem;
-  border: 1px solid var(--kd-line);
-  border-radius: 6px;
-  background: var(--kd-panel);
-}
-.kd-lab-card-value {
-  font: 800 1.02rem/1.1 var(--kd-font-mono);
-  font-variant-numeric: tabular-nums;
-}
-.kd-lab-card .kd-muted { font-size: 0.62rem; line-height: 1.35; }
-.kd-lab-table {
-  width: 100%;
-  border-collapse: collapse;
-  font: 600 0.64rem/1.5 var(--kd-font-mono);
-}
-.kd-lab-table th,
-.kd-lab-table td {
-  padding: 0.22rem 0.5rem;
-  border-bottom: 1px solid var(--kd-line);
-  text-align: left;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-.kd-lab-table th { color: var(--kd-muted); font-weight: 700; }
-.kd-lab-audition {
-  padding: 0.6rem 0.65rem;
-  border: 1px solid var(--kd-line);
-  border-radius: 6px;
-  background: var(--kd-panel);
 }

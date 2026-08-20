@@ -44,6 +44,9 @@ export interface UnifiedDeckState {
   buffering: boolean;
   /** True only after a STEM callback source has actually been installed on this Deck. */
   stemEnabled: boolean;
+  outputBufferMs: number;
+  minimumOutputBufferMs: number;
+  outputUnderruns: number;
   rate: number;
   /** 引擎级无缝循环窗口（曲目秒）；null 表示线性播放。 */
   loopStart: number | null;
@@ -152,6 +155,9 @@ const INITIAL_STATE: UnifiedPlayerState = {
     desiredPlaying: false,
     buffering: false,
     stemEnabled: false,
+    outputBufferMs: 0,
+    minimumOutputBufferMs: 0,
+    outputUnderruns: 0,
     rate: 1,
     loopStart: null,
     loopLength: null,
@@ -424,6 +430,9 @@ interface DesktopDeckSnapshotRaw {
   rate: number;
   buffering: boolean;
   stemEnabled?: boolean;
+  outputBufferMs?: number;
+  minimumOutputBufferMs?: number;
+  outputUnderruns?: number;
   loopStart?: number | null;
   loopLength?: number | null;
 }
@@ -472,6 +481,9 @@ function normalizedDesktop(raw: DesktopPlaybackSnapshotRaw): UnifiedPlayerState 
       desiredPlaying: deck.desiredPlaying ?? false,
       buffering: deck.buffering ?? false,
       stemEnabled: deck.stemEnabled ?? false,
+      outputBufferMs: Math.max(0, deck.outputBufferMs ?? 0),
+      minimumOutputBufferMs: Math.max(0, deck.minimumOutputBufferMs ?? 0),
+      outputUnderruns: Math.max(0, deck.outputUnderruns ?? 0),
       rate: Number.isFinite(deck.rate) && deck.rate > 0 ? deck.rate : 1,
       loopStart: typeof deck.loopStart === "number" ? deck.loopStart : null,
       loopLength: typeof deck.loopLength === "number" ? deck.loopLength : null,
@@ -951,6 +963,9 @@ class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
       desiredPlaying: source.autoplay ?? false,
       buffering: false,
       stemEnabled: false,
+      outputBufferMs: 0,
+      minimumOutputBufferMs: 0,
+      outputUnderruns: 0,
       rate: this.deckBaseRates[deck],
       loopStart: null,
       loopLength: null,

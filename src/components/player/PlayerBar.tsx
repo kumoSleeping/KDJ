@@ -139,7 +139,7 @@ import {
 } from "./PerformanceWorkspace";
 import { eqBandDb, nextLoadedDeckIndex, performanceLoadDeckIndex } from "../../lib/performanceCues";
 import { clampStemGain, stemGainRequestReady } from "../../lib/stemEq";
-import { allStemMask as stemMaskForMode } from "../../lib/stemMode";
+import { allStemMask as stemMaskForMode, STEM_MODE } from "../../lib/stemMode";
 import {
   beginMidiScratchHold,
   canResumeMidiScratchHold,
@@ -158,10 +158,6 @@ const STREAM_CACHE_WAVEFORM_POLL_MS = 750;
 const STREAM_CACHE_WAVEFORM_IDLE_POLL_MS = 3_000;
 /** macOS/Windows 可能同时从原生媒体会话和 WebView 报告同一次媒体键。 */
 const SYSTEM_MEDIA_DEDUPE_MS = 180;
-
-function stemBit(stem: StemName): number {
-  return stem === "drums" ? 1 : stem === "bass" ? 2 : stem === "other" ? 4 : 8;
-}
 
 function sameStemStatus(left: TrackStemStatus | null, right: TrackStemStatus): boolean {
   return Boolean(
@@ -460,7 +456,7 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
   const openQueuePanel = useAppStore((state) => state.openQueuePanel);
   const defaultQuality = useAppStore((state) => state.settings?.default_quality ?? null);
   const filterResonance = useAppStore((state) => state.settings?.filter_resonance ?? "high");
-  const stemMode = useAppStore((state) => state.settings?.stem_mode ?? "none");
+  const stemMode = STEM_MODE;
   const stemCompute = useAppStore((state) => state.settings?.stem_compute ?? "auto");
   const desiredStemRuntimeKey = `${stemMode}:${stemCompute}`;
   const allStemMask = stemMaskForMode(stemMode);
@@ -605,8 +601,8 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
   const reportedStemModelErrorRef = useRef("");
   const reportedStemTrackErrorsRef = useRef<[string, string]>(["", ""]);
   const pendingStemActionRef = useRef<[
-    StemName | "all" | null,
-    StemName | "all" | null,
+    "all" | null,
+    "all" | null,
   ]>([null, null]);
   const pendingStemGainTrackRef = useRef<[number | null, number | null]>([null, null]);
   const stemDeckTrackIdsRef = useRef<[number | null, number | null]>([null, null]);
@@ -3536,6 +3532,9 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     rightDeckView = rightTrack && rightTrack.id !== leftTrack?.id ? viewForTrack(rightTrack) : null;
   }
   const deckPlaying = pipDriving && pipSession?.source === "network" ? pipPlaying : playing;
+  const playbackVisualRate = pipDriving
+    ? 1
+    : (nativePlayer?.state().rate ?? frontEl.playbackRate ?? 1);
   const playbackPosition = pipDriving ? pipPosition : position;
   // 音频元数据尚未加载（例如恢复上次的唱盘）时，曲库已有的时长仍应先显示；
   // 否则波形都在却只剩一串 --:--，看不出整首还有多久。
@@ -3794,7 +3793,6 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     Promise.resolve(),
     Promise.resolve(),
   ]);
-  const stemAutoArmRef = useRef<[boolean, boolean]>([true, true]);
   const applyStemModeNow = async (
     side: 0 | 1,
     trackId: number,
@@ -3903,6 +3901,7 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     if (performanceStemModelRef.current?.state !== "ready") return;
     if (!deckTrack || !usesLocalLibraryRecord(deckTrack)) return;
     const current = performanceStemsRef.current[side];
+    if (stem !== "vocals") return;
     const gains = [...(
       stemGainTimersRef.current[side] !== null
         ? stemGainDraftRef.current[side]
@@ -3910,7 +3909,7 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     )] as [number, number, number, number];
     gains[stemGainIndex(stem)] = clampStemGain(value);
     stemGainDraftRef.current[side] = gains;
-    pendingStemGainTrackRef.current[side] = deckTrack.id;
+    pendingStemGainTrackRef.current[side] = current.enabled ? deckTrack.id : null;
     // STEM EQ 旋钮以指针速度更新本地控件；IPC 合并成 50ms 尾随一次。
     // 引擎在渲染线程直接混音，这个频率下的听觉依然是无级连续的。
     setPerformanceStems((states) => {
@@ -3919,14 +3918,9 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
         { ...states[1] },
       ];
       next[side].gains = gains;
-      if (
-        !loopHoldsOriginalRef.current[side]
-        && deck.loopStart === null
-      ) {
-        next[side].enabled = true;
-      }
       return next;
     });
+    if (!current.enabled) return;
     if (loopHoldsOriginalRef.current[side] || deck.loopStart !== null) {
       if (!current.enabled) return;
     }
@@ -3969,56 +3963,33 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     });
   };
 
-  const startPerformanceStems = (side: 0 | 1) => {
-    if (stemMode === "none") return;
-    if (performanceStemModel?.state !== "ready") {
-      downloadPerformanceStemModel();
-      return;
-    }
-    const deckTrack = performanceDecks[side].track;
+  const togglePerformanceStem = (side: 0 | 1) => {
+    const deckTrack = performanceDecksRef.current[side].track;
     if (!deckTrack || !usesLocalLibraryRecord(deckTrack)) {
       setNotice("STEM 仅支持本机曲库文件");
       return;
     }
-    if (!stemGainRequestReady(performanceStemsRef.current[side].status, deckTrack.id)) {
-      pendingStemActionRef.current[side] = "all";
+    if (performanceStemsRef.current[side].enabled) {
+      restorePerformanceOriginal(side);
       return;
     }
     loopHoldsOriginalRef.current[side] = false;
-    // The audible worker publishes the same separated blocks used by the rails. Starting an
-    // additional display scan first wastes an accelerator tile and can delay the first audio job.
+    pendingStemActionRef.current[side] = "all";
+    if (performanceStemModel?.state !== "ready") {
+      if (performanceStemModel?.supported) downloadPerformanceStemModel();
+      else setNotice("STEM runtime 正在准备");
+      return;
+    }
+    const status = performanceStemsRef.current[side].status;
+    if (!stemGainRequestReady(status, deckTrack.id)) return;
+    pendingStemActionRef.current[side] = null;
     void applyStemMode(side, true, allStemMask).catch((error: unknown) => {
-      setNotice(`STEM 切换失败：${error instanceof Error ? error.message : String(error)}`);
-    });
-  };
-
-  const togglePerformanceStem = (side: 0 | 1, stem: StemName) => {
-    if (stemMode === "none") return;
-    if (performanceStemModel?.state !== "ready") {
-      downloadPerformanceStemModel();
-      return;
-    }
-    loopHoldsOriginalRef.current[side] = false;
-    const deckTrack = performanceDecks[side].track;
-    if (!deckTrack || !usesLocalLibraryRecord(deckTrack)) {
-      setNotice("STEM 仅支持本机曲库文件");
-      return;
-    }
-    if (!stemGainRequestReady(performanceStemsRef.current[side].status, deckTrack.id)) {
-      pendingStemActionRef.current[side] = stem;
-      return;
-    }
-    const current = performanceStems[side];
-    const baseMask = current.enabled ? current.mask : allStemMask;
-    const nextMask = baseMask ^ stemBit(stem);
-    void applyStemMode(side, true, nextMask).catch((error: unknown) => {
       setNotice(`STEM 切换失败：${error instanceof Error ? error.message : String(error)}`);
     });
   };
 
   const restorePerformanceOriginal = (side: 0 | 1) => {
     if (!performanceStems[side].enabled) return;
-    stemAutoArmRef.current[side] = false;
     void applyStemMode(side, false, performanceStems[side].mask).catch((error: unknown) => {
       setNotice(`原曲切换失败：${error instanceof Error ? error.message : String(error)}`);
     });
@@ -4098,7 +4069,6 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
       pendingStemActionRef.current[side] = null;
       pendingStemGainTrackRef.current[side] = null;
       loopHoldsOriginalRef.current[side] = false;
-      stemAutoArmRef.current[side] = true;
       stemGainDraftRef.current[side] = [1, 1, 1, 1];
       if (stemGainTimersRef.current[side] !== null) {
         window.clearTimeout(stemGainTimersRef.current[side]!);
@@ -4189,7 +4159,7 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
       const prior = priorTrackIds[side];
       if (prior !== null && prior !== nextTrackIds[side] && !nextTrackIds.includes(prior)) {
         // Whole-track display fill is intentionally lease-bound. Releasing an old Deck must
-        // cancel it immediately instead of letting hidden Spleeter4 work compete with the live Deck.
+        // cancel it immediately instead of letting hidden ByteDance work compete with the live Deck.
         void api.releaseTrackStems(prior).catch(() => undefined);
       }
     });
@@ -4204,7 +4174,6 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
         pendingStemActionRef.current[side] = null;
         pendingStemGainTrackRef.current[side] = null;
         loopHoldsOriginalRef.current[side] = false;
-        stemAutoArmRef.current[side] = true;
         reportedStemTrackErrorsRef.current[side] = "";
         stemGainDraftRef.current[side] = [1, 1, 1, 1];
         // Keep the tail itself: late work checks track identity before publishing, while replacing
@@ -4286,22 +4255,11 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
       const status = performanceStems[side].status;
       const deckTrack = performanceDecks[side].track;
       const pendingGain = pendingStemGainTrackRef.current[side] === deckTrack?.id;
-      const shouldAutoEnable = stemAutoArmRef.current[side]
-        && !pending
-        && !pendingGain
-        && !performanceStems[side].enabled
-        && stemMode !== "none"
-        && stemRuntimeReadyKey === desiredStemRuntimeKey;
-      if ((!pending && !pendingGain && !shouldAutoEnable) || status?.state !== "ready" || status.trackId !== deckTrack?.id) return;
+      if ((!pending && !pendingGain) || status?.state !== "ready" || status.trackId !== deckTrack?.id) return;
       if (loopHoldsOriginalRef.current[side]) return;
       const mask = pending === "all"
         ? allStemMask
-        : pending
-          ? allStemMask ^ stemBit(pending)
-          : shouldAutoEnable
-            ? allStemMask
-            : performanceStemsRef.current[side].mask;
-      if (shouldAutoEnable) stemAutoArmRef.current[side] = false;
+        : performanceStemsRef.current[side].mask;
       void applyStemMode(side, true, mask)
         .then(() => {
           if (pendingStemActionRef.current[side] === pending) pendingStemActionRef.current[side] = null;
@@ -4310,15 +4268,12 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
           }
         })
         .catch((error: unknown) => {
-          if (shouldAutoEnable) stemAutoArmRef.current[side] = true;
           setNotice(`STEM 切换失败：${error instanceof Error ? error.message : String(error)}`);
         });
     });
   }, [
     allStemMask,
     desiredStemRuntimeKey,
-    stemMode,
-    stemRuntimeReadyKey,
     performanceDecks[0].track?.id,
     performanceDecks[1].track?.id,
     performanceStems[0].enabled,
@@ -4695,13 +4650,11 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
           });
       }}
       onMasterVolumeChange={setMasterVolume}
-      onStartStems={startPerformanceStems}
       onEnsureStemWaveScan={ensurePerformanceStemWaveScan}
       onReleaseStemWaveScan={releasePerformanceStemWaveScan}
       onDownloadStemModel={downloadPerformanceStemModel}
-      onToggleStem={togglePerformanceStem}
+      onToggleStemAll={togglePerformanceStem}
       onStemGain={setPerformanceStemGain}
-      onOriginalMode={restorePerformanceOriginal}
       onSetLoop={setPerformanceLoop}
       onClearLoop={clearPerformanceLoop}
       onSaveCuePoints={savePerformanceCues}
@@ -5033,6 +4986,8 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
             position={pipPosition}
             duration={pipDuration}
             preserveBarPhase={autoBeatSync}
+            playing={pipPlaying}
+            playbackRate={1}
             cueMs={
               track?.id === pipSession.trackId
                 ? selected?.id === track.id
@@ -5092,6 +5047,8 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
             position={track?.id === displayTrack.id ? position : 0}
             duration={track?.id === displayTrack.id ? playbackDuration : (displayTrack.duration ?? 0)}
             preserveBarPhase={autoBeatSync && track?.id === displayTrack.id}
+            playing={track?.id === displayTrack.id && deckPlaying}
+            playbackRate={playbackVisualRate}
             cueMs={selected?.id === displayTrack.id ? selected.cue_ms : displayTrack.cue_ms}
             endMs={selected?.id === displayTrack.id ? selected.end_ms : displayTrack.end_ms}
             cuePoints={displayTrack.cue_points}
@@ -5116,6 +5073,8 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
             height={42}
             dimPlayed
             preserveBarPhase={autoBeatSync}
+            playing={deckPlaying}
+            playbackRate={playbackVisualRate}
           />
         ) : (
           <div className="kd-player-wave-idle" aria-hidden="true" />

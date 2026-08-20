@@ -16,16 +16,16 @@ test("visible STEM lanes are display-only and the safe default is the original r
   assert.equal(performanceStemLanesVisible(STEM_LANE_BITS), true);
 });
 
-test("the original reference rail can be hidden independently from STEM lanes", () => {
-  assert.equal(normalizePerformanceWaveMask(0), 0);
-  assert.equal(normalizePerformanceWaveMask(STEM_LANE_BITS), STEM_LANE_BITS);
+test("the original reference rail is mandatory and vocals are the only optional lane", () => {
+  assert.equal(normalizePerformanceWaveMask(0), ORIGINAL_WAVE_BIT);
+  assert.equal(normalizePerformanceWaveMask(STEM_LANE_BITS), ORIGINAL_WAVE_BIT | STEM_LANE_BITS);
   assert.equal(normalizePerformanceWaveMask(ORIGINAL_WAVE_BIT | 8), 24);
 });
 
-test("shared mask migrates the old A-side setting, removes unknown bits, and defaults to original", () => {
-  assert.equal(normalizePerformanceWaveMask([0, 31]), 0);
-  assert.equal(normalizePerformanceWaveMask([STEM_LANE_BITS, 0]), STEM_LANE_BITS);
-  assert.equal(normalizePerformanceWaveMask([255, "bad"]), 31);
+test("shared mask migrates old settings while removing non-vocal STEM lanes", () => {
+  assert.equal(normalizePerformanceWaveMask([0, 31]), ORIGINAL_WAVE_BIT);
+  assert.equal(normalizePerformanceWaveMask([STEM_LANE_BITS, 0]), ORIGINAL_WAVE_BIT | STEM_LANE_BITS);
+  assert.equal(normalizePerformanceWaveMask([255, "bad"]), ORIGINAL_WAVE_BIT | STEM_LANE_BITS);
   assert.equal(normalizePerformanceWaveMask(null), DEFAULT_PERFORMANCE_WAVE_MASK);
   assert.equal(DEFAULT_PERFORMANCE_WAVE_MASK, ORIGINAL_WAVE_BIT);
 });

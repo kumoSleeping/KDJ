@@ -3,8 +3,7 @@
 ## Decision
 
 The top-level SCNet-Tran production option was replaced by ByteDance's two-stem
-`MobileNet_Subbandtime`. Historical SCNet research documents and the isolated STEM debug lab remain
-research references; they are not selectable production runtimes.
+MobileNet_Subbandtime. Historical SCNet research documents are not selectable production runtimes.
 
 Reference checkout: `/Users/kumo/Frameworks/music_source_separation`, cloned from
 <https://github.com/bytedance/music_source_separation> at
@@ -35,7 +34,6 @@ two-lane reconstruction within `1e-6`.
 ## Capability boundary
 
 This model has strong background throughput on the measured M2 and a much smaller artifact than the
-removed SCNet graph. It remains a non-causal three-second window model. It does **not** replace the
-separately admitted 512-frame HS-TasNet low-latency seek layer and is not advertised as a hard
-realtime guarantee. Full measurements are in
+removed SCNet graph. It remains a non-causal three-second window model and is not advertised as a
+hard realtime guarantee. Full measurements are in
 `research/stems/results/m2-bytedance-mobilenet-subbandtime-2026-08-20.json`.

@@ -10,7 +10,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
-use crate::{SAMPLE_RATE, SEGMENT_CONTEXT_SAMPLES, SEGMENT_SAMPLES};
+use crate::SAMPLE_RATE;
 
 pub(crate) struct StereoAudio {
     pub left: Vec<f32>,
@@ -276,12 +276,6 @@ impl StereoRegionDecoder {
     }
 }
 
-#[cfg(feature = "stem-debug-onnx")]
-pub(crate) fn decode_stereo(path: &Path) -> Result<StereoAudio> {
-    let mut decoder = StereoRegionDecoder::open(path)?;
-    decoder.read_samples(None)
-}
-
 /// Decode `[start, start + frames)` at 44.1 kHz stereo, padding with silence if the file ends.
 pub(crate) fn decode_stereo_region(
     path: &Path,
@@ -318,7 +312,7 @@ pub(crate) fn decode_stereo_region_cached(
     }
 }
 
-/// Sequential fixed-shape Spleeter4 windows. A seek reopens the decoder; a context-safe core advance
+/// Sequential fixed-shape ByteDance windows. A seek reopens the decoder; a context-safe core advance
 /// only reads the new tail instead of re-parsing the file from the playhead each time.
 pub struct StemWindowCursor {
     decoder: Option<StereoRegionDecoder>,
@@ -547,7 +541,7 @@ fn resample(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SEGMENT_CORE_SAMPLES;
+    use crate::{SEGMENT_CORE_SAMPLES, SEGMENT_SAMPLES};
     use std::io::Write;
 
     #[test]

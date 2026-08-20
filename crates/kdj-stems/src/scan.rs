@@ -584,7 +584,7 @@ fn wait_for_scan_ticket(
     }
 }
 
-/// Display scan feeds Spleeter4 one fixed 512-frame (11.96-second) STFT window centred on the
+/// Display scan feeds ByteDance one fixed 512-frame (11.96-second) STFT window centred on the
 /// retained 169-hop (3.92-second) tile, then publishes only that context-safe interior.
 fn decode_scan_window(
     decoder: &mut Option<StereoRegionDecoder>,
@@ -788,7 +788,7 @@ mod tests {
 
     #[test]
     fn a_successful_retry_clears_the_transient_tile_error() {
-        let mut error = "Spleeter4 bass 输出含非有限数值".to_owned();
+        let mut error = "ByteDance bass 输出含非有限数值".to_owned();
         update_scan_error(&mut error, &Ok(()));
         assert!(error.is_empty());
 

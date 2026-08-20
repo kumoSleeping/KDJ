@@ -109,7 +109,7 @@ export interface WaveformProps {
   /** 曲目时间相对墙钟的推进倍率。仅在局部波形走带时使用。 */
   playbackRate?: number;
   className?: string;
-  /** Precomputed alternate lane (for example one Spleeter4 stem); bypasses the library waveform API. */
+  /** Precomputed alternate lane (for example one ByteDance stem); bypasses the library waveform API. */
   waveform?: WaveformData;
   /** Empty vertical space reserved above and below the rendered columns (0..0.45 each side). */
   verticalInsetRatio?: number;
@@ -688,9 +688,28 @@ export function Waveform({
     interactiveScrub ? PERFORMANCE_WAVEFORM_SCRATCH_MAX_STEP_SECONDS : undefined,
     interactiveScrub,
   );
+  const animateOverview = !viewport.active
+    && !snapRail
+    && railAnimationReady
+    && playing
+    && !interactiveScrub
+    && !draggingRef.current
+    && shouldAnimateWaveformRail(
+      true,
+      previousTrackRef.current,
+      trackId,
+      previousPosition,
+      railPosition,
+    );
   const motionPosition = animateRail && playing && !interactiveScrub && railPosition !== null
     ? projectedWaveformPosition(railPosition, total, playbackRate)
     : railPosition;
+  const overviewMotionPosition = animateOverview && railPosition !== null
+    ? projectedWaveformPosition(railPosition, total, playbackRate)
+    : railPosition;
+  const motionRatio = total > 0 && overviewMotionPosition !== null
+    ? Math.min(1, Math.max(0, overviewMotionPosition / total))
+    : ratio;
   const motionViewport = waveformViewportLayout(total, motionPosition, viewportSeconds);
   const committedBake = previousTrackRef.current === trackId && viewport.active
     ? committedBakeWindowRef.current
@@ -999,7 +1018,14 @@ export function Waveform({
           <span
             className="kd-wave-fallback-fill"
             data-error={error ? "true" : undefined}
-            style={{ width: `${ratio !== null ? ratio * 100 : 0}%` }}
+            style={{
+              width: "100%",
+              transform: `scaleX(${motionRatio ?? 0})`,
+              transformOrigin: "0 50%",
+              transition: animateOverview
+                ? `transform ${PERFORMANCE_WAVEFORM_SMOOTHING_MS}ms linear`
+                : "none",
+            }}
           />
         </div>
       )}
@@ -1031,7 +1057,7 @@ export function Waveform({
 
       {/* 已播部分压暗：不换色，只盖一层半透明遮罩，颜色信息还在。
           遮罩色跟主题走：深色主题盖黑、浅色主题盖白，白天才不会糊成一团黑 */}
-      {dimPlayed && ratio !== null && ratio > 0 && (
+      {dimPlayed && motionRatio !== null && motionRatio > 0 && (
         <span
           className="kd-wave-dim"
           style={{
@@ -1039,7 +1065,12 @@ export function Waveform({
             left: 0,
             top: 0,
             bottom: 0,
-            width: `${ratio * 100}%`,
+            width: "100%",
+            transform: `scaleX(${motionRatio})`,
+            transformOrigin: "0 50%",
+            transition: animateOverview
+              ? `transform ${PERFORMANCE_WAVEFORM_SMOOTHING_MS}ms linear`
+              : "none",
             background: "var(--kd-wave-dim, rgba(0,0,0,0.55))",
             pointerEvents: "none",
           }}
@@ -1074,14 +1105,16 @@ export function Waveform({
 
       {ratio !== null && (
         <span
-          className="kd-wave-playhead"
+          className="kd-wave-playhead-motion"
           style={{
-            position: "absolute",
-            left: `${viewport.playheadPercent}%`,
-            width: 1,
-            pointerEvents: "none",
+            transform: `translate3d(${viewport.active ? viewport.playheadPercent : (motionRatio ?? ratio) * 100}%, 0, 0)`,
+            transition: animateOverview
+              ? `transform ${PERFORMANCE_WAVEFORM_SMOOTHING_MS}ms linear`
+              : "none",
           }}
-        />
+        >
+          <span className="kd-wave-playhead" />
+        </span>
       )}
 
       {seekable && (

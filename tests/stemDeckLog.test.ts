@@ -39,8 +39,8 @@ function diagnostics(patch: Partial<StemRuntimeDiagnostics> = {}): StemRuntimeDi
 
 function model(patch: Partial<StemModelStatus> = {}): StemModelStatus {
   return {
-    id: "spleeter4-fp16-onnx",
-    version: "Best-Practice-87c5b6d",
+    id: "bytedance-mobilenet-subbandtime-2-fp32-onnx",
+    version: "zenodo-5804160-kdj-3s-v1",
     supported: true,
     state: "ready",
     progress: 1,
@@ -98,12 +98,12 @@ test("job line reports live STEM work without filler copy", () => {
 
 test("runtime line names the model and the selected CPU/GPU path", () => {
   const ready = stemRuntimeLine(model());
-  assert.equal(ready.text, "Spleeter-4-FP16 Best-Practice-87c5b6d · ONNX Runtime · CPU · 4 threads · F 12ms · B 9ms · P95 11ms");
+  assert.equal(ready.text, "ByteDance-MobileNet-2-FP32 zenodo-5804160-kdj-3s-v1 · ONNX Runtime · CPU · 4 threads · F 12ms · B 9ms · P95 11ms");
   assert.equal(ready.error, false);
   const pending = stemRuntimeLine(model({
     diagnostics: diagnostics({ provider: "pending", firstBlockMs: null, lastBlockMs: null, p95BlockMs: null }),
   }));
-  assert.equal(pending.text, "Spleeter-4-FP16 Best-Practice-87c5b6d · ONNX Runtime");
+  assert.equal(pending.text, "ByteDance-MobileNet-2-FP32 zenodo-5804160-kdj-3s-v1 · ONNX Runtime");
   const mobileNet = stemRuntimeLine(model({
     id: "bytedance-mobilenet-subbandtime-2-fp32-onnx",
     version: "zenodo-5804160-kdj-3s-v1",
@@ -119,7 +119,7 @@ test("runtime line names the model and the selected CPU/GPU path", () => {
 test("deck log keeps two independent lines and surfaces errors", () => {
   const log = stemDeckLog(status(), model());
   assert.equal(log.job, "SEPARATING 42%");
-  assert.equal(log.runtime, "Spleeter-4-FP16 Best-Practice-87c5b6d · ONNX Runtime · CPU · 4 threads · F 12ms · B 9ms · P95 11ms");
+  assert.equal(log.runtime, "ByteDance-MobileNet-2-FP32 zenodo-5804160-kdj-3s-v1 · ONNX Runtime · CPU · 4 threads · F 12ms · B 9ms · P95 11ms");
   const failed = stemDeckLog(status({ state: "error", error: "Vulkan failed" }), model());
   assert.equal(failed.job, "Vulkan failed");
   assert.equal(failed.error, true);

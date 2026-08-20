@@ -116,7 +116,7 @@ pub struct Settings {
     /// Performance 双极滤波器的共振档位；缺省为高，旧版固定 Q=0.72 对应低档。
     #[serde(default)]
     pub filter_resonance: FilterResonance,
-    /// Global Deck STEM mode. Missing/legacy settings stay off until the user opts in.
+    /// Fixed production STEM model. Per-Deck activation is controlled in Performance EQ.
     #[serde(default)]
     pub stem_mode: StemMode,
     /// Automatic prefers the platform accelerator and falls back to CPU.
@@ -160,7 +160,7 @@ impl Settings {
             auto_start_downloads: false,
             player_waveform: true,
             filter_resonance: FilterResonance::High,
-            stem_mode: StemMode::None,
+            stem_mode: StemMode::MobileNetTwo,
             stem_compute: StemCompute::Auto,
             key_notation: KeyNotation::Camelot,
             virtual_disk_auto_grow: true,
@@ -390,6 +390,7 @@ impl AppConfig {
     /// 用一份完整 Settings 覆盖当前配置并落盘。
     pub fn apply_settings(&self, settings: Settings) -> Settings {
         let mut next = settings;
+        normalize_stem_mode(&mut next);
         sync_soundcloud_flag(&mut next);
         // 对外返回和落盘都使用展开后的确定路径；相同 PUT 不应白写 settings.json。
         next.download_dir = expand_user(&next.download_dir)
@@ -439,6 +440,7 @@ impl AppConfig {
             Err(_) => merge_field_by_field(&base, &raw),
         };
         migrate_enabled_platforms(&mut settings, &raw);
+        normalize_stem_mode(&mut settings);
         sync_soundcloud_flag(&mut settings);
 
         let mut guard = self.inner.write().unwrap();
@@ -466,6 +468,12 @@ impl AppConfig {
             let _ = std::fs::remove_file(&tmp);
         }
     }
+}
+
+/// STEM model selection is no longer a user setting. Keep the field in the wire contract for
+/// compatibility, but force every old value onto the one supported ByteDance model.
+fn normalize_stem_mode(settings: &mut Settings) {
+    settings.stem_mode = StemMode::MobileNetTwo;
 }
 
 /// 把 raw 里出现过的字段盖到 base 上（null 视为"没写"）。
@@ -526,7 +534,7 @@ mod tests {
         assert_eq!(config.to_settings().default_quality, Quality::Flac);
         assert_eq!(config.to_settings().concurrent_downloads, 3);
         assert_eq!(config.to_settings().filter_resonance, FilterResonance::High);
-        assert_eq!(config.to_settings().stem_mode, StemMode::None);
+        assert_eq!(config.to_settings().stem_mode, StemMode::MobileNetTwo);
         assert_eq!(config.to_settings().stem_compute, StemCompute::Auto);
         assert_eq!(config.to_settings().key_notation, KeyNotation::Camelot);
         assert!(config.to_settings().virtual_disk_auto_grow);
@@ -571,6 +579,16 @@ mod tests {
 
         let reopened = AppConfig::create(dir.join("data"), dir.join("dl"), 0);
         assert_eq!(reopened.to_settings(), settings);
+    }
+
+    #[test]
+    fn legacy_stem_selection_is_migrated_to_bytedance() {
+        let dir = scratch("stem-migration");
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join(SETTINGS_FILENAME), r#"{"stem_mode":"four"}"#).unwrap();
+        let config = AppConfig::create(data, dir.join("dl"), 0);
+        assert_eq!(config.to_settings().stem_mode, StemMode::MobileNetTwo);
     }
 
     #[test]

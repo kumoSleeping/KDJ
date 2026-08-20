@@ -14,6 +14,10 @@ pub struct TransportSnapshot {
     pub output_frames: u64,
     pub deck_frames: [u64; 2],
     pub deck_source_ids: [u64; 2],
+    /// Callback-observed output-ring starvation transitions for the currently installed source.
+    pub deck_output_underruns: [u64; 2],
+    /// Lowest callback-boundary output-ring fill for the current source; zero means unobserved.
+    pub deck_min_buffered_frames: [u64; 2],
 }
 
 pub(crate) struct SharedState {
@@ -30,6 +34,10 @@ pub(crate) struct SharedState {
     deck_b_frame: AtomicU64,
     deck_a_source: AtomicU64,
     deck_b_source: AtomicU64,
+    deck_a_output_underruns: AtomicU64,
+    deck_b_output_underruns: AtomicU64,
+    deck_a_min_buffered_frames: AtomicU64,
+    deck_b_min_buffered_frames: AtomicU64,
 }
 
 impl Default for SharedState {
@@ -48,6 +56,10 @@ impl Default for SharedState {
             deck_b_frame: AtomicU64::new(0),
             deck_a_source: AtomicU64::new(0),
             deck_b_source: AtomicU64::new(0),
+            deck_a_output_underruns: AtomicU64::new(0),
+            deck_b_output_underruns: AtomicU64::new(0),
+            deck_a_min_buffered_frames: AtomicU64::new(0),
+            deck_b_min_buffered_frames: AtomicU64::new(0),
         }
     }
 }
@@ -63,6 +75,8 @@ impl SharedState {
         output_frames: u64,
         deck_frames: [u64; 2],
         deck_source_ids: [u64; 2],
+        deck_output_underruns: [u64; 2],
+        deck_min_buffered_frames: [u64; 2],
     ) {
         // A seqlock prevents control readers from combining fields from two callbacks.
         // The audio thread still never takes a lock or waits for another thread.
@@ -87,6 +101,14 @@ impl SharedState {
             .store(deck_source_ids[0], Ordering::Relaxed);
         self.deck_b_source
             .store(deck_source_ids[1], Ordering::Relaxed);
+        self.deck_a_output_underruns
+            .store(deck_output_underruns[0], Ordering::Relaxed);
+        self.deck_b_output_underruns
+            .store(deck_output_underruns[1], Ordering::Relaxed);
+        self.deck_a_min_buffered_frames
+            .store(deck_min_buffered_frames[0], Ordering::Relaxed);
+        self.deck_b_min_buffered_frames
+            .store(deck_min_buffered_frames[1], Ordering::Relaxed);
         self.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -124,6 +146,14 @@ impl SharedState {
                 deck_source_ids: [
                     self.deck_a_source.load(Ordering::Relaxed),
                     self.deck_b_source.load(Ordering::Relaxed),
+                ],
+                deck_output_underruns: [
+                    self.deck_a_output_underruns.load(Ordering::Relaxed),
+                    self.deck_b_output_underruns.load(Ordering::Relaxed),
+                ],
+                deck_min_buffered_frames: [
+                    self.deck_a_min_buffered_frames.load(Ordering::Relaxed),
+                    self.deck_b_min_buffered_frames.load(Ordering::Relaxed),
                 ],
             };
             if before == self.generation.load(Ordering::Acquire) {

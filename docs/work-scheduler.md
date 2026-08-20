@@ -14,6 +14,7 @@ Spleeter/HS-TasNet 原生 session、整轨波形和曲库分析都有不同的�
 - 中间件统一任务类别、优先级、重型预算、排队公平性、deadline、取消和观测；
 - 两个物理 Deck 的 BPM/TEMPO 使用 latest-value lane；
 - callback 永远不调用阻塞准入接口；
+- coordinator 根据 callback-facing ring 水位发布 `Normal / Low / Critical` 音频压力；
 - native 推理和整首分析一旦进入不可抢占区，只能在它们公开的边界协作取消。
 
 这使“该干什么、不该干什么”只有一个策略源，同时不假装底层 native 调用可被安全
@@ -63,6 +64,10 @@ Spleeter/HS-TasNet 原生 session、整轨波形和曲库分析都有不同的�
   或排队的可听/即时模型任务。
 - `StemViewport` 不走重型 gate。两个 audio lease 只是“可能很快需要音频”，不是排队的
   推理；Audio 队列空时 viewport 必须继续。
+- 输出 ring 进入 `Low` 时不再启动 `StemViewport`、交互/当前曲/曲库波形分析和维护任务；
+  `Critical` 时连 look-ahead 也让路，只保留 TEMPO、即时和当前可听 STEM。恢复阈值高于
+  进入阈值，避免水位在边缘反复启动完整分析。该状态由 coordinator 发布，callback 本身
+  仍只访问 ring 和 atomics。
 
 最后一条是双 Deck 锁死修复的核心约束。不要再把 `live_decks == recommended_workers`
 写成 viewport 的硬禁令。
@@ -131,6 +136,7 @@ let snapshot = work_scheduler().snapshot();
 
 - `heavyLimit` / `heavyInUse`；
 - `liveStemDecks`；
+- `audioPressure`；
 - 每个 `WorkClass` 的 `queued` / `active`；
 - Deck A/B 的 TEMPO `rate` / `revision`。
 

@@ -46,8 +46,6 @@ import {
 import { api } from "../../lib/api";
 import { formatBytes } from "../../lib/format";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
-import { openStemDebug } from "../../lib/stemDebug";
-import { openStemLab } from "../../lib/stemLab";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
 import type {
@@ -58,7 +56,7 @@ import type {
   StemModelStatus,
   StreamCacheStats,
 } from "../../types";
-import { stemModeLabel } from "../../lib/stemMode";
+import { STEM_MODE, stemModeLabel } from "../../lib/stemMode";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { Button, InlineNotice, Panel } from "../common";
@@ -690,14 +688,10 @@ export function SettingsPanel() {
   }, [settings?.download_dir, settings?.stream_cache_enabled]);
 
   useEffect(() => {
-    if ((settings?.stem_mode ?? "none") === "none") {
-      setStemModel(null);
-      return;
-    }
     let disposed = false;
     const refresh = () => {
       void api.stemModelStatus(
-        settings?.stem_mode ?? "none",
+        STEM_MODE,
         settings?.stem_compute ?? "auto",
       ).then((status) => {
         if (!disposed) setStemModel(status);
@@ -714,14 +708,14 @@ export function SettingsPanel() {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [settings?.stem_compute, settings?.stem_mode, stemModel?.state]);
+  }, [settings?.stem_compute, stemModel?.state]);
 
   const downloadStemModel = async () => {
     if (stemModelBusy) return;
     setStemModelBusy(true);
     try {
       setStemModel(await api.downloadStemModel(
-        settings?.stem_mode ?? "none",
+        STEM_MODE,
         settings?.stem_compute ?? "auto",
       ));
     } catch (error) {
@@ -891,17 +885,17 @@ export function SettingsPanel() {
               onChange={(next) => void saveSettings({ stem_compute: next })}
             />
           </div>
-          {(settings?.stem_mode ?? "none") !== "none" ? (
+          {settings ? (
             <>
               <div className="kd-stream-cache-row">
                 <span className="kd-muted">
                   {stemModel?.state === "ready"
-                    ? `${stemModeLabel(settings?.stem_mode ?? "none")} ${stemModel.version} · 已安装${stemModel.diagnostics.provider ? ` · ${stemModel.diagnostics.provider}` : ""}`
+                    ? `${stemModeLabel(STEM_MODE)} ${stemModel.version} · 已安装${stemModel.diagnostics.provider ? ` · ${stemModel.diagnostics.provider}` : ""}`
                     : stemModel?.state === "downloading" || stemModel?.state === "queued"
-                      ? `${stemModeLabel(settings?.stem_mode ?? "none")} · ${Math.round(stemModel.progress * 100)}% · ${formatBytes(stemModel.downloadedBytes)}`
+                      ? `${stemModeLabel(STEM_MODE)} · ${Math.round(stemModel.progress * 100)}% · ${formatBytes(stemModel.downloadedBytes)}`
                       : stemModel?.state === "unsupported"
                         ? "当前平台尚未提供 STEM runtime"
-                        : `${stemModeLabel(settings?.stem_mode ?? "none")} · ${formatBytes(stemModel?.totalBytes ?? 0)}`}
+                        : `${stemModeLabel(STEM_MODE)} · ${formatBytes(stemModel?.totalBytes ?? 0)}`}
                 </span>
                 {stemModel?.supported && stemModel.state !== "ready" ? (
                   <Button
@@ -921,15 +915,6 @@ export function SettingsPanel() {
               />
             </>
           ) : null}
-          <div className="kd-stream-cache-row">
-            <span className="kd-muted">候选分离模型 · 本地调试</span>
-            <Button variant="ghost" size="sm" onClick={openStemDebug}>
-              调试台
-            </Button>
-            <Button variant="ghost" size="sm" onClick={openStemLab}>
-              跳转实验台
-            </Button>
-          </div>
         </Panel>
 
         <Panel heading="OneLibrary" dense>

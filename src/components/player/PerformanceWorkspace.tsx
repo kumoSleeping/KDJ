@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { AudioLines, ChevronDown, Drum, Guitar, Mic, Minus, Pause, Play, Plus, VolumeX } from "lucide-react";
+import { ChevronDown, Mic, Minus, Pause, Play, Plus } from "lucide-react";
 import {
   channelFaderGain,
   crossfaderChannelGains,
@@ -31,7 +31,7 @@ import type {
   TrackStemStatus,
   Waveform as WaveformData,
 } from "../../types";
-import { stemModeLaneKind, stemModeUsesFourLanes, stemModeUsesTwoLanes } from "../../lib/stemMode";
+import { stemModeLaneKind, stemModeUsesTwoLanes } from "../../lib/stemMode";
 import {
   detailWaveformBuckets,
   performanceWaveformViewportSeconds,
@@ -69,7 +69,6 @@ import {
 } from "../../lib/waveformCache";
 import { isStreamTrack } from "../../lib/streamTrack";
 import { Waveform, type SeekDetail } from "../library/Waveform";
-import { PerformanceWaveformCanvas, type PerformanceWaveLaneSource } from "./PerformanceWaveformCanvas";
 import type { EqStemLayer, MidiFeedback, MidiLayerState, MidiMapping, MidiResolvedAction } from "../../lib/midi/mapping";
 import { MIDI_PRESETS } from "../../lib/midi/presets";
 import { mappingForPort, dispatchMidiMessage, MidiEchoGuard, MidiFourteenBit, parseMidiBytes, scaleRangeToUnit, scaleUnitToRange, toggleEqStemLayer } from "../../lib/midi/mapping";
@@ -85,7 +84,7 @@ import {
 } from "../../lib/midiJog";
 import { usesLocalLibraryRecord } from "../../lib/playbackTrackSource";
 import { STEM_GAIN_UNITY, stemEqRingFillPath, stemEqRingTrackPath, stemEqToGain, stemGainToEq } from "../../lib/stemEq";
-import { knobBias, snapKnobToCenter, stemDeckLog, stemJobLine } from "../../lib/stemDeckLog";
+import { knobBias, snapKnobToCenter, stemDeckLog } from "../../lib/stemDeckLog";
 
 type TempoRangeId = "6" | "10" | "16" | "wide";
 
@@ -190,14 +189,12 @@ export interface PerformanceWorkspaceProps {
     channelGain: number,
   ) => void;
   onMasterVolumeChange: (volume: number) => void;
-  onStartStems: (side: 0 | 1) => void;
   onEnsureStemWaveScan?: (side: 0 | 1) => void;
   onReleaseStemWaveScan?: (trackId: number) => void;
   onStemWaveMaskChange?: (mask: number) => void;
   onDownloadStemModel: () => void;
-  onToggleStem: (side: 0 | 1, stem: StemName) => void;
+  onToggleStemAll: (side: 0 | 1) => void;
   onStemGain: (side: 0 | 1, stem: StemName, value: number) => void;
-  onOriginalMode: (side: 0 | 1) => void;
   onSetLoop: (side: 0 | 1, start: number, length: number) => void;
   onClearLoop: (side: 0 | 1) => void;
   onSaveCuePoints: (track: Track, cues: CuePoint[]) => Promise<void>;
@@ -349,39 +346,23 @@ type StemOption = {
   shortcut: string;
   bit: number;
   gainIndex: 0 | 1 | 2 | 3;
-  icon: typeof Drum;
+  icon: typeof Mic;
 };
 
-const FOUR_STEM_OPTIONS: StemOption[] = [
-  { stem: "drums", label: "DRUMS", short: "D", shortcut: "D", bit: STEM_WAVE_BITS.drums, gainIndex: 0, icon: Drum },
-  { stem: "bass", label: "BASS", short: "B", shortcut: "B", bit: STEM_WAVE_BITS.bass, gainIndex: 1, icon: Guitar },
-  { stem: "other", label: "OTHER", short: "O", shortcut: "O", bit: STEM_WAVE_BITS.other, gainIndex: 2, icon: AudioLines },
-  { stem: "vocals", label: "VOCALS", short: "V", shortcut: "V", bit: STEM_WAVE_BITS.vocals, gainIndex: 3, icon: Mic },
-];
-
 const TWO_STEM_OPTIONS: StemOption[] = [
-  { stem: "other", label: "INSTRUMENTAL", short: "I", shortcut: "I", bit: STEM_WAVE_BITS.other, gainIndex: 2, icon: AudioLines },
   { stem: "vocals", label: "VOCALS", short: "V", shortcut: "V", bit: STEM_WAVE_BITS.vocals, gainIndex: 3, icon: Mic },
-];
-
-const FOUR_STEM_EQ_KNOBS: { stem: StemName; label: string; gainIndex: 0 | 1 | 2 | 3 }[] = [
-  { stem: "vocals", label: "VOCALS", gainIndex: 3 },
-  { stem: "other", label: "OTHER", gainIndex: 2 },
-  { stem: "bass", label: "BASS", gainIndex: 1 },
-  { stem: "drums", label: "DRUMS", gainIndex: 0 },
 ];
 
 const TWO_STEM_EQ_KNOBS: { stem: StemName; label: string; gainIndex: 0 | 1 | 2 | 3 }[] = [
   { stem: "vocals", label: "VOCALS", gainIndex: 3 },
-  { stem: "other", label: "INSTRUMENTAL", gainIndex: 2 },
 ];
 
 function stemOptions(mode: StemMode): StemOption[] {
-  return stemModeUsesFourLanes(mode) ? FOUR_STEM_OPTIONS : stemModeUsesTwoLanes(mode) ? TWO_STEM_OPTIONS : [];
+  return stemModeUsesTwoLanes(mode) ? TWO_STEM_OPTIONS : [];
 }
 
-function stemEqKnobs(mode: StemMode) {
-  return stemModeUsesFourLanes(mode) ? FOUR_STEM_EQ_KNOBS : stemModeUsesTwoLanes(mode) ? TWO_STEM_EQ_KNOBS : [];
+function stemEqKnobs(_mode: StemMode) {
+  return TWO_STEM_EQ_KNOBS;
 }
 
 /** 低于这个幅度就当作底噪留空（后端 amp 已归一化到 0..1）。 */
@@ -674,11 +655,17 @@ function DeckWave({
   deck,
   side,
   position,
+  waveform,
+  interactiveScrub,
+  snapRail,
   onTrackDrop,
 }: {
   deck: PerformanceDeckModel;
   side: 0 | 1;
   position: number;
+  waveform: WaveformData | null;
+  interactiveScrub: boolean;
+  snapRail: boolean;
   onTrackDrop: PerformanceWorkspaceProps["onTrackDrop"];
 }) {
   const track = deck.track;
@@ -712,6 +699,29 @@ function DeckWave({
       }}
     >
       {!track ? <span className="kd-performance-wave-empty" /> : null}
+      {track && waveform ? (
+        <Waveform
+          className="kd-performance-focus-wave"
+          trackId={track.id}
+          track={track}
+          position={position}
+          duration={deck.duration || track.duration || 0}
+          cueMs={track.cue_ms}
+          endMs={track.end_ms}
+          cuePoints={track.cue_points}
+          loopStart={deck.loopStart}
+          loopLength={deck.loopLength}
+          height={50}
+          seekable={false}
+          showBeatGrid
+          viewportSeconds={performanceWaveformViewportSeconds(deck.rate)}
+          playing={deck.playing}
+          playbackRate={deck.rate}
+          waveform={waveform}
+          interactiveScrub={interactiveScrub}
+          snapRail={snapRail}
+        />
+      ) : null}
       <span className="kd-performance-wave-id" aria-hidden="true">{side === 0 ? "A" : "B"}</span>
       <span className="kd-performance-wave-bpm">{bpm ? bpm.toFixed(1) : "—"}</span>
       <span className="kd-performance-wave-time">{formatDuration(position)}</span>
@@ -734,9 +744,9 @@ function ToolbarWaveChannels({ displayMask, stemMode, onDisplayMask }: {
       <b>WAVES</b>
       <button
         type="button"
-        data-active={(displayMask & ORIGINAL_WAVE_BIT) !== 0 || undefined}
+        data-active
+        disabled
         title="原曲波形"
-        onClick={() => onDisplayMask(displayMask ^ ORIGINAL_WAVE_BIT)}
       >
         ORG
       </button>
@@ -758,9 +768,25 @@ function ToolbarWaveChannels({ displayMask, stemMode, onDisplayMask }: {
 function StemWaveLanes({
   displayMask,
   stemMode,
+  track,
+  position,
+  duration,
+  rate,
+  playing,
+  interactiveScrub,
+  snapRail,
+  sources,
 }: {
   displayMask: number;
   stemMode: StemMode;
+  track: Track | null;
+  position: number;
+  duration: number;
+  rate: number;
+  playing: boolean;
+  interactiveScrub: boolean;
+  snapRail: boolean;
+  sources: ReadonlyMap<StemName, { waveform: WaveformData | null; placeholder: WaveformData | null; opacity: number }>;
 }) {
   // 车道数量只由用户按键决定。波形响应到达前保留同高空槽，加载/换歌不会把
   // STEM 区先清零再逐条撑开。
@@ -775,7 +801,27 @@ function StemWaveLanes({
             data-stem={stem}
             data-kd-performance-wave-lane={stem}
           >
-            <span className="kd-performance-stem-wave-empty" aria-hidden="true" />
+            {track && sources.get(stem)?.waveform ? (
+              <Waveform
+                className="kd-performance-stem-wave"
+                trackId={track.id}
+                track={track}
+                position={position}
+                duration={duration}
+                height={17}
+                seekable={false}
+                viewportSeconds={performanceWaveformViewportSeconds(rate)}
+                playing={playing}
+                playbackRate={rate}
+                waveform={sources.get(stem)!.waveform!}
+                placeholder={sources.get(stem)!.placeholder}
+                opacity={sources.get(stem)!.opacity}
+                silenceThreshold={STEM_SILENCE_THRESHOLD}
+                verticalInsetRatio={0.1}
+                interactiveScrub={interactiveScrub}
+                snapRail={snapRail}
+              />
+            ) : <span className="kd-performance-stem-wave-empty" aria-hidden="true" />}
             <i className="kd-performance-stem-lane-icon" title={label} aria-label={label}>
               <Icon size={10} strokeWidth={2.4} />
             </i>
@@ -834,8 +880,8 @@ function PerformanceDeckWaves({
       : null),
     [buckets, duration, track?.id],
   );
-  const laneSources = useMemo<PerformanceWaveLaneSource[]>(() => {
-    const result: PerformanceWaveLaneSource[] = [];
+  const stemLaneSources = useMemo(() => {
+    const result = new Map<StemName, { waveform: WaveformData | null; placeholder: WaveformData | null; opacity: number }>();
     for (const { stem, bit, gainIndex } of stemOptions(stemMode)) {
       if ((displayMask & bit) === 0) continue;
       const waveform = track && waveforms[stem]?.track_id === track.id ? waveforms[stem] ?? null : null;
@@ -844,22 +890,10 @@ function PerformanceDeckWaves({
         : (stemState.mask & bit) !== 0
           ? clamp(stemState.gains[gainIndex] ?? 1, 0, 1)
           : 0;
-      result.push({
-        key: stem,
+      result.set(stem, {
         waveform: waveform ?? (stemState.enabled ? pendingWave : null),
         placeholder: mainWaveform,
         opacity: gain >= 0.999 ? 1 : 0.25 + 0.75 * gain,
-        silenceThreshold: STEM_SILENCE_THRESHOLD,
-        verticalInsetRatio: 0.1,
-      });
-    }
-    if ((displayMask & ORIGINAL_WAVE_BIT) !== 0) {
-      result.push({
-        key: "org",
-        waveform: mainWaveform,
-        opacity: 1,
-        silenceThreshold: 0,
-        verticalInsetRatio: 0.1,
       });
     }
     return result;
@@ -867,32 +901,26 @@ function PerformanceDeckWaves({
 
   return (
     <div className="kd-performance-deck-waves" data-side={side === 0 ? "a" : "b"}>
-      <StemWaveLanes displayMask={displayMask} stemMode={stemMode} />
-      {(displayMask & ORIGINAL_WAVE_BIT) !== 0 ? (
-        <StableDeckWave
-          deck={deck}
-          side={side}
-          position={position}
-          onTrackDrop={onTrackDrop}
-        />
-      ) : null}
-      <PerformanceWaveformCanvas
-        trackId={track?.id ?? null}
+      <StemWaveLanes
+        displayMask={displayMask}
+        stemMode={stemMode}
+        track={track}
         position={position}
         duration={duration}
         rate={deck.rate}
         playing={deck.playing}
-        interactive={interactiveScrub}
-        snap={snapRail}
-        lanes={laneSources}
-        bpm={track?.bpm ?? null}
-        firstBeat={track?.first_beat ?? null}
-        bpmConfidence={track?.bpm_confidence ?? null}
-        cuePoints={track?.cue_points ?? []}
-        cueMs={track?.cue_ms ?? null}
-        endMs={track?.end_ms ?? null}
-        loopStart={deck.loopStart}
-        loopLength={deck.loopLength}
+        interactiveScrub={interactiveScrub}
+        snapRail={snapRail}
+        sources={stemLaneSources}
+      />
+      <StableDeckWave
+        deck={deck}
+        side={side}
+        position={position}
+        waveform={mainWaveform}
+        interactiveScrub={interactiveScrub}
+        snapRail={snapRail}
+        onTrackDrop={onTrackDrop}
       />
       <DeckScratchSurface
         deck={deck}
@@ -968,6 +996,8 @@ function DeckInfo({ deck, side, preserveBarPhase, onSeek, onTrackDrop }: {
             height={18}
             buckets={640}
             preserveBarPhase={preserveBarPhase}
+            playing={deck.playing}
+            playbackRate={deck.rate}
             onSeek={(detail) => onSeek(side, detail)}
             className="kd-performance-overview-wave"
           />
@@ -1120,82 +1150,6 @@ function HotCuePads({ deck, side, quantize, onSeek, onSaveCuePoints }: {
           )}
         </div>
       ) : null}
-    </div>
-  );
-}
-
-/** STEM 垫只负责开关；音量改由中央外侧的 STEM EQ 旋钮控制。 */
-function StemPads({ deck, stemState, stemModel, stemMode, side, onDownloadStemModel, onToggleStem }: {
-  deck: PerformanceDeckModel;
-  stemState: PerformanceStemDeckModel;
-  stemModel: StemModelStatus | null;
-  stemMode: StemMode;
-  side: 0 | 1;
-  onDownloadStemModel: PerformanceWorkspaceProps["onDownloadStemModel"];
-  onToggleStem: PerformanceWorkspaceProps["onToggleStem"];
-}) {
-  const track = deck.track;
-  if (!track) return null;
-  if (stemModel?.supported && stemModel.state !== "ready") {
-    const downloading = stemModel.state === "queued" || stemModel.state === "downloading";
-    const progress = Math.round(stemModel.progress * 100);
-    return (
-      <div className="kd-performance-stem-download" data-side={side === 0 ? "a" : "b"}>
-        <button
-          type="button"
-          disabled={downloading}
-          onClick={onDownloadStemModel}
-          aria-label="下载分轨模型"
-        >
-          {downloading
-            ? `正在下载分轨模型 ${progress}%`
-            : "点击此处下载分轨模型（需要连接 Hugging Face）"}
-        </button>
-        {downloading ? (
-          <i aria-hidden="true"><span style={{ width: `${progress}%` }} /></i>
-        ) : null}
-      </div>
-    );
-  }
-  const ready = stemState.status?.state === "ready";
-  const busy = Boolean(
-    stemState.status && !["missing", "ready", "error"].includes(stemState.status.state),
-  );
-  const job = stemJobLine(stemState.status, stemModel);
-  return (
-    <div className="kd-performance-stem-pads" data-mode={stemModeLaneKind(stemMode)} data-side={side === 0 ? "a" : "b"} data-enabled={stemState.enabled || undefined}>
-      {stemOptions(stemMode).map(({ stem, label, bit, icon: Icon }) => {
-        const audible = stemState.enabled && (stemState.mask & bit) !== 0;
-        return (
-          <div
-            className="kd-performance-stem-pad"
-            key={stem}
-            data-stem={stem}
-            data-audible={audible || undefined}
-            data-ready={ready || undefined}
-          >
-            <button
-              type="button"
-              className="kd-performance-stem-pad-main"
-              disabled={busy}
-              title={
-                ready
-                  ? `${label} ${audible ? "静音" : "启用"} · Shift+${label[0]}`
-                  : busy
-                    ? job
-                    : `生成并启用 ${label}`
-              }
-              onClick={() => onToggleStem(side, stem)}
-            >
-              <Icon size={13} strokeWidth={2.2} />
-              <span>{label}</span>
-              <i className="kd-performance-stem-mute" data-muted={!audible || undefined}>
-                <VolumeX size={10} strokeWidth={2.4} />
-              </i>
-            </button>
-          </div>
-        );
-      })}
     </div>
   );
 }
@@ -1830,19 +1784,41 @@ function StemEqStrip({
   side,
   gains,
   stemMode,
+  stemState,
+  stemModel,
+  trackReady,
   midiActive,
   ready,
+  onToggle,
+  onDownload,
   onChange,
 }: {
   side: 0 | 1;
   gains: PerformanceStemGains;
   stemMode: StemMode;
+  stemState: PerformanceStemDeckModel;
+  stemModel: StemModelStatus | null;
+  trackReady: boolean;
   midiActive: boolean;
   ready: boolean;
+  onToggle: () => void;
+  onDownload: () => void;
   onChange: (stem: StemName, gain: number) => void;
 }) {
   const knobs = stemEqKnobs(stemMode);
-  if (knobs.length === 0) return null;
+  const modelReady = stemModel?.state === "ready";
+  const modelBusy = stemModel?.state === "queued" || stemModel?.state === "downloading";
+  const modelProgress = Math.round((stemModel?.progress ?? 0) * 100);
+  const actionLabel = modelBusy
+    ? `${modelProgress}%`
+    : stemState.enabled
+      ? "ON"
+      : "STEM";
+  const actionTitle = !trackReady
+    ? "STEM 仅支持本机曲库文件"
+    : !modelReady
+      ? (modelBusy ? `ByteDance 模型下载中 ${modelProgress}%` : "下载并准备 ByteDance STEM")
+      : (stemState.enabled ? "切回原曲" : "启动 ByteDance STEM");
   return (
     <div
       className="kd-performance-stem-eq"
@@ -1850,7 +1826,25 @@ function StemEqStrip({
       data-side={side === 0 ? "a" : "b"}
       data-midi={midiActive || undefined}
     >
-      <b>STEM EQ</b>
+      <header>
+        <b>STEM EQ</b>
+        <button
+          type="button"
+          className="kd-performance-stem-toggle"
+          data-active={stemState.enabled || undefined}
+          data-loading={modelBusy || undefined}
+          aria-pressed={stemState.enabled}
+          aria-label={`${side === 0 ? "A" : "B"} Deck STEM`}
+          title={actionTitle}
+          disabled={!trackReady || modelBusy || stemModel?.state === "unsupported"}
+          onClick={() => {
+            if (!modelReady) onDownload();
+            else onToggle();
+          }}
+        >
+          {actionLabel}
+        </button>
+      </header>
       <div>
         {knobs.map(({ stem, label, gainIndex }) => (
           <Knob
@@ -1875,7 +1869,6 @@ function DeckControls({
   deck,
   stemState,
   stemModel,
-  stemMode,
   side,
   modules,
   quantize,
@@ -1891,8 +1884,6 @@ function DeckControls({
   onPreviewRate,
   hardwareUnit,
   onSoftwareTempoOverride,
-  onDownloadStemModel,
-  onToggleStem,
   onSetLoop,
   onClearLoop,
   onSaveCuePoints,
@@ -1902,7 +1893,6 @@ function DeckControls({
   deck: PerformanceDeckModel;
   stemState: PerformanceStemDeckModel;
   stemModel: StemModelStatus | null;
-  stemMode: StemMode;
   side: 0 | 1;
   modules: Set<ModuleId>;
   quantize: boolean;
@@ -1918,8 +1908,6 @@ function DeckControls({
   onPreviewRate: (side: 0 | 1, rate: number) => void;
   hardwareUnit: number | null;
   onSoftwareTempoOverride: (side: 0 | 1) => void;
-  onDownloadStemModel: PerformanceWorkspaceProps["onDownloadStemModel"];
-  onToggleStem: PerformanceWorkspaceProps["onToggleStem"];
   onSetLoop: PerformanceWorkspaceProps["onSetLoop"];
   onClearLoop: PerformanceWorkspaceProps["onClearLoop"];
   onSaveCuePoints: PerformanceWorkspaceProps["onSaveCuePoints"];
@@ -1936,17 +1924,6 @@ function DeckControls({
   return (
     <section className="kd-performance-deck-controls" data-side={side === 0 ? "a" : "b"} data-playing={deck.playing || undefined}>
       <div className="kd-performance-deck-main">
-        {stemMode !== "none" ? (
-          <StemPads
-            deck={deck}
-            stemState={stemState}
-            stemModel={stemModel}
-            stemMode={stemMode}
-            side={side}
-            onDownloadStemModel={onDownloadStemModel}
-            onToggleStem={onToggleStem}
-          />
-        ) : null}
         <div className="kd-performance-transport">
           <button type="button" className="kd-performance-play" data-active={deck.playing || undefined} onClick={() => onTogglePlay(side)} disabled={!track} aria-label={deck.playing ? "暂停" : "播放"}>
             {deck.playing ? <Pause size={18} /> : <Play size={18} />}
@@ -2010,12 +1987,11 @@ export function PerformanceWorkspace({
   onRateChange,
   onMixerChange,
   onMasterVolumeChange,
-  onStartStems,
   onEnsureStemWaveScan,
   onReleaseStemWaveScan,
   onStemWaveMaskChange,
   onDownloadStemModel,
-  onToggleStem,
+  onToggleStemAll,
   onStemGain,
   onSetLoop,
   onClearLoop,
@@ -2060,12 +2036,8 @@ export function PerformanceWorkspace({
   // Fast Refresh can retain a pre-v3 mask with ORG turned off. Normalize at the render boundary,
   // not only while reading localStorage, so an already-open Performance view recovers immediately.
   const stemDisplayMask = normalizePerformanceWaveMask(storedStemDisplayMask);
-  const allowedStemDisplayMask = stemModeUsesFourLanes(stemMode)
-    ? 0b1111
-    : stemModeUsesTwoLanes(stemMode)
-      ? STEM_WAVE_BITS.other | STEM_WAVE_BITS.vocals
-      : 0;
-  const activeStemDisplayMask = stemDisplayMask & (ORIGINAL_WAVE_BIT | allowedStemDisplayMask);
+  const allowedStemDisplayMask = stemModeUsesTwoLanes(stemMode) ? STEM_WAVE_BITS.vocals : 0;
+  const activeStemDisplayMask = ORIGINAL_WAVE_BIT | (stemDisplayMask & allowedStemDisplayMask);
   const setStemDisplayMask = useCallback((mask: number) => {
     setStoredStemDisplayMask(normalizePerformanceWaveMask(mask));
   }, []);
@@ -2165,16 +2137,21 @@ export function PerformanceWorkspace({
       decks[0].track?.id ?? null,
       decks[1].track?.id ?? null,
     ];
+    const wantsVocalWave = performanceStemLanesVisible(activeStemDisplayMask);
+    const active: [number | null, number | null] = [
+      wantsVocalWave ? next[0] : null,
+      wantsVocalWave ? next[1] : null,
+    ];
     [...new Set(previous.filter((trackId): trackId is number => trackId !== null))]
-      .filter((trackId) => !next.includes(trackId))
+      .filter((trackId) => !active.includes(trackId))
       .forEach((trackId) => onReleaseStemWaveScan?.(trackId));
-    stemScanTrackIdsRef.current = next;
+    stemScanTrackIdsRef.current = active;
     if (stemModel?.state !== "ready") return;
     // Give the original 640-column rail its first paint, then automatically prepare STEM around
     // each loaded Deck. Staggering the mounts avoids two cold decode requests landing together;
     // the native scheduler still owns inference priority and expands beyond the viewport later.
     const timers = ([0, 1] as const).flatMap((side) => {
-      if (next[side] === null) return [];
+      if (active[side] === null) return [];
       return [window.setTimeout(
         () => onEnsureStemWaveScan?.(side),
         700 + side * 300,
@@ -2184,6 +2161,7 @@ export function PerformanceWorkspace({
   }, [
     decks[0].track?.id,
     decks[1].track?.id,
+    activeStemDisplayMask,
     onEnsureStemWaveScan,
     onReleaseStemWaveScan,
     stemModel?.state,
@@ -2325,7 +2303,7 @@ export function PerformanceWorkspace({
             waveform.b[index] = Math.round(Math.min(255, Math.max(0, b)));
             if (waveform.known) waveform.known[index] = true;
           });
-          // A fresh wrapper makes Waveform repaint only when a real Spleeter4 block changed. Its
+          // A fresh wrapper makes Waveform repaint only when a real ByteDance block changed. Its
           // large typed timeline arrays stay shared; copying them on every visual update would
           // merely move the old polling bottleneck from JSON parsing into the JS heap.
           next[side][stem] = {
@@ -2542,18 +2520,12 @@ export function PerformanceWorkspace({
       const key = event.key.toLowerCase();
       if (key === "s") {
         event.preventDefault();
-        onStartStems(side);
-        return;
-      }
-      const stem = stemOptions(stemMode).find((option) => option.shortcut.toLowerCase() === key)?.stem;
-      if (stem) {
-        event.preventDefault();
-        onToggleStem(side, stem);
+        onToggleStemAll(side);
       }
     };
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
-  }, [decks[0].active, decks[1].active, onStartStems, onToggleStem, stemMode]);
+  }, [decks[0].active, decks[1].active, onToggleStemAll]);
 
   const viewDecks = useMemo<[PerformanceDeckModel, PerformanceDeckModel]>(
     () => [
@@ -3230,11 +3202,8 @@ export function PerformanceWorkspace({
           onPreviewRate={previewDeckRate}
           hardwareUnit={tempoHardwareUnit[0]}
           onSoftwareTempoOverride={armTempoTakeover}
-          onDownloadStemModel={onDownloadStemModel}
-          onToggleStem={onToggleStem}
           onSetLoop={handleManualSetLoop} onClearLoop={handleManualClearLoop}
           onSaveCuePoints={onSaveCuePoints} onSaveMainCue={onSaveMainCue}
-          stemMode={stemMode}
           stemLanesVisible={performanceStemLanesVisible(activeStemDisplayMask)}
         />
         <section className="kd-performance-master">
@@ -3245,8 +3214,13 @@ export function PerformanceWorkspace({
                   side={0}
                   gains={stems[0].gains}
                   stemMode={stemMode}
+                  stemState={stems[0]}
+                  stemModel={stemModel}
+                  trackReady={Boolean(decks[0].track && usesLocalLibraryRecord(decks[0].track))}
                   midiActive={eqStemMode[0] === "stems"}
                   ready={stemModel?.state === "ready" && Boolean(decks[0].track && usesLocalLibraryRecord(decks[0].track))}
+                  onToggle={() => onToggleStemAll(0)}
+                  onDownload={onDownloadStemModel}
                   onChange={(stem, gain) => onStemGain(0, stem, gain)}
                 />
                 <MixerStrip
@@ -3263,8 +3237,13 @@ export function PerformanceWorkspace({
                   side={1}
                   gains={stems[1].gains}
                   stemMode={stemMode}
+                  stemState={stems[1]}
+                  stemModel={stemModel}
+                  trackReady={Boolean(decks[1].track && usesLocalLibraryRecord(decks[1].track))}
                   midiActive={eqStemMode[1] === "stems"}
                   ready={stemModel?.state === "ready" && Boolean(decks[1].track && usesLocalLibraryRecord(decks[1].track))}
+                  onToggle={() => onToggleStemAll(1)}
+                  onDownload={onDownloadStemModel}
                   onChange={(stem, gain) => onStemGain(1, stem, gain)}
                 />
               </div>
@@ -3309,11 +3288,8 @@ export function PerformanceWorkspace({
           onPreviewRate={previewDeckRate}
           hardwareUnit={tempoHardwareUnit[1]}
           onSoftwareTempoOverride={armTempoTakeover}
-          onDownloadStemModel={onDownloadStemModel}
-          onToggleStem={onToggleStem}
           onSetLoop={handleManualSetLoop} onClearLoop={handleManualClearLoop}
           onSaveCuePoints={onSaveCuePoints} onSaveMainCue={onSaveMainCue}
-          stemMode={stemMode}
           stemLanesVisible={performanceStemLanesVisible(activeStemDisplayMask)}
         />
       </div>

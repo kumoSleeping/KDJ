@@ -55,39 +55,6 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             axum::routing::post(stems::download_model),
         )
         .route(
-            "/api/stems/debug/model",
-            axum::routing::get(stems::debug_model_status),
-        )
-        .route(
-            "/api/stems/debug",
-            axum::routing::post(stems::debug_separate),
-        )
-        .route(
-            "/api/stems/debug/{session}",
-            axum::routing::delete(stems::debug_release),
-        )
-        .route(
-            "/api/stems/debug/{session}/{lane}",
-            axum::routing::get(stems::debug_audio),
-        );
-    // SeekLab 依赖平台 ONNX 后端，仅在 macOS / Windows / Android 提供。
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "android"))]
-    let router = router
-        .route(
-            "/api/stems/lab/catalog",
-            axum::routing::get(stems::lab_catalog),
-        )
-        .route("/api/stems/lab/seek", axum::routing::post(stems::lab_seek))
-        .route(
-            "/api/stems/lab/{session}/{name}",
-            axum::routing::get(stems::lab_audio),
-        )
-        .route(
-            "/api/stems/lab/{session}",
-            axum::routing::delete(stems::lab_release),
-        );
-    router
-        .route(
             "/api/tracks/{id}/stems",
             axum::routing::get(stems::track_status)
                 .post(stems::separate_track)
@@ -114,7 +81,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                     axum::http::header::CONTENT_LENGTH,
                 ]),
         )
-        .with_state(state)
+        .with_state(state);
+    router
 }
 
 /// 起服务，返回实际监听的端口（传 0 时由系统分配）。
