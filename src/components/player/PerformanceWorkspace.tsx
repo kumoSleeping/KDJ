@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown, Mic, Minus, Pause, Play, Plus } from "lucide-react";
 import {
   channelFaderGain,
@@ -38,12 +39,9 @@ import {
   waveformPointerSeconds,
 } from "../../lib/waveformViewport";
 import {
-  PERFORMANCE_WAVE_DISPLAY_STORAGE_KEY,
   ORIGINAL_WAVE_BIT,
   STEM_WAVE_BITS,
-  normalizePerformanceWaveMask,
   performanceStemLanesVisible,
-  readPerformanceWaveMask,
 } from "../../lib/performanceWaveDisplay";
 import { useDjConfig } from "../../lib/djMix";
 import {
@@ -161,7 +159,7 @@ export interface PerformanceWorkspaceProps {
   stemModel: StemModelStatus | null;
   stemMode: StemMode;
   masterVolume: number;
-  embedded?: boolean;
+  controlHost: HTMLElement | null;
   onClose?: () => void;
   onSeek: (side: 0 | 1, detail: Omit<SeekDetail, "trackId">) => void;
   /** Hardware jog seeks must stay on an already installed physical Deck. */
@@ -203,15 +201,7 @@ export interface PerformanceWorkspaceProps {
 
 type ModuleId = "info" | "wave" | "pads" | "mixer" | "monitor";
 
-const MODULES: { id: ModuleId; label: string }[] = [
-  { id: "info", label: "INFO" },
-  { id: "wave", label: "WAVE" },
-  { id: "pads", label: "CUE" },
-  { id: "mixer", label: "MIX" },
-  { id: "monitor", label: "MON" },
-];
-const ALL_MODULES = MODULES.map((module) => module.id);
-const MODULE_STORAGE_KEY = "kd-performance-modules-v2";
+const ALL_MODULES: ModuleId[] = ["info", "wave", "pads", "mixer", "monitor"];
 const MIXER_STORAGE_KEY = "kd-performance-mixer-v2";
 const LOOP_BEATS_STORAGE_KEY = "kd-performance-loop-beats-v1";
 const CROSSFADER_ENABLED_STORAGE_KEY = "kd-performance-crossfader-enabled-v1";
@@ -254,21 +244,6 @@ const DEFAULT_MIXER: PerformanceMixerValues = {
   filter: 0,
   volume: 1,
 };
-
-function readModules(): ModuleId[] {
-  try {
-    const value = JSON.parse(localStorage.getItem(MODULE_STORAGE_KEY) ?? "null") as unknown;
-    if (Array.isArray(value)) {
-      const selected = value.filter((item): item is ModuleId =>
-        ALL_MODULES.includes(item as ModuleId),
-      );
-      if (selected.length) return selected;
-    }
-  } catch {
-    // 坏存档回到默认全开。
-  }
-  return ALL_MODULES;
-}
 
 function readMixer(): [PerformanceMixerValues, PerformanceMixerValues] {
   try {
@@ -729,42 +704,6 @@ function DeckWave({
   );
 }
 
-/** 顶栏硬件式按键：A/B 共用可见车道，与 STEM 声音掩码完全独立。 */
-function ToolbarWaveChannels({ displayMask, stemMode, onDisplayMask }: {
-  displayMask: number;
-  stemMode: StemMode;
-  onDisplayMask: (mask: number) => void;
-}) {
-  return (
-    <span
-      className="kd-performance-toolbar-waves"
-      role="group"
-      aria-label="A/B Deck 共用波形显示"
-    >
-      <b>WAVES</b>
-      <button
-        type="button"
-        data-active
-        disabled
-        title="原曲波形"
-      >
-        ORG
-      </button>
-      {stemOptions(stemMode).map(({ stem, short, bit }) => (
-        <button
-          type="button"
-          key={stem}
-          data-active={(displayMask & bit) !== 0 || undefined}
-          title={`${stem.toUpperCase()} 波形`}
-          onClick={() => onDisplayMask(displayMask ^ bit)}
-        >
-          {short}
-        </button>
-      ))}
-    </span>
-  );
-}
-
 function StemWaveLanes({
   displayMask,
   stemMode,
@@ -974,6 +913,7 @@ function DeckInfo({ deck, side, preserveBarPhase, onSeek, onTrackDrop }: {
         if (ids.length) onTrackDrop(side, ids);
       }}
     >
+      <span className="kd-performance-overview-id" aria-hidden="true">{side === 0 ? "A" : "B"}</span>
       <span className="kd-performance-vinyl" aria-hidden="true">
         {track ? (
           <span className="kd-performance-vinyl-record" data-spinning={deck.playing || undefined}>
@@ -1971,7 +1911,7 @@ export function PerformanceWorkspace({
   stemModel,
   stemMode,
   masterVolume,
-  embedded = false,
+  controlHost,
   onClose,
   onSeek,
   onJogSeek,
@@ -1999,7 +1939,6 @@ export function PerformanceWorkspace({
   onSaveMainCue,
 }: PerformanceWorkspaceProps) {
   const autoBeatSync = useDjConfig((state) => state.autoBeatSync);
-  const [visible, setVisible] = useState<ModuleId[]>(readModules);
   const [quantize, setQuantize] = useState(true);
   const [mixers, setMixers] = useState<[PerformanceMixerValues, PerformanceMixerValues]>(readMixer);
   const [visualRates, setVisualRates] = useState<[number | null, number | null]>([null, null]);
@@ -2032,15 +1971,9 @@ export function PerformanceWorkspace({
   const [midiPort, setMidiPort] = useState<string | null>(null);
   const [headMix, setHeadMix] = useState(0);
   const [loopBeats, setLoopBeats] = useState<[number, number]>(readLoopBeats);
-  const [storedStemDisplayMask, setStoredStemDisplayMask] = useState(readPerformanceWaveMask);
-  // Fast Refresh can retain a pre-v3 mask with ORG turned off. Normalize at the render boundary,
-  // not only while reading localStorage, so an already-open Performance view recovers immediately.
-  const stemDisplayMask = normalizePerformanceWaveMask(storedStemDisplayMask);
-  const allowedStemDisplayMask = stemModeUsesTwoLanes(stemMode) ? STEM_WAVE_BITS.vocals : 0;
-  const activeStemDisplayMask = ORIGINAL_WAVE_BIT | (stemDisplayMask & allowedStemDisplayMask);
-  const setStemDisplayMask = useCallback((mask: number) => {
-    setStoredStemDisplayMask(normalizePerformanceWaveMask(mask));
-  }, []);
+  // 四轨底栏固定为 A/B 两条局部原曲 + A/B 两条整曲预览；STEM 只留在右侧 EQ，
+  // 不再把额外车道插进底栏，也不为不可见车道启动后台波形扫描。
+  const activeStemDisplayMask = ORIGINAL_WAVE_BIT;
   /** SYNC 锁定：base 是按下 SYNC 的那台；关系 otherEff = multiple × baseEff，双向跟随。 */
   const [syncLock, setSyncLock] = useState<{ base: 0 | 1; multiple: number } | null>(null);
   const [stemWaveforms, setStemWaveforms] = useState<[
@@ -2113,7 +2046,7 @@ export function PerformanceWorkspace({
     trackIds: [decks[0].track?.id ?? null, decks[1].track?.id ?? null] as [number | null, number | null],
   });
   const mixerSignatureRef = useRef<[string, string]>(["", ""]);
-  const modules = useMemo(() => new Set(visible), [visible]);
+  const modules = useMemo(() => new Set<ModuleId>(ALL_MODULES), []);
 
   useEffect(() => () => {
     if (syncConfirmationTimerRef.current !== null) {
@@ -2122,15 +2055,9 @@ export function PerformanceWorkspace({
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(MODULE_STORAGE_KEY, JSON.stringify(visible));
-  }, [visible]);
-  useEffect(() => {
     localStorage.setItem(LOOP_BEATS_STORAGE_KEY, JSON.stringify(loopBeats));
   }, [loopBeats]);
-  useEffect(() => {
-    localStorage.setItem(PERFORMANCE_WAVE_DISPLAY_STORAGE_KEY, JSON.stringify(stemDisplayMask));
-    onStemWaveMaskChange?.(stemDisplayMask);
-  }, [onStemWaveMaskChange, stemDisplayMask]);
+  useEffect(() => onStemWaveMaskChange?.(ORIGINAL_WAVE_BIT), [onStemWaveMaskChange]);
   useEffect(() => {
     const previous = stemScanTrackIdsRef.current;
     const next: [number | null, number | null] = [
@@ -3123,176 +3050,106 @@ export function PerformanceWorkspace({
     syncLock,
   ]);
 
-  const toggleModule = (id: ModuleId) => {
-    setVisible((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
-  };
+  const renderDeckControls = (side: 0 | 1) => (
+    <DeckControls
+      deck={viewDecks[side]}
+      stemState={stems[side]}
+      stemModel={stemModel}
+      side={side}
+      modules={modules}
+      quantize={quantize}
+      loopBeats={loopBeats[side]}
+      setLoopBeats={(beats) => setLoopBeats((current) => side === 0 ? [beats, current[1]] : [current[0], beats])}
+      onSeek={handleManualSeek}
+      onTogglePlay={handleManualTogglePlay}
+      onMainCue={handleManualMainCue}
+      syncLocked={syncLock !== null}
+      syncEnabled={syncEnabled}
+      onToggleSync={toggleSyncLock}
+      onRateChange={handleDeckRateChange}
+      onPreviewRate={previewDeckRate}
+      hardwareUnit={tempoHardwareUnit[side]}
+      onSoftwareTempoOverride={armTempoTakeover}
+      onSetLoop={handleManualSetLoop}
+      onClearLoop={handleManualClearLoop}
+      onSaveCuePoints={onSaveCuePoints}
+      onSaveMainCue={onSaveMainCue}
+      stemLanesVisible={performanceStemLanesVisible(activeStemDisplayMask)}
+    />
+  );
 
-  return (
-    <div className="kd-performance-workspace" data-embedded={embedded || undefined} data-testid="performance-workspace">
-      <header className="kd-performance-toolbar">
-        <strong>PERFORMANCE</strong>
+  const controlSurface = (
+    <div className="kd-performance-controls-surface" data-testid="performance-control-panel">
+      <div className="kd-performance-side-toolbar">
         {midiPort ? <span className="kd-performance-midi" data-active title={midiPort}>MIDI</span> : null}
-        <button type="button" data-active={quantize || undefined} onClick={() => setQuantize((value) => !value)}>QNT</button>
-        <ToolbarWaveChannels
-          displayMask={activeStemDisplayMask}
-          stemMode={stemMode}
-          onDisplayMask={setStemDisplayMask}
-        />
-        {modules.has("monitor") ? (
+        <button type="button" data-active={quantize || undefined} aria-pressed={quantize} onClick={() => setQuantize((value) => !value)}>QNT</button>
+      </div>
+      <div className="kd-performance-control-scroll">
+        <section className="kd-performance-control-block" data-block="deck" data-side="a">
+          <header><strong>DECK A</strong><span>CUE · LOOP · TEMPO</span></header>
+          {renderDeckControls(0)}
+        </section>
+        <section className="kd-performance-control-block" data-block="mixer">
+          <header><strong>MIXER</strong><span>EQ · CHANNEL · CROSSFADER</span></header>
+          <section className="kd-performance-master">
+            <div className="kd-performance-mixer-cluster">
+              <StemEqStrip side={0} gains={stems[0].gains} stemMode={stemMode} stemState={stems[0]} stemModel={stemModel} trackReady={Boolean(decks[0].track && usesLocalLibraryRecord(decks[0].track))} midiActive={eqStemMode[0] === "stems"} ready={stemModel?.state === "ready" && Boolean(decks[0].track && usesLocalLibraryRecord(decks[0].track))} onToggle={() => onToggleStemAll(0)} onDownload={onDownloadStemModel} onChange={(stem, gain) => onStemGain(0, stem, gain)} />
+              <MixerStrip side={0} mixer={mixers[0]} setMixer={(patch) => patchMixer(0, patch)} />
+              <MixerStrip side={1} mixer={mixers[1]} setMixer={(patch) => patchMixer(1, patch)} />
+              <StemEqStrip side={1} gains={stems[1].gains} stemMode={stemMode} stemState={stems[1]} stemModel={stemModel} trackReady={Boolean(decks[1].track && usesLocalLibraryRecord(decks[1].track))} midiActive={eqStemMode[1] === "stems"} ready={stemModel?.state === "ready" && Boolean(decks[1].track && usesLocalLibraryRecord(decks[1].track))} onToggle={() => onToggleStemAll(1)} onDownload={onDownloadStemModel} onChange={(stem, gain) => onStemGain(1, stem, gain)} />
+            </div>
+            <div className="kd-performance-crossfader" data-off={crossfaderEnabled ? undefined : true}>
+              <button type="button" className="kd-performance-crossfader-toggle" data-active={crossfaderEnabled || undefined} aria-pressed={crossfaderEnabled} aria-label="交叉推子" onClick={toggleCrossfaderEnabled}>XF</button>
+              <span data-side="a">A</span>
+              <span className="kd-performance-crossfader-body">
+                <i className="kd-performance-crossfader-scale" aria-hidden="true"><u /><u /><u /><u /><u /></i>
+                <MixerFader axis="horizontal" value={crossfaderEnabled ? (crossfader + 1) / 2 : 0.5} label="Crossfader A B" disabled={!crossfaderEnabled} onChange={(ratio) => setCrossfader(ratio * 2 - 1)} onReset={() => setCrossfader(0)} />
+                <b>{!crossfaderEnabled || crossfader === 0 ? "CENTER" : crossfader < 0 ? "A " + Math.round(-crossfader * 100) : "B " + Math.round(crossfader * 100)}</b>
+              </span>
+              <span data-side="b">B</span>
+              <span className="kd-performance-crossfader-spacer" aria-hidden="true" />
+            </div>
+          </section>
+        </section>
+        <section className="kd-performance-control-block" data-block="deck" data-side="b">
+          <header><strong>DECK B</strong><span>CUE · LOOP · TEMPO</span></header>
+          {renderDeckControls(1)}
+        </section>
+        <section className="kd-performance-control-block kd-performance-monitor-block" data-block="monitor">
+          <header><strong>OUTPUT</strong><span>CUE / MASTER</span></header>
           <span className="kd-performance-output-strips">
             <label title="双击恢复中间"><b>CUE MIX</b><input type="range" min={-1} max={1} step={0.01} value={headMix} onChange={(event) => setHeadMix(Number(event.currentTarget.value))} onDoubleClick={() => setHeadMix(0)} /></label>
             <label title="双击恢复 100%"><b>MASTER</b><input type="range" min={0} max={1} step={0.01} value={masterVolume} onChange={(event) => onMasterVolumeChange(Number(event.currentTarget.value))} onDoubleClick={() => onMasterVolumeChange(1)} /></label>
           </span>
-        ) : null}
-        <span className="kd-performance-module-switches">
-          {MODULES.map((module) => <button type="button" key={module.id} data-active={modules.has(module.id) || undefined} onClick={() => toggleModule(module.id)}>{module.label}</button>)}
-        </span>
-        {!embedded && onClose ? <button type="button" className="kd-performance-toolbar-close" onClick={onClose} aria-label="关闭 Performance">×</button> : null}
-      </header>
+        </section>
+      </div>
+    </div>
+  );
 
-      {modules.has("wave") ? (
-        <div className="kd-performance-wave-stack">
+  return (
+    <>
+      <div className="kd-performance-workspace" data-testid="performance-workspace">
+        <header className="kd-performance-wave-toolbar">
+          <strong>DECK A / B</strong>
+          <span>LIVE + OVERVIEW</span>
+          {onClose ? <button type="button" onClick={onClose} aria-label="收起四轨演出视图" title="收起四轨演出视图"><ChevronDown size={15} /></button> : null}
+        </header>
+        <div className="kd-performance-wave-stack" aria-label="Deck A/B 实时滚动波形">
           {([0, 1] as const).map((side) => {
             const position = scratchPreviews[side] ?? decks[side].position;
             const interactiveScrub = midiScratchActive[side] || scratchPreviews[side] != null;
             const other = (1 - side) as 0 | 1;
             return (
-              <PerformanceDeckWaves
-                key={side}
-              deck={viewDecks[side]}
-                other={viewDecks[other]}
-              stemState={stems[side]}
-              stemMode={stemMode}
-                side={side}
-              position={position}
-              interactiveScrub={interactiveScrub}
-              snapRail={false}
-              displayMask={activeStemDisplayMask}
-              waveforms={stemWaveforms[side]}
-                autoBeatSync={autoBeatSync}
-                syncMultiple={scratchMultiple(side)}
-                onSeek={handleManualSeek}
-                onScratchHold={handleManualScratchHold}
-                onScratchRelease={handleManualScratchRelease}
-                onScratchPreview={updateScratchPreview}
-                onScratchTick={onJogScratchTick}
-                onTrackDrop={handleManualTrackDrop}
-              />
+              <PerformanceDeckWaves key={side} deck={viewDecks[side]} other={viewDecks[other]} stemState={stems[side]} stemMode={stemMode} side={side} position={position} interactiveScrub={interactiveScrub} snapRail={false} displayMask={ORIGINAL_WAVE_BIT} waveforms={stemWaveforms[side]} autoBeatSync={autoBeatSync} syncMultiple={scratchMultiple(side)} onSeek={handleManualSeek} onScratchHold={handleManualScratchHold} onScratchRelease={handleManualScratchRelease} onScratchPreview={updateScratchPreview} onScratchTick={onJogScratchTick} onTrackDrop={handleManualTrackDrop} />
             );
           })}
         </div>
-      ) : null}
-
-      {modules.has("info") ? (
-        <div className="kd-performance-info-grid">
+        <div className="kd-performance-info-grid" aria-label="Deck A/B 整曲预览波形">
           <StableDeckInfo deck={decks[0]} side={0} preserveBarPhase={autoBeatSync} onSeek={handleManualSeek} onTrackDrop={handleManualTrackDrop} />
           <StableDeckInfo deck={decks[1]} side={1} preserveBarPhase={autoBeatSync} onSeek={handleManualSeek} onTrackDrop={handleManualTrackDrop} />
         </div>
-      ) : null}
-
-      <div className="kd-performance-console">
-        <DeckControls
-          deck={viewDecks[0]} stemState={stems[0]} stemModel={stemModel} side={0} modules={modules} quantize={quantize}
-          loopBeats={loopBeats[0]} setLoopBeats={(beats) => setLoopBeats((current) => [beats, current[1]])}
-          onSeek={handleManualSeek} onTogglePlay={handleManualTogglePlay} onMainCue={handleManualMainCue}
-          syncLocked={syncLock !== null}
-          syncEnabled={syncEnabled}
-          onToggleSync={toggleSyncLock}
-          onRateChange={handleDeckRateChange}
-          onPreviewRate={previewDeckRate}
-          hardwareUnit={tempoHardwareUnit[0]}
-          onSoftwareTempoOverride={armTempoTakeover}
-          onSetLoop={handleManualSetLoop} onClearLoop={handleManualClearLoop}
-          onSaveCuePoints={onSaveCuePoints} onSaveMainCue={onSaveMainCue}
-          stemLanesVisible={performanceStemLanesVisible(activeStemDisplayMask)}
-        />
-        <section className="kd-performance-master">
-          {modules.has("mixer") ? (
-            <>
-              <div className="kd-performance-mixer-cluster">
-                <StemEqStrip
-                  side={0}
-                  gains={stems[0].gains}
-                  stemMode={stemMode}
-                  stemState={stems[0]}
-                  stemModel={stemModel}
-                  trackReady={Boolean(decks[0].track && usesLocalLibraryRecord(decks[0].track))}
-                  midiActive={eqStemMode[0] === "stems"}
-                  ready={stemModel?.state === "ready" && Boolean(decks[0].track && usesLocalLibraryRecord(decks[0].track))}
-                  onToggle={() => onToggleStemAll(0)}
-                  onDownload={onDownloadStemModel}
-                  onChange={(stem, gain) => onStemGain(0, stem, gain)}
-                />
-                <MixerStrip
-                  side={0}
-                  mixer={mixers[0]}
-                  setMixer={(patch) => patchMixer(0, patch)}
-                />
-                <MixerStrip
-                  side={1}
-                  mixer={mixers[1]}
-                  setMixer={(patch) => patchMixer(1, patch)}
-                />
-                <StemEqStrip
-                  side={1}
-                  gains={stems[1].gains}
-                  stemMode={stemMode}
-                  stemState={stems[1]}
-                  stemModel={stemModel}
-                  trackReady={Boolean(decks[1].track && usesLocalLibraryRecord(decks[1].track))}
-                  midiActive={eqStemMode[1] === "stems"}
-                  ready={stemModel?.state === "ready" && Boolean(decks[1].track && usesLocalLibraryRecord(decks[1].track))}
-                  onToggle={() => onToggleStemAll(1)}
-                  onDownload={onDownloadStemModel}
-                  onChange={(stem, gain) => onStemGain(1, stem, gain)}
-                />
-              </div>
-              <div className="kd-performance-crossfader" data-off={crossfaderEnabled ? undefined : true}>
-                <button
-                  type="button"
-                  className="kd-performance-crossfader-toggle"
-                  data-active={crossfaderEnabled || undefined}
-                  aria-pressed={crossfaderEnabled}
-                  aria-label="交叉推子"
-                  onClick={toggleCrossfaderEnabled}
-                >
-                  XF
-                </button>
-                <span data-side="a">A</span>
-                <span className="kd-performance-crossfader-body">
-                  <i className="kd-performance-crossfader-scale" aria-hidden="true"><u /><u /><u /><u /><u /></i>
-                  <MixerFader
-                    axis="horizontal"
-                    value={crossfaderEnabled ? (crossfader + 1) / 2 : 0.5}
-                    label="Crossfader A B"
-                    disabled={!crossfaderEnabled}
-                    onChange={(ratio) => setCrossfader(ratio * 2 - 1)}
-                    onReset={() => setCrossfader(0)}
-                  />
-                  <b>{!crossfaderEnabled || crossfader === 0 ? "CENTER" : crossfader < 0 ? `A ${Math.round(-crossfader * 100)}` : `B ${Math.round(crossfader * 100)}`}</b>
-                </span>
-                <span data-side="b">B</span>
-                <span className="kd-performance-crossfader-spacer" aria-hidden="true" />
-              </div>
-            </>
-          ) : null}
-        </section>
-        <DeckControls
-          deck={viewDecks[1]} stemState={stems[1]} stemModel={stemModel} side={1} modules={modules} quantize={quantize}
-          loopBeats={loopBeats[1]} setLoopBeats={(beats) => setLoopBeats((current) => [current[0], beats])}
-          onSeek={handleManualSeek} onTogglePlay={handleManualTogglePlay} onMainCue={handleManualMainCue}
-          syncLocked={syncLock !== null}
-          syncEnabled={syncEnabled}
-          onToggleSync={toggleSyncLock}
-          onRateChange={handleDeckRateChange}
-          onPreviewRate={previewDeckRate}
-          hardwareUnit={tempoHardwareUnit[1]}
-          onSoftwareTempoOverride={armTempoTakeover}
-          onSetLoop={handleManualSetLoop} onClearLoop={handleManualClearLoop}
-          onSaveCuePoints={onSaveCuePoints} onSaveMainCue={onSaveMainCue}
-          stemLanesVisible={performanceStemLanesVisible(activeStemDisplayMask)}
-        />
       </div>
-    </div>
+      {controlHost ? createPortal(controlSurface, controlHost) : null}
+    </>
   );
 }

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import { createPortal } from "react-dom";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   Blend,
@@ -422,10 +421,17 @@ function PlayerDeck({
 
 interface PlayerBarProps {
   workMode: WorkMode;
-  djWorkspaceHost: HTMLDivElement | null;
+  performanceOpen: boolean;
+  performanceControlHost: HTMLDivElement | null;
+  onPerformanceOpenChange(open: boolean): void;
 }
 
-export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
+export function PlayerBar({
+  workMode,
+  performanceOpen,
+  performanceControlHost,
+  onPerformanceOpenChange,
+}: PlayerBarProps) {
   const { portrait } = useLayoutSignals();
   const mobileNative = usesNativeMobilePlayer();
   const playerRuntime = runtimePlayer();
@@ -647,7 +653,6 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     Track | null,
     Track | null,
   ]>([null, null]);
-  const [performanceOpen, setPerformanceOpen] = useState(false);
   const dualDeck = isDualDeckSession(workMode, performanceOpen);
   /** Channel fader × crossfader for each physical Deck; double-click replaces the quieter side. */
   const performanceChannelGainsRef = useRef<[number, number]>([
@@ -4459,10 +4464,10 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
       stemModel={performanceStemModel}
       stemMode={stemMode}
       masterVolume={playerVolume}
-      embedded={workMode === "dj"}
+      controlHost={performanceControlHost}
       onClose={() => {
         setNotice("");
-        setPerformanceOpen(false);
+        onPerformanceOpenChange(false);
       }}
       onSeek={(side, detail) => {
         const deckTrack = performanceDecks[side].track;
@@ -4666,15 +4671,9 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
     <div
       className="kd-player"
       data-pip={pipDriving ? "true" : undefined}
-      data-performance-dock={workMode !== "dj" && performanceOpen ? "true" : undefined}
+      data-performance-dock={performanceOpen ? "true" : undefined}
     >
-      {workMode === "dj"
-        ? djWorkspaceHost
-          ? createPortal(performanceWorkspace, djWorkspaceHost)
-          : null
-        : performanceOpen
-          ? performanceWorkspace
-          : null}
+      {performanceOpen ? performanceWorkspace : null}
       {/* 这里不再渲染 <audio>：播放元素归 djEngine 所有（两台 deck 互换正主），
           事件监听在上面的 effect 里挂到 frontEl 上 */}
       {/* 不再挂隐藏视频实例：详情面板已有可见播放器，双实例会同时解码并
@@ -4778,11 +4777,11 @@ export function PlayerBar({ workMode, djWorkspaceHost }: PlayerBarProps) {
           <button
             type="button"
             className="kd-player-step kd-player-performancebtn"
-            aria-label={performanceOpen ? "关闭双轨演出准备" : "打开双轨演出准备"}
+            aria-label={performanceOpen ? "收起四轨演出控制" : "展开四轨演出控制"}
             aria-pressed={performanceOpen}
             data-on={performanceOpen ? "true" : undefined}
-            title={performanceOpen ? "关闭双轨演出准备" : "双轨演出准备：Beat Grid、Hot Cue 与 Loop"}
-            onClick={() => setPerformanceOpen((open) => !open)}
+            title={performanceOpen ? "收起四轨演出控制" : "展开四轨波形与右侧演出控制"}
+            onClick={() => onPerformanceOpenChange(!performanceOpen)}
           >
             <SlidersHorizontal size={13} />
           </button>

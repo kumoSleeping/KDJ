@@ -42,7 +42,8 @@ export default function App() {
   const { columns, chrome, portrait } = useLayoutSignals();
   const [retrying, setRetrying] = useState(false);
   const [workMode, setWorkModeState] = useState<WorkMode>(() => readWorkMode());
-  const [djWorkspaceHost, setDjWorkspaceHost] = useState<HTMLDivElement | null>(null);
+  const [performanceOpen, setPerformanceOpen] = useState(false);
+  const [performanceControlHost, setPerformanceControlHost] = useState<HTMLDivElement | null>(null);
   const platform = window.kdj?.platform;
   const isMac = platform === "darwin";
   const isMobile = platform === "android" || platform === "ios";
@@ -137,7 +138,9 @@ export default function App() {
           <Workspace
             workMode={workMode}
             onWorkModeChange={setWorkMode}
-            onDjWorkspaceHost={setDjWorkspaceHost}
+            performanceOpen={performanceOpen}
+            onPerformanceOpenChange={setPerformanceOpen}
+            onPerformanceControlHost={setPerformanceControlHost}
           />
         ) : (
           <section className="kd-section">
@@ -170,7 +173,12 @@ export default function App() {
       {/* 没连上时不渲染播放条：没有可播的曲目，留个空条只会占地方 */}
       {connected && (
         <>
-          <PlayerBar workMode={workMode} djWorkspaceHost={djWorkspaceHost} />
+          <PlayerBar
+            workMode={workMode}
+            performanceOpen={performanceOpen}
+            performanceControlHost={performanceControlHost}
+            onPerformanceOpenChange={setPerformanceOpen}
+          />
           <VideoPipHost />
         </>
       )}

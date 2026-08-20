@@ -197,10 +197,18 @@ function loadWorkspacePanes(): WorkspacePaneState {
 interface WorkspaceProps {
   workMode: WorkMode;
   onWorkModeChange(mode: WorkMode): void;
-  onDjWorkspaceHost(node: HTMLDivElement | null): void;
+  performanceOpen: boolean;
+  onPerformanceOpenChange(open: boolean): void;
+  onPerformanceControlHost(node: HTMLDivElement | null): void;
 }
 
-export function Workspace({ workMode, onWorkModeChange, onDjWorkspaceHost }: WorkspaceProps) {
+export function Workspace({
+  workMode,
+  onWorkModeChange,
+  performanceOpen,
+  onPerformanceOpenChange,
+  onPerformanceControlHost,
+}: WorkspaceProps) {
   const selectedOneLibrary = usePlaylistStore((state) => state.selectedTarget);
   const oneLibraryDevices = usePlaylistStore((state) => state.devices);
   const selectedOneLibraryTracks = usePlaylistStore((state) => state.selectedTracks);
@@ -1270,7 +1278,7 @@ export function Workspace({ workMode, onWorkModeChange, onDjWorkspaceHost }: Wor
   // 暂时关掉右栏网络视频预览面板：细项改到下载队列里配；双击仍走浮动 / 系统 PiP。
   const previewAside = false;
   const realOverlayAside =
-    showFolders || showSettings || showVjExport || showVirtualDisk || previewAside || queueAside;
+    performanceOpen || showFolders || showSettings || showVjExport || showVirtualDisk || previewAside || queueAside;
   const oneLibraryDetailTrack = oneLibraryDetail
     ? oneLibraryPlayableTrack(oneLibraryDetail.track, oneLibraryDetail.target)
     : null;
@@ -1396,8 +1404,10 @@ export function Workspace({ workMode, onWorkModeChange, onDjWorkspaceHost }: Wor
     [oneLibraryDetailTrack, openLyricsPanel, setPreferredAsideFace, showTrackDetail],
   );
 
-  const asideLabel = showFolders
-    ? "文件夹"
+  const asideLabel = performanceOpen
+    ? "PERFORMANCE"
+    : showFolders
+      ? "文件夹"
     : showSettings
       ? "设置"
       : showVjExport
@@ -1417,7 +1427,13 @@ export function Workspace({ workMode, onWorkModeChange, onDjWorkspaceHost }: Wor
                 : detailAside
                   ? "曲目详情"
                   : "";
-  const asidePanel = showFolders ? (
+  const asidePanel = performanceOpen ? (
+    <div
+      ref={onPerformanceControlHost}
+      className="kd-performance-control-host"
+      aria-label="双 Deck 演出控制"
+    />
+  ) : showFolders ? (
     <FolderTree
       onNavigate={onFolderNavigate}
       onOpenStreamPlaylist={openStreamPlaylist}
@@ -1505,6 +1521,10 @@ export function Workspace({ workMode, onWorkModeChange, onDjWorkspaceHost }: Wor
     virtualDiskPanelEpoch,
     queuePanelEpoch,
   ]);
+
+  useEffect(() => {
+    if (performanceOpen && layout === "narrow") setSheet("aside");
+  }, [layout, performanceOpen]);
 
   const toggleQueueDrawer = useCallback(() => {
     const opening = !useAppStore.getState().showQueue;
@@ -1950,13 +1970,6 @@ export function Workspace({ workMode, onWorkModeChange, onDjWorkspaceHost }: Wor
             />
           }
         />
-        {workMode === "dj" ? (
-          <div
-            ref={onDjWorkspaceHost}
-            className="kd-dj-workspace-host"
-            aria-label="DJ 双轨工作区"
-          />
-        ) : null}
         <div className="kd-stage">
         <div
           className="kd-split"
@@ -2344,7 +2357,9 @@ export function Workspace({ workMode, onWorkModeChange, onDjWorkspaceHost }: Wor
                       title={asideLabel}
                       face={showTrackFaceSwitch ? trackAsideFace : undefined}
                       onFaceChange={showTrackFaceSwitch ? onTrackAsideFace : undefined}
-                      asideToggle={asideToggle}
+                      asideToggle={performanceOpen ? (
+                        <AsideToggleButton open canOpen onToggle={() => onPerformanceOpenChange(false)} />
+                      ) : asideToggle}
                     />
                     <div className="kd-split-aside-body kd-scroll">{asidePanel}</div>
                   </aside>
@@ -2367,7 +2382,7 @@ export function Workspace({ workMode, onWorkModeChange, onDjWorkspaceHost }: Wor
                 <AsideFaceSwitch face={trackAsideFace} onFaceChange={onTrackAsideFace} />
               ) : undefined
             }
-            onClose={closeAsideForUser}
+            onClose={performanceOpen ? () => onPerformanceOpenChange(false) : closeAsideForUser}
           >
             {asidePanel}
           </Sheet>

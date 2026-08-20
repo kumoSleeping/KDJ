@@ -8465,40 +8465,12 @@ button.kd-stream-status {
 }
 
 /* ============================================================
- * 主工作模式：DJ 上轨 / 下方曲库
+ * 主工作模式：DJ 曲库 + 共用底部播放栏
  * ========================================================== */
-.kd-dj-workspace-host {
-  position: relative;
-  /* 高度由演奏区内容决定：车道增加只把顶区撑高，永不挤压、永不滚动。 */
-  flex: 0 0 auto;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  border-bottom: 1px solid var(--kd-line);
-  background: var(--kd-panel-inset);
-}
-.kd-dj-workspace-host > .kd-performance-workspace[data-embedded="true"] {
-  position: relative;
-  inset: auto;
-  z-index: 0;
-  width: 100%;
-  height: auto;
-  border-top: none;
-  border-bottom: none;
-  box-shadow: none;
-}
-.kd-performance-workspace[data-embedded="true"] .kd-performance-head {
-  grid-template-columns: minmax(7rem, 1fr) auto minmax(7rem, 1fr);
-}
 .kd-app[data-work-mode="dj"] .kd-stage {
   min-height: 8.5rem;
 }
-.kd-app[data-work-mode="dj"] .kd-player {
-  /* 播放器仍挂载并拥有 transport / portal，只隐藏重复的底栏视觉。 */
-  display: none;
-}
-
-/* 管理模式弹出 DJ 台：收起底栏，演奏区接到窗口底部，播放切到双盘。 */
+/* 四轨演出展开后：收起普通底栏控制，波形演奏区接到窗口底部。 */
 .kd-app .kd-player[data-performance-dock="true"] {
   display: block;
   min-height: 0;
@@ -8525,9 +8497,6 @@ button.kd-stream-status {
 }
 
 @media (max-width: 760px), (max-aspect-ratio: 3 / 4) {
-  .kd-dj-workspace-host > .kd-performance-workspace[data-embedded="true"] {
-    height: auto;
-  }
   .kd-work-mode-switch > span {
     padding-inline: 0.22rem;
   }
@@ -10212,6 +10181,281 @@ button.kd-stream-status {
     letter-spacing: 0;
     font-size: var(--kd-dj-xs);
   }
+}
+
+/* Performance v3 — 四条波形固定在底部播放栏，全部演奏控制复用右侧旁路面板。
+   普通状态仍是原来的一条预览波形；只有明确展开时才应用下面这些布局。 */
+.kd-app .kd-player[data-performance-dock="true"] {
+  min-height: 0;
+  padding: 0;
+  background: #090c10;
+}
+.kd-app .kd-player[data-performance-dock="true"] > .kd-performance-workspace {
+  display: flex;
+  height: auto;
+  max-height: none;
+  padding: 0;
+  overflow: hidden;
+  background: #090c10;
+}
+.kd-performance-wave-toolbar {
+  flex: 0 0 auto;
+  min-height: 1.55rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.12rem 0.45rem;
+  border-bottom: 1px solid var(--kd-border-subtle);
+  color: var(--kd-text-subtle);
+  background: var(--kd-panel-inset);
+  font: 700 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  letter-spacing: 0.08em;
+}
+.kd-performance-wave-toolbar > strong {
+  color: var(--kd-text);
+  font-weight: 800;
+}
+.kd-performance-wave-toolbar > span {
+  color: var(--kd-text-disabled);
+}
+.kd-performance-wave-toolbar > button {
+  width: 1.55rem;
+  height: 1.35rem;
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  color: var(--kd-text-subtle);
+  background: transparent;
+  cursor: pointer;
+}
+.kd-performance-wave-toolbar > button:hover { color: var(--kd-text); }
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-wave-stack {
+  padding: 0;
+  border-bottom: 0;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-wave-row {
+  height: 2.8rem;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-grid {
+  display: flex;
+  flex-direction: column;
+  border-top: 4px solid #06080b;
+  border-bottom: 0;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info {
+  position: relative;
+  grid-template-columns: 1.15rem 1.65rem minmax(0, 1fr) auto;
+  min-height: 2.4rem;
+  gap: 0.28rem;
+  padding: 0.12rem 0.38rem;
+  border-right: 0;
+  border-bottom: 1px solid var(--kd-border-subtle);
+  background: #090c11;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info:last-child {
+  border-bottom: 0;
+}
+.kd-performance-overview-id {
+  align-self: center;
+  display: grid;
+  place-items: center;
+  width: 1rem;
+  height: 1rem;
+  color: #aab3c0;
+  border: 1px solid #4f5865;
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-vinyl {
+  width: 1.65rem;
+  height: 1.65rem;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-vinyl-record {
+  width: 1.55rem;
+  height: 1.55rem;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-copy {
+  grid-template-columns: clamp(6rem, 18vw, 13rem) minmax(0, 1fr);
+  grid-template-rows: 1fr 1fr;
+  align-items: center;
+  column-gap: 0.5rem;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-copy > strong {
+  grid-column: 1;
+  grid-row: 1;
+  align-self: end;
+  font-size: var(--kd-dj-md);
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-copy > span {
+  grid-column: 1;
+  grid-row: 2;
+  align-self: start;
+  font-size: var(--kd-dj-sm);
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-overview-wave {
+  grid-column: 2;
+  grid-row: 1 / 3;
+  align-self: stretch;
+  width: 100%;
+  height: 2rem !important;
+  margin: 0;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata {
+  grid-auto-flow: column;
+  gap: 0.45rem;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata dd {
+  margin-top: 0.08rem;
+  font-size: var(--kd-dj-md);
+}
+
+/* 右侧控制宿主由 Workspace 的宽屏 aside / 窄屏 Sheet 提供；portal 只填内容，
+   因此设置、队列、详情与演出控制共用完全相同的开合和尺寸语义。 */
+.kd-performance-control-host {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+  background: var(--kd-panel-inset);
+}
+.kd-performance-controls-surface {
+  --kd-dj-xs: calc(var(--kd-size-xs) * 0.85);
+  --kd-dj-sm: var(--kd-size-xs);
+  --kd-dj-md: var(--kd-size-sm);
+  --kd-dj-lg: var(--kd-size);
+  --kd-dj-xl: var(--kd-size-lg);
+  --kd-deck-a: #8c949f;
+  --kd-deck-b: #8c949f;
+  --kd-border: var(--kd-line);
+  --kd-border-subtle: var(--kd-line-soft);
+  --kd-text-subtle: var(--kd-muted);
+  --kd-text-disabled: var(--kd-faint);
+  --kd-fader-track: #3a414b;
+  --kd-fader-thumb: #9aa2ae;
+  --kd-fader-thumb-border: rgba(0, 0, 0, 0.55);
+  --kd-knob-boost: #e24b4b;
+  --kd-knob-cut: #4d8af0;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  color: var(--kd-text);
+  background: var(--kd-panel-inset);
+}
+.kd-performance-side-toolbar {
+  flex: 0 0 auto;
+  min-height: 1.8rem;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.25rem;
+  padding: 0.18rem 0.45rem;
+  border-bottom: 1px solid var(--kd-border-subtle);
+  background: var(--kd-panel);
+}
+.kd-performance-side-toolbar > button {
+  min-width: 2.2rem;
+  height: 1.35rem;
+  padding: 0 0.3rem;
+  border: 0;
+  color: var(--kd-text-subtle);
+  background: transparent;
+  font: 800 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  cursor: pointer;
+}
+.kd-performance-side-toolbar > button[data-active="true"] {
+  color: var(--kd-text);
+  background: color-mix(in srgb, var(--kd-text) 11%, transparent);
+}
+.kd-performance-control-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0.45rem;
+}
+.kd-performance-control-block {
+  min-width: 0;
+  margin-bottom: 0.45rem;
+  border: 1px solid var(--kd-border-subtle);
+  background: color-mix(in srgb, var(--kd-panel) 88%, transparent);
+}
+.kd-performance-control-block:last-child { margin-bottom: 0; }
+.kd-performance-control-block > header {
+  min-height: 1.6rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.18rem 0.42rem;
+  border-bottom: 1px solid var(--kd-border-subtle);
+  color: var(--kd-text-disabled);
+  font: 700 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  letter-spacing: 0.06em;
+}
+.kd-performance-control-block > header > strong {
+  color: var(--kd-text);
+  font-weight: 800;
+}
+.kd-performance-control-block > header > span { margin-left: auto; }
+.kd-performance-control-block > .kd-performance-deck-controls {
+  width: 100%;
+  min-height: 8.2rem;
+  padding: 0.35rem;
+  border: 0;
+  background: transparent;
+}
+.kd-performance-control-block > .kd-performance-master {
+  width: 100%;
+  padding: 0.38rem 0.42rem 0.32rem;
+  background: transparent;
+}
+.kd-performance-control-block .kd-performance-mixer-cluster {
+  max-width: 100%;
+}
+.kd-performance-monitor-block > .kd-performance-output-strips {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.55rem;
+}
+.kd-performance-monitor-block .kd-performance-output-strips label {
+  grid-template-columns: 4.2rem minmax(0, 1fr);
+}
+.kd-performance-monitor-block .kd-performance-output-strips input {
+  width: 100%;
+}
+
+:root[data-theme="light"] .kd-performance-controls-surface {
+  --kd-fader-track: #9aa3ae;
+  --kd-fader-thumb: #ffffff;
+  --kd-fader-thumb-border: rgba(0, 0, 0, 0.28);
+  --kd-knob-boost: #d1242f;
+  --kd-knob-cut: #1f6feb;
+  background: var(--kd-bg);
+}
+:root[data-theme="light"] .kd-performance-control-host,
+:root[data-theme="light"] .kd-performance-control-block {
+  background: var(--kd-panel);
+}
+
+@media (max-width: 640px) {
+  .kd-performance-control-scroll { padding: 0.28rem; }
+  .kd-performance-control-block > header > span { display: none; }
+  .kd-performance-control-block > .kd-performance-deck-controls { padding: 0.22rem; }
+  .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-copy {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-copy > strong,
+  .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-copy > span {
+    display: none;
+  }
+  .kd-app .kd-player[data-performance-dock="true"] .kd-performance-overview-wave {
+    grid-column: 1;
+  }
+  .kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata { display: none; }
 }
 
 /* DJ 工作台没有横向浏览这一交互。Performance 固定成完整控制面；下方曲库只
