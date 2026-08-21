@@ -136,7 +136,11 @@ impl YtmClient {
         );
         let mut request = self.http.post(&url).json(&body);
         if let Some(token) = self.access_token.read().unwrap().clone() {
-            request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
+            // ytmusicapi 的 OAuth 模式同款：Bearer 之外还要带请求时刻，
+            // Google 用它校验 token 新鲜度，缺了会被当成可疑客户端。
+            request = request
+                .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("X-Goog-Request-Time", unix_now().to_string());
         }
         let response = request
             .send()
@@ -269,6 +273,13 @@ impl YtmClient {
             _ => *state = ScriptState::Pending(url.to_string()),
         }
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn env_or(name: &str, default: &str) -> String {
