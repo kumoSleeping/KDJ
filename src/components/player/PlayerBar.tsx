@@ -2220,8 +2220,18 @@ export function PlayerBar() {
           : preferredPredictionGuard(current);
         const next = await pickNext(current, manual, preferred, preferredGuard);
         if (!stillCurrent()) return true;
-        if (!next || next.id === current.id) {
+        if (!next || (manual && next.id === current.id)) {
           djGaveUpRef.current = current.id;
+          return true;
+        }
+        // 单曲循环的自动续播：pickNext 会把当前曲目原样交回来。以前这里当成
+        // 「挑不到候选」直接放弃，接歌开着时表现就是循环失效——曲子放完停在
+        // Ended。现在原地接一场：同一首从 cue 重新进、过渡效果照常应用；
+        // 同曲 prepare 会被 reusable_deck 幂等短路、handoff 找不到目标而失败，
+        // 那条路会自动走硬切补偿（重新 load 同一首），循环依然成立。
+        if (next.id === current.id) {
+          if (djSwitchTo(next, current)) return true;
+          playTrack(next);
           return true;
         }
         if (!djSwitchTo(next, current)) {
