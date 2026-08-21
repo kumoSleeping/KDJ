@@ -164,7 +164,8 @@ export const api = {
 
   search: (body: SearchRequest) => post<SearchResponse>("/search", body),
   searchCapabilities: () => request<SearchCapabilities>("/search/capabilities"),
-  resolveCollection: (collection: CollectionResult, limit = 500) =>
+  /** limit = 0 表示不截断：歌单/专辑类解析一直检索到完整列出。 */
+  resolveCollection: (collection: CollectionResult, limit = 0) =>
     post<CollectionResolveResponse>("/search/collection", {
       platform: collection.platform,
       kind: collection.kind,
@@ -194,7 +195,7 @@ export const api = {
   streamCacheStats: () => request<StreamCacheStats>("/song/cache"),
   clearStreamCache: () =>
     request<StreamCacheStats>("/song/cache", { method: "DELETE" }),
-  resolve: (url: string, limit = 500) => post<ResolveResponse>("/resolve", { url, limit }),
+  resolve: (url: string, limit = 0) => post<ResolveResponse>("/resolve", { url, limit }),
   intake: (body: IntakeRequest) => post<IntakeResponse>("/intake", body),
 
   downloads: () => request<DownloadTask[]>("/downloads"),
@@ -444,7 +445,7 @@ export const api = {
 
   streamPlaylists: (platform: Exclude<Platform, "local" | "bilibili">) =>
     request<StreamPlaylist[]>(`/stream/playlists/${platform}`),
-  streamPlaylist: (playlist: StreamPlaylist, limit = 500) =>
+  streamPlaylist: (playlist: StreamPlaylist, limit = 0) =>
     post<StreamPlaylistResponse>("/stream/playlist", {
       platform: playlist.platform,
       key: playlist.key,

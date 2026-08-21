@@ -1345,7 +1345,9 @@ fn default_limit() -> usize {
     20
 }
 fn default_resolve_limit() -> usize {
-    500
+    // 0 = 不截断：歌单/专辑类解析要求一直检索到完整列出，
+    // 各平台把 0 解释成「全部」（见 kdj-providers 的 full_listing）。
+    0
 }
 fn default_max_entries() -> usize {
     50

@@ -488,6 +488,16 @@ pub fn effective_limit(limit: usize, default: usize) -> usize {
     }
 }
 
+/// 歌单/专辑类解析的「完整列出」语义：请求方不传上限（0）时一直检索到
+/// 完整列出，而不是回落到搜索用的默认页大小；显式传了正数仍尊重调用方。
+pub fn full_listing(limit: usize) -> usize {
+    if limit == 0 {
+        usize::MAX
+    } else {
+        limit
+    }
+}
+
 /// Python `if song.get("sq"):` 的真值判断：`null` / `0` / `""` / `[]` / `{}` 全是假。
 pub fn is_truthy(value: Option<&serde_json::Value>) -> bool {
     match value {
@@ -671,6 +681,8 @@ mod tests {
         assert_eq!(effective_limit(0, 500), 500);
         assert_eq!(effective_limit(5, 20), 5);
         assert_eq!(effective_limit(1, 20), 1);
+        assert_eq!(full_listing(0), usize::MAX, "0 = 完整列出");
+        assert_eq!(full_listing(30), 30, "显式上限仍然尊重调用方");
     }
 
     #[test]

@@ -26,8 +26,8 @@ use tokio::io::AsyncWriteExt as _;
 use super::client::{expect_ok, payload, NeteaseClient, HOST};
 use crate::net::{create_download_writer, host_is, AtomicDownload};
 use crate::provider::{
-    effective_limit, first_truthy, is_truthy, loose_int, qr_data_url_from_text, str_field,
-    unique_download_path, Capabilities, DownloadJob, MusicProvider, ProviderContext,
+    effective_limit, first_truthy, full_listing, is_truthy, loose_int, qr_data_url_from_text,
+    str_field, unique_download_path, Capabilities, DownloadJob, MusicProvider, ProviderContext,
 };
 use crate::tags;
 
@@ -661,7 +661,7 @@ impl MusicProvider for NeteaseProvider {
         {
             return Ok(None);
         }
-        let limit = effective_limit(limit, 500);
+        let limit = full_listing(limit);
         let (title, songs) = match kind {
             SearchKind::Playlist => self.playlist_tracks(key, limit).await?,
             SearchKind::Album => self.album_tracks(key, limit).await?,
@@ -761,7 +761,7 @@ impl MusicProvider for NeteaseProvider {
         if key.is_empty() {
             return Ok(None);
         }
-        let limit = effective_limit(limit, 500);
+        let limit = full_listing(limit);
         let (title, songs) = self.playlist_tracks(key, limit).await?;
         if songs.is_empty() {
             bail!("网易云歌单没有可用歌曲（{key}）");
@@ -778,7 +778,7 @@ impl MusicProvider for NeteaseProvider {
         let Some((kind, key)) = self.parse_url(url).await else {
             return Ok(None);
         };
-        let limit = effective_limit(limit, 500);
+        let limit = full_listing(limit);
         let (title, songs) = match kind {
             ResolveKind::Song => {
                 let songs = self.track_detail(std::slice::from_ref(&key)).await?;

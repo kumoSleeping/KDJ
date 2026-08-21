@@ -733,7 +733,7 @@ export function Workspace() {
       setActiveStreamPlaylist({ platform: playlist.platform, key: playlist.key });
     }
     try {
-      const response = await api.streamPlaylist(playlist, 500);
+      const response = await api.streamPlaylist(playlist, 0);
       if (requestId !== resultRequestSeqRef.current) return;
       const token = `${response.platform}:playlist:${response.key}`;
       const inLibrary = new Set(response.in_library_source_keys ?? []);
@@ -1593,7 +1593,7 @@ export function Workspace() {
     setSearchError("");
     setLoadingCollections((current) => new Set(current).add(token));
     try {
-      const response = await api.resolveCollection(collection, 500);
+      const response = await api.resolveCollection(collection, 0);
       if (resultGeneration !== resultRequestSeqRef.current) return;
       const resolved = resolvedCollectionItem(collection, response);
       setItems((current) =>
