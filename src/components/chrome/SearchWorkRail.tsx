@@ -16,6 +16,7 @@ const COLLECTION_LABEL = {
   playlist: "歌单",
   artist: "艺术家",
   album: "专辑",
+  radio: "播客",
 } as const;
 
 function countSourcesByPlatform(items: IntakeItem[]): Partial<Record<Platform, number>> {

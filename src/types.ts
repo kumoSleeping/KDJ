@@ -5,7 +5,7 @@
 
 export type Platform = "wyy" | "qqm" | "soundcloud" | "ytm" | "bilibili" | "local";
 export type Quality = "flac" | "320" | "128";
-export type SearchKind = "song" | "playlist" | "artist" | "album";
+export type SearchKind = "song" | "playlist" | "artist" | "album" | "radio";
 export type TaskState = "queued" | "running" | "processing" | "done" | "failed" | "canceled";
 export type AccountState = "missing" | "valid" | "expired" | "unknown";
 export type QrStateValue = "waiting" | "scanned" | "done" | "expired" | "refused" | "error";
@@ -266,6 +266,7 @@ export type IntakeKind =
   | "playlist"
   | "artist"
   | "album"
+  | "radio"
   | "unknown"
   | "error";
 

@@ -57,6 +57,7 @@ const KIND_LABEL: Record<IntakeKind, string> = {
   playlist: "歌单",
   artist: "艺术家",
   album: "专辑",
+  radio: "播客",
   unknown: "链接",
   error: "失败",
 };

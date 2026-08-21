@@ -412,6 +412,8 @@ pub enum SearchKind {
     Playlist,
     Artist,
     Album,
+    /// 网易云的播客/电台（官方叫「声音」）。仅网易云支持。
+    Radio,
 }
 
 impl SearchKind {
@@ -500,6 +502,7 @@ pub enum IntakeKind {
     Playlist,
     Artist,
     Album,
+    Radio,
     Unknown,
     Error,
 }

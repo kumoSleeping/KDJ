@@ -1060,6 +1060,7 @@ fn search_kind_label(kind: SearchKind) -> &'static str {
         SearchKind::Playlist => "歌单",
         SearchKind::Artist => "艺术家",
         SearchKind::Album => "专辑",
+        SearchKind::Radio => "播客",
     }
 }
 

@@ -1801,6 +1801,7 @@ async fn intake_one(state: &Arc<AppState>, entry: &str, payload: &IntakeRequest)
         SearchKind::Playlist => IntakeKind::Playlist,
         SearchKind::Artist => IntakeKind::Artist,
         SearchKind::Album => IntakeKind::Album,
+        SearchKind::Radio => IntakeKind::Radio,
     };
     item.title = entry.to_string();
     item.groups = response.groups;

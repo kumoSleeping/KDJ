@@ -271,7 +271,8 @@ impl QqMusicProvider {
             SearchKind::Artist => 1,
             SearchKind::Album => 2,
             SearchKind::Playlist => 3,
-            SearchKind::Song => return Ok(Vec::new()),
+            // 播客/电台只有网易云支持
+            SearchKind::Radio | SearchKind::Song => return Ok(Vec::new()),
         };
         let data = self
             .client
@@ -1098,7 +1099,7 @@ impl MusicProvider for QqMusicProvider {
             SearchKind::Playlist => self.playlist_tracks(key, limit).await?,
             SearchKind::Album => self.album_tracks(key, limit).await?,
             SearchKind::Artist => self.artist_tracks(key, limit).await?,
-            SearchKind::Song => return Ok(None),
+            SearchKind::Radio | SearchKind::Song => return Ok(None),
         };
         if entries.is_empty() {
             bail!("QQ 音乐集合没有可用歌曲（{key}）");
@@ -1330,7 +1331,7 @@ fn qq_collection_entries(data: &Value, kind: SearchKind) -> Option<&Vec<Value>> 
         ],
         SearchKind::Artist => &["/body/singer", "/body/item_singer", "/singer"],
         SearchKind::Album => &["/body/item_album", "/body/album", "/item_album"],
-        SearchKind::Song => return None,
+        SearchKind::Radio | SearchKind::Song => return None,
     };
     pointers
         .iter()
@@ -1442,7 +1443,7 @@ fn qq_collection_results(data: &Value, kind: SearchKind, limit: usize) -> Vec<Co
                         });
                     (key, title, format!("{count} 首 · {artist}"), cover, count)
                 }
-                SearchKind::Song => return None,
+                SearchKind::Radio | SearchKind::Song => return None,
             };
             Some(CollectionResult {
                 kind,

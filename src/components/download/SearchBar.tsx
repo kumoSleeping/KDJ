@@ -62,6 +62,7 @@ const SEARCH_KIND_LABEL: Record<SearchKind, string> = {
   playlist: "歌单",
   artist: "艺术家",
   album: "专辑",
+  radio: "播客",
 };
 
 export function SearchBar({

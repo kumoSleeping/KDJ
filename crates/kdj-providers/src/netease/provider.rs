@@ -38,6 +38,7 @@ const SEARCH_KINDS: &[SearchKind] = &[
     SearchKind::Playlist,
     SearchKind::Artist,
     SearchKind::Album,
+    SearchKind::Radio,
 ];
 
 /// 契约音质 → (网易云 level, 期望容器)
@@ -179,6 +180,83 @@ impl NeteaseProvider {
     }
 
     /// 专辑详情和链接解析共用这一条，避免搜索集合能展开、分享链接却走另一套接口。
+    /// 电台（播客）的全部节目。mainSong 就是标准歌曲结构，直接走 to_source；
+    /// 节目 id 与歌曲 id 不同源，但下载取流用的是 mainSong 的 id，链路一致。
+    async fn radio_programs(&self, radio_id: &str, limit: usize) -> Result<(String, Vec<Value>)> {
+        // 电台名拿不到不致命：内容照常展开，标题退回 id。
+        let title = self
+            .client
+            .weapi(
+                "/weapi/djradio/v1/get",
+                payload([("id", Value::String(radio_id.to_string()))]),
+            )
+            .await
+            .ok()
+            .and_then(|body| {
+                str_field(&body, "name")
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| format!("网易云播客 {radio_id}"));
+
+        let mut songs: Vec<Value> = Vec::new();
+        let page_size = 100i64;
+        let mut offset = 0i64;
+        loop {
+            if songs.len() >= limit || offset > 10_000 {
+                break;
+            }
+            let body = self
+                .client
+                .weapi(
+                    "/weapi/dj/program/byradio",
+                    payload([
+                        ("radioId", Value::String(radio_id.to_string())),
+                        ("limit", Value::String(page_size.to_string())),
+                        ("offset", Value::String(offset.to_string())),
+                        ("asc", Value::String("false".into())),
+                    ]),
+                )
+                .await?;
+            expect_ok(&body, "读取网易云播客节目")?;
+            let programs = body
+                .pointer("/programs")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if programs.is_empty() {
+                break;
+            }
+            for program in &programs {
+                // 失效/无音频的节目没有 mainSong，跳过。
+                if let Some(main_song) = program.get("mainSong").filter(|song| song.is_object()) {
+                    songs.push(main_song.clone());
+                }
+            }
+            offset += page_size;
+        }
+        songs.truncate(limit);
+        Ok((title, songs))
+    }
+
+    /// 单条节目链接 → mainSong。节目详情接口回 program 包一层。
+    async fn program_main_song(&self, program_id: &str) -> Result<Value> {
+        let body = self
+            .client
+            .weapi(
+                "/weapi/dj/program/detail",
+                payload([("id", Value::String(program_id.to_string()))]),
+            )
+            .await?;
+        expect_ok(&body, "读取网易云播客节目")?;
+        let song = body
+            .pointer("/program/mainSong")
+            .filter(|song| song.is_object())
+            .cloned()
+            .context("这条播客节目没有可下载的音频")?;
+        Ok(song)
+    }
+
     async fn album_tracks(&self, album_id: &str, limit: usize) -> Result<(String, Vec<Value>)> {
         let body: Value = self
             .client
@@ -618,7 +696,7 @@ impl MusicProvider for NeteaseProvider {
         if keyword.is_empty()
             || !matches!(
                 kind,
-                SearchKind::Playlist | SearchKind::Artist | SearchKind::Album
+                SearchKind::Playlist | SearchKind::Artist | SearchKind::Album | SearchKind::Radio
             )
         {
             return Ok(Vec::new());
@@ -627,6 +705,8 @@ impl MusicProvider for NeteaseProvider {
             SearchKind::Playlist => "1000",
             SearchKind::Album => "10",
             SearchKind::Artist => "100",
+            // 播客/电台（官方叫「声音」）
+            SearchKind::Radio => "1009",
             SearchKind::Song => return Ok(Vec::new()),
         };
         let limit = effective_limit(limit, 20);
@@ -656,7 +736,7 @@ impl MusicProvider for NeteaseProvider {
         if key.is_empty()
             || !matches!(
                 kind,
-                SearchKind::Playlist | SearchKind::Artist | SearchKind::Album
+                SearchKind::Playlist | SearchKind::Artist | SearchKind::Album | SearchKind::Radio
             )
         {
             return Ok(None);
@@ -666,6 +746,7 @@ impl MusicProvider for NeteaseProvider {
             SearchKind::Playlist => self.playlist_tracks(key, limit).await?,
             SearchKind::Album => self.album_tracks(key, limit).await?,
             SearchKind::Artist => self.artist_tracks(key, limit).await?,
+            SearchKind::Radio => self.radio_programs(key, limit).await?,
             SearchKind::Song => return Ok(None),
         };
         if songs.is_empty() {
@@ -775,6 +856,32 @@ impl MusicProvider for NeteaseProvider {
     }
 
     async fn resolve(&self, url: &str, limit: usize) -> Result<Option<ResolveResponse>> {
+        // 播客链接先于通用解析：djradio/radio 是电台（一包节目），
+        // program 是单条声音。它们的 id 与歌曲不同源，不能走 track_detail。
+        let text = html_unescape(url.trim());
+        if let Some(radio_id) = netease_radio_id(&text) {
+            let limit = full_listing(limit);
+            let (title, songs) = self.radio_programs(&radio_id, limit).await?;
+            if songs.is_empty() {
+                bail!("网易云播客没有可下载的节目（{radio_id}）");
+            }
+            return Ok(Some(ResolveResponse {
+                kind: ResolveKind::Playlist,
+                platform: Platform::Wyy,
+                title,
+                sources: songs.iter().take(limit).map(to_source).collect(),
+            }));
+        }
+        if let Some(program_id) = netease_program_id(&text) {
+            let song = self.program_main_song(&program_id).await?;
+            let source = to_source(&song);
+            return Ok(Some(ResolveResponse {
+                kind: ResolveKind::Song,
+                platform: Platform::Wyy,
+                title: source.title.clone(),
+                sources: vec![source],
+            }));
+        }
         let Some((kind, key)) = self.parse_url(url).await else {
             return Ok(None);
         };
@@ -1033,6 +1140,17 @@ fn parse_netease_path(text: &str) -> Option<(ResolveKind, String)> {
 }
 
 /// 找 `/song/12345` `/playlist12345` 这种"关键字后面第一串数字"。
+/// 播客链接的 id。djradio/radio 是电台 id，program 是单条节目 id。
+/// 网页版链接把参数藏在 fragment 里（/#/djradio?id=x），直接扫文本即可。
+fn netease_radio_id(text: &str) -> Option<String> {
+    let lowered = text.to_ascii_lowercase();
+    digits_after(&lowered, "djradio?id=").or_else(|| digits_after(&lowered, "radio?id="))
+}
+
+fn netease_program_id(text: &str) -> Option<String> {
+    digits_after(&text.to_ascii_lowercase(), "program?id=")
+}
+
 fn digits_after(haystack: &str, marker: &str) -> Option<String> {
     let start = haystack.find(marker)? + marker.len();
     let rest = &haystack[start..];
@@ -1111,6 +1229,7 @@ fn netease_collection_results(
         SearchKind::Playlist => result.get("playlists").and_then(Value::as_array),
         SearchKind::Album => result.get("albums").and_then(Value::as_array),
         SearchKind::Artist => result.get("artists").and_then(Value::as_array),
+        SearchKind::Radio => result.get("djRadios").and_then(Value::as_array),
         SearchKind::Song => None,
     }
     .into_iter()
@@ -1169,6 +1288,18 @@ fn netease_collection_results(
                             .or_else(|| str_field(entry, "img1v1Url"))
                             .unwrap_or_default()
                             .to_string(),
+                        count,
+                    )
+                }
+                SearchKind::Radio => {
+                    let count = loose_int(entry.get("programCount")).max(0) as usize;
+                    let dj = entry
+                        .get("dj")
+                        .and_then(|value| str_field(value, "nickname"))
+                        .unwrap_or("未知主播");
+                    (
+                        format!("{count} 集 · {dj}"),
+                        str_field(entry, "picUrl").unwrap_or_default().to_string(),
                         count,
                     )
                 }
@@ -1402,6 +1533,23 @@ fn new_session_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn podcast_link_ids_are_picked_from_radio_and_program_links() {
+        assert_eq!(
+            netease_radio_id("https://music.163.com/#/djradio?id=9657249"),
+            Some("9657249".into())
+        );
+        assert_eq!(
+            netease_radio_id("https://music.163.com/radio?id=9657249"),
+            Some("9657249".into())
+        );
+        assert_eq!(
+            netease_program_id("https://music.163.com/#/program?id=2491967534"),
+            Some("2491967534".into())
+        );
+        assert_eq!(netease_radio_id("https://music.163.com/#/song?id=1"), None);
+    }
 
     #[test]
     fn parses_every_share_link_shape_we_have_seen() {
