@@ -81,12 +81,15 @@ impl SharedState {
     }
 
     pub(crate) fn snapshot(&self) -> TransportSnapshot {
-        loop {
+        // 正常情况下重试几次就能读到一致快照。但音频回调线程若在 publish
+        // 中途被系统杀死（拔设备/驱动复位/休眠唤醒），generation 会永远停在
+        // 奇数——无界自旋会把控制线程整体卡死，表现为无法切歌、退出挂起。
+        // 字段各自都是独立的原子读，重试耗尽后兜底返回“可能拼接了两次
+        // 回调”的快照，对走带显示无害；绝不能为了一致性永远等下去。
+        const MAX_ATTEMPTS: usize = 64;
+        let mut last = TransportSnapshot::default();
+        for _ in 0..MAX_ATTEMPTS {
             let before = self.generation.load(Ordering::Acquire);
-            if before & 1 == 1 {
-                std::hint::spin_loop();
-                continue;
-            }
             let snapshot = TransportSnapshot {
                 mode: match self.mode.load(Ordering::Relaxed) {
                     1 => PlayerMode::RealtimeDj,
@@ -112,11 +115,44 @@ impl SharedState {
                     self.deck_b_source.load(Ordering::Relaxed),
                 ],
             };
-            if before == self.generation.load(Ordering::Acquire) {
+            if before & 1 == 0 && before == self.generation.load(Ordering::Acquire) {
                 return snapshot;
             }
+            last = snapshot;
+            std::hint::spin_loop();
         }
+        last
     }
 }
 
 pub(crate) type SharedTransportState = Arc<SharedState>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归：音频回调死在 publish 中间时 generation 永远停在奇数，
+    /// 快照读取必须有限次重试后返回，而不是把控制线程卡死。
+    #[test]
+    fn snapshot_returns_when_writer_died_mid_publish() {
+        let state = SharedState::default();
+        state.publish(
+            PlayerMode::Continuous,
+            true,
+            DeckId::A,
+            None,
+            480,
+            [240, 120],
+            [7, 9],
+        );
+        // 模拟回调线程在两次 fetch_add 之间被杀：generation 手动拨成奇数。
+        state.generation.store(1, Ordering::Release);
+
+        // 若退化回无界自旋，这个调用永不结束，测试整体超时。
+        let snapshot = state.snapshot();
+        // 兜底路径也要读到中断那次 publish 已写入的字段，而不是全默认值。
+        assert!(snapshot.playing);
+        assert_eq!(snapshot.output_frames, 480);
+        assert_eq!(snapshot.deck_source_ids, [7, 9]);
+    }
+}
