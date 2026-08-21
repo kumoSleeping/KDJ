@@ -29,8 +29,8 @@ use super::auth::{self, DeviceCode, DevicePoll, OAuthSession};
 use super::client::YtmClient;
 use crate::net::{create_download_writer, host_is, AtomicDownload};
 use crate::provider::{
-    effective_limit, no_login, str_field, unique_download_path, Capabilities, DownloadJob,
-    MusicProvider, ProviderContext,
+    effective_limit, full_listing, no_login, str_field, unique_download_path, Capabilities,
+    DownloadJob, MusicProvider, ProviderContext,
 };
 use crate::tags;
 
@@ -538,7 +538,7 @@ impl MusicProvider for YoutubeMusicProvider {
                 }))
             }
             ResolveKind::Playlist => {
-                let limit = effective_limit(limit, 500);
+                let limit = full_listing(limit);
                 let (title, sources) = self.resolve_playlist(&key, limit).await?;
                 Ok(Some(ResolveResponse {
                     kind: ResolveKind::Playlist,
