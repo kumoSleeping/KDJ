@@ -28,7 +28,7 @@ import {
 } from "../../lib/trackDrag";
 import type {
   CuePoint,
-  StemModelStatus,
+  StemRuntimeStatus,
   StemMode,
   StemName,
   Track,
@@ -181,7 +181,7 @@ export interface PerformanceStemDeckModel {
 export interface PerformanceWorkspaceProps {
   decks: [PerformanceDeckModel, PerformanceDeckModel];
   stems: [PerformanceStemDeckModel, PerformanceStemDeckModel];
-  stemModel: StemModelStatus | null;
+  stemRuntime: StemRuntimeStatus | null;
   stemMode: StemMode;
   masterVolume: number;
   onSeek: (side: 0 | 1, detail: Omit<SeekDetail, "trackId">) => void;
@@ -2418,7 +2418,7 @@ const StableDeckInfo = memo(DeckInfo);
 export function PerformanceWorkspace({
   decks: sourceDecks,
   stems,
-  stemModel,
+  stemRuntime,
   stemMode,
   masterVolume,
   onSeek,
@@ -2696,7 +2696,7 @@ export function PerformanceWorkspace({
         if (!stems[side].enabled) {
           const token = [
             decks[side].track?.id ?? "none",
-            stemModel?.state ?? "none",
+            stemRuntime?.state ?? "none",
             stems[side].status?.state ?? "none",
           ].join(":");
           if (vocalFxEnableAttemptRef.current[side] !== token) {
@@ -2737,7 +2737,7 @@ export function PerformanceWorkspace({
     decks[1].track?.id,
     fxMode,
     fxSlots,
-    stemModel?.state,
+    stemRuntime?.state,
     stems[0].enabled,
     stems[1].enabled,
     stems[0].gains,
@@ -2764,7 +2764,7 @@ export function PerformanceWorkspace({
       .filter((trackId) => !active.includes(trackId))
       .forEach((trackId) => onReleaseStemWaveScan?.(trackId));
     stemScanTrackIdsRef.current = active;
-    if (stemModel?.state !== "ready") return;
+    if (stemRuntime?.state !== "ready") return;
     // Give the original 640-column rail its first paint, then automatically prepare STEM around
     // each loaded Deck. Staggering the mounts avoids two cold decode requests landing together;
     // the native scheduler still owns inference priority and expands beyond the viewport later.
@@ -2782,7 +2782,7 @@ export function PerformanceWorkspace({
     activeStemDisplayMask,
     onEnsureStemWaveScan,
     onReleaseStemWaveScan,
-    stemModel?.state,
+    stemRuntime?.state,
   ]);
   useEffect(() => {
     localStorage.setItem(CROSSFADER_ENABLED_STORAGE_KEY, JSON.stringify(crossfaderEnabled));
@@ -2957,7 +2957,7 @@ export function PerformanceWorkspace({
             waveform.b[index] = Math.round(Math.min(255, Math.max(0, b)));
             if (waveform.known) waveform.known[index] = true;
           });
-          // A fresh wrapper makes Waveform repaint only when a real ByteDance block changed. Its
+          // A fresh wrapper makes Waveform repaint only when a real classical separation block changed. Its
           // large typed timeline arrays stay shared; copying them on every visual update would
           // merely move the old polling bottleneck from JSON parsing into the JS heap.
           next[side][stem] = {

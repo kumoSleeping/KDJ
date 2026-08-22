@@ -9,17 +9,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use kdj_core::work_scheduler::{work_scheduler, QueuedWork, WorkClass};
-use kdj_core::{StemCompute, StemMode};
 use rustfft::num_complex::Complex32;
 use rustfft::{Fft, FftPlanner};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::dsp::{apply_soft_gate, pack_model_input_for_mode, unpack_model_output};
 use crate::instant::instant_admission_active;
-use crate::runtime::{
-    configure_stem_runtime, recommended_worker_count, PlatformEngine, RuntimeInfo,
-};
+use crate::runtime::{recommended_worker_count, PlatformEngine, RuntimeInfo};
 use crate::runtime::{stem_runtime_preference, StemRuntimePreference};
 use crate::{StemKind, StemWaveform, SAMPLE_RATE};
 
@@ -32,7 +28,7 @@ const LIVE_WAVE_RETAIN_SECONDS: f64 = 30.0;
 /// instead of deleting the song tail before it can be painted.
 const LIVE_WAVE_COMPLETION_RETENTION: Duration = Duration::from_secs(60);
 /// One 46 ms Hann window per 10 ms display column. This follows the same STFT + frequency-colour
-/// gradient family used by DJ waveform tools, but runs only on completed ByteDance PCM in memory.
+/// gradient family used by DJ waveform tools, but runs only on completed classical Redress PCM in memory.
 const LIVE_STEM_COLOR_FFT_SIZE: usize = 2_048;
 const LIVE_STEM_COLOR_MIN_HZ: f32 = 35.0;
 const LIVE_STEM_COLOR_MAX_HZ: f32 = 16_000.0;
@@ -40,20 +36,20 @@ const LIVE_STEM_COLOR_MAX_HZ: f32 = 16_000.0;
 const LIVE_AMP_GAMMA: f32 = 0.72;
 /// Same floor as `kdj_analysis::waveform::COLOR_FLOOR` so STEM rails are not a grey wash.
 const LIVE_COLOR_FLOOR: f32 = 0.12;
-/// One fixed ByteDance tile produces this much retained source. This is a background-cache budget,
+/// One fixed classical Redress tile produces this much retained source. This is a background-cache budget,
 /// not callback latency or a promise that a cache miss is instantaneous.
 const DIAGNOSTIC_HISTORY: usize = 64;
 
-/// Bounded, user-visible observations from the actual inference workers. These values are
+/// Bounded, user-visible observations from the actual separation workers. These values are
 /// intentionally about completed work rather than a synthetic benchmark: testers can report the
 /// selected provider, cold block, steady P95, late blocks, output gaps, and memory-like failures
-/// from `/stems/model` without enabling a debug build.
+/// from `/stems/runtime` without enabling a debug build.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StemRuntimeDiagnostics {
     pub runtime: String,
     pub provider: String,
-    pub model_load_ms: Option<u64>,
+    pub initialization_ms: Option<u64>,
     pub first_block_ms: Option<u64>,
     pub last_block_ms: Option<u64>,
     pub p95_block_ms: Option<u64>,
@@ -85,7 +81,7 @@ impl StemRuntimeDiagnostics {
         Self {
             runtime,
             provider,
-            model_load_ms: None,
+            initialization_ms: None,
             first_block_ms: None,
             last_block_ms: None,
             p95_block_ms: None,
@@ -145,7 +141,7 @@ fn diagnostics_state() -> &'static Mutex<StemRuntimeDiagnostics> {
 static STEM_OUTPUT_UNDERRUNS: AtomicU64 = AtomicU64::new(0);
 static STEM_OUTPUT_UNDERRUNS_BY_DECK: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
-/// Snapshot used by the model status endpoint. The callback-side gap count is an atomic counter
+/// Snapshot used by the runtime status endpoint. The callback-side gap count is an atomic counter
 /// so the realtime renderer never locks the diagnostics mutex.
 pub fn stem_runtime_diagnostics() -> StemRuntimeDiagnostics {
     let mut diagnostics = diagnostics_state().lock().unwrap().clone();
@@ -200,11 +196,11 @@ pub fn record_stem_output_underrun_for_deck(deck: usize) {
     }
 }
 
-fn record_model_loaded(info: RuntimeInfo, elapsed: Duration) {
+fn record_runtime_initialized(info: RuntimeInfo, elapsed: Duration) {
     let mut diagnostics = diagnostics_state().lock().unwrap();
     diagnostics.runtime = info.runtime;
     diagnostics.provider = info.provider;
-    diagnostics.model_load_ms = Some(elapsed.as_millis().min(u128::from(u64::MAX)) as u64);
+    diagnostics.initialization_ms = Some(elapsed.as_millis().min(u128::from(u64::MAX)) as u64);
 }
 
 fn record_completed_block(info: RuntimeInfo, elapsed: Duration) {
@@ -332,7 +328,7 @@ impl LiveWaveSession {
 
 /// Incremental waveform payload for the performance UI. Sending a complete 24,000-column RGB
 /// waveform every 200ms made JSON parsing and canvas redraws compete with the compositor. A
-/// point is therefore sent only once, when its real ByteDance tile is published.
+/// point is therefore sent only once, when its real classical Redress tile is published.
 #[derive(Clone, Debug, Serialize)]
 pub struct LiveStemWaveformDelta {
     pub track_id: i64,
@@ -377,8 +373,8 @@ fn next_scan_generation() -> u64 {
     NEXT_SCAN_GENERATION.fetch_add(1, Ordering::AcqRel).max(1)
 }
 
-/// A model switch changes the meaning and number of every published lane. Retaining blocks across
-/// that boundary makes the new scanner treat old-model coverage as completed work, so invalidate
+/// A runtime reset changes the meaning and number of every published lane. Retaining blocks across
+/// that boundary makes the new scanner treat old-runtime coverage as completed work, so invalidate
 /// the complete public timeline and force mounted clients onto a fresh epoch.
 pub(crate) fn invalidate_live_stem_waveforms(reason: &'static str) {
     let mut sessions = live_waves().lock().unwrap();
@@ -391,7 +387,7 @@ pub(crate) fn invalidate_live_stem_waveforms(reason: &'static str) {
         event = "waveform_sessions_invalidated",
         count,
         reason,
-        "old-model STEM waveform blocks and coverage were invalidated"
+        "old-runtime STEM waveform blocks and coverage were invalidated"
     );
 }
 
@@ -460,7 +456,7 @@ pub fn begin_live_stem_waveform(
     let start = start.max(0.0);
     let duration = duration.max(0.0);
     if let Some(session) = sessions.get_mut(&track_id) {
-        // A live separator has no random-access model cache, so a real seek needs a new worker
+        // A live separator has no random-access separator cache, so a real seek needs a new worker
         // epoch. Its already separated waveform columns are still valid for this exact audio
         // file, though. Retaining them avoids blanking all rails every time the performer jogs or
         // SYNC retargets the current Deck.
@@ -753,8 +749,8 @@ fn prune_distant_live_wave_blocks(session: &mut LiveWaveSession, around: f64) {
         .retain(|block| block.start + block.duration >= keep_start && block.start <= keep_end);
 }
 
-/// Return the contiguous regions actually backed by completed ByteDance tiles. These bounds must
-/// come from published blocks rather than elapsed wall-clock time: a slow model must leave the
+/// Return the contiguous regions actually backed by completed classical Redress tiles. These bounds must
+/// come from published blocks rather than elapsed wall-clock time: a slow separator must leave the
 /// frontier where data really ends instead of making the UI advertise an empty future as loaded.
 fn live_waveform_frontiers(session: &LiveWaveSession) -> (f64, f64) {
     const EPSILON_SECONDS: f64 = 1.0 / SAMPLE_RATE as f64;
@@ -935,7 +931,7 @@ fn spectral_gradient(frequency: f32) -> [f32; 3] {
 
 /// Return only blocks that were published since `after_revision`. Unlike the legacy full
 /// waveform endpoint this has a bounded payload even for a long track: an ordinary 200ms poll
-/// is empty, and a completed ByteDance tile contributes only its own timeline columns.
+/// is empty, and a completed classical Redress tile contributes only its own timeline columns.
 pub fn live_stem_waveform_delta(
     track_id: i64,
     columns: usize,
@@ -1078,7 +1074,7 @@ fn display_live_amplitude(value: f32, scale: f32) -> f32 {
     (value / scale).clamp(0.0, 1.0).powf(LIVE_AMP_GAMMA)
 }
 
-/// One fixed ByteDance output tile in stable `Drums / Bass / Other / Vocals` slots. Model-only
+/// One fixed classical Redress output tile in stable `Drums / Bass / Other / Vocals` slots. FFT-only
 /// left/right context is removed before caching; each lane retains the audible core plus the short
 /// successor handoff tail.
 pub struct StemChunk {
@@ -1123,7 +1119,7 @@ enum InferencePriority {
     Fill,
 }
 
-fn inference_work_class(priority: InferencePriority) -> WorkClass {
+fn separation_work_class(priority: InferencePriority) -> WorkClass {
     match priority {
         InferencePriority::Audio => WorkClass::StemAudible,
         InferencePriority::LookAhead => WorkClass::StemLookAhead,
@@ -1137,8 +1133,8 @@ struct InferenceReceivers {
     fill: Mutex<Receiver<InferenceJob>>,
 }
 
-/// Result handle lets a playback worker submit overlapping chunks to two persistent model workers
-/// before waiting. Model load and inference remain completely outside the audio callback.
+/// Result handle lets a playback worker submit overlapping chunks to two persistent separation workers
+/// before waiting. Model load and separation remain completely outside the audio callback.
 pub struct StemInferenceTicket {
     receiver: Receiver<Result<Arc<StemChunk>>>,
     cancelled: Arc<AtomicBool>,
@@ -1149,14 +1145,14 @@ impl StemInferenceTicket {
         match self.receiver.try_recv() {
             Ok(result) => result.map(Some),
             Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => bail!("STEM 后台推理 worker 已退出"),
+            Err(TryRecvError::Disconnected) => bail!("STEM 后台分离 worker 已退出"),
         }
     }
 
     pub fn wait(self) -> Result<Arc<StemChunk>> {
         self.receiver
             .recv()
-            .context("STEM 后台推理 worker 已退出")?
+            .context("STEM 后台分离 worker 已退出")?
     }
 
     /// Wait for at most `timeout` without losing the ticket. Display work uses this to re-check
@@ -1165,7 +1161,7 @@ impl StemInferenceTicket {
         match self.receiver.recv_timeout(timeout) {
             Ok(result) => result.map(Some),
             Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => bail!("STEM 后台推理 worker 已退出"),
+            Err(RecvTimeoutError::Disconnected) => bail!("STEM 后台分离 worker 已退出"),
         }
     }
 
@@ -1186,14 +1182,14 @@ impl StemInferenceTicket {
 impl Drop for StemInferenceTicket {
     fn drop(&mut self) {
         // A queued optional ticket that timed out or whose Deck was unmounted must not consume a
-        // later inference slot. Native inference itself is not pre-emptible, but its stale result
+        // later separation slot. Native separation itself is not pre-emptible, but its stale result
         // is discarded at the next cancellation fence.
         self.cancelled.store(true, Ordering::Release);
     }
 }
 
 /// Small persistent worker pool owned only while one or more live STEM streams exist. Dropping the
-/// final pool handle closes the queue; worker-local native models and their GPU resources then
+/// final pool handle closes the queue; worker-local FFT workspaces then
 /// leave memory instead of becoming an application-lifetime cache.
 pub struct StemInferencePool {
     id: u64,
@@ -1217,12 +1213,8 @@ static ACTIVE_POOL_COUNT: AtomicUsize = AtomicUsize::new(0);
 static RESOURCE_SAMPLER_STARTED: AtomicBool = AtomicBool::new(false);
 static ALLOCATOR_RELIEF_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-fn effective_worker_count(requested: usize, mode: StemMode, instant: bool) -> usize {
-    if cfg!(target_os = "macos") || mode == StemMode::MobileNetTwo || instant {
-        1
-    } else {
-        requested.max(1)
-    }
+fn effective_worker_count(requested: usize) -> usize {
+    requested.clamp(1, recommended_worker_count())
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1292,7 +1284,7 @@ fn log_pool_resource(event: &'static str, pool_id: u64) {
         process_user_cpu_ms = resource.user_cpu_ns / 1_000_000,
         process_system_cpu_ms = resource.system_cpu_ns / 1_000_000,
         gpu_telemetry = if cfg!(target_os = "macos") {
-            "unavailable (CoreML disabled; ORT CPU path)"
+            "not used by classical CPU separator"
         } else {
             "unavailable"
         },
@@ -1369,7 +1361,7 @@ fn note_pool_started() {
                     rss_mib = resource.resident_bytes as f64 / 1_048_576.0,
                     footprint_mib = resource.physical_footprint_bytes as f64 / 1_048_576.0,
                     gpu_telemetry = if cfg!(target_os = "macos") {
-                        "unavailable (CoreML disabled; ORT CPU path)"
+                        "not used by classical CPU separator"
                     } else {
                         "unavailable"
                     },
@@ -1417,26 +1409,23 @@ impl StemInferencePool {
         recommended_worker_count()
     }
 
-    pub fn new(model_path: &Path, workers: usize) -> Result<Arc<Self>> {
+    pub fn new(_runtime_key: &Path, workers: usize) -> Result<Arc<Self>> {
         let preference = stem_runtime_preference();
         let id = NEXT_POOL_ID.fetch_add(1, Ordering::Relaxed);
-        if crate::model::platform_model_artifact(preference.mode).is_none() {
-            bail!("STEM 已关闭或当前平台尚未接入所选 runtime");
-        }
         if workers == 0 {
-            bail!("STEM 后台推理 worker 数量必须大于 0");
+            bail!("STEM 后台分离 worker 数量必须大于 0");
         }
         reset_stem_runtime_diagnostics();
-        // ByteDance is the sole production path. The retired instant layer is not
-        // created, so it cannot load a second model or compete with the live separator.
+        // classical Redress is the sole production path. The retired instant layer is not
+        // created, so it cannot load a second separator or compete with the live separator.
         let instant: Option<Arc<crate::InstantStemPool>> = None;
         // macOS production is deliberately ORT CPU-only. A second session duplicates native
         // arena/thread-pool memory without being required for the two-Deck retained-core rate.
         // Keep one shared FIFO worker for every macOS mode.
         // Other platforms retain their two-worker accelerator path unless HS layering reserves the
         // CPU budget.
-        let workers = effective_worker_count(workers, preference.mode, instant.is_some());
-        // Queue capacities are bounded because each fixed ByteDance tile is large. Audible cache
+        let workers = effective_worker_count(workers);
+        // Queue capacities are bounded because each fixed classical Redress tile is large. Audible cache
         // requests always overtake optional waveform preparation.
         let (audio_sender, audio_receiver) =
             mpsc::sync_channel::<InferenceJob>(workers.saturating_mul(8));
@@ -1450,29 +1439,18 @@ impl StemInferencePool {
         });
         let cache = Arc::new(Mutex::new(TileCache::default()));
         let shutdown = Arc::new(AtomicBool::new(false));
-        let model_path = model_path.to_path_buf();
         let mut worker_handles = Vec::with_capacity(workers);
         for index in 0..workers {
             let receivers = Arc::clone(&receivers);
             let cache = Arc::clone(&cache);
-            let model_path = model_path.clone();
-            let worker_preference = preference;
             let worker_shutdown = Arc::clone(&shutdown);
             let handle = std::thread::Builder::new()
                 .name(format!("kdj-live-stem-{index}"))
                 .spawn(move || {
                     kdj_core::thread_qos::prefer_live_audio();
-                    run_worker(
-                        id,
-                        index,
-                        model_path,
-                        worker_preference,
-                        receivers,
-                        cache,
-                        worker_shutdown,
-                    )
+                    run_worker(id, index, receivers, cache, worker_shutdown)
                 })
-                .context("启动 STEM 后台推理 worker")?;
+                .context("启动 STEM 后台分离 worker")?;
             worker_handles.push(handle);
         }
         note_pool_started();
@@ -1480,12 +1458,9 @@ impl StemInferencePool {
             target: "kdj_stem_lifecycle",
             event = "pool_created",
             pool_id = id,
-            mode = ?preference.mode,
-            compute = ?preference.compute,
             workers,
-            model_path = %model_path.display(),
             instant = instant.is_some(),
-            "STEM inference pool created"
+            "classical STEM worker pool created"
         );
         log_pool_resource("pool_created_resource", id);
         Ok(Arc::new(Self {
@@ -1509,11 +1484,9 @@ impl StemInferencePool {
             target: "kdj_stem_lifecycle",
             event = "pool_shutdown_begin",
             pool_id = self.id,
-            mode = ?self.preference.mode,
-            compute = ?self.preference.compute,
             reason,
             cache_entries = self.cache.lock().unwrap().entries.len(),
-            "STEM inference pool shutdown begins"
+            "STEM separation pool shutdown begins"
         );
         self.cache.lock().unwrap().entries.clear();
         if let Some(instant) = &self.instant {
@@ -1526,7 +1499,7 @@ impl StemInferencePool {
                     target: "kdj_stem_lifecycle",
                     event = "worker_join_panic",
                     pool_id = self.id,
-                    "STEM inference worker panicked during shutdown"
+                    "STEM separation worker panicked during shutdown"
                 );
             }
         }
@@ -1538,7 +1511,7 @@ impl StemInferencePool {
             pool_id = self.id,
             reason,
             allocator_released_mib = allocator_released_bytes as f64 / 1_048_576.0,
-            "STEM inference pool sessions unloaded"
+            "STEM separation pool sessions unloaded"
         );
         log_pool_resource("pool_shutdown_resource", self.id);
         schedule_allocator_pressure_relief(self.id);
@@ -1569,7 +1542,7 @@ impl StemInferencePool {
     }
 
     /// Reuse PCM already paid for by the visible viewport. This is intentionally an exact-key
-    /// lookup: callers may offset inside the retained core, but must never treat a nearby model
+    /// lookup: callers may offset inside the retained core, but must never treat a nearby separator
     /// window as if it represented different source samples.
     pub fn cached_for_key(&self, key: &[u8; 32]) -> Option<Arc<StemChunk>> {
         self.cache.lock().unwrap().get(key)
@@ -1591,7 +1564,7 @@ impl StemInferencePool {
             expected_epoch,
             InferencePriority::Audio,
         )
-        .and_then(|ticket| ticket.context("STEM 可听缓存推理已取消"))
+        .and_then(|ticket| ticket.context("STEM 可听缓存分离已取消"))
     }
 
     /// Submit one best-effort future chunk. This is deliberately separate from [`Self::submit`]:
@@ -1666,7 +1639,7 @@ impl StemInferencePool {
         priority: InferencePriority,
     ) -> Result<Option<StemInferenceTicket>> {
         if self.shutdown.load(Ordering::Acquire) {
-            bail!("STEM inference pool is shutting down");
+            bail!("STEM separation pool is shutting down");
         }
         let expected = crate::stem_tile_geometry().samples;
         if left.len() != expected || right.len() != expected {
@@ -1692,7 +1665,7 @@ impl StemInferencePool {
             epoch,
             expected_epoch,
             cancelled: Arc::clone(&cancelled),
-            work: work_scheduler().queued(inference_work_class(priority)),
+            work: work_scheduler().queued(separation_work_class(priority)),
             submitted_at: Instant::now(),
             reply,
         };
@@ -1703,7 +1676,7 @@ impl StemInferencePool {
             priority = ?priority,
             expected_epoch,
             current_epoch = job.epoch.load(Ordering::Acquire),
-            "STEM inference job submitted"
+            "STEM separation job submitted"
         );
         if matches!(priority, InferencePriority::Audio)
             && instant_admission_active()
@@ -1717,7 +1690,7 @@ impl StemInferencePool {
                     return Ok(None);
                 }
                 if self.shutdown.load(Ordering::Acquire) {
-                    bail!("STEM inference pool is shutting down");
+                    bail!("STEM separation pool is shutting down");
                 }
                 match self.audio_sender.try_send(job) {
                     Ok(()) => break,
@@ -1726,19 +1699,19 @@ impl StemInferencePool {
                         thread::sleep(Duration::from_millis(1));
                     }
                     Err(TrySendError::Disconnected(_)) => {
-                        bail!("STEM 后台推理 worker 已退出");
+                        bail!("STEM 后台分离 worker 已退出");
                     }
                 }
             },
             InferencePriority::LookAhead => match self.look_ahead_sender.try_send(job) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => return Ok(None),
-                Err(TrySendError::Disconnected(_)) => bail!("STEM 后台推理 worker 已退出"),
+                Err(TrySendError::Disconnected(_)) => bail!("STEM 后台分离 worker 已退出"),
             },
             InferencePriority::Fill => match self.fill_sender.try_send(job) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => return Ok(None),
-                Err(TrySendError::Disconnected(_)) => bail!("STEM 后台推理 worker 已退出"),
+                Err(TrySendError::Disconnected(_)) => bail!("STEM 后台分离 worker 已退出"),
             },
         }
         Ok(Some(StemInferenceTicket {
@@ -1757,8 +1730,6 @@ impl Drop for StemInferencePool {
 fn run_worker(
     pool_id: u64,
     worker_index: usize,
-    model_path: PathBuf,
-    preference: StemRuntimePreference,
     receivers: Arc<InferenceReceivers>,
     cache: Arc<Mutex<TileCache>>,
     shutdown: Arc<AtomicBool>,
@@ -1768,9 +1739,7 @@ fn run_worker(
         event = "worker_started",
         pool_id,
         worker_index,
-        mode = ?preference.mode,
-        compute = ?preference.compute,
-        "STEM inference worker started"
+        "classical STEM worker started"
     );
     let mut engine: Option<PlatformEngine> = None;
     // Audio always wins. Between optional lanes, give one ready viewport tile a turn after each
@@ -1779,7 +1748,7 @@ fn run_worker(
     let mut prefer_fill = false;
     loop {
         let Some(scheduled) =
-            next_inference_job_until(&receivers, Some(&shutdown), &mut prefer_fill)
+            next_separation_job_until(&receivers, Some(&shutdown), &mut prefer_fill)
         else {
             break;
         };
@@ -1798,18 +1767,20 @@ fn run_worker(
         if cancelled.load(Ordering::Acquire) || epoch.load(Ordering::Acquire) != expected_epoch {
             tracing::debug!(
                 target: "kdj_stem_lifecycle",
-                event = "job_cancelled_before_inference",
+                event = "job_cancelled_before_separation",
                 pool_id,
                 worker_index,
                 expected_epoch,
                 current_epoch = epoch.load(Ordering::Acquire),
                 "stale STEM job cancelled"
             );
-            let _ = reply.send(Err(anyhow::anyhow!("STEM 后台推理已取消")));
+            let _ = reply.send(Err(anyhow::anyhow!("STEM 后台分离已取消")));
             continue;
         }
         if shutdown.load(Ordering::Acquire) {
-            let _ = reply.send(Err(anyhow::anyhow!("STEM inference pool is shutting down")));
+            let _ = reply.send(Err(anyhow::anyhow!(
+                "STEM separation pool is shutting down"
+            )));
             break;
         }
         if let Some(chunk) = cache.lock().unwrap().get(&key) {
@@ -1828,12 +1799,10 @@ fn run_worker(
                     event = "session_load_begin",
                     pool_id,
                     worker_index,
-                    mode = ?preference.mode,
-                    compute = ?preference.compute,
-                    "STEM native session load begins"
+                    "classical STEM workspace initialization begins"
                 );
-                let loaded = PlatformEngine::load(&model_path, preference)?;
-                record_model_loaded(loaded.info(), load_started.elapsed());
+                let loaded = PlatformEngine::load();
+                record_runtime_initialized(loaded.info(), load_started.elapsed());
                 tracing::info!(
                     target: "kdj_stem_lifecycle",
                     event = "session_load_complete",
@@ -1842,22 +1811,19 @@ fn run_worker(
                     elapsed_ms = load_started.elapsed().as_millis(),
                     runtime = %loaded.info().runtime,
                     provider = %loaded.info().provider,
-                    "STEM native session loaded"
+                    "classical STEM workspace initialized"
                 );
                 engine = Some(loaded);
             }
             let infer_started = Instant::now();
-            let packed = pack_model_input_for_mode(preference.mode, &left, &right)?;
-            let output = engine
+            let mut stems = engine
                 .as_mut()
                 .expect("STEM cache engine")
-                .predict(&packed.values)?;
+                .separate(&left, &right)?;
             if cancelled.load(Ordering::Acquire) || epoch.load(Ordering::Acquire) != expected_epoch
             {
-                bail!("STEM 后台推理已取消");
+                bail!("STEM 后台分离已取消");
             }
-            let mut stems = unpack_model_output(&output, &packed)?;
-            apply_soft_gate(&left, &right, &mut stems);
             retain_stem_core_and_handoff(&mut stems);
             infer_elapsed = infer_started.elapsed();
             Ok(Arc::new(StemChunk {
@@ -1897,7 +1863,7 @@ fn run_worker(
         worker_index,
         session_unloaded = had_engine,
         shutdown = shutdown.load(Ordering::Acquire),
-        "STEM inference worker exited and native session was dropped"
+        "classical STEM worker exited and its FFT workspace was dropped"
     );
 }
 
@@ -1939,7 +1905,7 @@ fn tile_key(left: &[f32], right: &[f32]) -> [u8; 32] {
         // A scan decoder may reopen at an exact tile boundary while the playback cursor extends
         // sequentially from the prior FLAC packet. Their PCM is audibly identical but can differ
         // by a few float mantissa bits. Hash a stable PCM16 identity so both consumers reuse the
-        // immutable tile; the full-float samples still feed inference on a real miss.
+        // immutable tile; the full-float samples still feed separation on a real miss.
         let mut bytes = [0u8; 8_192];
         for samples in channel.chunks(bytes.len() / 2) {
             for (index, sample) in samples.iter().enumerate() {
@@ -1957,15 +1923,15 @@ fn tile_key(left: &[f32], right: &[f32]) -> [u8; 32] {
 }
 
 /// Workers always take ready audio work before look-ahead work. We intentionally poll instead of
-/// holding either receiver mutex in `recv`: two model workers must be able to claim separate Deck
+/// holding either receiver mutex in `recv`: two separation workers must be able to claim separate Deck
 /// jobs, and a new seek must not sit behind an idle worker waiting on the low-priority lane.
 #[cfg(test)]
-fn next_inference_job(receivers: &InferenceReceivers) -> Option<ScheduledInference> {
+fn next_separation_job(receivers: &InferenceReceivers) -> Option<ScheduledInference> {
     let mut prefer_fill = false;
-    next_inference_job_until(receivers, None, &mut prefer_fill)
+    next_separation_job_until(receivers, None, &mut prefer_fill)
 }
 
-fn next_inference_job_until(
+fn next_separation_job_until(
     receivers: &InferenceReceivers,
     shutdown: Option<&AtomicBool>,
     prefer_fill: &mut bool,
@@ -2073,7 +2039,7 @@ fn stem_pool_transition() -> &'static Mutex<()> {
     TRANSITION.get_or_init(|| Mutex::new(()))
 }
 
-/// Process-wide inference pool so display scan and live playback share the same worker set.
+/// Process-wide separation pool so display scan and live playback share the same worker set.
 pub struct StemPoolGuard {
     pool_id: u64,
     path: PathBuf,
@@ -2147,10 +2113,8 @@ pub fn acquire_stem_pool(path: &Path) -> Result<(StemPoolGuard, Arc<StemInferenc
             target: "kdj_stem_lifecycle",
             event = "incompatible_pool_retired",
             pool_id = retired.pool.id,
-            old_mode = ?retired.preference.mode,
-            new_mode = ?preference.mode,
             outstanding_leases = retired.leases,
-            "retiring incompatible STEM pool before loading another model"
+            "retiring incompatible classical STEM pool"
         );
         drop(registry);
         retired.pool.shutdown("incompatible_runtime_requested");
@@ -2181,42 +2145,24 @@ pub fn acquire_stem_pool(path: &Path) -> Result<(StemPoolGuard, Arc<StemInferenc
     ))
 }
 
-/// Retire the old pool and publish the new preference under one process-wide transition lock.
-/// `acquire_stem_pool` cannot observe the old preference after its registry entry disappeared (or
-/// the new preference while the old pool is still registered), which closes the model-switch gap
-/// between playback recovery and viewport scan requests.
-pub(crate) fn switch_current_stem_runtime(
-    mode: StemMode,
-    compute: StemCompute,
-    reason: &'static str,
-) -> bool {
+/// Retire every classical worker and invalidate short-lived waveform state.
+pub(crate) fn reset_current_stem_runtime(reason: &'static str) -> bool {
     let _transition = stem_pool_transition().lock().unwrap();
-    let previous = stem_runtime_preference();
-    let next = StemRuntimePreference { mode, compute };
-    if previous == next {
-        return false;
-    }
-
     let retired = shared_stem_pool().lock().unwrap().take();
+    let changed = retired.is_some();
     if let Some(retired) = retired {
         tracing::info!(
             target: "kdj_stem_lifecycle",
             event = "registry_pool_retired",
             pool_id = retired.pool.id,
-            mode = ?retired.preference.mode,
-            compute = ?retired.preference.compute,
             leases = retired.leases,
             reason,
             "current STEM pool removed from registry during atomic runtime switch"
         );
-        // Keep the old geometry/preference visible until its native workers have fully exited.
-        // New acquisitions are blocked by `_transition` throughout this join.
         retired.pool.shutdown(reason);
     }
-    let changed = configure_stem_runtime(mode, compute);
-    debug_assert!(changed);
     invalidate_live_stem_waveforms(reason);
-    true
+    changed
 }
 
 #[cfg(test)]
@@ -2227,19 +2173,14 @@ mod tests {
     };
 
     #[test]
-    fn mobilenet_and_instant_cpu_paths_never_duplicate_native_sessions() {
-        assert_eq!(effective_worker_count(2, StemMode::MobileNetTwo, false), 1);
-        assert_eq!(effective_worker_count(2, StemMode::MobileNetTwo, true), 1);
-        #[cfg(target_os = "macos")]
-        assert_eq!(effective_worker_count(2, StemMode::MobileNetTwo, false), 1);
+    fn classical_worker_count_is_bounded_for_dual_deck() {
+        assert_eq!(effective_worker_count(0), 1);
+        assert_eq!(effective_worker_count(2), 2);
+        assert_eq!(effective_worker_count(20), 2);
     }
 
     #[test]
-    #[ignore = "requires KDJ_STEM_TEST_MODEL_DIR pointing at the locked MobileNet ONNX directory"]
-    fn configured_mobilenet_runs_the_production_pool_and_reconstructs_two_lanes() {
-        let path = std::env::var("KDJ_STEM_TEST_MODEL_DIR")
-            .expect("set KDJ_STEM_TEST_MODEL_DIR to the MobileNet model directory");
-        crate::runtime::configure_stem_runtime(StemMode::MobileNetTwo, kdj_core::StemCompute::Cpu);
+    fn classical_pool_reconstructs_two_lanes_without_external_assets() {
         let geometry = crate::stem_tile_geometry();
         let mut left = vec![0.0; geometry.samples];
         let mut right = vec![0.0; geometry.samples];
@@ -2247,7 +2188,7 @@ mod tests {
             left[frame] = (std::f32::consts::TAU * 440.0 * frame as f32 / 44_100.0).sin() * 0.1;
             right[frame] = (std::f32::consts::TAU * 660.0 * frame as f32 / 44_100.0).sin() * 0.1;
         }
-        let pool = StemInferencePool::new(Path::new(&path), 2).unwrap();
+        let pool = StemInferencePool::new(Path::new(crate::RUNTIME_ID), 2).unwrap();
         let epoch = Arc::new(AtomicU64::new(1));
         let ticket = pool
             .submit_for(
@@ -2272,11 +2213,11 @@ mod tests {
                 };
                 let reconstructed =
                     chunk.stems()[2][frame][channel] + chunk.stems()[3][frame][channel];
-                assert!((source - reconstructed).abs() < 1e-6);
+                assert!((source - reconstructed).abs() < 2e-4);
             }
         }
         eprintln!(
-            "mobilenet production pool first tile including load: {:.1} ms",
+            "classical production pool first tile including init: {:.1} ms",
             started.elapsed().as_secs_f64() * 1_000.0
         );
 
@@ -2306,7 +2247,7 @@ mod tests {
     }
 
     #[test]
-    fn bytedance_stems_keep_the_models_absolute_level() {
+    fn classical_stems_keep_absolute_level() {
         let chunk = StemChunk {
             stems: std::array::from_fn(|_| vec![[0.09, 0.045], [-0.09, -0.045]]),
             reconstruction_gain: 1.0,
@@ -2315,7 +2256,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_tiles_drop_model_context_but_keep_the_handoff_tail() {
+    fn cached_tiles_drop_fft_context_but_keep_the_handoff_tail() {
         let mut stems = std::array::from_fn(|stem| {
             (0..SEGMENT_SAMPLES)
                 .map(|frame| [frame as f32, stem as f32])
@@ -2334,7 +2275,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_bytedance_tiles_are_shared_as_immutable_cache_entries() {
+    fn completed_classical_tiles_are_shared_as_immutable_cache_entries() {
         let key = tile_key(&[0.1, 0.2], &[0.3, 0.4]);
         let chunk = Arc::new(StemChunk {
             stems: std::array::from_fn(|stem| vec![[stem as f32, -(stem as f32)]]),
@@ -2386,9 +2327,9 @@ mod tests {
         look_ahead_sender.send(queued_job(10)).unwrap();
         audio_sender.send(queued_job(11)).unwrap();
 
-        let first = next_inference_job(&receivers).expect("queued job");
-        let second = next_inference_job(&receivers).expect("queued job");
-        let third = next_inference_job(&receivers).expect("queued job");
+        let first = next_separation_job(&receivers).expect("queued job");
+        let second = next_separation_job(&receivers).expect("queued job");
+        let third = next_separation_job(&receivers).expect("queued job");
         assert_eq!(first.job.expected_epoch, 11);
         assert_eq!(second.job.expected_epoch, 10);
         assert_eq!(third.job.expected_epoch, 9);
@@ -2410,21 +2351,21 @@ mod tests {
 
         let mut prefer_fill = false;
         assert_eq!(
-            next_inference_job_until(&receivers, None, &mut prefer_fill)
+            next_separation_job_until(&receivers, None, &mut prefer_fill)
                 .unwrap()
                 .job
                 .expected_epoch,
             401
         );
         assert_eq!(
-            next_inference_job_until(&receivers, None, &mut prefer_fill)
+            next_separation_job_until(&receivers, None, &mut prefer_fill)
                 .unwrap()
                 .job
                 .expected_epoch,
             303
         );
         assert_eq!(
-            next_inference_job_until(&receivers, None, &mut prefer_fill)
+            next_separation_job_until(&receivers, None, &mut prefer_fill)
                 .unwrap()
                 .job
                 .expected_epoch,
@@ -2447,15 +2388,15 @@ mod tests {
         fill_sender.send(queued_job(303)).unwrap();
 
         assert_eq!(
-            next_inference_job(&receivers).unwrap().job.expected_epoch,
+            next_separation_job(&receivers).unwrap().job.expected_epoch,
             101
         );
         assert_eq!(
-            next_inference_job(&receivers).unwrap().job.expected_epoch,
+            next_separation_job(&receivers).unwrap().job.expected_epoch,
             202
         );
         assert_eq!(
-            next_inference_job(&receivers).unwrap().job.expected_epoch,
+            next_separation_job(&receivers).unwrap().job.expected_epoch,
             303
         );
     }
@@ -2477,13 +2418,13 @@ mod tests {
         fill_sender.send(queued_job(303)).unwrap();
 
         let started = Instant::now();
-        let scheduled = next_inference_job(&receivers).expect("idle worker should drain fill");
+        let scheduled = next_separation_job(&receivers).expect("idle worker should drain fill");
         assert_eq!(scheduled.job.expected_epoch, 303);
         assert!(started.elapsed() < Duration::from_millis(100));
     }
 
     #[test]
-    fn inference_ticket_timeout_is_bounded_and_drop_cancels_the_job() {
+    fn separation_ticket_timeout_is_bounded_and_drop_cancels_the_job() {
         let (_sender, ticket) = StemInferenceTicket::test_pair();
         let cancelled = Arc::clone(&ticket.cancelled);
         let started = Instant::now();
@@ -2509,15 +2450,12 @@ mod tests {
         drop(audio_sender);
         drop(look_ahead_sender);
         drop(fill_sender);
-        assert!(next_inference_job(&receivers).is_none());
+        assert!(next_separation_job(&receivers).is_none());
     }
 
     #[test]
     fn live_pool_rejects_wrong_chunk_lengths_before_queueing() {
-        let Ok(model) = std::env::var("KDJ_SPLEETER4_MODEL_DIR") else {
-            return;
-        };
-        let pool = StemInferencePool::new(Path::new(&model), 1).unwrap();
+        let pool = StemInferencePool::new(Path::new(crate::RUNTIME_ID), 1).unwrap();
         let epoch = Arc::new(AtomicU64::new(1));
         assert!(pool.submit(vec![0.0; 32], vec![0.0; 32], epoch, 1).is_err());
     }
@@ -2706,7 +2644,7 @@ mod tests {
     }
 
     #[test]
-    fn live_waveform_delta_sends_each_bytedance_block_once_and_recovers_after_an_epoch_change() {
+    fn live_waveform_delta_sends_each_classical_block_once_and_recovers_after_an_epoch_change() {
         let track_id = -88_002;
         let guard = begin_live_stem_waveform(track_id, 11, 3.0, 20.0);
         let stems: [Vec<[f32; 2]>; 4] =

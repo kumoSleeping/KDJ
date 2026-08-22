@@ -52,11 +52,8 @@ import type {
   FilterResonance,
   KeyNotation,
   Quality,
-  StemCompute,
-  StemModelStatus,
   StreamCacheStats,
 } from "../../types";
-import { STEM_MODE, stemModeLabel } from "../../lib/stemMode";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { Button, InlineNotice, Panel } from "../common";
@@ -580,8 +577,6 @@ export function SettingsPanel() {
   const [streamCacheStats, setStreamCacheStats] = useState<StreamCacheStats | null>(null);
   const [streamCacheBusy, setStreamCacheBusy] = useState(false);
   const [streamCacheError, setStreamCacheError] = useState("");
-  const [stemModel, setStemModel] = useState<StemModelStatus | null>(null);
-  const [stemModelBusy, setStemModelBusy] = useState(false);
   const transitions = useDjConfig((state) => state.transitions);
   const effects = useDjConfig((state) => state.effects);
   const bars = useDjConfig((state) => state.bars);
@@ -688,48 +683,6 @@ export function SettingsPanel() {
       window.clearInterval(timer);
     };
   }, [settings?.download_dir, settings?.stream_cache_enabled]);
-
-  useEffect(() => {
-    let disposed = false;
-    const refresh = () => {
-      void api.stemModelStatus(
-        STEM_MODE,
-        settings?.stem_compute ?? "auto",
-      ).then((status) => {
-        if (!disposed) setStemModel(status);
-      }).catch(() => {
-        // The settings panel remains usable if an older local server has no STEM endpoint.
-      });
-    };
-    refresh();
-    const timer = window.setInterval(
-      refresh,
-      stemModel?.state === "downloading" || stemModel?.state === "queued" ? 500 : 5000,
-    );
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-    };
-  }, [settings?.stem_compute, stemModel?.state]);
-
-  const downloadStemModel = async () => {
-    if (stemModelBusy) return;
-    setStemModelBusy(true);
-    try {
-      setStemModel(await api.downloadStemModel(
-        STEM_MODE,
-        settings?.stem_compute ?? "auto",
-      ));
-    } catch (error) {
-      setStemModel((current) => current ? {
-        ...current,
-        state: "error",
-        error: error instanceof Error ? error.message : String(error),
-      } : current);
-    } finally {
-      setStemModelBusy(false);
-    }
-  };
 
   const toggleStreamCache = async () => {
     if (!settings || streamCacheBusy) return;
@@ -877,52 +830,6 @@ export function SettingsPanel() {
               onChange={(next) => void saveSettings({ filter_resonance: next })}
             />
           </div>
-        </Panel>
-
-        <Panel heading="STEM" dense>
-          <div className="kd-djp-switch-list" aria-label="STEM 选项">
-            <CycleToggle<StemCompute>
-              label="运算设备"
-              value={settings?.stem_compute ?? "auto"}
-              options={[
-                { id: "auto", text: "自动" },
-                { id: "gpu", text: "GPU" },
-                { id: "cpu", text: "CPU" },
-              ]}
-              title="自动优先 CoreML、DirectML 或 NNAPI；不可用时回退 CPU。强制 GPU 不会静默回退。"
-              onChange={(next) => void saveSettings({ stem_compute: next })}
-            />
-          </div>
-          {settings ? (
-            <>
-              <div className="kd-stream-cache-row">
-                <span className="kd-muted">
-                  {stemModel?.state === "ready"
-                    ? `${stemModeLabel(STEM_MODE)} ${stemModel.version} · 已安装${stemModel.diagnostics.provider ? ` · ${stemModel.diagnostics.provider}` : ""}`
-                    : stemModel?.state === "downloading" || stemModel?.state === "queued"
-                      ? `${stemModeLabel(STEM_MODE)} · ${Math.round(stemModel.progress * 100)}% · ${formatBytes(stemModel.downloadedBytes)}`
-                      : stemModel?.state === "unsupported"
-                        ? "当前平台尚未提供 STEM runtime"
-                        : `${stemModeLabel(STEM_MODE)} · ${formatBytes(stemModel?.totalBytes ?? 0)}`}
-                </span>
-                {stemModel?.supported && stemModel.state !== "ready" ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={stemModelBusy || stemModel.state === "downloading" || stemModel.state === "queued"}
-                    onClick={() => void downloadStemModel()}
-                  >
-                    {stemModel.state === "error" ? "重试" : "下载模型"}
-                  </Button>
-                ) : null}
-              </div>
-              <InlineNotice
-                text={stemModel?.error ?? ""}
-                block
-                onDismiss={() => setStemModel((current) => current ? { ...current, error: "" } : current)}
-              />
-            </>
-          ) : null}
         </Panel>
 
         <Panel heading="OneLibrary" dense>

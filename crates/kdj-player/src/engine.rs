@@ -2503,7 +2503,9 @@ mod tests {
     #[test]
     fn realtime_commands_are_fixed_size_and_need_no_drop() {
         assert!(!std::mem::needs_drop::<RtCommand>());
-        assert!(std::mem::size_of::<RtCommand>() <= 24);
+        // Deck spectrum and scratch commands carry fixed arrays; keep the enum within half a
+        // cache line while preserving the no-allocation realtime contract.
+        assert!(std::mem::size_of::<RtCommand>() <= 32);
     }
 
     #[test]

@@ -1,64 +1,78 @@
-# Native STEM runtime
+# Classical realtime STEM runtime
 
-KDJ production STEM has one model: ByteDance MobileNet_Subbandtime two-stem FP32. There is no
-global model selector. The model is prepared only when a Deck's compact STEM button in the EQ
-panel is pressed; each Deck can be returned to the original mix independently. Decode, scheduling,
-waveform publication and mixing remain in Rust + ONNX Runtime.
+KDJ production STEM is a model-free, CPU-only, two-track separator. It produces `Vocals` and
+`Instrumental`; the stable four-slot playback contract keeps Drums and Bass at zero, stores
+Instrumental in Other, and stores the centre estimate in Vocals. No model selection, weight
+download, accelerator setting, or whole-track analysis exists in the product path.
 
-## Production artifact
+The current production stage is **Test B: Redress soft spatial masking**. Performance's existing
+Vocal FX slot is the user control: enabling it mounts the classical stream, and its MIX control
+changes the vocal lane gain in the realtime mixer. There is no separate analysis button or lab
+panel. Original audio remains audible until the short classical buffer is ready.
 
-The source implementation is ByteDance
-[music_source_separation](https://github.com/bytedance/music_source_separation) at commit
-e64b858cd14c3cc974826c51390399eef623dd2a (Apache-2.0). The selected MUSDB18 accompaniment
-checkpoint is published in Zenodo record 5804160 (https://doi.org/10.5281/zenodo.5804160)
-(CC-BY-4.0). Vocals is the exact residual mixture - accompaniment, which keeps neutral
-two-lane reconstruction exact.
+## Signal contract
 
-| Artifact | Bytes | SHA-256 |
-| --- | ---: | --- |
-| bytedance-mobilenet-subbandtime-accompaniment-3s-fp32.onnx | 6,414,644 | 999ba99f306f09c9a35a18fe0007b53f8ad2c3cb5bb9d638128bf7257cd8e991 |
+- Input/output: 44.1 kHz stereo float PCM.
+- STFT: 2048 samples, periodic Hann, 512-sample hop.
+- Algorithmic look-ahead: 1024 samples = 23.22 ms.
+- Product tile: 8192 samples = 2048 past context + 4096 audible core + 2048 future context.
+- Seek: increment the stream epoch, discard queued old tiles, and start a fresh short tile at the
+  requested PCM position. No history outside the tile is required.
+- Output identity: `Vocals + Instrumental` reconstructs each input channel within floating-point
+  overlap-add tolerance.
 
-The model is downloaded into the versioned ByteDance directory, verified atomically, and can be
-provided offline through KDJ_BYTEDANCE_MOBILENET_MODEL_DIR. No other model artifact is part of
-the production catalog or downloader. Legacy none, four, two, and two_int8 settings are
-normalized to the fixed ByteDance mode; they cannot reactivate a retired runtime.
+The implementation uses the workspace's existing `rustfft`; this change adds no runtime package.
 
-## Tensor and lane contract
+## Algorithm provenance
 
-The graph accepts and returns float32 channel-major waveforms:
+Test B follows Ruairí de Fréin, “Reformulating the Binary Masking Approach of Adress as Soft
+Masking”, *Electronics* 9(9), 1373 (2020), DOI
+[10.3390/electronics9091373](https://doi.org/10.3390/electronics9091373). The underlying ADRess
+construction is D. Barry, B. Lawlor and E. Coyle, “Sound Source Separation: Azimuth
+Discrimination and Resynthesis”, DAFx-04, Naples (2004).
 
-    input:  [1, 2, 132300]
-    output: [1, 2, 132300]
-    sample rate: 44100 Hz
+For every STFT bin KDJ implements the paper's sequence:
 
-The direct model output occupies KDJ's Instrumental/Other lane. Drums and Bass remain exact zero
-lanes for the stable four-slot cache contract. Vocals is the residual. The fixed three-second
-window retains the middle 1.5 seconds after 750 ms of context on both edges. Adjacent tiles use a
-100 ms successor handoff to avoid boundary clicks.
+1. Construct both halves of the frequency-azimuth plane for 101 gains `g = 0..1`:
+   `A1 = |L - gR|`, `A2 = |R - gL|` (Redress equations 8–10).
+2. Precompute three pan-pot azimuth trajectories from the same equations: left `(1, 0.35)`,
+   centre `(1, 1)`, and right `(0.35, 1)`. This is the trajectory matrix H from equations 22–24.
+3. Solve `min(W >= 0) ||A - WH||²` using 100 Lee-Seung multiplicative updates
+   `W <- W * (A H^T) / (W H H^T)` as specified after equation 25. `H H^T` is precomputed.
+4. Group the centre column of W as Vocal and the left/right columns as Instrumental.
 
-Inference never runs in the audio callback. The background pool prioritizes audible tiles over
-look-ahead and display fill; macOS uses the safe ONNX Runtime CPU path, while supported Windows and
-Android builds may use DirectML or NNAPI according to the compute preference.
+The paper reconstructs each learned source magnitude with mixture phase. KDJ makes one explicitly
+documented DJ-product adaptation after the NQP: centre magnitude divided by all three learned
+magnitudes becomes a continuous soft ratio mask, a one-bin triangular frequency smoother reduces
+isolated holes, and the exact complementary mask is applied to both original complex stereo
+channels. This preserves stereo and guarantees neutral two-track reconstruction; it is not presented
+as an unmodified paper result. No binary mask is used.
 
-## UI and lifecycle
+## Stage boundary
 
-- The top STEM model switch is removed.
-- The main mixer keeps only channel GAIN, HIGH/MID/LOW/FILTER and LEVEL. VOCALS no longer occupies
-  an EQ knob; each Deck's third 3 FX slot defaults to the disabled VOCAL effect.
-- Enabling VOCAL keeps the original source audible until the neutral separated reconstruction is
-  ready, then its MIX slider controls VOCALS gain from mute to unity. The lower STEM strip remains
-  the explicit separated-lane control; there is no Instrumental/Other reduction knob.
-- Performance always renders the original waveform. VOCALS is the only optional separated rail;
-  Instrumental/Other, Drums and Bass remain audio internals and are not published as waveforms.
-- The scrolling Performance rails use the bounded three-screen canvas and compositor transform;
-  sparse native clock samples retarget a projected runway instead of redrawing at display rate.
-- A STEM button press downloads/prepares the fixed model when needed, mounts that Deck's live
-  separator, or switches back to the original mix when already enabled.
-- Unloading a Deck releases its display lease and cancels pending background work. Switching the
-  compute preference retires the existing pool before the replacement can be created.
+The repository also provides Test A, classical `(L + R) / 2` centre extraction with exact residual,
+only as a baseline. This stage intentionally stops after Test B. The following are not implemented
+yet:
 
-## License and attribution
+- Test C: realtime vocal F0 tracker and harmonic soft probability.
+- Test D: bounded Online REPET-SIM repetition probability.
+- Test E: generalized Wiener refinement beyond the current complementary ratio mask.
+- RPCA/Gammatone-WRPCA: offline comparison only; never a required realtime path.
 
-The ByteDance source is Apache-2.0 and the selected checkpoint is CC-BY-4.0. KDJ is non-commercial;
-attribution and checkpoint terms remain recorded in THIRD_PARTY_NOTICES.md. The model file is
-downloaded at runtime and is not packaged into the application.
+Centre kick, snare and bass can therefore still leak into Vocals. Wide, doubled or reverberant
+vocals can leak into Instrumental. Listening acceptance must not be inferred from synthetic tests.
+
+## Reproducible A/B tool
+
+```bash
+cargo run --release -p kdj-stems --example classical_stem_lab -- INPUT OUTPUT_DIR
+```
+
+The tool writes:
+
+- `OUTPUT_DIR/test-a/{vocals,instrumental}.wav`
+- `OUTPUT_DIR/test-b/{vocals,instrumental}.wav`
+- `OUTPUT_DIR/metrics.json`
+
+Metrics include wall time, realtime factor, macOS process CPU ratio, algorithmic latency, first
+tile time, seek-reset first tile time, and estimated working memory.

@@ -26,6 +26,11 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+# Redress runs one 100-iteration NQP per STFT bin. Size optimisation leaves a single Deck too
+# close to its realtime deadline on M2; optimise only this small Rust crate for throughput.
+[profile.release.package.kdj-stems]
+opt-level = 2
+
 # tauri:dev 默认是 debug：波形/分析在未优化下单曲要几十秒，播放条会一直空着。
 # `package."*"` 只覆盖 crates.io 依赖，不覆盖 workspace member——所以 kdj-analysis
 # 必须单独开。业务 UI / 路由 crate 仍保持未优化，增量编译友好。

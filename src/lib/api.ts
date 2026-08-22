@@ -41,9 +41,7 @@ import type {
   StreamPlaylistResponse,
   StreamCacheStats,
   StreamWaveformProgress,
-  StemModelStatus,
-  StemCompute,
-  StemMode,
+  StemRuntimeStatus,
   StemName,
   LiveStemWaveformDelta,
   TrackStemStatus,
@@ -420,32 +418,24 @@ export const api = {
   writeTags: (id: number) => post<Track>(`/library/tracks/${id}/write-tags`),
   waveform: (id: number, buckets = 640) =>
     request<Waveform>(`/library/waveform/${id}?buckets=${buckets}`),
-  stemModelStatus: (mode: StemMode, compute: StemCompute) =>
-    request<StemModelStatus>(`/stems/model?mode=${mode}&compute=${compute}`),
-  activateStemRuntime: (mode: StemMode, compute: StemCompute) =>
-    post<StemModelStatus>(`/stems/runtime?mode=${mode}&compute=${compute}`, {}),
-  downloadStemModel: (mode: StemMode, compute: StemCompute) =>
-    post<StemModelStatus>(`/stems/model/download?mode=${mode}&compute=${compute}`, {}),
+  stemRuntimeStatus: () => request<StemRuntimeStatus>("/stems/runtime"),
+  resetStemRuntime: () => post<StemRuntimeStatus>("/stems/runtime/reset", {}),
   trackStemStatus: (
     id: number,
-    mode: StemMode,
-    compute: StemCompute,
     position?: number,
     playing = false,
   ) =>
     request<TrackStemStatus>(
-      `/tracks/${id}/stems?mode=${mode}&compute=${compute}${
+      `/tracks/${id}/stems?${
         position === undefined || !Number.isFinite(position)
           ? ""
-          : `&position=${Math.max(0, position)}&playing=${playing ? "true" : "false"}`
+          : `position=${Math.max(0, position)}&playing=${playing ? "true" : "false"}`
       }`,
     ),
   separateTrackStems: (
     id: number,
     position = 0,
     options: {
-      mode: StemMode;
-      compute: StemCompute;
       duration?: number;
       deck?: 0 | 1;
       playing?: boolean;
@@ -456,8 +446,6 @@ export const api = {
       duration: Number.isFinite(options?.duration) ? Math.max(0, options?.duration ?? 0) : 0,
       deck: options?.deck === 1 ? 1 : 0,
       playing: options?.playing === true,
-      mode: options.mode,
-      compute: options.compute,
     }),
   releaseTrackStems: (id: number) =>
     request<{ released: boolean }>(`/tracks/${id}/stems`, { method: "DELETE" }),

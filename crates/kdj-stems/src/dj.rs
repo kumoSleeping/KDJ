@@ -63,7 +63,7 @@ impl PcmRandomAccessCache {
     }
 
     /// Copies a planar random-access window and zero-pads both song edges. `start` is signed so a
-    /// model can ask for left context before frame zero without a separate edge branch.
+    /// separator can ask for left context before frame zero without a separate edge branch.
     pub fn stereo_window(&self, start: i128, frames: usize) -> (Vec<f32>, Vec<f32>) {
         let mut left = vec![0.0; frames];
         let mut right = vec![0.0; frames];
@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_model_window_zero_pads_both_song_edges() {
+    fn signed_separator_window_zero_pads_both_song_edges() {
         let cache = PcmRandomAccessCache::from_interleaved(vec![[1.0, -1.0], [2.0, -2.0]]);
         let (left, right) = cache.stereo_window(-1, 4);
         assert_eq!(left, [0.0, 1.0, 2.0, 0.0]);

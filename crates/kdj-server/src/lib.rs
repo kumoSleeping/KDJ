@@ -45,14 +45,13 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     };
 
     let router = routes::router(ctx)
-        .route("/api/stems/model", axum::routing::get(stems::model_status))
         .route(
             "/api/stems/runtime",
-            axum::routing::post(stems::activate_runtime),
+            axum::routing::get(stems::runtime_status),
         )
         .route(
-            "/api/stems/model/download",
-            axum::routing::post(stems::download_model),
+            "/api/stems/runtime/reset",
+            axum::routing::post(stems::reset_runtime),
         )
         .route(
             "/api/tracks/{id}/stems",

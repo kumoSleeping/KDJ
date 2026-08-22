@@ -61,7 +61,7 @@ export interface SeekDetail {
 /**
  * Serato / Rekordbox 那种彩色波形。
  *
- * 模型来自 libdjwaveform：**一列 = 一根柱子**，高度是这一列的响度，
+ * 绘制方式来自 libdjwaveform：**一列 = 一根柱子**，高度是这一列的响度，
  * 颜色是这一列的频谱构成（红=低频鼓组、绿=中频人声、蓝=高频镲片）。
  * 后端 `/api/library/waveform` 已经把每列的 amp + rgb 算好，这里只负责画。
  *
@@ -113,7 +113,7 @@ export interface WaveformProps {
   /** 曲目时间相对墙钟的推进倍率。仅在局部波形走带时使用。 */
   playbackRate?: number;
   className?: string;
-  /** Precomputed alternate lane (for example one ByteDance stem); bypasses the library waveform API. */
+  /** Precomputed alternate lane (for example one classical Redress stem); bypasses the library waveform API. */
   waveform?: WaveformData;
   /** Empty vertical space reserved above and below the rendered columns (0..0.45 each side). */
   verticalInsetRatio?: number;

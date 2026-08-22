@@ -26,7 +26,7 @@ pub(crate) struct StereoRegionDecoder {
     source_rate: u32,
     conversion: Option<(SampleBuffer<f32>, u64, usize, u32)>,
     /// Decoded 44.1 kHz frames not consumed by the last exact region request. Symphonia packets
-    /// are normally much larger than one 512-frame model hop; throwing this tail away skips source
+    /// are normally much larger than one 512-frame separation hop; throwing this tail away skips source
     /// audio on the next hop and turns the STEM stream into short pops.
     output_pending: VecDeque<[f32; 2]>,
     resample_previous: Option<[f32; 2]>,
@@ -286,6 +286,19 @@ pub(crate) fn decode_stereo_region(
     decoder.decode_region(start, frames)
 }
 
+/// Decode a complete file to 44.1 kHz stereo for the classical A/B research tool. Product
+/// playback continues to use bounded region decoding.
+pub fn decode_stereo_file(path: &Path) -> Result<Vec<[f32; 2]>> {
+    let mut decoder = StereoRegionDecoder::open(path)?;
+    let decoded = decoder.read_samples(None)?;
+    Ok(decoded
+        .left
+        .into_iter()
+        .zip(decoded.right)
+        .map(|(left, right)| [left, right])
+        .collect())
+}
+
 /// Reuse `cached` when it already holds this path; reopen once if a seek/decode fails.
 pub(crate) fn decode_stereo_region_cached(
     cached: &mut Option<StereoRegionDecoder>,
@@ -312,7 +325,7 @@ pub(crate) fn decode_stereo_region_cached(
     }
 }
 
-/// Sequential fixed-shape ByteDance windows. A seek reopens the decoder; a context-safe core advance
+/// Sequential fixed-shape classical Redress windows. A seek reopens the decoder; a context-safe core advance
 /// only reads the new tail instead of re-parsing the file from the playhead each time.
 pub struct StemWindowCursor {
     decoder: Option<StereoRegionDecoder>,

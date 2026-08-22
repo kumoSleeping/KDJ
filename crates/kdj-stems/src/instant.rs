@@ -1,8 +1,8 @@
 //! Retired instant-separation boundary.
 //!
-//! The production runtime has one ByteDance background separator. These compatibility types keep
-//! the player stream contract source-compatible while making the retired instant path
-//! impossible to construct or load.
+//! The classical separator now supplies short-context output directly. These compatibility types
+//! keep the older player stream contract source-compatible while making its retired second pool
+//! impossible to construct.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -54,7 +54,7 @@ impl InstantTrackTicket {
     where
         F: Fn() -> bool,
     {
-        bail!("旧版即时 STEM runtime 已移除；请使用 ByteDance STEM")
+        bail!("旧版即时 STEM pool 已移除；请使用经典实时分离")
     }
 }
 
@@ -79,23 +79,23 @@ impl InstantStemTicket {
 pub struct InstantStemPool;
 
 impl InstantStemPool {
-    pub fn new(_model_directory: &Path) -> Result<Arc<Self>> {
-        bail!("旧版即时 STEM runtime 已移除；请使用 ByteDance STEM")
+    pub fn new(_runtime_directory: &Path) -> Result<Arc<Self>> {
+        bail!("旧版即时 STEM pool 已移除；请使用经典实时分离")
     }
 
-    pub(crate) fn new_for_parent(_model_directory: &Path, _pool_id: u64) -> Result<Arc<Self>> {
-        bail!("旧版即时 STEM runtime 已移除；请使用 ByteDance STEM")
+    pub(crate) fn new_for_parent(_runtime_directory: &Path, _pool_id: u64) -> Result<Arc<Self>> {
+        bail!("旧版即时 STEM pool 已移除；请使用经典实时分离")
     }
 
     pub fn prepare_track(&self, _path: &Path) -> Result<InstantTrackTicket> {
-        bail!("旧版即时 STEM runtime 已移除；请使用 ByteDance STEM")
+        bail!("旧版即时 STEM pool 已移除；请使用经典实时分离")
     }
 
     pub fn wait_ready<F>(&self, _deck: usize, _cancelled: F) -> Result<()>
     where
         F: Fn() -> bool,
     {
-        bail!("旧版即时 STEM runtime 已移除；请使用 ByteDance STEM")
+        bail!("旧版即时 STEM pool 已移除；请使用经典实时分离")
     }
 
     pub fn submit(
@@ -106,7 +106,7 @@ impl InstantStemPool {
         _epoch: Arc<std::sync::atomic::AtomicU64>,
         _expected_epoch: u64,
     ) -> Result<InstantStemTicket> {
-        bail!("旧版即时 STEM runtime 已移除；请使用 ByteDance STEM")
+        bail!("旧版即时 STEM pool 已移除；请使用经典实时分离")
     }
 
     pub fn is_ready(&self, _deck: usize) -> bool {

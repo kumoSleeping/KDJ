@@ -593,36 +593,6 @@ fn overall_confidence(
     round_to((weighted / total).clamp(0.0, 1.0), 4)
 }
 
-/// 把模型 logits 提供的检测证据合并进只基于时间点拟合得到的置信度。
-#[cfg(all(
-    feature = "beat-this",
-    not(any(target_os = "android", target_os = "ios"))
-))]
-pub(crate) fn apply_detector_confidence(
-    result: &mut BeatAnalysisResult,
-    detection_evidence: f64,
-    downbeat_evidence: Option<f64>,
-    has_agreement: bool,
-) {
-    result.confidence.detection = round_to(
-        0.5 * result.confidence.detection + 0.5 * detection_evidence.clamp(0.0, 1.0),
-        4,
-    );
-    if let Some(evidence) = downbeat_evidence {
-        result.confidence.downbeat = round_to(
-            0.5 * result.confidence.downbeat + 0.5 * evidence.clamp(0.0, 1.0),
-            4,
-        );
-    }
-    result.confidence.overall = overall_confidence(
-        result.confidence.detection,
-        result.confidence.grid_regularity,
-        result.confidence.metrical_level,
-        downbeat_evidence.map(|_| result.confidence.downbeat),
-        has_agreement.then_some(result.confidence.agreement),
-    );
-}
-
 fn round_to(value: f64, digits: i32) -> f64 {
     let factor = 10f64.powi(digits);
     (value * factor).round() / factor

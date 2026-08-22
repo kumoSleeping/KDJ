@@ -31,8 +31,8 @@ export type VideoFormat = "mp4" | "mkv" | "mov";
 export type KeyNotation = "camelot" | "traditional";
 /** Performance 双极滤波器的共振档位；后端将其映射为稳定的 DSP Q。 */
 export type FilterResonance = "low" | "medium" | "high";
-export type StemMode = "none" | "mobile_net_two";
-export type StemCompute = "auto" | "gpu" | "cpu";
+/** Fixed model-free two-track separator used by Performance. */
+export type StemMode = "classical_two";
 
 export interface Settings {
   download_dir: string;
@@ -74,10 +74,6 @@ export interface Settings {
   player_waveform: boolean;
   /** Performance 双极滤波器的共振强度。 */
   filter_resonance: FilterResonance;
-  /** 固定 ByteDance STEM 模型；是否启用由每个 Deck 的 EQ 控件决定。 */
-  stem_mode: StemMode;
-  /** STEM execution provider 偏好；auto 优先平台加速器。 */
-  stem_compute: StemCompute;
   /** 本地与 OneLibrary 列表里的调性表示。 */
   key_notation: KeyNotation;
   /** KDJ 虚拟磁盘空间不足时，创建更大的镜像、迁移数据并重试。 */
@@ -701,15 +697,10 @@ export interface LiveStemWaveformDelta {
   analysis_back_frontier: number;
 }
 
-export interface StemModelStatus {
+export interface StemRuntimeStatus {
   id: string;
   version: string;
-  supported: boolean;
-  state: "unsupported" | "missing" | "queued" | "downloading" | "ready" | "error";
-  progress: number;
-  downloadedBytes: number;
-  totalBytes: number;
-  error: string;
+  state: "ready" | "error";
   diagnostics: StemRuntimeDiagnostics;
 }
 
@@ -717,7 +708,7 @@ export interface StemModelStatus {
 export interface StemRuntimeDiagnostics {
   runtime: string;
   provider: string;
-  modelLoadMs: number | null;
+  initializationMs: number | null;
   firstBlockMs: number | null;
   lastBlockMs: number | null;
   p95BlockMs: number | null;
@@ -744,8 +735,6 @@ export interface TrackStemStatus {
   state:
     | "missing"
     | "queued"
-    | "downloadingModel"
-    | "loadingModel"
     | "separating"
     | "ready"
     | "error";

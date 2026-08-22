@@ -5,8 +5,7 @@ use std::time::UNIX_EPOCH;
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::Json;
-use kdj_core::{StemCompute, StemMode};
-use kdj_stems::{ModelStatus, StemKind, StemWaveform, TrackStemStatus};
+use kdj_stems::{StemKind, StemRuntimeStatus, StemWaveform, TrackStemStatus};
 use serde::Deserialize;
 
 use crate::error::{ApiError, ApiResult};
@@ -28,12 +27,6 @@ pub struct LiveWaveformQuery {
 }
 
 #[derive(Default, Deserialize)]
-pub struct ModelQuery {
-    mode: Option<StemMode>,
-    compute: Option<StemCompute>,
-}
-
-#[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SeparateTrackRequest {
     #[serde(default)]
@@ -44,8 +37,6 @@ pub struct SeparateTrackRequest {
     deck: u8,
     #[serde(default)]
     playing: bool,
-    mode: Option<StemMode>,
-    compute: Option<StemCompute>,
 }
 
 #[derive(Default, Deserialize)]
@@ -53,36 +44,18 @@ pub struct TrackStemQuery {
     position: Option<f64>,
     #[serde(default)]
     playing: bool,
-    mode: Option<StemMode>,
-    compute: Option<StemCompute>,
 }
 
 const fn default_columns() -> usize {
     640
 }
 
-pub async fn model_status(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<ModelQuery>,
-) -> Json<ModelStatus> {
-    let (mode, compute) = stem_selection(&state, query.mode, query.compute);
-    Json(state.stems.model_status(mode, compute))
+pub async fn runtime_status(State(state): State<Arc<AppState>>) -> Json<StemRuntimeStatus> {
+    Json(state.stems.runtime_status())
 }
 
-pub async fn activate_runtime(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<ModelQuery>,
-) -> Json<ModelStatus> {
-    let (mode, compute) = stem_selection(&state, query.mode, query.compute);
-    Json(state.stems.activate_runtime(mode, compute))
-}
-
-pub async fn download_model(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<ModelQuery>,
-) -> ApiResult<Json<ModelStatus>> {
-    let (mode, compute) = stem_selection(&state, query.mode, query.compute);
-    Ok(Json(state.stems.request_model(mode, compute)?))
+pub async fn reset_runtime(State(state): State<Arc<AppState>>) -> Json<StemRuntimeStatus> {
+    Json(state.stems.reset_runtime())
 }
 
 pub async fn track_status(
@@ -92,18 +65,15 @@ pub async fn track_status(
 ) -> ApiResult<Json<TrackStemStatus>> {
     let track = local_track(&state, id)?;
     let mtime = source_mtime(Path::new(&track.path))?;
-    let (mode, compute) = stem_selection(&state, query.mode, query.compute);
     if let Some(position) = query.position {
         Ok(Json(state.stems.retarget_track(
-            mode,
-            compute,
             id,
             position,
             mtime,
             query.playing,
         )))
     } else {
-        Ok(Json(state.stems.track_status(mode, compute, id, mtime)))
+        Ok(Json(state.stems.track_status(id, mtime)))
     }
 }
 
@@ -115,10 +85,7 @@ pub async fn separate_track(
     let track = local_track(&state, id)?;
     let path = Path::new(&track.path);
     let mtime = source_mtime(path)?;
-    let (mode, compute) = stem_selection(&state, request.mode, request.compute);
     Ok(Json(state.stems.request_track(
-        mode,
-        compute,
         id,
         path,
         mtime,
@@ -188,16 +155,4 @@ fn source_mtime(path: &Path) -> ApiResult<i64> {
     let value =
         i128::from(since_epoch.as_secs()) * 1_000_000_000 + i128::from(since_epoch.subsec_nanos());
     Ok(value.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64)
-}
-
-fn stem_selection(
-    state: &AppState,
-    _mode: Option<StemMode>,
-    compute: Option<StemCompute>,
-) -> (StemMode, StemCompute) {
-    let settings = state.config.to_settings();
-    (
-        StemMode::MobileNetTwo,
-        compute.unwrap_or(settings.stem_compute),
-    )
 }

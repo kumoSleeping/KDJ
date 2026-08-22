@@ -2,8 +2,8 @@
 //!
 //! Every mounted Deck paints and retains the current 30-second viewport. Tiles live in the live
 //! waveform session, stay bounded to that window, and are dropped as soon as the track leaves
-//! the Deck. Playback inference always wins: the scanner never opens a file or occupies the
-//! model while the audible path is already late.
+//! the Deck. Playback separation always wins: the scanner never opens a file or occupies the
+//! separator while the audible path is already late.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ use crate::{stem_tile_geometry, SAMPLE_RATE};
 
 /// Same visible window as the performance waveform rail (30 seconds, playhead-centred).
 pub const SCAN_VIEWPORT_SECONDS: f64 = 30.0;
-/// One model call normally completes well inside its retained-audio budget. This fence is long
+/// One separation tile normally completes well inside its retained-audio budget. This fence is long
 /// enough for first-session warm-up but prevents a native/provider failure from pinning the sole
 /// display scanner forever.
 const SCAN_TICKET_TIMEOUT: Duration = Duration::from_secs(10);
@@ -65,7 +65,7 @@ struct ScanJob {
     anchor: f64,
     deck: u8,
     playing: bool,
-    model_path: PathBuf,
+    runtime_key: PathBuf,
     epoch: Arc<AtomicU64>,
     expected_epoch: u64,
     guard: StemScanGuard,
@@ -106,7 +106,7 @@ impl StemScanScheduler {
         &self,
         track_id: i64,
         path: &Path,
-        model_path: &Path,
+        runtime_key: &Path,
         position: f64,
         duration: f64,
         deck: u8,
@@ -117,7 +117,10 @@ impl StemScanScheduler {
             .pool
             .as_ref()
             .is_some_and(|(_, pool)| !pool.matches_current_preference())
-            || state.jobs.values().any(|job| job.model_path != model_path);
+            || state
+                .jobs
+                .values()
+                .any(|job| job.runtime_key != runtime_key);
         if runtime_changed {
             for (_, job) in state.jobs.drain() {
                 job.epoch.fetch_add(1, Ordering::Release);
@@ -143,7 +146,7 @@ impl StemScanScheduler {
             anchor: position.max(0.0),
             deck,
             playing,
-            model_path: model_path.to_path_buf(),
+            runtime_key: runtime_key.to_path_buf(),
             epoch,
             expected_epoch: 1,
             guard: begin_scan_stem_waveform(track_id, duration.max(0.0)),
@@ -479,7 +482,7 @@ fn run_one_tile(
     let ScanWork::Window { track_id, start } = work;
     let snapshot = {
         let mut guard = state.lock().unwrap();
-        let (path, duration, epoch, expected_epoch, generation, model_path) = {
+        let (path, duration, epoch, expected_epoch, generation, runtime_key) = {
             let job = guard
                 .jobs
                 .get(&track_id)
@@ -499,11 +502,11 @@ fn run_one_tile(
                 Arc::clone(&job.epoch),
                 job.expected_epoch,
                 job.guard.generation(),
-                job.model_path.clone(),
+                job.runtime_key.clone(),
             )
         };
         if guard.pool.is_none() {
-            guard.pool = Some(acquire_stem_pool(&model_path)?);
+            guard.pool = Some(acquire_stem_pool(&runtime_key)?);
         }
         ScanTileSnapshot {
             path,
@@ -519,7 +522,7 @@ fn run_one_tile(
     }
     // Fill yields to audible and look-ahead tiles. With two workers, a free engine can still take
     // this viewport job while the other Deck's successor is in flight. The same completed PCM is
-    // published to the rail; the UI never invokes a second model for an already-paid audio tile.
+    // published to the rail; the UI never invokes a second separator for an already-paid audio tile.
     let (left, right) = decode_scan_window(decoder, &snapshot.path, start)?;
     if snapshot.epoch.load(Ordering::Acquire) != snapshot.expected_epoch {
         return Ok(());
@@ -576,7 +579,7 @@ fn wait_for_scan_ticket(
         }
         let remaining = timeout.saturating_sub(started.elapsed());
         if remaining.is_zero() {
-            return Err(anyhow!("STEM 波形扫描推理超时，稍后重试"));
+            return Err(anyhow!("STEM 波形扫描分离超时，稍后重试"));
         }
         if let Some(chunk) = ticket.wait_timeout(SCAN_TICKET_POLL.min(remaining))? {
             return Ok(chunk);
@@ -584,7 +587,7 @@ fn wait_for_scan_ticket(
     }
 }
 
-/// Display scan feeds ByteDance one fixed 512-frame (11.96-second) STFT window centred on the
+/// Display scan feeds classical Redress one fixed 512-frame (11.96-second) STFT window centred on the
 /// retained 169-hop (3.92-second) tile, then publishes only that context-safe interior.
 fn decode_scan_window(
     decoder: &mut Option<StereoRegionDecoder>,
@@ -788,7 +791,7 @@ mod tests {
 
     #[test]
     fn a_successful_retry_clears_the_transient_tile_error() {
-        let mut error = "ByteDance bass 输出含非有限数值".to_owned();
+        let mut error = "classical Redress bass 输出含非有限数值".to_owned();
         update_scan_error(&mut error, &Ok(()));
         assert!(error.is_empty());
 

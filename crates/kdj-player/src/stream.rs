@@ -34,7 +34,7 @@ use crate::time_stretch::{PitchPreservingStretcher, TempoControl, TimeStretchFra
 /// Default read-ahead owned by one streaming Deck. The queue stores stereo output frames, so its
 /// memory is fixed regardless of track length (four seconds at 48 kHz is about 1.5 MiB).
 pub const DEFAULT_STREAM_BUFFER_SECONDS: usize = 4;
-/// Publish each completed Spleeter4 tile to the waveform immediately; the audible ring is filled next.
+/// Publish each completed classical Redress tile to the waveform immediately; the audible ring is filled next.
 const LIVE_STEM_WAVEFORM_PUBLISH_LEAD_MS: u64 = 0;
 /// How many successor tiles stay in flight besides the tile currently being pushed into the ring.
 const LIVE_STEM_LOOKAHEAD_TILES: usize = 2;
@@ -43,7 +43,7 @@ const LIVE_STEM_LOOKAHEAD_TILES: usize = 2;
 /// absorb its measured tail latency or a scheduler pre-emption.
 const LIVE_STEM_SEEK_PREFILL_MS: u64 = 250;
 
-/// One in-memory future Spleeter4 tile. The worker that publishes its waveform also hands the exact
+/// One in-memory future classical Redress tile. The worker that publishes its waveform also hands the exact
 /// same PCM to playback, so a visual prefetch is never inferred a second time.
 struct LiveStemLookAhead {
     start: f64,
@@ -215,7 +215,7 @@ impl Default for LoopWindow {
         Self::new()
     }
 }
-/// One live STEM frame. Prepared Spleeter4 and seek-bridge streams emit `blend=1`; an overloaded
+/// One live STEM frame. Prepared classical Redress and seek-bridge streams emit `blend=1`; an overloaded
 /// seek folds its source equally into four temporary lanes so non-unity Rubber Band retains it.
 /// `original` is normally the reconstructed four-lane mix used by the renderer's interpolation
 /// contract.
@@ -1293,7 +1293,7 @@ fn initial_stem_frames_before_waveform_publish(
     source_frames.min(available_source_frames)
 }
 
-/// Runs the Spleeter4 background-cache path ahead of one live Deck.
+/// Runs the classical Redress background-cache path ahead of one live Deck.
 ///
 /// Cache misses are handled by the coordinator: original audio remains audible until this worker
 /// has a context-safe separated cushion, then the prepared stream replaces it at a block boundary.
@@ -2002,7 +2002,7 @@ where
     Ok(())
 }
 
-/// Queue one future Spleeter4 tile on the look-ahead lane and publish its waveform when ready.
+/// Queue one future classical Redress tile on the look-ahead lane and publish its waveform when ready.
 /// A full look-ahead queue means audio still owns both workers; this Deck retries later or submits
 /// the same window as mandatory audio when it becomes the audible boundary.
 #[allow(clippy::too_many_arguments)]
@@ -2829,7 +2829,7 @@ fn guarded_stem_handoff_frame(
         return current;
     }
     let linear = overlap_index as f32 / (handoff_frames - 1) as f32;
-    // Adjacent Spleeter4 estimates are phase-aligned because both see the same real PCM context. A
+    // Adjacent classical Redress estimates are phase-aligned because both see the same real PCM context. A
     // smooth linear partition keeps identical signals at unity; the old equal-power blend raised
     // the complete mix by up to +3 dB through every handoff.
     let current_gain = linear * linear * (3.0 - 2.0 * linear);
@@ -3076,7 +3076,8 @@ mod tests {
     #[test]
     fn live_stem_skips_tiles_that_are_already_behind_the_playhead() {
         let stride = live_stem_output_stride_frames() as f64 / f64::from(STEM_SAMPLE_RATE);
-        assert!(live_stem_skip_behind_start(0.0, 0.5, stride, 180.0).is_none());
+        assert!(live_stem_skip_behind_start(0.0, stride / 2.0, stride, 180.0).is_none());
+        assert!(live_stem_skip_behind_start(0.0, 0.5, stride, 180.0).is_some());
         let skipped = live_stem_skip_behind_start(0.0, 50.0, stride, 180.0)
             .expect("a 50s playhead must abandon the intro tile");
         assert!(skipped >= 50.0 - stride);
@@ -3293,10 +3294,12 @@ mod tests {
     }
 
     #[test]
-    fn seek_bridge_prefills_a_quarter_second_before_model_hops() {
-        let expected = STEM_SAMPLE_RATE as usize * LIVE_STEM_SEEK_PREFILL_MS as usize / 1_000;
+    fn seek_bridge_uses_the_complete_short_classical_core() {
+        let target = STEM_SAMPLE_RATE as usize * LIVE_STEM_SEEK_PREFILL_MS as usize / 1_000;
+        let expected = SEGMENT_CORE_SAMPLES.min(target);
         assert_eq!(seek_bridge_prefill_frames(SEGMENT_CORE_SAMPLES), expected);
-        assert!(expected >= INSTANT_HOP_FRAMES * 20);
+        assert!(expected >= INSTANT_HOP_FRAMES * 8);
+        assert!(expected as f64 / f64::from(STEM_SAMPLE_RATE) < 0.1);
         assert_eq!(seek_bridge_prefill_frames(123), 123);
     }
 
@@ -3316,7 +3319,7 @@ mod tests {
     }
 
     #[test]
-    fn first_spleeter4_core_fits_in_the_output_ring() {
+    fn first_classical_core_fits_in_the_output_ring() {
         let output_rate = 48_000u32;
         let tile_frames = live_stem_output_stride_frames();
         assert_eq!(tile_frames, SEGMENT_CORE_SAMPLES);
@@ -3389,285 +3392,5 @@ mod tests {
         assert!((track.interleaved()[0] - expected).abs() < 1e-6);
         assert!((track.interleaved()[1] - expected).abs() < 1e-6);
         let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn live_stem_start_reuses_a_ready_viewport_tile_when_fixtures_exist() {
-        let (Ok(model), Ok(audio)) = (
-            std::env::var("KDJ_SPLEETER4_MODEL_DIR"),
-            std::env::var("KDJ_STEM_TEST_AUDIO")
-                .or_else(|_| std::env::var("KDJ_SPLEETER4_TEST_AUDIO")),
-        ) else {
-            return;
-        };
-        let requested = std::env::var("KDJ_SPLEETER4_TEST_POSITION")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(60.0);
-        let stride = live_stem_output_stride_frames();
-        let requested_frame = (requested * f64::from(STEM_SAMPLE_RATE)).round() as u64;
-        let core_frame = requested_frame / stride as u64 * stride as u64;
-        let core_start = core_frame as f64 / f64::from(STEM_SAMPLE_RATE);
-        let pool = StemInferencePool::new(Path::new(&model), 1).unwrap();
-        let epoch = Arc::new(AtomicU64::new(1));
-        let (left, right) = StemWindowCursor::new()
-            .window_for_core(Path::new(&audio), core_start)
-            .unwrap();
-        pool.submit_for(
-            stem_tile_cache_key(Path::new(&audio), core_start),
-            left,
-            right,
-            Arc::clone(&epoch),
-            1,
-        )
-        .unwrap()
-        .wait()
-        .unwrap();
-        assert_eq!(kdj_stems::stem_runtime_diagnostics().processed_chunks, 1);
-
-        let worker_audio = audio.clone();
-        let worker_pool = Arc::clone(&pool);
-        let worker_epoch = Arc::clone(&epoch);
-        let (source, writer) = StreamSource::<StemFrame>::bounded(44_100 * 4);
-        let started = std::time::Instant::now();
-        let handle = std::thread::spawn(move || {
-            decode_live_stem_streaming(
-                Path::new(&worker_audio),
-                -91_338,
-                0,
-                requested,
-                requested + 8.0,
-                44_100,
-                worker_pool,
-                Arc::clone(&worker_epoch),
-                1,
-                writer,
-                || worker_epoch.load(Ordering::Acquire) != 1,
-                None,
-                None,
-            )
-        });
-        let startup_frames = 44_100 / 4;
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while std::time::Instant::now() < deadline
-            && source.buffered_frames() < startup_frames
-            && !source.ended()
-        {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        assert!(source.buffered_frames() >= startup_frames);
-        assert!(
-            started.elapsed() < Duration::from_millis(700),
-            "ready viewport tile still paid model latency: {:?}",
-            started.elapsed()
-        );
-        assert_eq!(
-            kdj_stems::stem_runtime_diagnostics().processed_chunks,
-            1,
-            "audible startup reran a tile that the viewport had already completed"
-        );
-        epoch.store(2, Ordering::Release);
-        drop(source);
-        assert!(handle.join().unwrap().is_err());
-    }
-
-    #[test]
-    fn live_stem_stream_waits_for_model_then_emits_only_model_lanes_when_fixtures_exist() {
-        const FIXTURE_SECONDS: f64 = 20.0;
-        const FIXTURE_STARTUP_BUFFER_MS: u64 = 250;
-        let (Ok(model), Ok(audio)) = (
-            std::env::var("KDJ_SPLEETER4_MODEL_DIR"),
-            std::env::var("KDJ_STEM_TEST_AUDIO")
-                .or_else(|_| std::env::var("KDJ_SPLEETER4_TEST_AUDIO")),
-        ) else {
-            return;
-        };
-        let fixture_position = std::env::var("KDJ_SPLEETER4_TEST_POSITION")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(2.0);
-        let original = decode_file_region(
-            Path::new(&audio),
-            fixture_position,
-            FIXTURE_SECONDS,
-            44_100,
-            || false,
-        )
-        .expect("fixture original mix");
-        let worker_audio = audio.clone();
-        let pool = StemInferencePool::new(Path::new(&model), 1).unwrap();
-        let epoch = Arc::new(AtomicU64::new(1));
-        let worker_epoch = Arc::clone(&epoch);
-        let (source, writer) = StreamSource::<StemFrame>::bounded(44_100 * 4);
-        let handle = std::thread::spawn(move || {
-            decode_live_stem_streaming(
-                Path::new(&worker_audio),
-                -91_337,
-                0,
-                fixture_position,
-                fixture_position + FIXTURE_SECONDS,
-                44_100,
-                pool,
-                Arc::clone(&worker_epoch),
-                1,
-                writer,
-                || worker_epoch.load(Ordering::Acquire) != 1,
-                None,
-                None,
-            )
-        });
-        let started = std::time::Instant::now();
-        let deadline = started + Duration::from_secs(30);
-        let startup_frames = 44_100 * FIXTURE_STARTUP_BUFFER_MS / 1_000;
-        while std::time::Instant::now() < deadline
-            && source.buffered_frames() < startup_frames
-            && !source.ended()
-        {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        assert!(
-            source.buffered_frames() >= startup_frames,
-            "live STEM stream never built its {FIXTURE_STARTUP_BUFFER_MS}ms startup cushion"
-        );
-        let mut saw_non_stem_frame = false;
-        let mut saw_stems = false;
-        let mut first_stem_at = None;
-        let mut source_frame = 0usize;
-        let mut full_stem_frames = 0usize;
-        let mut original_energy = 0.0f64;
-        let mut stem_energy = 0.0f64;
-        let mut lane_samples: [Vec<f32>; STEM_LANES * 2] = std::array::from_fn(|_| Vec::new());
-        let mut empty_batches_after_start = 0usize;
-        // Drain through one full output stride plus one second of its successor. The stream must
-        // wait before its first frame, then cross a genuine separated-model seam.
-        let separated_frames_for_handoff = live_stem_output_stride_frames() + 44_100;
-        while std::time::Instant::now() < deadline
-            && full_stem_frames < separated_frames_for_handoff
-        {
-            let mut frames_in_batch = 0usize;
-            for _ in 0..441 {
-                if let Some(frame) = source.pop_callback() {
-                    frames_in_batch += 1;
-                    saw_non_stem_frame |= frame.blend < 0.99;
-                    saw_stems |= frame.blend >= 0.99;
-                    if frame.blend >= 0.99 {
-                        first_stem_at.get_or_insert_with(|| started.elapsed());
-                        for lane in 0..STEM_LANES {
-                            lane_samples[lane * 2].push(frame.lanes[lane * 2]);
-                            lane_samples[lane * 2 + 1].push(frame.lanes[lane * 2 + 1]);
-                        }
-                    }
-                    if frame.blend >= 0.99
-                        && full_stem_frames < 44_100
-                        && source_frame < original.frames()
-                    {
-                        let mut reconstructed = [0.0f32; 2];
-                        for lane in 0..STEM_LANES {
-                            reconstructed[0] += frame.lanes[lane * 2] * frame.reconstruction_gain;
-                            reconstructed[1] +=
-                                frame.lanes[lane * 2 + 1] * frame.reconstruction_gain;
-                        }
-                        let base = source_frame * 2;
-                        for channel in 0..2 {
-                            original_energy +=
-                                f64::from(original.interleaved()[base + channel]).powi(2);
-                            stem_energy += f64::from(reconstructed[channel]).powi(2);
-                        }
-                    }
-                    if frame.blend >= 0.99 {
-                        full_stem_frames += 1;
-                    }
-                    source_frame += 1;
-                }
-            }
-            if saw_stems && frames_in_batch == 0 && !source.drained() {
-                empty_batches_after_start += 1;
-            }
-            if source.drained() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(
-            !saw_non_stem_frame,
-            "live STEM stream must never enqueue an original-mix fallback frame"
-        );
-        assert!(
-            saw_stems,
-            "Spleeter4 lanes did not arrive before the preparation deadline"
-        );
-        assert_eq!(
-            empty_batches_after_start, 0,
-            "live STEM stream exhausted its audible buffer after playback began"
-        );
-        assert!(
-            full_stem_frames >= separated_frames_for_handoff,
-            "did not cross a real Spleeter4 tile handoff in separated fixture audio"
-        );
-        let level_ratio = (stem_energy / original_energy).sqrt();
-        let lane_rms = std::array::from_fn::<_, { STEM_LANES * 2 }, _>(|lane| {
-            (lane_samples[lane]
-                .iter()
-                .take(44_100)
-                .map(|sample| f64::from(*sample).powi(2))
-                .sum::<f64>()
-                / lane_samples[lane].len().min(44_100).max(1) as f64)
-                .sqrt()
-        });
-        for left in 0..STEM_LANES {
-            for right in left + 1..STEM_LANES {
-                let difference = lane_samples[left * 2]
-                    .iter()
-                    .zip(&lane_samples[right * 2])
-                    .take(44_100)
-                    .map(|(left, right)| f64::from(*left - *right).powi(2))
-                    .sum::<f64>()
-                    / 44_100.0;
-                assert!(
-                    difference.sqrt() > 1e-4,
-                    "Spleeter4 lanes {left} and {right} collapsed to the same signal"
-                );
-            }
-        }
-        let mut worst_boundary_ratio = 0.0f64;
-        for samples in &lane_samples {
-            let mut boundary_energy = 0.0f64;
-            let mut boundary_count = 0u64;
-            let mut internal_energy = 0.0f64;
-            let mut internal_count = 0u64;
-            for index in 1..samples.len() {
-                let delta = f64::from(samples[index] - samples[index - 1]);
-                if index % live_stem_output_stride_frames() == 0 {
-                    boundary_energy += delta * delta;
-                    boundary_count += 1;
-                } else {
-                    internal_energy += delta * delta;
-                    internal_count += 1;
-                }
-            }
-            if boundary_count > 0 && internal_count > 0 && internal_energy > 0.0 {
-                let boundary_rms = (boundary_energy / boundary_count as f64).sqrt();
-                let internal_rms = (internal_energy / internal_count as f64).sqrt();
-                worst_boundary_ratio = worst_boundary_ratio.max(boundary_rms / internal_rms);
-            }
-        }
-        assert!(
-            (0.88..=1.12).contains(&level_ratio),
-            "full STEM reconstruction diverged from original mix level: ratio={level_ratio:.3}"
-        );
-        assert!(
-            worst_boundary_ratio < 4.0,
-            "model-hop stitching still has periodic lane discontinuities: worst boundary/internal delta ratio={worst_boundary_ratio:.3}"
-        );
-        eprintln!(
-            "cold Spleeter4 buffered first separated frame: {:?}; full-mix level ratio: {level_ratio:.3}; lane RMS: {lane_rms:?}; worst seam ratio: {worst_boundary_ratio:.3}",
-            first_stem_at.expect("saw_stems guarantees a first separated frame"),
-        );
-        epoch.store(2, Ordering::Release);
-        drop(source);
-        assert!(
-            handle.join().unwrap().is_err(),
-            "cancellation should stop look-ahead"
-        );
     }
 }

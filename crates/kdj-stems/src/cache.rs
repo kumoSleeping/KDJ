@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::{MODEL_ARCHIVE_SHA256, SAMPLE_RATE};
+use sha2::{Digest, Sha256};
+
+use crate::{RUNTIME_ID, SAMPLE_RATE};
 
 const MAGIC: &[u8; 8] = b"KDJSTEM1";
 const VERSION: u16 = 1;
@@ -66,7 +68,8 @@ pub struct StemCacheHeader {
     pub sample_rate: u32,
     pub frames: u64,
     pub source_mtime: i64,
-    pub model_sha256: [u8; 32],
+    /// Stable algorithm fingerprint. This occupies the legacy 32-byte cache-header slot.
+    pub algorithm_fingerprint: [u8; 32],
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -81,7 +84,7 @@ pub struct StemWaveform {
     /// partial responses leave untouched time ranges false so the UI renders no fake baseline.
     pub known: Vec<bool>,
     /// Live-only scan origin/frontier in track seconds. Persistent waveform responses leave these
-    /// empty; the frontend uses them for the immediate moving edge before first model output.
+    /// empty; the frontend uses them for the immediate moving edge before first separator output.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analysis_start: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -254,8 +257,8 @@ pub fn read_cache_header(path: &Path) -> Result<StemCacheHeader> {
     let sample_rate = read_u32(&mut reader)?;
     let frames = read_u64(&mut reader)?;
     let source_mtime = read_i64(&mut reader)?;
-    let mut model_sha256 = [0u8; 32];
-    reader.read_exact(&mut model_sha256)?;
+    let mut algorithm_fingerprint = [0u8; 32];
+    reader.read_exact(&mut algorithm_fingerprint)?;
     let expected_len = HEADER_BYTES + frames.saturating_mul(BYTES_PER_FRAME);
     let actual_len = reader.get_ref().metadata()?.len();
     if actual_len != expected_len {
@@ -265,7 +268,7 @@ pub fn read_cache_header(path: &Path) -> Result<StemCacheHeader> {
         sample_rate,
         frames,
         source_mtime,
-        model_sha256,
+        algorithm_fingerprint,
     })
 }
 
@@ -446,9 +449,8 @@ fn write_stem_rgb(path: &Path, waveform: &StemRgbFile) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn model_sha_bytes() -> [u8; 32] {
-    let decoded = hex::decode(MODEL_ARCHIVE_SHA256).expect("constant model SHA is hex");
-    decoded.try_into().expect("SHA-256 is 32 bytes")
+pub(crate) fn algorithm_fingerprint() -> [u8; 32] {
+    Sha256::digest(RUNTIME_ID.as_bytes()).into()
 }
 
 pub fn waveform_path(cache_path: &Path) -> PathBuf {
@@ -462,7 +464,7 @@ fn write_header(writer: &mut impl Write, header: &StemCacheHeader) -> Result<()>
     writer.write_all(&header.sample_rate.to_le_bytes())?;
     writer.write_all(&header.frames.to_le_bytes())?;
     writer.write_all(&header.source_mtime.to_le_bytes())?;
-    writer.write_all(&header.model_sha256)?;
+    writer.write_all(&header.algorithm_fingerprint)?;
     Ok(())
 }
 
@@ -669,7 +671,7 @@ mod tests {
             sample_rate: SAMPLE_RATE,
             frames: 882,
             source_mtime: 7,
-            model_sha256: model_sha_bytes(),
+            algorithm_fingerprint: algorithm_fingerprint(),
         };
         let frame = [[0.25, -0.25]; 4];
         let mut writer = StemCacheWriter::create(&destination, header).unwrap();
@@ -704,7 +706,7 @@ mod tests {
             sample_rate: SAMPLE_RATE,
             frames: frame_count as u64,
             source_mtime: 8,
-            model_sha256: model_sha_bytes(),
+            algorithm_fingerprint: algorithm_fingerprint(),
         };
         let frames: Vec<[[f32; 2]; 4]> = (0..frame_count)
             .map(|index| {

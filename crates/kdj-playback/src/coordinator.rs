@@ -41,10 +41,10 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const TEMPO_OUTPUT_BUFFER_MS: u64 = 160;
 const STARTUP_BUFFER_MS: u64 = 120;
 const SEEK_BUFFER_MS: u64 = 120;
-// ByteDance inference and tile assembly stay outside the callback. Once a fixed tile is ready, this
+// classical Redress separation and tile assembly stay outside the callback. Once a fixed tile is ready, this
 // short post-tempo ring absorbs scheduler jitter without retaining seconds of stale controls.
 const STEM_TEMPO_OUTPUT_BUFFER_MS: u64 = 640;
-/// ORG remains audible throughout a cache miss. Replace it only after ByteDance has produced a bounded
+/// ORG remains audible throughout a cache miss. Replace it only after classical Redress has produced a bounded
 /// quarter-second cushion from the context-safe centre of its fixed tile.
 const STEM_STARTUP_BUFFER_MS: u64 = 250;
 const STEM_SEEK_STARTUP_BUFFER_MS: u64 = 250;
@@ -67,7 +67,7 @@ const STEM_HANDOFF_EARLY_SEC: f64 = 0.002;
 const STEM_HANDOFF_ALIGN_SEC: f64 = 0.02;
 const STEM_HANDOFF_KEEP_MS: u64 = 80;
 /// After discarding a late tile down to the keep floor, wait this long for the stretch worker to
-/// refill from the same model window. A longer wait used to chase the next Spleeter tile forever.
+/// refill from the same separator window. A longer wait used to chase the next classical tile forever.
 const STEM_SEEK_CATCHUP_STALL: Duration = Duration::from_millis(40);
 const STEM_RECOVERY_BASE_DELAY: Duration = Duration::from_millis(900);
 const STEM_RECOVERY_MAX_DELAY: Duration = Duration::from_secs(8);
@@ -895,7 +895,7 @@ impl Actor {
         view.is_playing = false;
         view.rate = source.rate;
         view.buffering = true;
-        // ByteDance is a background tile model. Even an explicit STEM load starts with ORG and records
+        // classical Redress is a background tile model. Even an explicit STEM load starts with ORG and records
         // a follow-up request; only a context-safe prepared cushion may replace it.
         self.start_original_with_optional_stem_followup(deck, source, None, true)
     }
@@ -1029,7 +1029,7 @@ impl Actor {
         // used to freeze the transport UI for the whole time-stretcher startup window.
         view.buffering = self.decks[deck as usize].is_none();
         // Keep an already-separated Deck separated across Hot Cue/SYNC. Its current STEM source
-        // remains audible while a shadow ByteDance stream prepares near the future handoff point.
+        // remains audible while a shadow classical Redress stream prepares near the future handoff point.
         // Routing this case through ORG made STEM EQ appear reset and doubled SYNC model work.
         let replacing_live_stems = source.stem_enabled
             && self.decks[index].as_ref().is_some_and(|runtime| {
@@ -1495,7 +1495,7 @@ impl Actor {
             }
             return Ok(());
         }
-        // 慢速路径：原曲↔实时 STEM。原曲继续发声，分轨 worker 从当前位置开始推理。
+        // 慢速路径：原曲↔实时 STEM。原曲继续发声，分轨 worker 从当前位置开始分离。
         let mut source = self
             .source_for_deck(deck)
             .ok_or_else(|| "目标 Deck 没有可重建的音频源".to_string())?;
@@ -1532,7 +1532,7 @@ impl Actor {
                 gains: effective_stem_gains(mask, gains),
             })?;
         }
-        // Keep the current mix audible. Pausing until the first inference block made a newly
+        // Keep the current mix audible. Pausing until the first separation block made a newly
         // loaded playing Deck go silent, so the live waveform looked like it never started.
         self.state.decks[deck as usize].buffering = self.decks[deck as usize].is_none();
         self.start_stream(deck, source, None)?;
@@ -2399,8 +2399,8 @@ impl Actor {
             if Instant::now() < clocked.promote_at {
                 return StemHandoff::Wait;
             }
-            // ByteDance tiles often land after `promote_at`. Requiring the full late window
-            // before install made every Hot Cue chase a new model window and never replace
+            // classical Redress tiles often land after `promote_at`. Requiring the full late window
+            // before install made every Hot Cue chase a new separator window and never replace
             // the audible stream. Once the startup cushion exists, skip what we can and jump.
             if pending.source.buffered_frames() == 0 && pending.source.ended() {
                 return StemHandoff::RetargetClocked(retarget_clocked_deck_seek(
@@ -2515,7 +2515,7 @@ impl Actor {
                             continue;
                         }
                         // The current window is exhausted. Install what we have instead of
-                        // chasing another Spleeter tile while the outgoing song keeps playing.
+                        // chasing another classical tile while the outgoing song keeps playing.
                     }
                 }
             }
@@ -2603,7 +2603,7 @@ impl Actor {
                 }
             }
             // STEM 从暂停的原曲切过去时不能把原曲叠进分轨。若原曲仍在发声（seek
-            // 先跳原曲、STEM 随后接上），保留 replacement 短换手，避免先静音再等推理。
+            // 先跳原曲、STEM 随后接上），保留 replacement 短换手，避免先静音再等分离。
             let replace_raw_source = pending.request.stem_enabled
                 && self.decks[deck as usize]
                     .as_ref()
@@ -3523,11 +3523,9 @@ fn realtime_plan(plan: PlaybackTransitionPlan, sample_rate: u32) -> TransitionPl
 mod tests {
     use super::*;
     use crate::platform::PlaybackOutputSpec;
-    use kdj_core::{StemCompute, StemMode};
     use kdj_player::TransportSnapshot;
-    use kdj_stems::StemCoordinator;
     use std::sync::atomic::AtomicBool;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
 
     /// 不起真实声卡的输出替身：记录发送、按开关注入失败，快照由测试直接摆弄。
     struct FakeKnobs {
@@ -3661,14 +3659,6 @@ mod tests {
             taken: Mutex::new(false),
         };
         Actor::new(sender, receiver, emit, Arc::new(factory))
-    }
-
-    fn enable_bytedance_stem_runtime_for_test() {
-        static MANAGER: OnceLock<StemCoordinator> = OnceLock::new();
-        let manager = MANAGER.get_or_init(|| {
-            StemCoordinator::new(&std::env::temp_dir().join("kdj-playback-runtime-tests"))
-        });
-        manager.activate_runtime(StemMode::MobileNetTwo, StemCompute::Cpu);
     }
 
     fn source(track_id: i64, position: f64) -> PlaybackSource {
@@ -4095,7 +4085,7 @@ mod tests {
         let mut runtime = live_runtime(1, 12.0);
         runtime.source = PlaybackStream::Stems(stems);
         runtime.request.stem_enabled = true;
-        runtime.request.stem_cache_path = "/model/hs-tasnet.onnx".into();
+        runtime.request.stem_cache_path = "classical-redress-v1".into();
         actor.decks[DeckId::A as usize] = Some(runtime);
         actor.front = DeckId::A;
         actor.manual_mode = true;
@@ -4126,8 +4116,7 @@ mod tests {
             let mut runtime = live_runtime(index as i64 + 1, 12.0);
             runtime.source = PlaybackStream::Stems(stems);
             runtime.request.stem_enabled = true;
-            runtime.request.stem_cache_path =
-                "/model/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
+            runtime.request.stem_cache_path = "classical-redress-v1".into();
             actor.decks[deck as usize] = Some(runtime);
             actor.state.decks[deck as usize].track_id = Some(index as i64 + 1);
             actor.state.decks[deck as usize].current_time = 12.0;
@@ -4151,7 +4140,6 @@ mod tests {
 
     #[test]
     fn stem_seek_prepares_a_shadow_stem_generation_without_falling_back_to_original() {
-        enable_bytedance_stem_runtime_for_test();
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
         actor.open_output().expect("打开测试输出");
@@ -4160,8 +4148,7 @@ mod tests {
         let mut runtime = live_runtime(1, 12.0);
         runtime.source = PlaybackStream::Stems(stems);
         runtime.request.stem_enabled = true;
-        runtime.request.stem_cache_path =
-            "/model/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
+        runtime.request.stem_cache_path = "classical-redress-v1".into();
         runtime.request.stem_mask = 0b1010;
         runtime.request.stem_gains = [0.25, 0.5, 0.75, 1.25];
         let live_cancel = Arc::clone(&runtime.cancel);
@@ -4277,8 +4264,7 @@ mod tests {
         let mut actor = test_actor(&knobs);
         let mut runtime = live_runtime(1, 12.0);
         runtime.request.stem_enabled = true;
-        runtime.request.stem_cache_path =
-            "/models/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
+        runtime.request.stem_cache_path = "classical-redress-v1".into();
         actor.decks[DeckId::A as usize] = Some(runtime);
         actor.front = DeckId::A;
         actor.state.track_id = Some(1);
@@ -5482,7 +5468,7 @@ mod tests {
         }
         let mut request = source(1, 6.0);
         request.stem_enabled = true;
-        request.stem_cache_path = "/tmp/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
+        request.stem_cache_path = "classical-redress-v1".into();
         let pending = PendingStream {
             revision: 1,
             source: PlaybackStream::Stems(stream),
@@ -5521,7 +5507,7 @@ mod tests {
         }
         let mut request = source(1, 6.0);
         request.stem_enabled = true;
-        request.stem_cache_path = "/tmp/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
+        request.stem_cache_path = "classical-redress-v1".into();
         let pending = PendingStream {
             revision: 1,
             source: PlaybackStream::Stems(stream),
@@ -5566,7 +5552,7 @@ mod tests {
         let mut request = source(1, 20.0);
         request.rate = 1.25;
         request.stem_enabled = true;
-        request.stem_cache_path = "/tmp/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
+        request.stem_cache_path = "classical-redress-v1".into();
         actor.revisions[DeckId::A as usize] = 9;
         actor.pending[DeckId::A as usize] = Some(PendingStream {
             revision: 9,
@@ -5636,7 +5622,7 @@ mod tests {
         let promote_at = Instant::now() - Duration::from_millis(200);
         let mut request = source(1, 4.5);
         request.stem_enabled = true;
-        request.stem_cache_path = "/tmp/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
+        request.stem_cache_path = "classical-redress-v1".into();
         actor.revisions[DeckId::A as usize] = 11;
         actor.pending[DeckId::A as usize] = Some(PendingStream {
             revision: 11,
@@ -5707,7 +5693,7 @@ mod tests {
         let promote_at = Instant::now() - Duration::from_secs(2);
         let mut request = source(1, 30.0);
         request.stem_enabled = true;
-        request.stem_cache_path = "/tmp/bytedance-mobilenet-subbandtime-2-fp32-onnx".into();
+        request.stem_cache_path = "classical-redress-v1".into();
         actor.revisions[DeckId::A as usize] = 12;
         actor.pending[DeckId::A as usize] = Some(PendingStream {
             revision: 12,
@@ -5743,7 +5729,7 @@ mod tests {
         actor.promote_ready_streams();
         assert!(
             actor.pending[DeckId::A as usize].is_none(),
-            "a stalled keep floor must install instead of waiting for another model window"
+            "a stalled keep floor must install instead of waiting for another separator window"
         );
         let installed =
             knobs.snapshot.lock().unwrap().deck_frames[DeckId::A as usize] as f64 / 48_000.0;
@@ -5866,7 +5852,6 @@ mod tests {
 
     #[test]
     fn deck_seek_keeps_the_other_deck_and_prepares_stems_without_an_original_bridge() {
-        enable_bytedance_stem_runtime_for_test();
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
         actor.open_output().expect("打开测试输出");
@@ -5892,7 +5877,7 @@ mod tests {
         );
         let pending = actor.pending[DeckId::A as usize]
             .as_ref()
-            .expect("ByteDance shadow stream must be pending");
+            .expect("classical Redress shadow stream must be pending");
         assert!(pending.request.stem_enabled);
         assert!(!pending.followup_stems);
         assert!(pending.request.position > 4.0);
@@ -5914,7 +5899,7 @@ mod tests {
     }
 
     #[test]
-    fn loading_a_playing_deck_keeps_original_until_bytedance_is_ready() {
+    fn loading_a_playing_deck_keeps_original_until_classical_is_ready() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
         actor.open_output().expect("打开测试输出");
@@ -5930,7 +5915,7 @@ mod tests {
             .expect("播放中装入应先登记原曲流");
         assert!(
             !pending.request.stem_enabled,
-            "ByteDance cache miss must keep ORG audible"
+            "classical Redress cache miss must keep ORG audible"
         );
         assert!(pending.followup_stems);
         assert_eq!(pending.request.stem_cache_path, "/tmp/kdj-stem-cache");
