@@ -23,16 +23,16 @@ export interface BeatGridMarker {
 const MAX_BEAT_MARKERS = 8_192;
 
 /**
- * 中心满幅式 crossfader（Rekordbox Slow Cut / Mixxx additive / Pioneer 渐变）：
+ * 中心满幅式三次方 crossfader：
  * 居中时两边都保留各自的满音量，不会像 Constant Power 那样把两路都压到 -3 dB；
- * 推向某一边时该边始终满幅，另一边沿四分之一余弦退到静音。关闭横推时传入 0，
+ * 推向某一边时该边始终满幅，另一边沿镜像 X³ 曲线退到静音。关闭横推时传入 0，
  * 等价于 Pioneer THRU。
  */
 export function crossfaderChannelGains(value: number): readonly [number, number] {
   const x = Math.min(1, Math.max(-1, Number.isFinite(value) ? value : 0));
   if (x <= -1) return [1, 0];
   if (x >= 1) return [0, 1];
-  const fadingGain = Math.cos(Math.abs(x) * Math.PI / 2);
+  const fadingGain = (1 - Math.abs(x)) ** 3;
   return x < 0 ? [1, fadingGain] : [fadingGain, 1];
 }
 
@@ -47,10 +47,10 @@ export function channelFaderGain(value: number): number {
   return x ** 3;
 }
 
-/** Pioneer / rekordbox 通道 EQ：中位 0 dB，线性扫到 −26 dB / +6 dB。 */
+/** DJ 通道 EQ：中位 0 dB，线性扫到 −24 dB / +6 dB。 */
 export function eqBandDb(value: number): number {
   const x = Math.min(1, Math.max(-1, Number.isFinite(value) ? value : 0));
-  return x < 0 ? x * 26 : x * 6;
+  return x < 0 ? x * 24 : x * 6;
 }
 
 /** 不同曲目永远装入另一侧；同曲恢复和第一首保留当前侧。 */

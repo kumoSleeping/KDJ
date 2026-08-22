@@ -43,9 +43,11 @@ Android builds may use DirectML or NNAPI according to the compute preference.
 ## UI and lifecycle
 
 - The top STEM model switch is removed.
-- The EQ panel always exposes exactly one STEM control and one VOCALS gain knob per Deck.
-- The knob is neutral at unity and is the only STEM gain control; there is no Instrumental/Other
-  reduction knob.
+- The main mixer keeps only channel GAIN, HIGH/MID/LOW/FILTER and LEVEL. VOCALS no longer occupies
+  an EQ knob; each Deck's third 3 FX slot defaults to the disabled VOCAL effect.
+- Enabling VOCAL keeps the original source audible until the neutral separated reconstruction is
+  ready, then its MIX slider controls VOCALS gain from mute to unity. The lower STEM strip remains
+  the explicit separated-lane control; there is no Instrumental/Other reduction knob.
 - Performance always renders the original waveform. VOCALS is the only optional separated rail;
   Instrumental/Other, Drums and Bass remain audio internals and are not published as waveforms.
 - The scrolling Performance rails use the bounded three-screen canvas and compositor transform;

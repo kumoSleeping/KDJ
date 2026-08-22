@@ -1,9 +1,9 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
-use crate::{DeckId, PlayerMode};
+use crate::{DeckId, PlayerMode, EQ_SPECTRUM_BANDS};
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TransportSnapshot {
     pub mode: PlayerMode,
     pub playing: bool,
@@ -18,6 +18,10 @@ pub struct TransportSnapshot {
     pub deck_output_underruns: [u64; 2],
     /// Lowest callback-boundary output-ring fill for the current source; zero means unobserved.
     pub deck_min_buffered_frames: [u64; 2],
+    /// Post-EQ, pre-channel-fader peak level for live mixer meters (linear full scale).
+    pub deck_peak_levels: [f32; 2],
+    /// Fixed narrow-band post-EQ levels for each Deck, in linear full scale.
+    pub deck_spectrum_levels: [[f32; EQ_SPECTRUM_BANDS]; 2],
 }
 
 pub(crate) struct SharedState {
@@ -38,6 +42,9 @@ pub(crate) struct SharedState {
     deck_b_output_underruns: AtomicU64,
     deck_a_min_buffered_frames: AtomicU64,
     deck_b_min_buffered_frames: AtomicU64,
+    deck_a_peak_level: AtomicU32,
+    deck_b_peak_level: AtomicU32,
+    deck_spectrum_levels: [[AtomicU32; EQ_SPECTRUM_BANDS]; 2],
 }
 
 impl Default for SharedState {
@@ -60,6 +67,11 @@ impl Default for SharedState {
             deck_b_output_underruns: AtomicU64::new(0),
             deck_a_min_buffered_frames: AtomicU64::new(0),
             deck_b_min_buffered_frames: AtomicU64::new(0),
+            deck_a_peak_level: AtomicU32::new(0),
+            deck_b_peak_level: AtomicU32::new(0),
+            deck_spectrum_levels: std::array::from_fn(|_| {
+                std::array::from_fn(|_| AtomicU32::new(0))
+            }),
         }
     }
 }
@@ -77,6 +89,8 @@ impl SharedState {
         deck_source_ids: [u64; 2],
         deck_output_underruns: [u64; 2],
         deck_min_buffered_frames: [u64; 2],
+        deck_peak_levels: [f32; 2],
+        deck_spectrum_levels: [[f32; EQ_SPECTRUM_BANDS]; 2],
     ) {
         // A seqlock prevents control readers from combining fields from two callbacks.
         // The audio thread still never takes a lock or waits for another thread.
@@ -109,6 +123,16 @@ impl SharedState {
             .store(deck_min_buffered_frames[0], Ordering::Relaxed);
         self.deck_b_min_buffered_frames
             .store(deck_min_buffered_frames[1], Ordering::Relaxed);
+        self.deck_a_peak_level
+            .store(deck_peak_levels[0].max(0.0).to_bits(), Ordering::Relaxed);
+        self.deck_b_peak_level
+            .store(deck_peak_levels[1].max(0.0).to_bits(), Ordering::Relaxed);
+        for (target_deck, source_deck) in self.deck_spectrum_levels.iter().zip(deck_spectrum_levels)
+        {
+            for (target, source) in target_deck.iter().zip(source_deck) {
+                target.store(source.max(0.0).to_bits(), Ordering::Relaxed);
+            }
+        }
         self.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -155,6 +179,17 @@ impl SharedState {
                     self.deck_a_min_buffered_frames.load(Ordering::Relaxed),
                     self.deck_b_min_buffered_frames.load(Ordering::Relaxed),
                 ],
+                deck_peak_levels: [
+                    f32::from_bits(self.deck_a_peak_level.load(Ordering::Relaxed)),
+                    f32::from_bits(self.deck_b_peak_level.load(Ordering::Relaxed)),
+                ],
+                deck_spectrum_levels: std::array::from_fn(|deck| {
+                    std::array::from_fn(|band| {
+                        f32::from_bits(
+                            self.deck_spectrum_levels[deck][band].load(Ordering::Relaxed),
+                        )
+                    })
+                }),
             };
             if before == self.generation.load(Ordering::Acquire) {
                 return snapshot;

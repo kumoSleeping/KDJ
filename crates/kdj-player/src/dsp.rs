@@ -1,5 +1,7 @@
 use std::f32::consts::PI;
 
+use crate::EQ_SPECTRUM_BANDS;
+
 #[derive(Clone, Copy, Debug)]
 struct Coefficients {
     b0: f32,
@@ -89,9 +91,9 @@ impl StereoBiquad {
         self.coefficient_ramp_remaining = 0;
     }
 
-    /// FILTER knob messages arrive at control rate, not sample rate. Interpolating the biquad
-    /// coefficients here avoids an audible state/coefficients discontinuity every time the knob
-    /// advances; the other EQ bands remain immediate because they are normally stepped rarely.
+    /// Broad EQ bands can safely interpolate between nearby shelf/peak coefficients. The channel
+    /// FILTER deliberately does not use this path: modulating its near-unit low-frequency poles
+    /// injected state bursts, so that control uses two stable banks and a short crossfade below.
     fn ramp_coefficients(&mut self, coefficients: Coefficients, frames: u32) {
         let frames = frames.max(1);
         self.coefficient_target = coefficients;
@@ -125,6 +127,78 @@ impl StereoBiquad {
             0.0
         }
     }
+
+    fn reset(&mut self) {
+        self.state = [BiquadState::default(); 2];
+    }
+}
+
+/// Fifteen fixed, narrow post-EQ analysis bands. This is display metering, not another EQ: the
+/// audible mixer deliberately remains LOW/MID/HIGH so hand drawing and physical three-knob
+/// controllers always describe the same sound. All state is fixed-size and callback-local.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DeckSpectrum {
+    sample_rate: u32,
+    filters: [StereoBiquad; EQ_SPECTRUM_BANDS],
+    levels: [f32; EQ_SPECTRUM_BANDS],
+    release_per_frame: f32,
+}
+
+impl Default for DeckSpectrum {
+    fn default() -> Self {
+        Self {
+            sample_rate: 0,
+            filters: [StereoBiquad::default(); EQ_SPECTRUM_BANDS],
+            levels: [0.0; EQ_SPECTRUM_BANDS],
+            release_per_frame: 0.999_9,
+        }
+    }
+}
+
+impl DeckSpectrum {
+    /// 1/3-octave-like centres matching `src/lib/eqGraph.ts`, grouped five per broad EQ band.
+    const FREQUENCIES: [f32; EQ_SPECTRUM_BANDS] = [
+        40.0, 63.0, 100.0, 160.0, 250.0, 400.0, 630.0, 1_000.0, 1_600.0, 2_500.0, 4_000.0, 6_300.0,
+        10_000.0, 14_000.0, 18_000.0,
+    ];
+    const THIRD_OCTAVE_Q: f32 = 4.318;
+    const RELEASE_SECONDS: f32 = 0.16;
+
+    pub(crate) fn ensure_sample_rate(&mut self, sample_rate: u32) {
+        let sample_rate = sample_rate.max(1);
+        if self.sample_rate == sample_rate {
+            return;
+        }
+        self.sample_rate = sample_rate;
+        self.release_per_frame = (-1.0 / (sample_rate as f32 * Self::RELEASE_SECONDS)).exp();
+        for (filter, frequency) in self.filters.iter_mut().zip(Self::FREQUENCIES) {
+            filter.set_coefficients(band_pass(sample_rate, frequency, Self::THIRD_OCTAVE_Q));
+        }
+        self.reset();
+    }
+
+    #[inline]
+    pub(crate) fn observe(&mut self, input: [f32; 2]) {
+        for index in 0..EQ_SPECTRUM_BANDS {
+            let filtered = [
+                self.filters[index].process(0, input[0]),
+                self.filters[index].process(1, input[1]),
+            ];
+            let peak = filtered[0].abs().max(filtered[1].abs());
+            self.levels[index] = (self.levels[index] * self.release_per_frame).max(peak);
+        }
+    }
+
+    pub(crate) fn levels(&self) -> [f32; EQ_SPECTRUM_BANDS] {
+        self.levels
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.levels = [0.0; EQ_SPECTRUM_BANDS];
+        for filter in &mut self.filters {
+            filter.reset();
+        }
+    }
 }
 
 /// Three-band DJ isolator + bipolar channel filter. Coefficients are recalculated only when a
@@ -143,6 +217,12 @@ pub(crate) struct DeckEq {
     mid: StereoBiquad,
     high: StereoBiquad,
     channel_filter: StereoBiquad,
+    channel_filter_next: StereoBiquad,
+    channel_filter_q: f32,
+    channel_filter_next_q: f32,
+    channel_filter_crossfade: f32,
+    channel_filter_crossfade_step: f32,
+    channel_filter_crossfade_remaining: u32,
 }
 
 impl Default for DeckEq {
@@ -160,6 +240,12 @@ impl Default for DeckEq {
             mid: StereoBiquad::default(),
             high: StereoBiquad::default(),
             channel_filter: StereoBiquad::default(),
+            channel_filter_next: StereoBiquad::default(),
+            channel_filter_q: FILTER_NEAR_CENTER_Q,
+            channel_filter_next_q: FILTER_NEAR_CENTER_Q,
+            channel_filter_crossfade: 0.0,
+            channel_filter_crossfade_step: 0.0,
+            channel_filter_crossfade_remaining: 0,
         }
     }
 }
@@ -175,6 +261,7 @@ impl DeckEq {
         filter: f32,
         filter_resonance: f32,
     ) {
+        let sample_rate = sample_rate.max(1);
         let trim_db = finite_db(trim_db).clamp(-24.0, 6.0);
         let low_db = finite_db(low_db);
         let mid_db = finite_db(mid_db);
@@ -185,6 +272,7 @@ impl DeckEq {
             0.0
         };
         let filter_resonance = normalized_filter_resonance(filter_resonance);
+        let filter_effective_resonance = effective_filter_resonance(filter, filter_resonance);
         if self.sample_rate == sample_rate
             && self.trim_db == trim_db
             && self.low_db == low_db
@@ -195,7 +283,11 @@ impl DeckEq {
         {
             return;
         }
-        self.sample_rate = sample_rate.max(1);
+        let initialise_coefficients = self.sample_rate == 0 || self.sample_rate != sample_rate;
+        let filter_changed = initialise_coefficients
+            || self.filter != filter
+            || self.filter_resonance != filter_resonance;
+        self.sample_rate = sample_rate;
         self.trim_db = trim_db;
         self.low_db = low_db;
         self.mid_db = mid_db;
@@ -203,25 +295,56 @@ impl DeckEq {
         self.filter = filter;
         self.filter_resonance = filter_resonance;
         self.trim_gain = db_gain(trim_db);
-        self.low
-            .set_coefficients(shelf(self.sample_rate, 220.0, low_db, false));
-        self.mid
-            .set_coefficients(peaking(self.sample_rate, 1_200.0, 0.8, mid_db));
-        self.high
-            .set_coefficients(shelf(self.sample_rate, 5_500.0, high_db, true));
+        let low_coefficients = shelf(self.sample_rate, 220.0, low_db, false);
+        let mid_coefficients = peaking(self.sample_rate, 1_200.0, 0.8, mid_db);
+        let high_coefficients = shelf(self.sample_rate, 5_500.0, high_db, true);
+        if initialise_coefficients {
+            self.low.set_coefficients(low_coefficients);
+            self.mid.set_coefficients(mid_coefficients);
+            self.high.set_coefficients(high_coefficients);
+        } else {
+            let frames = eq_coefficient_ramp_frames(self.sample_rate);
+            self.low.ramp_coefficients(low_coefficients, frames);
+            self.mid.ramp_coefficients(mid_coefficients, frames);
+            self.high.ramp_coefficients(high_coefficients, frames);
+        }
         let filter_coefficients = if filter < -FILTER_CENTER_DEADZONE {
             let cutoff = 18_000.0 * (90.0f32 / 18_000.0).powf(-filter);
-            low_pass(self.sample_rate, cutoff, filter_resonance)
+            low_pass(self.sample_rate, cutoff, filter_effective_resonance)
         } else if filter > FILTER_CENTER_DEADZONE {
             let cutoff = 22.0 * (8_000.0f32 / 22.0).powf(filter);
-            high_pass(self.sample_rate, cutoff, filter_resonance)
+            high_pass(self.sample_rate, cutoff, filter_effective_resonance)
         } else {
             Coefficients::default()
         };
-        self.channel_filter.ramp_coefficients(
-            filter_coefficients,
-            filter_coefficient_ramp_frames(self.sample_rate),
-        );
+        if initialise_coefficients {
+            self.channel_filter.set_coefficients(filter_coefficients);
+            self.channel_filter_next
+                .set_coefficients(filter_coefficients);
+            self.channel_filter.reset();
+            self.channel_filter_next.reset();
+            self.channel_filter_q = filter_effective_resonance;
+            self.channel_filter_next_q = filter_effective_resonance;
+            self.channel_filter_crossfade = 0.0;
+            self.channel_filter_crossfade_step = 0.0;
+            self.channel_filter_crossfade_remaining = 0;
+        } else if filter_changed {
+            // UI/MIDI delivery is normally slower than this transition. If a newer command does
+            // arrive mid-fade, retain the currently dominant live bank before preparing the next
+            // target so an obsolete coefficient set can never win the race.
+            if self.channel_filter_crossfade_remaining > 0 && self.channel_filter_crossfade >= 0.5 {
+                std::mem::swap(&mut self.channel_filter, &mut self.channel_filter_next);
+                self.channel_filter_q = self.channel_filter_next_q;
+            }
+            self.channel_filter_next
+                .set_coefficients(filter_coefficients);
+            self.channel_filter_next.reset();
+            self.channel_filter_next_q = filter_effective_resonance;
+            let frames = filter_crossfade_frames(self.sample_rate);
+            self.channel_filter_crossfade = 0.0;
+            self.channel_filter_crossfade_step = 1.0 / frames as f32;
+            self.channel_filter_crossfade_remaining = frames;
+        }
     }
 
     pub(crate) fn ensure_sample_rate(&mut self, sample_rate: u32) {
@@ -253,24 +376,49 @@ impl DeckEq {
         self.mid.state = [BiquadState::default(); 2];
         self.high.state = [BiquadState::default(); 2];
         self.channel_filter.state = [BiquadState::default(); 2];
+        self.channel_filter_next.state = [BiquadState::default(); 2];
     }
 
     pub(crate) fn process_stereo(&mut self, input: [f32; 2]) -> [f32; 2] {
         // Advance once per stereo frame so left/right stay on identical coefficients.
-        self.channel_filter.advance_coefficients();
-        let protect_resonant_peak =
-            self.filter.abs() > FILTER_CENTER_DEADZONE && self.filter_resonance > 1.0;
+        self.low.advance_coefficients();
+        self.mid.advance_coefficients();
+        self.high.advance_coefficients();
+        let crossfading = self.channel_filter_crossfade_remaining > 0;
+        let mix = self.channel_filter_crossfade;
         let mut output = [0.0; 2];
         for channel in 0..2 {
             let low = self.low.process(channel, input[channel] * self.trim_gain);
             let mid = self.mid.process(channel, low);
             let high = self.high.process(channel, mid);
-            let filtered = self.channel_filter.process(channel, high);
-            output[channel] = if protect_resonant_peak {
-                resonant_filter_soft_limit(filtered)
+            let current = self.channel_filter.process(channel, high);
+            let current = if self.channel_filter_q > 1.0 {
+                resonant_filter_soft_limit(current)
             } else {
-                filtered
+                current
             };
+            output[channel] = if crossfading {
+                let next = self.channel_filter_next.process(channel, high);
+                let next = if self.channel_filter_next_q > 1.0 {
+                    resonant_filter_soft_limit(next)
+                } else {
+                    next
+                };
+                current + (next - current) * mix
+            } else {
+                current
+            };
+        }
+        if crossfading {
+            self.channel_filter_crossfade_remaining -= 1;
+            self.channel_filter_crossfade =
+                (self.channel_filter_crossfade + self.channel_filter_crossfade_step).min(1.0);
+            if self.channel_filter_crossfade_remaining == 0 {
+                std::mem::swap(&mut self.channel_filter, &mut self.channel_filter_next);
+                self.channel_filter_q = self.channel_filter_next_q;
+                self.channel_filter_crossfade = 0.0;
+                self.channel_filter_crossfade_step = 0.0;
+            }
         }
         output
     }
@@ -298,15 +446,38 @@ fn normalized_filter_resonance(value: f32) -> f32 {
 /// ±1% of the bipolar FILTER throw counts as the 12 o'clock detent. Hardware mixers click there;
 /// 7-bit MIDI center is 64/127 and never lands on exact 0.
 const FILTER_CENTER_DEADZONE: f32 = 0.01;
-/// A 24 ms coefficient ramp is longer than an individual callback but shorter than a normal
-/// control gesture. It turns frequent 40 ms UI updates into one continuous filter sweep.
-const FILTER_COEFFICIENT_RAMP_MILLIS: u32 = 24;
+/// The first tenth of the FILTER throw should remove inaudible edge content, not add a sub-bass
+/// or ultrasonic resonant shelf. Q=1/sqrt(2) is monotonic, so mastered audio keeps its headroom
+/// while the knob leaves its centre detent. The selected resonance fades back in beyond 10% and
+/// reaches full strength at 30%, where the sweep is already an intentional audible effect.
+const FILTER_NEAR_CENTER_Q: f32 = 0.707_106_77;
+const FILTER_RESONANCE_RAMP_START: f32 = 0.10;
+const FILTER_RESONANCE_RAMP_END: f32 = 0.30;
+/// A 24 ms dual-filter crossfade is longer than an individual callback but shorter than a normal
+/// control gesture. Unlike interpolating near-unit IIR coefficients, it cannot inject a resonant
+/// state burst while frequent 40 ms UI updates sweep the low-frequency end of the filter.
+const FILTER_CROSSFADE_MILLIS: u32 = 24;
+const EQ_COEFFICIENT_RAMP_MILLIS: u32 = 24;
 const FILTER_SOFT_LIMIT_KNEE: f32 = 0.92;
 const FILTER_SOFT_LIMIT_CEILING: f32 = 0.985;
 
-fn filter_coefficient_ramp_frames(sample_rate: u32) -> u32 {
-    (u64::from(sample_rate.max(1)) * u64::from(FILTER_COEFFICIENT_RAMP_MILLIS) / 1_000)
-        .clamp(16, 4_096) as u32
+fn filter_crossfade_frames(sample_rate: u32) -> u32 {
+    (u64::from(sample_rate.max(1)) * u64::from(FILTER_CROSSFADE_MILLIS) / 1_000).clamp(16, 4_096)
+        as u32
+}
+
+fn eq_coefficient_ramp_frames(sample_rate: u32) -> u32 {
+    (u64::from(sample_rate.max(1)) * u64::from(EQ_COEFFICIENT_RAMP_MILLIS) / 1_000).clamp(16, 4_096)
+        as u32
+}
+
+fn effective_filter_resonance(filter: f32, selected_q: f32) -> f32 {
+    let amount = filter.abs();
+    let linear = ((amount - FILTER_RESONANCE_RAMP_START)
+        / (FILTER_RESONANCE_RAMP_END - FILTER_RESONANCE_RAMP_START))
+        .clamp(0.0, 1.0);
+    let smooth = linear * linear * (3.0 - 2.0 * linear);
+    FILTER_NEAR_CENTER_Q + (selected_q - FILTER_NEAR_CENTER_Q) * smooth
 }
 
 /// High resonance can lift a mastered transient beyond full scale even after its Q is kept in a
@@ -623,6 +794,15 @@ fn high_pass(sample_rate: u32, frequency: f32, q: f32) -> Coefficients {
     )
 }
 
+/// RBJ constant-peak-gain band pass. A sine at the centre remains unity while frequencies
+/// outside the one-third-octave window fall away, making fixed dBFS display scaling meaningful.
+fn band_pass(sample_rate: u32, frequency: f32, q: f32) -> Coefficients {
+    let omega = 2.0 * PI * frequency.clamp(20.0, sample_rate as f32 * 0.45) / sample_rate as f32;
+    let alpha = omega.sin() / (2.0 * q.max(0.1));
+    let cosine = omega.cos();
+    normalized_coefficients(alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cosine, 1.0 - alpha)
+}
+
 fn normalized_coefficients(b0: f32, b1: f32, b2: f32, a0: f32, a1: f32, a2: f32) -> Coefficients {
     Coefficients {
         b0: b0 / a0,
@@ -709,6 +889,31 @@ mod tests {
     }
 
     #[test]
+    fn live_spectrum_keeps_narrow_tones_in_their_own_band() {
+        let mut spectrum = DeckSpectrum::default();
+        spectrum.ensure_sample_rate(48_000);
+        for frame in 0..48_000 {
+            let sample = (2.0 * PI * 1_000.0 * frame as f32 / 48_000.0).sin() * 0.5;
+            spectrum.observe([sample; 2]);
+        }
+        let levels = spectrum.levels();
+        let strongest = levels
+            .iter()
+            .enumerate()
+            .max_by(|left, right| left.1.total_cmp(right.1))
+            .map(|(index, _)| index);
+        assert_eq!(strongest, Some(7));
+        assert!(
+            levels[7] > levels[2] * 5.0,
+            "1 kHz leaked into LOW: {levels:?}"
+        );
+        assert!(
+            levels[7] > levels[12] * 5.0,
+            "1 kHz leaked into HIGH: {levels:?}"
+        );
+    }
+
+    #[test]
     fn channel_filter_resonance_uses_low_as_legacy_and_high_as_default() {
         // The current/legacy Q is the low setting. At a cutoff-adjacent tone, the high setting
         // must be clearly stronger without returning to the former unsafe +12 dB peak.
@@ -771,6 +976,109 @@ mod tests {
     }
 
     #[test]
+    fn near_center_filter_uses_monotonic_q_without_resonant_gain() {
+        for filter in [-0.10, -0.04, -0.03, 0.03, 0.04, 0.10] {
+            let effective = effective_filter_resonance(filter, crate::FILTER_RESONANCE_HIGH_Q);
+            assert!(
+                (effective - FILTER_NEAR_CENTER_Q).abs() < 0.000_1,
+                "FILTER {filter:+.0}% restored resonance inside the protected centre range: Q={effective}",
+                filter = filter * 100.0,
+            );
+
+            let cutoff = if filter < 0.0 {
+                18_000.0 * (90.0f32 / 18_000.0).powf(-filter)
+            } else {
+                22.0 * (8_000.0f32 / 22.0).powf(filter)
+            };
+            let peak_frequency = if filter < 0.0 {
+                cutoff * 0.955
+            } else {
+                cutoff * 1.047
+            };
+            let mut dry = DeckEq::default();
+            dry.configure(
+                48_000,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                crate::FILTER_RESONANCE_HIGH_Q,
+            );
+            let mut filtered = DeckEq::default();
+            filtered.configure(
+                48_000,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                filter,
+                crate::FILTER_RESONANCE_HIGH_Q,
+            );
+            let dry_rms = tone_rms(&mut dry, peak_frequency);
+            let filtered_rms = tone_rms(&mut filtered, peak_frequency);
+            assert!(
+                filtered_rms <= dry_rms * 1.01,
+                "FILTER {filter:+.0}% still boosted its former resonance: dry={dry_rms}, filtered={filtered_rms}",
+                filter = filter * 100.0,
+            );
+        }
+    }
+
+    #[test]
+    fn near_center_filter_sweep_stays_continuous_on_bass_heavy_audio() {
+        let mut eq = DeckEq::default();
+        let mut previous = 0.0f32;
+        let mut peak = 0.0f32;
+        let mut largest_step = 0.0f32;
+        let mut frame = 0usize;
+        for filter in [0.0, 0.02, 0.03, 0.04, 0.06, 0.08, 0.10, 0.08, 0.04, 0.0] {
+            eq.configure(
+                48_000,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                filter,
+                crate::FILTER_RESONANCE_HIGH_Q,
+            );
+            for _ in 0..1_920 {
+                let phase = frame as f32 / 48_000.0;
+                let input = (2.0 * PI * 30.0 * phase).sin() * 0.72
+                    + (2.0 * PI * 1_000.0 * phase).sin() * 0.12;
+                let output = eq.process_stereo([input; 2])[0];
+                assert!(output.is_finite());
+                peak = peak.max(output.abs());
+                largest_step = largest_step.max((output - previous).abs());
+                previous = output;
+                frame += 1;
+            }
+        }
+        assert!(
+            peak < 0.9,
+            "near-centre sweep unexpectedly gained the input: peak={peak}"
+        );
+        assert!(
+            largest_step < 0.08,
+            "near-centre sweep produced a discontinuity: largest_step={largest_step}"
+        );
+    }
+
+    #[test]
+    fn selected_filter_resonance_returns_smoothly_after_the_protected_range() {
+        let selected = crate::FILTER_RESONANCE_HIGH_Q;
+        let at_start = effective_filter_resonance(FILTER_RESONANCE_RAMP_START, selected);
+        let midway = effective_filter_resonance(
+            (FILTER_RESONANCE_RAMP_START + FILTER_RESONANCE_RAMP_END) * 0.5,
+            selected,
+        );
+        let at_end = effective_filter_resonance(FILTER_RESONANCE_RAMP_END, selected);
+        assert!((at_start - FILTER_NEAR_CENTER_Q).abs() < f32::EPSILON);
+        assert!(midway > at_start && midway < at_end);
+        assert!((at_end - selected).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn resonant_filter_uses_a_soft_ceiling_for_near_full_scale_audio() {
         let filter = -0.55;
         let cutoff = 18_000.0 * (90.0f32 / 18_000.0).powf(-filter);
@@ -797,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_filter_coefficients_ramp_between_knob_updates() {
+    fn channel_filter_crossfades_between_knob_updates() {
         let mut eq = DeckEq::default();
         eq.configure(
             48_000,
@@ -808,7 +1116,7 @@ mod tests {
             -0.25,
             crate::FILTER_RESONANCE_HIGH_Q,
         );
-        for _ in 0..filter_coefficient_ramp_frames(48_000) {
+        for _ in 0..filter_crossfade_frames(48_000) {
             eq.process_stereo([0.2; 2]);
         }
         let before = eq.channel_filter.coefficients;
@@ -822,16 +1130,25 @@ mod tests {
             -0.75,
             crate::FILTER_RESONANCE_HIGH_Q,
         );
-        let target = eq.channel_filter.coefficient_target;
-        assert!(eq.channel_filter.coefficient_ramp_remaining > 0);
+        let target = eq.channel_filter_next.coefficients;
+        assert!(eq.channel_filter_crossfade_remaining > 0);
         eq.process_stereo([0.2; 2]);
-        let first_step = eq.channel_filter.coefficients;
+        let first_mix = eq.channel_filter_crossfade;
 
-        assert!(coefficient_distance(before, first_step) > 0.0);
-        assert!(
-            coefficient_distance(before, first_step) < coefficient_distance(before, target),
-            "FILTER coefficient change skipped its smoothing ramp"
+        assert_eq!(
+            coefficient_distance(before, eq.channel_filter.coefficients),
+            0.0
         );
+        assert!(
+            coefficient_distance(before, target) > 0.0,
+            "FILTER update did not prepare a distinct target bank"
+        );
+        assert!(first_mix > 0.0 && first_mix < 1.0);
+        for _ in 1..filter_crossfade_frames(48_000) {
+            eq.process_stereo([0.2; 2]);
+        }
+        assert_eq!(eq.channel_filter_crossfade_remaining, 0);
+        assert!(coefficient_distance(eq.channel_filter.coefficients, target) < 0.000_1);
     }
 
     #[test]

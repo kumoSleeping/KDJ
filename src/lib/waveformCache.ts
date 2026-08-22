@@ -112,9 +112,9 @@ function emptyStreamEntry(trackId: number, duration: number): StreamWaveformEntr
   };
 }
 
-const STREAM_AMP_GAMMA = 1.2;
-const STREAM_COLOR_GAMMA = 6;
-const STREAM_COLOR_FLOOR = 0.12;
+const STREAM_AMP_GAMMA = 0.9;
+const STREAM_COLOR_GAMMA = 2.4;
+const STREAM_COLOR_FLOOR = 0.06;
 
 function percentile(sorted: readonly number[], percent: number): number {
   if (sorted.length === 0) return 0;

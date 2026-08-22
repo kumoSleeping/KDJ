@@ -6,10 +6,13 @@ import {
   barPhase,
   barPhaseAlignedSeek,
   barPhaseLock,
+  boundedPhaseAlignedFollowerPosition,
+  crossfaderTempoPlan,
   deckSyncRate,
   ENGINE_TEMPO_MAX,
   ENGINE_TEMPO_MIN,
   manualSyncBarInput,
+  linkedDeckRates,
   msUntilNextBoundary,
   nearestGridSnap,
   phaseAlignedFollowerPosition,
@@ -311,6 +314,64 @@ test("manual SYNC corrects residual offsets above 3ms even below the generic 12m
     syncFollowerSeekPositionWithLead(input, 0, SYNC_PHASE_TOLERANCE_SEC) ?? -1,
     10,
   );
+});
+
+test("manual SYNC advances to an equivalent bar instead of clamping a negative target to zero", () => {
+  const input = manualSyncBarInput({
+    followerPositionSec: 0.1,
+    followerDurationSec: 180,
+    followerBpm: 120,
+    followerFirstBeatSec: 0,
+    followerRate: 1,
+    masterPositionSec: 1.8,
+    masterBpm: 120,
+    masterFirstBeatSec: 0,
+    masterRate: 1,
+    multiple: 1,
+  });
+  almost(syncFollowerSeekPositionWithLead(input, 0, SYNC_PHASE_TOLERANCE_SEC) ?? -1, 1.8);
+  almost(boundedPhaseAlignedFollowerPosition(0.1, 1, 0.3, 2, 180), 1.8);
+});
+
+test("linked tempo rates stay exact and constrain both Decks at the engine boundary", () => {
+  const relation = { base: 0 as const, multiple: 1 };
+  const rates = linkedDeckRates(0, 1.1, [120, 132], relation);
+  assert.ok(rates);
+  almost(120 * rates[0], 132 * rates[1], 1e-9);
+
+  const constrained = linkedDeckRates(0, 2, [120, 240], relation);
+  assert.ok(constrained);
+  almost(constrained[0], 2);
+  almost(constrained[1], 1);
+  almost(120 * constrained[0], 240 * constrained[1], 1e-9);
+});
+
+test("crossfader tempo moves between original endpoints through a shared midpoint", () => {
+  const left = crossfaderTempoPlan(0, [120, 132]);
+  const center = crossfaderTempoPlan(0.5, [120, 132]);
+  const right = crossfaderTempoPlan(1, [120, 132]);
+  assert.ok(left && center && right);
+  almost(left.rates[0], 1);
+  almost(120 * left.rates[0], 132 * left.rates[1]);
+  almost(center.targetBpm, 126);
+  almost(120 * center.rates[0], 126);
+  almost(132 * center.rates[1], 126);
+  almost(right.rates[1], 1);
+  almost(120 * right.rates[0], 132 * right.rates[1]);
+});
+
+test("crossfader tempo folds half-time BPM before interpolation", () => {
+  const plan = crossfaderTempoPlan(0.5, [70, 140]);
+  assert.ok(plan);
+  assert.equal(plan.relation.multiple, 2);
+  almost(plan.targetBpm, 140);
+  almost(plan.rates[0], 1);
+  almost(plan.rates[1], 1);
+});
+
+test("crossfader tempo refuses missing BPM or a pair outside the shared engine range", () => {
+  assert.equal(crossfaderTempoPlan(0.5, [null, 128]), null);
+  assert.equal(crossfaderTempoPlan(0.5, [20, 300]), null);
 });
 
 test("half-time bar lock prefers the downbeat over the follower's third beat", () => {

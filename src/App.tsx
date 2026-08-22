@@ -42,8 +42,7 @@ export default function App() {
   const { columns, chrome, portrait } = useLayoutSignals();
   const [retrying, setRetrying] = useState(false);
   const [workMode, setWorkModeState] = useState<WorkMode>(() => readWorkMode());
-  const [performanceOpen, setPerformanceOpen] = useState(false);
-  const [performanceControlHost, setPerformanceControlHost] = useState<HTMLDivElement | null>(null);
+  const [performanceOpen, setPerformanceOpen] = useState(workMode === "dj");
   const platform = window.kdj?.platform;
   const isMac = platform === "darwin";
   const isMobile = platform === "android" || platform === "ios";
@@ -120,9 +119,9 @@ export default function App() {
 
   const setWorkMode = useCallback((mode: WorkMode) => {
     setWorkModeState(mode);
+    setPerformanceOpen(mode === "dj");
     writeWorkMode(mode);
   }, []);
-
   return (
     <div
       className="kd-app"
@@ -138,9 +137,6 @@ export default function App() {
           <Workspace
             workMode={workMode}
             onWorkModeChange={setWorkMode}
-            performanceOpen={performanceOpen}
-            onPerformanceOpenChange={setPerformanceOpen}
-            onPerformanceControlHost={setPerformanceControlHost}
           />
         ) : (
           <section className="kd-section">
@@ -176,8 +172,6 @@ export default function App() {
           <PlayerBar
             workMode={workMode}
             performanceOpen={performanceOpen}
-            performanceControlHost={performanceControlHost}
-            onPerformanceOpenChange={setPerformanceOpen}
           />
           <VideoPipHost />
         </>

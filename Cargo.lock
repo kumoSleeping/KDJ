@@ -3237,7 +3237,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "symphonia 0.5.5",
- "thiserror 2.0.19",
  "tracing",
 ]
 

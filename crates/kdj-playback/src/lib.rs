@@ -10,7 +10,7 @@ mod platform;
 mod remote_source;
 
 pub use contract::{
-    CommandAck, PlaybackCommand, PlaybackPhase, PlaybackSnapshot, PlaybackSource,
+    CommandAck, PlaybackCommand, PlaybackLevels, PlaybackPhase, PlaybackSnapshot, PlaybackSource,
     PlaybackSourceKind, PlaybackTransitionPlan,
 };
 pub use coordinator::PlaybackCoordinator;

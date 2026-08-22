@@ -83,6 +83,11 @@ pub enum RtCommand {
         deck: DeckId,
         rate: f32,
     },
+    /// Change both persistent Deck tempos at one callback boundary. A linked SYNC fader must not
+    /// expose an intermediate frame where only one side has adopted the new clock rate.
+    SetDeckRates {
+        rates: [f32; 2],
+    },
     /// Per-lane STEM gains in `StemKind::index` order (drums, bass, other, vocals). Applied by
     /// the renderer with a short ramp, so mute/volume moves land at the next callback frame
     /// without touching any decode worker.
@@ -109,6 +114,18 @@ pub enum RtCommand {
         mid_db: f32,
         high_db: f32,
         filter: f32,
+    },
+    /// Shared manual Performance FX unit. `pad` is 0 when no momentary Pad FX is held.
+    SetDeckFx {
+        deck: DeckId,
+        echo: f32,
+        echo_parameter: f32,
+        reverb: f32,
+        reverb_parameter: f32,
+        gater: f32,
+        gater_parameter: f32,
+        pad: u8,
+        beat_seconds: f32,
     },
     /// Global Q for the Performance channel filter. It is prevalidated on the control thread;
     /// the callback only swaps coefficients for both decks at its next boundary.

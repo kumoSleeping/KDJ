@@ -17,6 +17,7 @@ use crate::android_media::AndroidMediaSession;
 use crate::desktop_media::DesktopMediaSession;
 
 pub const STATE_EVENT: &str = "playback-state";
+pub const LEVEL_EVENT: &str = "playback-levels";
 
 pub struct DesktopPlayerHandle {
     coordinator: Arc<PlaybackCoordinator>,
@@ -52,6 +53,14 @@ impl DesktopPlayerHandle {
             coordinator_slot
                 .set(Arc::clone(&coordinator))
                 .map_err(|_| "系统媒体控制重复绑定播放器".to_string())?;
+            {
+                let level_app = app.clone();
+                coordinator.subscribe_levels(move |levels| {
+                    if let Err(error) = level_app.emit(LEVEL_EVENT, levels) {
+                        tracing::warn!("发送电平失败：{error}");
+                    }
+                });
+            }
             return Ok(Self {
                 coordinator,
                 _media_session: media_session,
@@ -69,7 +78,7 @@ impl DesktopPlayerHandle {
                         None
                     }
                 };
-            let event_app = app;
+            let event_app = app.clone();
             let event_media = media_session.clone();
             let coordinator = Arc::new(PlaybackCoordinator::spawn(move |snapshot| {
                 if let Some(media) = &event_media {
@@ -82,6 +91,14 @@ impl DesktopPlayerHandle {
             coordinator_slot
                 .set(Arc::clone(&coordinator))
                 .map_err(|_| "Android 媒体控制重复绑定播放器".to_string())?;
+            {
+                let level_app = app.clone();
+                coordinator.subscribe_levels(move |levels| {
+                    if let Err(error) = level_app.emit(LEVEL_EVENT, levels) {
+                        tracing::warn!("发送电平失败：{error}");
+                    }
+                });
+            }
             return Ok(Self {
                 coordinator,
                 _media_session: media_session,

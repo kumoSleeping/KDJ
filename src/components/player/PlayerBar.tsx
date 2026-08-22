@@ -14,7 +14,6 @@ import {
   Repeat1,
   RefreshCw,
   Shuffle,
-  SlidersHorizontal,
   PictureInPicture2,
   SkipBack,
   SkipForward,
@@ -119,6 +118,7 @@ import {
   oneLibraryPlaybackSource,
   usesLocalLibraryRecord,
 } from "../../lib/playbackTrackSource";
+import { oneLibraryTrackByPlaybackId } from "../../lib/oneLibraryTrack";
 import {
   PLAYER_COMMAND_EVENT,
   publishPlayerSession,
@@ -422,15 +422,11 @@ function PlayerDeck({
 interface PlayerBarProps {
   workMode: WorkMode;
   performanceOpen: boolean;
-  performanceControlHost: HTMLDivElement | null;
-  onPerformanceOpenChange(open: boolean): void;
 }
 
 export function PlayerBar({
   workMode,
   performanceOpen,
-  performanceControlHost,
-  onPerformanceOpenChange,
 }: PlayerBarProps) {
   const { portrait } = useLayoutSignals();
   const mobileNative = usesNativeMobilePlayer();
@@ -3510,7 +3506,9 @@ export function PlayerBar({
     // 另一首物理 B，随后按播放键时看起来就像 Deck 被后台偷偷替换。
     const physicalCurrentTrackId = currentDeckView?.track?.id ?? null;
     const physicalCurrentSide = physicalCurrentTrackId !== null
-      ? performanceDeckStates.findIndex((deck) => deck.trackId === physicalCurrentTrackId)
+      ? performanceDeckStates[visualActiveIndex].trackId === physicalCurrentTrackId
+        ? visualActiveIndex
+        : performanceDeckStates.findIndex((deck) => deck.trackId === physicalCurrentTrackId)
       : -1;
     const preparedTrackId = playerRuntime.state().preparedTrackId;
     const retainedLeft = retainedDecks[0]
@@ -3534,7 +3532,7 @@ export function PlayerBar({
     const rightTrack = confirmedRightOverride
       ?? (physicalCurrentSide === 1 ? currentDeckView?.track ?? null : retainedRight);
     leftDeckView = leftTrack ? viewForTrack(leftTrack) : null;
-    rightDeckView = rightTrack && rightTrack.id !== leftTrack?.id ? viewForTrack(rightTrack) : null;
+    rightDeckView = rightTrack ? viewForTrack(rightTrack) : null;
   }
   const deckPlaying = pipDriving && pipSession?.source === "network" ? pipPlaying : playing;
   const playbackVisualRate = pipDriving
@@ -3701,6 +3699,7 @@ export function PlayerBar({
       playing:
         (leftPerformanceState ? leftPerformanceState.playing || leftPerformanceState.desiredPlaying : undefined) ??
         (visualActiveIndex === 0 && deckPlaying),
+      peakLevel: leftPerformanceState?.peakLevel ?? 0,
       rate: leftPerformanceState?.rate ?? 1,
       cover: leftDeckView?.cover ?? "",
       loopStart: leftPerformanceState?.loopStart ?? null,
@@ -3716,6 +3715,7 @@ export function PlayerBar({
       playing:
         (rightPerformanceState ? rightPerformanceState.playing || rightPerformanceState.desiredPlaying : undefined) ??
         (visualActiveIndex === 1 && deckPlaying),
+      peakLevel: rightPerformanceState?.peakLevel ?? 0,
       rate: rightPerformanceState?.rate ?? 1,
       cover: rightDeckView?.cover ?? "",
       loopStart: rightPerformanceState?.loopStart ?? null,
@@ -3798,6 +3798,16 @@ export function PlayerBar({
     Promise.resolve(),
     Promise.resolve(),
   ]);
+  const waitForInstalledStemMode = async (side: 0 | 1, trackId: number, enabled: boolean) => {
+    const deadline = performance.now() + 12_000;
+    while (performance.now() < deadline) {
+      const installed = playerRuntime.state().decks[side];
+      if (installed.trackId !== trackId) return false;
+      if (installed.stemEnabled === enabled) return true;
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 20));
+    }
+    throw new Error(enabled ? "STEM 安全缓冲等待超时" : "原曲安全缓冲等待超时");
+  };
   const applyStemModeNow = async (
     side: 0 | 1,
     trackId: number,
@@ -3831,21 +3841,6 @@ export function PlayerBar({
     if (!status || status.trackId !== deckTrack.id || status.state !== "ready" || !status.cachePath) {
       throw new Error("STEM 尚未就绪");
     }
-    const nextGains = [...stemGainDraftRef.current[side]] as [number, number, number, number];
-    if (enabled) {
-      setPerformanceStems((current) => {
-        const next: [PerformanceStemDeckModel, PerformanceStemDeckModel] = [
-          { ...current[0] },
-          { ...current[1] },
-        ];
-        next[side].enabled = true;
-        next[side].mask = mask & 0b1111;
-        if (stemGainTimersRef.current[side] === null) {
-          next[side].gains = nextGains;
-        }
-        return next;
-      });
-    }
     await ensurePerformanceDeck(side, deck.playing);
     if (performanceDecksRef.current[side].track?.id !== trackId) return;
     // 读取即时 draft，而非排队前的 React state 快照。这样在 STEM 流准备期间发生的
@@ -3853,6 +3848,7 @@ export function PlayerBar({
     const liveGains = [...stemGainDraftRef.current[side]] as [number, number, number, number];
     try {
       await playerRuntime.setDeckStems(deckTrack.id, enabled, status.cachePath, mask, liveGains);
+      await waitForInstalledStemMode(side, trackId, enabled);
     } catch (error) {
       if (enabled) {
         setPerformanceStems((current) => {
@@ -4342,9 +4338,6 @@ export function PlayerBar({
     if (!deckTrack) return;
     const nativeDecks = playerRuntime.state().decks;
     if (nativeDecks[side].trackId === deckTrack.id) return;
-    if (nativeDecks[side === 0 ? 1 : 0].trackId === deckTrack.id) {
-      throw new Error(`这首曲目实际位于 Deck ${side === 0 ? "B" : "A"}`);
-    }
     const inFlight = performanceDeckEnsureRef.current[side];
     if (inFlight?.trackId === deckTrack.id) return inFlight.promise;
     const generation = ++performanceDeckEnsureGenerationRef.current[side];
@@ -4381,13 +4374,12 @@ export function PlayerBar({
     const nativeStateBefore = playerRuntime.state();
     const currentBefore = trackRef.current;
     const currentSideBefore = currentBefore
-      ? nativeStateBefore.decks.findIndex((deck) => deck.trackId === currentBefore.id)
+      ? nativeStateBefore.decks[visualActiveIndexRef.current].trackId === currentBefore.id
+        ? visualActiveIndexRef.current
+        : nativeStateBefore.decks.findIndex((deck) => deck.trackId === currentBefore.id)
       : -1;
-    const otherSide: 0 | 1 = side === 0 ? 1 : 0;
-    const otherTrack = performanceDecks[otherSide].track;
-    if (otherTrack?.id === deckTrack.id) {
-      throw new Error(`这首曲目已经在 Deck ${otherSide === 0 ? "A" : "B"}`);
-    }
+    // A/B are independent physical Decks. Loading the same track on both is intentional for
+    // beat jumps, loops and handoffs; track identity must never be used as a uniqueness lock.
     if (isStreamTrack(deckTrack)) await resolvePendingStreamTrack(deckTrack);
     const at = Math.max(0, requestedPosition ?? (deckTrack.first_beat ?? 0));
     const nativeDeck = nativeStateBefore.decks[side];
@@ -4436,10 +4428,9 @@ export function PlayerBar({
     wasDualDeckRef.current = dualDeck;
     if (dualDeck || !wasDual) return;
     // 收起 DJ 台后回到管理器单路：停掉非正主 Deck，避免底栏只显示一首却仍有两路出声。
-    const frontId = trackRef.current?.id ?? null;
     ([0, 1] as const).forEach((side) => {
       const deck = playerRuntime.state().decks[side];
-      if (!deck.trackId || (frontId !== null && deck.trackId === frontId)) return;
+      if (!deck.trackId || side === visualActiveIndexRef.current) return;
       if (!deck.playing && !deck.desiredPlaying) return;
       void playerRuntime.pauseDeck(side).catch(() => undefined);
     });
@@ -4449,7 +4440,7 @@ export function PlayerBar({
     const id = ids[0];
     if (!Number.isFinite(id)) return;
     try {
-      const dropped = await api.track(id);
+      const dropped = oneLibraryTrackByPlaybackId(id) ?? await api.track(id);
       const at = Math.max(0, dropped.first_beat ?? 0);
       await installPerformanceTrack(side, dropped, useDjConfig.getState().playOnLoad, at);
     } catch (error: unknown) {
@@ -4464,11 +4455,6 @@ export function PlayerBar({
       stemModel={performanceStemModel}
       stemMode={stemMode}
       masterVolume={playerVolume}
-      controlHost={performanceControlHost}
-      onClose={() => {
-        setNotice("");
-        onPerformanceOpenChange(false);
-      }}
       onSeek={(side, detail) => {
         const deckTrack = performanceDecks[side].track;
         if (!deckTrack) return;
@@ -4625,6 +4611,42 @@ export function PlayerBar({
             return false;
           });
       }}
+      onRatePairChange={(rates) => {
+        const physical = playerRuntime.state().decks;
+        if (
+          !performanceDecks[0].track
+          || !performanceDecks[1].track
+          || physical[0].trackId !== performanceDecks[0].track.id
+          || physical[1].trackId !== performanceDecks[1].track.id
+        ) return false;
+        const bounded: [number, number] = [
+          Math.min(2, Math.max(0.5, rates[0])),
+          Math.min(2, Math.max(0.5, rates[1])),
+        ];
+        return playerRuntime.setDeckRates(bounded)
+          .then(() => true)
+          .catch((error: unknown) => {
+            setNotice("SYNC TEMPO 调整失败：" + (error instanceof Error ? error.message : String(error)));
+            return false;
+          });
+      }}
+      onSync={(request) => {
+        const followerTrack = performanceDecks[request.follower].track;
+        const masterTrack = performanceDecks[request.master].track;
+        const physical = playerRuntime.state().decks;
+        if (
+          !followerTrack
+          || !masterTrack
+          || physical[request.follower].trackId !== followerTrack.id
+          || physical[request.master].trackId !== masterTrack.id
+        ) return false;
+        return playerRuntime.syncDeck(request)
+          .then(() => true)
+          .catch((error: unknown) => {
+            setNotice("SYNC 对齐失败：" + (error instanceof Error ? error.message : String(error)));
+            return false;
+          });
+      }}
       onMixerChange={(side, values, channelGain) => {
         performanceChannelGainsRef.current[side] = channelGain;
         const shownTrack = performanceDecks[side].track;
@@ -4654,10 +4676,14 @@ export function PlayerBar({
             setNotice(`Deck ${side === 0 ? "A" : "B"} 混音控制失败：${error instanceof Error ? error.message : String(error)}`);
           });
       }}
+      onDeckFx={(side, fx) => {
+        void playerRuntime.setDeckFx(side, fx).catch((error: unknown) => {
+          setNotice(`Deck ${side === 0 ? "A" : "B"} 效果器失败：${error instanceof Error ? error.message : String(error)}`);
+        });
+      }}
       onMasterVolumeChange={setMasterVolume}
       onEnsureStemWaveScan={ensurePerformanceStemWaveScan}
       onReleaseStemWaveScan={releasePerformanceStemWaveScan}
-      onDownloadStemModel={downloadPerformanceStemModel}
       onToggleStemAll={togglePerformanceStem}
       onStemGain={setPerformanceStemGain}
       onSetLoop={setPerformanceLoop}
@@ -4773,17 +4799,6 @@ export function PlayerBar({
             onClick={toggleDjEnabled}
           >
             <Blend size={14} />
-          </button>
-          <button
-            type="button"
-            className="kd-player-step kd-player-performancebtn"
-            aria-label={performanceOpen ? "收起四轨演出控制" : "展开四轨演出控制"}
-            aria-pressed={performanceOpen}
-            data-on={performanceOpen ? "true" : undefined}
-            title={performanceOpen ? "收起四轨演出控制" : "展开四轨波形与右侧演出控制"}
-            onClick={() => onPerformanceOpenChange(!performanceOpen)}
-          >
-            <SlidersHorizontal size={13} />
           </button>
           {canDesktopLyrics ? (
             <button

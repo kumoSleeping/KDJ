@@ -34,6 +34,10 @@ import {
 } from "../../lib/waveformViewport";
 import { beatGridMarkers } from "../../lib/performanceCues";
 import { barPhaseAlignedSeek } from "../../lib/beatGridSync";
+import {
+  vocalGuideWaveformDisplayRgb,
+  waveformDisplayRgb,
+} from "../../lib/waveformPalette";
 import { ContextMenu } from "../common";
 
 /** 点波形跳转：PlayerBar 监听它，和 kd:play / kd:position 一套约定。 */
@@ -119,6 +123,8 @@ export interface WaveformProps {
   placeholder?: WaveformData | null;
   /** 整轨透明度：分轨车道跟随分轨音量，静音时最淡但不消失。 */
   opacity?: number;
+  /** Display-only colour mapping; vocal guide rails stay in a vivid yellow-to-green range. */
+  palette?: "rgb" | "vocal-guide";
   /** A held hardware platter may move backward at frame rate; interpolate both directions. */
   interactiveScrub?: boolean;
   /** Skip CSS rail interpolation for this paint — SYNC/seek landings must not slide then bounce. */
@@ -136,6 +142,7 @@ function draw(
   placeholder?: WaveformData | null,
   timeStart: number | null = null,
   timeEnd: number | null = null,
+  palette: "rgb" | "vocal-guide" = "rgb",
 ) {
   const dpr = window.devicePixelRatio || 1;
   // 局部 DJ 轨道会比视口宽数倍；限制 backing store，避免长曲在 Retina 屏上
@@ -248,6 +255,9 @@ function draw(
         columns.map((column) => column.known),
       )
     : null;
+  const displayRgb = palette === "vocal-guide"
+    ? vocalGuideWaveformDisplayRgb
+    : waveformDisplayRgb;
   for (let x = 0; x < columns.length; x += 1) {
     const column = columns[x];
     if (!column.known) {
@@ -277,7 +287,8 @@ function draw(
           const pgg = Math.round(placeholder.g[pl] + (placeholder.g[pr] - placeholder.g[pl]) * pm);
           const pbb = Math.round(placeholder.b[pl] + (placeholder.b[pr] - placeholder.b[pl]) * pm);
           ctx.globalAlpha = 0.3;
-          ctx.fillStyle = `rgb(${prr},${pgg},${pbb})`;
+          const [displayR, displayG, displayB] = displayRgb(prr, pgg, pbb, pAmp);
+          ctx.fillStyle = `rgb(${displayR},${displayG},${displayB})`;
           ctx.fillRect(x * columnCssWidth, mid - half, columnCssWidth, half * 2);
           ctx.globalAlpha = 1;
         }
@@ -288,7 +299,13 @@ function draw(
       // 分轨车道里“这段没有这个乐器”只剩底噪；留空，不画成一条平线假装有内容。
       continue;
     }
-    ctx.fillStyle = `rgb(${column.r},${column.g},${column.b})`;
+    const [displayR, displayG, displayB] = displayRgb(
+      column.r,
+      column.g,
+      column.b,
+      column.amp,
+    );
+    ctx.fillStyle = `rgb(${displayR},${displayG},${displayB})`;
     // 最小 1px：静音段也留一条中线，否则波形会断成几截看着像坏了
     const half = Math.max(
       0.5,
@@ -444,6 +461,7 @@ export function Waveform({
   silenceThreshold = 0,
   placeholder = null,
   opacity,
+  palette = "rgb",
   interactiveScrub = false,
   snapRail = false,
 }: WaveformProps) {
@@ -800,6 +818,7 @@ export function Waveform({
         placeholder,
         bake?.startSec ?? null,
         bake?.endSec ?? null,
+        palette,
       );
     };
     render();
@@ -813,6 +832,7 @@ export function Waveform({
     verticalInsetRatio,
     silenceThreshold,
     placeholder,
+    palette,
     viewport.active,
     bake?.startSec,
     bake?.endSec,

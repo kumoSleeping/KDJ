@@ -30,7 +30,11 @@ import {
 } from "../../lib/searchDrag";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import {
+  dispatchTrackDeckDrop,
+  finishTrackDrop,
   suppressCoverClickAfterTrackDrop,
+  trackDeckDropSideAt,
+  TRACK_DECK_DROP_TARGET_ATTR,
 } from "../../lib/trackDrag";
 import {
   playClickForLayout,
@@ -463,6 +467,13 @@ export function OneLibraryTrackTable({
     };
     const paintTarget = (x: number, y: number) => {
       clearTargets();
+      const deckSide = trackDeckDropSideAt(x, y);
+      if (deckSide !== null) {
+        document
+          .querySelectorAll<HTMLElement>(`[${TRACK_DECK_DROP_TARGET_ATTR}="${deckSide}"]`)
+          .forEach((element) => element.setAttribute("data-kd-pointer-track-over", "deck"));
+        return;
+      }
       const hit = hitAt(x, y);
       const cover = hit?.closest<HTMLElement>(`[${ONE_LIBRARY_COVER_TARGET_ATTR}]`);
       if (cover) {
@@ -523,6 +534,7 @@ export function OneLibraryTrackTable({
     };
     const onUp = (up: PointerEvent) => {
       if (up.pointerId !== pointerId) return;
+      const deckSide = trackDeckDropSideAt(up.clientX, up.clientY);
       const hit = hitAt(up.clientX, up.clientY);
       const cover = hit?.closest<HTMLElement>(`[${ONE_LIBRARY_COVER_TARGET_ATTR}]`);
       const row = canReorder
@@ -536,6 +548,15 @@ export function OneLibraryTrackTable({
       cleanup();
       if (!dragging) return;
       up.preventDefault();
+      if (deckSide !== null) {
+        const playableIds = ids
+          .map((id) => tracks.find((candidate) => candidate.content_id === id))
+          .filter((candidate): candidate is OneLibraryTrack => Boolean(candidate))
+          .map((candidate) => oneLibraryPlayableTrack(candidate, target).id);
+        dispatchTrackDeckDrop(playableIds, deckSide);
+        finishTrackDrop();
+        return;
+      }
       if (cover && coverDevice && Number.isFinite(coverContentId)) {
         suppressCoverClickAfterTrackDrop();
         dispatchOneLibraryCoverDrop({

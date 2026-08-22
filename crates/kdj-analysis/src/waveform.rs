@@ -1,8 +1,10 @@
-//! DJ RGB 波形：**每一列一根柱子**，高度 = 峰值包络，颜色 = 这一列的频谱构成。
+//! DJ RGB 波形：**每一列一根柱子**，高度 = 峰值/能量混合包络，颜色 = 这一列的频谱构成。
 //!
 //! Mixxx 的正式波形不是把低采样率 STFT 拉宽，而是先用低/中/高分频器连续处理 PCM，
 //! 再把细粒度峰值包络聚合到屏幕列。这里采用同一条快路径：互补 IIR crossover 只扫
-//! 一遍样本，生成 200 列/秒的 master，overview 取均值，局部 DJ 视图保留 100 列/秒。
+//! 一遍样本，生成 200 列/秒的 master，overview 做能量汇聚，局部 DJ 视图保留
+//! 100 列/秒。单纯峰值会把现代母带的每一段都顶满；混合 RMS 与 peak 才能同时保留
+//! 段落响度、鼓点瞬态和 break 的真实落差。
 //!
 //! 波形单开一条路径而不是塞进分析结果：它是纯展示用的，
 //! 既不影响 BPM/调性，也不该逼用户为了看波形去重跑一次分析。
@@ -34,18 +36,18 @@ const MASTER_COLUMNS_PER_SECOND: f64 = 200.0;
 /// 也不会把 2–4 kHz 的存在感全部误画成镲片蓝色。
 const XOVER_LOW: f64 = 600.0;
 const XOVER_HIGH: f64 = 4000.0;
-/// 小于 1 的 gamma 会保住 break、弱拍和混响尾巴；旧 1.2 会把它们压进中线。
-const AMP_GAMMA: f64 = 0.72;
-/// γ 很大是必须的：占比的偏离量本身很小（0.45 → 0.50 这种级别），
-/// γ=2 出来是一片淡彩，γ=6 才是 DJ 软件里那种能一眼分辨段落的饱和色。
-const COLOR_GAMMA: f64 = 6.0;
-/// 通道下限：纯 (255,0,0) 在深色底上太扎眼，抬一点让暗通道保留一丝底色。
-const COLOR_FLOOR: f64 = 0.12;
+/// 接近线性的高度保留段落动态；仍略提弱尾音，但不再把整首歌抬成实心墙。
+const AMP_GAMMA: f64 = 0.90;
+/// 温和强调相对频谱偏离。旧 γ=6 把很小的比例变化推成纯 RGB，长时间观看刺眼，
+/// 相邻列也会像彩色噪点一样跳。2.4 仍能区分鼓、人声与镲片段，但保留混合层次。
+const COLOR_GAMMA: f64 = 2.4;
+/// 暗通道只留少量底色；最终显示 palette 会再映射到低饱和冷色系。
+const COLOR_FLOOR: f64 = 0.06;
 
-/// Unnormalised peak energy for the broad low/mid/high bands at a display resolution.
+/// Unnormalised crest-aware energy for the broad low/mid/high bands at a display resolution.
 ///
-/// `band_waveform` turns these into intentionally vivid full-track RGB. Live STEM lanes instead
-/// use the genuine ratios and loudness below to preserve each separated source's stable character.
+/// `band_waveform` turns these into relative low/mid/high strengths. The frontend display palette
+/// bounds brightness without discarding that RGB identity. Live STEM lanes use the same energies.
 #[derive(Debug, Default)]
 pub struct BandEnergy {
     pub overall: Vec<f64>,
@@ -54,8 +56,8 @@ pub struct BandEnergy {
     pub high: Vec<f64>,
 }
 
-/// Summarise the complementary low/mid/high crossover peaks without applying a display palette.
-/// Each result column is the mean of its underlying 5 ms peak frames.
+/// Summarise complementary low/mid/high crossover envelopes without applying a display palette.
+/// Each 5 ms frame uses sqrt(RMS × peak): RMS reveals section density while peak keeps transients.
 pub fn band_energy(samples: &[f32], sr: f64, buckets: usize) -> BandEnergy {
     let buckets = buckets.clamp(64, MAX_WAVEFORM_BUCKETS);
     let master = peak_band_frames(samples, sr);
@@ -190,7 +192,8 @@ pub fn band_waveform(samples: &[f32], sr: f64, buckets: usize) -> Waveform {
 }
 
 /// 一阶互补 crossover：`low + mid + high == input`，没有 FFT 窗引入的 64 ms 拖影。
-/// 每个输出 frame 保存该 5 ms 内的绝对峰，内存与曲长线性但只有四个 f64 序列。
+/// 每个输出 frame 保存该 5 ms 内 sqrt(RMS × peak) 的 crest-aware 包络，内存与曲长
+/// 线性但只有四个 f64 序列。
 fn peak_band_frames(samples: &[f32], sr: f64) -> [Vec<f64>; 4] {
     if !sr.is_finite() || sr <= 0.0 {
         return Default::default();
@@ -208,6 +211,7 @@ fn peak_band_frames(samples: &[f32], sr: f64) -> [Vec<f64>; 4] {
 
     for frame in samples.chunks(frame_samples) {
         let mut frame_peaks = [0.0f64; 4];
+        let mut frame_squares = [0.0f64; 4];
         for sample in frame {
             let input = if sample.is_finite() {
                 f64::from(*sample)
@@ -225,10 +229,12 @@ fn peak_band_frames(samples: &[f32], sr: f64) -> [Vec<f64>; 4] {
             ];
             for index in 0..4 {
                 frame_peaks[index] = frame_peaks[index].max(split[index]);
+                frame_squares[index] += split[index] * split[index];
             }
         }
         for index in 0..4 {
-            peaks[index].push(frame_peaks[index]);
+            let rms = (frame_squares[index] / frame.len().max(1) as f64).sqrt();
+            peaks[index].push((rms * frame_peaks[index]).sqrt());
         }
     }
     peaks
@@ -328,6 +334,25 @@ mod tests {
         let samples = tone(440.0, 10.0, WAVEFORM_SR as f64);
         let wave = band_waveform(&samples, WAVEFORM_SR as f64, 200);
         assert!(wave.amp.iter().all(|v| (0.0..=1.0).contains(v)));
+    }
+
+    #[test]
+    fn crest_aware_envelope_keeps_sparse_transients_below_dense_sections() {
+        let sr = WAVEFORM_SR as f64;
+        let frame_samples = (sr / MASTER_COLUMNS_PER_SECOND).round() as usize;
+        let mut sparse = vec![0.0f32; frame_samples * 32];
+        for frame in 0..32 {
+            sparse[frame * frame_samples] = 1.0;
+        }
+        let dense = vec![1.0f32; frame_samples * 32];
+        let sparse_frames = peak_band_frames(&sparse, sr);
+        let dense_frames = peak_band_frames(&dense, sr);
+        let sparse_mean = sparse_frames[0].iter().sum::<f64>() / sparse_frames[0].len() as f64;
+        let dense_mean = dense_frames[0].iter().sum::<f64>() / dense_frames[0].len() as f64;
+        assert!(
+            dense_mean > sparse_mean * 2.0,
+            "相同 peak 的稀疏 click 不能再把段落画得和持续高能段一样满"
+        );
     }
 
     #[test]

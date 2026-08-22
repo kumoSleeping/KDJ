@@ -93,7 +93,7 @@ test("rolling waveform scratch is relative and clamped", () => {
   assert.equal(scratchPosition(179, -100, 100, 12, 180), 180);
 });
 
-test("crossfader keeps both decks full at center and curves only the opposite deck down", () => {
+test("crossfader keeps both decks full at center and cubes only the opposite deck down", () => {
   assert.deepEqual(crossfaderChannelGains(-1), [1, 0]);
   const center = crossfaderChannelGains(0);
   assert.deepEqual(center, [1, 1]);
@@ -101,11 +101,11 @@ test("crossfader keeps both decks full at center and curves only the opposite de
   assert.ok(Math.abs(right[0]) < 1e-10);
   assert.equal(right[1], 1);
   const [leftAtHalfRight, rightAtHalfRight] = crossfaderChannelGains(0.5);
-  assert.ok(Math.abs(leftAtHalfRight - Math.SQRT1_2) < 1e-12);
+  assert.equal(leftAtHalfRight, 0.125);
   assert.equal(rightAtHalfRight, 1);
   const [leftAtHalfLeft, rightAtHalfLeft] = crossfaderChannelGains(-0.5);
   assert.equal(leftAtHalfLeft, 1);
-  assert.ok(Math.abs(rightAtHalfLeft - Math.SQRT1_2) < 1e-12);
+  assert.equal(rightAtHalfLeft, 0.125);
 });
 
 test("channel fader stays quiet through the first half and opens near the top", () => {
@@ -118,13 +118,13 @@ test("channel fader stays quiet through the first half and opens near the top", 
   assert.ok(channelFaderGain(0.5) < channelFaderGain(0.7));
 });
 
-test("Pioneer EQ maps the knob linearly to -26 dB / +6 dB", () => {
+test("DJ EQ maps the knob linearly to -24 dB / +6 dB", () => {
   assert.equal(eqBandDb(0), 0);
   assert.equal(eqBandDb(1), 6);
-  assert.equal(eqBandDb(-1), -26);
+  assert.equal(eqBandDb(-1), -24);
   assert.equal(eqBandDb(0.5), 3);
-  assert.equal(eqBandDb(-0.5), -13);
-  assert.equal(eqBandDb(-0.2), -5.2);
+  assert.equal(eqBandDb(-0.5), -12);
+  assert.ok(Math.abs(eqBandDb(-0.2) + 4.8) < 1e-9);
 });
 
 test("cue validation catches duplicate slots and invalid loops", () => {

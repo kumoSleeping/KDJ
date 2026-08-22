@@ -23,7 +23,7 @@ use kdj_stems::{
 };
 
 use crate::contract::{
-    CommandAck, PlaybackCommand, PlaybackPhase, PlaybackSnapshot, PlaybackSource,
+    CommandAck, PlaybackCommand, PlaybackLevels, PlaybackPhase, PlaybackSnapshot, PlaybackSource,
     PlaybackSourceKind, PlaybackTransitionPlan,
 };
 use crate::platform::{CpalOutputFactory, PlaybackOutput, PlaybackOutputFactory};
@@ -33,6 +33,8 @@ const ACTOR_TICK: Duration = Duration::from_millis(10);
 /// Seeking 时加密轮询，尽快提权已就绪的 shadow Deck（不降低预缓冲）。
 const SEEK_ACTOR_TICK: Duration = Duration::from_millis(1);
 const STATE_INTERVAL: Duration = Duration::from_millis(100);
+/// 电平表专用的高频轻量事件节奏（全量快照仍保持 STATE_INTERVAL，避免全局重渲染）。
+const LEVEL_INTERVAL: Duration = Duration::from_millis(33);
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 // A long raw PCM ring absorbs decode/network jitter. The final post-Rubber-Band ring is
 // intentionally short, so a new fader target cannot wait behind seconds of old-tempo PCM.
@@ -48,6 +50,8 @@ const STEM_STARTUP_BUFFER_MS: u64 = 250;
 const STEM_SEEK_STARTUP_BUFFER_MS: u64 = 250;
 /// 同曲 seek 的互补平滑换手时长：短到无感，长到足以消掉随机采样点之间的阶跃。
 const SEEK_HANDOFF_MS: u64 = 5;
+/// Below this wall-clock error a decoder replacement costs more than the residual phase offset.
+const SYNC_PHASE_TOLERANCE_SEC: f64 = 0.003;
 /// A pending replacement even a few milliseconds away must not publish the outgoing decoder.
 /// 50ms used to let SYNC phase-align seeks leak the old playhead, which the UI interpolated
 /// as the needle and beat grid reversing under a centered playhead.
@@ -76,6 +80,7 @@ const STEM_AUDIO_RECOVER_BUFFER_MS: u64 = 450;
 type CommandReply = SyncSender<Result<CommandAck, String>>;
 type StateReply = SyncSender<PlaybackSnapshot>;
 type StateEmitter = Arc<dyn Fn(PlaybackSnapshot) + Send + Sync>;
+type LevelEmitter = Arc<dyn Fn(PlaybackLevels) + Send + Sync>;
 
 pub struct PlaybackCoordinator {
     sender: Sender<Request>,
@@ -141,6 +146,11 @@ impl PlaybackCoordinator {
             .map_err(|_| "播放协调器没有及时确认系统媒体命令".to_string())?
     }
 
+    /// 订阅高频轻量电平事件（~30Hz），供表桥直接驱动电平表，绕开全量快照的 10Hz 节奏。
+    pub fn subscribe_levels(&self, emit: impl Fn(PlaybackLevels) + Send + Sync + 'static) {
+        let _ = self.sender.send(Request::SubscribeLevels(Arc::new(emit)));
+    }
+
     pub fn snapshot(&self) -> Result<PlaybackSnapshot, String> {
         let (reply, response) = mpsc::sync_channel(1);
         self.sender
@@ -177,6 +187,7 @@ enum Request {
         result: Result<StreamMetadata, String>,
     },
     DeviceError(String),
+    SubscribeLevels(LevelEmitter),
     Shutdown,
 }
 
@@ -371,6 +382,9 @@ struct Actor {
     state: PlaybackSnapshot,
     last_emitted: PlaybackSnapshot,
     last_state_tick: Instant,
+    level_emit: Option<LevelEmitter>,
+    last_level_tick: Instant,
+    latest_levels: PlaybackLevels,
     volume: f32,
     eq: (f32, f32),
     filter_resonance: f32,
@@ -411,6 +425,9 @@ impl Actor {
             state: PlaybackSnapshot::default(),
             last_emitted: PlaybackSnapshot::default(),
             last_state_tick: Instant::now(),
+            level_emit: None,
+            last_level_tick: Instant::now(),
+            latest_levels: PlaybackLevels::default(),
             volume: 1.0,
             eq: (0.0, 0.0),
             filter_resonance: DEFAULT_FILTER_RESONANCE_Q,
@@ -448,6 +465,7 @@ impl Actor {
             self.promote_ready_streams();
             self.release_stem_pool_if_idle();
             self.refresh_from_audio();
+            self.publish_levels();
             self.publish_audio_pressure();
             self.protect_audio_from_stem_underrun();
             self.retry_interrupted_stems();
@@ -490,9 +508,11 @@ impl Actor {
                 let immediate_snapshot = !matches!(
                     &command,
                     PlaybackCommand::SetDeckRate { .. }
+                        | PlaybackCommand::SetDeckRates { .. }
                         | PlaybackCommand::NudgeDeck { .. }
                         | PlaybackCommand::ScratchDeck { .. }
                         | PlaybackCommand::SetDeckStems { .. }
+                        | PlaybackCommand::SetDeckFx { .. }
                 );
                 let result = self.apply_command(command_id, command).map(|()| {
                     self.bump_sequence();
@@ -510,9 +530,11 @@ impl Actor {
                 let immediate_snapshot = !matches!(
                     &command,
                     PlaybackCommand::SetDeckRate { .. }
+                        | PlaybackCommand::SetDeckRates { .. }
                         | PlaybackCommand::NudgeDeck { .. }
                         | PlaybackCommand::ScratchDeck { .. }
                         | PlaybackCommand::SetDeckStems { .. }
+                        | PlaybackCommand::SetDeckFx { .. }
                 );
                 let result = self.apply_command(command_id, command).map(|()| {
                     self.bump_sequence();
@@ -597,6 +619,10 @@ impl Actor {
                     self.publish(true);
                 }
             }
+            Request::SubscribeLevels(emit) => {
+                self.level_emit = Some(emit);
+                self.last_level_tick = Instant::now() - LEVEL_INTERVAL;
+            }
             Request::DeviceError(error) => {
                 self.player.take();
                 self.fail(format!("系统音频设备中断：{error}"));
@@ -633,6 +659,26 @@ impl Actor {
             } => self.seek_deck_when_ready(deck, position, play_when_ready),
             PlaybackCommand::NudgeDeck { deck, amount } => self.nudge_deck(deck, amount),
             PlaybackCommand::SetDeckRate { deck, rate } => self.set_deck_rate(deck, rate),
+            PlaybackCommand::SetDeckRates { rates } => self.set_deck_rates(rates),
+            PlaybackCommand::SyncDeck {
+                follower,
+                master,
+                rate,
+                follower_bpm,
+                follower_first_beat,
+                master_bpm,
+                master_first_beat,
+                beats_per_bar,
+            } => self.sync_deck(
+                follower,
+                master,
+                rate,
+                follower_bpm,
+                follower_first_beat,
+                master_bpm,
+                master_first_beat,
+                beats_per_bar,
+            ),
             PlaybackCommand::SetDeckMixer {
                 deck,
                 channel_gain,
@@ -651,6 +697,27 @@ impl Actor {
                     high_db,
                     filter,
                 },
+            ),
+            PlaybackCommand::SetDeckFx {
+                deck,
+                echo,
+                echo_parameter,
+                reverb,
+                reverb_parameter,
+                gater,
+                gater_parameter,
+                pad,
+                beat_seconds,
+            } => self.set_deck_fx(
+                deck,
+                echo,
+                echo_parameter,
+                reverb,
+                reverb_parameter,
+                gater,
+                gater_parameter,
+                pad,
+                beat_seconds,
             ),
             PlaybackCommand::SetFilterResonance { resonance } => {
                 self.set_filter_resonance(resonance)
@@ -1227,6 +1294,118 @@ impl Actor {
         Ok(())
     }
 
+    fn set_deck_rates(&mut self, rates: [f32; 2]) -> Result<(), String> {
+        if rates
+            .iter()
+            .any(|rate| !rate.is_finite() || !(0.5..=2.0).contains(rate))
+        {
+            return Err("播放速度必须在 0.5 到 2.0 之间".into());
+        }
+        for deck in [DeckId::A, DeckId::B] {
+            let index = deck as usize;
+            if self.decks[index].is_none() && self.pending[index].is_none() {
+                return Err("SYNC 关联的两首曲目必须都已装入 Deck".to_string());
+            }
+        }
+        for deck in [DeckId::A, DeckId::B] {
+            self.clear_jog_nudge(deck);
+            self.cancel_clocked_deck_seek(deck);
+        }
+        self.enter_manual_mode();
+        for deck in [DeckId::A, DeckId::B] {
+            let index = deck as usize;
+            let rate = rates[index];
+            if let Some(runtime) = self.decks[index].as_mut() {
+                runtime.request.rate = rate;
+                runtime.tempo.set(rate);
+            }
+            if let Some(pending) = self.pending[index].as_mut() {
+                pending.request.rate = rate;
+                pending.tempo.set(rate);
+            }
+            self.state.decks[index].rate = rate;
+            if self.front == deck {
+                self.state.rate = rate;
+            }
+        }
+        // One callback command is the important boundary: linked faders never create a transient
+        // half-updated pair, and one actor snapshot replaces two independent 10 Hz UI echoes.
+        self.send(RtCommand::SetDeckRates { rates })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sync_deck(
+        &mut self,
+        follower: u8,
+        master: u8,
+        rate: f32,
+        follower_bpm: f64,
+        follower_first_beat: f64,
+        master_bpm: f64,
+        master_first_beat: f64,
+        beats_per_bar: u8,
+    ) -> Result<(), String> {
+        let follower = deck_id(follower)?;
+        let master = deck_id(master)?;
+        if follower == master {
+            return Err("SYNC 主从 Deck 不能相同".into());
+        }
+        if !rate.is_finite()
+            || !(0.5..=2.0).contains(&rate)
+            || !follower_bpm.is_finite()
+            || follower_bpm <= 0.0
+            || !master_bpm.is_finite()
+            || master_bpm <= 0.0
+            || !follower_first_beat.is_finite()
+            || !master_first_beat.is_finite()
+            || !(1..=16).contains(&beats_per_bar)
+        {
+            return Err("SYNC 网格参数无效".into());
+        }
+        let follower_index = follower as usize;
+        let master_index = master as usize;
+        if self.source_for_deck(follower).is_none() || self.source_for_deck(master).is_none() {
+            return Err("SYNC 关联的两首曲目必须都已装入 Deck".into());
+        }
+
+        // Cancel an older shadow first, then read both callback cursors from the same transport
+        // snapshot. The former WebView algorithm compared a fresh rate with positions that could
+        // be almost one 100 ms state tick old, leaving a repeatable phase offset.
+        self.clear_jog_nudge(follower);
+        self.cancel_clocked_deck_seek(follower);
+        self.enter_manual_mode();
+        self.refresh_from_audio();
+        let follower_position = self.state.decks[follower_index].current_time;
+        let master_position = self.state.decks[master_index].current_time;
+        let master_rate = self
+            .source_for_deck(master)
+            .map(|source| f64::from(source.rate))
+            .unwrap_or(f64::from(self.state.decks[master_index].rate));
+        let duration = self
+            .source_for_deck(follower)
+            .and_then(|source| source.duration);
+        let target = sync_phase_target(SyncPhaseInput {
+            follower_position,
+            follower_bpm,
+            follower_first_beat,
+            follower_rate: f64::from(rate),
+            master_position,
+            master_bpm,
+            master_first_beat,
+            master_rate,
+            beats_per_bar: f64::from(beats_per_bar),
+            follower_duration: duration,
+        })
+        .ok_or_else(|| "SYNC 无法建立有效网格".to_string())?;
+
+        self.set_deck_rate(follower as u8, rate)?;
+        let wall_error = (target - follower_position).abs() / f64::from(rate);
+        if self.manual_desired_playing[follower_index] && wall_error > SYNC_PHASE_TOLERANCE_SEC {
+            self.seek_deck_when_ready(follower as u8, target, false)?;
+        }
+        Ok(())
+    }
+
     fn set_deck_mixer(&mut self, deck: u8, mut mixer: DeckMixer) -> Result<(), String> {
         let deck = deck_id(deck)?;
         mixer.channel_gain = finite_clamp(mixer.channel_gain, 0.0, 1.0, 1.0);
@@ -1240,6 +1419,32 @@ impl Actor {
             self.apply_deck_mixer(deck, mixer)?;
         }
         Ok(())
+    }
+
+    fn set_deck_fx(
+        &mut self,
+        deck: u8,
+        echo: f32,
+        echo_parameter: f32,
+        reverb: f32,
+        reverb_parameter: f32,
+        gater: f32,
+        gater_parameter: f32,
+        pad: u8,
+        beat_seconds: f32,
+    ) -> Result<(), String> {
+        let deck = deck_id(deck)?;
+        self.send(RtCommand::SetDeckFx {
+            deck,
+            echo: finite_clamp(echo, 0.0, 1.0, 0.0),
+            echo_parameter: finite_clamp(echo_parameter, 0.0, 1.0, 0.5),
+            reverb: finite_clamp(reverb, 0.0, 1.0, 0.0),
+            reverb_parameter: finite_clamp(reverb_parameter, 0.0, 1.0, 0.5),
+            gater: finite_clamp(gater, 0.0, 1.0, 0.0),
+            gater_parameter: finite_clamp(gater_parameter, 0.0, 1.0, 0.5),
+            pad: pad.min(8),
+            beat_seconds: finite_clamp(beat_seconds, 0.1, 4.0, 0.5),
+        })
     }
 
     fn set_deck_stems(
@@ -2639,6 +2844,10 @@ impl Actor {
             Some(player) => player.snapshot(),
             None => return,
         };
+        self.latest_levels = PlaybackLevels {
+            peaks: audio.deck_peak_levels,
+            bands: audio.deck_spectrum_levels,
+        };
         let mut rewind_ended = [false, false];
         for deck in [DeckId::A, DeckId::B] {
             let index = deck as usize;
@@ -2683,6 +2892,7 @@ impl Actor {
                     runtime.output_sample_rate,
                 );
                 view.output_underruns = audio.deck_output_underruns[index];
+                view.peak_level = audio.deck_peak_levels[index];
                 if let Some(seek) = stem_clock.as_ref() {
                     if self.pending[index].is_none() {
                         seek.publish_clock(played);
@@ -2814,6 +3024,17 @@ impl Actor {
                 };
             }
         }
+    }
+
+    fn publish_levels(&mut self) {
+        let Some(emit) = &self.level_emit else {
+            return;
+        };
+        if self.last_level_tick.elapsed() < LEVEL_INTERVAL {
+            return;
+        }
+        self.last_level_tick = Instant::now();
+        emit(self.latest_levels);
     }
 
     fn publish_audio_pressure(&self) {
@@ -3013,6 +3234,91 @@ impl Actor {
         (self.emit)(self.state.clone());
         self.last_emitted = self.state.clone();
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SyncPhaseInput {
+    follower_position: f64,
+    follower_bpm: f64,
+    follower_first_beat: f64,
+    follower_rate: f64,
+    master_position: f64,
+    master_bpm: f64,
+    master_first_beat: f64,
+    master_rate: f64,
+    beats_per_bar: f64,
+    follower_duration: Option<f64>,
+}
+
+fn sync_grid_origin(first_beat: f64, cell: f64) -> f64 {
+    first_beat.rem_euclid(cell)
+}
+
+fn wrap_sync_error(value: f64, period: f64) -> f64 {
+    let mut wrapped = value.rem_euclid(period);
+    if wrapped > period / 2.0 {
+        wrapped -= period;
+    }
+    wrapped
+}
+
+/// Resolve the nearest phase-equivalent follower position that is actually seekable.
+///
+/// A nearest signed correction can point before 0 when a freshly loaded Deck is synchronized.
+/// Clamping that result to 0 destroys the phase relation; advancing by one common grid period
+/// preserves exactly the same downbeat while staying inside the track.
+fn sync_phase_target(input: SyncPhaseInput) -> Option<f64> {
+    if !input.follower_position.is_finite()
+        || !input.master_position.is_finite()
+        || !input.follower_bpm.is_finite()
+        || input.follower_bpm <= 0.0
+        || !input.master_bpm.is_finite()
+        || input.master_bpm <= 0.0
+        || !input.follower_first_beat.is_finite()
+        || !input.master_first_beat.is_finite()
+        || !input.follower_rate.is_finite()
+        || input.follower_rate <= 0.0
+        || !input.master_rate.is_finite()
+        || input.master_rate <= 0.0
+        || !input.beats_per_bar.is_finite()
+        || input.beats_per_bar <= 0.0
+    {
+        return None;
+    }
+    let follower_cell = 60.0 / input.follower_bpm * input.beats_per_bar;
+    let master_cell = 60.0 / input.master_bpm * input.beats_per_bar;
+    let follower_period = follower_cell / input.follower_rate;
+    let master_period = master_cell / input.master_rate;
+    let common_period = follower_period.max(master_period);
+    if !common_period.is_finite() || common_period <= 0.0 {
+        return None;
+    }
+    let follower_wall = (input.follower_position
+        - sync_grid_origin(input.follower_first_beat, follower_cell))
+        / input.follower_rate;
+    let master_wall = (input.master_position
+        - sync_grid_origin(input.master_first_beat, master_cell))
+        / input.master_rate;
+    let error = wrap_sync_error(follower_wall - master_wall, common_period);
+    let source_period = common_period * input.follower_rate;
+    let mut target = input.follower_position - error * input.follower_rate;
+    let max_position = input
+        .follower_duration
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+        .map(|duration| (duration - SEEK_END_MARGIN_SECONDS).max(0.0))
+        .unwrap_or(f64::INFINITY);
+    if target < 0.0 {
+        target += (-target / source_period).ceil() * source_period;
+    }
+    if target > max_position && max_position.is_finite() {
+        target -= ((target - max_position) / source_period).ceil() * source_period;
+    }
+    if target < 0.0 || target > max_position {
+        // Extremely short tracks may contain no full equivalent cell. A bounded target is safer
+        // than an invalid seek, though such a track cannot promise a persistent bar lock.
+        target = target.clamp(0.0, max_position);
+    }
+    Some(target)
 }
 
 fn validate_source(source: &PlaybackSource) -> Result<(), String> {
@@ -3393,6 +3699,48 @@ mod tests {
         let mut remote = local;
         remote.source_kind = PlaybackSourceKind::Remote;
         assert!(validate_source(&remote).is_err());
+    }
+
+    #[test]
+    fn sync_phase_target_uses_the_next_equivalent_bar_near_track_start() {
+        let target = sync_phase_target(SyncPhaseInput {
+            follower_position: 0.1,
+            follower_bpm: 120.0,
+            follower_first_beat: 0.0,
+            follower_rate: 1.0,
+            master_position: 1.8,
+            master_bpm: 120.0,
+            master_first_beat: 0.0,
+            master_rate: 1.0,
+            beats_per_bar: 4.0,
+            follower_duration: Some(180.0),
+        })
+        .expect("valid grids");
+        assert!((target - 1.8).abs() < 1e-9, "target={target}");
+    }
+
+    #[test]
+    fn linked_rates_reach_the_callback_as_one_atomic_command() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 4.0));
+        actor.decks[1] = Some(live_runtime(2, 8.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[1].track_id = Some(2);
+        knobs.sent.lock().unwrap().clear();
+
+        actor.set_deck_rates([1.1, 0.9]).expect("关联 TEMPO");
+
+        assert_eq!(actor.state.decks[0].rate, 1.1);
+        assert_eq!(actor.state.decks[1].rate, 0.9);
+        let sent = knobs.sent.lock().unwrap();
+        assert!(matches!(
+            sent.as_slice(),
+            [RtCommand::SetDeckRates { rates }]
+                if (rates[0] - 1.1).abs() < f32::EPSILON
+                    && (rates[1] - 0.9).abs() < f32::EPSILON
+        ));
     }
 
     #[test]

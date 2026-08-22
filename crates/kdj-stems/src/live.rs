@@ -1773,8 +1773,14 @@ fn run_worker(
         "STEM inference worker started"
     );
     let mut engine: Option<PlatformEngine> = None;
+    // Audio always wins. Between optional lanes, give one ready viewport tile a turn after each
+    // look-ahead tile; otherwise a single fast macOS worker can keep seeing a freshly replenished
+    // look-ahead queue and the visible vocal rail appears to analyse slower than realtime.
+    let mut prefer_fill = false;
     loop {
-        let Some(scheduled) = next_inference_job_until(&receivers, Some(&shutdown)) else {
+        let Some(scheduled) =
+            next_inference_job_until(&receivers, Some(&shutdown), &mut prefer_fill)
+        else {
             break;
         };
         let ScheduledInference { job, _slot } = scheduled;
@@ -1955,12 +1961,14 @@ fn tile_key(left: &[f32], right: &[f32]) -> [u8; 32] {
 /// jobs, and a new seek must not sit behind an idle worker waiting on the low-priority lane.
 #[cfg(test)]
 fn next_inference_job(receivers: &InferenceReceivers) -> Option<ScheduledInference> {
-    next_inference_job_until(receivers, None)
+    let mut prefer_fill = false;
+    next_inference_job_until(receivers, None, &mut prefer_fill)
 }
 
 fn next_inference_job_until(
     receivers: &InferenceReceivers,
     shutdown: Option<&AtomicBool>,
+    prefer_fill: &mut bool,
 ) -> Option<ScheduledInference> {
     loop {
         if shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
@@ -2014,12 +2022,19 @@ fn next_inference_job_until(
                 return Some(ScheduledInference { job, _slot: None });
             }
         }
+        if *prefer_fill && work_scheduler().allows(WorkClass::StemViewport) {
+            if let Ok(job) = receivers.fill.lock().unwrap().try_recv() {
+                *prefer_fill = false;
+                return Some(ScheduledInference { job, _slot: None });
+            }
+        }
         let look_ahead = if work_scheduler().allows(WorkClass::StemLookAhead) {
             receivers.look_ahead.lock().unwrap().try_recv()
         } else {
             Err(TryRecvError::Empty)
         };
         if let Ok(job) = look_ahead {
+            *prefer_fill = true;
             return Some(ScheduledInference { job, _slot: None });
         }
         let fill = if work_scheduler().allows(WorkClass::StemViewport) {
@@ -2028,6 +2043,7 @@ fn next_inference_job_until(
             Err(TryRecvError::Empty)
         };
         if let Ok(job) = fill {
+            *prefer_fill = false;
             return Some(ScheduledInference { job, _slot: None });
         }
         if matches!(audio, Err(TryRecvError::Disconnected))
@@ -2376,6 +2392,44 @@ mod tests {
         assert_eq!(first.job.expected_epoch, 11);
         assert_eq!(second.job.expected_epoch, 10);
         assert_eq!(third.job.expected_epoch, 9);
+    }
+
+    #[test]
+    fn viewport_fill_gets_one_turn_between_continuous_look_ahead_tiles() {
+        let (_audio_sender, audio_receiver) = mpsc::sync_channel(1);
+        let (look_ahead_sender, look_ahead_receiver) = mpsc::sync_channel(2);
+        let (fill_sender, fill_receiver) = mpsc::sync_channel(1);
+        let receivers = InferenceReceivers {
+            audio: Mutex::new(audio_receiver),
+            look_ahead: Mutex::new(look_ahead_receiver),
+            fill: Mutex::new(fill_receiver),
+        };
+        look_ahead_sender.send(queued_job(401)).unwrap();
+        look_ahead_sender.send(queued_job(402)).unwrap();
+        fill_sender.send(queued_job(303)).unwrap();
+
+        let mut prefer_fill = false;
+        assert_eq!(
+            next_inference_job_until(&receivers, None, &mut prefer_fill)
+                .unwrap()
+                .job
+                .expected_epoch,
+            401
+        );
+        assert_eq!(
+            next_inference_job_until(&receivers, None, &mut prefer_fill)
+                .unwrap()
+                .job
+                .expected_epoch,
+            303
+        );
+        assert_eq!(
+            next_inference_job_until(&receivers, None, &mut prefer_fill)
+                .unwrap()
+                .job
+                .expected_epoch,
+            402
+        );
     }
 
     #[test]

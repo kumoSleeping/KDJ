@@ -106,6 +106,8 @@ export function wrapSigned(value: number, period: number): number {
 
 export interface BarPhaseLockInput {
   followerPositionSec: number;
+  /** Optional playable bound used to select an equivalent grid cell near track edges. */
+  followerDurationSec?: number;
   followerBpm: number;
   followerFirstBeatSec: number;
   followerRate: number;
@@ -215,6 +217,36 @@ export function phaseAlignedFollowerPosition(
   return Math.max(0, followerPositionSec - errorSec * followerRate);
 }
 
+const SYNC_END_MARGIN_SEC = 0.25;
+
+/**
+ * Keep the nearest phase correction inside the seekable track range by moving an integer number
+ * of common grid cells. Clamping a negative target to zero is not equivalent and was the main
+ * reason a freshly loaded follower looked permanently offset after SYNC.
+ */
+export function boundedPhaseAlignedFollowerPosition(
+  followerPositionSec: number,
+  followerRate: number,
+  errorSec: number,
+  commonPeriodSec: number,
+  durationSec?: number | null,
+): number {
+  let target = phaseAlignedFollowerPosition(followerPositionSec, followerRate, errorSec);
+  const sourcePeriod = commonPeriodSec * followerRate;
+  if (!(sourcePeriod > 0) || !Number.isFinite(sourcePeriod)) return target;
+  // phaseAlignedFollowerPosition deliberately protects general callers from negatives, so recover
+  // the signed raw target here before selecting an equivalent in-range cell.
+  target = followerPositionSec - errorSec * followerRate;
+  const maximum = durationSec != null && Number.isFinite(durationSec) && durationSec > 0
+    ? Math.max(0, durationSec - SYNC_END_MARGIN_SEC)
+    : Number.POSITIVE_INFINITY;
+  if (target < 0) target += Math.ceil(-target / sourcePeriod) * sourcePeriod;
+  if (target > maximum && Number.isFinite(maximum)) {
+    target -= Math.ceil((target - maximum) / sourcePeriod) * sourcePeriod;
+  }
+  return clamp(target, 0, maximum);
+}
+
 /** 小于这个墙钟误差就不必再 seek：听感上已经锁住，解码器重启才是更贵的。 */
 const PHASE_SEEK_MIN_ERROR_SEC = 0.012;
 /** Final manual-SYNC acceptance tolerance; also used by bounded post-promotion confirmation. */
@@ -240,7 +272,103 @@ export function syncFollowerSeekPosition(
 ): number | null {
   const lock = barPhaseLock(input);
   if (!lock || Math.abs(lock.errorSec) < minErrorSec) return null;
-  return phaseAlignedFollowerPosition(input.followerPositionSec, input.followerRate, lock.errorSec);
+  return boundedPhaseAlignedFollowerPosition(
+    input.followerPositionSec,
+    input.followerRate,
+    lock.errorSec,
+    lock.barSec,
+    input.followerDurationSec,
+  );
+}
+
+export interface DeckSyncRelation {
+  base: 0 | 1;
+  multiple: number;
+}
+
+export interface CrossfaderTempoPlan {
+  rates: [number, number];
+  relation: DeckSyncRelation;
+  /** Common beat-equivalent BPM after folding the left Deck by relation.multiple. */
+  targetBpm: number;
+}
+
+/**
+ * Two-Deck tempo plan driven by the crossfader position.
+ *
+ * The left original BPM (folded through the nearest half/double-time relation) anchors 0, the
+ * right original BPM anchors 1, and the centre is their arithmetic mean. Both rates always map
+ * to the same beat-equivalent target, so an already aligned bar phase stays aligned while the
+ * fader moves. Return null rather than independently clamping either Deck: independent clamps
+ * would silently break the BPM lock.
+ */
+export function crossfaderTempoPlan(
+  ratio: number,
+  bpms: readonly [number | null | undefined, number | null | undefined],
+  minRate = ENGINE_TEMPO_MIN,
+  maxRate = ENGINE_TEMPO_MAX,
+): CrossfaderTempoPlan | null {
+  const leftBpm = bpms[0];
+  const rightBpm = bpms[1];
+  if (
+    leftBpm == null
+    || rightBpm == null
+    || !(leftBpm > 0)
+    || !(rightBpm > 0)
+    || !Number.isFinite(ratio)
+  ) return null;
+  const folded = deckSyncRate(rightBpm, leftBpm, minRate, maxRate);
+  if (!folded) return null;
+  const relation: DeckSyncRelation = { base: 0, multiple: folded.multiple };
+  const leftAnchor = leftBpm * folded.multiple;
+  const rightAnchor = rightBpm;
+  const position = clamp(ratio, 0, 1);
+  const targetBpm = leftAnchor + (rightAnchor - leftAnchor) * position;
+  const rates: [number, number] = [
+    targetBpm / leftAnchor,
+    targetBpm / rightAnchor,
+  ];
+  if (rates.some((rate) => !Number.isFinite(rate) || rate < minRate || rate > maxRate)) {
+    return null;
+  }
+  return { rates, relation, targetBpm };
+}
+
+/**
+ * Exact two-Deck rates for a linked TEMPO gesture. The requested side is constrained by the
+ * partner's engine range as well as its own, so clamping can never silently break the BPM lock.
+ */
+export function linkedDeckRates(
+  side: 0 | 1,
+  requestedRate: number,
+  bpms: readonly [number | null | undefined, number | null | undefined],
+  relation: DeckSyncRelation,
+  minRate = ENGINE_TEMPO_MIN,
+  maxRate = ENGINE_TEMPO_MAX,
+): [number, number] | null {
+  const other = (1 - side) as 0 | 1;
+  const ownBpm = bpms[side];
+  const otherBpm = bpms[other];
+  if (
+    ownBpm == null
+    || otherBpm == null
+    || !(ownBpm > 0)
+    || !(otherBpm > 0)
+    || !(relation.multiple > 0)
+    || !Number.isFinite(requestedRate)
+  ) return null;
+  const factor = relation.base === side
+    ? (ownBpm * relation.multiple) / otherBpm
+    : ownBpm / (relation.multiple * otherBpm);
+  if (!(factor > 0) || !Number.isFinite(factor)) return null;
+  const ownMin = Math.max(minRate, minRate / factor);
+  const ownMax = Math.min(maxRate, maxRate / factor);
+  if (ownMin > ownMax) return null;
+  const ownRate = clamp(requestedRate, ownMin, ownMax);
+  const rates: [number, number] = [0, 0];
+  rates[side] = ownRate;
+  rates[other] = ownRate * factor;
+  return rates;
 }
 
 /**

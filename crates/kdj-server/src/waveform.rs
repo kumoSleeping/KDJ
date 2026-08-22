@@ -22,8 +22,8 @@ use crate::jobs;
 
 /// 播放条 / 详情栏默认要的列数。分析预热也写这一档。
 pub const DEFAULT_WAVEFORM_BUCKETS: usize = 640;
-pub const CANONICAL_WAVEFORM_PROFILE: &str = "kdwave-v3-640";
-pub const CANONICAL_WAVEFORM_REVISION: i64 = 3;
+pub const CANONICAL_WAVEFORM_PROFILE: &str = "kdwave-v4-640";
+pub const CANONICAL_WAVEFORM_REVISION: i64 = 4;
 const CACHE_MAGIC: &[u8; 8] = b"KDJWAVE\0";
 const CACHE_VERSION: u16 = 1;
 const CACHE_HEADER_LEN: usize = 8 + 2 + 8 + 8 + 4;
@@ -626,8 +626,9 @@ fn detail_from_cache(cache_dir: &Path, track_id: i64, mtime: u64) -> Option<Wave
     .map(|(wave, _)| wave)
 }
 
-/// 完整播放条使用固定列数。分析器按 STFT 整数步长输出近似列数，这里以时间面积
-/// 重采样到请求宽度；高度保留窗口峰值，颜色按响度加权，短曲也不会退化成双空线。
+/// 完整播放条使用固定列数。这里以时间面积重采样到请求宽度；高度以 80% RMS +
+/// 20% peak 汇聚，避免一个 click 把整段 overview 顶满，同时保留可见瞬态；颜色仍按
+/// 响度加权，短曲也不会退化成双空线。
 pub fn fit_waveform_columns(wave: Waveform, columns: usize) -> Waveform {
     let columns = columns.clamp(64, MAX_WAVEFORM_BUCKETS);
     let source_len = wave.amp.len();
@@ -649,6 +650,8 @@ pub fn fit_waveform_columns(wave: Waveform, columns: usize) -> Waveform {
         let first = start.floor() as usize;
         let last = (end.ceil() as usize).min(source_len);
         let mut peak = 0.0f32;
+        let mut square_sum = 0.0f64;
+        let mut amplitude_weight = 0.0f64;
         let mut r = 0.0f64;
         let mut g = 0.0f64;
         let mut b = 0.0f64;
@@ -660,6 +663,8 @@ pub fn fit_waveform_columns(wave: Waveform, columns: usize) -> Waveform {
             }
             let value = wave.amp[source].clamp(0.0, 1.0);
             peak = peak.max(value);
+            square_sum += f64::from(value * value) * overlap;
+            amplitude_weight += overlap;
             let weight = overlap * (f64::from(value) + 0.001);
             r += f64::from(wave.r[source]) * weight;
             g += f64::from(wave.g[source]) * weight;
@@ -667,7 +672,12 @@ pub fn fit_waveform_columns(wave: Waveform, columns: usize) -> Waveform {
             total_weight += weight;
         }
         let fallback = first.min(source_len - 1);
-        amp.push(peak);
+        let rms = if amplitude_weight > 0.0 {
+            (square_sum / amplitude_weight).sqrt() as f32
+        } else {
+            peak
+        };
+        amp.push((rms * 0.8 + peak * 0.2).clamp(0.0, 1.0));
         red.push(if total_weight > 0.0 {
             (r / total_weight).round() as u8
         } else {
@@ -704,13 +714,14 @@ pub fn file_mtime(path: &Path) -> u64 {
 }
 
 fn cache_path(cache_dir: &Path, track_id: i64, buckets: usize, mtime: u64) -> PathBuf {
-    cache_dir.join(format!("{track_id}-v5-{buckets}-{mtime}.kdwave"))
+    cache_dir.join(format!("{track_id}-v6-{buckets}-{mtime}.kdwave"))
 }
 
 fn remove_obsolete_track_caches(cache_dir: &Path, track_id: i64) -> usize {
     let old_json_prefix = format!("{track_id}-v2-");
     let old_binary_prefix = format!("{track_id}-v3-");
     let old_native_prefix = format!("{track_id}-v4-");
+    let old_peak_prefix = format!("{track_id}-v5-");
     let Ok(entries) = std::fs::read_dir(cache_dir) else {
         return 0;
     };
@@ -723,6 +734,7 @@ fn remove_obsolete_track_caches(cache_dir: &Path, track_id: i64) -> usize {
             (name.starts_with(&old_json_prefix) && name.ends_with(".json"))
                 || (name.starts_with(&old_binary_prefix) && name.ends_with(".kdwave"))
                 || (name.starts_with(&old_native_prefix) && name.ends_with(".kdwave"))
+                || (name.starts_with(&old_peak_prefix) && name.ends_with(".kdwave"))
         })
         .filter(|entry| std::fs::remove_file(entry.path()).is_ok())
         .count()
@@ -767,8 +779,8 @@ fn read_cache(path: &Path) -> Option<Waveform> {
     })
 }
 
-/// 路径版本同时是波形算法版本。旧 STFT / 31.25 Hz 缓存不能迁移到 v5，否则详细
-/// 视图即使请求 100 列/秒，拿到的仍是被插值拉宽的旧数据。
+/// 路径版本同时是波形算法版本。v5 的纯 peak / 高饱和数据不能迁移到 v6，否则
+/// 新 palette 下仍然看不出段落动态。
 fn read_cached(cache_dir: &Path, key: WaveKey) -> Option<(Waveform, bool)> {
     let current = cache_path(cache_dir, key.track_id, key.buckets, key.mtime);
     read_cache(&current)
@@ -797,7 +809,7 @@ pub(crate) fn load_cached_default(
     // 旧分析任务曾先生成波形、再把 BPM/Key 写入音频标签。音频内容没变，但
     // 标签写入会改变 mtime，留下一个仍然有效、文件名时间戳却落后一拍的缓存。
     // 这里仅回读已有文件，不把它冒充当前资产状态，也不会触发重新解码。
-    let prefix = format!("{track_id}-v5-{}-", DEFAULT_WAVEFORM_BUCKETS);
+    let prefix = format!("{track_id}-v6-{}-", DEFAULT_WAVEFORM_BUCKETS);
     let mut candidates: Vec<(u64, PathBuf)> = std::fs::read_dir(cache_dir)
         .ok()?
         .flatten()
@@ -999,7 +1011,7 @@ mod tests {
     #[test]
     fn cache_writes_atomically_and_roundtrips() {
         let dir = scratch("roundtrip");
-        let path = dir.join("1-v5-640-1.kdwave");
+        let path = dir.join("1-v6-640-1.kdwave");
         let wave = Waveform {
             track_id: 1,
             duration: 3.5,
@@ -1023,29 +1035,67 @@ mod tests {
     }
 
     #[test]
-    fn completed_v5_waveform_removes_only_that_tracks_obsolete_caches() {
+    fn overview_energy_pooling_does_not_turn_one_transient_into_a_full_height_section() {
+        let mut amp = vec![0.2; 640];
+        amp[5] = 1.0;
+        let sparse = fit_waveform_columns(
+            Waveform {
+                track_id: 1,
+                duration: 10.0,
+                amp,
+                r: vec![80; 640],
+                g: vec![120; 640],
+                b: vec![180; 640],
+            },
+            64,
+        );
+        assert!(
+            sparse.amp[0] < 0.6,
+            "单个 peak 不应把整个 overview 时间窗画满：{}",
+            sparse.amp[0]
+        );
+
+        let dense = fit_waveform_columns(
+            Waveform {
+                track_id: 2,
+                duration: 10.0,
+                amp: vec![1.0; 640],
+                r: vec![80; 640],
+                g: vec![120; 640],
+                b: vec![180; 640],
+            },
+            64,
+        );
+        assert!(dense.amp.iter().all(|value| (*value - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn completed_v6_waveform_removes_only_that_tracks_obsolete_caches() {
         let dir = scratch("obsolete-cleanup");
         let old_json = dir.join("7-v2-640-1.json");
         let old_binary = dir.join("7-v3-4096-1.kdwave");
         let old_resampled = dir.join("7-v4-24000-1.kdwave");
         let other_track = dir.join("70-v3-640-1.kdwave");
-        let current = dir.join("7-v5-640-1.kdwave");
+        let old_peak = dir.join("7-v5-640-1.kdwave");
+        let current = dir.join("7-v6-640-1.kdwave");
         for path in [
             &old_json,
             &old_binary,
             &old_resampled,
+            &old_peak,
             &other_track,
             &current,
         ] {
             std::fs::write(path, b"fixture").unwrap();
         }
 
-        assert_eq!(remove_obsolete_track_caches(&dir, 7), 3);
+        assert_eq!(remove_obsolete_track_caches(&dir, 7), 4);
         assert!(!old_json.exists());
         assert!(!old_binary.exists());
         assert!(!old_resampled.exists());
+        assert!(!old_peak.exists());
         assert!(other_track.exists(), "不能误删 id 前缀相似的其它曲目");
-        assert!(current.exists(), "不能删刚写成功的 v5 波形");
+        assert!(current.exists(), "不能删刚写成功的 v6 波形");
         let _ = std::fs::remove_dir_all(dir);
     }
 

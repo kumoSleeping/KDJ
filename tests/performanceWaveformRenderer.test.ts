@@ -5,6 +5,7 @@ import {
   performanceOverlayStrokeX,
   performanceWaveformMotionSeconds,
 } from "../src/lib/performanceWaveformRenderer";
+import { waveformDisplayRgb } from "../src/lib/waveformPalette";
 
 test("GPU waveform packing preserves RGBA amplitude and unknown-column masks", () => {
   const packed = packPerformanceWaveformTexture({
@@ -18,10 +19,13 @@ test("GPU waveform packing preserves RGBA amplitude and unknown-column masks", (
   }, 8);
   assert.deepEqual([packed.width, packed.height, packed.count], [3, 1, 3]);
   assert.deepEqual([...packed.knownBytes], [255, 0, 255]);
+  const first = waveformDisplayRgb(1, 3, 6, 0);
+  const second = waveformDisplayRgb(2, 4, 7, 0.5);
+  const third = waveformDisplayRgb(300, 5, 8, 1);
   assert.deepEqual([...packed.colorBytes.slice(0, 12)], [
-    1, 3, 6, 0,
-    2, 4, 7, 128,
-    255, 5, 8, 255,
+    ...first, 0,
+    ...second, 128,
+    ...third, 255,
   ]);
 });
 

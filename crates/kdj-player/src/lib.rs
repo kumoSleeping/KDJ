@@ -21,6 +21,8 @@ pub const FILTER_RESONANCE_LOW_Q: f32 = 0.72;
 pub const FILTER_RESONANCE_MEDIUM_Q: f32 = 1.4;
 pub const FILTER_RESONANCE_HIGH_Q: f32 = 2.4;
 pub const DEFAULT_FILTER_RESONANCE_Q: f32 = FILTER_RESONANCE_HIGH_Q;
+/// Fixed live-EQ analyser width shared by the realtime engine and the Tauri event contract.
+pub const EQ_SPECTRUM_BANDS: usize = 15;
 
 pub use command::{DeckId, PlayerMode, RtCommand, TransitionPlan};
 pub use decode::{

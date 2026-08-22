@@ -1557,10 +1557,11 @@ export const djEngine = {
       const db = deck.waveformFrequencyData[index];
       const magnitude = Number.isFinite(db) ? Math.pow(10, db / 20) : 0;
       const power = magnitude * magnitude;
-      // 与 Rust 本地波形使用相同的 200 Hz / 1.5 kHz 三段交叉点。
-      if (hz < 200) {
+      // 与 Rust 本地波形使用相同的 600 Hz / 4 kHz 三段交叉点：人声主体留在中频，
+      // 只有真正的 presence/镲片区域进入高频色，不把整首曲子染成高饱和蓝白噪点。
+      if (hz < 600) {
         low += power;
-      } else if (hz < 1_500) {
+      } else if (hz < 4_000) {
         middle += power;
       } else {
         high += power;

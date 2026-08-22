@@ -601,6 +601,8 @@ export function SettingsPanel() {
   const setWidePlay = useTrackClickPrefs((state) => state.setWidePlay);
   const transportFade = usePlaybackPrefs((state) => state.transportFade);
   const setTransportFade = usePlaybackPrefs((state) => state.setTransportFade);
+  const quantize = usePlaybackPrefs((state) => state.quantize);
+  const setQuantize = usePlaybackPrefs((state) => state.setQuantize);
   const lyricsEngines = useLyricsPrefs((state) => state.engines);
   const setLyricsEngines = useLyricsPrefs((state) => state.setEngines);
   const tryOnlineWhenMissing = useLyricsPrefs((state) => state.tryOnlineWhenMissing);
@@ -856,6 +858,12 @@ export function SettingsPanel() {
               label="播放 / 暂停渐入渐出"
               title="播放时用约 120 毫秒渐入，暂停时用约 120 毫秒渐出；关掉后立即播放或暂停。"
               onChange={() => setTransportFade(!transportFade)}
+            />
+            <Switch
+              checked={quantize}
+              label="节拍量化"
+              title="主 CUE、Hot Cue 与 Loop 起点吸附到分析节拍网格。"
+              onChange={() => setQuantize(!quantize)}
             />
             <CycleToggle<FilterResonance>
               label="FILTER 共振"

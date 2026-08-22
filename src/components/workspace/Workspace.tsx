@@ -197,17 +197,11 @@ function loadWorkspacePanes(): WorkspacePaneState {
 interface WorkspaceProps {
   workMode: WorkMode;
   onWorkModeChange(mode: WorkMode): void;
-  performanceOpen: boolean;
-  onPerformanceOpenChange(open: boolean): void;
-  onPerformanceControlHost(node: HTMLDivElement | null): void;
 }
 
 export function Workspace({
   workMode,
   onWorkModeChange,
-  performanceOpen,
-  onPerformanceOpenChange,
-  onPerformanceControlHost,
 }: WorkspaceProps) {
   const selectedOneLibrary = usePlaylistStore((state) => state.selectedTarget);
   const oneLibraryDevices = usePlaylistStore((state) => state.devices);
@@ -1237,7 +1231,10 @@ export function Workspace({
       // 「定位正在播」只滚动列表到当前歌曲，不展开右栏/抽屉
       if (isLocatePlaying) return;
       // 唱盘 / 其他显式查看：钉住内容面
-      pinTrackAside(faceForTrackPin(), source === "player-deck" ? getPlayingTrack()?.id : undefined);
+      pinTrackAside(
+        faceForTrackPin(),
+        source === "player-deck" ? getPlayingTrack()?.id : undefined,
+      );
       if (layout === "narrow") setSheet("aside");
     };
     window.addEventListener(DETAIL_EVENT, onDetail);
@@ -1278,7 +1275,7 @@ export function Workspace({
   // 暂时关掉右栏网络视频预览面板：细项改到下载队列里配；双击仍走浮动 / 系统 PiP。
   const previewAside = false;
   const realOverlayAside =
-    performanceOpen || showFolders || showSettings || showVjExport || showVirtualDisk || previewAside || queueAside;
+    showFolders || showSettings || showVjExport || showVirtualDisk || previewAside || queueAside;
   const oneLibraryDetailTrack = oneLibraryDetail
     ? oneLibraryPlayableTrack(oneLibraryDetail.track, oneLibraryDetail.target)
     : null;
@@ -1293,6 +1290,18 @@ export function Workspace({
         : pinnedStreamTrack ?? (isStreamTrack(playingTrack) ? playingTrack : selected);
   const activeOneLibraryDetail =
     oneLibraryDetail && asideTrackId === oneLibraryDetailTrack?.id ? oneLibraryDetail : null;
+  const trackDetailPanel = activeOneLibraryDetail ? (
+    <OneLibraryTrackDetail
+      track={activeOneLibraryDetail.track}
+      target={activeOneLibraryDetail.target}
+    />
+  ) : detailTrack ? (
+    isStreamTrack(detailTrack) ? (
+      <StreamTrackDetail key={detailTrack.id} track={detailTrack} />
+    ) : (
+      <TrackDetail key={detailTrack.id} track={detailTrack} />
+    )
+  ) : null;
   // 有 showLyrics / 歌词极时也要挂面板：无曲时 LyricsView 自己显示空态，
   // 不能因为 lyricsTrack 为空就把整栏吞掉（看起来像点了没反应）。
   const lyricsAside =
@@ -1404,9 +1413,7 @@ export function Workspace({
     [oneLibraryDetailTrack, openLyricsPanel, setPreferredAsideFace, showTrackDetail],
   );
 
-  const asideLabel = performanceOpen
-    ? "PERFORMANCE"
-    : showFolders
+  const asideLabel = showFolders
       ? "文件夹"
     : showSettings
       ? "设置"
@@ -1427,13 +1434,7 @@ export function Workspace({
                 : detailAside
                   ? "曲目详情"
                   : "";
-  const asidePanel = performanceOpen ? (
-    <div
-      ref={onPerformanceControlHost}
-      className="kd-performance-control-host"
-      aria-label="双 Deck 演出控制"
-    />
-  ) : showFolders ? (
+  const asidePanel = showFolders ? (
     <FolderTree
       onNavigate={onFolderNavigate}
       onOpenStreamPlaylist={openStreamPlaylist}
@@ -1464,18 +1465,7 @@ export function Workspace({
     <QueuePanel />
   ) : lyricsAside ? (
     <LyricsView track={lyricsTrack} />
-  ) : detailAside && activeOneLibraryDetail ? (
-    <OneLibraryTrackDetail
-      track={activeOneLibraryDetail.track}
-      target={activeOneLibraryDetail.target}
-    />
-  ) : detailAside && detailTrack ? (
-    isStreamTrack(detailTrack) ? (
-      <StreamTrackDetail key={detailTrack.id} track={detailTrack} />
-    ) : (
-      <TrackDetail key={detailTrack.id} track={detailTrack} />
-    )
-  ) : null;
+  ) : detailAside ? trackDetailPanel : null;
   const queueOpen =
     showQueue &&
     !showSettings &&
@@ -1522,10 +1512,6 @@ export function Workspace({
     queuePanelEpoch,
   ]);
 
-  useEffect(() => {
-    if (performanceOpen && layout === "narrow") setSheet("aside");
-  }, [layout, performanceOpen]);
-
   const toggleQueueDrawer = useCallback(() => {
     const opening = !useAppStore.getState().showQueue;
     if (opening) setDetailPinned(false);
@@ -1562,7 +1548,7 @@ export function Workspace({
     }
   }, []);
 
-  const COLUMN_BOUNDS = { left: [140, 420], right: [240, 600] } as const;
+  const LEFT_COLUMN_BOUNDS = [140, 420] as const;
   const LEFT_RAIL_WIDTH = 58;
   const LEFT_RAIL_SNAP = 112;
 
@@ -1575,7 +1561,10 @@ export function Workspace({
     const target = side === "left" ? (el.firstElementChild as HTMLElement) : localAsideRef.current;
     if (!target) return;
     const startWidth = target.getBoundingClientRect().width;
-    const [min, max] = COLUMN_BOUNDS[side];
+    const rightHostWidth = Math.max(0, (target.parentElement?.getBoundingClientRect().width ?? 0) - 1);
+    const [min, max] = side === "left"
+      ? LEFT_COLUMN_BOUNDS
+      : [Math.min(240, rightHostWidth), rightHostWidth] as const;
     let treeExpanded = compactTreeExpanded;
     const onMove = (move: PointerEvent) => {
       // 左把手往右拖 = 左栏变宽；右把手往右拖 = 右栏变窄
@@ -2119,7 +2108,7 @@ export function Workspace({
                     tracks={tracks}
                     loading={loading}
                     layout={layout}
-                    fitWidth={workMode === "dj"}
+                    fitWidth={false}
                     selectedId={selectedId}
                     selectedIds={selectedIds}
                     shortcutActive={activeWorkspacePane === "local"}
@@ -2357,9 +2346,7 @@ export function Workspace({
                       title={asideLabel}
                       face={showTrackFaceSwitch ? trackAsideFace : undefined}
                       onFaceChange={showTrackFaceSwitch ? onTrackAsideFace : undefined}
-                      asideToggle={performanceOpen ? (
-                        <AsideToggleButton open canOpen onToggle={() => onPerformanceOpenChange(false)} />
-                      ) : asideToggle}
+                      asideToggle={asideToggle}
                     />
                     <div className="kd-split-aside-body kd-scroll">{asidePanel}</div>
                   </aside>
@@ -2382,7 +2369,7 @@ export function Workspace({
                 <AsideFaceSwitch face={trackAsideFace} onFaceChange={onTrackAsideFace} />
               ) : undefined
             }
-            onClose={performanceOpen ? () => onPerformanceOpenChange(false) : closeAsideForUser}
+            onClose={closeAsideForUser}
           >
             {asidePanel}
           </Sheet>

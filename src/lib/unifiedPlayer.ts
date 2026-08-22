@@ -16,7 +16,12 @@ import {
 } from "tauri-plugin-native-audio-api";
 import type { FilterResonance, Track } from "../types";
 import { djEngine } from "./djMix";
+import { EQ_GRAPH_BAND_COUNT } from "./eqGraph";
 import { usesRemotePlaybackSource } from "./playbackTrackSource";
+import {
+  SYNC_PHASE_TOLERANCE_SEC,
+  syncFollowerSeekPositionWithLead,
+} from "./beatGridSync";
 
 export type UnifiedPlayerStatus = "idle" | "loading" | "paused" | "playing" | "ended" | "error";
 export type UnifiedPlayerKind = "desktop-native" | "mobile-native" | "browser-preview";
@@ -47,6 +52,8 @@ export interface UnifiedDeckState {
   outputBufferMs: number;
   minimumOutputBufferMs: number;
   outputUnderruns: number;
+  /** Post-EQ peak in linear full scale; values >= 1 indicate clipping. */
+  peakLevel: number;
   rate: number;
   /** 引擎级无缝循环窗口（曲目秒）；null 表示线性播放。 */
   loopStart: number | null;
@@ -60,6 +67,28 @@ export interface UnifiedDeckMixer {
   midDb: number;
   highDb: number;
   filter: number;
+}
+
+export interface UnifiedDeckFx {
+  echo: number;
+  echoParameter: number;
+  reverb: number;
+  reverbParameter: number;
+  gater: number;
+  gaterParameter: number;
+  pad: number;
+  beatSeconds: number;
+}
+
+export interface UnifiedDeckSyncRequest {
+  follower: 0 | 1;
+  master: 0 | 1;
+  rate: number;
+  followerBpm: number;
+  followerFirstBeat: number;
+  masterBpm: number;
+  masterFirstBeat: number;
+  beatsPerBar?: number;
 }
 
 export interface UnifiedTransitionPlan {
@@ -113,7 +142,12 @@ export interface UnifiedPlayer {
   /** Held platter motion in track seconds. Must sum ticks instead of latest-wins. */
   scratchDeck(deck: 0 | 1, delta: number): Promise<UnifiedPlayerState>;
   setDeckRate(deck: 0 | 1, rate: number): Promise<UnifiedPlayerState>;
+  /** Linked SYNC tempo update applied to both callback clocks at one boundary. */
+  setDeckRates(rates: [number, number]): Promise<UnifiedPlayerState>;
+  /** Native-clock BPM + downbeat alignment for one follower Deck. */
+  syncDeck(request: UnifiedDeckSyncRequest): Promise<UnifiedPlayerState>;
   setDeckMixer(deck: 0 | 1, mixer: UnifiedDeckMixer): Promise<UnifiedPlayerState>;
+  setDeckFx(deck: 0 | 1, fx: UnifiedDeckFx): Promise<UnifiedPlayerState>;
   setFilterResonance(resonance: FilterResonance): Promise<UnifiedPlayerState>;
   setDeckStems(
     trackId: number,
@@ -158,6 +192,7 @@ const INITIAL_STATE: UnifiedPlayerState = {
     outputBufferMs: 0,
     minimumOutputBufferMs: 0,
     outputUnderruns: 0,
+    peakLevel: 0,
     rate: 1,
     loopStart: null,
     loopLength: null,
@@ -334,7 +369,19 @@ class MobileNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     return Promise.reject(new Error("iOS 连续播放模式不支持双 Deck"));
   }
 
+  setDeckRates(): Promise<UnifiedPlayerState> {
+    return Promise.reject(new Error("iOS 连续播放模式不支持双 Deck"));
+  }
+
+  syncDeck(): Promise<UnifiedPlayerState> {
+    return Promise.reject(new Error("iOS 连续播放模式不支持双 Deck"));
+  }
+
   setDeckMixer(): Promise<UnifiedPlayerState> {
+    return Promise.resolve(this.snapshot);
+  }
+
+  setDeckFx(): Promise<UnifiedPlayerState> {
     return Promise.resolve(this.snapshot);
   }
 
@@ -433,6 +480,7 @@ interface DesktopDeckSnapshotRaw {
   outputBufferMs?: number;
   minimumOutputBufferMs?: number;
   outputUnderruns?: number;
+  peakLevel?: number;
   loopStart?: number | null;
   loopLength?: number | null;
 }
@@ -443,8 +491,29 @@ interface DesktopCommandAckRaw {
   snapshot: DesktopPlaybackSnapshotRaw;
 }
 
+interface DesktopLevelsRaw {
+  peaks: [number, number];
+  bands: [number[], number[]];
+}
+
 interface TauriEvent<T> {
   payload: T;
+}
+
+const liveDeckLevels: [number, number] = [0, 0];
+const liveDeckSpectrum: [number[], number[]] = [
+  new Array<number>(EQ_GRAPH_BAND_COUNT).fill(0),
+  new Array<number>(EQ_GRAPH_BAND_COUNT).fill(0),
+];
+let liveDeckLevelsActive = false;
+/** 高频电平（~30Hz 轻量事件，绕开 10Hz 全量快照）：电平表在 rAF 里直读，不走 React 状态。 */
+export function getLiveDeckPeak(deck: 0 | 1): number | null {
+  return liveDeckLevelsActive ? liveDeckLevels[deck] : null;
+}
+
+/** Fixed-width post-EQ levels are mutated by the Tauri event listener and read directly in rAF. */
+export function getLiveDeckSpectrum(deck: 0 | 1): readonly number[] | null {
+  return liveDeckLevelsActive ? liveDeckSpectrum[deck] : null;
 }
 
 function normalizedDesktop(raw: DesktopPlaybackSnapshotRaw): UnifiedPlayerState {
@@ -484,6 +553,7 @@ function normalizedDesktop(raw: DesktopPlaybackSnapshotRaw): UnifiedPlayerState 
       outputBufferMs: Math.max(0, deck.outputBufferMs ?? 0),
       minimumOutputBufferMs: Math.max(0, deck.minimumOutputBufferMs ?? 0),
       outputUnderruns: Math.max(0, deck.outputUnderruns ?? 0),
+      peakLevel: Number.isFinite(deck.peakLevel) ? Math.max(0, deck.peakLevel ?? 0) : 0,
       rate: Number.isFinite(deck.rate) && deck.rate > 0 ? deck.rate : 1,
       loopStart: typeof deck.loopStart === "number" ? deck.loopStart : null,
       loopLength: typeof deck.loopLength === "number" ? deck.loopLength : null,
@@ -496,6 +566,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   readonly supportsRealtimeDj = true;
   private initPromise: Promise<UnifiedPlayerState> | null = null;
   private unlisten: UnlistenFn | null = null;
+  private unlistenLevels: UnlistenFn | null = null;
   private sequence = 0;
   private nextCommandId = 1;
   /** Tauri invoke 可以并发越序到达；播放命令必须和 commandId 保持同一顺序。 */
@@ -523,6 +594,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private deckSeekRevisions: [number, number] = [0, 0];
   /** 每个物理 Deck 的高频旋钮手势只让最新值进入 IPC，旧值不能排队追赶。 */
   private deckMixerRevisions: [number, number] = [0, 0];
+  private deckFxRevisions: [number, number] = [0, 0];
 
   initialize(): Promise<UnifiedPlayerState> {
     if (this.initPromise) return this.initPromise;
@@ -531,11 +603,35 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
         "playback-state",
         (event: TauriEvent<DesktopPlaybackSnapshotRaw>) => this.accept(event.payload),
       );
+      this.unlistenLevels = await listen<DesktopLevelsRaw | [number, number]>(
+        "playback-levels",
+        (event: TauriEvent<DesktopLevelsRaw | [number, number]>) => {
+          const payload = event.payload;
+          // Array support keeps Vite HMR safe while an already-running pre-spectrum backend is
+          // being restarted; production frontend/backend builds always use the object contract.
+          if (Array.isArray(payload)) {
+            liveDeckLevels[0] = Number.isFinite(payload[0]) ? Math.max(0, payload[0]) : 0;
+            liveDeckLevels[1] = Number.isFinite(payload[1]) ? Math.max(0, payload[1]) : 0;
+          } else {
+            liveDeckLevels[0] = Number.isFinite(payload.peaks?.[0]) ? Math.max(0, payload.peaks[0]) : 0;
+            liveDeckLevels[1] = Number.isFinite(payload.peaks?.[1]) ? Math.max(0, payload.peaks[1]) : 0;
+            ([0, 1] as const).forEach((deck) => {
+              for (let band = 0; band < EQ_GRAPH_BAND_COUNT; band += 1) {
+                const value = payload.bands?.[deck]?.[band];
+                liveDeckSpectrum[deck][band] = Number.isFinite(value) ? Math.max(0, value) : 0;
+              }
+            });
+          }
+          liveDeckLevelsActive = true;
+        },
+      );
       const snapshot = await invoke<DesktopPlaybackSnapshotRaw>("playback_initialize");
       return this.accept(snapshot);
     })().catch((error) => {
       this.unlisten?.();
       this.unlisten = null;
+      this.unlistenLevels?.();
+      this.unlistenLevels = null;
       this.initPromise = null;
       throw error;
     });
@@ -622,6 +718,8 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     this.deckSeekRevisions[1] += 1;
     this.deckMixerRevisions[0] += 1;
     this.deckMixerRevisions[1] += 1;
+    this.deckFxRevisions[0] += 1;
+    this.deckFxRevisions[1] += 1;
     const revision = ++this.loadRevision;
     return this.command(
       { type: "load", source: this.source(source) },
@@ -637,6 +735,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     this.deckNudgeRevisions[deck] += 1;
     this.deckSeekRevisions[deck] += 1;
     this.deckMixerRevisions[deck] += 1;
+    this.deckFxRevisions[deck] += 1;
     return this.command({ type: "loadDeck", deck, source: this.source(source) });
   }
 
@@ -790,12 +889,68 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     return operation;
   }
 
+  setDeckRates(rates: [number, number]): Promise<UnifiedPlayerState> {
+    const revisions: [number, number] = [
+      this.deckRateRevisions[0] + 1,
+      this.deckRateRevisions[1] + 1,
+    ];
+    this.deckRateRevisions = revisions;
+    const operation = Promise.all(this.rateTails).then(() =>
+      this.control(
+        { type: "setDeckRates", rates },
+        () => this.deckRateRevisions[0] === revisions[0]
+          && this.deckRateRevisions[1] === revisions[1],
+      ),
+    );
+    const tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.rateTails = [tail, tail];
+    return operation;
+  }
+
+  syncDeck(request: UnifiedDeckSyncRequest): Promise<UnifiedPlayerState> {
+    const follower = request.follower;
+    const rateRevision = this.deckRateRevisions[follower] + 1;
+    const seekRevision = this.deckSeekRevisions[follower] + 1;
+    this.deckRateRevisions[follower] = rateRevision;
+    this.deckSeekRevisions[follower] = seekRevision;
+    const operation = Promise.all([this.rateTails[follower], this.seekTails[follower]]).then(() =>
+      this.command(
+        {
+          type: "syncDeck",
+          ...request,
+          beatsPerBar: request.beatsPerBar ?? 4,
+        },
+        () => this.deckRateRevisions[follower] === rateRevision
+          && this.deckSeekRevisions[follower] === seekRevision,
+      ),
+    );
+    const tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.rateTails[follower] = tail;
+    this.seekTails[follower] = tail;
+    return operation;
+  }
+
   setDeckMixer(deck: 0 | 1, mixer: UnifiedDeckMixer): Promise<UnifiedPlayerState> {
     const revision = this.deckMixerRevisions[deck] + 1;
     this.deckMixerRevisions[deck] = revision;
     return this.command(
       { type: "setDeckMixer", deck, ...mixer },
       () => this.deckMixerRevisions[deck] === revision,
+    );
+  }
+
+  setDeckFx(deck: 0 | 1, fx: UnifiedDeckFx): Promise<UnifiedPlayerState> {
+    const revision = this.deckFxRevisions[deck] + 1;
+    this.deckFxRevisions[deck] = revision;
+    return this.control(
+      { type: "setDeckFx", deck, ...fx },
+      () => this.deckFxRevisions[deck] === revision,
     );
   }
 
@@ -883,9 +1038,18 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     this.deckSeekRevisions[1] += 1;
     this.deckMixerRevisions[0] += 1;
     this.deckMixerRevisions[1] += 1;
+    this.deckFxRevisions[0] += 1;
+    this.deckFxRevisions[1] += 1;
     if (this.initPromise) await this.command({ type: "dispose" }).catch(() => undefined);
     this.unlisten?.();
     this.unlisten = null;
+    this.unlistenLevels?.();
+    this.unlistenLevels = null;
+    liveDeckLevelsActive = false;
+    liveDeckLevels[0] = 0;
+    liveDeckLevels[1] = 0;
+    liveDeckSpectrum[0].fill(0);
+    liveDeckSpectrum[1].fill(0);
     this.initPromise = null;
     this.sequence = 0;
     this.commandTail = Promise.resolve();
@@ -966,6 +1130,7 @@ class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
       outputBufferMs: 0,
       minimumOutputBufferMs: 0,
       outputUnderruns: 0,
+      peakLevel: 0,
       rate: this.deckBaseRates[deck],
       loopStart: null,
       loopLength: null,
@@ -1085,7 +1250,51 @@ class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
     return this.refresh();
   }
 
+  setDeckRates(rates: [number, number]): Promise<UnifiedPlayerState> {
+    ([0, 1] as const).forEach((deck) => {
+      if (this.snapshot.decks[deck].trackId === null) {
+        throw new Error("SYNC 关联的两首曲目必须都已装入 Deck");
+      }
+      this.clearNudge(deck);
+      this.deckBaseRates[deck] = rates[deck];
+      if (!this.deckScratchHeld[deck]) djEngine.deckElement(deck).playbackRate = rates[deck];
+    });
+    return this.refresh();
+  }
+
+  syncDeck(request: UnifiedDeckSyncRequest): Promise<UnifiedPlayerState> {
+    const follower = this.snapshot.decks[request.follower];
+    const master = this.snapshot.decks[request.master];
+    if (follower.trackId === null || master.trackId === null) {
+      return Promise.reject(new Error("SYNC 关联的两首曲目必须都已装入 Deck"));
+    }
+    const followerAudio = djEngine.deckElement(request.follower);
+    const masterAudio = djEngine.deckElement(request.master);
+    this.clearNudge(request.follower);
+    this.deckBaseRates[request.follower] = request.rate;
+    if (!this.deckScratchHeld[request.follower]) followerAudio.playbackRate = request.rate;
+    const seekTo = syncFollowerSeekPositionWithLead({
+      followerPositionSec: followerAudio.currentTime,
+      followerBpm: request.followerBpm,
+      followerFirstBeatSec: request.followerFirstBeat,
+      followerRate: request.rate,
+      followerDurationSec: follower.duration,
+      masterPositionSec: masterAudio.currentTime,
+      masterBpm: request.masterBpm,
+      masterFirstBeatSec: request.masterFirstBeat,
+      masterRate: this.deckBaseRates[request.master],
+      multiple: 1,
+      beatsPerCell: request.beatsPerBar ?? 4,
+    }, 0, SYNC_PHASE_TOLERANCE_SEC);
+    if (seekTo !== null && !followerAudio.paused) followerAudio.currentTime = seekTo;
+    return this.refresh();
+  }
+
   setDeckMixer(): Promise<UnifiedPlayerState> {
+    return Promise.resolve(this.snapshot);
+  }
+
+  setDeckFx(): Promise<UnifiedPlayerState> {
     return Promise.resolve(this.snapshot);
   }
 

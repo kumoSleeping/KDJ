@@ -5,7 +5,7 @@ use kdj_stems::record_stem_output_underrun_for_deck;
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::command::{EngineCommand, SourceKind};
-use crate::dsp::{DeckEq, TransitionFx};
+use crate::dsp::{DeckEq, DeckSpectrum, TransitionFx};
 use crate::state::{SharedState, SharedTransportState};
 use crate::stream::{FrameLerp, StemFrame, STEM_GAIN_MAX, STEM_LANES};
 use crate::{
@@ -237,6 +237,192 @@ impl StemGains {
 }
 
 /// State owned exclusively by the platform audio callback.
+const MANUAL_FX_BUFFER_FRAMES: usize = 192_000;
+
+struct DeckManualFx {
+    echo_target: f32,
+    echo_parameter: f32,
+    reverb_target: f32,
+    reverb_parameter: f32,
+    gater_target: f32,
+    gater_parameter: f32,
+    echo: f32,
+    reverb: f32,
+    gater: f32,
+    pad: u8,
+    pad_mix: f32,
+    pad_target: f32,
+    beat_seconds: f32,
+    phase: u64,
+    echo_at: usize,
+    reverb_at: usize,
+    echo_buffer: Vec<[f32; 2]>,
+    reverb_buffer: Vec<[f32; 2]>,
+    filter_state: [f32; 2],
+}
+
+impl DeckManualFx {
+    fn new() -> Self {
+        Self {
+            echo_target: 0.0,
+            echo_parameter: 0.5,
+            reverb_target: 0.0,
+            reverb_parameter: 0.5,
+            gater_target: 0.0,
+            gater_parameter: 0.5,
+            echo: 0.0,
+            reverb: 0.0,
+            gater: 0.0,
+            pad: 0,
+            pad_mix: 0.0,
+            pad_target: 0.0,
+            beat_seconds: 0.5,
+            phase: 0,
+            echo_at: 0,
+            reverb_at: 0,
+            echo_buffer: vec![[0.0; 2]; MANUAL_FX_BUFFER_FRAMES],
+            reverb_buffer: vec![[0.0; 2]; MANUAL_FX_BUFFER_FRAMES],
+            filter_state: [0.0; 2],
+        }
+    }
+
+    fn configure(
+        &mut self,
+        echo: f32,
+        echo_parameter: f32,
+        reverb: f32,
+        reverb_parameter: f32,
+        gater: f32,
+        gater_parameter: f32,
+        pad: u8,
+        beat_seconds: f32,
+    ) {
+        self.echo_target = finite_unit(echo);
+        self.echo_parameter = finite_unit(echo_parameter);
+        self.reverb_target = finite_unit(reverb);
+        self.reverb_parameter = finite_unit(reverb_parameter);
+        self.gater_target = finite_unit(gater);
+        self.gater_parameter = finite_unit(gater_parameter);
+        if pad > 0 {
+            self.pad = pad.min(8);
+            self.pad_target = 1.0;
+        } else {
+            self.pad_target = 0.0;
+        }
+        self.beat_seconds = if beat_seconds.is_finite() {
+            beat_seconds.clamp(0.1, 4.0)
+        } else {
+            0.5
+        };
+    }
+
+    #[inline]
+    fn process(&mut self, input: [f32; 2], sample_rate: u32) -> [f32; 2] {
+        let ramp = 1.0 / (sample_rate.max(1) as f32 * 0.012);
+        self.echo += (self.echo_target - self.echo).clamp(-ramp, ramp);
+        self.reverb += (self.reverb_target - self.reverb).clamp(-ramp, ramp);
+        self.gater += (self.gater_target - self.gater).clamp(-ramp, ramp);
+        self.pad_mix += (self.pad_target - self.pad_mix).clamp(-ramp, ramp);
+        let pad_echo = matches!(self.pad, 1 | 2)
+            .then_some(self.pad_mix)
+            .unwrap_or(0.0);
+        let pad_reverb = matches!(self.pad, 3 | 4)
+            .then_some(self.pad_mix)
+            .unwrap_or(0.0);
+        let pad_gater = matches!(self.pad, 5 | 6)
+            .then_some(self.pad_mix)
+            .unwrap_or(0.0);
+
+        let echo_depth = self.echo.max(pad_echo);
+        let echo_division = if self.pad == 1 {
+            0.125
+        } else if self.pad == 2 {
+            0.25
+        } else {
+            0.0625 * 16.0f32.powf(self.echo_parameter)
+        };
+        let echo_frames = ((sample_rate as f32 * self.beat_seconds * echo_division) as usize)
+            .clamp(1, MANUAL_FX_BUFFER_FRAMES - 1);
+        let echo_read =
+            (self.echo_at + MANUAL_FX_BUFFER_FRAMES - echo_frames) % MANUAL_FX_BUFFER_FRAMES;
+        let delayed = self.echo_buffer[echo_read];
+        self.echo_buffer[self.echo_at] = [
+            input[0] + delayed[0] * (0.12 + 0.66 * self.echo_parameter),
+            input[1] + delayed[1] * (0.12 + 0.66 * self.echo_parameter),
+        ];
+        self.echo_at = (self.echo_at + 1) % MANUAL_FX_BUFFER_FRAMES;
+
+        let reverb_depth = self.reverb.max(pad_reverb);
+        let reverb_seconds = if self.pad == 3 {
+            0.11
+        } else if self.pad == 4 {
+            0.38
+        } else {
+            0.05 + self.reverb_parameter * 0.55
+        };
+        let reverb_frames =
+            ((sample_rate as f32 * reverb_seconds) as usize).clamp(1, MANUAL_FX_BUFFER_FRAMES - 1);
+        let reverb_read =
+            (self.reverb_at + MANUAL_FX_BUFFER_FRAMES - reverb_frames) % MANUAL_FX_BUFFER_FRAMES;
+        let reverbed = self.reverb_buffer[reverb_read];
+        self.reverb_buffer[self.reverb_at] = [
+            input[0] + reverbed[1] * (0.18 + 0.68 * self.reverb_parameter),
+            input[1] + reverbed[0] * (0.18 + 0.68 * self.reverb_parameter),
+        ];
+        self.reverb_at = (self.reverb_at + 1) % MANUAL_FX_BUFFER_FRAMES;
+
+        let gater_depth = self.gater.max(pad_gater);
+        let gate_division = if self.pad == 6 {
+            16.0
+        } else if self.pad == 5 {
+            8.0
+        } else {
+            4.0 * 8.0f32.powf(self.gater_parameter)
+        };
+        let gate_frames = (sample_rate as f32 * self.beat_seconds / gate_division).max(1.0) as u64;
+        let gate_open = (self.phase / gate_frames) % 2 == 0;
+        self.phase = self.phase.wrapping_add(1);
+        let gate_gain = if gate_open {
+            1.0
+        } else {
+            1.0 - gater_depth * 0.92
+        };
+
+        let mut out = [
+            (input[0] + delayed[0] * echo_depth * 0.7 + reverbed[0] * reverb_depth * 0.55)
+                * gate_gain,
+            (input[1] + delayed[1] * echo_depth * 0.7 + reverbed[1] * reverb_depth * 0.55)
+                * gate_gain,
+        ];
+        if (self.pad == 7 || self.pad == 8) && self.pad_mix > 0.0 {
+            let cutoff = if self.pad == 7 { 700.0 } else { 1_600.0 };
+            let alpha =
+                (std::f32::consts::TAU * cutoff / sample_rate.max(1) as f32).clamp(0.001, 0.45);
+            for channel in 0..2 {
+                self.filter_state[channel] += alpha * (out[channel] - self.filter_state[channel]);
+                let filtered = if self.pad == 7 {
+                    self.filter_state[channel]
+                } else {
+                    out[channel] - self.filter_state[channel]
+                };
+                out[channel] += (filtered - out[channel]) * self.pad_mix;
+            }
+        }
+        if self.pad_target == 0.0 && self.pad_mix <= f32::EPSILON {
+            self.pad = 0;
+        }
+        out
+    }
+}
+
+fn finite_unit(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 pub struct AudioRenderer {
     consumer: Consumer<EngineCommand>,
     retired: Option<Producer<u64>>,
@@ -263,6 +449,9 @@ pub struct AudioRenderer {
     output_frames: u64,
     deck_output_underruns: [u64; 2],
     deck_min_buffered_frames: [u64; 2],
+    deck_peak_levels: [f32; 2],
+    deck_spectrum: [DeckSpectrum; 2],
+    deck_levels_active: [bool; 2],
     deck_positions: [f64; 2],
     deck_gains: [f32; 2],
     deck_rates: [f64; 2],
@@ -282,6 +471,7 @@ pub struct AudioRenderer {
     output_sample_rate: u32,
     filter_resonance: f32,
     deck_eq: [DeckEq; 2],
+    deck_manual_fx: [DeckManualFx; 2],
     transition_fx: TransitionFx,
     master_gain: f32,
     transition: Option<Transition>,
@@ -341,6 +531,9 @@ fn make_channels(
             output_frames: 0,
             deck_output_underruns: [0; 2],
             deck_min_buffered_frames: [u64::MAX; 2],
+            deck_peak_levels: [0.0; 2],
+            deck_spectrum: [DeckSpectrum::default(); 2],
+            deck_levels_active: [false; 2],
             deck_positions: [0.0; 2],
             deck_gains: [1.0; 2],
             deck_rates: [1.0; 2],
@@ -357,6 +550,7 @@ fn make_channels(
             output_sample_rate: 48_000,
             filter_resonance: crate::DEFAULT_FILTER_RESONANCE_Q,
             deck_eq: [DeckEq::default(); 2],
+            deck_manual_fx: std::array::from_fn(|_| DeckManualFx::new()),
             transition_fx: TransitionFx::new(),
             master_gain: 1.0,
             transition: None,
@@ -407,6 +601,9 @@ impl AudioRenderer {
             } else {
                 [0.0; 2]
             };
+            let a = self.deck_manual_fx[0].process(a, self.output_sample_rate);
+            let b = self.deck_manual_fx[1].process(b, self.output_sample_rate);
+            self.observe_deck_levels(a, b);
             for channel in 0..channels {
                 output[index + channel] = if self.playing {
                     let side = channel.min(1);
@@ -483,6 +680,9 @@ impl AudioRenderer {
             } else {
                 [0.0; 2]
             };
+            let a = self.deck_manual_fx[0].process(a, self.output_sample_rate);
+            let b = self.deck_manual_fx[1].process(b, self.output_sample_rate);
+            self.observe_deck_levels(a, b);
             for (channel, sample) in frame.iter_mut().enumerate() {
                 *sample = if self.playing {
                     let side = channel.min(1);
@@ -639,6 +839,9 @@ impl AudioRenderer {
                 ([a, b], [0.0; 2])
             };
             let [a, b] = processed;
+            let a = self.deck_manual_fx[0].process(a, self.output_sample_rate);
+            let b = self.deck_manual_fx[1].process(b, self.output_sample_rate);
+            self.observe_deck_levels(a, b);
             for (channel, sample) in frame.iter_mut().enumerate() {
                 let value = if self.playing {
                     let side = channel.min(1);
@@ -742,6 +945,33 @@ impl AudioRenderer {
             held[0] * self.stream_edge_gains[index],
             held[1] * self.stream_edge_gains[index],
         ]
+    }
+
+    #[inline]
+    fn observe_deck_levels(&mut self, a: [f32; 2], b: [f32; 2]) {
+        // Fast attack with a ~0.35s visual release at 48 kHz so meters feel responsive. The callback
+        // remains allocation/lock free; levels may exceed 1.0 so the UI can report clipping.
+        const RELEASE_PER_FRAME: f32 = 0.999_94;
+        for (index, input) in [a, b].into_iter().enumerate() {
+            let active = self.playing && self.deck_playing[index];
+            if !active {
+                if self.deck_levels_active[index] {
+                    self.deck_peak_levels[index] = 0.0;
+                    self.deck_spectrum[index].reset();
+                    self.deck_levels_active[index] = false;
+                }
+                continue;
+            }
+            if !self.deck_levels_active[index] {
+                self.deck_peak_levels[index] = 0.0;
+                self.deck_spectrum[index].reset();
+                self.deck_levels_active[index] = true;
+            }
+            let peak = input[0].abs().max(input[1].abs());
+            self.deck_peak_levels[index] =
+                (self.deck_peak_levels[index] * RELEASE_PER_FRAME).max(peak);
+            self.deck_spectrum[index].observe(input);
+        }
     }
 
     fn mix_replacement(
@@ -1078,15 +1308,17 @@ impl AudioRenderer {
             self.replacement_positions[index] = self.deck_positions[index];
             self.replacement_stream_playback[index] = self.stream_playback[index];
             self.replacement_stem_playback[index] = self.stem_stream_playback[index];
-            let fade_frames = if matches!(previous.kind, SourceKind::Stream)
-                && matches!(source_kind, SourceKind::StemStream)
-            {
-                // Raw→STEM is a timbre change, not a same-source seek. 20ms is still below
-                // transport latency and avoids the 5ms tick that read as a stutter.
-                (self.output_sample_rate / 50).max(1)
-            } else {
-                (self.output_sample_rate / 200).max(1)
-            };
+            let fade_frames =
+                if matches!(previous.kind, SourceKind::Stream | SourceKind::StemStream)
+                    && matches!(source_kind, SourceKind::Stream | SourceKind::StemStream)
+                    && previous.kind != source_kind
+                {
+                    // Raw→STEM is a timbre change. An 80ms overlap is short to operate but long
+                    // enough to hide the model timbre edge without a perceived stop/start tick.
+                    (self.output_sample_rate * 2 / 25).max(1)
+                } else {
+                    (self.output_sample_rate / 200).max(1)
+                };
             self.replacement_remaining[index] = fade_frames;
             self.replacement_total[index] = fade_frames;
         } else {
@@ -1125,6 +1357,9 @@ impl AudioRenderer {
         self.stem_stream_playback[index] = StreamPlaybackState::default();
         self.deck_output_underruns[index] = 0;
         self.deck_min_buffered_frames[index] = u64::MAX;
+        self.deck_peak_levels[index] = 0.0;
+        self.deck_spectrum[index].reset();
+        self.deck_levels_active[index] = false;
     }
 
     fn clear_prepared(&mut self, deck: DeckId) {
@@ -1150,6 +1385,9 @@ impl AudioRenderer {
         self.replacement_total[index] = 0;
         self.deck_output_underruns[index] = 0;
         self.deck_min_buffered_frames[index] = u64::MAX;
+        self.deck_peak_levels[index] = 0.0;
+        self.deck_spectrum[index].reset();
+        self.deck_levels_active[index] = false;
         if deck == self.active_deck && self.mode == PlayerMode::Continuous {
             self.stop_transport();
             self.transition = None;
@@ -1218,6 +1456,13 @@ impl AudioRenderer {
                     self.deck_rates[deck as usize] = f64::from(rate);
                 }
             }
+            RtCommand::SetDeckRates { rates } => {
+                for (deck, rate) in rates.into_iter().enumerate() {
+                    if rate.is_finite() && rate > 0.0 {
+                        self.deck_rates[deck] = f64::from(rate);
+                    }
+                }
+            }
             RtCommand::SetDeckStemGains { deck, gains } => {
                 let state = &mut self.stem_gains[deck as usize];
                 for lane in 0..STEM_LANES {
@@ -1262,10 +1507,34 @@ impl AudioRenderer {
                 filter,
                 self.filter_resonance,
             ),
+            RtCommand::SetDeckFx {
+                deck,
+                echo,
+                echo_parameter,
+                reverb,
+                reverb_parameter,
+                gater,
+                gater_parameter,
+                pad,
+                beat_seconds,
+            } => {
+                self.deck_manual_fx[deck as usize].configure(
+                    echo,
+                    echo_parameter,
+                    reverb,
+                    reverb_parameter,
+                    gater,
+                    gater_parameter,
+                    pad,
+                    beat_seconds,
+                );
+            }
             RtCommand::SeekPrepared { deck, frame } => {
                 let index = deck as usize;
                 self.deck_positions[index] = frame as f64;
                 self.deck_eq[index].reset();
+                self.deck_peak_levels[index] = 0.0;
+                self.deck_spectrum[index].reset();
                 self.scratch_tapes[index].reset();
                 self.stream_playback[index] = StreamPlaybackState::default();
                 self.stem_stream_playback[index] = StreamPlaybackState::default();
@@ -1282,6 +1551,8 @@ impl AudioRenderer {
             } => {
                 self.deck_positions[to as usize] = target_frame as f64;
                 self.deck_eq[to as usize].reset();
+                self.deck_peak_levels[to as usize] = 0.0;
+                self.deck_spectrum[to as usize].reset();
                 if to == self.active_deck || transition_frames == 0 {
                     self.active_deck = to;
                     self.transition = None;
@@ -1383,6 +1654,9 @@ impl AudioRenderer {
     fn ensure_eq_sample_rate(&mut self) {
         for eq in &mut self.deck_eq {
             eq.ensure_sample_rate(self.output_sample_rate);
+        }
+        for spectrum in &mut self.deck_spectrum {
+            spectrum.ensure_sample_rate(self.output_sample_rate);
         }
     }
 
@@ -1495,6 +1769,11 @@ impl AudioRenderer {
             self.deck_output_underruns,
             self.deck_min_buffered_frames
                 .map(|frames| if frames == u64::MAX { 0 } else { frames }),
+            self.deck_peak_levels,
+            [
+                self.deck_spectrum[0].levels(),
+                self.deck_spectrum[1].levels(),
+            ],
         );
     }
 }
@@ -1949,6 +2228,79 @@ mod tests {
     }
 
     #[test]
+    fn manual_echo_fx_is_audible_after_its_beat_synced_delay() {
+        let (mut controller, mut renderer) = command_channel(8);
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::SetDeckFx {
+                deck: DeckId::A,
+                echo: 1.0,
+                echo_parameter: 0.0,
+                reverb: 0.0,
+                reverb_parameter: 0.5,
+                gater: 0.0,
+                gater_parameter: 0.5,
+                pad: 0,
+                beat_seconds: 0.1,
+            })
+            .unwrap();
+        let mut input = vec![0.0; 1_000];
+        input[0] = 1.0;
+        let mut output = vec![0.0; input.len()];
+        renderer.render(&input, &[], &mut output, 1);
+        assert!(
+            output.iter().skip(250).any(|sample| sample.abs() > 0.01),
+            "the manual echo must produce a delayed wet sample",
+        );
+    }
+
+    #[test]
+    fn realtime_peak_snapshot_preserves_over_zero_dbfs_values() {
+        let (mut controller, mut renderer) = command_channel(4);
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        let mut output = [0.0; 16];
+        renderer.render(&[1.2; 16], &[], &mut output, 1);
+        assert!(controller.snapshot().deck_peak_levels[0] >= 1.2);
+    }
+
+    #[test]
+    fn realtime_snapshot_exposes_independent_post_eq_spectrum_bands() {
+        let (mut controller, mut renderer) = command_channel(4);
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        let input = (0..12_000)
+            .map(|frame| (std::f32::consts::TAU * 1_000.0 * frame as f32 / 48_000.0).sin() * 0.5)
+            .collect::<Vec<_>>();
+        let mut output = vec![0.0; input.len()];
+        renderer.render(&input, &[], &mut output, 1);
+        let snapshot = controller.snapshot();
+        let strongest = snapshot.deck_spectrum_levels[0]
+            .iter()
+            .enumerate()
+            .max_by(|left, right| left.1.total_cmp(right.1))
+            .map(|(index, _)| index);
+        assert_eq!(strongest, Some(7));
+        assert_eq!(
+            snapshot.deck_spectrum_levels[1],
+            [0.0; crate::EQ_SPECTRUM_BANDS]
+        );
+    }
+
+    #[test]
     fn crossfader_endpoint_gains_isolate_the_requested_deck() {
         let (mut controller, mut renderer) = command_channel(16);
         controller
@@ -2281,6 +2633,18 @@ mod tests {
         );
         assert!((controller.snapshot().deck_frames[0] as i64 - 1_024).abs() <= 2);
         drop(writer);
+    }
+
+    #[test]
+    fn linked_deck_rates_are_applied_in_one_callback_command() {
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .send(RtCommand::SetDeckRates { rates: [1.2, 0.8] })
+            .unwrap();
+        let mut output = [0.0; 2];
+        renderer.render_prepared(&mut output, 48_000, 1);
+        assert!((renderer.deck_rates[0] - 1.2).abs() < 1e-6);
+        assert!((renderer.deck_rates[1] - 0.8).abs() < 1e-6);
     }
 
     #[test]

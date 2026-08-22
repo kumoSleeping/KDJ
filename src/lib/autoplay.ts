@@ -111,13 +111,15 @@ export async function trackById(id: number): Promise<Track | null> {
   if (oneLibrary) return oneLibrary;
   // OneLibrary 的负数稳定 id 若不在本次运行快照里，不能拿去请求本地 tracks API。
   if (id < 0) return null;
-  const inPage = useLibraryStore.getState().tracks.find((track) => track.id === id);
-  if (inPage) return inPage;
+  const inPage = useLibraryStore.getState().tracks.find((track) => track.id === id) ?? null;
   try {
+    // Deck memory/history only stores ids, so this boundary must fetch the authoritative row.
+    // An in-page object can predate a v2 BPM analysis and still contain BPM/Key while missing
+    // first_beat; reusing it makes the restored second Deck lose its grid and disables SYNC.
     return await api.track(id);
   } catch {
-    // 曲目被删了 / 后端不通：安静放弃，按钮点了没反应好过弹一条错误
-    return null;
+    // 后端短暂不可用时，页内对象仍比完全丢掉历史/唱盘更有用。
+    return inPage;
   }
 }
 

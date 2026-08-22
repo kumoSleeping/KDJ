@@ -1,4 +1,5 @@
 import { cueColor, waveformLoopRegions } from "./cuePoints";
+import { waveformDisplayRgb } from "./waveformPalette";
 import type { CuePoint, Waveform } from "../types";
 
 export interface PerformanceWaveRenderLane {
@@ -241,9 +242,15 @@ export function packPerformanceWaveformTexture(
   const knownBytes = new Uint8Array(width * height);
   for (let index = 0; index < count; index += 1) {
     const colorAt = index * 4;
-    colorBytes[colorAt] = clamp(Math.round(wave.r[index] ?? 0), 0, 255);
-    colorBytes[colorAt + 1] = clamp(Math.round(wave.g[index] ?? 0), 0, 255);
-    colorBytes[colorAt + 2] = clamp(Math.round(wave.b[index] ?? 0), 0, 255);
+    const [red, green, blue] = waveformDisplayRgb(
+      wave.r[index] ?? 0,
+      wave.g[index] ?? 0,
+      wave.b[index] ?? 0,
+      wave.amp[index] ?? 0,
+    );
+    colorBytes[colorAt] = red;
+    colorBytes[colorAt + 1] = green;
+    colorBytes[colorAt + 2] = blue;
     colorBytes[colorAt + 3] = clamp(Math.round((wave.amp[index] ?? 0) * 255), 0, 255);
     knownBytes[index] = wave.known === undefined || wave.known[index] ? 255 : 0;
   }
@@ -638,9 +645,9 @@ export class PerformanceWaveformRenderer {
           ctx.restore();
         }
       };
-      strokeLines(minorLines, "rgba(210,218,228,0.34)", 1);
-      strokeLines(barLines.map((line) => line.x), "#e4c400", 2);
-      ctx.fillStyle = "#f7dd49";
+      strokeLines(minorLines, "rgba(210,218,228,0.26)", 1);
+      strokeLines(barLines.map((line) => line.x), "#e8c126", 1);
+      ctx.fillStyle = "#ffe56a";
       ctx.shadowColor = "#000";
       ctx.shadowBlur = 2;
       for (const line of barLines) {
@@ -730,7 +737,13 @@ export class PerformanceWaveformRenderer {
         const amp = clamp(source.amp[sourceIndex] ?? 0, 0, 1);
         if ((known && (lane.silenceThreshold ?? 0) > 0 && amp <= (lane.silenceThreshold ?? 0)) || amp <= 0.01) continue;
         ctx.globalAlpha = (lane.opacity ?? 1) * (known ? 1 : 0.3);
-        ctx.fillStyle = `rgb(${source.r[sourceIndex] ?? 0},${source.g[sourceIndex] ?? 0},${source.b[sourceIndex] ?? 0})`;
+        const [red, green, blue] = waveformDisplayRgb(
+          source.r[sourceIndex] ?? 0,
+          source.g[sourceIndex] ?? 0,
+          source.b[sourceIndex] ?? 0,
+          amp,
+        );
+        ctx.fillStyle = `rgb(${red},${green},${blue})`;
         const half = Math.max(0.5, amp * availableHalf);
         ctx.fillRect(x, middle - half, 1, half * 2);
       }
