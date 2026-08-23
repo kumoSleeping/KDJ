@@ -5,11 +5,29 @@ import {
   isOneLibraryPlaybackTrack,
   oneLibraryPlaybackSource,
 } from "./playbackTrackSource";
+import { overviewWaveformFromDetail } from "./waveformViewport";
 
 /** 当前曲、下一台 Deck 和最近查看过的歌曲足够；避免整晚演出后数组只增不减。 */
 const CACHE_LIMIT = 24;
-const cache = new Map<number, Waveform>();
-const inflight = new Map<number, Promise<Waveform>>();
+const DEFAULT_WAVEFORM_BUCKETS = 640;
+const cache = new Map<string, Waveform>();
+const inflight = new Map<string, Promise<Waveform>>();
+
+function normalizedBuckets(buckets: number): number {
+  return Math.min(24_000, Math.max(64, Math.round(Number.isFinite(buckets) ? buckets : DEFAULT_WAVEFORM_BUCKETS)));
+}
+
+function waveformCacheKey(trackId: number, buckets: number): string {
+  return `${trackId}:${normalizedBuckets(buckets)}`;
+}
+
+function waveformKeyParts(key: string): [number, number] | null {
+  const separator = key.lastIndexOf(":");
+  if (separator <= 0) return null;
+  const trackId = Number(key.slice(0, separator));
+  const buckets = Number(key.slice(separator + 1));
+  return Number.isFinite(trackId) && Number.isFinite(buckets) ? [trackId, buckets] : null;
+}
 
 /**
  * 在线波形不能另起一次 fetch：媒体元素已经在下载同一首歌，再拉整轨会浪费双倍流量，
@@ -94,9 +112,9 @@ function emptyStreamEntry(trackId: number, duration: number): StreamWaveformEntr
   };
 }
 
-const STREAM_AMP_GAMMA = 1.2;
-const STREAM_COLOR_GAMMA = 6;
-const STREAM_COLOR_FLOOR = 0.12;
+const STREAM_AMP_GAMMA = 0.9;
+const STREAM_COLOR_GAMMA = 2.4;
+const STREAM_COLOR_FLOOR = 0.06;
 
 function percentile(sorted: readonly number[], percent: number): number {
   if (sorted.length === 0) return 0;
@@ -471,83 +489,133 @@ export function clearStreamWaveform(trackId: number): void {
   notifyStreamWaveform(trackId);
 }
 
-function remember(trackId: number, wave: Waveform): Waveform {
-  cache.delete(trackId);
-  cache.set(trackId, wave);
+function remember(trackId: number, buckets: number, wave: Waveform): Waveform {
+  const key = waveformCacheKey(trackId, buckets);
+  cache.delete(key);
+  cache.set(key, wave);
   while (cache.size > CACHE_LIMIT) {
-    const oldest = cache.keys().next().value as number | undefined;
+    const oldest = cache.keys().next().value as string | undefined;
     if (oldest === undefined) break;
     cache.delete(oldest);
   }
   return wave;
 }
 
-export function cachedWaveform(trackId: number): Waveform | null {
-  const hit = cache.get(trackId);
-  if (!hit) return null;
-  // Map 的插入顺序就是 LRU 顺序；命中一次便挪到队尾。
-  return remember(trackId, hit);
+export function cachedWaveform(trackId: number, buckets = DEFAULT_WAVEFORM_BUCKETS): Waveform | null {
+  const key = waveformCacheKey(trackId, buckets);
+  const hit = cache.get(key);
+  if (hit) {
+    // Map 的插入顺序就是 LRU 顺序；命中一次便挪到队尾。
+    return remember(trackId, buckets, hit);
+  }
+  const requested = normalizedBuckets(buckets);
+  // 高密度响应可以直接画在较窄 canvas 上，不能因为 key 不同又解一次整轨。
+  // 从最新项向前找，优先复用已经在 Deck 上的 master。
+  for (const [candidateKey, candidate] of [...cache.entries()].reverse()) {
+    const parts = waveformKeyParts(candidateKey);
+    if (!parts || parts[0] !== trackId || parts[1] < requested) continue;
+    cache.delete(candidateKey);
+    cache.set(candidateKey, candidate);
+    return remember(trackId, requested, overviewWaveformFromDetail(candidate, requested));
+  }
+  return null;
 }
 
-export function loadWaveform(trackId: number): Promise<Waveform> {
-  const hit = cachedWaveform(trackId);
+function denserInflight(trackId: number, buckets: number): Promise<Waveform> | null {
+  const requested = normalizedBuckets(buckets);
+  for (const [candidateKey, pending] of inflight) {
+    const parts = waveformKeyParts(candidateKey);
+    if (parts && parts[0] === trackId && parts[1] >= requested) {
+      return pending.then((wave) =>
+        remember(trackId, requested, overviewWaveformFromDetail(wave, requested))
+      );
+    }
+  }
+  return null;
+}
+
+function sparserInflight(trackId: number, buckets: number): Promise<Waveform> | null {
+  const requested = normalizedBuckets(buckets);
+  for (const [candidateKey, pending] of inflight) {
+    const parts = waveformKeyParts(candidateKey);
+    if (parts && parts[0] === trackId && parts[1] < requested) return pending;
+  }
+  return null;
+}
+
+export function loadWaveform(trackId: number, buckets = DEFAULT_WAVEFORM_BUCKETS): Promise<Waveform> {
+  const normalized = normalizedBuckets(buckets);
+  const key = waveformCacheKey(trackId, normalized);
+  const hit = cachedWaveform(trackId, normalized);
   if (hit) return Promise.resolve(hit);
-  const pending = inflight.get(trackId);
+  const denser = denserInflight(trackId, normalized);
+  if (denser) return denser;
+  const pending = inflight.get(key);
   if (pending) return pending;
+  const preview = sparserInflight(trackId, normalized);
+  if (preview) return preview.then(() => loadWaveform(trackId, normalized));
   const request = api
-    .waveform(trackId)
+    .waveform(trackId, normalized)
     .then((data) => {
-      inflight.delete(trackId);
-      return remember(trackId, data);
+      inflight.delete(key);
+      return remember(trackId, normalized, data);
     })
     .catch((error: unknown) => {
-      inflight.delete(trackId);
+      inflight.delete(key);
       throw error;
     });
-  inflight.set(trackId, request);
+  inflight.set(key, request);
   return request;
 }
 
-function loadOneLibraryWaveform(track: Track): Promise<Waveform> {
-  const hit = cachedWaveform(track.id);
+function loadOneLibraryWaveform(track: Track, buckets = DEFAULT_WAVEFORM_BUCKETS): Promise<Waveform> {
+  const normalized = normalizedBuckets(buckets);
+  const key = waveformCacheKey(track.id, normalized);
+  const hit = cachedWaveform(track.id, normalized);
   if (hit) return Promise.resolve(hit);
-  const pending = inflight.get(track.id);
+  const denser = denserInflight(track.id, normalized);
+  if (denser) return denser;
+  const pending = inflight.get(key);
   if (pending) return pending;
+  const preview = sparserInflight(track.id, normalized);
+  if (preview) return preview.then(() => loadOneLibraryWaveform(track, normalized));
   const source = oneLibraryPlaybackSource(track);
   if (!source) return Promise.reject(new Error("OneLibrary 播放来源无效"));
   const request = api
-    .oneLibraryWaveform(source.devicePath, source.contentId, track.id)
+    .oneLibraryWaveform(source.devicePath, source.contentId, track.id, normalized)
     .then((data) => {
-      inflight.delete(track.id);
-      return remember(track.id, data);
+      inflight.delete(key);
+      return remember(track.id, normalized, data);
     })
     .catch((error: unknown) => {
-      inflight.delete(track.id);
+      inflight.delete(key);
       throw error;
     });
-  inflight.set(track.id, request);
+  inflight.set(key, request);
   return request;
 }
 
 /** 曲库波形走服务端缓存；负 id 只能读取媒体播放过程中形成的渐进快照。 */
-export function loadWaveformById(trackId: number): Promise<Waveform> {
-  if (trackId >= 0) return loadWaveform(trackId);
+export function loadWaveformById(trackId: number, buckets = DEFAULT_WAVEFORM_BUCKETS): Promise<Waveform> {
+  if (trackId >= 0) return loadWaveform(trackId, buckets);
   const snapshot = streamWaveformSnapshot(trackId);
   return snapshot
     ? Promise.resolve(snapshot.waveform)
     : Promise.reject(new Error("在线试听波形正在随媒体缓存生成"));
 }
 
-export function loadWaveformForTrack(track: Track): Promise<Waveform> {
-  if (isOneLibraryPlaybackTrack(track)) return loadOneLibraryWaveform(track);
-  return isStreamTrack(track) ? loadWaveformById(track.id) : loadWaveform(track.id);
+export function loadWaveformForTrack(track: Track, buckets = DEFAULT_WAVEFORM_BUCKETS): Promise<Waveform> {
+  if (isOneLibraryPlaybackTrack(track)) return loadOneLibraryWaveform(track, buckets);
+  return isStreamTrack(track) ? loadWaveformById(track.id, buckets) : loadWaveform(track.id, buckets);
 }
 
 /**
- * 本地曲提前读服务端缓存。在线曲明确不预取：它由正在播放的媒体 buffered +
- * analyser 渐进生成，不能为了底部波形再下载一次整首音频。
+ * Current and predicted tracks only prefetch the canonical first-paint waveform. A detailed
+ * master is requested by a mounted rail after it has stayed visible; eagerly decoding every
+ * current/predicted Deck made one load compete with the other Deck's live transport.
  */
 export function prefetchWaveform(track: Track | null | undefined): void {
   if (!track || isStreamTrack(track)) return;
-  void loadWaveformForTrack(track).catch(() => undefined);
+  void loadWaveformForTrack(track, DEFAULT_WAVEFORM_BUCKETS)
+    .catch(() => undefined);
 }

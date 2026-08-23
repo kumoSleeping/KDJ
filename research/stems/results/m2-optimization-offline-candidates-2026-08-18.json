@@ -1,0 +1,159 @@
+{
+  "machine": {
+    "model": "MacBook Air M2",
+    "memoryGiB": 16,
+    "macOS": "26.5",
+    "xcode": "15.2",
+    "torch": "2.13.0",
+    "corpus": "20 distinct 44.1 kHz stereo local excerpts"
+  },
+  "rt3sOptimization": {
+    "deadlineMs": 11.609977,
+    "baselineSeparateLaunchers": {
+      "deckServiceMeanMs": [15.995318, 15.978882],
+      "deckServiceP99Ms": [26.493626, 27.900184],
+      "deadlineMissesPerDeck": 498,
+      "armedRssBytes": 1710000000
+    },
+    "oneLauncherOneGraphTwoIndependentProcessors": {
+      "batchServiceMeanMs": 15.908182,
+      "batchServiceP95Ms": 19.556412,
+      "batchServiceP99Ms": 21.650210,
+      "deadlineMisses": 500,
+      "completionP99FromReleaseMs": 2188.529927,
+      "armedRssBytes": 1497923584,
+      "finding": "Graph sharing reduces P99 and about 200 MiB, but not sustained compute throughput."
+    },
+    "mixedFp16": {
+      "convertedTensors": 11,
+      "fp32ParamsBytes": 200653256,
+      "mixedParamsBytes": 164424840,
+      "mixedParamsSha256": "49a8347a16447c13fcf05decf82be3ce471eaad334dc0cd18f5fa42342d2d196",
+      "singleDeckServiceMeanMs": 9.129017,
+      "singleDeckServiceP99Ms": 11.663711,
+      "sharedGraphDualDeckServiceMeanMs": 15.599279,
+      "sharedGraphDualDeckServiceP95Ms": 18.397205,
+      "sharedGraphDualDeckServiceP99Ms": 19.103388,
+      "sharedGraphDeadlineMisses": 500,
+      "sharedGraphArmedRssBytes": 1363099648,
+      "qualitySdrAgainstFp32Db": {
+        "drums": 71.702,
+        "bass": 70.7971,
+        "vocals": 62.9178,
+        "other": 69.7839
+      },
+      "finding": "Quality is retained and memory improves, but dual-Deck throughput still fails."
+    },
+    "spectralLiteRejected": {
+      "batchServiceMeanMs": 9.866913,
+      "batchServiceP95Ms": 12.265455,
+      "batchServiceP99Ms": 12.692403,
+      "deadlineMisses": 266,
+      "simulated250msRingStarvedHops": 0,
+      "stemSumVsSourceSdrDb": [-2.15069, -2.12464],
+      "stemSumRmsRatioDb": -2.61542,
+      "finding": "Average dual-Deck throughput passes only after deleting the waveform branch; separation and reconstruction quality become unacceptable."
+    },
+    "lowerEndAppleSilicon": {
+      "status": "not qualified",
+      "reason": "Even the best full-quality M2 dual-Deck P99 is 19.10 ms versus an 11.61 ms deadline. No lower-end Apple Silicon can be claimed from a failing M2 result."
+    }
+  },
+  "assets": {
+    "dttnet": {
+      "repository": "https://github.com/junyuchen-cjy/DTTNet-Pytorch",
+      "commit": "890a25ea4b8e0433d5e1fe5acf92a4eab781de61",
+      "sourceLicense": "Apache-2.0",
+      "checkpointLicense": "No separate checkpoint license was found; official repository download links are the provenance evidence.",
+      "megaFolderFinding": "The official Mega folder currently exposes bass and vocals only.",
+      "baiduDrumsOtherStatus": "abandoned by scope decision; no further Baidu login, transfer, download or four-checkpoint benchmark is planned",
+      "files": {
+        "bass": {
+          "name": "bassg32_ep2935.ckpt",
+          "bytes": 50686772,
+          "sha256": "ac30d7ae072a94f2b878ce53c52a6d583455378e10896af7a4681ee4c2d93d07",
+          "downloaded": true
+        },
+        "vocals": {
+          "name": "vocalsg32_ep4082.ckpt",
+          "bytes": 59956788,
+          "sha256": "7bd9654cdda816152ea09dec1a6aa2bdb216c9b3bb11984199e95590a665eff5",
+          "downloaded": true
+        },
+        "drums": {
+          "name": "drumsg32_ep1612.ckpt",
+          "bytes": 59956788,
+          "downloaded": false,
+          "status": "abandoned"
+        },
+        "other": {
+          "name": "otherg32_ep3605.ckpt",
+          "bytes": 59956788,
+          "downloaded": false,
+          "status": "abandoned"
+        }
+      }
+    },
+    "scnetSmall": {
+      "implementationRepository": "https://github.com/ZFTurbo/Music-Source-Separation-Training",
+      "implementationCommit": "2ba884c2083070c4061fb2d5e3afc41e32420b8a",
+      "preferredDownloadSource": "ZFTurbo Music-Source-Separation-Training GitHub Release",
+      "release": "v.1.0.6",
+      "releaseName": "SCNet MUSDB18",
+      "releaseUrl": "https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/tag/v.1.0.6",
+      "checkpointDownloadUrl": "https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/download/v.1.0.6/scnet_checkpoint_musdb18.ckpt",
+      "configDownloadUrl": "https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/download/v.1.0.6/config_musdb18_scnet.yaml",
+      "releaseAssetsDirectDownloadVerified": true,
+      "releaseAssetsMatchLocalEvaluatorByteForByte": true,
+      "sourceAndCheckpointLicense": "MIT with author clarification for checkpoint/converted redistribution",
+      "checkpointBytes": 42434986,
+      "checkpointSha256": "1bc0d1abb20bfdf966dcd07637bafd03e4bc13653d09ef18bc9b3e342eafe2aa",
+      "configBytes": 1739,
+      "configSha256": "19103def86d549701f824804fc5f3d244e8e8ccd4032da6ee9d5b4f2a5f2da16"
+    }
+  },
+  "twentyTrackBenchmark": {
+    "chunkSeconds": 5.92,
+    "dttnetBass": {
+      "parameters": 4199368,
+      "output": "one stereo bass stem",
+      "mpsSingleSeconds": {"mean": 0.250555, "p95": 0.257503, "p99": 0.258850},
+      "mpsDualBatchSeconds": {"mean": 0.479941, "p95": 0.490729, "p99": 0.553898},
+      "mpsSingleRtf": 0.0423,
+      "cpuSingleSeconds": {"mean": 1.503191, "p95": 1.563704, "p99": 1.601686},
+      "cpuDualBatchSeconds": {"mean": 2.695480, "p95": 2.740323, "p99": 2.762241},
+      "contextShiftOverlapSdrDb": 17.9552,
+      "mpsDriverPeakBytes": 5348786176,
+      "nonFiniteSamples": 0
+    },
+    "dttnetVocals": {
+      "parameters": 4968712,
+      "output": "one stereo vocals stem",
+      "mpsSingleSeconds": {"mean": 0.540187, "p95": 0.548517, "p99": 0.549048},
+      "mpsDualBatchSeconds": {"mean": 1.112018, "p95": 1.175995, "p99": 1.568630},
+      "mpsSingleRtf": 0.0912,
+      "cpuSingleSeconds": {"mean": 3.850783, "p95": 3.937219, "p99": 4.007560},
+      "cpuDualBatchSeconds": {"mean": 7.502005, "p95": 7.940655, "p99": 7.981336},
+      "contextShiftOverlapSdrDb": 7.3111,
+      "mpsDriverPeakBytes": 12137299968,
+      "nonFiniteSamples": 0
+    },
+    "scnetSmall": {
+      "parameters": 10578768,
+      "output": "four stereo stems in one model call",
+      "mpsSingleSeconds": {"mean": 0.287116, "p95": 0.291053, "p99": 0.296629},
+      "mpsDualBatchSeconds": {"mean": 0.598227, "p95": 0.681495, "p99": 0.690844},
+      "mpsSingleRtf": 0.0485,
+      "cpuSingleSeconds": {"mean": 1.843672, "p95": 1.893564, "p99": 1.945044},
+      "cpuDualBatchSeconds": {"mean": 3.484573, "p95": 3.671498, "p99": 3.682380},
+      "contextShiftOverlapSdrDb": 19.1068,
+      "mpsDriverPeakMiB": 5915.03,
+      "nonFiniteSamples": 0
+    }
+  },
+  "latencyVerdict": {
+    "dttnet": "Not causal: 6144 STFT, 5.92 s trained chunk, 50% overlap-add and bidirectional LSTMs. Warm first target output is 250-540 ms per available stem, not <30 ms.",
+    "scnetSmall": "Not causal and context-dependent. It is the faster complete four-stem cache candidate, but a 5.92 s MPS chunk still takes about 287 ms and changes by 19.1 dB under a one-second context shift.",
+    "recommendedUse": "SCNet Small for background/Hot-Cue-neighborhood cache generation; neither candidate belongs in the 512-sample audio callback path."
+  }
+}

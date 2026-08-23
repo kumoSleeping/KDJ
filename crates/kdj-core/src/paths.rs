@@ -16,7 +16,12 @@ pub fn sanitize_filename_value(value: &str, fallback: &str) -> String {
     let cleaned: String = value
         .trim()
         .chars()
-        .filter(|c| !matches!(c, '\\' | '/' | '*' | '?' | ':' | '"' | '<' | '>' | '|' | '\r' | '\n' | '\t'))
+        .filter(|c| {
+            !matches!(
+                c,
+                '\\' | '/' | '*' | '?' | ':' | '"' | '<' | '>' | '|' | '\r' | '\n' | '\t'
+            )
+        })
         .collect();
     // 连续空白压成一个空格
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -235,7 +240,14 @@ mod tests {
 
     #[test]
     fn renders_the_default_template() {
-        let name = render_filename("{title} - {artist}", "夜曲", "周杰伦", "十一月的萧邦", "1", "flac");
+        let name = render_filename(
+            "{title} - {artist}",
+            "夜曲",
+            "周杰伦",
+            "十一月的萧邦",
+            "1",
+            "flac",
+        );
         assert_eq!(name, "夜曲 - 周杰伦.flac");
     }
 
@@ -249,10 +261,16 @@ mod tests {
 
     #[test]
     fn is_within_rejects_sibling_prefix_collisions() {
-        assert!(is_within(Path::new("/lib/set"), Path::new("/lib/set/a.mp3")));
+        assert!(is_within(
+            Path::new("/lib/set"),
+            Path::new("/lib/set/a.mp3")
+        ));
         assert!(is_within(Path::new("/lib/set"), Path::new("/lib/set")));
         // "/lib/set2" 不在 "/lib/set" 里，字符串前缀匹配会误判，Path::starts_with 不会
-        assert!(!is_within(Path::new("/lib/set"), Path::new("/lib/set2/a.mp3")));
+        assert!(!is_within(
+            Path::new("/lib/set"),
+            Path::new("/lib/set2/a.mp3")
+        ));
     }
 
     #[test]

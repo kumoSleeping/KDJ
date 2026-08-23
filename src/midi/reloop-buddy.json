@@ -1,0 +1,148 @@
+{
+  "name": "Reloop Buddy",
+  "description": "监听键切换 EQ / STEM EQ。Shift+高频=GAIN，Shift+低频=FILTER。TEMPO 走 10-bit（MSB 9 / LSB 63，max 1023）并反相。缓动盘 CC 6 + 电容 Note 6：按盘局部刮擦，边缘转动临时 pitch bend；Shift+缓动盘（CC 6 的 Shift 层或设备 CC 43）整轨快搜。选歌旋钮默认反转（顺时针往下），切侧栏/列表并 Load A/B。",
+  "match": {
+    "portContains": ["Buddy"]
+  },
+  "bindings": [
+    { "kind": "note", "channel": 0, "data": 0, "actions": [{ "type": "playToggle", "deck": 0 }] },
+    { "kind": "note", "channel": 0, "data": 16, "actions": [{ "type": "playToggle", "deck": 0 }] },
+    { "kind": "note", "channel": 0, "data": 1, "actions": [{ "type": "cue", "deck": 0 }] },
+    { "kind": "note", "channel": 0, "data": 5, "actions": [{ "type": "cue", "deck": 0 }] },
+    { "kind": "note", "channel": 0, "data": 2, "actions": [{ "type": "sync", "deck": 0 }] },
+    { "kind": "note", "channel": 0, "data": 3, "actions": [{ "type": "sync", "deck": 0 }] },
+    { "kind": "note", "channel": 0, "data": 27, "actions": [{ "type": "toggleEqStem", "deck": 0 }] },
+    { "kind": "note", "channel": 1, "data": 0, "actions": [{ "type": "playToggle", "deck": 1 }] },
+    { "kind": "note", "channel": 1, "data": 16, "actions": [{ "type": "playToggle", "deck": 1 }] },
+    { "kind": "note", "channel": 1, "data": 1, "actions": [{ "type": "cue", "deck": 1 }] },
+    { "kind": "note", "channel": 1, "data": 5, "actions": [{ "type": "cue", "deck": 1 }] },
+    { "kind": "note", "channel": 1, "data": 2, "actions": [{ "type": "sync", "deck": 1 }] },
+    { "kind": "note", "channel": 1, "data": 3, "actions": [{ "type": "sync", "deck": 1 }] },
+    { "kind": "note", "channel": 1, "data": 27, "actions": [{ "type": "toggleEqStem", "deck": 1 }] },
+
+    {
+      "kind": "cc",
+      "channel": 0,
+      "data": 23,
+      "actions": [
+        { "type": "eqHigh", "deck": 0, "when": { "eqStem": "eq", "shift": false } },
+        { "type": "stemGain", "deck": 0, "stems": ["vocals"], "when": { "eqStem": "stems", "shift": false } },
+        { "type": "gain", "deck": 0, "when": { "shift": true } }
+      ]
+    },
+    {
+      "kind": "cc",
+      "channel": 0,
+      "data": 25,
+      "actions": [
+        { "type": "eqMid", "deck": 0, "when": { "eqStem": "eq" } },
+        { "type": "stemGain", "deck": 0, "stems": ["other", "bass"], "when": { "eqStem": "stems" } }
+      ]
+    },
+    {
+      "kind": "cc",
+      "channel": 0,
+      "data": 26,
+      "actions": [
+        { "type": "eqLow", "deck": 0, "when": { "eqStem": "eq", "shift": false } },
+        { "type": "stemGain", "deck": 0, "stems": ["drums"], "when": { "eqStem": "stems", "shift": false } },
+        { "type": "filter", "deck": 0, "when": { "shift": true } }
+      ]
+    },
+    {
+      "kind": "cc",
+      "channel": 1,
+      "data": 23,
+      "actions": [
+        { "type": "eqHigh", "deck": 1, "when": { "eqStem": "eq", "shift": false } },
+        { "type": "stemGain", "deck": 1, "stems": ["vocals"], "when": { "eqStem": "stems", "shift": false } },
+        { "type": "gain", "deck": 1, "when": { "shift": true } }
+      ]
+    },
+    {
+      "kind": "cc",
+      "channel": 1,
+      "data": 25,
+      "actions": [
+        { "type": "eqMid", "deck": 1, "when": { "eqStem": "eq" } },
+        { "type": "stemGain", "deck": 1, "stems": ["other", "bass"], "when": { "eqStem": "stems" } }
+      ]
+    },
+    {
+      "kind": "cc",
+      "channel": 1,
+      "data": 26,
+      "actions": [
+        { "type": "eqLow", "deck": 1, "when": { "eqStem": "eq", "shift": false } },
+        { "type": "stemGain", "deck": 1, "stems": ["drums"], "when": { "eqStem": "stems", "shift": false } },
+        { "type": "filter", "deck": 1, "when": { "shift": true } }
+      ]
+    },
+
+    { "kind": "cc", "channel": 0, "data": 55, "actions": [{ "type": "gain", "deck": 0 }] },
+    { "kind": "cc", "channel": 1, "data": 55, "actions": [{ "type": "gain", "deck": 1 }] },
+    { "kind": "cc", "channel": 0, "data": 58, "actions": [{ "type": "filter", "deck": 0 }] },
+    { "kind": "cc", "channel": 1, "data": 58, "actions": [{ "type": "filter", "deck": 1 }] },
+
+    { "kind": "cc", "channel": 0, "data": 28, "actions": [{ "type": "volume", "deck": 0 }] },
+    { "kind": "cc", "channel": 1, "data": 28, "actions": [{ "type": "volume", "deck": 1 }] },
+    { "kind": "cc", "channel": 0, "data": 9, "lsb": 63, "max": 1023, "invert": true, "actions": [{ "type": "tempo", "deck": 0 }] },
+    { "kind": "cc", "channel": 1, "data": 9, "lsb": 63, "max": 1023, "invert": true, "actions": [{ "type": "tempo", "deck": 1 }] },
+    { "kind": "cc", "channel": 14, "data": 10, "actions": [{ "type": "master" }] },
+    { "kind": "cc", "channel": 14, "data": 8, "actions": [{ "type": "crossfader" }] },
+    { "kind": "note", "channel": 14, "data": 0, "edge": "all", "actions": [{ "type": "shiftHold" }] },
+    { "kind": "note", "channel": 0, "data": 36, "edge": "all", "actions": [{ "type": "shiftHold" }] },
+    { "kind": "note", "channel": 1, "data": 36, "edge": "all", "actions": [{ "type": "shiftHold" }] },
+
+    {
+      "kind": "cc",
+      "channel": 0,
+      "data": 6,
+      "actions": [
+        { "type": "jog", "deck": 0, "when": { "shift": false } },
+        { "type": "jogSeek", "deck": 0, "when": { "shift": true } }
+      ]
+    },
+    {
+      "kind": "cc",
+      "channel": 1,
+      "data": 6,
+      "actions": [
+        { "type": "jog", "deck": 1, "when": { "shift": false } },
+        { "type": "jogSeek", "deck": 1, "when": { "shift": true } }
+      ]
+    },
+    { "kind": "note", "channel": 0, "data": 6, "edge": "all", "actions": [{ "type": "jogTouch", "deck": 0 }] },
+    { "kind": "note", "channel": 1, "data": 6, "edge": "all", "actions": [{ "type": "jogTouch", "deck": 1 }] },
+    { "kind": "cc", "channel": 0, "data": 43, "actions": [{ "type": "jogSeek", "deck": 0 }] },
+    { "kind": "cc", "channel": 1, "data": 43, "actions": [{ "type": "jogSeek", "deck": 1 }] },
+
+    { "kind": "cc", "channel": 14, "data": 0, "invert": true, "actions": [{ "type": "browseStep" }] },
+    { "kind": "note", "channel": 14, "data": 6, "actions": [{ "type": "browsePress" }] },
+    { "kind": "note", "channel": 14, "data": 2, "actions": [{ "type": "loadSelected", "deck": 0 }] },
+    { "kind": "note", "channel": 14, "data": 3, "actions": [{ "type": "loadSelected", "deck": 1 }] },
+
+    { "kind": "note", "channel": 4, "data": 64, "actions": [{ "type": "loopToggle", "deck": 0 }] },
+    { "kind": "cc", "channel": 4, "data": 52, "actions": [{ "type": "loopSize", "deck": 0 }] },
+    { "kind": "note", "channel": 5, "data": 64, "actions": [{ "type": "loopToggle", "deck": 1 }] },
+    { "kind": "cc", "channel": 5, "data": 52, "actions": [{ "type": "loopSize", "deck": 1 }] }
+  ],
+  "outputs": [
+    { "kind": "note", "channel": 0, "data": 0, "from": "playing", "deck": 0 },
+    { "kind": "note", "channel": 0, "data": 16, "from": "playing", "deck": 0 },
+    { "kind": "note", "channel": 0, "data": 1, "from": "pausedLoaded", "deck": 0 },
+    { "kind": "note", "channel": 0, "data": 5, "from": "pausedLoaded", "deck": 0 },
+    { "kind": "note", "channel": 0, "data": 2, "from": "syncing", "deck": 0 },
+    { "kind": "note", "channel": 0, "data": 3, "from": "syncing", "deck": 0 },
+    { "kind": "note", "channel": 0, "data": 27, "from": "eqStem", "deck": 0 },
+    { "kind": "note", "channel": 4, "data": 64, "from": "looping", "deck": 0 },
+    { "kind": "note", "channel": 1, "data": 0, "from": "playing", "deck": 1 },
+    { "kind": "note", "channel": 1, "data": 16, "from": "playing", "deck": 1 },
+    { "kind": "note", "channel": 1, "data": 1, "from": "pausedLoaded", "deck": 1 },
+    { "kind": "note", "channel": 1, "data": 5, "from": "pausedLoaded", "deck": 1 },
+    { "kind": "note", "channel": 1, "data": 2, "from": "syncing", "deck": 1 },
+    { "kind": "note", "channel": 1, "data": 3, "from": "syncing", "deck": 1 },
+    { "kind": "note", "channel": 1, "data": 27, "from": "eqStem", "deck": 1 },
+    { "kind": "note", "channel": 5, "data": 64, "from": "looping", "deck": 1 }
+  ]
+}

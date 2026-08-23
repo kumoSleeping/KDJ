@@ -2809,7 +2809,9 @@ async fn one_library_waveform(
         move || crate::usb_library::one_library_content_file(&device_path, params.content_id)
     })
     .await?;
-    let buckets = params.buckets.clamp(64, 2_000);
+    let buckets = params
+        .buckets
+        .clamp(64, crate::waveform::MAX_WAVEFORM_BUCKETS);
     let waveform = state
         .waveforms
         .get_or_compute_detached(
@@ -4036,7 +4038,7 @@ const STREAM_CHUNK: usize = 256 * 1024;
 /// **边读边发**，对齐 Python 版的 `_iter_file`：整份读进内存的话，一首 100 MB 的
 /// flac 每被 seek 一次就要多占 100 MB——桌面上的表现是"拖一下进度条卡一下"，
 /// 安卓上直接就是 OOM。DJ 的曲库里 flac 是常态，不是边角情况。
-async fn audio_response(
+pub(crate) async fn audio_response(
     path: &Path,
     total: u64,
     mime: String,
@@ -4339,7 +4341,9 @@ async fn library_waveform(
     AxumPath(id): AxumPath<i64>,
     Query(params): Query<WaveformParams>,
 ) -> ApiResult<Json<Waveform>> {
-    let buckets = params.buckets.clamp(64, 2000);
+    let buckets = params
+        .buckets
+        .clamp(64, crate::waveform::MAX_WAVEFORM_BUCKETS);
     let track = state
         .library
         .get(id)?

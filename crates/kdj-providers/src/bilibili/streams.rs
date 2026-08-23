@@ -134,8 +134,7 @@ fn parse_streams(list: Option<&Value>) -> Vec<MediaStream> {
     };
     list.iter()
         .filter_map(|item| {
-            let (url, backup_urls) =
-                primary_and_backups(item, &["baseUrl", "base_url"])?;
+            let (url, backup_urls) = primary_and_backups(item, &["baseUrl", "base_url"])?;
             Some(MediaStream {
                 url,
                 backup_urls,
@@ -214,10 +213,7 @@ pub fn pick_best(
                 .cloned();
             // 音频挑码率最高的；杜比全景声/Hi-Res 不是 AAC，塞进 m4a 后 DJ 软件读不了，
             // 而且没法 `-c:a copy`，所以只从常规 audio 数组里选（不碰 dolby/flac 分支）。
-            let audio = audios
-                .iter()
-                .max_by_key(|stream| stream.bandwidth)
-                .cloned();
+            let audio = audios.iter().max_by_key(|stream| stream.bandwidth).cloned();
             (video, audio)
         }
     }
@@ -345,7 +341,11 @@ mod tests {
             ],
             "备用链要保留，且别把和主链重复的再塞一遍"
         );
-        assert_eq!(audio.unwrap().url, "https://cdn/a-192.m4s", "音频取最高码率");
+        assert_eq!(
+            audio.unwrap().url,
+            "https://cdn/a-192.m4s",
+            "音频取最高码率"
+        );
     }
 
     #[test]
@@ -406,7 +406,10 @@ mod tests {
         let options = stream_options(&dash_payload());
         let ids: Vec<i64> = options.iter().map(|option| option.quality_id).collect();
         assert_eq!(ids, vec![120, 80, 32], "按高度降序");
-        let p1080 = options.iter().find(|option| option.quality_id == 80).unwrap();
+        let p1080 = options
+            .iter()
+            .find(|option| option.quality_id == 80)
+            .unwrap();
         assert!(p1080.codec.starts_with("avc"), "同档位只留最兼容的编码");
         assert_eq!(p1080.label, "高清 1080P");
     }

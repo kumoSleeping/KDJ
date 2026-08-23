@@ -66,6 +66,7 @@ import type { AccountState, FolderNode, StreamPlaylist } from "../../types";
 import { ContextMenu, InlineNotice } from "../common";
 import { PlatformMark } from "../download/PlatformMark";
 import { PlaylistSection } from "./PlaylistSection";
+import { isMidiBrowseActivate, midiBrowseItemProps } from "../../lib/midiLibraryNav";
 
 /** @deprecated 请从 `lib/trackDrag` 引用；保留 re-export 以免旧 import 断掉。 */
 export { TRACK_DND_TYPE };
@@ -454,6 +455,7 @@ export function NarrowFolderRail({
         key={`${sourceRoot ? "narrow-local-root" : "narrow-local-child"}:${node.path}`}
         type="button"
         {...{ [FOLDER_DROP_PATH_ATTR]: node.path }}
+        {...midiBrowseItemProps("local", `local:folder:${node.path}`)}
         data-active={sourceActive || folderActive || undefined}
         data-drop={narrowDrop === node.path ? "true" : undefined}
         title={node.path}
@@ -591,6 +593,7 @@ export function NarrowFolderRail({
                 type="button"
                 data-active={active || undefined}
                 data-stream-platform={platform}
+                {...midiBrowseItemProps("search", `search:playlist:${platform}:${playlist.key}`)}
                 title={`${playlist.title} · ${playlist.count} 首`}
                 onClick={() => openStreamPlaylist(platform, playlist)}
               >
@@ -629,6 +632,7 @@ export function NarrowFolderRail({
                         type="button"
                         data-active={active || undefined}
                         data-stream-platform={platform}
+                        {...midiBrowseItemProps("search", `search:playlist:${platform}:${playlist.key}`)}
                         title={`${playlist.title} · ${playlist.count} 首`}
                         onClick={() => openStreamPlaylist(platform, playlist)}
                       >
@@ -661,6 +665,7 @@ export function NarrowFolderRail({
       <button
         type="button"
         {...{ [SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR]: "" }}
+        {...midiBrowseItemProps("local", "local:all")}
         data-active={filter.folder === "" || undefined}
         data-drop={narrowDrop === ALL_TRACKS_DROP_TARGET ? "true" : undefined}
         title="全部曲目（拖入下载会落到默认下载文件夹）"
@@ -692,6 +697,7 @@ export function NarrowFolderRail({
         <button
           type="button"
           data-active={narrowSource.kind === "onelibrary" || undefined}
+          {...midiBrowseItemProps("onelibrary", "onelibrary:root")}
           aria-label="显示 OneLibrary 列表"
           title="在下方显示 OneLibrary 列表"
           onClick={() => setNarrowSource({ kind: "onelibrary" })}
@@ -708,6 +714,7 @@ export function NarrowFolderRail({
                 narrowSource.platform === streamRoot.id) || undefined
             }
             data-stream-platform={streamRoot.id}
+            {...midiBrowseItemProps("search", `search:root:${streamRoot.id}`)}
             aria-label={`显示 ${streamRoot.label} 歌单`}
             title={`在下方显示 ${streamRoot.label} 收藏和歌单`}
             onClick={() => {
@@ -744,6 +751,7 @@ export function NarrowFolderRail({
           <button
             type="button"
             data-active={isOutsideFolder(filter.folder) || undefined}
+            {...midiBrowseItemProps("local", "local:outside")}
             title="不在曲库目录里的曲目"
             onClick={() => choose(OUTSIDE_FOLDER)}
           >
@@ -782,6 +790,7 @@ export function NarrowFolderRail({
                       : {})}
                     data-active={active || undefined}
                     data-drop={narrowDrop === dropKey || undefined}
+                    {...midiBrowseItemProps("onelibrary", `onelibrary:${device.path}:${playlist.id}`)}
                     title={`${device.name} · ${playlist.name} · ${playlist.track_count} 首`}
                     onClick={() => {
                       useAppStore.getState().focusLibrary();
@@ -1136,12 +1145,16 @@ export function FolderTree({
         <div
           className="kd-folder kd-folder-stream-root"
           data-stream-platform={platform}
+          {...midiBrowseItemProps("search", `search:root:${platform}`)}
           style={{ paddingLeft: "0.35rem" }}
           role="button"
           tabIndex={0}
           aria-expanded={open}
           title={rootHint}
-          onClick={() => toggleStreamRoot(platform, accountState)}
+          onClick={() => {
+            if (isMidiBrowseActivate() && streamExpanded[platform]) return;
+            toggleStreamRoot(platform, accountState);
+          }}
           onKeyDown={(event) => {
             if (event.key !== "Enter" && event.key !== " ") return;
             event.preventDefault();
@@ -1274,6 +1287,7 @@ export function FolderTree({
                 className="kd-folder kd-folder-action kd-folder-stream-playlist kd-folder-stream-playlist-direct"
                 data-active={active || undefined}
                 data-stream-platform={platform}
+                {...midiBrowseItemProps("search", `search:playlist:${platform}:${playlist.key}`)}
                 title={`${playlist.title} · ${playlist.count} 首`}
                 onClick={() => openStreamPlaylist(platform, playlist)}
               >
@@ -1321,6 +1335,7 @@ export function FolderTree({
                         className="kd-folder kd-folder-action kd-folder-stream-playlist"
                         data-active={active || undefined}
                         data-stream-platform={platform}
+                        {...midiBrowseItemProps("search", `search:playlist:${platform}:${playlist.key}`)}
                         title={`${playlist.title} · ${playlist.count} 首`}
                         onClick={() => openStreamPlaylist(platform, playlist)}
                       >
@@ -1346,6 +1361,7 @@ export function FolderTree({
         <div
           className="kd-folder"
           {...{ [FOLDER_DROP_PATH_ATTR]: node.path }}
+          {...midiBrowseItemProps("local", `local:folder:${node.path}`)}
           data-active={active}
           data-drop={dropTarget === node.path && dropEdge === ""}
           data-edge={dropTarget === node.path ? dropEdge || undefined : undefined}
@@ -1358,7 +1374,7 @@ export function FolderTree({
             // 进文件夹默认按手排顺序看（set 是按演出顺序排的）；
             // 回到全库时手排没有意义，还原成默认的按入库时间。
             setFilter(
-              active
+              active && !isMidiBrowseActivate()
                 ? { folder: "", sort: "added_at", order: "desc" }
                 : { folder: node.path, sort: "custom" },
             );
@@ -1578,6 +1594,7 @@ export function FolderTree({
         <div
           className="kd-folder"
           {...{ [SEARCH_DEFAULT_DOWNLOAD_DROP_ATTR]: "" }}
+          {...midiBrowseItemProps("local", "local:all")}
           data-active={filter.folder === ""}
           data-drop={dropTarget === ALL_TRACKS_DROP_TARGET ? "true" : undefined}
           style={{ paddingLeft: "0.35rem" }}
@@ -1627,6 +1644,7 @@ export function FolderTree({
           <div
             className="kd-folder"
             data-active={isOutsideFolder(filter.folder)}
+            {...midiBrowseItemProps("local", "local:outside")}
             style={{ paddingLeft: "0.35rem" }}
             title="不在曲库目录里的曲目"
             onClick={() => {

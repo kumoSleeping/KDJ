@@ -110,7 +110,11 @@ pub async fn create_qq_qr(http: &reqwest::Client) -> Result<QqQrSession> {
         .context("获取 QQ 二维码失败")?;
 
     let qrsig = cookie_from(&response, "qrsig").context("QQ 二维码响应里没有 qrsig")?;
-    let png = response.bytes().await.context("读取二维码图片失败")?.to_vec();
+    let png = response
+        .bytes()
+        .await
+        .context("读取二维码图片失败")?
+        .to_vec();
     anyhow::ensure!(!png.is_empty(), "QQ 音乐二维码获取失败");
     Ok(QqQrSession { png, qrsig })
 }
@@ -137,10 +141,7 @@ pub async fn check_qq_qr(http: &reqwest::Client, session: &QqQrSession) -> Resul
             ("has_onekey", "1"),
         ])
         .header(reqwest::header::REFERER, "https://xui.ptlogin2.qq.com/")
-        .header(
-            reqwest::header::COOKIE,
-            format!("qrsig={}", session.qrsig),
-        )
+        .header(reqwest::header::COOKIE, format!("qrsig={}", session.qrsig))
         .send()
         .await
         .context("轮询 QQ 二维码状态失败")?;
@@ -411,7 +412,10 @@ pub async fn poll_dual_qr(
             Ok(QrOutcome::Scanned) => return Ok(DualQrOutcome::Scanned),
             Ok(QrOutcome::Waiting) => qq_alive = true,
             Ok(QrOutcome::Refused) => {
-                if !matches!(mobile_state, DualQrOutcome::Waiting | DualQrOutcome::Scanned) {
+                if !matches!(
+                    mobile_state,
+                    DualQrOutcome::Waiting | DualQrOutcome::Scanned
+                ) {
                     abort_mobile(session);
                     return Ok(DualQrOutcome::Refused);
                 }
@@ -523,7 +527,10 @@ async fn request_mobile_qrcode(http: &reqwest::Client) -> Result<(Vec<u8>, Strin
         "获取 QQ 音乐客户端二维码失败：HTTP {}",
         response.status()
     );
-    let value: Value = response.json().await.context("客户端二维码响应不是合法 JSON")?;
+    let value: Value = response
+        .json()
+        .await
+        .context("客户端二维码响应不是合法 JSON")?;
     let item = value.get("req_0").context("客户端二维码响应缺少 req_0")?;
     let code = item.get("code").and_then(Value::as_i64).unwrap_or(-1);
     anyhow::ensure!(code == 0, "获取 QQ 音乐客户端二维码失败：code={code}");
@@ -666,7 +673,10 @@ async fn authorize_mobile_cookies(
         .send()
         .await
         .context("换取 QQ 音乐客户端凭证失败")?;
-    let value: Value = response.json().await.context("客户端凭证响应不是合法 JSON")?;
+    let value: Value = response
+        .json()
+        .await
+        .context("客户端凭证响应不是合法 JSON")?;
     let item = value.get("req_0").context("客户端凭证响应缺少 req_0")?;
     let code = item.get("code").and_then(Value::as_i64).unwrap_or(-1);
     if code != 0 {
@@ -678,14 +688,14 @@ async fn authorize_mobile_cookies(
     if credential.login_type == 0 {
         credential.login_type = 6;
     }
-    anyhow::ensure!(credential.is_present(), "QQ 音乐客户端没有返回可用的 musickey");
+    anyhow::ensure!(
+        credential.is_present(),
+        "QQ 音乐客户端没有返回可用的 musickey"
+    );
     Ok(credential)
 }
 
-fn cookie_map_value(
-    cookies: &serde_json::Map<String, Value>,
-    name: &str,
-) -> Option<String> {
+fn cookie_map_value(cookies: &serde_json::Map<String, Value>, name: &str) -> Option<String> {
     cookies
         .get(name)
         .and_then(|entry| entry.get("value").or(Some(entry)))
@@ -771,7 +781,13 @@ mod tests {
         .as_object()
         .cloned()
         .unwrap();
-        assert_eq!(cookie_map_value(&cookies, "qqmusic_uin").as_deref(), Some("12345"));
-        assert_eq!(cookie_map_value(&cookies, "qqmusic_key").as_deref(), Some("plain-token"));
+        assert_eq!(
+            cookie_map_value(&cookies, "qqmusic_uin").as_deref(),
+            Some("12345")
+        );
+        assert_eq!(
+            cookie_map_value(&cookies, "qqmusic_key").as_deref(),
+            Some("plain-token")
+        );
     }
 }

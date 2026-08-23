@@ -122,7 +122,8 @@ pub fn zzc_sign(payload: &str) -> String {
 
     let mut part3 = [0u8; 20];
     for (i, value) in SCRAMBLE_VALUES.iter().enumerate() {
-        let byte = u8::from_str_radix(&hash_hex[i * 2..i * 2 + 2], 16).expect("SHA-1 输出是十六进制");
+        let byte =
+            u8::from_str_radix(&hash_hex[i * 2..i * 2 + 2], 16).expect("SHA-1 输出是十六进制");
         part3[i] = value ^ byte;
     }
     let b64: String = base64::engine::general_purpose::STANDARD
@@ -253,8 +254,8 @@ impl QqClient {
         match serde_json::to_string_pretty(&credential) {
             Ok(body) => {
                 let tmp = self.session_path.with_extension("json.tmp");
-                if let Err(err) =
-                    std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &self.session_path))
+                if let Err(err) = std::fs::write(&tmp, body)
+                    .and_then(|_| std::fs::rename(&tmp, &self.session_path))
                 {
                     tracing::warn!("写入 QQ 音乐凭证失败：{err}");
                 }
@@ -356,7 +357,8 @@ impl QqClient {
         param: Value,
         platform: QqPlatform,
     ) -> Result<Value> {
-        self.call_signed(module, method, param, platform, false).await
+        self.call_signed(module, method, param, platform, false)
+            .await
     }
 
     /// `sign = true` 时改打 musics.fcg 并附带 zzc 签名。
@@ -429,10 +431,9 @@ impl QqClient {
         let body = serde_json::to_string(&Value::Object(payload))?;
 
         let mut request = if sign {
-            self.http.post(MUSICS).query(&[
-                ("_", now_secs().to_string()),
-                ("sign", zzc_sign(&body)),
-            ])
+            self.http
+                .post(MUSICS)
+                .query(&[("_", now_secs().to_string()), ("sign", zzc_sign(&body))])
         } else {
             self.http.post(MUSICU)
         };
@@ -623,7 +624,10 @@ mod tests {
         let param = refresh_param(&wechat);
         assert_eq!(param["str_musicid"], "7", "没有 str_musicid 就用 musicid");
         assert_eq!(param["loginMode"], 2);
-        assert!(param.get("access_token").is_none(), "微信分支不带 access_token");
+        assert!(
+            param.get("access_token").is_none(),
+            "微信分支不带 access_token"
+        );
 
         let qq = Credential {
             login_type: 2,
@@ -635,7 +639,10 @@ mod tests {
         let param = refresh_param(&qq);
         assert_eq!(param["expired_in"], 1234);
         assert_eq!(param["musicid"], 7);
-        assert!(param.get("str_musicid").is_none(), "QQ 分支不带 str_musicid");
+        assert!(
+            param.get("str_musicid").is_none(),
+            "QQ 分支不带 str_musicid"
+        );
 
         // 手机号等其余类型走通用参数：两组字段都要在
         let other = Credential {

@@ -78,11 +78,8 @@ impl DesktopMediaSession {
                 state.cached_cover_url = None;
             }
             let cover_url = state.cached_cover_url.clone();
-            let needs_cache =
-                metadata.artwork_url.is_some() && state.cached_cover_url.is_none();
-            if let Err(error) =
-                set_metadata(&mut state.controls, &metadata, cover_url.as_deref())
-            {
+            let needs_cache = metadata.artwork_url.is_some() && state.cached_cover_url.is_none();
+            if let Err(error) = set_metadata(&mut state.controls, &metadata, cover_url.as_deref()) {
                 tracing::warn!("更新系统媒体元数据失败：{error}");
             } else {
                 state.metadata = metadata.clone();
@@ -509,7 +506,10 @@ mod tests {
         let trimmed = url.trim_start_matches("file://");
         #[cfg(windows)]
         {
-            assert!(!trimmed.starts_with('/'), "souvlaki must not see a leading slash");
+            assert!(
+                !trimmed.starts_with('/'),
+                "souvlaki must not see a leading slash"
+            );
             assert!(trimmed.contains('\\') || trimmed.contains(':'));
         }
         #[cfg(not(windows))]

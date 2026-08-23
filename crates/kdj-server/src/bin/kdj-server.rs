@@ -9,17 +9,14 @@ use kdj_core::AppConfig;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info,kdj=debug".into()),
-        )
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,kdj=debug".into()))
         .init();
 
     let data_dir = std::env::var("KUMODECK_DATA_DIR")
         .or_else(|_| std::env::var("KDJ_DATA_DIR"))
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
-            kdj_core::config::home_dir()
-                .join("Library/Application Support/kumodeck/data")
+            kdj_core::config::home_dir().join("Library/Application Support/kumodeck/data")
         });
     let download_dir = std::env::var("KUMODECK_DOWNLOAD_DIR")
         .or_else(|_| std::env::var("KDJ_DOWNLOAD_DIR"))

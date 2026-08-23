@@ -1,0 +1,111 @@
+{
+  "verdict": "no-go",
+  "reason": "Neither pinned existing runtime satisfies dual-Deck P99 < 11.609977 ms on this M2; RT3S seek state also does not converge reliably after <=1000 ms pre-roll.",
+  "machine": {
+    "model": "MacBook Air M2",
+    "memoryGiB": 16,
+    "macOS": "26.5 (25F71)",
+    "xcode": "15.2",
+    "toolchainCaveat": "GPU Audio documents Xcode 26 for macOS 26. The source compiled and ran, but this is not the vendor's validated compiler pairing."
+  },
+  "deadlineMs": 11.609977,
+  "stemgenRt": {
+    "modelSha256": {
+      "model.onnx": "3e6432f8704c44ed61f9709296acea07112913a62cc7465b1ea44071197f58b1",
+      "model.onnx.data": "355f036eb618a03b878e01e5da1b4b0e5463c725c4cb2ed18f94888003c7d722"
+    },
+    "runtime": "ONNX Runtime 1.22.0 CPU, four intra-op threads, one inter-op thread",
+    "anonymous20TrackCorpus": {
+      "method": "20 distinct local tracks, 44.1 kHz stereo PCM16, 200 model hops per track, paced at 512/44100 seconds",
+      "totalHops": 4000,
+      "meanServiceMs": 9.975,
+      "meanOfTrackP95Ms": 12.621,
+      "trackP95RangeMs": [8.792, 19.172],
+      "meanOfTrackP99Ms": 23.305,
+      "trackP99RangeMs": [9.671, 52.717],
+      "deadlineMisses": 1516,
+      "hostCpuPercentMean": 348.221,
+      "rssMiBRange": [239.766, 675.891],
+      "p95MsByTrack": [11.228, 9.344, 9.487, 9.811, 9.270, 9.008, 8.792, 10.690, 15.259, 19.172, 16.420, 15.282, 17.549, 15.640, 13.952, 15.084, 14.025, 10.980, 11.929, 9.490],
+      "p99MsByTrack": [12.799, 10.245, 10.786, 11.403, 10.278, 11.929, 9.671, 11.497, 52.717, 52.415, 49.279, 23.064, 48.117, 19.432, 34.367, 23.152, 35.119, 13.278, 16.311, 10.239],
+      "deadlineMissesByTrack": [30, 1, 4, 25, 2, 27, 1, 4, 183, 167, 185, 146, 192, 110, 130, 116, 125, 35, 33, 0]
+    },
+    "priorDualDeck1000HopIsolation": {
+      "deck1P50Ms": 22.864,
+      "deck1P95Ms": 36.545,
+      "deck1P99Ms": 48.105,
+      "deck2P50Ms": 22.918,
+      "deck2P95Ms": 39.270,
+      "deck2P99Ms": 55.875,
+      "deadlineMissesPerDeck": 1000
+    }
+  },
+  "rt3s": {
+    "gpuAudioPlatform": "2.3.0.219",
+    "paramsSha256": "0bbc9b0e335e38e11585e340192421f5fb9e44e49edd0fb3c482377aa4e3bad9",
+    "learnedParameters": 50163208,
+    "anonymous20TrackCorpus": {
+      "method": "same 20 distinct local tracks converted to 44.1 kHz stereo float32, synchronous RT3SLib, 200 paced hops per track",
+      "totalHops": 4000,
+      "meanServiceMs": 9.774594,
+      "meanOfTrackP95Ms": 11.184496,
+      "trackP95RangeMs": [10.857771, 11.665430],
+      "meanOfTrackP99Ms": 12.604954,
+      "trackP99RangeMs": [11.850351, 15.204729],
+      "deadlineMisses": 259,
+      "nonFiniteSamples": 0,
+      "hostCpuPercentMean": 4.786689,
+      "armedRssBytesRange": [1262241256, 1262503376],
+      "p95MsByTrack": [11.297621, 11.149085, 11.153248, 11.665430, 11.504502, 11.022136, 10.857771, 11.418169, 10.937810, 10.951476, 11.170480, 11.045981, 11.132254, 11.396594, 11.226882, 11.322592, 10.859019, 11.145160, 11.243056, 11.190657],
+      "p99MsByTrack": [12.437246, 12.362204, 12.407630, 15.204729, 12.436755, 12.280734, 12.352560, 13.265427, 13.036856, 12.160058, 11.969334, 11.850351, 13.134055, 12.758250, 12.120716, 12.344895, 12.268407, 12.513964, 12.303857, 12.891043],
+      "deadlineMissesByTrack": [18, 11, 13, 23, 15, 10, 11, 19, 14, 9, 9, 12, 17, 16, 10, 10, 6, 10, 13, 13]
+    },
+    "singleDeck500HopRetest": {
+      "serviceMeanMs": 10.042267,
+      "serviceP95Ms": 12.458384,
+      "serviceP99Ms": 18.277763,
+      "deadlineMisses": 151,
+      "simulated250msRingUnderrunTransitions": 0,
+      "armedRssBytes": 1263486440
+    },
+    "dualDeck500HopAsyncParallel": {
+      "deck0ServiceMeanMs": 15.995318,
+      "deck0ServiceP99Ms": 26.493626,
+      "deck1ServiceMeanMs": 15.978882,
+      "deck1ServiceP99Ms": 27.900184,
+      "deadlineMissesPerDeck": 498,
+      "simulated250msRingStarvedHops": [434, 435],
+      "simulated250msRingUnderrunTransitions": [2, 1],
+      "completionP99FromReleaseMs": [2204.171551, 2200.679942]
+    },
+    "seekRecovery": {
+      "comparison": "eight-channel output against the same target reached by continuous playback",
+      "firstAudibleProxy": "SDR >= 10 dB for one hop; objective proxy, not a listening verdict",
+      "fullyStableProxy": "SDR >= 30 dB for five consecutive hops",
+      "atTenSecondTarget": [
+        {"preRollMs": 0, "hotCueToFirstOutputMs": 109.145875, "firstHopSdrDb": 0.407078, "firstAudibleProxyMs": 313.469388, "fullyStableWithinOneSecond": false},
+        {"preRollMs": 50, "hotCueToFirstOutputMs": 140.336375, "firstHopSdrDb": 8.070592, "firstAudibleProxyMs": 197.369615, "fullyStableWithinOneSecond": false},
+        {"preRollMs": 100, "hotCueToFirstOutputMs": 182.284833, "firstHopSdrDb": 6.419380, "firstAudibleProxyMs": 197.369615, "fullyStableWithinOneSecond": false},
+        {"preRollMs": 250, "hotCueToFirstOutputMs": 285.265708, "firstHopSdrDb": 9.982599, "firstAudibleProxyMs": 127.709751, "fullyStableWithinOneSecond": false},
+        {"preRollMs": 500, "hotCueToFirstOutputMs": 475.134625, "firstHopSdrDb": 9.000124, "firstAudibleProxyMs": 313.469388, "fullyStableWithinOneSecond": false},
+        {"preRollMs": 1000, "hotCueToFirstOutputMs": 851.232125, "firstHopSdrDb": 20.197737, "firstAudibleProxyMs": 0.0, "fullyStableWithinOneSecond": false}
+      ],
+      "longWindowFinding": "Recovery was non-monotonic. At a separate five-second target, 50 ms pre-roll first sustained 30 dB after 3.634 s, 100/250 ms only after about 8 s, and 0/500/1000 ms did not sustain 30 dB within the 8.13 s observation. Arbitrary seek therefore requires exact state checkpoints or a different model/runtime contract."
+    },
+    "auditionArtifact": {
+      "durationSeconds": 9.996190,
+      "renderMs": 7637.824250,
+      "stemSumVsSourcePsnrDb": [174.989, 175.028],
+      "laneRmsDb": {"drums": -18.150518, "bass": -18.898192, "vocals": -27.040744, "other": -20.224371},
+      "subjectiveListening": "not scored; files were generated and hash-verified, but no human listening result was fabricated"
+    }
+  },
+  "power": {
+    "status": "not measured",
+    "reason": "powermetrics requires administrator privileges; the non-interactive test process did not have them"
+  },
+  "training": {
+    "status": "not started",
+    "reason": "the existing-model runtime did not pass the stop boundary"
+  }
+}

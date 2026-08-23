@@ -599,6 +599,7 @@ fn copy_atomic(source: &Path, destination: &Path) -> Result<u64> {
 fn write_analysis_bundle(
     root: &Path,
     bundle: AnalysisBundle,
+    preserve_existing_cues: bool,
     created_files: &mut Vec<PathBuf>,
     replaced_files: &mut Vec<(PathBuf, Vec<u8>)>,
 ) -> Result<bool> {
@@ -606,10 +607,14 @@ fn write_analysis_bundle(
     for file in bundle.files {
         let path = root.join(&file.relative_path);
         let previous = fs::read(&path).ok();
-        let body = previous
-            .as_deref()
-            .map(|existing| preserve_external_cue_sections(&file.body, existing))
-            .unwrap_or(file.body);
+        let body = if preserve_existing_cues {
+            previous
+                .as_deref()
+                .map(|existing| preserve_external_cue_sections(&file.body, existing))
+                .unwrap_or(file.body)
+        } else {
+            file.body
+        };
         if previous.as_deref() == Some(body.as_slice()) {
             continue;
         }
@@ -1252,6 +1257,119 @@ fn one_library_cue_points(library: &OneLibrary) -> Result<HashMap<i32, Vec<CuePo
         cue_points.sort_by_key(|cue| (cue.start_ms, cue.hot_cue.unwrap_or_default(), cue.id));
     }
     Ok(by_content)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn managed_cues_equal(existing: &[CuePoint], managed: &[CuePoint]) -> bool {
+    let normalize = |cues: &[CuePoint]| {
+        let mut values: Vec<_> = cues
+            .iter()
+            .filter(|cue| {
+                cue.start_ms >= 0
+                    && cue.end_ms.is_none_or(|end_ms| end_ms > cue.start_ms)
+                    && cue.hot_cue.is_none_or(|slot| (1..=8).contains(&slot))
+            })
+            .map(|cue| {
+                (
+                    cue.hot_cue,
+                    cue.start_ms,
+                    cue.end_ms,
+                    cue.color_index.filter(|value| (1..=8).contains(value)),
+                    cue.comment.trim().to_owned(),
+                    cue.active_loop,
+                )
+            })
+            .collect();
+        values.sort();
+        values
+    };
+    normalize(existing) == normalize(managed)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn cue_frame_150(ms: i64) -> i32 {
+    i32::try_from(ms.saturating_mul(150).saturating_add(500) / 1_000).unwrap_or(i32::MAX)
+}
+
+/// 同步 OneLibrary 标准 cue 表。ANLZ 负责播放器加载，数据库负责列表交换与颜色/备注；
+/// Engine DJ 一样维护两份，不能只写其中一边。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn replace_one_library_cues(
+    db_path: &Path,
+    content_id: i32,
+    cues: &[CuePoint],
+    bpm: Option<f64>,
+) -> Result<()> {
+    use diesel::sql_types::{Integer, Nullable, Text};
+
+    let mut conn = rbox::one_library::establish_connection(
+        db_path
+            .to_str()
+            .context("OneLibrary 数据库路径不是 UTF-8")?,
+    )?;
+    conn.transaction::<(), diesel::result::Error, _>(|conn| {
+        diesel::sql_query(
+            "DELETE FROM hotCueBankList_cue WHERE cue_id IN \
+             (SELECT cue_id FROM cue WHERE content_id = ?)",
+        )
+        .bind::<Integer, _>(content_id)
+        .execute(conn)?;
+        diesel::sql_query("DELETE FROM cue WHERE content_id = ?")
+            .bind::<Integer, _>(content_id)
+            .execute(conn)?;
+
+        for cue in cues.iter().filter(|cue| {
+            cue.start_ms >= 0
+                && cue.end_ms.is_none_or(|end_ms| end_ms > cue.start_ms)
+                && cue.hot_cue.is_none_or(|slot| (1..=8).contains(&slot))
+        }) {
+            let start_usec = i32::try_from(cue.start_ms.saturating_mul(1_000)).ok();
+            let end_usec = cue
+                .end_ms
+                .and_then(|end_ms| i32::try_from(end_ms.saturating_mul(1_000)).ok());
+            let end_frame = cue.end_ms.map(cue_frame_150).unwrap_or(-1);
+            let (loop_numerator, loop_denominator) = cue
+                .end_ms
+                .zip(bpm)
+                .and_then(|(end_ms, bpm)| {
+                    let beats = (end_ms - cue.start_ms) as f64 * bpm / 60_000.0;
+                    let rounded = beats.round();
+                    (bpm.is_finite()
+                        && bpm > 0.0
+                        && beats.is_finite()
+                        && (1.0..=f64::from(i32::MAX)).contains(&rounded)
+                        && (beats - rounded).abs() <= 0.02)
+                        .then_some((rounded as i32, 1))
+                })
+                .unzip();
+            diesel::sql_query(
+                "INSERT INTO cue (content_id, kind, colorTableIndex, cueComment, isActiveLoop, \
+                 beatLoopNumerator, beatLoopDenominator, inUsec, outUsec, \
+                 in150FramePerSec, out150FramePerSec) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind::<Integer, _>(content_id)
+            .bind::<Integer, _>(cue.hot_cue.unwrap_or_default())
+            .bind::<Nullable<Integer>, _>(cue.color_index.filter(|value| (1..=8).contains(value)))
+            .bind::<Text, _>(cue.comment.trim())
+            .bind::<Integer, _>(i32::from(cue.active_loop))
+            .bind::<Nullable<Integer>, _>(loop_numerator)
+            .bind::<Nullable<Integer>, _>(loop_denominator)
+            .bind::<Nullable<Integer>, _>(start_usec)
+            .bind::<Nullable<Integer>, _>(end_usec)
+            .bind::<Integer, _>(cue_frame_150(cue.start_ms))
+            .bind::<Integer, _>(end_frame)
+            .execute(conn)?;
+        }
+        diesel::sql_query(
+            "UPDATE content SET cueUpdateCount = COALESCE(cueUpdateCount, 0) + 1 \
+             WHERE content_id = ?",
+        )
+        .bind::<Integer, _>(content_id)
+        .execute(conn)?;
+        Ok(())
+    })?;
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2472,6 +2590,7 @@ fn export_playlist_to_device(
         }
 
         let library = open_or_create_library(&db_path)?;
+        let existing_cues_by_content = one_library_cue_points(&library)?;
         let mut existing_content: HashMap<String, _> = library
             .get_contents()?
             .into_iter()
@@ -2554,22 +2673,48 @@ fn export_playlist_to_device(
                 .year
                 .get(..4)
                 .and_then(|value| value.parse::<i32>().ok());
-            let (analysis_path, analysis_changed, has_local_analysis) = if let Some(local) =
-                item.analysis.as_ref()
-            {
-                let bundle = local.bundle(&item.db_path);
-                let database_path = bundle.database_path.clone();
-                let changed =
-                    write_analysis_bundle(&root, bundle, &mut created_files, &mut replaced_files)?;
-                exported_analysis += 1;
-                (database_path, changed, true)
-            } else {
-                let bundle = AnalysisBundle::placeholder(&item.db_path);
-                let database_path = bundle.database_path.clone();
-                let changed = write_missing_analysis_bundle(&root, bundle, &mut created_files)?;
-                (database_path, changed, false)
-            };
-            if let Some(mut content) = existing_content.remove(&item.db_path) {
+            let managed_cues = item
+                .track
+                .cue_points_managed
+                .then_some(item.track.cue_points.as_slice());
+            let (analysis_path, analysis_changed, has_local_analysis) =
+                if let Some(local) = item.analysis.as_ref() {
+                    let bundle = local.bundle_with_cues(
+                        &item.db_path,
+                        managed_cues.unwrap_or_default(),
+                        item.track.bpm,
+                    );
+                    let database_path = bundle.database_path.clone();
+                    let changed = write_analysis_bundle(
+                        &root,
+                        bundle,
+                        managed_cues.is_none(),
+                        &mut created_files,
+                        &mut replaced_files,
+                    )?;
+                    exported_analysis += 1;
+                    (database_path, changed, true)
+                } else {
+                    let bundle = AnalysisBundle::placeholder_with_cues(
+                        &item.db_path,
+                        managed_cues.unwrap_or_default(),
+                        item.track.bpm,
+                    );
+                    let database_path = bundle.database_path.clone();
+                    let changed = if managed_cues.is_some() {
+                        write_analysis_bundle(
+                            &root,
+                            bundle,
+                            false,
+                            &mut created_files,
+                            &mut replaced_files,
+                        )?
+                    } else {
+                        write_missing_analysis_bundle(&root, bundle, &mut created_files)?
+                    };
+                    (database_path, changed, false)
+                };
+            let content_id = if let Some(mut content) = existing_content.remove(&item.db_path) {
                 let previous = content.clone();
                 if !one_library_image_is_readable(&root, &library, content.image_id)? {
                     content.image_id = export_embedded_cover(
@@ -2617,7 +2762,7 @@ fn export_playlist_to_device(
                     content.has_modified = Some(1);
                 }
                 if content == previous {
-                    content_ids.push(content.id);
+                    content.id
                 } else {
                     content.information_update_count = Some(
                         content
@@ -2625,7 +2770,7 @@ fn export_playlist_to_device(
                             .unwrap_or_default()
                             .saturating_add(1),
                     );
-                    content_ids.push(library.update_content(content)?.id);
+                    library.update_content(content)?.id
                 }
             } else {
                 let image_id = export_embedded_cover(
@@ -2661,8 +2806,18 @@ fn export_playlist_to_device(
                 content.analysed_bits = Some(if has_local_analysis { 41 } else { 0 });
                 content.content_link = Some(ONE_LIBRARY_CONTENT_LINK);
                 content.has_modified = Some(0);
-                content_ids.push(library.insert_content(content)?.id);
+                library.insert_content(content)?.id
+            };
+            if let Some(cues) = managed_cues {
+                let existing = existing_cues_by_content
+                    .get(&content_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                if analysis_changed || !managed_cues_equal(existing, cues) {
+                    replace_one_library_cues(&db_path, content_id, cues, item.track.bpm)?;
+                }
             }
+            content_ids.push(content_id);
         }
 
         let target_playlist = if let Some(id) = target_playlist_id {
@@ -3583,6 +3738,92 @@ mod tests {
         assert_eq!(contents[0].path, original_content_path);
         assert_eq!(library.get_contents().unwrap().len(), 1);
         drop(library);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn portable_export_round_trips_managed_hot_loops_and_explicit_clear() {
+        let base = std::env::temp_dir().join(format!(
+            "kdj-onelibrary-cue-export-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let root = base.join("USB");
+        fs::create_dir_all(&root).unwrap();
+        let source = base.join("cues.mp3");
+        fs::write(&source, b"cue-export-payload").unwrap();
+        let cues = vec![CuePoint {
+            id: -2,
+            hot_cue: Some(2),
+            start_ms: 4_000,
+            end_ms: Some(8_000),
+            color_index: Some(2),
+            color: "red".into(),
+            comment: "Drop".into(),
+            active_loop: true,
+        }];
+        let mut track = Track {
+            id: 92,
+            path: source.to_string_lossy().into_owned(),
+            filename: "cues.mp3".into(),
+            title: "Managed Cues".into(),
+            duration: Some(120.0),
+            cue_points: cues.clone(),
+            cue_points_managed: true,
+            ..Track::default()
+        };
+        let device = RemovableDevice {
+            path: root.to_string_lossy().into_owned(),
+            name: "Test USB".into(),
+            file_system: "exFAT".into(),
+            available_bytes: 1024 * 1024,
+            one_library_file_system: true,
+            ..RemovableDevice::default()
+        };
+
+        export_playlist_to_device(device.clone(), None, "Cues", vec![track.clone()], None).unwrap();
+        let db_path = one_library_db(&root);
+        let library = OneLibrary::new(&db_path).unwrap();
+        let content = library.get_contents().unwrap().remove(0);
+        let exported = one_library_cue_points(&library).unwrap();
+        assert!(managed_cues_equal(
+            exported.get(&content.id).unwrap(),
+            &cues
+        ));
+        assert_eq!(content.cue_update_count, Some(1));
+        let analysis_path = content.analysis_data_file_path.unwrap();
+        drop(library);
+        let dat = fs::read(root.join(analysis_path.trim_start_matches('/'))).unwrap();
+        let hot = dat
+            .windows(24)
+            .position(|window| window.starts_with(b"PCOB") && window[15] == 1)
+            .unwrap();
+        assert_eq!(
+            u16::from_be_bytes(dat[hot + 18..hot + 20].try_into().unwrap()),
+            1
+        );
+        assert_eq!(&dat[hot + 24..hot + 28], b"PCPT");
+
+        track.cue_points.clear();
+        export_playlist_to_device(device, None, "Cues", vec![track], None).unwrap();
+        let library = OneLibrary::new(&db_path).unwrap();
+        let content = library.get_contents().unwrap().remove(0);
+        assert!(one_library_cue_points(&library)
+            .unwrap()
+            .get(&content.id)
+            .is_none_or(Vec::is_empty));
+        assert_eq!(content.cue_update_count, Some(2));
+        drop(library);
+        let dat = fs::read(root.join(analysis_path.trim_start_matches('/'))).unwrap();
+        let hot = dat
+            .windows(24)
+            .position(|window| window.starts_with(b"PCOB") && window[15] == 1)
+            .unwrap();
+        assert_eq!(
+            u16::from_be_bytes(dat[hot + 18..hot + 20].try_into().unwrap()),
+            0
+        );
         let _ = fs::remove_dir_all(base);
     }
 

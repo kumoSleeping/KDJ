@@ -7,6 +7,12 @@ license.workspace = true
 
 [dependencies]
 anyhow = "=1.0.104"
+kdj-core = { version = "0.2.41", path = "../kdj-core" }
 kdj-player = { version = "0.2.41", path = "../kdj-player" }
+kdj-stems = { version = "0.2.41", path = "../kdj-stems" }
 reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1.0.229", features = ["derive"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+serde_json = "1.0.151"

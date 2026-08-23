@@ -21,6 +21,8 @@ mod desktop_media;
 #[cfg(any(desktop, target_os = "android"))]
 mod desktop_player;
 #[cfg(desktop)]
+mod midi;
+#[cfg(desktop)]
 mod virtual_disk;
 
 use std::path::{Path, PathBuf};
@@ -1215,6 +1217,8 @@ pub fn run() {
         app.manage(UpdateProgressState::default());
         #[cfg(desktop)]
         app.manage(virtual_disk::VirtualDiskManager::default());
+        #[cfg(desktop)]
+        app.manage(midi::MidiHub::spawn(app.handle().clone()));
         #[cfg(any(desktop, target_os = "android"))]
         app.manage(
             desktop_player::DesktopPlayerHandle::spawn(app.handle().clone())
@@ -1277,7 +1281,10 @@ pub fn run() {
         virtual_disk::virtual_disk_delete,
         desktop_player::playback_initialize,
         desktop_player::playback_command,
-        desktop_player::playback_state
+        desktop_player::playback_control,
+        desktop_player::playback_state,
+        midi::midi_devices,
+        midi::midi_send
     ]);
     #[cfg(all(mobile, target_os = "android"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -1296,6 +1303,7 @@ pub fn run() {
         set_desktop_lyrics,
         desktop_player::playback_initialize,
         desktop_player::playback_command,
+        desktop_player::playback_control,
         desktop_player::playback_state,
         media_permission_granted
     ]);

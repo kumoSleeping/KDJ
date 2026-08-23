@@ -1,0 +1,296 @@
+--- a/gpuaudio/include/gpu_primitives/include/gpu_primitives/Linear.h
++++ b/gpuaudio/include/gpu_primitives/include/gpu_primitives/Linear.h
+@@ -30,7 +30,7 @@
+ struct Linear<NUM_IN, NUM_OUT, TYPE, true> {
+     struct Weights {
+         Matrix<NUM_OUT, NUM_IN, TYPE, MatrixStorage::row_major> m_mat;
+-        Vector<NUM_OUT> m_bias;
++        Vector<NUM_OUT, TYPE> m_bias;
+     };
+ 
+     Weights m_weights;
+--- a/gpuaudio/include/gpu_primitives/include/gpu_primitives/Conv1D.h
++++ b/gpuaudio/include/gpu_primitives/include/gpu_primitives/Conv1D.h
+@@ -30,7 +30,7 @@
+ struct Conv1D<NUM_IN, NUM_OUT, KERNEL_SIZE, STRIDE, TYPE, true> {
+     struct Weights {
+         Matrix<NUM_OUT, NUM_IN * KERNEL_SIZE, TYPE, MatrixStorage::row_major> m_mat;
+-        Vector<NUM_OUT> m_bias;
++        Vector<NUM_OUT, TYPE> m_bias;
+     };
+ 
+     Weights m_weights;
+--- a/SoundSourceSeparation/rt3s_processor/rt3s_processor/src/device/GpuHsTasNet.h
++++ b/SoundSourceSeparation/rt3s_processor/rt3s_processor/src/device/GpuHsTasNet.h
+@@ -23,19 +23,19 @@
+     Spectrogram m_stft;
+ 
+     Linear<2052u, 500u, TYPE, true> m_spec_encode;
+-    RMSNorm<500u, TYPE, false> m_spec_norm;
++    RMSNorm<500u, float, false> m_spec_norm;
+     Linear<500u, 8208u, TYPE, true> m_spec_mask_linear;
+     Conv1D<2u, 3000u, 1024u, 512u, TYPE, true> m_conv_encode;
+     Linear<1500u, 500u, TYPE, true> m_basis_to_embed;
+-    RMSNorm<500u, TYPE, false> m_waveform_norm;
++    RMSNorm<500u, float, false> m_waveform_norm;
+     Linear<500u, 6000u, TYPE, true> m_waveform_mask_linear;
+     ConvTranspose1D<1500u, 2u, 1024u, 512u, TYPE, false> m_conv_decode;
+ 
+-    LSTM<500u, 500u, 2u, TYPE> m_pre_spec_branch;
+-    LSTM<500u, 500u, 2u, TYPE> m_post_spec_branch;
+-    LSTM<1000u, 1000u, 2u, TYPE> m_fusion_branch;
+-    LSTM<500u, 500u, 2u, TYPE> m_pre_waveform_branch;
+-    LSTM<500u, 500u, 2u, TYPE> m_post_waveform_branch;
++    LSTM<500u, 500u, 2u, float> m_pre_spec_branch;
++    LSTM<500u, 500u, 2u, float> m_post_spec_branch;
++    LSTM<1000u, 1000u, 2u, float> m_fusion_branch;
++    LSTM<500u, 500u, 2u, float> m_pre_waveform_branch;
++    LSTM<500u, 500u, 2u, float> m_post_waveform_branch;
+ 
+ #if !defined(GPU_AUDIO_DEVICE)
+     GpuHsTasNet(std::istream& weights_in, uint64_t lut, uint64_t inv_lut) {
+--- a/SoundSourceSeparation/rt3s_processor/rt3s_processor/src/device/Rt3sProcessor.cuh
++++ b/SoundSourceSeparation/rt3s_processor/rt3s_processor/src/device/Rt3sProcessor.cuh
+@@ -48,7 +48,7 @@
+     };
+     template <uint32_t Layer, typename LSTMClass, typename TaskParamType, typename Context>
+     __device_fct __forceinline_fct void general_lstm_task(Context context, __device_addr LSTMClass& lstm, __device_addr ProcessorParameter* processor_param, __device_addr TaskParamType* task_param) __device_addr {
+-        // auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        // auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+ 
+         auto vec_in = reinterpret_cast<__device_addr typename LSTMClass::InVecType const*>(task_param->p_in);
+         auto vec_out = reinterpret_cast<__device_addr typename LSTMClass::OutVecType*>(task_param->p_out);
+@@ -120,7 +120,7 @@
+     // 0. enqueue input (task 0)
+     template <typename Context>
+     __device_fct __forceinline_fct void enqueue_input_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr void* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+ 
+         // one block per channel; offset to their input/output samples
+         uint32_t ch = context.blockId();
+@@ -153,7 +153,7 @@
+     template <typename Context>
+     __device_fct __forceinline_fct void spec_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr SpecParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+         // Encoder: Spectrogram
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+         __device_addr auto& ringbuffer = hstasnet->m_input_history;
+ 
+         // one block per channel; offset to their input/output samples
+@@ -171,7 +171,7 @@
+     template <typename Context>
+     __device_fct __forceinline_fct void spec_encode_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr SpecEncParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+         //  linear layer 1x2052x500 -> 1x500
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+ 
+         // reordered spectrogram; input to linear layer
+         auto vec_in = reinterpret_cast<__device_addr decltype(hstasnet->m_spec_encode)::InVecType const*>(task_param->p_spec_reordered_in);
+@@ -184,7 +184,7 @@
+     // 1.2 waveform pre fusion (task 3)
+     template <typename Context>
+     __device_fct __forceinline_fct void conv_encode_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr ConvEncodeParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+         __device_addr auto& ringbuffer = hstasnet->m_input_history;
+ 
+         // get access to 1024 samples of each channel: 2048x1 samples; input to convolution
+@@ -212,7 +212,7 @@
+     // task 5
+     template <typename Context>
+     __device_fct __forceinline_fct void basis_embed_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr BasisEmbedParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+         // compute linear layer: 500x1500 * 1500x1 -> 500x1
+         auto vec_in = reinterpret_cast<__device_addr decltype(hstasnet->m_basis_to_embed)::InVecType const*>(task_param->p_audio_basis_in);
+         auto vec_out = reinterpret_cast<__device_addr decltype(hstasnet->m_basis_to_embed)::OutVecType*>(task_param->p_waveform_encoded_out);
+@@ -224,7 +224,7 @@
+     template <typename Context>
+     __device_fct __forceinline_fct void pre_spec_waveform_lstm_task_0(Context context, __device_addr ProcessorParameter* processor_param, __device_addr PreSpecWaveformLstmParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+         // LSTM layer 0 500-> 500
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+         constexpr uint32_t blocks_per_branch = PreSpecWaveformLstmParams::LstmParams::Blocks;
+         Wip::DefaultContext subcontext(context.threadId(), 32u, context.blockDim(), context.blockId() % blocks_per_branch, blocks_per_branch, reinterpret_cast<__threadgroup_addr char*>(context.smem()));
+         if (context.blockId() < blocks_per_branch) {
+@@ -240,7 +240,7 @@
+     template <typename Context>
+     __device_fct __forceinline_fct void pre_spec_waveform_lstm_task_1(Context context, __device_addr ProcessorParameter* processor_param, __device_addr PreSpecWaveformLstmParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+         // LSTM layer 1 500-> 500
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+         constexpr uint32_t blocks_per_branch = PreSpecWaveformLstmParams::LstmParams::Blocks;
+         Wip::DefaultContext subcontext(context.threadId(), 32u, context.blockDim(), context.blockId() % blocks_per_branch, blocks_per_branch, reinterpret_cast<__threadgroup_addr char*>(context.smem()));
+         if (context.blockId() < blocks_per_branch) {
+@@ -258,7 +258,7 @@
+     template <typename Context>
+     __device_fct __forceinline_fct void fusion_task_0(Context context, __device_addr ProcessorParameter* processor_param, __device_addr FusionParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+         // LSTM layer 0 1000 -> 1000
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+         // fusion: combined lstm; input from spectral pre-fusion lstm [0..500) and waveform pre-fusion lstm [500...1000)
+         general_lstm_task<0>(context, hstasnet->m_fusion_branch, processor_param, &task_param->lstm_params);
+     }
+@@ -266,7 +266,7 @@
+     template <typename Context>
+     __device_fct __forceinline_fct void fusion_task_1(Context context, __device_addr ProcessorParameter* processor_param, __device_addr FusionParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+         // LSTM layer 1 1000 -> 1000
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+         general_lstm_task<1>(context, hstasnet->m_fusion_branch, processor_param, &task_param->lstm_params);
+ 
+         // add p_spec_waveform_encoded to fusion lstm output
+@@ -288,7 +288,7 @@
+     template <typename Context>
+     __device_fct __forceinline_fct void post_spec_waveform_lstm_task_0(Context context, __device_addr ProcessorParameter* processor_param, __device_addr PostSpecWaveformLstmParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+         // LSTM layer 0 500-> 500
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+         constexpr uint32_t blocks_per_branch = PostSpecWaveformLstmParams::LstmParams::Blocks;
+         Wip::DefaultContext subcontext(context.threadId(), 32u, context.blockDim(), context.blockId() % blocks_per_branch, blocks_per_branch, reinterpret_cast<__threadgroup_addr char*>(context.smem()));
+         if (context.blockId() < blocks_per_branch) {
+@@ -303,7 +303,7 @@
+     template <typename Context>
+     __device_fct __forceinline_fct void post_spec_waveform_lstm_task_1(Context context, __device_addr ProcessorParameter* processor_param, __device_addr PostSpecWaveformLstmParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+         // LSTM layer 1 500-> 500
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+         constexpr uint32_t blocks_per_branch = PostSpecWaveformLstmParams::LstmParams::Blocks;
+         Wip::DefaultContext subcontext(context.threadId(), 32u, context.blockDim(), context.blockId() % blocks_per_branch, blocks_per_branch, reinterpret_cast<__threadgroup_addr char*>(context.smem()));
+         if (context.blockId() < blocks_per_branch) {
+@@ -320,7 +320,7 @@
+     // 2.4 post-post-fusion lstms rms normalization (task 12)
+     template <typename Context>
+     __device_fct __forceinline_fct void spec_waveform_rms_norm_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr SpecWaveformNormParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+ 
+         constexpr uint32_t BLOCK_DIM {256u};
+ 
+@@ -344,7 +344,7 @@
+     // 3.1 spectral post fusion (task 13)
+     template <typename Context>
+     __device_fct __forceinline_fct void spec_mask_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr SpecMaskParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+ 
+         // normalized lstm output 1x500
+         auto vec_in = reinterpret_cast<__device_addr decltype(hstasnet->m_spec_mask_linear)::InVecType const*>(task_param->p_spec_post_rnn_norm_in);
+@@ -401,7 +401,7 @@
+     template <typename Context>
+     __device_fct __forceinline_fct void inv_spec_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr InvSpecParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+         // Decoder: i-Spectrogram
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+         __device_addr auto& ringbuffer = hstasnet->m_spec_output_history;
+ 
+         // 8 channels = 4 sources with 2 channels each
+@@ -426,7 +426,7 @@
+     // 3.2 waveform post fusion (task 16)
+     template <typename Context>
+     __device_fct __forceinline_fct void waveform_mask_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr WaveformMaskParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+ 
+         // normalized output of post-fusion lstm 1x500
+         auto vec_in = reinterpret_cast<__device_addr decltype(hstasnet->m_waveform_mask_linear)::InVecType const*>(task_param->p_waveform_post_rnn_norm_in);
+@@ -457,7 +457,7 @@
+     // task 18
+     template <typename Context>
+     __device_fct __forceinline_fct void conv_decode_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr ConvDecodeParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+         __device_addr auto& ringbuffer = hstasnet->m_waveform_output_history;
+ 
+         // transposed convolution of the per source audio basis to get a reconstructed audio signal
+@@ -475,7 +475,7 @@
+     // 4. combine branches (task 19)
+     template <typename Context>
+     __device_fct __forceinline_fct void combine_branches_task(Context context, __device_addr ProcessorParameter* processor_param, __device_addr CombineBranchesParams* task_param, __device_addr float* __device_addr* input, __device_addr float* __device_addr* output) __device_addr {
+-        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<float>*>(processor_param->d_hstasnet);
++        auto hstasnet = reinterpret_cast<__device_addr gpua::GpuHsTasNet<half>*>(processor_param->d_hstasnet);
+         uint32_t ch = context.blockId();
+ 
+         // get access to [cursor - 512, cursor] in spec and waveform output
+--- a/SoundSourceSeparation/rt3s_processor/rt3s_processor/src/Rt3sTaskDescriptors.h
++++ b/SoundSourceSeparation/rt3s_processor/rt3s_processor/src/Rt3sTaskDescriptors.h
+@@ -83,7 +83,7 @@
+ }
+ 
+ // pre-fusion lstm
+-void pre_spec_waveform_lstm_task_0(GpuTaskData& gpu_task, gpua::GpuHsTasNet<float>* h_hstasnet) {
++void pre_spec_waveform_lstm_task_0(GpuTaskData& gpu_task, gpua::GpuHsTasNet<half>* h_hstasnet) {
+     gpu_task.entry_idx = 6u;
+     gpu_task.thread_count = gpua::PreSpecWaveformLstmParams::BlockSize;
+     gpu_task.block_count = gpua::PreSpecWaveformLstmParams::Blocks;
+@@ -92,7 +92,7 @@
+     gpu_task.processing_flags = ProcessingFlag::eProcessingFlagDefault;
+ }
+ 
+-void pre_spec_waveform_lstm_task_1(GpuTaskData& gpu_task, gpua::GpuHsTasNet<float>* h_hstasnet) {
++void pre_spec_waveform_lstm_task_1(GpuTaskData& gpu_task, gpua::GpuHsTasNet<half>* h_hstasnet) {
+     gpu_task.entry_idx = 7u;
+     gpu_task.thread_count = gpua::PreSpecWaveformLstmParams::BlockSize;
+     gpu_task.block_count = gpua::PreSpecWaveformLstmParams::Blocks;
+@@ -102,7 +102,7 @@
+ }
+ 
+ // fusion
+-void fusion_task_0(GpuTaskData& gpu_task, gpua::GpuHsTasNet<float>* h_hstasnet) {
++void fusion_task_0(GpuTaskData& gpu_task, gpua::GpuHsTasNet<half>* h_hstasnet) {
+     gpu_task.entry_idx = 8u;
+     gpu_task.thread_count = gpua::FusionParams::LstmParams::BlockSize;
+     gpu_task.block_count = gpua::FusionParams::LstmParams::Blocks;
+@@ -111,7 +111,7 @@
+     gpu_task.processing_flags = ProcessingFlag::eProcessingFlagDefault;
+ }
+ 
+-void fusion_task_1(GpuTaskData& gpu_task, gpua::GpuHsTasNet<float>* h_hstasnet) {
++void fusion_task_1(GpuTaskData& gpu_task, gpua::GpuHsTasNet<half>* h_hstasnet) {
+     gpu_task.entry_idx = 9u;
+     gpu_task.thread_count = gpua::FusionParams::LstmParams::BlockSize;
+     gpu_task.block_count = gpua::FusionParams::LstmParams::Blocks;
+@@ -121,7 +121,7 @@
+ }
+ 
+ // post-fusion lstm
+-void post_spec_waveform_lstm_task_0(GpuTaskData& gpu_task, gpua::GpuHsTasNet<float>* h_hstasnet) {
++void post_spec_waveform_lstm_task_0(GpuTaskData& gpu_task, gpua::GpuHsTasNet<half>* h_hstasnet) {
+     gpu_task.entry_idx = 10u;
+     gpu_task.thread_count = gpua::PostSpecWaveformLstmParams::BlockSize;
+     gpu_task.block_count = gpua::PostSpecWaveformLstmParams::Blocks;
+@@ -130,7 +130,7 @@
+     gpu_task.processing_flags = ProcessingFlag::eProcessingFlagDefault;
+ }
+ 
+-void post_spec_waveform_lstm_task_1(GpuTaskData& gpu_task, gpua::GpuHsTasNet<float>* h_hstasnet) {
++void post_spec_waveform_lstm_task_1(GpuTaskData& gpu_task, gpua::GpuHsTasNet<half>* h_hstasnet) {
+     gpu_task.entry_idx = 11u;
+     gpu_task.thread_count = gpua::PostSpecWaveformLstmParams::BlockSize;
+     gpu_task.block_count = gpua::PostSpecWaveformLstmParams::Blocks;
+--- a/SoundSourceSeparation/rt3s_processor/rt3s_processor/src/Rt3sProcessor.cpp
++++ b/SoundSourceSeparation/rt3s_processor/rt3s_processor/src/Rt3sProcessor.cpp
+@@ -472,19 +472,19 @@
+     m_d_twiddle_inverse_LUT = m_memory_manager.AllocateGpuMemory(MaxTwiddleLUT * 2 * sizeof(float));
+ 
+     // copy-once data: device HS-TasNet (network parameters and state)
+-    m_d_hstasnet = m_memory_manager.AllocateGpuMemory(sizeof(gpua::GpuHsTasNet<float>));
++    m_d_hstasnet = m_memory_manager.AllocateGpuMemory(sizeof(gpua::GpuHsTasNet<half>));
+ 
+     ////////////////////////////////
+     // initialize the host network
+     ParamStreamBuf weights_in_buf(spec->params, spec->params_bytes);
+     std::istream weights_in(&weights_in_buf);
+     weights_in.unsetf(std::ios::skipws);
+-    auto hstasnet = std::make_unique<gpua::GpuHsTasNet<float>>(weights_in, m_d_twiddle_LUT->GetGpuPointer(), m_d_twiddle_inverse_LUT->GetGpuPointer());
++    auto hstasnet = std::make_unique<gpua::GpuHsTasNet<half>>(weights_in, m_d_twiddle_LUT->GetGpuPointer(), m_d_twiddle_inverse_LUT->GetGpuPointer());
+ 
+     // transfer copy-once data to the gpu
+     m_memory_manager.MemCpyCpuToGpu(*m_d_twiddle_LUT.get(), 0u, &twiddle_LUT[0], MaxTwiddleLUT * 2 * sizeof(float));
+     m_memory_manager.MemCpyCpuToGpu(*m_d_twiddle_inverse_LUT.get(), 0u, &twiddle_inverse_LUT[0], MaxTwiddleLUT * 2 * sizeof(float));
+-    m_memory_manager.MemCpyCpuToGpu(*m_d_hstasnet.get(), 0u, hstasnet.get(), sizeof(gpua::GpuHsTasNet<float>));
++    m_memory_manager.MemCpyCpuToGpu(*m_d_hstasnet.get(), 0u, hstasnet.get(), sizeof(gpua::GpuHsTasNet<half>));
+ 
+     ////////////////////////////////
+     // configure the gpu tasks

@@ -114,7 +114,9 @@ pub fn mel_to_hz(mel: f64) -> f64 {
 }
 
 pub fn rfft_freqs(n_fft: usize, sr: f64) -> Vec<f64> {
-    (0..=n_fft / 2).map(|i| i as f64 * sr / n_fft as f64).collect()
+    (0..=n_fft / 2)
+        .map(|i| i as f64 * sr / n_fft as f64)
+        .collect()
 }
 
 /// 三角滤波器组，`n_mels` 行 × `1 + n_fft/2` 列。峰值归一（不做 Slaney 面积归一）。
@@ -306,12 +308,14 @@ mod tests {
         assert_eq!(fb[0].len(), N_FFT / 2 + 1);
 
         let expected_peaks = [
-            0.916_689, 0.946_714, 0.984_958, 0.878_331, 0.977_000, 0.888_912, 0.896_536,
-            0.904_366,
+            0.916_689, 0.946_714, 0.984_958, 0.878_331, 0.977_000, 0.888_912, 0.896_536, 0.904_366,
         ];
         for (i, want) in expected_peaks.iter().enumerate() {
             let peak = fb[i].iter().cloned().fold(0.0f32, f32::max) as f64;
-            assert!(close(peak, *want, 1e-5), "第 {i} 行峰值 {peak}，期望 {want}");
+            assert!(
+                close(peak, *want, 1e-5),
+                "第 {i} 行峰值 {peak}，期望 {want}"
+            );
         }
         let row3_sum: f64 = fb[3].iter().map(|v| *v as f64).sum();
         assert!(close(row3_sum, 3.381_121, 1e-4), "第 3 行和 {row3_sum}");
@@ -389,7 +393,7 @@ mod tests {
     #[test]
     fn parabolic_interpolation_recovers_a_subsample_peak() {
         // 顶点在 2.25 处的抛物线
-        let values: Vec<f64> = (0..5).map(|i| -( i as f64 - 2.25).powi(2)).collect();
+        let values: Vec<f64> = (0..5).map(|i| -(i as f64 - 2.25).powi(2)).collect();
         assert!(close(parabolic_peak(&values, 2), 2.25, 1e-9));
         // 边界不插值
         assert!(close(parabolic_peak(&values, 0), 0.0, 1e-12));

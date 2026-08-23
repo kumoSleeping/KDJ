@@ -1,5 +1,9 @@
 # KDJ Repository Rules
 
+## Project Intent
+
+- KDJ is a non-commercial project. Non-commercial license terms MUST NOT be treated as a current integration blocker; still record and comply with attribution, share-alike, redistribution, and model-specific terms, and reassess before any future commercial distribution.
+
 ## Active Architecture
 
 - **The only active desktop architecture is Rust + Tauri.**
@@ -25,9 +29,7 @@
 
 - Frontend: `npm run typecheck` and `npm run tauri:web:build`.
 - Rust: use the narrowest relevant `cargo test`/`cargo check`, then workspace validation when appropriate.
-- GUI: launch only through `npm run tauri:dev`.
-- **GUI inspection and automation MUST target the development instance started by the current `npm run tauri:dev` session. Never use `/Applications/KDJ.app`, an installed release, or another KDJ process as evidence for the development build.**
-- If more than one KDJ instance is running, verify the target process by PID and executable path before reading or operating its window. If the UI tool cannot distinguish the dev process from the installed app, stop the UI inspection instead of guessing.
+- GUI automation on Apple Silicon: launch with `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="$PWD/scripts/tauri-dev-gui-runner.sh" npm run tauri:dev`; the Cargo runner keeps the executable in that current dev session but registers it as `/tmp/KDJ Dev.app` (`com.kdj.dev`), which `computer_use` can target. Before operating it, verify the PID/path and parent session with `ps`/`lsappinfo` and `computer_use.list_apps`; never target `com.kdj.app`, `/Applications/KDJ.app`, or another KDJ process, and stop rather than guess if the identities differ.
 - Pure frontend changes under `src/` or frontend CSS SHOULD use Vite HMR in the running Tauri dev session; do not fully restart the app for each frontend-only edit.
 - Rust backend, `src-tauri/`, Tauri configuration, native capability, or startup changes MUST be validated by fully stopping and restarting `npm run tauri:dev` before reporting completion.
 

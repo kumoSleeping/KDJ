@@ -77,17 +77,16 @@ jobs:
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
           echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
-      # 只装真机会用到的两个 ABI：aarch64 覆盖 2018 年后基本所有机器，
-      # armv7 兜老设备。i686 / x86_64 是模拟器用的，要跑模拟器再补
-      # （同时 `tauri android build` 的 --target 也要一起加，否则 gradle
-      #  找不到那个 ABI 的 .so 会直接失败）。
+      # SCNet Vulkan 的 pinned ExecuTorch AAR 只带 arm64-v8a / x86_64；本测试版只发
+      # 真机主流的 aarch64，不能再假装 armv7 能运行后把 APK 交给用户。i686/x86_64
+      # 是模拟器用的，要跑模拟器再补对应 target 和 AAR ABI。
       #
       # 注意：`android init` 自己还会 rustup 补装 i686 / x86_64（本机实测），
       # 所以这里少装两个不会让 init 失败，只是 init 那一步会多花一点时间下载。
       - name: 安装 Rust 与安卓 target
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi
+          targets: aarch64-linux-android
 
       - name: Rust 构建缓存
         uses: Swatinem/rust-cache@v2
@@ -125,8 +124,7 @@ jobs:
         if: steps.shell.outputs.present == 'true'
         run: npx --yes @tauri-apps/cli@^2 android init
 
-      # 分支构建允许不签名（只验证能否交叉编译）；tag 是交付物，缺任意一项都
-      # 必须在耗时数小时的 Android 编译之前停下，不能再悄悄发布 unsigned APK。
+      # Tag 是正式交付物，缺任意正式密钥都必须在耗时构建之前停下。
       - name: 验证正式发行签名密钥
         if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
         shell: bash
@@ -143,20 +141,52 @@ jobs:
             fi
           done
 
-      # init 之后必须重做的三件事（明文放行 / 签名 / 图标）统一交给
-      # scripts/android-postinit.sh —— 本地和 CI 跑**同一份**脚本。
-      # 各写一套的下场是"我这儿能装、CI 出来的装不上"，而且这种差异
-      # 只有等到把 APK 拷进手机那一刻才会暴露。
-      #
-      # 签名的钥匙来自 repo secrets（配置方法见 docs/rust-port/08-updates-and-signing.md）：
-      #   ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS
-      # 分支构建没配时脚本会跳过签名；正式 tag 已由上一步强制门禁。
-      - name: init 后置补丁（明文 / 签名 / 图标）
-        if: steps.shell.outputs.present == 'true'
+      # 正式 tag 使用稳定的发布密钥；把 secret 写进环境而不是直接传给 post-init，
+      # 这样测试签名和正式签名走同一个脚本分支，且脚本不必知道 GitHub Actions。
+      - name: 配置正式发行签名环境
+        if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
+        shell: bash
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          {
+            echo "ANDROID_KEYSTORE_BASE64=$ANDROID_KEYSTORE_BASE64"
+            echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS"
+          } >> "$GITHUB_ENV"
+
+      # workflow_dispatch 的分支 APK 也要能实际装进设备收诊断，不能上传一个只能
+      # 验证编译的 unsigned 文件。每次 runner 生成独立测试证书：它绝不能用于发布，
+      # 也不能覆盖由正式 tag 使用的稳定签名。
+      - name: 生成可安装的测试签名
+        if: steps.shell.outputs.present == 'true' && !startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_store="$RUNNER_TEMP/kdj-device-test.jks"
+          keytool -genkeypair -noprompt -storetype JKS \
+            -keystore "$key_store" -storepass kdj-device-test \
+            -alias kdj-device-test -keypass kdj-device-test \
+            -dname 'CN=KDJ Device Test, OU=Test, O=KDJ, C=ZZ' \
+            -keyalg RSA -keysize 2048 -validity 7
+          {
+            echo "ANDROID_KEYSTORE_PATH=$key_store"
+            echo 'ANDROID_KEYSTORE_PASSWORD=kdj-device-test'
+            echo 'ANDROID_KEY_ALIAS=kdj-device-test'
+            echo 'ANDROID_KEY_PASSWORD=kdj-device-test'
+          } >> "$GITHUB_ENV"
+
+      # init 之后必须重做的五件事（明文放行 / 权限 / ExecuTorch / 签名 / 图标）统一交给
+      # scripts/android-postinit.sh —— 本地和 CI 跑**同一份**脚本。
+      # 各写一套的下场是"我这儿能装、CI 出来的装不上"，而且这种差异
+      # 只有等到把 APK 拷进手机那一刻才会暴露。
+      #
+      # 签名环境在上两步确定：tag 用 repo secrets，非 tag 用一次性的设备测试证书。
+      - name: init 后置补丁（明文 / 权限 / ExecuTorch / 签名 / 图标）
+        if: steps.shell.outputs.present == 'true'
         run: ./scripts/android-postinit.sh
 
       # 风险表已按本机实测（NDK r27c）重排。**先看下面这三条已经被证伪的**，
@@ -176,10 +206,9 @@ jobs:
       #   1. ✅ ~~明文 HTTP 被禁~~ 已解决：init 之后的「放行 localhost 明文」
       #      步骤把 release 的 usesCleartextTraffic 翻成 true（本机 merged
       #      manifest 已验证），细节与取舍见 06-packaging-results.md §4.7 后记。
-      #   2. ✅ ~~签名~~ 已解决：android-postinit.sh 从 secrets 里还原 keystore
-      #      并注入 signingConfigs，产物是 app-universal-release.apk（不带
-      #      -unsigned 后缀）。secrets 没配时退回未签名包，届时产物名会变，
-      #      下面上传那步的通配符两种都收。
+      #   2. ✅ ~~签名~~ 已解决：android-postinit.sh 注入 signingConfigs；tag 还原
+      #      正式 keystore，测试构建生成一次性设备签名，产物始终是可安装的
+      #      app-arm64-release.apk（不带 -unsigned 后缀）。
       #   3. **16KB page size**：Android 15 起要求 .so 按 16KB 对齐，
       #      老 NDK 编出来的库在新机器上会加载失败——这也是钉 r27 的理由之一。
       #      r27c 编出来的库还没装进真机验证过。
@@ -211,13 +240,28 @@ jobs:
           # 分支构建缺失可接受（产物里登录不可用）；正式 tag 已由上面的门禁强制。
           KDJ_YTM_OAUTH_CLIENT_ID: ${{ secrets.KDJ_YTM_OAUTH_CLIENT_ID }}
           KDJ_YTM_OAUTH_CLIENT_SECRET: ${{ secrets.KDJ_YTM_OAUTH_CLIENT_SECRET }}
-        # Rust 主库本身约 14 MiB；把 arm64/armv7 塞进同一个 universal APK 会让
-        # 每位用户下载两套互斥机器码。按 ABI 拆包才能守住单包 20 MiB 预算。
-        run: npx --yes @tauri-apps/cli@^2 android build --apk --split-per-abi --target aarch64 --target armv7
+        # ExecuTorch Vulkan 的 arm64 native runtime 与 Rust 主库只发一份。模型 .pte 在
+        # 首次启用 STEM 时下载到 app data，不打进 APK；不要构造包含不支持 armv7 的
+        # universal 包。
+        run: npx --yes @tauri-apps/cli@^2 android build --apk --split-per-abi --target aarch64
 
       - name: APK 单包体积门禁
         if: steps.shell.outputs.present == 'true'
         run: ./scripts/check-android-apk-size.sh
+
+      - name: 验证测试 APK 可安装签名
+        if: steps.shell.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t apks < <(find src-tauri/gen/android/app/build/outputs/apk -path '*/release/*-release.apk' -print | sort)
+          if [ "${#apks[@]}" -eq 0 ]; then
+            echo "::error::没有找到可安装的 *-release.apk"
+            exit 1
+          fi
+          for apk in "${apks[@]}"; do
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify -v "$apk"
+          done
 
       - name: 验证正式 APK 确实已签名
         if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')

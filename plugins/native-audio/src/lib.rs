@@ -5,10 +5,7 @@ use tauri::{
 };
 
 #[cfg(target_os = "android")]
-use tauri::{
-    plugin::PluginHandle,
-    Manager,
-};
+use tauri::{plugin::PluginHandle, Manager};
 
 #[cfg(target_os = "android")]
 const PLUGIN_IDENTIFIER: &str = "app.tauri.nativeaudio";

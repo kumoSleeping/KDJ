@@ -149,7 +149,10 @@ pub async fn check(current: &str) -> Result<UpdateInfo> {
         current: current.to_string(),
         url: url.to_string(),
         name: body["name"].as_str().unwrap_or(&tag).to_string(),
-        published_at: body["published_at"].as_str().unwrap_or_default().to_string(),
+        published_at: body["published_at"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
         notes: body["body"].as_str().unwrap_or_default().to_string(),
     })
 }
@@ -161,7 +164,10 @@ mod tests {
     #[test]
     fn version_triples_compare_like_humans_expect() {
         assert!(triple("v0.3.0") > triple("0.2.1"));
-        assert!(triple("0.2.10") > triple("0.2.9"), "逐段数值比，不是字符串比");
+        assert!(
+            triple("0.2.10") > triple("0.2.9"),
+            "逐段数值比，不是字符串比"
+        );
         assert!(triple("1.0.0") > triple("0.99.99"));
         assert_eq!(triple("v0.2.1"), triple("0.2.1"), "v 前缀不参与比较");
         // 解析不了的当 (0,0,0)：奇形怪状的 tag 永远不会被当成"新版本"
@@ -230,6 +236,9 @@ mod tests {
             signed_android_apk_url(&with_universal, AndroidAbi::Arm64),
             Some("uni")
         );
-        assert_eq!(signed_android_apk_url(&serde_json::json!({"assets": []}), AndroidAbi::Arm64), None);
+        assert_eq!(
+            signed_android_apk_url(&serde_json::json!({"assets": []}), AndroidAbi::Arm64),
+            None
+        );
     }
 }

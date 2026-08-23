@@ -13,7 +13,8 @@ const CUE_COLORS: Record<string, { css: string; label: string; text: string }> =
 };
 
 function colorDefinition(cue: CuePoint) {
-  return CUE_COLORS[cue.color.trim().toLowerCase()] ?? null;
+  const name = typeof cue.color === "string" ? cue.color.trim().toLowerCase() : "";
+  return name ? CUE_COLORS[name] ?? null : null;
 }
 
 /** OneLibrary 颜色表只存标准色名；这里给波形和色块统一转换为可见的 sRGB。 */
@@ -63,7 +64,87 @@ export function cueTimeRange(cue: CuePoint): string {
 }
 
 export function cueTitle(cue: CuePoint): string {
-  return [cueTypeLabel(cue), cueTimeRange(cue), cueColorLabel(cue), cue.comment.trim()]
+  const comment = typeof cue.comment === "string" ? cue.comment.trim() : "";
+  return [cueTypeLabel(cue), cueTimeRange(cue), cueColorLabel(cue), comment]
     .filter(Boolean)
     .join(" · ");
+}
+
+/** 现场 Loop（不是某个 Cue Loop）用的预览色，避开 8 个 Hot Cue 色板。 */
+export const DEFAULT_LOOP_OVERLAY_COLOR = "#5eb8ff";
+const LOOP_ALIGN_MS = 12;
+
+export interface WaveformLoopRegion {
+  key: string;
+  startSec: number;
+  endSec: number;
+  color: string;
+  active: boolean;
+}
+
+export function cueNearTime(
+  cues: readonly CuePoint[],
+  timeSec: number,
+  windowMs = LOOP_ALIGN_MS,
+): CuePoint | undefined {
+  if (!Number.isFinite(timeSec)) return undefined;
+  const ms = timeSec * 1_000;
+  return cues.find((cue) => Math.abs(cue.start_ms - ms) <= windowMs);
+}
+
+/** 现场 Loop 若正好落在某个已存 Cue Loop 上，预览改用该 Cue 的颜色。 */
+export function matchingLoopCue(
+  cues: readonly CuePoint[],
+  startSec: number,
+  lengthSec: number,
+  windowMs = LOOP_ALIGN_MS,
+): CuePoint | undefined {
+  if (!Number.isFinite(startSec) || !Number.isFinite(lengthSec) || lengthSec <= 0) return undefined;
+  const startMs = startSec * 1_000;
+  const endMs = (startSec + lengthSec) * 1_000;
+  return cues.find((cue) => (
+    cue.end_ms !== null
+    && Math.abs(cue.start_ms - startMs) <= windowMs
+    && Math.abs(cue.end_ms - endMs) <= windowMs
+  ));
+}
+
+/**
+ * 波形上要铺的 Loop 预览：已存 Cue Loop 始终画出区间；现场 Loop 若没有对上
+ * Cue，就再铺一层默认色。对上了则只加强那条 Cue Loop，避免叠两层。
+ */
+export function waveformLoopRegions(
+  cues: readonly CuePoint[],
+  loopStartSec?: number | null,
+  loopLengthSec?: number | null,
+): WaveformLoopRegion[] {
+  const live = typeof loopStartSec === "number"
+    && Number.isFinite(loopStartSec)
+    && typeof loopLengthSec === "number"
+    && Number.isFinite(loopLengthSec)
+    && loopLengthSec > 0
+    ? { startSec: loopStartSec, endSec: loopStartSec + loopLengthSec }
+    : null;
+  const liveMatch = live ? matchingLoopCue(cues, live.startSec, live.endSec - live.startSec) : undefined;
+  const regions: WaveformLoopRegion[] = [];
+  for (const cue of cues) {
+    if (cue.end_ms === null || cue.end_ms <= cue.start_ms) continue;
+    regions.push({
+      key: `cue-loop:${cue.id}`,
+      startSec: cue.start_ms / 1_000,
+      endSec: cue.end_ms / 1_000,
+      color: cueColor(cue),
+      active: liveMatch?.id === cue.id,
+    });
+  }
+  if (live && !liveMatch) {
+    regions.push({
+      key: "live-loop",
+      startSec: live.startSec,
+      endSec: live.endSec,
+      color: DEFAULT_LOOP_OVERLAY_COLOR,
+      active: true,
+    });
+  }
+  return regions;
 }

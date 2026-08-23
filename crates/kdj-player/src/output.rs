@@ -8,9 +8,10 @@ use rtrb::Consumer;
 
 use crate::command::SourceKind;
 use crate::engine::{dynamic_command_channel, AudioRenderer};
+use crate::stream::StemFrame;
 use crate::{
-    command_channel, CommandError, DeckId, DecodedTrack, PlayerController, RtCommand,
-    StreamSource, TransportSnapshot,
+    command_channel, CommandError, DeckId, DecodedTrack, PlayerController, RtCommand, StreamSource,
+    TransportSnapshot,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +76,7 @@ pub struct DynamicPlayer {
 enum OwnedSource {
     Decoded(Arc<DecodedTrack>),
     Stream(Arc<StreamSource>),
+    StemStream(Arc<StreamSource<StemFrame>>),
 }
 
 /// Opens a complete two-deck native output path for already decoded tracks.
@@ -139,8 +141,7 @@ impl DynamicPlayer {
             SourceKind::Decoded,
             address,
             start_frame,
-        )
-        {
+        ) {
             self.sources.remove(&source_id);
             return Err(error);
         }
@@ -162,6 +163,31 @@ impl DynamicPlayer {
             deck,
             source_id,
             SourceKind::Stream,
+            address,
+            start_frame,
+        ) {
+            self.sources.remove(&source_id);
+            return Err(error);
+        }
+        Ok(source_id)
+    }
+
+    pub fn install_stem_stream(
+        &mut self,
+        deck: DeckId,
+        source: Arc<StreamSource<StemFrame>>,
+        start_frame: u64,
+    ) -> Result<u64, CommandError> {
+        self.collect_retired();
+        let source_id = self.next_source_id;
+        self.next_source_id = self.next_source_id.wrapping_add(1).max(1);
+        let address = Arc::as_ptr(&source) as usize;
+        self.sources
+            .insert(source_id, OwnedSource::StemStream(source));
+        if let Err(error) = self.controller.install_prepared(
+            deck,
+            source_id,
+            SourceKind::StemStream,
             address,
             start_frame,
         ) {
@@ -219,7 +245,10 @@ impl DeviceOutput {
         let sample_format = supported.sample_format();
         let supported_buffer = supported.buffer_size();
         let mut config: StreamConfig = supported.into();
-        let target_frames = (config.sample_rate / 100).max(1);
+        // A 20ms hardware quantum is still responsive for DJ controls and materially more robust
+        // while background waveform analysis is using CPU. The old 10ms request could underrun on
+        // an otherwise healthy four-second Deck ring, producing the user's periodic buzz/stutter.
+        let target_frames = (config.sample_rate / 50).max(1);
         let requested_buffer_frames = match supported_buffer {
             SupportedBufferSize::Range { min, max } => Some(target_frames.clamp(*min, *max)),
             SupportedBufferSize::Unknown => None,

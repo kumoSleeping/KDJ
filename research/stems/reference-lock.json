@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "capturedAt": "2026-08-18",
+  "repositories": [
+    {
+      "name": "StemgenRT",
+      "url": "https://github.com/sweetspotsoundsystem/stemgen-rt.git",
+      "commit": "eaaba4fe8ed77a312ddaee34948bea34e0cbc30b",
+      "sourceLicense": "MIT",
+      "weightLicense": "unverified; the source license does not establish checkpoint provenance or redistribution rights"
+    },
+    {
+      "name": "GPU Audio SDK",
+      "url": "https://github.com/gpuaudio/gpuaudio-sdk.git",
+      "commit": "4cde62009594e0f4f1db712d27be4fea8b0d06c8",
+      "sourceLicense": "CC BY-NC-SA 4.0"
+    },
+    {
+      "name": "RT3S Processor",
+      "url": "https://github.com/gpuaudio/rt3s_processor.git",
+      "commit": "f0631f5f7d1460d5ba9b9d4f456722315fa0c1d2",
+      "sourceLicense": "CC BY-NC-SA 4.0"
+    },
+    {
+      "name": "RT3SLib",
+      "url": "https://github.com/gpuaudio/RT3SLib.git",
+      "commit": "2de98f8129073927f7a7dc4fb2629535ebf70c79",
+      "sourceLicense": "CC BY-NC-SA 4.0; some file headers additionally say proprietary/confidential"
+    },
+    {
+      "name": "ZFTurbo Music-Source-Separation-Training",
+      "url": "https://github.com/ZFTurbo/Music-Source-Separation-Training.git",
+      "commit": "2ba884c2083070c4061fb2d5e3afc41e32420b8a",
+      "sourceLicense": "MIT",
+      "weightLicense": "MIT with the upstream SCNet license clarification referenced in docs/waveform-scnet-evaluation.md"
+    },
+    {
+      "name": "demixr scnet-executorch",
+      "url": "https://github.com/demixr/scnet-executorch.git",
+      "commit": "89f043bb939eb8726e9875d05e480b2a007fabc0",
+      "sourceLicense": "MIT",
+      "weightIdentity": "372/372 tensor keys, shapes and values exactly match ZFTurbo v1.0.6 checkpoint; maxAbsDifference=0"
+    },
+    {
+      "name": "lucidrains HS-TasNet",
+      "url": "https://github.com/lucidrains/HS-TasNet.git",
+      "commit": "5bd950260d26efb2797c7c2d8b101c77f69abda7",
+      "sourceLicense": "MIT",
+      "weightLicense": "not applicable: no checkpoint is present in the pinned Git tree or GitHub releases"
+    }
+  ],
+  "artifacts": [
+    {
+      "name": "StemgenRT model.onnx",
+      "url": "https://media.githubusercontent.com/media/sweetspotsoundsystem/stemgen-rt/eaaba4fe8ed77a312ddaee34948bea34e0cbc30b/model/model.onnx",
+      "bytes": 497166,
+      "sha256": "3e6432f8704c44ed61f9709296acea07112913a62cc7465b1ea44071197f58b1"
+    },
+    {
+      "name": "StemgenRT model.onnx.data",
+      "url": "https://media.githubusercontent.com/media/sweetspotsoundsystem/stemgen-rt/eaaba4fe8ed77a312ddaee34948bea34e0cbc30b/model/model.onnx.data",
+      "bytes": 210763776,
+      "sha256": "355f036eb618a03b878e01e5da1b4b0e5463c725c4cb2ed18f94888003c7d722"
+    },
+    {
+      "name": "GPU Audio RT3S model archive",
+      "url": "https://github.com/gpuaudio/platform_headers/releases/download/v0.0.1/RT3S_model.zip",
+      "bytes": 185693806,
+      "sha256": "3e9bf313557081abcc5fd54f448f21702964253277cd6cce56bd53b88406a935",
+      "containedArtifact": {
+        "name": "params.bw",
+        "bytes": 200653256,
+        "sha256": "0bbc9b0e335e38e11585e340192421f5fb9e44e49edd0fb3c482377aa4e3bad9"
+      },
+      "license": "GPU Audio RT3S Model License: research/evaluation/academic/demonstration, non-commercial only; trained on MUSDB18"
+    },
+    {
+      "name": "GPU Audio Platform macOS metapackage 2.3.0.219",
+      "url": "https://www.gpu.audio/download/26",
+      "bytes": 2271038,
+      "sha256": "56c279cfc9b16ee4129b63413475a302721aa66843db51f25e166263b3800d08",
+      "license": "GPU Audio EULA/proprietary binary; research machine dependency, not redistributable by KDJ"
+    },
+    {
+      "name": "SCNet MUSDB18 config",
+      "url": "https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/download/v.1.0.6/config_musdb18_scnet.yaml",
+      "releaseUrl": "https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/tag/v.1.0.6",
+      "bytes": 1739,
+      "sha256": "19103def86d549701f824804fc5f3d244e8e8ccd4032da6ee9d5b4f2a5f2da16",
+      "license": "MIT"
+    },
+    {
+      "name": "SCNet MUSDB18 checkpoint",
+      "url": "https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/download/v.1.0.6/scnet_checkpoint_musdb18.ckpt",
+      "releaseUrl": "https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/tag/v.1.0.6",
+      "bytes": 42434986,
+      "sha256": "1bc0d1abb20bfdf966dcd07637bafd03e4bc13653d09ef18bc9b3e342eafe2aa",
+      "license": "MIT with attribution; see upstream SCNet issue 35"
+    },
+    {
+      "name": "SCNet Small Core ML deployment package",
+      "url": "https://github.com/demixr/scnet-executorch/releases/download/v0.1.2/scnet_coreml.mlpackage.zip",
+      "releaseUrl": "https://github.com/demixr/scnet-executorch/releases/tag/v0.1.2",
+      "bytes": 34543230,
+      "sha256": "d15357c0abc901defb76282178966b0c41cc3e7b9ad34a8a0fd4598b11043c2f",
+      "license": "MIT; exported from tensors exactly matching the locked ZFTurbo SCNet Small checkpoint"
+    }
+  ]
+}

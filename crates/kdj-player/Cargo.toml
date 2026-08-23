@@ -8,8 +8,14 @@ license.workspace = true
 [dependencies]
 anyhow = "=1.0.104"
 cpal = "=0.18.1"
+kdj-core = { version = "0.2.41", path = "../kdj-core" }
+kdj-stems = { version = "0.2.41", path = "../kdj-stems" }
 rtrb = "=0.3.4"
 symphonia = { version = "=0.5.5", features = ["aac", "alac", "mp3", "isomp4", "ogg", "vorbis", "flac", "wav", "pcm"] }
+tracing = "=0.1.44"
+
+[build-dependencies]
+cc = "=1.4.0"
 
 # cpal 0.18 accepts both windows 0.61 and 0.62 independently. Without a direct pair pin,
 # Cargo can resolve `windows` 0.61 with `windows-core` 0.62 and cpal's COM implementations fail

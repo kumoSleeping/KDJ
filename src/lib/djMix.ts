@@ -41,7 +41,8 @@ import {
   type ExternalAdoptionKey,
 } from "./browserDeckPreload";
 import { mediaUrlForTrack } from "./streamTrack";
-import type { Track } from "../types";
+import { BEATS_PER_BAR as GRID_BEATS_PER_BAR, msUntilNextBoundary } from "./beatGridSync";
+import type { FilterResonance, Track } from "../types";
 
 /* ---------------------------------------------------------------- 配置 */
 
@@ -89,6 +90,15 @@ interface DjConfig {
    * 开 → 从 cue 起播、到 end 切下一首；关 → 首拍起播、波形尾段切歌。
    */
   applyInOutPoints: boolean;
+  /**
+   * 自动对拍：波形跳转保持小节相位；SYNC 锁小节（黄线对齐）；接歌等到下一小节边界。
+   * 关掉后点击跳转仍是精确落点，SYNC 只锁拍子（灰线对齐）。
+   */
+  autoBeatSync: boolean;
+  /**
+   * DJ 双盘装入曲目后立即从首拍起播。关掉则只装盘、停在首拍。
+   */
+  playOnLoad: boolean;
 }
 
 const DEFAULT_CONFIG: DjConfig = {
@@ -98,14 +108,25 @@ const DEFAULT_CONFIG: DjConfig = {
   bars: 1,
   vocalCut: true,
   applyInOutPoints: true,
+  autoBeatSync: true,
+  playOnLoad: true,
 };
 
 function loadDjConfig(): DjConfig {
   try {
     const raw: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
     if (raw && typeof raw === "object") {
-      const { enabled, transitions, effects, preset, bars, vocalCut, applyInOutPoints } =
-        raw as Record<string, unknown>;
+      const {
+        enabled,
+        transitions,
+        effects,
+        preset,
+        bars,
+        vocalCut,
+        applyInOutPoints,
+        autoBeatSync,
+        playOnLoad,
+      } = raw as Record<string, unknown>;
       const pickNumber = (value: unknown, allowed: readonly number[], fallback: number) =>
         allowed.includes(value as number) ? (value as number) : fallback;
       const selected = pickIds(transitions, isTransition);
@@ -118,6 +139,8 @@ function loadDjConfig(): DjConfig {
         vocalCut: vocalCut === true,
         // 缺字段按开：旧配置没有这项时保持「cue 起播」的既有行为。
         applyInOutPoints: applyInOutPoints !== false,
+        autoBeatSync: autoBeatSync !== false,
+        playOnLoad: playOnLoad !== false,
       };
     }
     // 旧版只存了预设名。"vocal" 已从预设降级成独立开关，语义原样迁过来
@@ -138,13 +161,25 @@ interface DjConfigState extends DjConfig {
   setBars(bars: number): void;
   setVocalCut(value: boolean): void;
   setApplyInOutPoints(value: boolean): void;
+  setAutoBeatSync(value: boolean): void;
+  setPlayOnLoad(value: boolean): void;
 }
 
 function saveDjConfig(state: DjConfig): void {
-  const { enabled, transitions, effects, bars, vocalCut, applyInOutPoints } = state;
+  const { enabled, transitions, effects, bars, vocalCut, applyInOutPoints, autoBeatSync, playOnLoad } =
+    state;
   localStorage.setItem(
     STORAGE_KEY,
-    JSON.stringify({ enabled, transitions, effects, bars, vocalCut, applyInOutPoints }),
+    JSON.stringify({
+      enabled,
+      transitions,
+      effects,
+      bars,
+      vocalCut,
+      applyInOutPoints,
+      autoBeatSync,
+      playOnLoad,
+    }),
   );
 }
 
@@ -188,6 +223,14 @@ export const useDjConfig = create<DjConfigState>((set, get) => ({
     set({ applyInOutPoints });
     saveDjConfig(get());
   },
+  setAutoBeatSync(autoBeatSync) {
+    set({ autoBeatSync });
+    saveDjConfig(get());
+  },
+  setPlayOnLoad(playOnLoad) {
+    set({ playOnLoad });
+    saveDjConfig(get());
+  },
 }));
 
 /* ---------------------------------------------------------------- 参数 */
@@ -217,6 +260,17 @@ const ECHO_FEEDBACK_MAX = 0.34;
 const HYDRANT_FEEDBACK_MAX = 0.3;
 /** 共振 Q 的安全上限。高于 3 在满电平母带上很容易形成刺耳窄峰。 */
 const RESONANCE_Q_MAX = 2.4;
+/** Web Audio 的低档严格保留此前固定的 0.7；其余档位在安全上限内逐级提高。 */
+const FILTER_RESONANCE_Q: Record<FilterResonance, number> = {
+  low: 0.7,
+  medium: 1.4,
+  high: RESONANCE_Q_MAX,
+};
+let channelFilterResonanceQ = FILTER_RESONANCE_Q.high;
+
+function filterResonanceQ(resonance: FilterResonance): number {
+  return FILTER_RESONANCE_Q[resonance] ?? FILTER_RESONANCE_Q.high;
+}
 
 /** 接歌用的秒数 = 小节数 × 每小节时长（按出让方的 BPM）。 */
 export function mixSeconds(bpm: number | null | undefined, bars: number): number {
@@ -246,6 +300,8 @@ export function bpmSyncRate(fromBpm: number | null, toBpm: number | null): numbe
   }
   return best > SYNC_MAX_RATIO || best < 1 / SYNC_MAX_RATIO ? 1 : best;
 }
+
+export { deckSyncRate } from "./beatGridSync";
 
 /**
  * 只有 iOS 仍由插件内 AVPlayer 独占输出。Android 的本地文件虽由共享 Rust
@@ -681,12 +737,12 @@ function buildDeck(ctx: AudioContext, el: HTMLAudioElement): Deck {
   const lowpass = ctx.createBiquadFilter();
   lowpass.type = "lowpass";
   lowpass.frequency.value = 20000;
-  lowpass.Q.value = 0.7;
+  lowpass.Q.value = channelFilterResonanceQ;
 
   const highpass = ctx.createBiquadFilter();
   highpass.type = "highpass";
   highpass.frequency.value = 10;
-  highpass.Q.value = 0.7;
+  highpass.Q.value = channelFilterResonanceQ;
 
   const fader = ctx.createGain();
   fader.gain.value = 1;
@@ -874,9 +930,9 @@ function neutralize(ctx: AudioContext, deck: Deck, faderGain = 1): void {
   deck.vocalMakeup.gain.setValueAtTime(1, now);
   deck.low.gain.setValueAtTime(0, now);
   deck.lowpass.frequency.setValueAtTime(20000, now);
-  deck.lowpass.Q.setValueAtTime(0.7, now);
+  deck.lowpass.Q.setValueAtTime(channelFilterResonanceQ, now);
   deck.highpass.frequency.setValueAtTime(10, now);
-  deck.highpass.Q.setValueAtTime(0.7, now);
+  deck.highpass.Q.setValueAtTime(channelFilterResonanceQ, now);
   deck.fader.gain.setValueAtTime(faderGain, now);
   deck.echoDelay.delayTime.setValueAtTime(0.25, now);
   deck.echoFeedback.gain.setValueAtTime(0.25, now);
@@ -1239,16 +1295,14 @@ function schedule(
     );
   }
   if (transitions.includes("filter")) {
-    // 共振扫频：旧歌被低通「收走」，共振峰越拉越高做出扫频的啸声；
-    // 新歌从高通后面「放出来」。频率走 exp，人耳的音高感是对数的。
+    // 共振扫频：旧歌被低通「收走」，新歌从高通后面「放出来」。频率走 exp，
+    // 人耳的音高感是对数的；Q 则直接采用设置里的低/中/高强度。
     out.lowpass.frequency.setValueAtTime(18000, now);
     out.lowpass.frequency.exponentialRampToValueAtTime(160, now + seconds);
-    out.lowpass.Q.setValueAtTime(0.7, now);
-    out.lowpass.Q.linearRampToValueAtTime(RESONANCE_Q_MAX, now + seconds * 0.8);
+    out.lowpass.Q.setValueAtTime(channelFilterResonanceQ, now);
     input.highpass.frequency.setValueAtTime(700, now);
     input.highpass.frequency.exponentialRampToValueAtTime(10, now + seconds * 0.7);
-    input.highpass.Q.setValueAtTime(RESONANCE_Q_MAX, now);
-    input.highpass.Q.linearRampToValueAtTime(0.7, now + seconds * 0.7);
+    input.highpass.Q.setValueAtTime(channelFilterResonanceQ, now);
   }
   // cross：只有底下那对等功率曲线；和别项一起抽到时不额外处理。
 
@@ -1387,6 +1441,8 @@ export interface DjBeginOptions {
   vocalCut: boolean;
   /** 为 true 时新歌从 cue_ms 起播；否则从首拍（或曲头）起。 */
   applyInOutPoints?: boolean;
+  /** 为 true 时等到出让方的下一小节边界再起播；否则仍等下一拍。 */
+  autoBeatSync?: boolean;
 }
 
 /**
@@ -1464,6 +1520,11 @@ export const djEngine = {
     return elements[frontIndex];
   },
 
+  /** Performance 模式使用固定 Deck 身份；不会随自动接歌的 front 角色互换。 */
+  deckElement(index: 0 | 1): HTMLAudioElement {
+    return elements[index];
+  },
+
   /**
    * 读取当前已被媒体元素解码出来的一小帧，用于在线渐进波形。
    * 这里只读 Web Audio 图里的 AnalyserNode，不 fetch、不 decodeAudioData，
@@ -1496,10 +1557,11 @@ export const djEngine = {
       const db = deck.waveformFrequencyData[index];
       const magnitude = Number.isFinite(db) ? Math.pow(10, db / 20) : 0;
       const power = magnitude * magnitude;
-      // 与 Rust 本地波形使用相同的 200 Hz / 1.5 kHz 三段交叉点。
-      if (hz < 200) {
+      // 与 Rust 本地波形使用相同的 600 Hz / 4 kHz 三段交叉点：人声主体留在中频，
+      // 只有真正的 presence/镲片区域进入高频色，不把整首曲子染成高饱和蓝白噪点。
+      if (hz < 600) {
         low += power;
-      } else if (hz < 1_500) {
+      } else if (hz < 4_000) {
         middle += power;
       } else {
         high += power;
@@ -1544,6 +1606,23 @@ export const djEngine = {
     }
     elements[0].volume = value;
     elements[1].volume = value;
+  },
+
+  /**
+   * Browser-preview fallback for the persisted Performance filter setting. Save the value even
+   * before Web Audio is warm so a later deck graph starts at the selected resonance; an existing
+   * graph swaps both channel filters immediately.
+   */
+  setFilterResonance(resonance: FilterResonance): void {
+    channelFilterResonanceQ = filterResonanceQ(resonance);
+    if (!ctx || !decks) return;
+    const now = ctx.currentTime;
+    for (const deck of decks) {
+      for (const param of [deck.lowpass.Q, deck.highpass.Q]) {
+        param.cancelScheduledValues(now);
+        param.setValueAtTime(channelFilterResonanceQ, now);
+      }
+    }
   },
 
   /**
@@ -2514,21 +2593,15 @@ export const djEngine = {
 
       // BPM 相同不等于拍点相位相同。异步挑歌/加载完成的时刻是随机的，直接从
       // next.first_beat 起播会让新歌第一拍落在旧歌两拍之间，两只底鼓挤成稳定的
-      // “哒哒”瞬态。已知旧歌第一拍时，最多等一拍，卡到它的下一个拍点再起播。
-      const fromBpm = options.from.bpm;
-      const fromFirstBeat = options.from.first_beat;
-      if (fromBpm && fromBpm > 0 && fromFirstBeat !== null) {
-        const sourceBeatSeconds = 60 / fromBpm;
-        const sourcePosition = Math.max(0, djEngine.currentTime(out.el) - fromFirstBeat);
-        const phase = ((sourcePosition % sourceBeatSeconds) + sourceBeatSeconds) % sourceBeatSeconds;
-        let sourceUntilBeat = (sourceBeatSeconds - phase) % sourceBeatSeconds;
-        const outgoingRate = Math.max(0.25, out.el.playbackRate || 1);
-        let waitMs = (sourceUntilBeat / outgoingRate) * 1000;
-        // 离拍点太近时主线程来不及稳定调度，宁可等下一拍，也不要落在拍后几十 ms。
-        if (waitMs < 80) {
-          sourceUntilBeat += sourceBeatSeconds;
-          waitMs = (sourceUntilBeat / outgoingRate) * 1000;
-        }
+      // “哒哒”瞬态。已知旧歌网格时，卡到下一个拍或小节边界再起播。
+      const waitMs = msUntilNextBoundary(
+        djEngine.currentTime(out.el),
+        options.from.bpm,
+        options.from.first_beat,
+        Math.max(0.25, out.el.playbackRate || 1),
+        options.autoBeatSync ? GRID_BEATS_PER_BAR : 1,
+      );
+      if (waitMs != null) {
         active.startTimeout = window.setTimeout(playOnBeat, waitMs);
       } else {
         playOnBeat();

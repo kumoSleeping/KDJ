@@ -9,7 +9,7 @@
   </h1>
 
   <p>
-    <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="License">
+    <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-lightgrey?style=flat-square" alt="License">
     <a href="https://github.com/kumoSleeping/KDJ/releases/latest"><img src="https://img.shields.io/github/v/release/kumoSleeping/KDJ?style=flat-square&label=release&color=orange" alt="Release"></a>
     <img src="https://img.shields.io/badge/Rust-dea584?style=flat-square&logo=rust&logoColor=black" alt="Rust">
     <img src="https://img.shields.io/badge/Tauri-24C8DB?style=flat-square&logo=tauri&logoColor=white" alt="Tauri">
@@ -68,6 +68,7 @@ KDJ 把跨平台搜歌、下载、本地曲库和音乐分析放进一个桌面�
 > OneLibrary 便携导出会把音频实体复制到 U 盘；只保存在本机的播放列表引用无法在另一台电脑上脱离原文件使用。已有完整 KDJ 分析的曲目会同时写入 BPM、Key、beatgrid 和 OneLibrary 波形；没有完整分析的曲目仍交给目标 DJ 软件补算。KDJ 另在卷内的 `.kdj` 保存便携波形缓存，软盘重挂载后不必重新解码。
 - 播放
   - 系统级音频输出与音量控制
+  - Rubber Band R3 保调 Tempo / BPM Sync；普通立体声与 8 声道 STEM 共用原生处理链
   - rkb 风格波形预览
   - 多种切歌效果（交叉 / 低频交接 / 滤波 / FX）
   - 视频浮窗与系统画中画；视频混流与抽取音轨
@@ -84,4 +85,7 @@ KDJ 只提供媒体管理与技术工具。使用搜索、试听和下载功能�
 
 ## 许可证
 
-KDJ 以 [MIT](https://opensource.org/license/mit) 许可证发布。
+KDJ 以 [GNU GPL 3.0 或更高版本](LICENSE)发布。发行包静态链接 GPL-2.0-or-later
+的 Rubber Band Library；对应源码和许可文本保存在
+[`crates/kdj-player/vendor/rubberband`](crates/kdj-player/vendor/rubberband)，其他说明见
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

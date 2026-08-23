@@ -11,6 +11,18 @@ mod output;
 mod state;
 mod stream;
 mod stretch;
+mod time_stretch;
+
+/// Stable DSP Q values behind the semantic low / medium / high resonance setting. Low preserves
+/// the legacy channel-filter response. High is a Pioneer-like resonant sweep; the former `Q = 4`
+/// peak could add ~12 dB on mastered material, so 2.4 stays musical and the resonant path already
+/// has a soft ceiling.
+pub const FILTER_RESONANCE_LOW_Q: f32 = 0.72;
+pub const FILTER_RESONANCE_MEDIUM_Q: f32 = 1.4;
+pub const FILTER_RESONANCE_HIGH_Q: f32 = 2.4;
+pub const DEFAULT_FILTER_RESONANCE_Q: f32 = FILTER_RESONANCE_HIGH_Q;
+/// Fixed live-EQ analyser width shared by the realtime engine and the Tauri event contract.
+pub const EQ_SPECTRUM_BANDS: usize = 15;
 
 pub use command::{DeckId, PlayerMode, RtCommand, TransitionPlan};
 pub use decode::{
@@ -23,7 +35,15 @@ pub use output::{
 };
 pub use state::TransportSnapshot;
 pub use stream::{
-    decode_file_streaming, decode_source_streaming, StreamMetadata, StreamSource, StreamWriter,
-    StreamingMediaSource, DEFAULT_STREAM_BUFFER_SECONDS,
+    decode_file_region, decode_file_streaming, decode_file_streaming_looped,
+    decode_live_stem_streaming, decode_source_region, decode_source_streaming,
+    decode_source_streaming_looped, decode_stem_cache_region, decode_stem_cache_streaming,
+    run_pitch_preserving_pipeline, stream_decoded_loop, FrameLerp, LoopWindow, StemFrame,
+    StreamMetadata, StreamSeekControl, StreamSource, StreamWriter, StreamingMediaSource,
+    DEFAULT_STREAM_BUFFER_SECONDS, STEM_GAIN_MAX, STEM_LANES,
 };
 pub use stretch::{stretch_preserving_pitch, stretch_preserving_pitch_with_cancel};
+pub use time_stretch::{
+    normalize_rate, PitchPreservingStretcher, TempoControl, TimeStretchFrame, MAX_TEMPO_RATE,
+    MIN_TEMPO_RATE,
+};

@@ -7,6 +7,8 @@ pub mod events;
 pub mod models;
 pub mod musical_key;
 pub mod paths;
+pub mod thread_qos;
+pub mod work_scheduler;
 
 pub use config::{AppConfig, Settings};
 pub use events::EventHub;

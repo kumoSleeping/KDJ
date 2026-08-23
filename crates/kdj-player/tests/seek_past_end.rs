@@ -82,7 +82,10 @@ fn seek_past_end_compressed_samples() {
         for position in [3.0, 3.05, 5.0] {
             let (result, buffered) = decode_at(path, position);
             eprintln!("{file} pos={position} -> {result} buffered={buffered}");
-            assert!(result.starts_with("OK"), "{file} pos={position} 不应失败：{result}");
+            assert!(
+                result.starts_with("OK"),
+                "{file} pos={position} 不应失败：{result}"
+            );
             assert!(buffered > 0);
         }
     }

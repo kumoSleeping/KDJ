@@ -13,6 +13,7 @@ pub mod lyrics;
 mod one_library_analysis;
 pub mod routes;
 pub mod state;
+pub mod stems;
 pub mod stream_cache;
 pub mod stream_waveform;
 pub mod usb_library;
@@ -43,7 +44,29 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         downloads,
     };
 
-    routes::router(ctx)
+    let router = routes::router(ctx)
+        .route(
+            "/api/stems/runtime",
+            axum::routing::get(stems::runtime_status),
+        )
+        .route(
+            "/api/stems/runtime/reset",
+            axum::routing::post(stems::reset_runtime),
+        )
+        .route(
+            "/api/tracks/{id}/stems",
+            axum::routing::get(stems::track_status)
+                .post(stems::separate_track)
+                .delete(stems::release_track),
+        )
+        .route(
+            "/api/tracks/{id}/stems/waveform/{stem}",
+            axum::routing::get(stems::stem_waveform),
+        )
+        .route(
+            "/api/tracks/{id}/stems/waveform",
+            axum::routing::get(stems::live_stem_waveform),
+        )
         .route("/ws", axum::routing::get(ws::handler))
         // 服务只监听 127.0.0.1；开放 CORS 让 Tauri WebView 和本机浏览器调试都能直连。
         .layer(
@@ -57,7 +80,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                     axum::http::header::CONTENT_LENGTH,
                 ]),
         )
-        .with_state(state)
+        .with_state(state);
+    router
 }
 
 /// 起服务，返回实际监听的端口（传 0 时由系统分配）。

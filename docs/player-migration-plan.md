@@ -12,15 +12,16 @@ is [`playback-v2-architecture.md`](./playback-v2-architecture.md).
 - `PlayerBar` renders state and supplies policy inputs; it does not output local desktop audio.
 
 Ordinary load, predicted-next prewarm and seek now use bounded streaming Decks. They no longer wait
-for full-track PCM or offline WSOLA. Local desktop playback has no WebView audio fallback.
+for full-track PCM or offline time stretching. Local desktop playback has no WebView audio fallback.
 
 ## Remaining work
 
 1. Move recommendation and ended policy from `PlayerBar` into a Rust application service once the
    in-process library service is exposed to the coordinator.
-2. Add block-based pitch-preserving tempo processing to the streaming worker. Until then DJ effects
-   and callback-timed handoff work at rate 1; whole-track WSOLA is not restored on the click path.
-3. Implement Android/iOS `PlaybackOutputFactory` adapters and bind their media-session,
+2. Implement Android/iOS `PlaybackOutputFactory` adapters and bind their media-session,
    interruption and background policies without duplicating the coordinator.
+
+Pitch-preserving Tempo/BPM Sync is complete in the active slice: stereo and eight-channel STEM
+streams use the vendored Rubber Band 4 R3 real-time engine outside the callback.
 
 User-side runtime checks are intentionally left to the project owner for this change.

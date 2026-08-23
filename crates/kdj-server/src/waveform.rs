@@ -10,16 +10,20 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::{Context, Result};
+use kdj_analysis::waveform::detail_waveform_buckets;
 use kdj_core::models::Waveform;
+use kdj_core::work_scheduler::WorkClass;
+
+pub const MAX_WAVEFORM_BUCKETS: usize = kdj_analysis::waveform::MAX_WAVEFORM_BUCKETS;
 use kdj_library::LibraryService;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Semaphore};
 
 use crate::jobs;
 
 /// 播放条 / 详情栏默认要的列数。分析预热也写这一档。
 pub const DEFAULT_WAVEFORM_BUCKETS: usize = 640;
-pub const CANONICAL_WAVEFORM_PROFILE: &str = "kdwave-v1-640";
-pub const CANONICAL_WAVEFORM_REVISION: i64 = 1;
+pub const CANONICAL_WAVEFORM_PROFILE: &str = "kdwave-v4-640";
+pub const CANONICAL_WAVEFORM_REVISION: i64 = 4;
 const CACHE_MAGIC: &[u8; 8] = b"KDJWAVE\0";
 const CACHE_VERSION: u16 = 1;
 const CACHE_HEADER_LEN: usize = 8 + 2 + 8 + 8 + 4;
@@ -30,6 +34,22 @@ struct WaveKey {
     track_id: i64,
     buckets: usize,
     mtime: u64,
+}
+
+/// One full-file decode is shared by every column count for the same audio identity.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct DecodeKey {
+    track_id: i64,
+    mtime: u64,
+}
+
+impl WaveKey {
+    fn decode_key(self) -> DecodeKey {
+        DecodeKey {
+            track_id: self.track_id,
+            mtime: self.mtime,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -57,7 +77,10 @@ struct WarmQueue {
 /// 旧实现用全局 `BUSY`：上一首没算完，后续所有歌曲直接跳过，批量分析结束后
 /// 大量歌曲仍要在播放时现场计算。这里固定一个 worker，忙时排队而不是丢弃。
 pub struct WaveformCoordinator {
-    inflight: Mutex<HashMap<WaveKey, broadcast::Sender<WaveOutcome>>>,
+    inflight: Mutex<HashMap<DecodeKey, broadcast::Sender<WaveOutcome>>>,
+    /// A full-file decode scans the entire song. One is enough; parallel interactive
+    /// requests starve the Tauri WebView and live Decks.
+    interactive_detail_gate: Arc<Semaphore>,
     warm: Mutex<WarmQueue>,
     warm_ready: Condvar,
     library: Arc<LibraryService>,
@@ -67,6 +90,7 @@ impl WaveformCoordinator {
     pub fn new(library: Arc<LibraryService>) -> Arc<Self> {
         let coordinator = Arc::new(Self {
             inflight: Default::default(),
+            interactive_detail_gate: Arc::new(Semaphore::new(1)),
             warm: Default::default(),
             warm_ready: Condvar::new(),
             library,
@@ -74,7 +98,10 @@ impl WaveformCoordinator {
         let worker = Arc::clone(&coordinator);
         let _ = std::thread::Builder::new()
             .name("waveform-worker".into())
-            .spawn(move || worker.warm_loop());
+            .spawn(move || {
+                kdj_core::thread_qos::prefer_background();
+                worker.warm_loop();
+            });
         coordinator
     }
 
@@ -135,12 +162,6 @@ impl WaveformCoordinator {
     }
 
     fn run_warm_request(&self, request: &WarmRequest) {
-        let cache_file = cache_path(
-            &request.cache_dir,
-            request.key.track_id,
-            request.key.buckets,
-            request.key.mtime,
-        );
         if let Some((_, canonical)) = read_cached(&request.cache_dir, request.key) {
             if canonical {
                 self.record_status(request.key, None);
@@ -150,7 +171,7 @@ impl WaveformCoordinator {
 
         // 等后台额度时先不要占 inflight：播放器若在这时要同一首，可以直接成为
         // 交互 leader；拿到额度后再查一次缓存，就不会重复解码。
-        let _permit = jobs::acquire_background_analysis_permit();
+        let _permit = jobs::acquire_scheduled_work(WorkClass::Maintenance);
         if let Some((_, canonical)) = read_cached(&request.cache_dir, request.key) {
             if canonical {
                 self.record_status(request.key, None);
@@ -158,14 +179,15 @@ impl WaveformCoordinator {
             return;
         }
 
-        // 真正开始后和交互请求共用 inflight 表，同一首只解一次。
+        // 真正开始后和交互请求共用 inflight 表，同一首歌只解一次。
+        let decode_key = request.key.decode_key();
         let leader = {
             let mut map = self.inflight.lock().expect("waveform inflight");
-            if map.contains_key(&request.key) {
+            if map.contains_key(&decode_key) {
                 false
             } else {
                 let (tx, _rx) = broadcast::channel(1);
-                map.insert(request.key, tx);
+                map.insert(decode_key, tx);
                 true
             }
         };
@@ -173,10 +195,16 @@ impl WaveformCoordinator {
             return;
         }
 
-        let computed = compute_waveform(&request.path, request.key.track_id, request.key.buckets);
+        let computed = compute_shared_waveforms(&request.path, request.key.track_id);
         let outcome = match computed {
-            Ok(wave) => match write_cache(&cache_file, &wave) {
-                Ok(()) => WaveOutcome::Ok(wave),
+            Ok((overview, detail)) => match store_shared_waveforms(
+                &request.cache_dir,
+                request.key.track_id,
+                request.key.mtime,
+                &overview,
+                &detail,
+            ) {
+                Ok(()) => WaveOutcome::Ok(detail),
                 Err(err) => WaveOutcome::Err(format!("{err:#}")),
             },
             Err(err) => WaveOutcome::Err(format!("{err:#}")),
@@ -185,7 +213,7 @@ impl WaveformCoordinator {
             tracing::debug!("波形预热跳过 {}：{}", request.key.track_id, message);
         }
         self.record_outcome(request.key, &outcome);
-        publish(self, request.key, outcome);
+        publish(self, decode_key, outcome);
     }
 
     /// 交互读取：缓存未命中时暂停后台分析接下一首，把 CPU 先让给播放器。
@@ -210,7 +238,7 @@ impl WaveformCoordinator {
         cache_dir: PathBuf,
         portable_cache_dir: Option<PathBuf>,
     ) -> Result<Waveform> {
-        let buckets = buckets.clamp(64, 2_000);
+        let buckets = buckets.clamp(64, MAX_WAVEFORM_BUCKETS);
         let mtime = file_mtime(&path);
         let key = WaveKey {
             track_id: cache_id,
@@ -225,7 +253,9 @@ impl WaveformCoordinator {
         {
             waveform.track_id = cache_id;
             // 回填本机缓存是优化；外置缓存已完整可读，即使本机目录暂时不可写也能播放。
-            let _ = write_cache(&cache_path(&cache_dir, cache_id, buckets, mtime), &waveform);
+            if write_cache(&cache_path(&cache_dir, cache_id, buckets, mtime), &waveform).is_ok() {
+                remove_obsolete_track_caches(&cache_dir, cache_id);
+            }
             return Ok(waveform);
         }
 
@@ -246,6 +276,7 @@ impl WaveformCoordinator {
             if let Some((mut waveform, _)) = read_cached(&cache_dir, legacy_key) {
                 waveform.track_id = cache_id;
                 write_cache(&cache_path(&cache_dir, cache_id, buckets, mtime), &waveform)?;
+                remove_obsolete_track_caches(&cache_dir, cache_id);
                 persist_portable_waveform(portable_cache_dir.as_deref(), key, &waveform);
                 return Ok(waveform);
             }
@@ -285,75 +316,111 @@ impl WaveformCoordinator {
         interactive: bool,
         record_status: bool,
     ) -> Result<Waveform> {
-        let buckets = buckets.clamp(64, 2000);
+        let buckets = buckets.clamp(64, MAX_WAVEFORM_BUCKETS);
         let mtime = file_mtime(&path);
         let key = WaveKey {
             track_id,
             buckets,
             mtime,
         };
-        let cache_file = cache_path(&cache_dir, track_id, buckets, mtime);
-        if let Some((cached, canonical)) = read_cached(&cache_dir, key) {
-            if canonical && record_status {
+        if let Some(cached) = resolve_from_cache(&cache_dir, key) {
+            if record_status {
                 self.record_status(key, None);
             }
             return Ok(cached);
         }
 
+        let decode_key = key.decode_key();
         let follower = {
             let mut map = self.inflight.lock().expect("waveform inflight");
-            if let Some(tx) = map.get(&key) {
+            if let Some(tx) = map.get(&decode_key) {
                 Some(tx.subscribe())
             } else {
                 let (tx, _rx) = broadcast::channel(1);
-                map.insert(key, tx);
+                map.insert(decode_key, tx);
                 None
             }
         };
 
         if let Some(mut rx) = follower {
             return match rx.recv().await.context("等待波形结果失败")? {
-                WaveOutcome::Ok(wave) => Ok(wave),
+                WaveOutcome::Ok(wave) => Ok(fit_waveform_columns(wave, buckets)),
                 WaveOutcome::Err(msg) => Err(anyhow::anyhow!(msg)),
             };
         }
 
+        // Every interactive full-file decode shares one gate. 640 and 24k now cost the same
+        // decode/scan, so they must not run beside a live Deck at the same time.
+        let decode_permit = if interactive {
+            Some(
+                Arc::clone(&self.interactive_detail_gate)
+                    .acquire_owned()
+                    .await
+                    .context("等待波形解码任务失败")?,
+            )
+        } else {
+            None
+        };
         let coord = Arc::clone(self);
         let outcome = tokio::task::spawn_blocking(move || {
-            // 只有播放器请求占交互优先权；全库补齐和预热则与 BPM 共用 2 个额度。
-            let _yield = interactive.then(jobs::yield_analysis_permits);
-            let _background_permit = (!interactive).then(jobs::acquire_background_analysis_permit);
-            // 等闸门期间别人可能已经写好缓存（分析预热 / 并发请求）
-            if let Some((cached, canonical)) = read_cached(&cache_dir, key) {
-                let outcome = WaveOutcome::Ok(cached);
-                if canonical && record_status {
-                    coord.record_outcome(key, &outcome);
+            kdj_core::thread_qos::prefer_background();
+            let _decode_permit = decode_permit;
+            let _work = jobs::acquire_scheduled_work(if interactive {
+                WorkClass::InteractiveWaveform
+            } else {
+                WorkClass::Maintenance
+            });
+            if let Some(cached) = resolve_from_cache(&cache_dir, key) {
+                let published =
+                    detail_from_cache(&cache_dir, key.track_id, key.mtime).unwrap_or(cached);
+                let outcome = WaveOutcome::Ok(published);
+                if record_status {
+                    coord.record_outcome(
+                        WaveKey {
+                            track_id,
+                            buckets: DEFAULT_WAVEFORM_BUCKETS,
+                            mtime,
+                        },
+                        &outcome,
+                    );
                 }
-                publish(&coord, key, outcome.clone());
+                publish(&coord, decode_key, outcome.clone());
                 return outcome;
             }
-            let computed = compute_waveform(&path, track_id, buckets);
+            let computed = compute_shared_waveforms(&path, track_id);
             let outcome = match computed {
-                Ok(wave) => match write_cache(&cache_file, &wave) {
-                    Ok(()) => WaveOutcome::Ok(wave),
-                    Err(err) => WaveOutcome::Err(format!("{err:#}")),
-                },
+                Ok((overview, detail)) => {
+                    match store_shared_waveforms(&cache_dir, track_id, mtime, &overview, &detail) {
+                        Ok(()) => {
+                            remove_obsolete_track_caches(&cache_dir, track_id);
+                            WaveOutcome::Ok(detail)
+                        }
+                        Err(err) => WaveOutcome::Err(format!("{err:#}")),
+                    }
+                }
                 Err(err) => {
                     tracing::warn!("波形生成失败 {track_id}：{err:#}");
                     WaveOutcome::Err(format!("{err:#}"))
                 }
             };
             if record_status {
-                coord.record_outcome(key, &outcome);
+                coord.record_outcome(
+                    WaveKey {
+                        track_id,
+                        buckets: DEFAULT_WAVEFORM_BUCKETS,
+                        mtime,
+                    },
+                    &outcome,
+                );
             }
-            publish(&coord, key, outcome.clone());
+            publish(&coord, decode_key, outcome.clone());
             outcome
         })
         .await
         .context("波形任务被取消")?;
 
         match outcome {
-            WaveOutcome::Ok(wave) => Ok(wave),
+            WaveOutcome::Ok(wave) => Ok(fit_waveform_columns(wave, buckets)),
             WaveOutcome::Err(msg) => Err(anyhow::anyhow!(msg)),
         }
     }
@@ -399,7 +466,7 @@ fn persist_portable_waveform(directory: Option<&Path>, key: WaveKey, waveform: &
     }
 }
 
-fn publish(coord: &WaveformCoordinator, key: WaveKey, outcome: WaveOutcome) {
+fn publish(coord: &WaveformCoordinator, key: DecodeKey, outcome: WaveOutcome) {
     if let Some(tx) = coord
         .inflight
         .lock()
@@ -480,26 +547,90 @@ fn write_cache(path: &Path, wave: &Waveform) -> Result<()> {
     Ok(())
 }
 
-fn compute_waveform(path: &Path, track_id: i64, buckets: usize) -> Result<Waveform> {
-    let decoded =
-        kdj_analysis::decode::decode_audio(path, kdj_analysis::waveform::WAVEFORM_SR, None)
-            .with_context(|| format!("解码失败：{}", path.display()))?;
-    let mut wave = kdj_analysis::waveform::band_waveform(
+fn compute_shared_waveforms(path: &Path, track_id: i64) -> Result<(Waveform, Waveform)> {
+    let decoded = kdj_analysis::decode::decode_audio_native(path, None)
+        .with_context(|| format!("解码失败：{}", path.display()))?;
+    let duration = decoded
+        .duration
+        .unwrap_or(decoded.samples.len() as f64 / f64::from(decoded.sample_rate).max(1.0));
+    let mut detail = kdj_analysis::waveform::band_waveform(
         &decoded.samples,
         decoded.sample_rate as f64,
-        buckets,
+        detail_waveform_buckets(duration),
     );
-    if wave.amp.is_empty() {
+    if detail.amp.is_empty() {
         anyhow::bail!("文件没有可解码的音频");
     }
-    wave.track_id = track_id;
-    Ok(wave)
+    detail.track_id = track_id;
+    let mut overview = fit_waveform_columns(detail.clone(), DEFAULT_WAVEFORM_BUCKETS);
+    overview.track_id = track_id;
+    Ok((overview, detail))
 }
 
-/// 完整播放条使用固定列数。分析器按 STFT 整数步长输出近似列数，这里以时间面积
-/// 重采样到请求宽度；高度保留窗口峰值，颜色按响度加权，短曲也不会退化成双空线。
+fn store_shared_waveforms(
+    cache_dir: &Path,
+    track_id: i64,
+    mtime: u64,
+    overview: &Waveform,
+    detail: &Waveform,
+) -> Result<()> {
+    write_cache(
+        &cache_path(cache_dir, track_id, DEFAULT_WAVEFORM_BUCKETS, mtime),
+        overview,
+    )?;
+    if detail.amp.len() != overview.amp.len() {
+        write_cache(
+            &cache_path(cache_dir, track_id, detail.amp.len(), mtime),
+            detail,
+        )?;
+    }
+    Ok(())
+}
+
+fn resolve_from_cache(cache_dir: &Path, key: WaveKey) -> Option<Waveform> {
+    if let Some((cached, _)) = read_cached(cache_dir, key) {
+        return Some(cached);
+    }
+    let overview_key = WaveKey {
+        track_id: key.track_id,
+        buckets: DEFAULT_WAVEFORM_BUCKETS,
+        mtime: key.mtime,
+    };
+    let overview = read_cached(cache_dir, overview_key)?.0;
+    if key.buckets == DEFAULT_WAVEFORM_BUCKETS {
+        return Some(overview);
+    }
+    let detail = detail_from_cache(cache_dir, key.track_id, key.mtime)?;
+    Some(fit_waveform_columns(detail, key.buckets))
+}
+
+fn detail_from_cache(cache_dir: &Path, track_id: i64, mtime: u64) -> Option<Waveform> {
+    let overview = read_cached(
+        cache_dir,
+        WaveKey {
+            track_id,
+            buckets: DEFAULT_WAVEFORM_BUCKETS,
+            mtime,
+        },
+    )?
+    .0;
+    let detail_n = detail_waveform_buckets(overview.duration);
+    read_cached(
+        cache_dir,
+        WaveKey {
+            track_id,
+            buckets: detail_n,
+            mtime,
+        },
+    )
+    .map(|(wave, _)| wave)
+}
+
+/// 完整播放条使用固定列数。这里以时间面积重采样到请求宽度；高度以 80% RMS +
+/// 20% peak 汇聚，避免一个 click 把整段 overview 顶满，同时保留可见瞬态；颜色仍按
+/// 响度加权，短曲也不会退化成双空线。
 pub fn fit_waveform_columns(wave: Waveform, columns: usize) -> Waveform {
-    let columns = columns.clamp(64, 2_000);
+    let columns = columns.clamp(64, MAX_WAVEFORM_BUCKETS);
     let source_len = wave.amp.len();
     if source_len == columns
         || source_len == 0
@@ -519,6 +650,8 @@ pub fn fit_waveform_columns(wave: Waveform, columns: usize) -> Waveform {
         let first = start.floor() as usize;
         let last = (end.ceil() as usize).min(source_len);
         let mut peak = 0.0f32;
+        let mut square_sum = 0.0f64;
+        let mut amplitude_weight = 0.0f64;
         let mut r = 0.0f64;
         let mut g = 0.0f64;
         let mut b = 0.0f64;
@@ -530,6 +663,8 @@ pub fn fit_waveform_columns(wave: Waveform, columns: usize) -> Waveform {
             }
             let value = wave.amp[source].clamp(0.0, 1.0);
             peak = peak.max(value);
+            square_sum += f64::from(value * value) * overlap;
+            amplitude_weight += overlap;
             let weight = overlap * (f64::from(value) + 0.001);
             r += f64::from(wave.r[source]) * weight;
             g += f64::from(wave.g[source]) * weight;
@@ -537,7 +672,12 @@ pub fn fit_waveform_columns(wave: Waveform, columns: usize) -> Waveform {
             total_weight += weight;
         }
         let fallback = first.min(source_len - 1);
-        amp.push(peak);
+        let rms = if amplitude_weight > 0.0 {
+            (square_sum / amplitude_weight).sqrt() as f32
+        } else {
+            peak
+        };
+        amp.push((rms * 0.8 + peak * 0.2).clamp(0.0, 1.0));
         red.push(if total_weight > 0.0 {
             (r / total_weight).round() as u8
         } else {
@@ -574,11 +714,30 @@ pub fn file_mtime(path: &Path) -> u64 {
 }
 
 fn cache_path(cache_dir: &Path, track_id: i64, buckets: usize, mtime: u64) -> PathBuf {
-    cache_dir.join(format!("{track_id}-v3-{buckets}-{mtime}.kdwave"))
+    cache_dir.join(format!("{track_id}-v6-{buckets}-{mtime}.kdwave"))
 }
 
-fn legacy_cache_path(cache_dir: &Path, track_id: i64, buckets: usize, mtime: u64) -> PathBuf {
-    cache_dir.join(format!("{track_id}-v2-{buckets}-{mtime}.json"))
+fn remove_obsolete_track_caches(cache_dir: &Path, track_id: i64) -> usize {
+    let old_json_prefix = format!("{track_id}-v2-");
+    let old_binary_prefix = format!("{track_id}-v3-");
+    let old_native_prefix = format!("{track_id}-v4-");
+    let old_peak_prefix = format!("{track_id}-v5-");
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            (name.starts_with(&old_json_prefix) && name.ends_with(".json"))
+                || (name.starts_with(&old_binary_prefix) && name.ends_with(".kdwave"))
+                || (name.starts_with(&old_native_prefix) && name.ends_with(".kdwave"))
+                || (name.starts_with(&old_peak_prefix) && name.ends_with(".kdwave"))
+        })
+        .filter(|entry| std::fs::remove_file(entry.path()).is_ok())
+        .count()
 }
 
 fn read_cache(path: &Path) -> Option<Waveform> {
@@ -620,28 +779,13 @@ fn read_cache(path: &Path) -> Option<Waveform> {
     })
 }
 
-fn read_legacy_cache(path: &Path) -> Option<Waveform> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let wave: Waveform = serde_json::from_str(&text).ok()?;
-    encode_cache(&wave).ok()?;
-    Some(wave)
-}
-
-/// 旧 JSON 通过结构校验后直接转成 `.kdwave`，不重新解码音频。只有新文件写完并
-/// 重新读回成功才删除旧文件；转换写失败时仍返回旧波形，播放不受迁移影响。
+/// 路径版本同时是波形算法版本。v5 的纯 peak / 高饱和数据不能迁移到 v6，否则
+/// 新 palette 下仍然看不出段落动态。
 fn read_cached(cache_dir: &Path, key: WaveKey) -> Option<(Waveform, bool)> {
     let current = cache_path(cache_dir, key.track_id, key.buckets, key.mtime);
-    if let Some(wave) = read_cache(&current).filter(|wave| wave.track_id == key.track_id) {
-        return Some((wave, true));
-    }
-    let legacy = legacy_cache_path(cache_dir, key.track_id, key.buckets, key.mtime);
-    let wave = read_legacy_cache(&legacy).filter(|wave| wave.track_id == key.track_id)?;
-    let canonical = write_cache(&current, &wave).is_ok()
-        && read_cache(&current).is_some_and(|saved| saved.track_id == key.track_id);
-    if canonical {
-        let _ = std::fs::remove_file(legacy);
-    }
-    Some((wave, canonical))
+    read_cache(&current)
+        .filter(|wave| wave.track_id == key.track_id)
+        .map(|wave| (wave, true))
 }
 
 /// 只读取本地曲目已经生成好的固定波形，不触发解码或重新分析。
@@ -665,7 +809,7 @@ pub(crate) fn load_cached_default(
     // 旧分析任务曾先生成波形、再把 BPM/Key 写入音频标签。音频内容没变，但
     // 标签写入会改变 mtime，留下一个仍然有效、文件名时间戳却落后一拍的缓存。
     // 这里仅回读已有文件，不把它冒充当前资产状态，也不会触发重新解码。
-    let prefix = format!("{track_id}-v3-{}-", DEFAULT_WAVEFORM_BUCKETS);
+    let prefix = format!("{track_id}-v6-{}-", DEFAULT_WAVEFORM_BUCKETS);
     let mut candidates: Vec<(u64, PathBuf)> = std::fs::read_dir(cache_dir)
         .ok()?
         .flatten()
@@ -867,7 +1011,7 @@ mod tests {
     #[test]
     fn cache_writes_atomically_and_roundtrips() {
         let dir = scratch("roundtrip");
-        let path = dir.join("1-v3-640-1.kdwave");
+        let path = dir.join("1-v6-640-1.kdwave");
         let wave = Waveform {
             track_id: 1,
             duration: 3.5,
@@ -888,6 +1032,104 @@ mod tests {
             "成功提交后不能留下半成品"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn overview_energy_pooling_does_not_turn_one_transient_into_a_full_height_section() {
+        let mut amp = vec![0.2; 640];
+        amp[5] = 1.0;
+        let sparse = fit_waveform_columns(
+            Waveform {
+                track_id: 1,
+                duration: 10.0,
+                amp,
+                r: vec![80; 640],
+                g: vec![120; 640],
+                b: vec![180; 640],
+            },
+            64,
+        );
+        assert!(
+            sparse.amp[0] < 0.6,
+            "单个 peak 不应把整个 overview 时间窗画满：{}",
+            sparse.amp[0]
+        );
+
+        let dense = fit_waveform_columns(
+            Waveform {
+                track_id: 2,
+                duration: 10.0,
+                amp: vec![1.0; 640],
+                r: vec![80; 640],
+                g: vec![120; 640],
+                b: vec![180; 640],
+            },
+            64,
+        );
+        assert!(dense.amp.iter().all(|value| (*value - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn completed_v6_waveform_removes_only_that_tracks_obsolete_caches() {
+        let dir = scratch("obsolete-cleanup");
+        let old_json = dir.join("7-v2-640-1.json");
+        let old_binary = dir.join("7-v3-4096-1.kdwave");
+        let old_resampled = dir.join("7-v4-24000-1.kdwave");
+        let other_track = dir.join("70-v3-640-1.kdwave");
+        let old_peak = dir.join("7-v5-640-1.kdwave");
+        let current = dir.join("7-v6-640-1.kdwave");
+        for path in [
+            &old_json,
+            &old_binary,
+            &old_resampled,
+            &old_peak,
+            &other_track,
+            &current,
+        ] {
+            std::fs::write(path, b"fixture").unwrap();
+        }
+
+        assert_eq!(remove_obsolete_track_caches(&dir, 7), 4);
+        assert!(!old_json.exists());
+        assert!(!old_binary.exists());
+        assert!(!old_resampled.exists());
+        assert!(!old_peak.exists());
+        assert!(other_track.exists(), "不能误删 id 前缀相似的其它曲目");
+        assert!(current.exists(), "不能删刚写成功的 v6 波形");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn one_decode_writes_overview_and_detail_caches() {
+        let dir = scratch("shared-decode");
+        let audio = dir.join("track.wav");
+        let cache_dir = dir.join("cache");
+        write_test_wav(&audio);
+        let library = Arc::new(kdj_library::LibraryService::new(
+            kdj_library::Database::open_in_memory().unwrap(),
+        ));
+        let coordinator = WaveformCoordinator::new(library);
+        let overview = coordinator
+            .get_or_compute(1, audio.clone(), 640, cache_dir.clone())
+            .await
+            .unwrap();
+        assert_eq!(overview.amp.len(), 640);
+        let mtime = file_mtime(&audio);
+        let detail_n = detail_waveform_buckets(overview.duration);
+        assert!(
+            cache_path(&cache_dir, 1, 640, mtime).is_file(),
+            "640 overview must be written from the first decode"
+        );
+        assert!(
+            cache_path(&cache_dir, 1, detail_n, mtime).is_file(),
+            "detail master must be written from the same decode"
+        );
+        let detailed = coordinator
+            .get_or_compute(1, audio, detail_n, cache_dir)
+            .await
+            .unwrap();
+        assert_eq!(detailed.amp.len(), detail_n);
+        assert_eq!(detailed.duration, overview.duration);
     }
 
     #[test]
@@ -932,35 +1174,6 @@ mod tests {
             b: vec![2],
         };
         assert!(encode_cache(&bad).is_err(), "通道错位不能写进缓存");
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn legacy_json_is_converted_without_decoding_audio() {
-        let dir = scratch("legacy");
-        let key = WaveKey {
-            track_id: 7,
-            buckets: 640,
-            mtime: 99,
-        };
-        let old = legacy_cache_path(&dir, key.track_id, key.buckets, key.mtime);
-        let wave = Waveform {
-            track_id: 7,
-            duration: 8.0,
-            amp: vec![0.2, 0.8],
-            r: vec![1, 2],
-            g: vec![3, 4],
-            b: vec![5, 6],
-        };
-        std::fs::write(&old, serde_json::to_vec(&wave).unwrap()).unwrap();
-
-        let (loaded, canonical) = read_cached(&dir, key).unwrap();
-        assert!(canonical);
-        assert_eq!(loaded.amp, wave.amp);
-        let current = cache_path(&dir, key.track_id, key.buckets, key.mtime);
-        assert!(current.is_file());
-        assert!(read_cache(&current).is_some());
-        assert!(!old.exists(), "新二进制重新校验成功后才清理旧 JSON");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

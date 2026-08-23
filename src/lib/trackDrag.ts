@@ -1,5 +1,12 @@
 export const TRACK_DRAG_STATE_EVENT = "kd:track-drag-state";
 export const TRACK_TRASH_DROP_EVENT = "kd:track-trash-drop";
+/** Performance A/B Deck 接收曲库曲目的跨组件事件与落点标记。 */
+export const TRACK_DECK_DROP_EVENT = "kd:track-deck-drop";
+export const TRACK_DECK_DROP_TARGET_ATTR = "data-kd-track-deck-drop";
+/** 单个横向区域按落点中线分配到 Deck A/B。 */
+export const TRACK_DECK_SPLIT_DROP_TARGET = "split";
+export const TRACK_SAMPLER_DROP_EVENT = "kd:track-sampler-drop";
+export const TRACK_SAMPLER_DROP_TARGET_ATTR = "data-kd-track-sampler-drop";
 /** 详情栏封面框接收曲目拖放时的跨组件事件。 */
 export const TRACK_COVER_DROP_EVENT = "kd:track-cover-drop";
 /** 不用字符串散落在 TrackTable 和 TrackDetail 两处，避免拖放目标漂移。 */
@@ -8,6 +15,110 @@ export const TRACK_COVER_DROP_TARGET_ATTR = "data-kd-track-cover-drop";
 export interface TrackCoverDropDetail {
   ids: number[];
   targetTrackId: number;
+}
+
+export interface TrackDeckDropDetail {
+  ids: number[];
+  side: 0 | 1;
+}
+
+export interface TrackSamplerDropDetail {
+  ids: number[];
+  slot: number;
+}
+
+export interface TrackDeckDropRegion {
+  side: string | null;
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+function deckSide(value: string | null): 0 | 1 | null {
+  return value === "0" ? 0 : value === "1" ? 1 : null;
+}
+
+function deckSideInRegion(region: TrackDeckDropRegion, x: number, y: number): 0 | 1 | null {
+  if (x < region.left || x > region.right || y < region.top || y > region.bottom) return null;
+  if (region.side === TRACK_DECK_SPLIT_DROP_TARGET) {
+    return x < region.left + (region.right - region.left) / 2 ? 0 : 1;
+  }
+  return deckSide(region.side);
+}
+
+/** Pointer 拖放按最终屏幕坐标认 A/B，避免 WebKit 的合成层吞掉落点。 */
+export function trackDeckSideForPoint(
+  regions: readonly TrackDeckDropRegion[],
+  x: number,
+  y: number,
+): 0 | 1 | null {
+  for (const region of regions) {
+    const side = deckSideInRegion(region, x, y);
+    if (side !== null) return side;
+  }
+  return null;
+}
+
+/** 命中最上层 DOM；若 WebKit 返回 Canvas/合成层外壳，再用所有 Deck 矩形兜底。 */
+export function trackDeckDropSideAt(x: number, y: number): 0 | 1 | null {
+  const selector = "[" + TRACK_DECK_DROP_TARGET_ATTR + "]";
+  const stack = typeof document.elementsFromPoint === "function"
+    ? document.elementsFromPoint(x, y)
+    : [document.elementFromPoint(x, y)].filter((element): element is Element => element !== null);
+  for (const element of stack) {
+    const target = element.closest(selector);
+    if (!target) continue;
+    const rect = target.getBoundingClientRect();
+    const side = deckSideInRegion({
+      side: target.getAttribute(TRACK_DECK_DROP_TARGET_ATTR),
+      left: rect.left,
+      right: rect.right,
+      top: rect.top,
+      bottom: rect.bottom,
+    }, x, y);
+    if (side !== null) return side;
+  }
+  const regions = Array.from(document.querySelectorAll<HTMLElement>(selector), (target) => {
+    const rect = target.getBoundingClientRect();
+    return {
+      side: target.getAttribute(TRACK_DECK_DROP_TARGET_ATTR),
+      left: rect.left,
+      right: rect.right,
+      top: rect.top,
+      bottom: rect.bottom,
+    };
+  });
+  return trackDeckSideForPoint(regions, x, y);
+}
+
+/**
+ * 自定义 pointer 拖动期间冻结源列表。WebKit 会在指针接近滚动层边缘时自行滚动，
+ * 进而让虚拟列表卸载源行并发送 pointercancel；overflow 与滚动位置回写需同时启用。
+ */
+export function lockTrackPointerDragScroll(
+  target: HTMLElement | null,
+  top: number,
+  left: number,
+): () => void {
+  if (!target) return () => undefined;
+  const previousOverflow = target.style.overflow;
+  let restoring = false;
+  const restore = () => {
+    if (restoring || (target.scrollTop === top && target.scrollLeft === left)) return;
+    restoring = true;
+    target.scrollTop = top;
+    target.scrollLeft = left;
+    restoring = false;
+  };
+  target.style.overflow = "hidden";
+  target.addEventListener("scroll", restore, { passive: true });
+  restore();
+  return () => {
+    target.removeEventListener("scroll", restore);
+    restore();
+    target.style.overflow = previousOverflow;
+  };
 }
 
 /** 与 FolderTree 里的 MIME 保持一致；WebKit 有时在 dragover 不暴露它。 */
@@ -44,6 +155,22 @@ export function dispatchTrackCoverDrop(ids: number[], targetTrackId: number): vo
       detail: { ids: [...ids], targetTrackId },
     }),
   );
+}
+
+export function dispatchTrackDeckDrop(ids: number[], side: 0 | 1): void {
+  if (ids.length === 0) return;
+  window.dispatchEvent(
+    new CustomEvent<TrackDeckDropDetail>(TRACK_DECK_DROP_EVENT, {
+      detail: { ids: [...ids], side },
+    }),
+  );
+}
+
+export function dispatchTrackSamplerDrop(ids: number[], slot: number): void {
+  if (ids.length === 0 || !Number.isInteger(slot) || slot < 0 || slot > 7) return;
+  window.dispatchEvent(new CustomEvent<TrackSamplerDropDetail>(TRACK_SAMPLER_DROP_EVENT, {
+    detail: { ids: [...ids], slot },
+  }));
 }
 
 /** 进程内当前正在拖的曲目。drop 目标在 MIME 读不到时靠它认人。 */

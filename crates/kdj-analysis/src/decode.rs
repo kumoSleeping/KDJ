@@ -1,4 +1,4 @@
-//! 解码：文件 → 单声道 f32 PCM @ 22050 Hz。
+//! 解码：文件 → 单声道 f32 PCM（分析用 22050 Hz；展示波形可保留源采样率）。
 //!
 //! Python 版是起 ffmpeg 子进程解码。这里换成 symphonia + rubato，纯 Rust：
 //! - 安卓上没法 spawn ffmpeg，这是上安卓的必要条件；
@@ -38,12 +38,27 @@ pub fn decode_audio(path: &Path, target_sr: u32, max_seconds: Option<f64>) -> Re
     decode_audio_from(path, target_sr, max_seconds, 0.0)
 }
 
+/// 展示波形只需要峰值包络，不需要 BPM/Key 所要求的带限重采样。保留源采样率可以
+/// 省掉整轨 32-tap sinc（4 分钟 MP3 在 M2 上约 7 秒），也是装轨即时显示的快路径。
+pub fn decode_audio_native(path: &Path, max_seconds: Option<f64>) -> Result<DecodedAudio> {
+    decode_audio_inner(path, None, max_seconds, 0.0)
+}
+
 /// 带起始偏移的解码。
 ///
 /// 分析窗从曲子 15% 处开始（跳过 intro 的静音铺垫），所以需要 seek。
 pub fn decode_audio_from(
     path: &Path,
     target_sr: u32,
+    max_seconds: Option<f64>,
+    offset: f64,
+) -> Result<DecodedAudio> {
+    decode_audio_inner(path, Some(target_sr), max_seconds, offset)
+}
+
+fn decode_audio_inner(
+    path: &Path,
+    target_sr: Option<u32>,
     max_seconds: Option<f64>,
     offset: f64,
 ) -> Result<DecodedAudio> {
@@ -143,9 +158,8 @@ pub fn decode_audio_from(
         if spec.rate > 0 {
             source_sr = spec.rate;
         }
-        let slot = buffer.get_or_insert_with(|| {
-            SampleBuffer::<f32>::new(audio.capacity() as u64, spec)
-        });
+        let slot =
+            buffer.get_or_insert_with(|| SampleBuffer::<f32>::new(audio.capacity() as u64, spec));
         slot.copy_interleaved_ref(audio);
         let interleaved = slot.samples();
         decoded_samples += interleaved.len();
@@ -163,8 +177,8 @@ pub fn decode_audio_from(
         for frame in interleaved.chunks(ch) {
             mono.push(frame.iter().sum::<f32>() * gain);
         }
-        let wanted_source_samples = max_seconds
-            .map(|secs| ((secs + 1.0) * source_sr as f64) as usize * ch);
+        let wanted_source_samples =
+            max_seconds.map(|secs| ((secs + 1.0) * source_sr as f64) as usize * ch);
         if wanted_source_samples.is_some_and(|wanted| decoded_samples >= wanted) {
             break;
         }
@@ -180,14 +194,15 @@ pub fn decode_audio_from(
         }
     }
 
-    let samples = if source_sr == target_sr {
+    let output_sr = target_sr.filter(|rate| *rate > 0).unwrap_or(source_sr);
+    let samples = if source_sr == output_sr {
         mono
     } else {
-        resample(&mono, source_sr, target_sr)
+        resample(&mono, source_sr, output_sr)
     };
     let samples = match max_seconds {
         Some(secs) => {
-            let limit = (secs * target_sr as f64) as usize;
+            let limit = (secs * output_sr as f64) as usize;
             samples.into_iter().take(limit).collect()
         }
         None => samples,
@@ -195,7 +210,7 @@ pub fn decode_audio_from(
 
     Ok(DecodedAudio {
         samples,
-        sample_rate: target_sr,
+        sample_rate: output_sr,
         duration,
         channels,
         source_sample_rate: source_sr,

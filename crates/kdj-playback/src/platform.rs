@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use kdj_player::{
-    open_dynamic_default, DeckId, DynamicPlayer, RtCommand, StreamSource, TransportSnapshot,
+    open_dynamic_default, DeckId, DecodedTrack, DynamicPlayer, RtCommand, StemFrame, StreamSource,
+    TransportSnapshot,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -20,6 +21,20 @@ pub trait PlaybackOutput {
         &mut self,
         deck: DeckId,
         source: Arc<StreamSource>,
+        start_frame: u64,
+    ) -> Result<u64, String>;
+    fn install_stem_stream(
+        &mut self,
+        deck: DeckId,
+        source: Arc<StreamSource<StemFrame>>,
+        start_frame: u64,
+    ) -> Result<u64, String>;
+    /// Installs an in-memory slice (engine loop region). The renderer wraps its cursor when the
+    /// matching `RtCommand::SetDeckLoop` arrives.
+    fn install_decoded(
+        &mut self,
+        deck: DeckId,
+        track: Arc<DecodedTrack>,
         start_frame: u64,
     ) -> Result<u64, String>;
     fn clear(&mut self, deck: DeckId) -> Result<(), String>;
@@ -65,6 +80,25 @@ impl PlaybackOutput for DynamicPlayer {
     ) -> Result<u64, String> {
         DynamicPlayer::install_stream(self, deck, source, start_frame)
             .map_err(|error| error.to_string())
+    }
+
+    fn install_stem_stream(
+        &mut self,
+        deck: DeckId,
+        source: Arc<StreamSource<StemFrame>>,
+        start_frame: u64,
+    ) -> Result<u64, String> {
+        DynamicPlayer::install_stem_stream(self, deck, source, start_frame)
+            .map_err(|error| error.to_string())
+    }
+
+    fn install_decoded(
+        &mut self,
+        deck: DeckId,
+        track: Arc<DecodedTrack>,
+        start_frame: u64,
+    ) -> Result<u64, String> {
+        DynamicPlayer::install(self, deck, track, start_frame).map_err(|error| error.to_string())
     }
 
     fn clear(&mut self, deck: DeckId) -> Result<(), String> {

@@ -29,8 +29,10 @@ import {
   cueColorLabel,
   cueTimeRange,
   cueTypeLabel,
+  DEFAULT_LOOP_OVERLAY_COLOR,
   formatCueTime,
   hotCueLabel,
+  waveformLoopRegions,
 } from "../src/lib/cuePoints";
 import { OneLibraryCueList } from "../src/components/library/OneLibraryCueList";
 import { TrackKeyChip } from "../src/components/common/TrackKeyChip";
@@ -157,6 +159,30 @@ test("OneLibrary cue labels preserve type, number, time, loop, and standard colo
   assert.equal(cueTypeLabel({ ...cue, hot_cue: null, end_ms: null }), "Memory Cue");
 });
 
+test("waveform loop regions use cue color when the live loop matches a cue loop", () => {
+  const cue: CuePoint = {
+    id: 2,
+    hot_cue: 2,
+    start_ms: 8_000,
+    end_ms: 12_000,
+    color_index: 4,
+    color: "yellow",
+    comment: "",
+    active_loop: true,
+  };
+  const live = waveformLoopRegions([], 8, 4);
+  assert.equal(live.length, 1);
+  assert.equal(live[0].color, DEFAULT_LOOP_OVERLAY_COLOR);
+  assert.equal(live[0].active, true);
+  const matched = waveformLoopRegions([cue], 8, 4);
+  assert.equal(matched.length, 1);
+  assert.equal(matched[0].color, "#d4a900");
+  assert.equal(matched[0].active, true);
+  const preview = waveformLoopRegions([cue], null, null);
+  assert.equal(preview.length, 1);
+  assert.equal(preview[0].active, false);
+});
+
 test("OneLibrary cue UI renders waveform flags, loop ranges, details, and no empty filler", async () => {
   Object.assign(globalThis, {
     localStorage: {
@@ -198,12 +224,67 @@ test("OneLibrary cue UI renders waveform flags, loop ranges, details, and no emp
   ));
   assert.match(markup, /class="kd-wave-cue-loop"/);
   assert.match(markup, /class="kd-wave-cue" data-kind="hot"/);
-  assert.match(markup, />B<\/span>/);
+  assert.match(markup, /data-kind="loop-end"/);
   assert.match(markup, /Hot Loop B/);
   assert.match(markup, /01:02\.345 – 01:06\.000/);
   assert.match(markup, /蓝色/);
   assert.match(markup, /Drop/);
   assert.equal(renderToStaticMarkup(createElement(OneLibraryCueList, { cuePoints: [] })), "");
+});
+
+test("an ad-hoc loop paints a default overlay until it matches a cue loop color", async () => {
+  Object.assign(globalThis, {
+    localStorage: {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    },
+    document: {
+      baseURI: "http://127.0.0.1/",
+      createElement: () => ({ preservesPitch: true, webkitPreservesPitch: true }),
+      documentElement: { dataset: {} },
+      querySelectorAll: () => [],
+    },
+    window: {
+      kdj: { baseUrl: "http://127.0.0.1:43123", platform: "darwin" },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    },
+  });
+  const { Waveform } = await import("../src/components/library/Waveform");
+  const { DEFAULT_LOOP_OVERLAY_COLOR } = await import("../src/lib/cuePoints");
+  const adHoc = renderToStaticMarkup(createElement(Waveform, {
+    trackId: 42,
+    duration: 120,
+    loopStart: 8,
+    loopLength: 4,
+    seekable: false,
+  }));
+  assert.match(adHoc, /class="kd-wave-cue-loop"/);
+  assert.match(adHoc, /data-active="true"/);
+  assert.match(adHoc, new RegExp(DEFAULT_LOOP_OVERLAY_COLOR));
+  assert.doesNotMatch(adHoc, /data-kind="loop-start"/);
+  assert.doesNotMatch(adHoc, /data-kind="loop-end"/);
+  const cue: CuePoint = {
+    id: 9,
+    hot_cue: 2,
+    start_ms: 8_000,
+    end_ms: 12_000,
+    color_index: 4,
+    color: "yellow",
+    comment: "",
+    active_loop: true,
+  };
+  const matched = renderToStaticMarkup(createElement(Waveform, {
+    trackId: 42,
+    duration: 120,
+    cuePoints: [cue],
+    loopStart: 8,
+    loopLength: 4,
+    seekable: false,
+  }));
+  assert.match(matched, /#d4a900/);
+  assert.doesNotMatch(matched, new RegExp(DEFAULT_LOOP_OVERLAY_COLOR));
 });
 
 test("local and OneLibrary keys share the same colored presentation", () => {

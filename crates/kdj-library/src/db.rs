@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS tracks (
   comment TEXT,
   cue_ms INTEGER,
   end_ms INTEGER,
+  cue_points_json TEXT NOT NULL DEFAULT '[]',
+  cue_points_managed INTEGER NOT NULL DEFAULT 0,
   source_platform TEXT,
   source_key TEXT,
   analyzed_at TEXT,
@@ -121,7 +123,8 @@ CREATE INDEX IF NOT EXISTS idx_track_bpm_key_analysis_v2_revision
   ON track_bpm_key_analysis_v2(analyzer_revision, analyzed_at);
 "#;
 
-/// 老库升级用：只列可空列（NOT NULL 列没法 ALTER ADD，而它们从 v1 起就存在）。
+/// 老库升级用：只列可空列，或带常量默认值、可安全补入旧行的 NOT NULL 列。
+/// 没有默认值的 NOT NULL 列没法 ALTER ADD，而它们从 v1 起就存在。
 /// 名字是模块常量、不来自外部输入，拼进 DDL 是安全的。
 const MIGRATION_COLUMNS: &[(&str, &str)] = &[
     ("title", "TEXT"),
@@ -150,6 +153,8 @@ const MIGRATION_COLUMNS: &[(&str, &str)] = &[
     ("comment", "TEXT"),
     ("cue_ms", "INTEGER"),
     ("end_ms", "INTEGER"),
+    ("cue_points_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("cue_points_managed", "INTEGER NOT NULL DEFAULT 0"),
     ("source_platform", "TEXT"),
     ("source_key", "TEXT"),
     ("analyzed_at", "TEXT"),
@@ -556,13 +561,22 @@ mod tests {
         let db = Database::open(&path).unwrap();
         let conn = db.conn().unwrap();
         // 补齐之后新列可读，老数据还在
-        let (camelot, filename): (Option<String>, String) = conn
-            .query_row("SELECT camelot, filename FROM tracks", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+        let (camelot, filename, cue_points, cue_points_managed): (
+            Option<String>,
+            String,
+            String,
+            bool,
+        ) = conn
+            .query_row(
+                "SELECT camelot, filename, cue_points_json, cue_points_managed FROM tracks",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
             .unwrap();
         assert_eq!(camelot, None);
         assert_eq!(filename, "b.mp3");
+        assert_eq!(cue_points, "[]");
+        assert!(!cue_points_managed);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

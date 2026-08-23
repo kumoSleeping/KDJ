@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use kdj_core::models::{Track, Waveform};
+use kdj_core::models::{CuePoint, Track, Waveform};
 
 const ANLZ_HEADER_LEN: u32 = 28;
 const DETAIL_COLUMNS_PER_SECOND: f64 = 150.0;
@@ -52,15 +52,19 @@ impl AnalysisBundle {
     /// 未完成本地分析的曲目仍必须有关联 ANLZ。djay 把 Cue 写在这些文件里；若
     /// `analysisDataFilePath` 为空，Cue 只活在当前 deck，换歌后立即消失。
     pub fn placeholder(usb_path: &str) -> Self {
+        Self::placeholder_with_cues(usb_path, &[], None)
+    }
+
+    pub fn placeholder_with_cues(usb_path: &str, cues: &[CuePoint], bpm: Option<f64>) -> Self {
         let directory = anlz_directory(usb_path);
         let path = path_section(usb_path);
-        let dat = anlz_file(&[path.clone(), empty_cue_section(1), empty_cue_section(0)]);
+        let dat = anlz_file(&[path.clone(), cue_section(1, cues), cue_section(0, cues)]);
         let ext = anlz_file(&[
             path.clone(),
-            empty_cue_section(1),
-            empty_cue_section(0),
-            empty_extended_cue_section(1),
-            empty_extended_cue_section(0),
+            cue_section(1, cues),
+            cue_section(0, cues),
+            extended_cue_section(1, cues, bpm),
+            extended_cue_section(0, cues, bpm),
         ]);
         let two_ex = anlz_file(&[path]);
         let database_path = format!("/{directory}/ANLZ0000.DAT");
@@ -121,7 +125,14 @@ impl LocalAnalysis {
         if !interval.is_finite() || interval <= 0.0 {
             return None;
         }
-        let mut time = first_beat.rem_euclid(interval);
+        let bar = interval * 4.0;
+        let origin = first_beat.rem_euclid(bar);
+        let mut index: i64 = 0;
+        let mut time = origin;
+        while time - interval >= 0.0 {
+            time -= interval;
+            index -= 1;
+        }
         let mut beats = Vec::new();
         while time <= duration {
             let time_ms = (time * 1_000.0).round();
@@ -129,11 +140,12 @@ impl LocalAnalysis {
                 break;
             }
             beats.push(Beat {
-                number: (beats.len() % 4 + 1) as u16,
+                number: (index.rem_euclid(4) + 1) as u16,
                 tempo,
                 time_ms: time_ms as u32,
             });
             time += interval;
+            index += 1;
         }
         if beats.len() < 2 {
             return None;
@@ -150,7 +162,17 @@ impl LocalAnalysis {
         })
     }
 
+    #[cfg(test)]
     pub fn bundle(&self, usb_path: &str) -> AnalysisBundle {
+        self.bundle_with_cues(usb_path, &[], None)
+    }
+
+    pub fn bundle_with_cues(
+        &self,
+        usb_path: &str,
+        cues: &[CuePoint],
+        bpm: Option<f64>,
+    ) -> AnalysisBundle {
         let directory = anlz_directory(usb_path);
         let path = path_section(usb_path);
         let dat = anlz_file(&[
@@ -159,16 +181,16 @@ impl LocalAnalysis {
             beat_grid_section(&self.beats),
             mono_preview_section(b"PWAV", self, PREVIEW_COLUMNS),
             mono_preview_section(b"PWV2", self, TINY_PREVIEW_COLUMNS),
-            empty_cue_section(1),
-            empty_cue_section(0),
+            cue_section(1, cues),
+            cue_section(0, cues),
         ]);
         let ext = anlz_file(&[
             path.clone(),
             mono_detail_section(self),
-            empty_cue_section(1),
-            empty_cue_section(0),
-            empty_extended_cue_section(1),
-            empty_extended_cue_section(0),
+            cue_section(1, cues),
+            cue_section(0, cues),
+            extended_cue_section(1, cues, bpm),
+            extended_cue_section(0, cues, bpm),
             extended_beat_grid_section(&self.beats),
             color_detail_section(self),
             color_preview_section(self),
@@ -369,19 +391,128 @@ fn extended_beat_grid_section(beats: &[Beat]) -> Vec<u8> {
     tag(b"PQT2", &header, &body)
 }
 
-fn empty_cue_section(kind: u32) -> Vec<u8> {
-    let mut header = Vec::with_capacity(12);
-    header.extend_from_slice(&kind.to_be_bytes());
-    header.extend_from_slice(&0u32.to_be_bytes());
-    header.extend_from_slice(&u32::MAX.to_be_bytes());
-    tag(b"PCOB", &header, &[])
+fn cue_matches_list(cue: &CuePoint, kind: u32) -> bool {
+    cue.start_ms >= 0
+        && cue.end_ms.is_none_or(|end_ms| end_ms > cue.start_ms)
+        && match kind {
+            0 => cue.hot_cue.is_none(),
+            1 => cue.hot_cue.is_some_and(|slot| (1..=8).contains(&slot)),
+            _ => false,
+        }
 }
 
-fn empty_extended_cue_section(kind: u32) -> Vec<u8> {
+fn cue_u32(value: i64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// Engine/djay 使用的短 PCPT 变体：header=28、total=56，保留字段为 0/0xffffffff。
+fn cue_entry(cue: &CuePoint) -> Vec<u8> {
+    let mut body = Vec::with_capacity(56);
+    body.extend_from_slice(b"PCPT");
+    body.extend_from_slice(&28u32.to_be_bytes());
+    body.extend_from_slice(&56u32.to_be_bytes());
+    body.extend_from_slice(&cue.hot_cue.unwrap_or_default().max(0).to_be_bytes());
+    let status = if cue.active_loop && cue.end_ms.is_some() {
+        4u32
+    } else {
+        0u32
+    };
+    body.extend_from_slice(&status.to_be_bytes());
+    body.extend_from_slice(&0u32.to_be_bytes());
+    body.extend_from_slice(&0u16.to_be_bytes());
+    body.extend_from_slice(&0u16.to_be_bytes());
+    body.push(u8::from(cue.end_ms.is_some()) + 1);
+    body.push(0);
+    body.extend_from_slice(&1_000u16.to_be_bytes());
+    body.extend_from_slice(&cue_u32(cue.start_ms).to_be_bytes());
+    body.extend_from_slice(&cue.end_ms.map(cue_u32).unwrap_or(u32::MAX).to_be_bytes());
+    body.extend_from_slice(&[0xff; 16]);
+    body
+}
+
+fn cue_section(kind: u32, cues: &[CuePoint]) -> Vec<u8> {
+    let matching: Vec<_> = cues
+        .iter()
+        .filter(|cue| cue_matches_list(cue, kind))
+        .collect();
+    let mut header = Vec::with_capacity(12);
+    header.extend_from_slice(&kind.to_be_bytes());
+    header.extend_from_slice(&(matching.len() as u32).to_be_bytes());
+    header.extend_from_slice(&0u32.to_be_bytes());
+    let body: Vec<u8> = matching.into_iter().flat_map(cue_entry).collect();
+    tag(b"PCOB", &header, &body)
+}
+
+fn cue_rgb(cue: &CuePoint) -> (u8, u8, u8) {
+    match cue.color_index.or(cue.hot_cue).unwrap_or_default() {
+        1 => (0xe6, 0x57, 0x9a),
+        2 => (0xe5, 0x48, 0x4d),
+        3 => (0xed, 0x7b, 0x2f),
+        4 => (0xd4, 0xa9, 0x00),
+        5 => (0x2e, 0xaa, 0x62),
+        6 => (0x15, 0x99, 0xad),
+        7 => (0x46, 0x76, 0xdf),
+        8 => (0x96, 0x56, 0xcc),
+        _ => (0, 0, 0),
+    }
+}
+
+/// Engine/djay 的无备注 PCP2 是 56 字节；备注仍由 OneLibrary cue 表完整承载。
+fn quantized_loop_ratio(cue: &CuePoint, bpm: Option<f64>) -> (u16, u16) {
+    let Some((end_ms, bpm)) = cue.end_ms.zip(bpm) else {
+        return (0, 0);
+    };
+    if !bpm.is_finite() || bpm <= 0.0 {
+        return (0, 0);
+    }
+    let beats = (end_ms - cue.start_ms) as f64 * bpm / 60_000.0;
+    let rounded = beats.round();
+    if !beats.is_finite()
+        || !(1.0..=f64::from(u16::MAX)).contains(&rounded)
+        || (beats - rounded).abs() > 0.02
+    {
+        return (0, 0);
+    }
+    (rounded as u16, 1)
+}
+
+fn extended_cue_entry(cue: &CuePoint, bpm: Option<f64>) -> Vec<u8> {
+    let mut body = Vec::with_capacity(56);
+    body.extend_from_slice(b"PCP2");
+    body.extend_from_slice(&16u32.to_be_bytes());
+    body.extend_from_slice(&56u32.to_be_bytes());
+    body.extend_from_slice(&cue.hot_cue.unwrap_or_default().max(0).to_be_bytes());
+    body.push(u8::from(cue.end_ms.is_some()) + 1);
+    body.push(0);
+    body.extend_from_slice(&1_000u16.to_be_bytes());
+    body.extend_from_slice(&cue_u32(cue.start_ms).to_be_bytes());
+    body.extend_from_slice(&cue.end_ms.map(cue_u32).unwrap_or(u32::MAX).to_be_bytes());
+    body.extend_from_slice(&[0; 8]);
+    let (loop_numerator, loop_denominator) = quantized_loop_ratio(cue, bpm);
+    body.extend_from_slice(&loop_numerator.to_be_bytes());
+    body.extend_from_slice(&loop_denominator.to_be_bytes());
+    body.extend_from_slice(&0u32.to_be_bytes());
+    body.push(cue.color_index.unwrap_or_default().clamp(0, 255) as u8);
+    let (red, green, blue) = cue_rgb(cue);
+    body.extend_from_slice(&[red, green, blue]);
+    body.extend_from_slice(&[0; 8]);
+    body
+}
+
+fn extended_cue_section(kind: u32, cues: &[CuePoint], bpm: Option<f64>) -> Vec<u8> {
+    let matching: Vec<_> = cues
+        .iter()
+        .filter(|cue| cue_matches_list(cue, kind))
+        .collect();
     let mut header = Vec::with_capacity(8);
     header.extend_from_slice(&kind.to_be_bytes());
-    header.extend_from_slice(&0u32.to_be_bytes());
-    tag(b"PCO2", &header, &[])
+    header.extend_from_slice(&(matching.len() as u16).to_be_bytes());
+    header.extend_from_slice(&0u16.to_be_bytes());
+    let body: Vec<u8> = matching
+        .into_iter()
+        .flat_map(|cue| extended_cue_entry(cue, bpm))
+        .collect();
+    tag(b"PCO2", &header, &body)
 }
 
 fn mono_byte(column: WaveColumn) -> u8 {
@@ -691,6 +822,122 @@ mod tests {
             vec![(*b"PCOB", 1), (*b"PCOB", 0), (*b"PCO2", 1), (*b"PCO2", 0),]
         );
         assert!(bundle.database_path.ends_with("/ANLZ0000.DAT"));
+    }
+
+    #[test]
+    fn managed_hot_loop_is_written_to_engine_style_pcpt_and_pcp2() {
+        let cues = vec![CuePoint {
+            id: -3,
+            hot_cue: Some(3),
+            start_ms: 4_000,
+            end_ms: Some(8_000),
+            color_index: Some(3),
+            color: "orange".into(),
+            comment: "Drop".into(),
+            active_loop: true,
+        }];
+        let bundle =
+            AnalysisBundle::placeholder_with_cues("/Contents/KDJ/Test.mp3", &cues, Some(120.0));
+        let dat = &bundle.files[0].body;
+        let hot = anlz_section_ranges(dat)
+            .unwrap()
+            .1
+            .into_iter()
+            .find(|range| cue_section_key(dat, range) == Some((*b"PCOB", 1)))
+            .unwrap();
+        assert_eq!(
+            u32::from_be_bytes(dat[hot.start + 4..hot.start + 8].try_into().unwrap()),
+            24
+        );
+        assert_eq!(
+            u32::from_be_bytes(dat[hot.start + 8..hot.start + 12].try_into().unwrap()),
+            80
+        );
+        assert_eq!(
+            u16::from_be_bytes(dat[hot.start + 18..hot.start + 20].try_into().unwrap()),
+            1
+        );
+        assert_eq!(&dat[hot.start + 24..hot.start + 28], b"PCPT");
+        assert_eq!(
+            u32::from_be_bytes(dat[hot.start + 36..hot.start + 40].try_into().unwrap()),
+            3
+        );
+        assert_eq!(dat[hot.start + 52], 2);
+        assert_eq!(
+            u32::from_be_bytes(dat[hot.start + 56..hot.start + 60].try_into().unwrap()),
+            4_000
+        );
+        assert_eq!(
+            u32::from_be_bytes(dat[hot.start + 60..hot.start + 64].try_into().unwrap()),
+            8_000
+        );
+
+        let ext = &bundle.files[1].body;
+        let extended = anlz_section_ranges(ext)
+            .unwrap()
+            .1
+            .into_iter()
+            .find(|range| cue_section_key(ext, range) == Some((*b"PCO2", 1)))
+            .unwrap();
+        assert_eq!(
+            u32::from_be_bytes(
+                ext[extended.start + 8..extended.start + 12]
+                    .try_into()
+                    .unwrap()
+            ),
+            76
+        );
+        assert_eq!(
+            u16::from_be_bytes(
+                ext[extended.start + 16..extended.start + 18]
+                    .try_into()
+                    .unwrap()
+            ),
+            1
+        );
+        assert_eq!(
+            u16::from_be_bytes(
+                ext[extended.start + 18..extended.start + 20]
+                    .try_into()
+                    .unwrap()
+            ),
+            0
+        );
+        assert_eq!(&ext[extended.start + 20..extended.start + 24], b"PCP2");
+        assert_eq!(
+            u32::from_be_bytes(
+                ext[extended.start + 24..extended.start + 28]
+                    .try_into()
+                    .unwrap()
+            ),
+            16
+        );
+        assert_eq!(
+            u32::from_be_bytes(
+                ext[extended.start + 28..extended.start + 32]
+                    .try_into()
+                    .unwrap()
+            ),
+            56
+        );
+        assert_eq!(ext[extended.start + 36], 2);
+        assert_eq!(
+            u16::from_be_bytes(
+                ext[extended.start + 56..extended.start + 58]
+                    .try_into()
+                    .unwrap()
+            ),
+            8
+        );
+        assert_eq!(
+            u16::from_be_bytes(
+                ext[extended.start + 58..extended.start + 60]
+                    .try_into()
+                    .unwrap()
+            ),
+            1
+        );
+        assert_eq!(ext[extended.start + 64], 3);
     }
 
     #[test]

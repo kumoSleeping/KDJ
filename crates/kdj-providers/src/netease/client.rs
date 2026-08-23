@@ -10,16 +10,17 @@ use std::sync::RwLock;
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
-use serde_json::{Map, Value};
 #[cfg(test)]
 use serde_json::json;
+use serde_json::{Map, Value};
 
 use super::crypto::{eapi_encrypt, weapi_encrypt};
 
 pub const HOST: &str = "https://music.163.com";
 /// weapi 用的 UA。伪装成 pyncm 反而更稳（这个 UA 已经在生产里跑了很久）。
 const UA_DEFAULT: &str = "Mozilla/5.0 (linux@github.com/mos9527/pyncm) Chrome/PyNCM.1.8.1";
-const UA_EAPI: &str = "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) \
+const UA_EAPI: &str =
+    "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) \
                        Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/2.10.2.200154";
 const DEVICE_ID: &str = "pyncm!";
 

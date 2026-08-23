@@ -1,7 +1,10 @@
-//! Serato 式彩色波形：**每一列一根柱子**，高度 = 响度，颜色 = 这一列的频谱构成。
+//! DJ RGB 波形：**每一列一根柱子**，高度 = 峰值/能量混合包络，颜色 = 这一列的频谱构成。
 //!
-//! 做法照搬 libdjwaveform / Serato 的模型：STFT 之后，一帧（一列）先算出
-//! 低/中/高三段的能量，高度取三段之和，颜色取三段的**相对占比**。
+//! Mixxx 的正式波形不是把低采样率 STFT 拉宽，而是先用低/中/高分频器连续处理 PCM，
+//! 再把细粒度峰值包络聚合到屏幕列。这里采用同一条快路径：互补 IIR crossover 只扫
+//! 一遍样本，生成 200 列/秒的 master，overview 做能量汇聚，局部 DJ 视图保留
+//! 100 列/秒。单纯峰值会把现代母带的每一段都顶满；混合 RMS 与 peak 才能同时保留
+//! 段落响度、鼓点瞬态和 break 的真实落差。
 //!
 //! 波形单开一条路径而不是塞进分析结果：它是纯展示用的，
 //! 既不影响 BPM/调性，也不该逼用户为了看波形去重跑一次分析。
@@ -10,65 +13,105 @@ use kdj_core::models::Waveform;
 
 use crate::dsp::{self, percentile};
 
-/// 16 kHz：奈奎斯特 8 kHz，高频段还留得住镲和空气感；
-/// 再高就只是让解码和 STFT 变慢，对一条几百像素宽的波形没有意义。
-pub const WAVEFORM_SR: u32 = 16000;
-const N_FFT: usize = 1024;
-const HOP: usize = 512;
-/// Serato 的三色交叉点（社区实测）：红↔绿 ≈ 200 Hz，绿↔蓝 ≈ 1.5 kHz。
-/// 2.5 kHz 试过，人声段会被算成"高频"而发蓝，1.5 kHz 才把人声留在绿区。
-const XOVER_LOW: f64 = 200.0;
-const XOVER_HIGH: f64 = 1500.0;
-const AMP_GAMMA: f64 = 1.2;
-/// γ 很大是必须的：占比的偏离量本身很小（0.45 → 0.50 这种级别），
-/// γ=2 出来是一片淡彩，γ=6 才是 DJ 软件里那种能一眼分辨段落的饱和色。
-const COLOR_GAMMA: f64 = 6.0;
-/// 通道下限：纯 (255,0,0) 在深色底上太扎眼，抬一点让暗通道保留一丝底色。
-const COLOR_FLOOR: f64 = 0.12;
+/// 合成测试和显式降采样调用方的参考采样率。产品装轨快路径保留音源 native rate，
+/// 避免为了展示波形跑整轨 sinc resample。
+pub const WAVEFORM_SR: u32 = 22_050;
+/// 普通歌曲按 100 列/秒保存详细波形；十分钟以上曲目再受总列数上限保护。
+pub const DETAIL_WAVEFORM_COLUMNS_PER_SECOND: f64 = 100.0;
+pub const MAX_WAVEFORM_BUCKETS: usize = 24_000;
+const MIN_DETAIL_WAVEFORM_BUCKETS: usize = 2_000;
+
+/// Full-track master density used by the local DJ viewport. One decode should
+/// always materialise this profile; 640-column overviews downsample it.
+pub fn detail_waveform_buckets(duration_sec: f64) -> usize {
+    if !duration_sec.is_finite() || duration_sec <= 0.0 {
+        return MIN_DETAIL_WAVEFORM_BUCKETS;
+    }
+    ((duration_sec * DETAIL_WAVEFORM_COLUMNS_PER_SECOND).ceil() as usize)
+        .clamp(MIN_DETAIL_WAVEFORM_BUCKETS, MAX_WAVEFORM_BUCKETS)
+}
+
+const MASTER_COLUMNS_PER_SECOND: f64 = 200.0;
+/// Mixxx AnalyzerWaveform 的 RGB 分频点。相较旧 200/1500 Hz，能把人声主体留在中频，
+/// 也不会把 2–4 kHz 的存在感全部误画成镲片蓝色。
+const XOVER_LOW: f64 = 600.0;
+const XOVER_HIGH: f64 = 4000.0;
+/// 接近线性的高度保留段落动态；仍略提弱尾音，但不再把整首歌抬成实心墙。
+const AMP_GAMMA: f64 = 0.90;
+/// 温和强调相对频谱偏离。旧 γ=6 把很小的比例变化推成纯 RGB，长时间观看刺眼，
+/// 相邻列也会像彩色噪点一样跳。2.4 仍能区分鼓、人声与镲片段，但保留混合层次。
+const COLOR_GAMMA: f64 = 2.4;
+/// 暗通道只留少量底色；最终显示 palette 会再映射到低饱和冷色系。
+const COLOR_FLOOR: f64 = 0.06;
+
+/// Unnormalised crest-aware energy for the broad low/mid/high bands at a display resolution.
+///
+/// `band_waveform` turns these into relative low/mid/high strengths. The frontend display palette
+/// bounds brightness without discarding that RGB identity. Live STEM lanes use the same energies.
+#[derive(Debug, Default)]
+pub struct BandEnergy {
+    pub overall: Vec<f64>,
+    pub low: Vec<f64>,
+    pub mid: Vec<f64>,
+    pub high: Vec<f64>,
+}
+
+/// Summarise complementary low/mid/high crossover envelopes without applying a display palette.
+/// Each 5 ms frame uses sqrt(RMS × peak): RMS reveals section density while peak keeps transients.
+pub fn band_energy(samples: &[f32], sr: f64, buckets: usize) -> BandEnergy {
+    let buckets = buckets.clamp(64, MAX_WAVEFORM_BUCKETS);
+    let master = peak_band_frames(samples, sr);
+    let n_frames = master[0].len();
+    if n_frames == 0 {
+        return BandEnergy::default();
+    }
+    let count = buckets.min(n_frames);
+    let mut energy = BandEnergy {
+        overall: vec![0.0; count],
+        low: vec![0.0; count],
+        mid: vec![0.0; count],
+        high: vec![0.0; count],
+    };
+    for index in 0..count {
+        let start = index * n_frames / count;
+        let end = ((index + 1) * n_frames / count)
+            .max(start + 1)
+            .min(n_frames);
+        let width = (end - start) as f64;
+        energy.overall[index] = master[0][start..end].iter().sum::<f64>() / width;
+        energy.low[index] = master[1][start..end].iter().sum::<f64>() / width;
+        energy.mid[index] = master[2][start..end].iter().sum::<f64>() / width;
+        energy.high[index] = master[3][start..end].iter().sum::<f64>() / width;
+    }
+    energy
+}
 
 pub fn band_waveform(samples: &[f32], sr: f64, buckets: usize) -> Waveform {
-    let buckets = buckets.clamp(64, 2000);
-    // center=false：波形要的是“第 n 段音频长什么样”，不需要和拍点对齐。
-    // FFT 每出来一帧就归并成低/中/高三个数，不再保留 bins × frames 的完整频谱。
-    let energies = band_energy_frames(samples, sr, N_FFT, HOP);
-    let n_frames = energies[0].len();
-    if n_frames == 0 {
-        return Waveform::default();
-    }
-
-    // 帧 → 显示格。尾巴不足一格的直接截掉，补零会画出一根假的静音柱。
-    let step = (n_frames / buckets).max(1);
-    let count = n_frames / step;
+    let energy = band_energy(samples, sr, buckets);
+    let count = energy.overall.len();
     if count == 0 {
         return Waveform::default();
     }
-    let mut bands = [vec![0.0f64; count], vec![0.0f64; count], vec![0.0f64; count]];
-    for (band, source) in bands.iter_mut().zip(&energies) {
-        for (index, slot) in band.iter_mut().enumerate() {
-            let start = index * step;
-            *slot = source[start..start + step].iter().sum::<f64>() / step as f64;
-        }
-    }
 
-    // ---- 高度：三段功率之和开根号（= 幅度），再做百分位对比拉伸。
-    // 只除以 P99 是不够的：现代母带压完之后整首的 RMS 都挤在 0.6~1.0，
-    // 画出来就是一条实心带。把 P5 当作"地板"减掉，起伏才回得来。
-    let mut amp: Vec<f64> = (0..count)
-        .map(|i| (bands[0][i] + bands[1][i] + bands[2][i]).sqrt())
-        .collect();
-    let mut sorted = amp.clone();
+    // 细 master → 请求列。每列对 5 ms 峰值取均值，和 Mixxx summary 的
+    // “先取细峰、再平均”一致：overview 不会被单个 click 撑成实心墙，详细档也不糊瞬态。
+    let mut overall = energy.overall;
+    let bands = [energy.low, energy.mid, energy.high];
+
+    // ---- 高度：P99.5 只负责挡异常峰，不再减 P5。真正的静音仍是 0，弱 intro、
+    // break 和 reverb tail 不会像旧实现一样被整段裁掉。
+    let mut sorted = overall.clone();
     sorted.sort_by(f64::total_cmp);
     let hi = {
-        let value = percentile(&sorted, 99.0);
+        let value = percentile(&sorted, 99.5);
         if value > 0.0 {
             value
         } else {
             1.0
         }
     };
-    let lo = percentile(&sorted, 5.0);
-    for value in amp.iter_mut() {
-        *value = ((*value - lo) / (hi - lo).max(1e-9)).clamp(0.0, 1.0).powf(AMP_GAMMA);
+    for value in overall.iter_mut() {
+        *value = (*value / hi).clamp(0.0, 1.0).powf(AMP_GAMMA);
     }
 
     // ---- 颜色：这一列的频谱**占比**，相对全曲常态的偏离量。
@@ -83,16 +126,13 @@ pub fn band_waveform(samples: &[f32], sr: f64, buckets: usize) -> Waveform {
     //
     // 代价：颜色是**相对本曲**的，两首曲子的同一个颜色不代表同样的绝对频谱。
     // 但波形是拿来看单曲结构的，段落之间分得开比跨曲可比更有用。
-    let mut mag: [Vec<f64>; 3] = [
-        bands[0].iter().map(|v| v.sqrt()).collect(),
-        bands[1].iter().map(|v| v.sqrt()).collect(),
-        bands[2].iter().map(|v| v.sqrt()).collect(),
-    ];
+    let mut mag = bands;
 
-    // 配色前先沿时间轴做滑动平均：一格才 200~300 ms，底鼓和踩镲会逐格交替，
-    // 不平滑的话每根柱子颜色都跳，画出来是彩色噪点。
-    // 高度不参与平滑——瞬态该锐就得锐。
-    let span = ((count / 128).max(3)) | 1;
+    // overview 的单列已经平均了数十个 master 峰，不必再跨秒平滑。只有详细档做
+    // 3 列去毛刺（约 30 ms）；旧 `count/128` 在 4096 档会把颜色抹平一秒以上。
+    let duration = samples.len() as f64 / sr.max(1.0);
+    let columns_per_second = count as f64 / duration.max(1e-9);
+    let span = if columns_per_second >= 20.0 { 3 } else { 1 };
     if count > span {
         for row in mag.iter_mut() {
             *row = dsp::moving_average(row, span);
@@ -141,7 +181,7 @@ pub fn band_waveform(samples: &[f32], sr: f64, buckets: usize) -> Waveform {
     Waveform {
         track_id: 0,
         duration: ((samples.len() as f64 / sr) * 1000.0).round() / 1000.0,
-        amp: amp
+        amp: overall
             .into_iter()
             .map(|v| ((v * 10_000.0).round() / 10_000.0) as f32)
             .collect(),
@@ -151,54 +191,53 @@ pub fn band_waveform(samples: &[f32], sr: f64, buckets: usize) -> Waveform {
     }
 }
 
-/// `center = false` 的逐帧 STFT。只保留每帧三频段功率：5 分钟音频原先要分配
-/// 约 `513 × 9,000` 个频谱值，现在只保留 `3 × 9,000` 个 f64。
-fn band_energy_frames(
-    samples: &[f32],
-    sr: f64,
-    n_fft: usize,
-    hop: usize,
-) -> [Vec<f64>; 3] {
-    use rustfft::num_complex::Complex32;
-    use rustfft::FftPlanner;
-
-    if samples.len() < n_fft {
+/// 一阶互补 crossover：`low + mid + high == input`，没有 FFT 窗引入的 64 ms 拖影。
+/// 每个输出 frame 保存该 5 ms 内 sqrt(RMS × peak) 的 crest-aware 包络，内存与曲长
+/// 线性但只有四个 f64 序列。
+fn peak_band_frames(samples: &[f32], sr: f64) -> [Vec<f64>; 4] {
+    if !sr.is_finite() || sr <= 0.0 {
         return Default::default();
     }
-    let bins = n_fft / 2 + 1;
-    let frames = 1 + (samples.len() - n_fft) / hop;
-    let window = dsp::hann_window(n_fft);
-    let mut energies = [
-        vec![0.0f64; frames],
-        vec![0.0f64; frames],
-        vec![0.0f64; frames],
-    ];
+    let frame_samples = (sr / MASTER_COLUMNS_PER_SECOND).round().max(1.0) as usize;
+    if samples.len() < frame_samples {
+        return Default::default();
+    }
+    let frames = samples.len().div_ceil(frame_samples);
+    let mut peaks: [Vec<f64>; 4] = std::array::from_fn(|_| Vec::with_capacity(frames));
+    let low_alpha = 1.0 - (-2.0 * std::f64::consts::PI * XOVER_LOW / sr).exp();
+    let high_alpha = 1.0 - (-2.0 * std::f64::consts::PI * XOVER_HIGH / sr).exp();
+    let mut low_state = 0.0f64;
+    let mut mid_state = 0.0f64;
 
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(n_fft);
-    let mut scratch = vec![Complex32::new(0.0, 0.0); fft.get_inplace_scratch_len()];
-    let mut buffer = vec![Complex32::new(0.0, 0.0); n_fft];
-
-    for frame in 0..frames {
-        let start = frame * hop;
-        for (i, slot) in buffer.iter_mut().enumerate() {
-            *slot = Complex32::new(samples[start + i] * window[i] as f32, 0.0);
-        }
-        fft.process_with_scratch(&mut buffer, &mut scratch);
-        for (bin, value) in buffer.iter().take(bins).enumerate() {
-            let hz = bin as f64 * sr / n_fft as f64;
-            let band = if hz < XOVER_LOW {
-                0
-            } else if hz < XOVER_HIGH {
-                1
+    for frame in samples.chunks(frame_samples) {
+        let mut frame_peaks = [0.0f64; 4];
+        let mut frame_squares = [0.0f64; 4];
+        for sample in frame {
+            let input = if sample.is_finite() {
+                f64::from(*sample)
             } else {
-                2
+                0.0
             };
-            let magnitude = value.norm() as f64;
-            energies[band][frame] += magnitude * magnitude;
+            low_state += low_alpha * (input - low_state);
+            let above_low = input - low_state;
+            mid_state += high_alpha * (above_low - mid_state);
+            let split = [
+                input.abs(),
+                low_state.abs(),
+                mid_state.abs(),
+                (above_low - mid_state).abs(),
+            ];
+            for index in 0..4 {
+                frame_peaks[index] = frame_peaks[index].max(split[index]);
+                frame_squares[index] += split[index] * split[index];
+            }
+        }
+        for index in 0..4 {
+            let rms = (frame_squares[index] / frame.len().max(1) as f64).sqrt();
+            peaks[index].push((rms * frame_peaks[index]).sqrt());
         }
     }
-    energies
+    peaks
 }
 
 #[cfg(test)]
@@ -223,28 +262,42 @@ mod tests {
     }
 
     #[test]
-    fn bucket_count_follows_the_integer_division_rule() {
-        // 分格是 `step = max(1, n_frames/buckets)` 再 `count = n_frames/step`
-        //（和 Python 版同一个公式）。两条推论：
-        //  1. 帧数不够时，请求再多格也只能给出帧数那么多列；
-        //  2. 帧数远多于请求格数时，整数除法会让实际列数略多于请求值。
+    fn bucket_count_is_exact_until_the_master_density_is_exhausted() {
         let sr = WAVEFORM_SR as f64;
-        let frames_of = |seconds: f64| 1 + ((seconds * sr) as usize - N_FFT) / HOP;
+        let frames_of = |seconds: f64| {
+            ((seconds * sr) as usize).div_ceil((sr / MASTER_COLUMNS_PER_SECOND).round() as usize)
+        };
 
-        // 30 秒 ≈ 937 帧：请求 640 格时 step 被压到 1，只能原样给 937 列
+        // 30 秒有约 6000 个 master 峰；普通 overview 应严格得到请求的 640 列。
         let short = band_waveform(&tone(440.0, 30.0, sr), sr, 640);
-        assert_eq!(short.amp.len(), frames_of(30.0), "帧数不足时按帧给");
+        assert_eq!(short.amp.len(), 640);
 
-        // 5 分钟 ≈ 9370 帧：这时才谈得上"接近请求值"
+        // 请求超过 master 密度时不补假列，前端在屏幕空间插值。
+        let oversized = band_waveform(&tone(440.0, 1.0, sr), sr, 2_000);
+        assert_eq!(oversized.amp.len(), frames_of(1.0));
+
+        // 长曲的 overview 也保持稳定 payload 大小。
         let long_samples = tone(440.0, 300.0, sr);
         for buckets in [100usize, 300, 640] {
             let wave = band_waveform(&long_samples, sr, buckets);
-            assert!(
-                wave.amp.len() >= buckets && wave.amp.len() <= buckets * 12 / 10,
-                "请求 {buckets} 格，实际 {}",
-                wave.amp.len()
-            );
+            assert_eq!(wave.amp.len(), buckets.max(64));
         }
+    }
+
+    #[test]
+    fn detailed_profile_keeps_one_hundred_real_columns_per_second() {
+        let sr = WAVEFORM_SR as f64;
+        let seconds = 30.0;
+        let requested = (seconds * DETAIL_WAVEFORM_COLUMNS_PER_SECOND) as usize;
+        let wave = band_waveform(&tone(440.0, seconds, sr), sr, requested);
+        assert_eq!(wave.amp.len(), requested);
+    }
+
+    #[test]
+    fn detail_bucket_count_matches_the_frontend_viewport_contract() {
+        assert_eq!(detail_waveform_buckets(0.0), 2_000);
+        assert_eq!(detail_waveform_buckets(180.0), 18_000);
+        assert_eq!(detail_waveform_buckets(600.0), 24_000);
     }
 
     #[test]
@@ -281,6 +334,25 @@ mod tests {
         let samples = tone(440.0, 10.0, WAVEFORM_SR as f64);
         let wave = band_waveform(&samples, WAVEFORM_SR as f64, 200);
         assert!(wave.amp.iter().all(|v| (0.0..=1.0).contains(v)));
+    }
+
+    #[test]
+    fn crest_aware_envelope_keeps_sparse_transients_below_dense_sections() {
+        let sr = WAVEFORM_SR as f64;
+        let frame_samples = (sr / MASTER_COLUMNS_PER_SECOND).round() as usize;
+        let mut sparse = vec![0.0f32; frame_samples * 32];
+        for frame in 0..32 {
+            sparse[frame * frame_samples] = 1.0;
+        }
+        let dense = vec![1.0f32; frame_samples * 32];
+        let sparse_frames = peak_band_frames(&sparse, sr);
+        let dense_frames = peak_band_frames(&dense, sr);
+        let sparse_mean = sparse_frames[0].iter().sum::<f64>() / sparse_frames[0].len() as f64;
+        let dense_mean = dense_frames[0].iter().sum::<f64>() / dense_frames[0].len() as f64;
+        assert!(
+            dense_mean > sparse_mean * 2.0,
+            "相同 peak 的稀疏 click 不能再把段落画得和持续高能段一样满"
+        );
     }
 
     #[test]

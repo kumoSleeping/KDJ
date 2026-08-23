@@ -48,7 +48,12 @@ import { formatBytes } from "../../lib/format";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
-import type { KeyNotation, Quality, StreamCacheStats } from "../../types";
+import type {
+  FilterResonance,
+  KeyNotation,
+  Quality,
+  StreamCacheStats,
+} from "../../types";
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { Button, InlineNotice, Panel } from "../common";
@@ -577,16 +582,22 @@ export function SettingsPanel() {
   const bars = useDjConfig((state) => state.bars);
   const vocalCut = useDjConfig((state) => state.vocalCut);
   const applyInOutPoints = useDjConfig((state) => state.applyInOutPoints);
+  const autoBeatSync = useDjConfig((state) => state.autoBeatSync);
+  const playOnLoad = useDjConfig((state) => state.playOnLoad);
   const toggleTransition = useDjConfig((state) => state.toggleTransition);
   const toggleEffect = useDjConfig((state) => state.toggleEffect);
   const setBars = useDjConfig((state) => state.setBars);
   const setVocalCut = useDjConfig((state) => state.setVocalCut);
   const setApplyInOutPoints = useDjConfig((state) => state.setApplyInOutPoints);
+  const setAutoBeatSync = useDjConfig((state) => state.setAutoBeatSync);
+  const setPlayOnLoad = useDjConfig((state) => state.setPlayOnLoad);
 
   const widePlay = useTrackClickPrefs((state) => state.widePlay);
   const setWidePlay = useTrackClickPrefs((state) => state.setWidePlay);
   const transportFade = usePlaybackPrefs((state) => state.transportFade);
   const setTransportFade = usePlaybackPrefs((state) => state.setTransportFade);
+  const quantize = usePlaybackPrefs((state) => state.quantize);
+  const setQuantize = usePlaybackPrefs((state) => state.setQuantize);
   const lyricsEngines = useLyricsPrefs((state) => state.engines);
   const setLyricsEngines = useLyricsPrefs((state) => state.setEngines);
   const tryOnlineWhenMissing = useLyricsPrefs((state) => state.tryOnlineWhenMissing);
@@ -801,6 +812,23 @@ export function SettingsPanel() {
               title="播放时用约 120 毫秒渐入，暂停时用约 120 毫秒渐出；关掉后立即播放或暂停。"
               onChange={() => setTransportFade(!transportFade)}
             />
+            <Switch
+              checked={quantize}
+              label="节拍量化"
+              title="主 CUE、Hot Cue 与 Loop 起点吸附到分析节拍网格。"
+              onChange={() => setQuantize(!quantize)}
+            />
+            <CycleToggle<FilterResonance>
+              label="FILTER 共振"
+              value={settings?.filter_resonance ?? "high"}
+              options={[
+                { id: "low", text: "低" },
+                { id: "medium", text: "中" },
+                { id: "high", text: "高" },
+              ]}
+              title="Performance 双极 FILTER 的共振强度。高档为默认；低档与此前的固定滤波响应一致。"
+              onChange={(next) => void saveSettings({ filter_resonance: next })}
+            />
           </div>
         </Panel>
 
@@ -1007,6 +1035,18 @@ export function SettingsPanel() {
                 label="应用开始 / 结束点"
                 title="自动接播与自动续播时：有开始点就从那里起播，有结束点就到点切下一首；关掉则按首拍起播、波形尾段切歌。"
                 onChange={() => setApplyInOutPoints(!applyInOutPoints)}
+              />
+              <Switch
+                checked={autoBeatSync}
+                label="自动对拍"
+                title="开启后：点波形落到被点小节内与当前播放相同的相位；SYNC 锁小节（黄线对齐）；接歌等到下一小节边界。关掉则点击精确落点，SYNC 只锁拍子（灰线对齐）。"
+                onChange={() => setAutoBeatSync(!autoBeatSync)}
+              />
+              <Switch
+                checked={playOnLoad}
+                label="加载后立即播放"
+                title="DJ 模式下把曲目装入 Deck 后立即从首拍起播；关掉则只装盘，停在首拍等你按播放。"
+                onChange={() => setPlayOnLoad(!playOnLoad)}
               />
               {DJ_EFFECTS.map((item) => (
                 <Switch

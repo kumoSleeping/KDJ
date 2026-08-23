@@ -199,6 +199,9 @@ pub struct AppState {
     pub analysis: crate::jobs::AnalysisRegistry,
     /// 波形单飞：同一首歌的并发请求共享一次解码。
     pub waveforms: Arc<crate::waveform::WaveformCoordinator>,
+    /// The fixed classical Redress STEM coordinator owns background separation; it never enters playback
+    /// or audio callback threads.
+    pub stems: kdj_stems::StemCoordinator,
     /// 文件夹与波形升级各自只允许一个实例；前端重连/HMR 不会重复开整库任务。
     pub maintenance: crate::jobs::MaintenanceRegistry,
     /// 串行化曲目文件操作，避免撤回与复制/移动/删除同时改同一路径。
@@ -229,6 +232,7 @@ impl AppState {
         providers.insert(Platform::Bilibili, bilibili.clone());
 
         let waveforms = crate::waveform::WaveformCoordinator::new(library.clone());
+        let stems = kdj_stems::StemCoordinator::new(&config.data_dir);
         let stream_cache = crate::stream_cache::StreamCache::default();
         stream_cache.set_enabled(config.to_settings().stream_cache_enabled);
         Ok(Arc::new(AppState {
@@ -245,6 +249,7 @@ impl AppState {
             stream_waveforms: Default::default(),
             analysis: Default::default(),
             waveforms,
+            stems,
             maintenance: Default::default(),
             folder_operations: Mutex::new(()),
             folder_undo: Mutex::new(VecDeque::new()),

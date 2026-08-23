@@ -25,15 +25,23 @@ import { observeTrackScroller } from "../../lib/autoAnalyze";
 import { getBridge } from "../../lib/bridge";
 import { isEditable } from "../../lib/useLibraryClipboard";
 import { tableSortTitle } from "../../lib/tableSort";
+import { DJ_TRACK_TABLE_COLUMN_WIDTHS, fitDjTrackColumns } from "../../lib/djTableLayout";
 import {
   announceTrackDrag,
   claimActiveTrackDragIds,
   dispatchTrackCoverDrop,
+  dispatchTrackDeckDrop,
+  dispatchTrackSamplerDrop,
   finishTrackDrop,
   isTrackDrag,
+  lockTrackPointerDragScroll,
   readTrackDragIds,
   suppressCoverClickAfterTrackDrop,
+  trackDeckDropSideAt,
   TRACK_COVER_DROP_TARGET_ATTR,
+  TRACK_DECK_DROP_TARGET_ATTR,
+  TRACK_DECK_SPLIT_DROP_TARGET,
+  TRACK_SAMPLER_DROP_TARGET_ATTR,
   TRACK_TRASH_DROP_EVENT,
   type TrackDragDetail,
 } from "../../lib/trackDrag";
@@ -233,6 +241,8 @@ export interface TrackTableProps {
    * 却退化成手机排版。摆不摆得下长条要看还剩几栏，不看这一栏被挤成多窄。
    */
   layout: LayoutMode;
+  /** 可选紧凑适配；DJ 模式当前保留完整配置列并由外层横向滚动。 */
+  fitWidth?: boolean;
   selectedId: number | null;
   selectedIds: number[];
   /** 分屏中只有当前点亮板块可以消费全局删除快捷键。 */
@@ -488,6 +498,7 @@ export function TrackTable({
   tracks,
   loading,
   layout,
+  fitWidth = false,
   selectedId,
   selectedIds,
   sort,
@@ -584,8 +595,25 @@ export function TrackTable({
     const startY = event.clientY;
     const pointerId = event.pointerId;
     const ids = selected.has(track.id) ? [...selectedIds] : [track.id];
+    const sourceRow = event.currentTarget;
+    const sourceScroller = sourceRow.closest<HTMLElement>(".kd-scroll");
+    const sourceScrollTop = sourceScroller?.scrollTop ?? 0;
+    const sourceScrollLeft = sourceScroller?.scrollLeft ?? 0;
+    const previousUserSelect = sourceRow.style.userSelect;
+    sourceRow.style.userSelect = "none";
     let dragging = false;
     let ghost: HTMLDivElement | null = null;
+    let unlockScroll: () => void = () => undefined;
+
+    try {
+      sourceRow.setPointerCapture(pointerId);
+    } catch {
+      // WebKit 若已经开始取消该指针，window capture 监听仍可完成收尾。
+    }
+
+    const blockDragScroll = (scrollEvent: Event) => {
+      if (dragging) scrollEvent.preventDefault();
+    };
 
     const clearTargets = () => {
       document
@@ -605,7 +633,41 @@ export function TrackTable({
         playlist.setAttribute("data-kd-pointer-track-over", "playlist");
         return;
       }
+      const splitDeck = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          `[${TRACK_DECK_DROP_TARGET_ATTR}="${TRACK_DECK_SPLIT_DROP_TARGET}"]`,
+        ),
+      ).find((target) => {
+        const rect = target.getBoundingClientRect();
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+      });
+      if (splitDeck) {
+        const rect = splitDeck.getBoundingClientRect();
+        splitDeck.setAttribute(
+          "data-kd-pointer-track-over",
+          x < rect.left + rect.width / 2 ? "deck-left" : "deck-right",
+        );
+        return;
+      }
+      const side = trackDeckDropSideAt(x, y);
+      if (side !== null) {
+        document
+          .querySelectorAll<HTMLElement>(
+            "[" + TRACK_DECK_DROP_TARGET_ATTR + "]",
+          )
+          .forEach((target) => {
+            if (target.getAttribute(TRACK_DECK_DROP_TARGET_ATTR) === String(side)) {
+              target.setAttribute("data-kd-pointer-track-over", "deck");
+            }
+          });
+        return;
+      }
       const hit = hitAt(x, y);
+      const sampler = hit?.closest<HTMLElement>(`[${TRACK_SAMPLER_DROP_TARGET_ATTR}]`);
+      if (sampler) {
+        sampler.setAttribute("data-kd-pointer-track-over", "sampler");
+        return;
+      }
       const oneLibraryCover = hit?.closest<HTMLElement>(`[${ONE_LIBRARY_COVER_TARGET_ATTR}]`);
       if (oneLibraryCover) {
         oneLibraryCover.setAttribute("data-kd-pointer-track-over", "cover");
@@ -631,9 +693,18 @@ export function TrackTable({
       window.removeEventListener("pointermove", onMove, true);
       window.removeEventListener("pointerup", onUp, true);
       window.removeEventListener("pointercancel", onCancel, true);
+      window.removeEventListener("wheel", blockDragScroll, true);
       clearTargets();
+      unlockScroll();
+      unlockScroll = () => undefined;
       ghost?.remove();
       ghost = null;
+      sourceRow.style.userSelect = previousUserSelect;
+      try {
+        if (sourceRow.hasPointerCapture(pointerId)) sourceRow.releasePointerCapture(pointerId);
+      } catch {
+        // 指针取消或虚拟行卸载后 capture 可能已由 WebKit 自动释放。
+      }
       delete document.body.dataset.kdTrackPointerDragging;
       delete document.body.dataset.kdTrackPointerSource;
       pointerDragCleanupRef.current = null;
@@ -647,6 +718,12 @@ export function TrackTable({
       announceTrackDrag(ids);
       document.body.dataset.kdTrackPointerDragging = "true";
       document.body.dataset.kdTrackPointerSource = "local";
+      unlockScroll = lockTrackPointerDragScroll(
+        sourceScroller,
+        sourceScrollTop,
+        sourceScrollLeft,
+      );
+      window.addEventListener("wheel", blockDragScroll, { capture: true, passive: false });
       ghost = document.createElement("div");
       ghost.className = "kd-track-pointer-ghost";
       ghost.textContent = ids.length > 1 ? `移动 ${ids.length} 首曲目` : (track.title || track.filename);
@@ -668,6 +745,9 @@ export function TrackTable({
       const folder = folderDropElementAt(up.clientX, up.clientY);
       const hit = hitAt(up.clientX, up.clientY);
       const playlist = playlistDropElementAt(up.clientX, up.clientY);
+      const deckSide = trackDeckDropSideAt(up.clientX, up.clientY);
+      const sampler = hit?.closest<HTMLElement>(`[${TRACK_SAMPLER_DROP_TARGET_ATTR}]`);
+      const samplerSlot = sampler ? Number(sampler.getAttribute(TRACK_SAMPLER_DROP_TARGET_ATTR)) : NaN;
       const trash = hit?.closest<HTMLElement>("[data-kd-track-trash-target]");
       const oneLibraryCover = hit?.closest<HTMLElement>(`[${ONE_LIBRARY_COVER_TARGET_ATTR}]`);
       const cover = hit?.closest<HTMLElement>(`[${TRACK_COVER_DROP_TARGET_ATTR}]`);
@@ -682,6 +762,18 @@ export function TrackTable({
       cleanup();
       if (!dragging) return;
       up.preventDefault();
+
+      if (deckSide !== null) {
+        dispatchTrackDeckDrop(ids, deckSide);
+        finishTrackDrop();
+        return;
+      }
+
+      if (Number.isInteger(samplerSlot) && samplerSlot >= 0 && samplerSlot < 8) {
+        dispatchTrackSamplerDrop(ids, samplerSlot);
+        finishTrackDrop();
+        return;
+      }
 
       if (folder) {
         const dest = folder.getAttribute(FOLDER_DROP_PATH_ATTR)?.trim() ?? "";
@@ -1036,17 +1128,26 @@ export function TrackTable({
 
   const orderedColumns = orderByPrefs(COLUMNS, colPrefs.order);
   const colIds = orderedColumns.map((column) => column.key);
-  const visibleColumns = orderedColumns.filter((column) => !colPrefs.hidden.includes(column.key));
+  const configuredVisibleColumns = orderedColumns.filter(
+    (column) => !colPrefs.hidden.includes(column.key),
+  );
+  const visibleColumns = fitWidth
+    ? fitDjTrackColumns(configuredVisibleColumns)
+    : configuredVisibleColumns;
   /** 只有曲库行需要序号列；纯待下载占位时不占左侧空白。 */
   const showIndexCol = tracks.length > 0;
-  const indexWidth = widthFor(INDEX_COL_KEY, INDEX_DEFAULT_WIDTH);
+  const indexWidth = fitWidth ? "10%" : widthFor(INDEX_COL_KEY, INDEX_DEFAULT_WIDTH);
+  const displayWidthFor = (column: Column) => fitWidth
+    ? DJ_TRACK_TABLE_COLUMN_WIDTHS[column.key as keyof typeof DJ_TRACK_TABLE_COLUMN_WIDTHS]
+    : widthFor(column.key, column.width ?? "4rem");
   const tableColSpan = visibleColumns.length + (showIndexCol ? 1 : 0) + 1;
-  const tableMinWidthPx =
-    (showIndexCol ? remStringToPx(indexWidth) : 0) +
-    visibleColumns.reduce(
-      (sum, column) => sum + remStringToPx(widthFor(column.key, column.width ?? "4rem")),
-      0,
-    );
+  const tableMinWidthPx = fitWidth
+    ? "100%"
+    : (showIndexCol ? remStringToPx(indexWidth) : 0) +
+      visibleColumns.reduce(
+        (sum, column) => sum + remStringToPx(displayWidthFor(column)),
+        0,
+      );
 
   /* ---------------------------------------------------- 虚拟滚动 */
   /**
@@ -1197,16 +1298,18 @@ export function TrackTable({
         className="kd-table"
         data-kind="library"
         data-layout={layout}
+        data-fit-width={fitWidth || undefined}
         style={{ minWidth: tableMinWidthPx }}
       >
         {/* 每个真实列由 col 锁住自己的宽度，最后一列只吃剩余空白。
             这样拖标题不会再按比例挤动艺人/BPM；总宽超过视口时由外层横向滚动。 */}
         <colgroup>
-          {showIndexCol ? <col style={{ width: indexWidth }} /> : null}
+          {showIndexCol ? <col data-col="index" style={{ width: indexWidth }} /> : null}
           {visibleColumns.map((column) => (
             <col
               key={column.key}
-              style={{ width: widthFor(column.key, column.width ?? "4rem") }}
+              data-col={column.key}
+              style={{ width: displayWidthFor(column) }}
             />
           ))}
           <col />
@@ -1233,7 +1336,7 @@ export function TrackTable({
               </th>
             ) : null}
             {visibleColumns.map((column) => {
-              const colWidth = widthFor(column.key, column.width ?? "4rem");
+              const colWidth = displayWidthFor(column);
               return (
               <th
                 key={column.key}

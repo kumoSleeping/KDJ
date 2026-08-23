@@ -7,20 +7,22 @@
 # 的东西，都只能做成 init 之后的补丁步骤，且本地和 CI 必须跑同一份——
 # 两边各写一套的下场是"我这儿能装，CI 出来的装不上"。
 #
-# 做四件事：
+# 做五件事：
 #   1. release 放行 localhost 明文（不然装到真机是白屏）
 #   2. AndroidManifest 注入曲库媒体读取权限（gen/android 不进版本库，
 #      清单手改会被 init 冲掉；缺了它们运行时申请会被系统静默拒绝，
 #      曲库在共享存储里永远扫到 0 首）
-#   3. 注入签名配置（不签名的 APK 在 Android 7+ 上根本装不了）
-#   4. 把仓库里的真图标盖过模板默认图标
+#   3. 下载校验 ExecuTorch Vulkan AAR，并注入 Kotlin/JNI bridge
+#   4. 注入签名配置（不签名的 APK 在 Android 7+ 上根本装不了）
+#   5. 把仓库里的真图标盖过模板默认图标
 #
 # 签名的钥匙从环境变量来，脚本本身不含任何密码：
 #   ANDROID_KEYSTORE_BASE64   keystore 文件的 base64（CI 用；本地可省）
 #   ANDROID_KEYSTORE_PATH     keystore 路径（本地用，默认 ~/.android/kdj-release.jks）
 #   ANDROID_KEYSTORE_PASSWORD 口令
 #   ANDROID_KEY_ALIAS         别名（默认 kdj）
-# 一个都没有时**跳过签名**继续跑，出未签名包——本地只想验证能不能编时不该被卡住。
+# 一个都没有时**跳过 release 签名**继续跑——本地只想验证能不能编时不该被卡住；
+# Gradle 的 `--debug` APK 仍由 Android debug key 自动签名，release 则不可安装。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -96,7 +98,88 @@ print("  权限已就位" if not missing else f"  已注入 {len(missing)} 条�
 PY
 echo "✓ 清单权限（READ_MEDIA_AUDIO / READ_MEDIA_VIDEO / READ_EXTERNAL_STORAGE≤32）"
 
-# ---------------------------------------------------------------- 3. 签名
+# ---------------------------------------------------------------- 3. ExecuTorch Vulkan
+# SCNet v0.1.2 的 Android .pte 由 ExecuTorch 1.0.1 导出，必须和带 Vulkan delegate
+# 的同版 AAR 配套。Maven Central 的默认 executorch-android AAR 是 CPU/XNNPACK 变体，
+# 不能悄悄替换为它；这里固定下载官方 Vulkan AAR 并在下载前后校验 SHA-256。
+EXECUTORCH_VERSION="1.0.1"
+EXECUTORCH_AAR="executorch-vulkan-${EXECUTORCH_VERSION}.aar"
+EXECUTORCH_URL="https://ossci-android.s3.amazonaws.com/executorch/release/${EXECUTORCH_VERSION}-vulkan/executorch.aar"
+EXECUTORCH_SHA256="34ec65577e54116b729da7e130890bccdd08a596034853915af7dcc2253a7304"
+APP_DIR="$GEN/app"
+LIB_DIR="$APP_DIR/libs"
+mkdir -p "$LIB_DIR"
+AAR_PATH="$LIB_DIR/$EXECUTORCH_AAR"
+if [ -f "$AAR_PATH" ]; then
+  actual=$(shasum -a 256 "$AAR_PATH" | awk '{print $1}')
+  if [ "$actual" != "$EXECUTORCH_SHA256" ]; then
+    echo "⚠ ExecuTorch AAR 校验不匹配，重新下载"
+    rm -f "$AAR_PATH"
+  fi
+fi
+if [ ! -f "$AAR_PATH" ]; then
+  partial="$AAR_PATH.partial"
+  rm -f "$partial"
+  curl --fail --location --retry 3 --retry-delay 2 --silent --show-error "$EXECUTORCH_URL" -o "$partial"
+  actual=$(shasum -a 256 "$partial" | awk '{print $1}')
+  if [ "$actual" != "$EXECUTORCH_SHA256" ]; then
+    rm -f "$partial"
+    echo "::error::ExecuTorch Vulkan AAR SHA-256 校验失败"
+    exit 1
+  fi
+  mv "$partial" "$AAR_PATH"
+fi
+
+# `gen/android` 不进版本库。Kotlin helper 与 keep rule 都从跟踪的源文件重建；release
+# 开 R8 时必须保持类名/静态方法，Rust JNI 的 app-class-loader 调用才不会被混淆掉。
+STEM_RUNTIME_SOURCE="$ROOT/src-tauri/android/StemRuntime.kt"
+STEM_RUNTIME_DEST="$APP_DIR/src/main/java/com/kdj/app/StemRuntime.kt"
+[ -f "$STEM_RUNTIME_SOURCE" ] || { echo "::error::缺少 $STEM_RUNTIME_SOURCE"; exit 1; }
+mkdir -p "$(dirname "$STEM_RUNTIME_DEST")" "$APP_DIR/proguard"
+cp "$STEM_RUNTIME_SOURCE" "$STEM_RUNTIME_DEST"
+cat > "$APP_DIR/proguard/kdj-executorch.pro" <<'EOF'
+# Rust calls StemRuntime through JNI; R8 must not rename/remove the bridge or ExecuTorch's
+# JNI-registered Java surface.
+-keep class com.kdj.app.StemRuntime { public static *; }
+-keep class org.pytorch.executorch.** { *; }
+EOF
+
+python3 - "$GRADLE" "$EXECUTORCH_AAR" <<'PY'
+import sys
+
+p, aar = sys.argv[1:]
+s = open(p).read()
+marker = "// KDJ_EXECUTORCH_VULKAN"
+if marker not in s:
+    default_anchor = "    defaultConfig {"
+    if default_anchor not in s:
+        print("::error::Gradle 模板里找不到 defaultConfig，无法锁定 arm64 ExecuTorch ABI")
+        sys.exit(1)
+    s = s.replace(
+        default_anchor,
+        default_anchor
+        + "\n        // KDJ_EXECUTORCH_VULKAN: AAR 仅含 arm64-v8a / x86_64；测试包明确只发 arm64。\n"
+        + "        ndk { abiFilters += \"arm64-v8a\" }",
+        1,
+    )
+    dependency_anchor = "dependencies {"
+    if dependency_anchor not in s:
+        print("::error::Gradle 模板里找不到 dependencies，无法接入 ExecuTorch Vulkan")
+        sys.exit(1)
+    dependency_block = (
+        dependency_anchor
+        + "\n    // KDJ_EXECUTORCH_VULKAN: pinned alongside SCNet v0.1.2 .pte; do not replace with Maven's CPU AAR.\n"
+        + f"    implementation(files(\"libs/{aar}\"))\n"
+        + "    implementation(\"com.facebook.soloader:nativeloader:0.10.5\")\n"
+        + "    implementation(\"com.facebook.fbjni:fbjni:0.7.0\")"
+    )
+    s = s.replace(dependency_anchor, dependency_block, 1)
+    open(p, "w").write(s)
+PY
+grep -q 'KDJ_EXECUTORCH_VULKAN' "$GRADLE" || { echo "::error::ExecuTorch Gradle 注入失败"; exit 1; }
+echo "✓ ExecuTorch Vulkan 1.0.1（arm64 AAR + Kotlin bridge）"
+
+# ---------------------------------------------------------------- 4. 签名
 KEYSTORE="${ANDROID_KEYSTORE_PATH:-$HOME/.android/kdj-release.jks}"
 if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
   KEYSTORE="$GEN/app/release.jks"
@@ -157,10 +240,10 @@ PY
   # 当成变量名的一部分，报 "KEYSTORE）: unbound variable"，看着像变量没设
   echo "✓ 签名配置（keystore：${KEYSTORE}）"
 else
-  echo "⚠ 没有 keystore 或口令，跳过签名——出来的是 unsigned APK，装不进真机"
+  echo "⚠ 没有 keystore 或口令：release APK 会是 unsigned（--debug APK 仍自动签名）"
 fi
 
-# ---------------------------------------------------------------- 4. 图标
+# ---------------------------------------------------------------- 5. 图标
 # init 出来的工程带的是 Tauri 默认图标；真图标（tauri icon 的产物）在仓库里。
 # 顺带把自适应图标的背景层从模板的 #fff 换成应用底色——白底配深色前景，
 # 在圆形遮罩里会露一圈白边。

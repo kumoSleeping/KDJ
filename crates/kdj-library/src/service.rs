@@ -1160,6 +1160,29 @@ impl LibraryService {
             assignments.push("end_ms = ?");
             values.push(SqlValue::Integer(end_ms));
         }
+        if let Some(cue_points) = &patch.cue_points {
+            let mut hot_slots = HashSet::new();
+            for cue in cue_points {
+                anyhow::ensure!(cue.start_ms >= 0, "Cue 起点不能为负数");
+                anyhow::ensure!(
+                    cue.end_ms.is_none_or(|end_ms| end_ms > cue.start_ms),
+                    "Loop 终点必须晚于 Cue 起点"
+                );
+                anyhow::ensure!(
+                    !cue.active_loop || cue.end_ms.is_some(),
+                    "Active Loop 必须有终点"
+                );
+                if let Some(slot) = cue.hot_cue {
+                    anyhow::ensure!((1..=8).contains(&slot), "Hot Cue 槽位必须为 1 到 8");
+                    anyhow::ensure!(hot_slots.insert(slot), "Hot Cue {slot} 槽位重复");
+                }
+            }
+            assignments.push("cue_points_json = ?");
+            values.push(SqlValue::Text(
+                serde_json::to_string(cue_points).context("序列化 Cue 点失败")?,
+            ));
+            assignments.push("cue_points_managed = 1");
+        }
 
         let stamp = now_iso();
         if !assignments.is_empty() {
@@ -1422,6 +1445,8 @@ impl LibraryService {
     /// 都按删除前写回，不走重新扫描，避免一次撤回变成一首"新导入"的歌。
     pub fn restore_deleted(&self, deleted: &DeletedTrack) -> Result<Track> {
         let track = &deleted.track;
+        let cue_points_json =
+            serde_json::to_string(&track.cue_points).context("序列化待恢复的 Cue 点失败")?;
         let original = Path::new(&track.path);
         anyhow::ensure!(
             self.get(track.id)?.is_none(),
@@ -1458,11 +1483,12 @@ impl LibraryService {
                     bitrate, samplerate, channels, format, size, bpm, bpm_confidence,
                     first_beat, music_key, camelot, open_key, key_confidence, energy,
                     rms_db, peak_db, rating, color, comment, cue_ms, end_ms,
+                    cue_points_json, cue_points_managed,
                     source_platform, source_key, analyzed_at, added_at, modified_at,
                     analysis_error
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )",
                 rusqlite::params![
                     track.id,
@@ -1494,6 +1520,8 @@ impl LibraryService {
                     track.comment,
                     track.cue_ms,
                     track.end_ms,
+                    cue_points_json,
+                    track.cue_points_managed,
                     track.source_platform,
                     track.source_key,
                     track.analyzed_at,
@@ -2419,7 +2447,8 @@ impl LibraryService {
         const COLUMNS: &str = "title, artist, album, genre, year, duration, bitrate, \
              samplerate, channels, format, bpm, bpm_confidence, first_beat, music_key, camelot, \
              open_key, key_confidence, energy, rms_db, peak_db, rating, color, comment, cue_ms, \
-             end_ms, source_platform, source_key, analyzed_at, analysis_error";
+             end_ms, cue_points_json, cue_points_managed, source_platform, source_key, \
+             analyzed_at, analysis_error";
         let assignments: Vec<String> = COLUMNS
             .split(',')
             .map(|name| format!("{} = ?", name.trim()))
@@ -2557,6 +2586,12 @@ fn row_to_track(row: &Row) -> Track {
         comment: text(row, "comment"),
         cue_ms: row.get("cue_ms").ok().flatten(),
         end_ms: row.get("end_ms").ok().flatten(),
+        cue_points: serde_json::from_str(&text(row, "cue_points_json")).unwrap_or_default(),
+        cue_points_managed: row
+            .get::<_, Option<bool>>("cue_points_managed")
+            .ok()
+            .flatten()
+            .unwrap_or(false),
         source_platform: {
             let value = text(row, "source_platform");
             if value.is_empty() {
@@ -2578,7 +2613,7 @@ fn row_to_track(row: &Row) -> Track {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kdj_core::models::HarmonicRelation;
+    use kdj_core::models::{CuePoint, HarmonicRelation};
 
     /// 伪造曲库根。**必须带盘符**，`/lib` 或 `\lib` 都不行。
     ///
@@ -2814,6 +2849,22 @@ mod tests {
         )
         .unwrap();
         drop(conn);
+        let cue_points = vec![CuePoint {
+            id: 11,
+            hot_cue: Some(2),
+            start_ms: 4_000,
+            comment: "drop".into(),
+            ..CuePoint::default()
+        }];
+        service
+            .patch(
+                id,
+                &TrackPatch {
+                    cue_points: Some(cue_points.clone()),
+                    ..TrackPatch::default()
+                },
+            )
+            .unwrap();
 
         let (removed, snapshot) = service.delete_for_undo(id, FileDisposal::Keep).unwrap();
         assert!(removed);
@@ -2825,6 +2876,8 @@ mod tests {
         assert_eq!(restored.title, "撤回测试");
         assert_eq!(restored.camelot, "8A");
         assert_eq!(restored.tags, vec!["favorite"]);
+        assert_eq!(restored.cue_points, cue_points);
+        assert!(restored.cue_points_managed);
         let position: i64 = service
             .db()
             .conn()
@@ -3297,6 +3350,184 @@ mod tests {
             track.year, "2021-05-17",
             "整串日期要原样存住，不能截成 2021"
         );
+    }
+
+    #[test]
+    fn patch_replaces_and_explicitly_clears_managed_cue_points() {
+        let service = service();
+        let id = insert(&service, Row::default());
+        let initial = service.get(id).unwrap().unwrap();
+        assert!(initial.cue_points.is_empty());
+        assert!(!initial.cue_points_managed);
+
+        let cue_points = vec![
+            CuePoint {
+                id: 1,
+                hot_cue: None,
+                start_ms: 1_250,
+                comment: "Memory Cue".into(),
+                ..CuePoint::default()
+            },
+            CuePoint {
+                id: 2,
+                hot_cue: Some(1),
+                start_ms: 8_000,
+                end_ms: Some(12_000),
+                color_index: Some(3),
+                color: "#22c55e".into(),
+                comment: "Intro loop".into(),
+                active_loop: true,
+            },
+        ];
+        let updated = service
+            .patch(
+                id,
+                &TrackPatch {
+                    cue_points: Some(cue_points.clone()),
+                    ..TrackPatch::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.cue_points, cue_points);
+        assert!(updated.cue_points_managed);
+
+        let stored: (String, bool) = service
+            .db()
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT cue_points_json, cue_points_managed FROM tracks WHERE id = ?",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<CuePoint>>(&stored.0).unwrap(),
+            cue_points
+        );
+        assert!(stored.1);
+
+        let cleared = service
+            .patch(
+                id,
+                &TrackPatch {
+                    cue_points: Some(Vec::new()),
+                    ..TrackPatch::default()
+                },
+            )
+            .unwrap();
+        assert!(cleared.cue_points.is_empty());
+        assert!(
+            cleared.cue_points_managed,
+            "显式清空仍是受管理状态，导出时需要删除目标端的旧 Cue"
+        );
+    }
+
+    #[test]
+    fn patch_rejects_invalid_or_duplicate_hot_cues() {
+        let service = service();
+        let id = insert(&service, Row::default());
+        let duplicate = vec![
+            CuePoint {
+                id: 1,
+                hot_cue: Some(2),
+                start_ms: 1_000,
+                ..CuePoint::default()
+            },
+            CuePoint {
+                id: 2,
+                hot_cue: Some(2),
+                start_ms: 2_000,
+                ..CuePoint::default()
+            },
+        ];
+        let error = service
+            .patch(
+                id,
+                &TrackPatch {
+                    cue_points: Some(duplicate),
+                    ..TrackPatch::default()
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("槽位重复"));
+
+        let invalid_loop = CuePoint {
+            id: 3,
+            hot_cue: Some(1),
+            start_ms: 4_000,
+            active_loop: true,
+            ..CuePoint::default()
+        };
+        let error = service
+            .patch(
+                id,
+                &TrackPatch {
+                    cue_points: Some(vec![invalid_loop]),
+                    ..TrackPatch::default()
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("必须有终点"));
+    }
+
+    #[test]
+    fn malformed_cue_json_reads_as_an_empty_unmanaged_compatible_list() {
+        let service = service();
+        let id = insert(&service, Row::default());
+        service
+            .db()
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE tracks SET cue_points_json = 'not-json' WHERE id = ?",
+                [id],
+            )
+            .unwrap();
+
+        let track = service.get(id).unwrap().unwrap();
+        assert!(track.cue_points.is_empty());
+        assert!(!track.cue_points_managed);
+    }
+
+    #[test]
+    fn cloning_metadata_preserves_managed_cue_points() {
+        let service = service();
+        let source_id = insert(
+            &service,
+            Row {
+                path: "/lib/source.mp3",
+                ..Row::default()
+            },
+        );
+        let target_id = insert(
+            &service,
+            Row {
+                path: "/lib/target.mp3",
+                ..Row::default()
+            },
+        );
+        let cue_points = vec![CuePoint {
+            id: 5,
+            hot_cue: Some(3),
+            start_ms: 16_000,
+            color_index: Some(6),
+            ..CuePoint::default()
+        }];
+        service
+            .patch(
+                source_id,
+                &TrackPatch {
+                    cue_points: Some(cue_points.clone()),
+                    ..TrackPatch::default()
+                },
+            )
+            .unwrap();
+
+        service.clone_metadata(source_id, target_id).unwrap();
+        let target = service.get(target_id).unwrap().unwrap();
+        assert_eq!(target.cue_points, cue_points);
+        assert!(target.cue_points_managed);
     }
 
     /// 造一个 2 秒静音 WAV，用来做"真的写标签"的测试。

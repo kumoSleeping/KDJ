@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { LoaderCircle, PlugZap, RefreshCw } from "lucide-react";
-import { Button, EmptyState } from "./components/common";
+import { Button, EmptyState, ToastHost } from "./components/common";
 import { Workspace } from "./components/workspace/Workspace";
 import { PlayerBar } from "./components/player/PlayerBar";
 import { VideoPipHost } from "./components/player/VideoPipHost";
@@ -14,6 +14,7 @@ import { bootAll, connectEvents, selectConnected, useAppStore } from "./stores/a
 import { usePlaylistStore } from "./stores/playlistStore";
 import { useLyricsPrefs } from "./lib/lyricsPrefs";
 import { useUpdateStore } from "./stores/updateStore";
+import { readWorkMode, writeWorkMode, type WorkMode } from "./lib/workMode";
 
 // 只有一个界面：工作台（曲库 + 搜索下载合一）。
 // 登录 / 队列从顶栏专用按钮进入；其余设置仍就地改。
@@ -40,6 +41,8 @@ export default function App() {
   const refreshOneLibraryDevices = usePlaylistStore((state) => state.refreshDevices);
   const { columns, chrome, portrait } = useLayoutSignals();
   const [retrying, setRetrying] = useState(false);
+  const [workMode, setWorkModeState] = useState<WorkMode>(() => readWorkMode());
+  const [performanceOpen, setPerformanceOpen] = useState(workMode === "dj");
   const platform = window.kdj?.platform;
   const isMac = platform === "darwin";
   const isMobile = platform === "android" || platform === "ios";
@@ -114,6 +117,11 @@ export default function App() {
     void bootAll().finally(() => setRetrying(false));
   }, []);
 
+  const setWorkMode = useCallback((mode: WorkMode) => {
+    setWorkModeState(mode);
+    setPerformanceOpen(mode === "dj");
+    writeWorkMode(mode);
+  }, []);
   return (
     <div
       className="kd-app"
@@ -122,10 +130,14 @@ export default function App() {
       data-columns={columns}
       data-chrome={chrome}
       data-portrait={portrait ? "true" : undefined}
+      data-work-mode={workMode}
     >
       <div className="kd-body">
         {connected ? (
-          <Workspace />
+          <Workspace
+            workMode={workMode}
+            onWorkModeChange={setWorkMode}
+          />
         ) : (
           <section className="kd-section">
             {booting || retrying ? (
@@ -153,10 +165,14 @@ export default function App() {
         )}
       </div>
 
+      <ToastHost />
       {/* 没连上时不渲染播放条：没有可播的曲目，留个空条只会占地方 */}
       {connected && (
         <>
-          <PlayerBar />
+          <PlayerBar
+            workMode={workMode}
+            performanceOpen={performanceOpen}
+          />
           <VideoPipHost />
         </>
       )}

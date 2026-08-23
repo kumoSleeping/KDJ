@@ -22,6 +22,7 @@ import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackD
 import { enqueueSearchOneLibraryDrop, isSearchDownloadDrag } from "../../lib/searchDrag";
 import { clearTextSelection } from "../../lib/textSelection";
 import { oneLibraryTreeDropPosition } from "../../lib/oneLibraryTree";
+import { isMidiBrowseActivate, midiBrowseItemProps } from "../../lib/midiLibraryNav";
 import { usePlaylistStore } from "../../stores/playlistStore";
 import { useAppStore } from "../../stores/appStore";
 import type { OneLibraryPlaylist, RemovableDevice } from "../../types";
@@ -232,6 +233,7 @@ export function PlaylistSection({
               : {})}
             data-disabled={disabled || playlist.attribute === 4 || undefined}
             data-active={active || undefined}
+            {...midiBrowseItemProps("onelibrary", `onelibrary:${device.path}:${playlist.id}`)}
             data-drop={currentDrop && drop.edge === "inside" ? "true" : undefined}
             data-edge={
               currentDrop && drop.edge !== "inside" ? drop.edge : undefined
@@ -240,6 +242,7 @@ export function PlaylistSection({
             onClick={() => {
               if (editing?.playlistId === playlist.id) return;
               if (isFolder) {
+                if (isMidiBrowseActivate() && folderOpen) return;
                 setOpenFolders((current) => {
                   const next = new Set(current);
                   if (next.has(key)) next.delete(key);

@@ -249,7 +249,9 @@ fn harmonic_matches_are_compatible_sorted_and_deduped() {
         panic!("真库里应当有已分析的曲目");
     };
 
-    let matches = service.harmonic_matches(source.id, 6.0, 50, true, "").unwrap();
+    let matches = service
+        .harmonic_matches(source.id, 6.0, 50, true, "")
+        .unwrap();
     assert!(!matches.is_empty(), "「{}」一条推荐都没有", source.filename);
 
     let allowed: std::collections::HashSet<String> =

@@ -62,14 +62,75 @@ pub enum RtCommand {
         deck: DeckId,
         gain: f32,
     },
+    SetDeckPlaying {
+        deck: DeckId,
+        playing: bool,
+    },
+    /// Capacitive platter contact temporarily owns this Deck's media cursor. This is deliberately
+    /// separate from `SetDeckPlaying`: the logical transport stays playing while the callback
+    /// stops consuming its source, so a release cannot be mistaken for a Play/Pause transition.
+    SetDeckScratchHeld {
+        deck: DeckId,
+        held: bool,
+    },
+    /// Relative platter motion while a capacitive hold owns this Deck. The callback plays the
+    /// moved audio immediately instead of waiting for a decoder rebuild on note-off.
+    ScratchDeck {
+        deck: DeckId,
+        delta_frames: f64,
+    },
     SetRate {
         deck: DeckId,
         rate: f32,
     },
+    /// Change both persistent Deck tempos at one callback boundary. A linked SYNC fader must not
+    /// expose an intermediate frame where only one side has adopted the new clock rate.
+    SetDeckRates {
+        rates: [f32; 2],
+    },
+    /// Per-lane STEM gains in `StemKind::index` order (drums, bass, other, vocals). Applied by
+    /// the renderer with a short ramp, so mute/volume moves land at the next callback frame
+    /// without touching any decode worker.
+    SetDeckStemGains {
+        deck: DeckId,
+        gains: [f32; 4],
+    },
+    /// Transport-level loop on the *currently installed* source. The callback wraps its media
+    /// cursor into `[start_frames, start_frames + frames)` instead of ending the Deck; EQ, STEM
+    /// gains and TEMPO stay on that source. Installing a replacement source clears this flag
+    /// until the coordinator restores it.
+    SetDeckLoop {
+        deck: DeckId,
+        looping: bool,
+        /// Inclusive loop-in, in the same output-rate frame units as `deck_positions`.
+        start_frames: u64,
+        /// Loop duration in those frames. Ignored when `looping` is false.
+        frames: u64,
+    },
     SetEq {
         deck: DeckId,
+        trim_db: f32,
         low_db: f32,
+        mid_db: f32,
         high_db: f32,
+        filter: f32,
+    },
+    /// Shared manual Performance FX unit. `pad` is 0 when no momentary Pad FX is held.
+    SetDeckFx {
+        deck: DeckId,
+        echo: f32,
+        echo_parameter: f32,
+        reverb: f32,
+        reverb_parameter: f32,
+        gater: f32,
+        gater_parameter: f32,
+        pad: u8,
+        beat_seconds: f32,
+    },
+    /// Global Q for the Performance channel filter. It is prevalidated on the control thread;
+    /// the callback only swaps coefficients for both decks at its next boundary.
+    SetFilterResonance {
+        q: f32,
     },
     /// Select a cue that a decode worker has already made available to the renderer.
     SeekPrepared {
@@ -91,6 +152,7 @@ pub(crate) enum SourceKind {
     #[default]
     Decoded,
     Stream,
+    StemStream,
 }
 
 /// Internal source-lifetime messages share the transport queue so installing a source and its

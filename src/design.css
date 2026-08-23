@@ -913,6 +913,7 @@ textarea {
  * 右栏与底下的主列表是独立滚动面，指针停在右栏时不能带动主列表。
  */
 .kd-local-list-slot {
+  --kd-visible-right: min(var(--kd-right, 25rem), calc(100% - 1px));
   position: relative;
   flex: 1 1 auto;
   min-width: 0;
@@ -930,7 +931,7 @@ textarea {
   position: absolute;
   top: 0;
   bottom: 0;
-  right: var(--kd-right, 25rem);
+  right: var(--kd-visible-right);
   width: 1px;
   z-index: 6;
 }
@@ -939,7 +940,7 @@ textarea {
   top: 0;
   right: 0;
   bottom: 0;
-  width: var(--kd-right, 25rem);
+  width: var(--kd-visible-right);
   z-index: 5;
   box-shadow: -10px 0 28px rgba(15, 18, 28, 0.08);
 }
@@ -948,7 +949,7 @@ textarea {
  * 否则绝对定位的详情/队列面板会盖住本地曲库和搜索结果右侧的工具按钮。
  */
 .kd-local-list-slot[data-aside="open"] > .kd-workspace-panes {
-  margin-right: calc(var(--kd-right, 25rem) + 1px);
+  margin-right: calc(var(--kd-visible-right) + 1px);
 }
 
 /* ============================================================
@@ -1973,6 +1974,10 @@ body[data-kd-track-pointer-source="local"]
   background: var(--kd-panel);
   border-right: none;
 }
+.kd-tree-slot [data-kd-browse-cursor] {
+  background: var(--kd-selected);
+  color: var(--kd-text);
+}
 .kd-tree-slot > .kd-narrow-folder-panel,
 .kd-tree-slot > .kd-narrow-folder-rail {
   flex: 1 1 auto;
@@ -2553,6 +2558,11 @@ body[data-kd-track-pointer-dragging="true"] * {
   cursor: grabbing !important;
   user-select: none !important;
   -webkit-user-select: none !important;
+}
+body[data-kd-track-pointer-dragging="true"] {
+  overflow: hidden !important;
+  overscroll-behavior: none;
+  touch-action: none;
 }
 .kd-track-pointer-ghost {
   position: fixed;
@@ -3321,10 +3331,8 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
 /* ============================================================
  * 就地提示（InlineNotice）
  * ------------------------------------------------------------
- * 右下角的浮层通知已经删掉：它盖在内容上、5 秒就自己跑了，
- * 出错时人往往正盯着别处，回头看已经什么都没有了。
- * 失败改成留在**出事的那个地方**——按钮旁边、面板里的一行小字，
- * 不会自己消失，做下一次同样的操作时才清掉。
+ * 面板里、按钮旁边的失败回执仍贴在出事的地方。瞬时消息（播放/STEM）
+ * 走右下角 .kd-toast，10 秒后自己弹回，不再插进播放条。
  *
  * 不用红：红色只给"动作"（加入队列 / 停止分析 / 移出曲库），
  * 一个区域里再多一块红，那个真正要被按的按钮就不显眼了。
@@ -3349,6 +3357,51 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   padding: 0.3rem 0.5rem;
 }
 
+@keyframes kd-toast-in {
+  from { transform: translateY(110%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+@keyframes kd-toast-out {
+  from { transform: translateY(0); opacity: 1; }
+  to { transform: translateY(110%); opacity: 0; }
+}
+.kd-toast {
+  position: fixed;
+  right: 0.7rem;
+  bottom: calc(0.7rem + env(safe-area-inset-bottom, 0px));
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  max-width: min(32rem, calc(100% - 1.1rem));
+  gap: 0.45rem;
+  padding: 0.38rem 0.48rem;
+  border: 1px solid var(--kd-line);
+  background: color-mix(in srgb, var(--kd-panel-raised) 94%, transparent);
+  box-shadow: 0 5px 18px rgba(0,0,0,0.28);
+  color: var(--kd-text);
+  font: 650 var(--kd-size)/1.35 var(--kd-font);
+  animation: kd-toast-in 180ms var(--kd-pop-ease) both;
+}
+.kd-toast[data-leaving="true"] {
+  animation: kd-toast-out 180ms ease-in both;
+}
+.kd-toast > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-toast > button {
+  flex: none;
+  width: 1.1rem;
+  height: 1.1rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+
 /* ============================================================
  * 侧方弹出动画（Sheet / 桌面右栏 / 对话框共用）
  * 只改 :root 的 --kd-pop-* 或下面两段 keyframes，全部弹出一起变。
@@ -3369,7 +3422,9 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
 }
 @media (prefers-reduced-motion: reduce) {
   .kd-pop-panel,
-  .kd-pop-scrim {
+  .kd-pop-scrim,
+  .kd-toast,
+  .kd-toast[data-leaving="true"] {
     animation: none;
   }
 }
@@ -3834,6 +3889,20 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
 .kd-wave-dim {
   z-index: 2;
 }
+.kd-wave-analysis-frontier {
+  position: absolute;
+  z-index: 5;
+  top: 12%;
+  bottom: 12%;
+  width: 1px;
+  pointer-events: none;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 0 5px rgba(110, 177, 255, 0.9);
+  transition: left 220ms linear;
+}
+.kd-wave-analysis-frontier[data-direction="back"] {
+  background: rgba(132, 195, 255, 0.68);
+}
 /* 在线波形的未知区域仍应是一条可读的流媒体进度轨，而不是一根死灰线。
    已缓冲段稍亮；真实 analyser 柱由 canvas 叠在上面。 */
 .kd-wave-stream-bed {
@@ -4173,15 +4242,50 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   );
 }
 .kd-wave-playhead {
+  position: absolute;
+  left: 0;
   top: -5px;
   bottom: -5px;
+  width: 1px;
   z-index: 3;
   background: var(--kd-theme);
   box-shadow: 0 0 0 0.5px color-mix(in srgb, var(--kd-theme) 55%, transparent),
     0 0 3px rgba(0, 0, 0, 0.55);
 }
+.kd-wave-playhead-motion {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  width: 100%;
+  pointer-events: none;
+  will-change: transform;
+}
 
-/* OneLibrary Loop 用浅色区间，Cue 起点用顶部旗标；两层都不挡波形跳转。 */
+/* 演出准备波形的拍线：细线是拍，较亮的实线是每四拍的小节起点。 */
+.kd-wave-beat-grid {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.kd-wave-beat-grid > i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: color-mix(in srgb, var(--kd-text) 18%, transparent);
+}
+.kd-wave-beat-grid > i[data-bar="true"] {
+  background: color-mix(in srgb, var(--kd-theme) 72%, transparent);
+}
+.kd-wave-beat-grid > i:not(:empty) {
+  color: color-mix(in srgb, var(--kd-theme) 86%, white);
+  font: 700 8px/1 var(--kd-font-mono);
+  text-indent: 3px;
+}
+
+/* Loop 预览是半透明色块；Cue 是上下三角夹一条竖线，颜色跟 Cue 走。 */
 .kd-wave-cue-loop {
   position: absolute;
   top: 0;
@@ -4189,53 +4293,45 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   z-index: 2;
   min-width: 1px;
   pointer-events: none;
-  background: color-mix(in srgb, var(--kd-cue-color) 18%, transparent);
+  background: color-mix(in srgb, var(--kd-cue-color) 28%, transparent);
   box-shadow:
-    inset 1px 0 color-mix(in srgb, var(--kd-cue-color) 72%, transparent),
-    inset -1px 0 color-mix(in srgb, var(--kd-cue-color) 72%, transparent);
+    inset 2px 0 color-mix(in srgb, var(--kd-cue-color) 82%, transparent),
+    inset -2px 0 color-mix(in srgb, var(--kd-cue-color) 82%, transparent);
+}
+.kd-wave-cue-loop[data-active="true"] {
+  background: color-mix(in srgb, var(--kd-cue-color) 38%, transparent);
 }
 .kd-wave-cue {
   --kd-cue-color: #7d8796;
-  --kd-cue-text: #fff;
   position: absolute;
   top: 0;
+  bottom: 0;
   z-index: 5;
+  width: 2px;
   transform: translateX(-50%);
   pointer-events: none;
-  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.72));
-}
-.kd-wave-cue[data-kind="hot"] {
-  display: grid;
-  place-items: center;
-  min-width: 13px;
-  height: 12px;
-  padding: 0 2px;
-  border-radius: 0 0 3px 3px;
   background: var(--kd-cue-color);
-  color: var(--kd-cue-text);
-  font-size: 8px;
-  font-weight: 800;
-  line-height: 1;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.85));
 }
-.kd-wave-cue[data-kind="hot"]::after {
+.kd-wave-cue::before,
+.kd-wave-cue::after {
   content: "";
   position: absolute;
   left: 50%;
-  bottom: -3px;
-  width: 5px;
-  height: 5px;
-  background: var(--kd-cue-color);
-  transform: translateX(-50%) rotate(45deg);
-}
-.kd-wave-cue[data-kind="memory"] {
   width: 0;
   height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
+  pointer-events: none;
+  transform: translateX(-50%);
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+}
+.kd-wave-cue::before {
+  top: 0;
   border-top: 7px solid var(--kd-cue-color);
 }
-.kd-wave-cue[data-loop="true"][data-kind="hot"] {
-  box-shadow: inset 0 -2px color-mix(in srgb, var(--kd-cue-text) 62%, transparent);
+.kd-wave-cue::after {
+  bottom: 0;
+  border-bottom: 7px solid var(--kd-cue-color);
 }
 
 /* KDJ 裁切起止点：只留顶部主题色三角，不画竖线——竖线会压住下面的波形柱。 */
@@ -4257,6 +4353,265 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   font-size: var(--kd-size-xs);
   color: var(--kd-warn);
   max-width: 12rem;
+}
+
+/* ============================================================
+ * 双轨演出准备
+ * ========================================================== */
+.kd-performance-workspace {
+  position: absolute;
+  z-index: 12;
+  right: 0;
+  bottom: 100%;
+  left: 0;
+  height: clamp(26rem, 52vh, 33rem);
+  display: grid;
+  grid-template-rows: 2.15rem minmax(0, 1fr) auto auto;
+  border-top: 1px solid var(--kd-line);
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel-inset);
+  box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.36);
+  /* DJ 字号层级：锚在曲库字号变量上，随设置字号（根 rem）一起缩放。 */
+  --kd-dj-xs: calc(var(--kd-size-xs) * 0.85);
+  --kd-dj-sm: var(--kd-size-xs);
+  --kd-dj-md: var(--kd-size-sm);
+  --kd-dj-lg: var(--kd-size);
+  --kd-dj-xl: var(--kd-size-lg);
+}
+.kd-performance-head {
+  display: grid;
+  grid-template-columns: minmax(7rem, 1fr) auto minmax(7rem, 1fr);
+  align-items: center;
+  min-width: 0;
+  padding: 0 0.65rem;
+  border-bottom: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+}
+.kd-performance-head > strong {
+  color: var(--kd-text-body);
+  font-size: var(--kd-size-xs);
+  letter-spacing: 0;
+}
+.kd-performance-mode {
+  display: flex;
+  position: relative;
+  inset: auto;
+  z-index: auto;
+  align-items: center;
+  gap: 0.15rem;
+}
+.kd-performance-mode > button,
+.kd-performance-close {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  height: 1.65rem;
+  min-width: 1.75rem;
+  padding: 0 0.35rem;
+  border: none;
+  background: transparent;
+  color: var(--kd-muted);
+  font: 700 var(--kd-size-xs)/1 var(--kd-font);
+  cursor: pointer;
+}
+.kd-performance-mode > button:hover,
+.kd-performance-close:hover {
+  color: var(--kd-text);
+}
+.kd-performance-mode > button[data-on="true"] {
+  color: var(--kd-theme);
+  box-shadow: inset 0 -2px var(--kd-theme);
+}
+.kd-performance-mode-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: 0.5rem;
+  padding-left: 0.55rem;
+  border-left: 1px solid var(--kd-line);
+  color: var(--kd-faint);
+  font-size: var(--kd-size-xs);
+  font-weight: 700;
+}
+.kd-performance-close {
+  justify-self: end;
+  width: 1.75rem;
+  padding: 0;
+}
+.kd-performance-decks {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+.kd-performance-deck {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 1.85rem minmax(5.5rem, 1fr) 1.65rem;
+  border-left: 3px solid transparent;
+  background: var(--kd-panel-inset);
+}
+.kd-performance-deck + .kd-performance-deck {
+  border-top: 1px solid var(--kd-line);
+}
+.kd-performance-deck[data-active="true"] {
+  border-left-color: var(--kd-theme);
+}
+.kd-performance-deck[data-empty="true"] {
+  grid-template-rows: 1fr;
+}
+.kd-performance-deck-head {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 2rem minmax(8rem, 1fr) minmax(6rem, 0.55fr) auto auto auto;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0 0.65rem;
+  border-bottom: 1px solid var(--kd-line-soft);
+  background: var(--kd-panel);
+}
+.kd-performance-deck[data-empty="true"] .kd-performance-deck-head {
+  border-bottom: none;
+}
+.kd-performance-deck-head > strong {
+  color: var(--kd-theme);
+  font: 800 var(--kd-size-lg)/1 var(--kd-font-mono);
+}
+.kd-performance-deck-title,
+.kd-performance-deck-artist {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-performance-deck-title {
+  color: var(--kd-text-body);
+  font-weight: 750;
+}
+.kd-performance-deck-artist,
+.kd-performance-deck-fact {
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+}
+.kd-performance-deck-fact,
+.kd-performance-deck-time {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.kd-performance-deck-time {
+  color: var(--kd-text-body);
+  font: 700 var(--kd-size-sm)/1 var(--kd-font-mono);
+}
+.kd-performance-wave-wrap {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  background: #05070a;
+}
+:root[data-theme="light"] .kd-performance-wave-wrap {
+  background: #eef1f4;
+}
+.kd-performance-wave {
+  width: 100%;
+  height: 100% !important;
+}
+.kd-performance-wave canvas {
+  height: 100% !important;
+}
+.kd-performance-focus .kd-wave-playhead {
+  z-index: 7;
+  width: 2px !important;
+  box-shadow:
+    0 0 0 0.5px color-mix(in srgb, var(--kd-theme) 72%, transparent),
+    0 0 7px color-mix(in srgb, var(--kd-theme) 45%, transparent);
+}
+/* 迷你总览波形较矮，三角收小以免吃掉整条高度。 */
+.kd-performance-overview-wave .kd-wave-cue {
+  width: 1px;
+}
+.kd-performance-overview-wave .kd-wave-cue::before,
+.kd-performance-overview-wave .kd-wave-cue::after {
+  border-left-width: 3px;
+  border-right-width: 3px;
+}
+.kd-performance-overview-wave .kd-wave-cue::before {
+  border-top-width: 4px;
+}
+.kd-performance-overview-wave .kd-wave-cue::after {
+  border-bottom-width: 4px;
+}
+.kd-performance-overviews {
+  display: grid;
+  grid-template-rows: repeat(2, 1.75rem);
+  min-height: 0;
+  border-top: 1px solid var(--kd-line);
+  background: var(--kd-panel);
+}
+.kd-performance-overview {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  align-items: stretch;
+  border-left: 3px solid transparent;
+}
+.kd-performance-overview + .kd-performance-overview {
+  border-top: 1px solid var(--kd-line-soft);
+}
+.kd-performance-overview[data-active="true"] {
+  border-left-color: var(--kd-theme);
+}
+.kd-performance-overview > strong {
+  display: grid;
+  place-items: center;
+  color: var(--kd-muted);
+  font: 800 9px/1 var(--kd-font-mono);
+}
+.kd-performance-overview[data-active="true"] > strong {
+  color: var(--kd-theme);
+}
+.kd-performance-overview-wave {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  background: #05070a;
+}
+:root[data-theme="light"] .kd-performance-overview-wave {
+  background: #eef1f4;
+}
+.kd-performance-overview-wave > div {
+  width: 100%;
+  height: 100% !important;
+}
+.kd-performance-overview-wave canvas {
+  height: 100% !important;
+}
+
+@media (max-width: 760px) {
+  .kd-performance-workspace {
+    height: min(68vh, 35rem);
+  }
+  .kd-performance-head {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+  .kd-performance-mode {
+    justify-content: center;
+    overflow-x: auto;
+  }
+  .kd-performance-mode-label {
+    display: none;
+  }
+  .kd-performance-deck-head {
+    grid-template-columns: 1.5rem minmax(0, 1fr) auto auto;
+    gap: 0.35rem;
+  }
+  .kd-performance-deck-artist,
+  .kd-performance-deck-fact:first-of-type {
+    display: none;
+  }
+  .kd-performance-deck {
+    grid-template-rows: 1.85rem minmax(4.5rem, 1fr) 3rem;
+  }
 }
 
 .kd-vj-export-list {
@@ -6621,6 +6976,41 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   gap: 0.15rem;
   flex: none;
 }
+.kd-work-mode-switch {
+  appearance: none;
+  height: 1.6rem;
+  display: inline-grid;
+  grid-template-columns: repeat(2, auto);
+  align-items: center;
+  gap: 0.1rem;
+  margin-right: 0.35rem;
+  padding: 0.12rem;
+  border: 1px solid var(--kd-line);
+  border-radius: 0.35rem;
+  background: var(--kd-panel-inset);
+  color: var(--kd-faint);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.kd-work-mode-switch > span {
+  height: 1.2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.18rem;
+  padding: 0 0.36rem;
+  border-radius: 0.22rem;
+  font: 700 0.61rem/1 var(--kd-font);
+  white-space: nowrap;
+}
+.kd-work-mode-switch > span[data-active="true"] {
+  background: var(--kd-panel);
+  color: var(--kd-theme);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+.kd-work-mode-switch:hover {
+  border-color: color-mix(in srgb, var(--kd-theme) 45%, var(--kd-line));
+}
 .kd-chrome-btn {
   appearance: none;
   position: relative;
@@ -7014,9 +7404,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 .kd-app[data-portrait="true"] .kd-player-scrub > .kd-player-time {
   display: block;
 }
-.kd-app[data-portrait="true"] .kd-player > .kd-notice {
-  grid-column: 1 / -1;
-}
 
 /* 接近方形的窗口仍保留桌面工作区：三栏和表格在这里比抽屉更有用。但播放器
    的“左右唱盘跨波形行”只适合真正宽的底栏；在平板横竖切换、中等宽桌面窗里，
@@ -7119,9 +7506,6 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
     grid-area: wave;
     margin-left: 0;
     margin-right: 0;
-  }
-  .kd-app:not([data-portrait="true"]) .kd-player > .kd-notice {
-    grid-column: 1 / -1;
   }
 }
 
@@ -7397,6 +7781,12 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 }
 .kd-player-djbtn[data-on="true"]:hover:not(:disabled) {
   color: var(--kd-theme-strong);
+}
+.kd-player-performancebtn {
+  width: 1.45rem;
+}
+.kd-player-performancebtn[data-on="true"] {
+  color: var(--kd-theme);
 }
 .kd-player-lyricsbtn {
   position: relative;
@@ -8092,3 +8482,3599 @@ button.kd-stream-status {
   cursor: wait;
   opacity: 0.65;
 }
+
+/* ============================================================
+ * 主工作模式：DJ 曲库 + 共用底部播放栏
+ * ========================================================== */
+.kd-app[data-work-mode="dj"] .kd-stage {
+  min-height: 8.5rem;
+}
+/* 四轨演出展开后：收起普通底栏控制，波形演奏区接到窗口底部。 */
+.kd-app .kd-player[data-performance-dock="true"] {
+  display: block;
+  min-height: 0;
+  padding: 0 0 0.18rem;
+  row-gap: 0;
+  column-gap: 0;
+}
+.kd-app .kd-player[data-performance-dock="true"]::before,
+.kd-app .kd-player[data-performance-dock="true"] > .kd-player-leading,
+.kd-app .kd-player[data-performance-dock="true"] > .kd-player-transport,
+.kd-app .kd-player[data-performance-dock="true"] > .kd-player-trailing,
+.kd-app .kd-player[data-performance-dock="true"] > .kd-player-scrub {
+  display: none;
+}
+.kd-app .kd-player[data-performance-dock="true"] > .kd-performance-workspace {
+  position: relative;
+  inset: auto;
+  z-index: 0;
+  width: 100%;
+  height: clamp(28rem, 56vh, 38rem);
+  padding-bottom: 0.2rem;
+  border-top: none;
+  box-shadow: none;
+}
+/* DJ 模式：顶栏仍固定在窗口最上方；DJ 板块（薄款波形 + 混音栏 + Deck
+   传输行）紧跟其后，曲库管理列表填剩余空间。非 DJ 模式播放条仍在底部。 */
+.kd-app:has(> .kd-player[data-performance-dock="true"]) {
+  position: relative;
+  box-sizing: border-box;
+  padding-top: var(--kd-chrome-top);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.kd-app:has(> .kd-player[data-performance-dock="true"]) .kd-app-chrome {
+  position: absolute;
+  z-index: 40;
+  top: 0;
+  right: 0;
+  left: 0;
+}
+.kd-app:has(> .kd-player[data-performance-dock="true"]) > .kd-player {
+  order: -1;
+  min-height: 0;
+  border-top: 0;
+  border-bottom: 1px solid var(--kd-line);
+}
+
+@media (max-width: 760px), (max-aspect-ratio: 3 / 4) {
+  .kd-work-mode-switch > span {
+    padding-inline: 0.22rem;
+  }
+  .kd-work-mode-switch > span svg {
+    display: none;
+  }
+}
+
+/* Performance v2 — 紧凑双 Deck + 固定通道台。旧版浮层选择器保留给历史布局，
+   以下规则只覆盖新组件实际渲染的结构。 */
+.kd-performance-workspace {
+  /* 两台 Deck 共用同一套强调色；位置和内容已经足够表达左右关系。 */
+  --kd-deck-a: #9a8cff;
+  --kd-deck-b: #9a8cff;
+  /* 本区块引用的语义变量在此落地，旧性能浮层维持原样不受影响。 */
+  --kd-border: var(--kd-line);
+  --kd-border-subtle: var(--kd-line-soft);
+  --kd-text-subtle: var(--kd-muted);
+  --kd-text-disabled: var(--kd-faint);
+  /* 推子统一扁平三件：细轨道 + 实心圆钮 + 细边；浅色主题在下方覆写。 */
+  --kd-fader-track: #3a414b;
+  --kd-fader-thumb: #9aa2ae;
+  --kd-fader-thumb-border: rgba(0, 0, 0, 0.55);
+  --kd-knob-boost: #e24b4b;
+  --kd-knob-cut: #4d8af0;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: clamp(31rem, 64vh, 42rem);
+  min-height: 0;
+  overflow: hidden;
+  color: var(--kd-text);
+  background: #090c10;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.kd-performance-workspace[data-embedded="true"] {
+  position: relative;
+  inset: auto;
+  z-index: auto;
+  height: auto;
+  padding-bottom: 0.16rem;
+}
+.kd-performance-toolbar-close { margin-left: 0.15rem; }
+.kd-performance-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.28rem;
+  min-width: 0;
+  min-height: 1.75rem;
+  overflow: hidden;
+  padding: 0.2rem 0.48rem;
+  border-bottom: 1px solid var(--kd-border-subtle);
+  background: color-mix(in srgb, var(--kd-panel-raised) 86%, transparent);
+}
+.kd-performance-toolbar > strong {
+  margin-right: 0.2rem;
+  color: var(--kd-text-subtle);
+  font: 800 0.61rem/1 var(--kd-font-mono);
+  letter-spacing: 0.12em;
+}
+.kd-performance-midi {
+  padding: 0.12rem 0.32rem;
+  border: 1px solid color-mix(in srgb, var(--kd-accent) 55%, var(--kd-border-subtle));
+  border-radius: 999px;
+  color: var(--kd-accent);
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+  letter-spacing: 0.1em;
+}
+.kd-performance-toolbar button {
+  min-height: 1.25rem;
+  padding: 0 0.38rem;
+  border: 0;
+  border-radius: 0.22rem;
+  color: var(--kd-text-subtle);
+  background: transparent;
+  font: 700 var(--kd-dj-md)/1 var(--kd-font-mono);
+}
+.kd-performance-toolbar button:hover { color: var(--kd-text-body); }
+.kd-performance-toolbar button[data-active="true"] {
+  color: var(--kd-text);
+  background: color-mix(in srgb, var(--kd-text) 11%, transparent);
+}
+.kd-performance-module-switches {
+  display: flex;
+  gap: 0.18rem;
+  margin-left: auto;
+}
+.kd-performance-toolbar-waves,
+.kd-performance-output-strips {
+  display: flex;
+  align-items: center;
+  gap: 0.18rem;
+  min-width: 0;
+}
+.kd-performance-toolbar-waves > b {
+  margin: 0 0.08rem 0 0.18rem;
+  color: var(--kd-text-subtle);
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+}
+.kd-performance-toolbar-waves[data-side="b"] > b { color: var(--kd-text-subtle); }
+.kd-performance-output-strips {
+  gap: 0.42rem;
+  margin-left: auto;
+}
+.kd-performance-output-strips label {
+  display: grid;
+  grid-template-columns: auto 4.6rem;
+  align-items: center;
+  gap: 0.22rem;
+  color: var(--kd-text-subtle);
+  font: 700 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  white-space: nowrap;
+}
+.kd-performance-output-strips input { width: 4.6rem; }
+.kd-performance-output-strips input::-webkit-slider-runnable-track {
+  height: 3px;
+  background: var(--kd-fader-track);
+}
+.kd-performance-output-strips input::-webkit-slider-thumb {
+  width: 13px;
+  height: 13px;
+  margin-top: -5px;
+  border: 1px solid var(--kd-fader-thumb-border);
+  border-radius: 50% !important;
+  background: var(--kd-fader-thumb);
+}
+.kd-performance-output-strips + .kd-performance-module-switches { margin-left: 0.38rem; }
+.kd-performance-wave-stack {
+  /* A/B 网格只留一道极细接缝，便于肉眼核对同相小节线。 */
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  background: #06080b;
+  border-bottom: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-deck-waves {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.kd-performance-deck-waves + .kd-performance-deck-waves {
+  margin-top: 1px;
+}
+.kd-performance-wave-renderer,
+.kd-performance-wave-gpu,
+.kd-performance-wave-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.kd-performance-wave-renderer {
+  z-index: 2;
+  overflow: hidden;
+}
+.kd-performance-wave-gpu,
+.kd-performance-wave-overlay {
+  display: block;
+}
+.kd-performance-wave-overlay { z-index: 2; }
+.kd-performance-wave-row {
+  position: relative;
+  flex: 0 0 auto;
+  height: 3.15rem;
+  overflow: hidden;
+  background: #090c11;
+}
+.kd-performance-wave-menu {
+  position: absolute;
+  z-index: 10;
+  top: 0.14rem;
+  right: 0.14rem;
+  width: max-content;
+  pointer-events: auto;
+}
+.kd-performance-wave-menu-trigger {
+  width: 1.45rem;
+  height: 1.25rem;
+  display: grid;
+  place-items: center;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0.16rem;
+  color: #aab3c0;
+  background: transparent;
+}
+.kd-performance-wave-menu-trigger:hover,
+.kd-performance-wave-menu[data-open="true"] .kd-performance-wave-menu-trigger { color: #eef3f8; }
+.kd-performance-wave-menu-popover {
+  margin-top: 0.08rem;
+  padding: 1px;
+  background: var(--kd-border-subtle);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.42);
+}
+.kd-performance-wave-menu-popover > button {
+  min-width: 5rem;
+  height: 1.35rem;
+  padding: 0 0.42rem;
+  border: 0;
+  color: var(--kd-text-subtle);
+  background: #0b1016;
+  font: 750 var(--kd-dj-xs)/1 var(--kd-font);
+  text-align: left;
+  white-space: nowrap;
+}
+.kd-performance-wave-menu-popover > button[data-active="true"] {
+  color: #a9e9c2;
+  background: #101a16;
+}
+.kd-performance-wave-empty { display: block; height: 100%; }
+[data-wave-seek="off"],
+[data-wave-seek="off"] * {
+  pointer-events: none !important;
+}
+.kd-performance-scratch {
+  position: relative;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.kd-performance-deck-waves > .kd-performance-scratch {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  height: auto;
+}
+.kd-performance-scratch:active { cursor: grabbing; }
+.kd-performance-focus-wave,
+.kd-performance-stem-wave {
+  width: 100%;
+  height: 100% !important;
+  min-width: 0;
+}
+.kd-performance-focus-wave .kd-wave-playhead {
+  z-index: 7;
+  width: 2px !important;
+  background: #ff344f;
+  box-shadow: 0 0 0 0.5px rgba(255,255,255,0.72), 0 0 6px rgba(255,52,79,0.62);
+}
+/* 滚动波形的层级：低对比拍线、单像素暖黄小节线、每小节连续编号。 */
+.kd-performance-focus-wave .kd-wave-beat-grid > i {
+  width: 1px;
+  background: rgba(27, 31, 38, 0.22);
+  box-shadow: none;
+}
+.kd-performance-focus-wave .kd-wave-beat-grid > i[data-bar="true"] {
+  width: 1px;
+  background: #c79d12;
+  box-shadow: none;
+}
+.kd-performance-focus-wave .kd-wave-beat-grid > i:not(:empty) {
+  padding: 2px 0 0 3px;
+  color: #6b4b00;
+  font: 800 0.58rem/1 var(--kd-font-mono);
+  text-indent: 0;
+  text-shadow: 0 1px rgba(255,255,255,0.72);
+}
+:root:not([data-theme="light"]) .kd-performance-focus-wave .kd-wave-beat-grid > i {
+  background: rgba(226, 234, 244, 0.16);
+}
+:root:not([data-theme="light"]) .kd-performance-focus-wave .kd-wave-beat-grid > i[data-bar="true"] {
+  background: #e8c126;
+  box-shadow: none;
+}
+:root:not([data-theme="light"]) .kd-performance-focus-wave .kd-wave-beat-grid > i:not(:empty) {
+  color: #ffe66a;
+  text-shadow: 0 1px #000, 1px 0 #000, -1px 0 #000;
+}
+.kd-performance-wave-row[data-playing="true"] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-deck-a) 40%, transparent);
+}
+.kd-performance-wave-row[data-side="b"][data-playing="true"] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-deck-b) 40%, transparent);
+}
+/* VOCALS 是主网格底部的强度带，不占独立车道，也不改变 A/B 波形总高度。 */
+.kd-performance-stem-lanes {
+  position: absolute;
+  z-index: 2;
+  right: 0;
+  bottom: 1px;
+  left: 0;
+  height: 0.62rem;
+  min-height: 0;
+  pointer-events: none;
+}
+.kd-performance-stem-lane {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+  height: auto;
+  overflow: hidden;
+  background: transparent;
+}
+/* 图标直接画在波形上，不加底板；用投影保证压过亮色波形时仍可辨。 */
+.kd-performance-stem-lane-icon {
+  position: absolute;
+  z-index: 8;
+  left: 0.14rem;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 0.74rem;
+  height: 0.74rem;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.85));
+}
+/* B 盘车道图标贴右缘，与 A 盘左右呼应。 */
+.kd-performance-deck-waves[data-side="b"] .kd-performance-stem-lane-icon {
+  left: auto;
+  right: 0.14rem;
+}
+.kd-performance-stem-lane[data-stem="vocals"] .kd-performance-stem-lane-icon { color: #7ce5ae; }
+.kd-performance-stem-wave {
+  min-width: 0;
+  background: transparent !important;
+}
+.kd-performance-stem-wave-empty {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  background: transparent;
+}
+.kd-performance-stem-wave .kd-wave-playhead {
+  z-index: 7;
+  background: #fff;
+  box-shadow: 0 0 3px #000;
+}
+/* 每台 Deck 的一体式 Beat Grid：普通拍线和黄色小节线只画一份，满宽覆盖 ORG + STEM。 */
+.kd-performance-deck-grid {
+  position: absolute;
+  z-index: 6;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.kd-performance-deck-grid *,
+.kd-performance-deck-grid *::before,
+.kd-performance-deck-grid *::after {
+  pointer-events: none !important;
+}
+.kd-wave-rail {
+  pointer-events: none;
+}
+.kd-performance-deck-grid-rail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  will-change: transform;
+}
+.kd-performance-deck-grid-zoom,
+.kd-wave-rail-zoom {
+  position: absolute;
+  inset: 0;
+}
+.kd-performance-deck-grid-rail > i {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(210, 218, 228, 0.34);
+  box-shadow: none;
+}
+.kd-performance-deck-grid-rail > i[data-bar="true"] {
+  width: 1px;
+  background: #e4c400;
+  box-shadow: none;
+}
+.kd-performance-deck-grid .kd-wave-cue {
+  z-index: 5;
+  width: 2px;
+}
+.kd-performance-deck-grid .kd-wave-cue::before,
+.kd-performance-deck-grid .kd-wave-cue::after {
+  border-left-width: 6px;
+  border-right-width: 6px;
+}
+.kd-performance-deck-grid .kd-wave-cue::before {
+  border-top-width: 8px;
+}
+.kd-performance-deck-grid .kd-wave-cue::after {
+  border-bottom-width: 8px;
+}
+.kd-performance-deck-grid-rail > i > b {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  color: #e8edf4;
+  font: 800 0.55rem/1 var(--kd-font-mono);
+  text-shadow: 0 1px 2px #000, 0 0 3px #000;
+}
+.kd-performance-info-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  border-bottom: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-info {
+  display: grid;
+  grid-template-columns: 2.85rem minmax(0, 1fr) auto;
+  min-width: 0;
+  gap: 0.36rem;
+  padding: 0.22rem 0.36rem;
+  border-right: 1px solid var(--kd-border-subtle);
+  background: color-mix(in srgb, var(--kd-panel-raised) 70%, transparent);
+}
+.kd-performance-info:last-child { border-right: 0; }
+.kd-performance-vinyl {
+  width: 2.85rem;
+  height: 2.85rem;
+  display: grid;
+  place-items: center;
+}
+.kd-performance-vinyl-record {
+  width: 2.7rem;
+  height: 2.7rem;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50% !important;
+  background: repeating-radial-gradient(circle, #191a1e 0 1px, #050506 1.5px 3px);
+  box-shadow: 0 2px 5px rgba(0,0,0,0.42), inset 0 0 0 1px rgba(255,255,255,0.06);
+  animation: kd-player-vinyl-spin 2.8s linear infinite paused;
+}
+.kd-performance-vinyl-record[data-spinning="true"] { animation-play-state: running; }
+.kd-performance-vinyl-record img {
+  width: 68%;
+  height: 68%;
+  border-radius: 50% !important;
+  object-fit: cover;
+}
+.kd-performance-info-copy {
+  display: grid;
+  grid-template-rows: auto auto minmax(15px, 1fr);
+  min-width: 0;
+  align-content: center;
+}
+.kd-performance-info-copy strong,
+.kd-performance-info-copy > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.kd-performance-info-copy strong { font-size: var(--kd-dj-lg); }
+.kd-performance-info-copy > span { color: var(--kd-text-subtle); font-size: var(--kd-dj-md); }
+.kd-performance-overview-wave {
+  align-self: end;
+  margin-top: 0.18rem;
+  border-radius: 0.12rem;
+}
+/* 自定义 pointer 拖动与原生 DnD 共用同一组强反馈；波形行和信息栏同步亮起。 */
+.kd-performance-wave-row[data-kd-pointer-track-over="deck"],
+.kd-performance-info[data-kd-pointer-track-over="deck"],
+.kd-performance-scratch[data-kd-pointer-track-over="deck"],
+.kd-performance-wave-row[data-kd-native-track-over="true"],
+.kd-performance-info[data-kd-native-track-over="true"],
+.kd-performance-scratch[data-kd-native-track-over="true"] {
+  z-index: 8;
+  background: color-mix(in srgb, var(--kd-deck-a) 13%, var(--kd-panel));
+  box-shadow: inset 0 0 0 2px var(--kd-deck-a), inset 0 0 18px color-mix(in srgb, var(--kd-deck-a) 20%, transparent);
+}
+.kd-performance-wave-row[data-side="b"][data-kd-pointer-track-over="deck"],
+.kd-performance-info[data-side="b"][data-kd-pointer-track-over="deck"],
+.kd-performance-scratch[data-side="b"][data-kd-pointer-track-over="deck"],
+.kd-performance-wave-row[data-side="b"][data-kd-native-track-over="true"],
+.kd-performance-info[data-side="b"][data-kd-native-track-over="true"],
+.kd-performance-scratch[data-side="b"][data-kd-native-track-over="true"] {
+  background: color-mix(in srgb, var(--kd-deck-b) 13%, var(--kd-panel));
+  box-shadow: inset 0 0 0 2px var(--kd-deck-b), inset 0 0 18px color-mix(in srgb, var(--kd-deck-b) 20%, transparent);
+}
+.kd-performance-metadata {
+  display: grid;
+  grid-auto-flow: column;
+  gap: 0.35rem;
+  margin: 0;
+  align-items: center;
+}
+.kd-performance-metadata div { text-align: center; }
+.kd-performance-metadata dt {
+  color: var(--kd-text-subtle);
+  font: 700 var(--kd-dj-sm)/1 var(--kd-font-mono);
+}
+.kd-performance-metadata dd {
+  margin: 0.18rem 0 0;
+  color: var(--kd-text);
+  font: 800 var(--kd-dj-lg)/1 var(--kd-font-mono);
+}
+.kd-performance-console {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding-bottom: 0.16rem;
+}
+.kd-performance-deck-controls {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-items: start;
+  align-content: stretch;
+  column-gap: 0.16rem;
+  row-gap: 0.12rem;
+  min-width: 0;
+  padding: 0.24rem 0.32rem 0.1rem;
+  border-right: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-deck-controls[data-side="b"] {
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 0.24rem 0.32rem 0.1rem;
+  border-right: 0;
+  border-left: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-deck-main {
+  grid-column: 2;
+  grid-row: 1 / 3;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.2rem;
+  min-width: 0;
+}
+/* transport 吃掉主区剩余高度：Cue 垫占满上方，LOOP 收成底栏。 */
+.kd-performance-deck-main > .kd-performance-transport {
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-height: 0;
+}
+.kd-performance-deck-controls[data-side="b"] .kd-performance-deck-main {
+  grid-column: 1;
+  align-items: flex-start;
+}
+.kd-performance-deck-controls[data-playing="true"] {
+  background: rgba(255,255,255,0.025);
+}
+.kd-performance-deck-controls[data-side="b"][data-playing="true"] {
+  background: rgba(255,255,255,0.025);
+}
+.kd-performance-cues {
+  display: flex;
+  align-items: stretch;
+  grid-column: 3;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+  direction: ltr;
+}
+.kd-performance-cues-bank {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+.kd-performance-cues-bank > span {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-rows: 1fr 1fr;
+  min-height: 3.05rem;
+  overflow: hidden;
+  border: 1px solid var(--kd-border-subtle);
+  background: var(--kd-panel-inset);
+}
+.kd-performance-cue-slot {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-items: stretch;
+  min-width: 0;
+  min-height: 0;
+  padding: 0.16rem 0.16rem 0.14rem;
+  border: 0;
+  border-right: 1px solid var(--kd-border-subtle);
+  border-bottom: 1px solid var(--kd-border-subtle);
+  border-radius: 0;
+  color: var(--kd-text-subtle);
+  background: transparent;
+}
+.kd-performance-cue-slot:nth-child(4n) { border-right: 0; }
+.kd-performance-cue-slot:nth-child(n+5) { border-bottom: 0; }
+.kd-performance-cue-slot:not([data-filled="true"]) {
+  grid-template-rows: 1fr;
+  place-items: center;
+  color: color-mix(in srgb, var(--kd-text-subtle) 72%, transparent);
+}
+.kd-performance-cue-slot:not([data-filled="true"]):hover:not(:disabled) {
+  color: var(--kd-text-subtle);
+  background: color-mix(in srgb, var(--kd-text) 6%, transparent);
+}
+.kd-performance-cue-slot:not([data-filled="true"]):disabled { opacity: 0.4; }
+.kd-performance-cue-note {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kd-text-subtle);
+  font: 650 var(--kd-dj-xs)/1.2 var(--kd-font);
+  text-align: start;
+  word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.kd-performance-cue-jump {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  width: 100%;
+  height: 1.05rem;
+  min-height: 1.05rem;
+  padding: 0 0.22rem;
+  border: 0;
+  border-radius: 0.12rem;
+  color: #fff;
+  background: var(--kd-pad);
+}
+.kd-performance-cue-jump:hover {
+  filter: brightness(1.08);
+}
+.kd-performance-cue-jump:active {
+  filter: brightness(0.92);
+}
+.kd-performance-cue-jump svg {
+  display: block;
+  margin-inline-start: 1px;
+}
+/* 传输条：PLAY / CUE 与 Cue 垫同行；LOOP 与节拍跳转收在垫下方。 */
+.kd-performance-transport {
+  display: grid;
+  grid-template-columns: 2.55rem 2.9rem minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 0.16rem;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+.kd-performance-transport:not(:has(.kd-performance-cues)) {
+  grid-template-rows: auto;
+}
+.kd-performance-deck-controls[data-side="b"] .kd-performance-transport { direction: rtl; }
+.kd-performance-deck-controls[data-side="b"] .kd-performance-transport > button { direction: ltr; }
+.kd-performance-transport > button {
+  min-height: 1.92rem;
+  border: 1px solid var(--kd-border-subtle);
+  border-radius: 0.26rem;
+  color: var(--kd-text-body);
+  background: var(--kd-panel-raised);
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+  letter-spacing: 0.05em;
+}
+.kd-performance-transport > button:hover:not(:disabled) { color: var(--kd-text); }
+.kd-performance-transport > button:active:not(:disabled) { background: var(--kd-panel-inset); }
+.kd-performance-transport > button:disabled { opacity: 0.42; }
+.kd-performance-play {
+  grid-column: 1;
+  grid-row: 1;
+  width: auto;
+  min-width: 2.4rem;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+.kd-performance-play svg[data-lucide="play"] { margin-inline-start: 1px; }
+/* 功能色只留两个：PLAY 绿、CUE 琥珀；其余激活态一律中性。 */
+.kd-performance-play[data-active="true"] {
+  color: #062b16 !important;
+  border-color: #1f9d55;
+  background: #2fce6b;
+}
+.kd-performance-main-cue {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 2.7rem;
+  padding: 0 0.52rem;
+  font-size: var(--kd-dj-lg);
+  color: #f0b429 !important;
+  border-color: color-mix(in srgb, #f0b429 42%, var(--kd-border-subtle)) !important;
+}
+.kd-performance-sync[data-active="true"] {
+  color: #06170d !important;
+  border-color: #78efaa !important;
+  background: #42d982 !important;
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.34),
+    0 0 0 1px rgba(38, 187, 101, 0.38),
+    0 0 9px rgba(55, 218, 128, 0.34);
+  text-shadow: none;
+}
+.kd-performance-loop {
+  display: flex;
+  grid-column: 3;
+  grid-row: 2;
+  align-items: stretch;
+  gap: 0.18rem;
+  min-width: 0;
+}
+.kd-performance-transport:not(:has(.kd-performance-cues)) .kd-performance-loop {
+  grid-row: 1;
+}
+.kd-performance-deck-controls[data-side="b"] .kd-performance-loop { direction: rtl; }
+.kd-performance-deck-controls[data-side="b"] .kd-performance-loop > * { direction: ltr; }
+.kd-performance-loop-stepper,
+.kd-performance-loop-jump {
+  display: grid;
+  flex: 1 1 0;
+  grid-template-rows: 1.5rem auto;
+  align-items: stretch;
+  width: auto;
+  min-width: 0;
+  background: transparent;
+}
+.kd-performance-loop-stepper > span,
+.kd-performance-loop-jump > span:first-child {
+  display: grid;
+  min-height: 1.5rem;
+  overflow: hidden;
+  border: 1px solid var(--kd-border-subtle);
+  border-radius: 0.26rem;
+  background: var(--kd-panel-raised);
+}
+.kd-performance-loop-stepper > span { grid-template-columns: 0.92rem minmax(1.15rem, 1fr) 0.92rem; }
+.kd-performance-loop-jump > span:first-child { grid-template-columns: 1fr 1fr; }
+.kd-performance-loop-stepper button,
+.kd-performance-loop-jump button {
+  min-height: 1.5rem;
+  border: 0;
+  border-radius: 0;
+  color: var(--kd-text-subtle);
+  background: transparent;
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+}
+.kd-performance-loop-stepper button:active:not(:disabled),
+.kd-performance-loop-jump button:active:not(:disabled) {
+  background: color-mix(in srgb, var(--kd-text) 8%, transparent);
+}
+.kd-performance-loop-toggle {
+  color: var(--kd-text) !important;
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono) !important;
+  border-inline: 1px solid var(--kd-border-subtle) !important;
+}
+.kd-performance-loop-toggle[data-active="true"] {
+  color: var(--kd-text) !important;
+  background: color-mix(in srgb, var(--kd-text) 12%, transparent);
+}
+.kd-performance-loop-jump > span:first-child > button:first-of-type {
+  border-right: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-loop-stepper > em {
+  padding: 0.16rem 0 0;
+  color: var(--kd-text-subtle);
+  font: 700 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  font-style: normal;
+  letter-spacing: 0.06em;
+  text-align: center;
+  white-space: nowrap;
+}
+.kd-performance-loop-jump-size {
+  display: grid;
+  grid-template-columns: 1.15rem minmax(0, 1fr) 1.15rem;
+  align-items: center;
+  min-width: 0;
+  padding-top: 0.08rem;
+  color: var(--kd-text-subtle);
+}
+.kd-performance-loop-jump-size > button {
+  width: 1.15rem;
+  height: 1rem;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+}
+.kd-performance-loop-jump-size > button:hover:not(:disabled) {
+  color: var(--kd-text);
+}
+.kd-performance-loop-jump-size > output {
+  min-width: 0;
+  overflow: hidden;
+  font: 700 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.06em;
+  text-align: center;
+  white-space: nowrap;
+}
+.kd-performance-loop button:disabled { opacity: 0.4; }
+/* 通道条按内容收窄；竖推子放进定宽井，避免 rotate 后仍占横向把 FILTER/GAIN 叠在一起。 */
+/* TEMPO 竖排面板：竖推子占满控制区全高（跨两行），SYNC / 有效 BPM / 百分比 + 量程 / −/+ 收进推子旁的一列。 */
+.kd-performance-tempo {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  align-self: stretch;
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: stretch;
+  gap: 0.16rem;
+  padding: 0.06rem 0.14rem 0.04rem 0.1rem;
+  border-right: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-deck-controls[data-side="b"] .kd-performance-tempo {
+  grid-column: 2;
+  flex-direction: row-reverse;
+  padding: 0.06rem 0.1rem 0.04rem 0.14rem;
+  border-right: 0;
+  border-left: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-tempo-side {
+  display: grid;
+  align-content: space-between;
+  justify-items: stretch;
+  gap: 0.08rem;
+  min-width: 2.2rem;
+}
+.kd-performance-tempo .kd-performance-sync {
+  height: 1.05rem;
+  border: 1px solid var(--kd-border-subtle);
+  color: var(--kd-text-body);
+  background: var(--kd-panel-raised);
+  font: 800 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  letter-spacing: 0.06em;
+}
+.kd-performance-tempo .kd-performance-sync:active:not(:disabled) { background: var(--kd-panel-inset); }
+.kd-performance-tempo .kd-performance-sync:disabled { opacity: 0.42; }
+.kd-performance-tempo-bpm {
+  color: var(--kd-text);
+  font: 800 calc(var(--kd-dj-xl) * 1.15)/1 var(--kd-font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.kd-performance-tempo-pct {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.1rem;
+  min-width: 0;
+}
+.kd-performance-tempo-pct > output {
+  color: var(--kd-text-subtle);
+  font: 700 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+/* 量程下拉：透明 select 盖在 ▾ 图标上，点击弹出原生菜单。 */
+.kd-performance-tempo-range {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 0.08rem;
+}
+.kd-performance-tempo-range select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.kd-performance-tempo-range > svg { color: var(--kd-text-subtle); pointer-events: none; }
+/* 竖推本体由 .kd-dj-vfader 提供：与通道竖推同宽，在面板里居中并吃满高度。 */
+.kd-performance-tempo {
+  justify-content: center;
+}
+.kd-performance-tempo > .kd-dj-vfader {
+  flex: 0 0 1.4rem;
+}
+.kd-performance-tempo-steps {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.12rem;
+}
+.kd-performance-tempo-steps > button {
+  display: grid;
+  place-items: center;
+  height: 0.95rem;
+  border: 1px solid var(--kd-border-subtle);
+  color: var(--kd-text-body);
+  background: transparent;
+}
+.kd-performance-tempo-steps > button:hover:not(:disabled) { background: color-mix(in srgb, var(--kd-text) 8%, transparent); }
+.kd-performance-tempo-steps > button:disabled { opacity: 0.42; }
+/* 通道竖推 / 交叉横推：和 TEMPO 同一套槽轨 + 胶囊帽。 */
+.kd-performance-fader {
+  position: relative;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+}
+.kd-performance-fader:active { cursor: grabbing; }
+.kd-performance-fader[data-disabled="true"] {
+  cursor: default;
+  opacity: 0.55;
+  pointer-events: none;
+}
+.kd-performance-fader[data-disabled="true"]:active { cursor: default; }
+.kd-performance-fader:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--kd-text) 28%, transparent);
+}
+.kd-performance-fader[data-axis="vertical"] {
+  width: 1.42rem;
+  min-height: 2.7rem;
+  max-height: 4.2rem;
+  height: 100%;
+  align-self: end;
+}
+.kd-performance-fader[data-axis="horizontal"] {
+  width: 100%;
+  height: 1.38rem;
+}
+.kd-performance-fader::before {
+  content: "";
+  position: absolute;
+  background: color-mix(in srgb, var(--kd-fader-track) 88%, transparent);
+  border-radius: 1px;
+}
+.kd-performance-fader[data-axis="vertical"]::before {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 3px;
+  margin-left: -1.5px;
+}
+.kd-performance-fader[data-axis="horizontal"]::before {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 3px;
+  margin-top: -1.5px;
+}
+.kd-performance-fader-ticks { position: absolute; inset: 0; pointer-events: none; }
+.kd-performance-fader-ticks > u {
+  position: absolute;
+  background: var(--kd-fader-track);
+  text-decoration: none;
+}
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-ticks > u {
+  left: 50%;
+  width: 0.55rem;
+  height: 1px;
+  margin-left: -0.275rem;
+}
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-ticks > u:nth-child(1) { top: 0; }
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-ticks > u:nth-child(2) { top: 25%; }
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-ticks > u:nth-child(3) { top: 50%; }
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-ticks > u:nth-child(4) { top: 75%; }
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-ticks > u:nth-child(5) { top: 100%; }
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-ticks > u {
+  top: 50%;
+  width: 1px;
+  height: 0.55rem;
+  margin-top: -0.275rem;
+}
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-ticks > u:nth-child(1) { left: 0; }
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-ticks > u:nth-child(2) { left: 25%; }
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-ticks > u:nth-child(3) {
+  left: 50%;
+  height: 0.78rem;
+  margin-top: -0.39rem;
+  background: var(--kd-text-subtle);
+}
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-ticks > u:nth-child(4) { left: 75%; }
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-ticks > u:nth-child(5) { left: 100%; }
+.kd-performance-fader-fill {
+  position: absolute;
+  background: color-mix(in srgb, var(--kd-text) 22%, var(--kd-fader-track));
+  pointer-events: none;
+}
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-fill {
+  left: 50%;
+  bottom: 0;
+  width: 3px;
+  margin-left: -1.5px;
+  border-radius: 1px;
+}
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-fill {
+  display: none;
+}
+.kd-performance-fader-thumb {
+  position: absolute;
+  border: 1px solid var(--kd-fader-thumb-border);
+  background: var(--kd-fader-thumb);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+.kd-performance-fader-thumb::after {
+  content: "";
+  position: absolute;
+  background: rgba(10, 12, 16, 0.55);
+}
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-thumb {
+  left: 50%;
+  width: 1.42rem;
+  height: 0.48rem;
+  transform: translate(-50%, 50%);
+}
+.kd-performance-fader[data-axis="vertical"] .kd-performance-fader-thumb::after {
+  left: 0.12rem;
+  right: 0.12rem;
+  top: 50%;
+  height: 1px;
+}
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-thumb {
+  top: 50%;
+  width: 0.48rem;
+  height: 1.22rem;
+  transform: translate(-50%, -50%);
+}
+.kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-thumb::after {
+  top: 0.12rem;
+  bottom: 0.12rem;
+  left: 50%;
+  width: 1px;
+}
+.kd-performance-fader-thumb[data-center="true"] {
+  border-color: color-mix(in srgb, var(--kd-text) 35%, var(--kd-fader-thumb-border));
+}
+.kd-performance-crossfader {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  width: 100%;
+  align-items: center;
+  gap: 0.22rem;
+  color: var(--kd-text-subtle);
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+}
+.kd-performance-crossfader-toggle,
+.kd-performance-crossfader-spacer {
+  box-sizing: border-box;
+  width: 1.42rem;
+  min-height: 1.22rem;
+}
+.kd-performance-crossfader-toggle {
+  padding: 0;
+  border: 0;
+  color: var(--kd-text-subtle);
+  background: transparent;
+  font: 800 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  letter-spacing: 0.04em;
+}
+.kd-performance-crossfader-toggle:hover { color: var(--kd-text-body); }
+.kd-performance-crossfader-toggle[data-active="true"] {
+  color: var(--kd-text);
+  background: color-mix(in srgb, var(--kd-text) 11%, transparent);
+}
+.kd-performance-crossfader > span[data-side] {
+  display: grid;
+  place-items: center;
+  width: 0.82rem;
+  color: var(--kd-text-subtle);
+}
+.kd-performance-crossfader-body {
+  position: relative;
+  display: grid;
+  grid-template-rows: 0.34rem 1.38rem 0.42rem;
+  min-width: 0;
+  padding: 0 0.12rem;
+}
+.kd-performance-crossfader-scale {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  align-items: end;
+  height: 0.38rem;
+}
+.kd-performance-crossfader-scale u {
+  justify-self: center;
+  width: 1px;
+  height: 0.18rem;
+  background: var(--kd-text-disabled);
+  text-decoration: none;
+}
+.kd-performance-crossfader-scale u:nth-child(3) {
+  height: 0.34rem;
+  background: var(--kd-text);
+}
+.kd-performance-crossfader-body > b {
+  align-self: center;
+  color: var(--kd-text-disabled);
+  font: 700 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  text-align: center;
+  letter-spacing: 0.04em;
+}
+
+.kd-performance-cue-menu {
+  position: fixed;
+  z-index: 1000;
+  display: grid;
+  min-width: 10.5rem;
+  padding: 0.22rem;
+  border: 1px solid var(--kd-border);
+  background: var(--kd-panel-raised);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+}
+.kd-performance-cue-menu > button,
+.kd-performance-cue-menu form button {
+  min-height: 1.65rem;
+  padding: 0 0.48rem;
+  border: 0;
+  color: var(--kd-text);
+  background: transparent;
+  text-align: left;
+  font: 600 var(--kd-dj-lg)/1 var(--kd-font);
+}
+.kd-performance-cue-menu > button:hover { background: var(--kd-hover); }
+.kd-performance-cue-menu > button[data-danger="true"] { color: var(--kd-danger); }
+.kd-performance-cue-menu form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.22rem;
+}
+.kd-performance-cue-menu form input {
+  min-width: 0;
+  height: 1.7rem;
+  padding: 0 0.35rem;
+  border: 1px solid var(--kd-border);
+  color: var(--kd-text);
+  background: var(--kd-panel-inset);
+  font-size: var(--kd-dj-lg);
+}
+.kd-performance-cue-menu form button {
+  color: var(--kd-text-body);
+  border-left: 1px solid var(--kd-border-subtle);
+}
+
+/* —— 日间模式：Performance 控制台不再保留硬件黑，整区换成浅色扁平面。 —— */
+:root[data-theme="light"] .kd-performance-workspace {
+  --kd-line: #c5cad3;
+  --kd-line-soft: #d0d5dd;
+  --kd-fader-track: #9aa3ae;
+  --kd-fader-thumb: #ffffff;
+  --kd-fader-thumb-border: rgba(0, 0, 0, 0.28);
+  --kd-knob-boost: #d1242f;
+  --kd-knob-cut: #1f6feb;
+  --kd-border: #c5cad3;
+  --kd-border-subtle: #d0d5dd;
+  --kd-text-subtle: #5c6370;
+  background: var(--kd-bg);
+}
+/* 波形区在亮色主题下仍保持深色底（rekordbox/djay 浅色模式惯例）：车道、角标、
+   播放头、节拍线全部沿用深色配色，不做亮色覆盖。 */
+:root[data-theme="light"] .kd-performance-tempo-bpm { color: var(--kd-text); }
+:root[data-theme="light"] .kd-performance-tempo-pct > output { color: var(--kd-text-body); }
+:root[data-theme="light"] .kd-performance-tempo .kd-performance-sync {
+  border-color: var(--kd-line);
+  color: var(--kd-text-body);
+  background: var(--kd-panel);
+  box-shadow: none;
+  text-shadow: none;
+}
+:root[data-theme="light"] .kd-dj-vfader-zero { background: #7d858f; }
+:root[data-theme="light"] .kd-dj-vfader-lock { background: #c3c9d1; }
+:root[data-theme="light"] .kd-dj-vfader-lock[data-active="true"] { background: #1fa957; }
+:root[data-theme="light"] .kd-dj-vfader-thumb {
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+:root[data-theme="light"] .kd-dj-vfader-thumb[data-center="true"] {
+  border-color: #1f9d55;
+  background: #2fce6b;
+}
+:root[data-theme="light"] .kd-dj-vfader-takeover {
+  background: color-mix(in srgb, var(--kd-text-subtle) 45%, transparent);
+}
+:root[data-theme="light"] .kd-dj-vfader-ghost { border-color: #7d858f; }
+:root[data-theme="light"] .kd-dj-slide-track::before { border-color: #b9bfc9; background: #eef1f5; }
+:root[data-theme="light"] .kd-dj-slide[data-variant="bare"] > .kd-dj-slide-track::before { background: #a8b0ba; }
+:root[data-theme="light"] .kd-dj-metfader { border-color: #b9bfc9; background: #e8ebef; }
+:root[data-theme="light"] .kd-performance-fader::before {
+  background: #a8b0ba;
+}
+:root[data-theme="light"] .kd-performance-fader-ticks > u { background: #b7bec7; }
+:root[data-theme="light"] .kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-ticks > u:nth-child(3) {
+  background: #7d858f;
+}
+:root[data-theme="light"] .kd-performance-fader-fill {
+  background: color-mix(in srgb, var(--kd-text) 18%, #c6ccd4);
+}
+:root[data-theme="light"] .kd-performance-fader-thumb {
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+:root[data-theme="light"] .kd-performance-fader-thumb::after { background: rgba(0, 0, 0, 0.22); }
+:root[data-theme="light"] .kd-performance-tempo-steps > button {
+  border-color: var(--kd-line);
+  color: var(--kd-text-body);
+  background: var(--kd-panel);
+}
+:root[data-theme="light"] .kd-performance-tempo-steps > button:hover:not(:disabled) { background: var(--kd-hover); }
+:root[data-theme="light"] .kd-performance-vinyl-record {
+  background: repeating-radial-gradient(circle, #d7dade 0 1px, #f3f4f6 1.5px 3px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.18), inset 0 0 0 1px rgba(0, 0, 0, 0.05);
+}
+:root[data-theme="light"] .kd-performance-deck-controls[data-playing="true"],
+:root[data-theme="light"] .kd-performance-deck-controls[data-side="b"][data-playing="true"] {
+  background: rgba(0, 0, 0, 0.03);
+}
+:root[data-theme="light"] .kd-performance-transport > button {
+  border-color: var(--kd-line);
+  color: var(--kd-text-body);
+  background: var(--kd-panel);
+  box-shadow: none;
+  text-shadow: none;
+}
+:root[data-theme="light"] .kd-performance-transport > button:active:not(:disabled) {
+  background: var(--kd-hover);
+  box-shadow: none;
+}
+:root[data-theme="light"] .kd-performance-play[data-active="true"] {
+  color: #07130c !important;
+  border-color: #1fa557;
+  background: #4ade80;
+  box-shadow: none;
+}
+:root[data-theme="light"] .kd-performance-main-cue {
+  color: #b45309 !important;
+  border-color: rgba(217, 154, 18, 0.5) !important;
+}
+:root[data-theme="light"] .kd-performance-sync[data-active="true"] {
+  color: #06170d !important;
+  border-color: #14964d !important;
+  background: #54dc8d !important;
+}
+:root[data-theme="light"] .kd-performance-loop-stepper > span,
+:root[data-theme="light"] .kd-performance-loop-jump > span:first-child,
+:root[data-theme="light"] .kd-performance-cues-bank > span {
+  border-color: var(--kd-line);
+  background: var(--kd-panel);
+  box-shadow: none;
+}
+:root[data-theme="light"] .kd-performance-loop-stepper button,
+:root[data-theme="light"] .kd-performance-loop-jump button {
+  color: var(--kd-muted);
+  background: transparent;
+}
+:root[data-theme="light"] .kd-performance-loop-stepper button:active:not(:disabled),
+:root[data-theme="light"] .kd-performance-loop-jump button:active:not(:disabled) {
+  background: var(--kd-hover);
+}
+:root[data-theme="light"] .kd-performance-cue-slot {
+  border-right-color: var(--kd-line);
+  border-bottom-color: var(--kd-line);
+}
+:root[data-theme="light"] .kd-performance-cue-slot:not([data-filled="true"]) {
+  color: var(--kd-muted);
+}
+:root[data-theme="light"] .kd-performance-cue-note {
+  color: var(--kd-muted);
+}
+:root[data-theme="light"] .kd-performance-loop-toggle {
+  color: var(--kd-text) !important;
+  border-inline-color: var(--kd-line) !important;
+}
+:root[data-theme="light"] .kd-performance-loop-toggle[data-active="true"] {
+  background: color-mix(in srgb, var(--kd-text) 8%, transparent);
+}
+:root[data-theme="light"] .kd-performance-loop-jump > span:first-child > button:first-of-type {
+  border-right-color: var(--kd-line);
+}
+:root[data-theme="light"] .kd-performance-loop-stepper > em,
+:root[data-theme="light"] .kd-performance-loop-jump-size {
+  color: var(--kd-muted);
+}
+:root[data-theme="light"] .kd-performance-stem-eq[data-midi="true"] {
+  background: color-mix(in srgb, var(--kd-text) 5%, transparent);
+}
+:root[data-theme="light"] .kd-dj-slide[data-stem="drums"] { --kd-dj-accent: #b25e12; }
+:root[data-theme="light"] .kd-dj-slide[data-stem="bass"] { --kd-dj-accent: #c2333d; }
+:root[data-theme="light"] .kd-dj-slide[data-stem="other"] { --kd-dj-accent: #4557c9; }
+:root[data-theme="light"] .kd-dj-slide[data-stem="vocals"] { --kd-dj-accent: #17703c; }
+:root[data-theme="light"] .kd-performance-stem-toggle { --kd-stem: #17703c; }
+
+:root[data-theme="light"] .kd-performance-transport > button:disabled,
+:root[data-theme="light"] .kd-performance-cue-slot:disabled,
+:root[data-theme="light"] .kd-performance-loop button:disabled,
+:root[data-theme="light"] .kd-performance-tempo-steps > button:disabled,
+:root[data-theme="light"] .kd-performance-tempo .kd-performance-sync:disabled {
+  opacity: 0.72;
+}
+
+@media (max-width: 900px) {
+  .kd-performance-console { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
+  .kd-performance-metadata { grid-auto-flow: row; gap: 0.18rem; }
+  .kd-performance-output-strips label { grid-template-columns: auto 3.1rem; }
+  .kd-performance-output-strips input { width: 3.1rem; }
+  .kd-performance-toolbar-waves button { padding-inline: 0.22rem; }
+}
+
+@media (max-width: 640px) {
+  .kd-performance-console {
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  }
+  .kd-performance-tempo-side { min-width: 1.95rem; }
+  .kd-performance-loop-jump-size > output {
+    letter-spacing: 0;
+    font-size: var(--kd-dj-xs);
+  }
+}
+
+/* Performance v3 — 四条波形与演奏控制统一放进主 DJ 板块。
+   普通状态仍是原来的一条预览波形；只有明确展开时才应用下面这些布局。 */
+.kd-app .kd-player[data-performance-dock="true"] {
+  min-height: 0;
+  padding: 0;
+  background: #090c10;
+}
+.kd-app .kd-player[data-performance-dock="true"] > .kd-performance-workspace {
+  display: flex;
+  height: auto;
+  max-height: none;
+  padding: 0;
+  overflow: hidden;
+  background: #090c10;
+}
+.kd-performance-wave-toolbar {
+  flex: 0 0 auto;
+  min-height: 1.55rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.12rem 0.45rem;
+  border-bottom: 1px solid var(--kd-border-subtle);
+  color: var(--kd-text-subtle);
+  background: var(--kd-panel-inset);
+  font: 700 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  letter-spacing: 0.08em;
+}
+.kd-performance-wave-toolbar > strong {
+  color: var(--kd-text);
+  font-weight: 800;
+}
+.kd-performance-wave-toolbar > span {
+  color: var(--kd-text-disabled);
+}
+.kd-performance-wave-toolbar > button {
+  width: 1.55rem;
+  height: 1.35rem;
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  color: var(--kd-text-subtle);
+  background: transparent;
+  cursor: pointer;
+}
+.kd-performance-wave-toolbar > button:hover { color: var(--kd-text); }
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-wave-stack {
+  padding: 0;
+  border-bottom: 0;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-wave-row {
+  height: 3.4rem;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-grid {
+  --kd-dock-vinyl-size: 4.35rem;
+  --kd-dock-transport-size: 4.65rem;
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.35rem;
+  min-width: 0;
+  padding: 0.36rem 0.72rem 0.42rem;
+  overflow: hidden;
+  border-top: 4px solid #06080b;
+  border-bottom: 0;
+  background: #080b0f;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-grid[data-kd-native-track-over]::after,
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-grid[data-kd-pointer-track-over]::after {
+  content: "";
+  position: absolute;
+  z-index: 30;
+  top: 0.18rem;
+  bottom: 0.18rem;
+  width: calc(50% - 0.22rem);
+  pointer-events: none;
+  border: 1px solid rgba(174, 164, 255, 0.78);
+  background: rgba(154, 140, 255, 0.075);
+  box-shadow: inset 0 0 0 1px rgba(154, 140, 255, 0.15), inset 0 0 18px rgba(154, 140, 255, 0.1);
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-grid[data-kd-native-track-over="0"]::after,
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-grid[data-kd-pointer-track-over="deck-left"]::after {
+  left: 0.18rem;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-grid[data-kd-native-track-over="1"]::after,
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-grid[data-kd-pointer-track-over="deck-right"]::after {
+  right: 0.18rem;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--kd-dock-vinyl-size) var(--kd-dock-transport-size) minmax(0, 1fr);
+  grid-template-rows: 1.4rem 2.72rem;
+  grid-template-areas:
+    "vinyl preview preview"
+    "vinyl transport track";
+  gap: 0.28rem 0.58rem;
+  min-width: 0;
+  min-height: 4.4rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info[data-side="b"] {
+  grid-template-columns: minmax(0, 1fr) var(--kd-dock-transport-size) var(--kd-dock-vinyl-size);
+  grid-template-areas:
+    "preview preview vinyl"
+    "track transport vinyl";
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-vinyl {
+  position: relative;
+  grid-area: vinyl;
+  align-self: center;
+  width: var(--kd-dock-vinyl-size);
+  height: var(--kd-dock-vinyl-size);
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-vinyl-record {
+  width: calc(var(--kd-dock-vinyl-size) - 0.18rem);
+  height: calc(var(--kd-dock-vinyl-size) - 0.18rem);
+  box-shadow:
+    0 4px 14px rgba(0, 0, 0, 0.55),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.09),
+    inset 0 0 0 0.52rem rgba(0, 0, 0, 0.18);
+}
+.kd-performance-overview-slot {
+  grid-area: preview;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.kd-performance-dock-transport {
+  grid-area: transport;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.22rem;
+}
+.kd-performance-info[data-side="b"] .kd-performance-dock-transport { direction: rtl; }
+.kd-performance-dock-transport > button {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0.2rem;
+  color: #b9c3cf;
+  background: transparent;
+  box-shadow: none;
+  font: 900 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  cursor: pointer;
+}
+.kd-performance-info[data-side="b"] .kd-performance-dock-transport > button { direction: ltr; }
+.kd-performance-dock-transport > button:hover:not(:disabled) {
+  color: #f7fbff;
+  background: rgba(255, 255, 255, 0.055);
+}
+.kd-performance-dock-transport > button:active:not(:disabled) {
+  transform: translateY(1px);
+  filter: brightness(0.94);
+}
+.kd-performance-dock-transport > button:disabled {
+  cursor: default;
+  opacity: 0.32;
+}
+.kd-performance-dock-play[data-active="true"] {
+  color: #45db7c !important;
+  background: rgba(47, 206, 107, 0.08) !important;
+}
+.kd-performance-dock-cue {
+  color: #f6bc3d !important;
+  background: transparent !important;
+  letter-spacing: 0.035em;
+}
+.kd-performance-trackline {
+  grid-area: track;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  margin-right: 0;
+  padding: 0.12rem 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.kd-performance-info[data-side="b"] .kd-performance-trackline {
+  grid-template-columns: auto minmax(0, 1fr);
+  margin-right: 0;
+  margin-left: 0;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-copy {
+  display: grid;
+  grid-template-rows: auto auto;
+  min-width: 0;
+  align-items: center;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-copy > strong {
+  color: #eef5fb;
+  font-size: var(--kd-dj-lg);
+  line-height: 1.08;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-copy > span {
+  margin-top: 0.13rem;
+  color: #8f9cab;
+  font-size: var(--kd-dj-sm);
+  line-height: 1;
+}
+.kd-performance-info[data-side="b"] .kd-performance-info-copy {
+  grid-column: 2;
+  text-align: right;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-overview-wave {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 1.05rem !important;
+  margin: 0;
+  border-radius: 0 !important;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata {
+  grid-auto-flow: column;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+}
+.kd-performance-info[data-side="b"] .kd-performance-metadata {
+  grid-column: 1;
+  grid-row: 1;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata dd {
+  margin-top: 0.08rem;
+  font-size: var(--kd-dj-md);
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata [data-time="true"] dt {
+  display: none;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata [data-time="true"] dd {
+  margin-top: 0;
+  color: #eef5fb;
+  font-size: var(--kd-dj-lg);
+}
+.kd-performance-dock-crossfader {
+  position: absolute;
+  z-index: 10;
+  left: 50%;
+  bottom: 0.18rem;
+  width: clamp(10rem, 42%, 24rem);
+  height: 2.18rem;
+  display: grid;
+  grid-template-columns: 1.38rem minmax(0, 1fr) 2.15rem;
+  align-items: center;
+  gap: 0.3rem;
+  transform: translateX(-50%);
+  border: 0;
+  background: transparent;
+}
+.kd-performance-crossfader-lock,
+.kd-performance-crossfader-tempo-sync {
+  width: 1.38rem;
+  height: 1.38rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  color: #9fa9b5;
+  background: transparent;
+  cursor: pointer;
+}
+.kd-performance-crossfader-tempo-sync {
+  width: 2.15rem;
+  color: #7f8996;
+  font: 850 0.55rem/1 var(--kd-font-mono);
+  letter-spacing: 0.02em;
+}
+.kd-performance-crossfader-lock:hover,
+.kd-performance-crossfader-tempo-sync:hover:not(:disabled) {
+  color: #f1f5fa;
+  background: rgba(255, 255, 255, 0.055);
+}
+.kd-performance-crossfader-lock[aria-pressed="true"] { color: #c9bfff; }
+.kd-performance-crossfader-tempo-sync[data-active="true"] {
+  color: #70cfff;
+  background: color-mix(in srgb, #70cfff 9%, transparent);
+}
+.kd-performance-crossfader-tempo-sync:disabled {
+  cursor: default;
+  opacity: 0.28;
+}
+/* 横推与 TEMPO/LEVEL 共用硬件式语言：发丝轨、五档刻度、直角推柄。 */
+.kd-performance-crossfader-capsule {
+  position: relative;
+  display: block;
+  height: 1.5rem;
+  overflow: visible;
+  border: 0;
+  border-radius: 0 !important;
+  background: transparent;
+}
+.kd-performance-crossfader-capsule::before {
+  content: none;
+}
+.kd-performance-crossfader-shade {
+  display: none;
+}
+.kd-performance-crossfader-shade[data-half="left"] {
+  left: 0;
+  background: linear-gradient(90deg, rgba(24, 28, 37, 0.92) 0%, rgba(29, 33, 43, 0.72) 62%, transparent 100%);
+}
+.kd-performance-crossfader-shade[data-half="right"] {
+  right: 0;
+  background: linear-gradient(270deg, rgba(24, 28, 37, 0.92) 0%, rgba(29, 33, 43, 0.72) 62%, transparent 100%);
+}
+.kd-performance-crossfader-position {
+  display: none;
+}
+.kd-performance-crossfader-capsule .kd-performance-fader[data-axis="horizontal"] {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+}
+.kd-performance-crossfader-capsule .kd-performance-fader::before {
+  display: block;
+  height: 1px;
+  margin-top: -0.5px;
+  background: color-mix(in srgb, var(--kd-fader-track) 88%, transparent);
+}
+.kd-performance-crossfader-capsule .kd-performance-fader-ticks,
+.kd-performance-crossfader-capsule .kd-performance-fader-thumb {
+  display: block;
+}
+.kd-performance-crossfader-capsule .kd-performance-fader-fill { display: none; }
+.kd-performance-crossfader-capsule .kd-performance-fader[data-axis="horizontal"] .kd-performance-fader-thumb {
+  width: 0.82rem;
+  height: 1.5rem;
+  border-radius: 0.42rem !important;
+}
+.kd-performance-dock-crossfader[data-off="true"] {
+  filter: none;
+}
+.kd-performance-dock-crossfader[data-off="true"] .kd-performance-crossfader-capsule {
+  opacity: 0.56;
+}
+
+/* 右侧控制宿主由 Workspace 的宽屏 aside / 窄屏 Sheet 提供；portal 只填内容，
+   因此设置、队列、详情与演出控制共用完全相同的开合和尺寸语义。 */
+.kd-performance-control-host {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+  background: var(--kd-panel-inset);
+}
+.kd-split-aside-body:has(> .kd-performance-control-host),
+.kd-sheet-body:has(> .kd-performance-control-host) {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+.kd-performance-controls-surface {
+  --kd-dj-xs: calc(var(--kd-size-xs) * 0.85);
+  --kd-dj-sm: var(--kd-size-xs);
+  --kd-dj-md: var(--kd-size-sm);
+  --kd-dj-lg: var(--kd-size);
+  --kd-dj-xl: var(--kd-size-lg);
+  --kd-deck-a: #8c949f;
+  --kd-deck-b: #8c949f;
+  --kd-border: var(--kd-line);
+  --kd-border-subtle: var(--kd-line-soft);
+  --kd-text-subtle: var(--kd-muted);
+  --kd-text-disabled: var(--kd-faint);
+  --kd-fader-track: #3a414b;
+  --kd-fader-thumb: #9aa2ae;
+  --kd-fader-thumb-border: rgba(0, 0, 0, 0.55);
+  --kd-knob-boost: #e24b4b;
+  --kd-knob-cut: #4d8af0;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  color: var(--kd-text);
+  background: var(--kd-panel-inset);
+}
+.kd-performance-side-toolbar {
+  flex: 0 0 auto;
+  min-height: 1.8rem;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.25rem;
+  padding: 0.18rem 0.45rem;
+  border-bottom: 1px solid var(--kd-border-subtle);
+  background: var(--kd-panel);
+}
+.kd-performance-side-toolbar > button {
+  min-width: 2.2rem;
+  height: 1.35rem;
+  padding: 0 0.3rem;
+  border: 0;
+  color: var(--kd-text-subtle);
+  background: transparent;
+  font: 800 var(--kd-dj-sm)/1 var(--kd-font-mono);
+  cursor: pointer;
+}
+.kd-performance-side-toolbar > button[data-active="true"] {
+  color: var(--kd-text);
+  background: color-mix(in srgb, var(--kd-text) 11%, transparent);
+}
+.kd-performance-control-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.3rem;
+}
+.kd-performance-control-block {
+  /* 滚动容器里不允许收缩：宁可溢出出滚动条，也不能把内容裁没。 */
+  flex: 0 0 auto;
+  min-width: 0;
+  margin-bottom: 0;
+  border: 1px solid var(--kd-border-subtle);
+  background: color-mix(in srgb, var(--kd-panel) 88%, transparent);
+}
+.kd-performance-control-block[data-block="other-settings"] { order: 1; }
+.kd-performance-control-block[data-block="cue-loop"] { order: 2; }
+.kd-performance-control-block[data-block="fx-sampler"] { order: 3; }
+
+.kd-performance-fx-sampler-block {
+  min-height: 0;
+  padding: 0.34rem 0.42rem 0.38rem;
+}
+.kd-performance-fx-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin-bottom: 0.34rem;
+}
+.kd-performance-fx-modes,
+.kd-performance-fx-targets {
+  display: inline-flex;
+  min-width: 0;
+}
+.kd-performance-fx-modes > button,
+.kd-performance-fx-targets > button {
+  min-height: 1.25rem;
+  padding: 0.12rem 0.34rem;
+  border: 1px solid var(--kd-border-subtle);
+  color: var(--kd-text-subtle);
+  background: transparent;
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+}
+.kd-performance-fx-modes > button + button,
+.kd-performance-fx-targets > button + button { border-left: 0; }
+.kd-performance-fx-modes > button[data-active="true"],
+.kd-performance-fx-targets > button[data-active="true"] {
+  color: var(--kd-text);
+  background: color-mix(in srgb, #9a8cff 14%, transparent);
+}
+.kd-performance-fx-knobs {
+  display: grid;
+  grid-auto-rows: minmax(1.85rem, auto);
+  gap: 1px;
+  margin-inline: -0.42rem;
+  background: var(--kd-border-subtle);
+}
+.kd-performance-fx-slot {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 2.2rem minmax(4.2rem, 0.55fr) minmax(5rem, 1fr) minmax(5rem, 1fr);
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.14rem 0.55rem;
+  background: var(--kd-panel-inset);
+}
+/* FX 槽里的滑条用窄标签列，把宽度让给轨道。 */
+.kd-performance-fx-slot .kd-dj-slide {
+  grid-template-columns: 1.55rem minmax(0, 1fr) 1.75rem;
+  gap: 0.22rem;
+}
+.kd-performance-fx-on {
+  height: 1.65rem;
+  border: 1px solid var(--kd-border-subtle);
+  color: var(--kd-text);
+  background: transparent;
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+}
+.kd-performance-fx-slot[data-active="true"] .kd-performance-fx-on {
+  color: #fff;
+  border-color: #7567cf;
+  background: #7567cf;
+}
+.kd-performance-fx-select {
+  position: relative;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--kd-text);
+  font: 750 var(--kd-dj-md)/1 var(--kd-font);
+}
+.kd-performance-fx-select > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-performance-fx-select > select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.kd-performance-fx-select > svg { flex: none; color: var(--kd-text-subtle); }
+.kd-performance-pad-fx,
+.kd-performance-sampler-pads {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-rows: repeat(2, 1.75rem);
+  gap: 1px;
+  background: var(--kd-border-subtle);
+  border: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-pad-fx > button,
+.kd-performance-sampler-pads > button {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0.16rem 0.24rem;
+  border: 0;
+  color: var(--kd-text-subtle);
+  background: var(--kd-panel-inset);
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-performance-pad-fx > button[data-active="true"] {
+  color: #fff;
+  background: #7567cf;
+}
+.kd-performance-sampler-pads > button[data-kd-pointer-track-over="sampler"] {
+  color: #fff;
+  background: color-mix(in srgb, #9a8cff 38%, var(--kd-panel-inset));
+}
+.kd-performance-sampler-pads > button > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kd-performance-control-block:last-child { margin-bottom: 0; }
+.kd-performance-control-block > header {
+  min-height: 1.6rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.18rem 0.42rem;
+  border-bottom: 1px solid var(--kd-border-subtle);
+  color: var(--kd-text-disabled);
+  font: 700 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  letter-spacing: 0.06em;
+}
+.kd-performance-control-block > header > strong {
+  color: var(--kd-text);
+  font-weight: 800;
+}
+.kd-performance-control-block > header > span { margin-left: auto; }
+.kd-performance-control-block > .kd-performance-deck-controls {
+  width: 100%;
+  min-height: 8.2rem;
+  padding: 0.35rem;
+  border: 0;
+  background: transparent;
+}
+
+.kd-performance-dual-cue-loop {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+}
+.kd-performance-cue-loop-deck {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: minmax(4.4rem, 1fr) auto;
+  gap: 0.3rem;
+  padding: 0.38rem 0.42rem 0.34rem;
+}
+.kd-performance-cue-loop-deck + .kd-performance-cue-loop-deck {
+  border-left: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-cue-loop-deck > .kd-performance-cues {
+  grid-column: auto;
+  grid-row: auto;
+  width: 100%;
+}
+.kd-performance-cue-loop-deck > .kd-performance-loop {
+  grid-column: auto;
+  grid-row: auto;
+  width: 100%;
+}
+.kd-performance-cue-loop-deck[data-side="b"] > .kd-performance-loop { direction: rtl; }
+.kd-performance-cue-loop-deck[data-side="b"] > .kd-performance-loop > * { direction: ltr; }
+.kd-performance-mixer-layout {
+  display: grid;
+  grid-template-columns: minmax(3.3rem, 4.7rem) minmax(0, 1fr) minmax(3.3rem, 4.7rem);
+  align-items: stretch;
+  gap: 0.3rem;
+  width: 100%;
+  min-width: 0;
+  min-height: 10rem;
+}
+.kd-performance-mixer-tempo {
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+}
+.kd-performance-mixer-tempo[data-side="a"] { justify-content: flex-end; }
+.kd-performance-mixer-tempo[data-side="b"] { justify-content: flex-start; }
+.kd-performance-mixer-tempo > .kd-performance-tempo {
+  width: 100%;
+  min-height: 0;
+  grid-column: auto;
+  grid-row: auto;
+}
+.kd-performance-mixer-tempo[data-side="b"] > .kd-performance-tempo {
+  flex-direction: row-reverse;
+  padding: 0.06rem 0.1rem 0.04rem 0.14rem;
+  border-right: 0;
+  border-left: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-control-block .kd-performance-mixer-cluster {
+  max-width: 100%;
+}
+.kd-performance-mixer-layout > .kd-performance-mixer-cluster {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  gap: 0;
+  width: 100%;
+  padding-bottom: 2.55rem;
+}
+.kd-performance-channel-column {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: stretch;
+  padding: 0.06rem 0.3rem 0.12rem;
+}
+.kd-performance-mixer-layout .kd-performance-channel-column > .kd-performance-strip {
+  align-self: center;
+  justify-self: center;
+  width: min(100%, 17rem);
+}
+.kd-performance-channel-column + .kd-performance-channel-column {
+  border-left: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-mixer-layout .kd-performance-strip {
+  width: 100%;
+  height: auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 0.3rem;
+  padding: 0;
+  margin: 0;
+}
+.kd-performance-mixer-layout .kd-performance-strip[data-side="b"] {
+  grid-template-columns: minmax(0, 1fr);
+  margin: 0;
+}
+.kd-performance-mixer-layout .kd-performance-strip[data-side="b"] .kd-performance-strip-knobs {
+  grid-column: 1;
+}
+.kd-performance-mixer-layout .kd-performance-strip-knobs {
+  display: grid;
+  grid-template-columns: minmax(2.95rem, 1.35fr) minmax(2.3rem, 1fr);
+  grid-template-rows: repeat(3, minmax(2.15rem, auto));
+  gap: 0.14rem;
+  width: 100%;
+  height: auto;
+  justify-items: stretch;
+  align-items: center;
+  align-content: start;
+  padding-top: 0.2rem;
+}
+.kd-performance-mixer-layout .kd-performance-strip-knobs > :first-child {
+  grid-column: 1;
+  grid-row: 1 / 4;
+  align-self: center;
+  width: 2.55rem;
+}
+.kd-performance-mixer-layout .kd-performance-strip-knobs > :nth-child(2) {
+  grid-column: 2;
+  grid-row: 1;
+}
+.kd-performance-mixer-layout .kd-performance-strip-knobs > :nth-child(3) {
+  grid-column: 2;
+  grid-row: 2;
+}
+.kd-performance-mixer-layout .kd-performance-strip-knobs > :nth-child(4) {
+  grid-column: 2;
+  grid-row: 3;
+}
+.kd-performance-mixer-layout .kd-performance-strip-knobs > :nth-child(2),
+.kd-performance-mixer-layout .kd-performance-strip-knobs > :nth-child(3),
+.kd-performance-mixer-layout .kd-performance-strip-knobs > :nth-child(4),
+.kd-performance-mixer-layout .kd-performance-stem-eq .kd-dj-arcknob {
+  width: 1.85rem;
+}
+/* ==== DJ 滑条（SlideStrip）：克制胶囊轨道 + 指针，整行可横滑 ====
+   FX 参数 / CUE MIX / MASTER 共用；bare 变体（GAIN）是发丝微调条。
+   双极量程从中心起填，单极从左端起填。 */
+.kd-dj-slide {
+  --kd-dj-accent: var(--kd-text);
+  min-width: 0;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 2.9rem minmax(0, 1fr) 2.3rem;
+  align-items: stretch;
+  gap: 0.34rem;
+  color: var(--kd-text-subtle);
+}
+.kd-dj-slide > b {
+  min-width: 0;
+  align-self: center;
+  overflow: hidden;
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  letter-spacing: 0.05em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-dj-slide > output {
+  align-self: center;
+  color: var(--kd-text-subtle);
+  font: 700 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.kd-dj-slide-track {
+  position: relative;
+  min-width: 0;
+  min-height: 1.75rem;
+  cursor: ew-resize;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+}
+.kd-dj-slide-track:focus-visible {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--kd-text) 42%, transparent);
+}
+/* 轨道：一枚克制的胶囊——细边框、无渐变无发光；指针是一根超出胶囊的针。 */
+.kd-dj-slide-track::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 0.95rem;
+  transform: translateY(-50%);
+  border: 1px solid var(--kd-border-subtle);
+  border-radius: 999px !important;
+  background: var(--kd-panel-inset);
+}
+.kd-dj-slide-zero { display: none; }
+.kd-dj-slide[data-bipolar="true"] .kd-dj-slide-zero {
+  display: block;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1px;
+  height: 0.5rem;
+  transform: translate(-0.5px, -50%);
+  background: var(--kd-text-subtle);
+}
+.kd-dj-slide-fill {
+  position: absolute;
+  top: 50%;
+  height: 0.55rem;
+  margin-top: -0.275rem;
+  border-radius: 999px !important;
+  background: color-mix(in srgb, var(--kd-dj-accent) 26%, transparent);
+  pointer-events: none;
+}
+.kd-dj-slide-thumb {
+  position: absolute;
+  top: 50%;
+  width: 0.14rem;
+  height: 1.2rem;
+  transform: translate(-50%, -50%);
+  border-radius: 999px !important;
+  background: var(--kd-dj-accent);
+  text-decoration: none;
+  pointer-events: none;
+}
+/* bare 变体：GAIN 发丝微调条——标签+数值一行，下面一根发丝轨 + 小方柄，不用药丸。 */
+.kd-dj-slide[data-variant="bare"] {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto 0.95rem;
+  gap: 0.06rem 0.2rem;
+}
+.kd-dj-slide[data-variant="bare"] > output { justify-self: end; }
+.kd-dj-slide[data-variant="bare"] > .kd-dj-slide-track {
+  grid-column: 1 / -1;
+  min-height: 0.95rem;
+}
+.kd-dj-slide[data-variant="bare"] > .kd-dj-slide-track::before {
+  height: 1px;
+  border: 0;
+  border-radius: 0 !important;
+  background: color-mix(in srgb, var(--kd-fader-track) 88%, transparent);
+}
+.kd-dj-slide[data-variant="bare"] .kd-dj-slide-fill {
+  height: 1px;
+  margin-top: -0.5px;
+  border-radius: 0 !important;
+  background: color-mix(in srgb, var(--kd-dj-accent) 58%, transparent);
+}
+.kd-dj-slide[data-variant="bare"] .kd-dj-slide-thumb {
+  width: 0.18rem;
+  height: 0.68rem;
+  border-radius: 0 !important;
+  background: var(--kd-fader-thumb);
+}
+.kd-dj-slide[data-variant="bare"] .kd-dj-slide-zero { height: 0.4rem; }
+.kd-dj-slide[data-stem="drums"] { --kd-dj-accent: #d59d6b; }
+.kd-dj-slide[data-stem="bass"] { --kd-dj-accent: #d08088; }
+.kd-dj-slide[data-stem="other"] { --kd-dj-accent: #93a3d8; }
+.kd-dj-slide[data-stem="vocals"] { --kd-dj-accent: #82c49e; }
+.kd-dj-slide[data-boost="true"]:not([data-stem]) { --kd-dj-accent: var(--kd-knob-boost); }
+.kd-dj-slide[data-cut="true"]:not([data-stem]) { --kd-dj-accent: var(--kd-knob-cut); }
+.kd-dj-slide[data-boost="true"] > b,
+.kd-dj-slide[data-cut="true"] > b { color: var(--kd-dj-accent); }
+.kd-dj-slide[data-disabled="true"] { opacity: 0.42; }
+.kd-dj-slide[data-disabled="true"] .kd-dj-slide-track { cursor: default; }
+.kd-performance-central-faders {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(1.8rem, 1fr));
+  align-items: stretch;
+  gap: 0.18rem;
+  padding: 0.1rem 0.12rem 0.2rem;
+  border-inline: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-channel-fader {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  justify-items: stretch;
+  gap: 0.22rem;
+}
+.kd-performance-channel-fader > .kd-dj-metfader { justify-self: center; }
+.kd-performance-channel-fader > b {
+  color: var(--kd-text-subtle);
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  text-align: center;
+}
+/* ==== 底部混音栏：TEMPO 两侧、通道旋钮、中央响度推子，从弹出面板迁出 ==== */
+.kd-performance-mixer-dock {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+  padding: 0.3rem 0.55rem 0.42rem;
+  border-top: 1px solid var(--kd-border-subtle);
+  background: color-mix(in srgb, var(--kd-panel) 72%, transparent);
+}
+.kd-performance-mixer-dock .kd-performance-mixer-layout {
+  width: 100%;
+  min-height: 8.5rem;
+}
+/* ==== DJ 竖推（VFader）：TEMPO 与通道音量共用同一套槽轨 + 直角柄 ==== */
+.kd-dj-vfader {
+  position: relative;
+  width: 1.4rem;
+  min-height: 5.6rem;
+  align-self: stretch;
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+}
+.kd-dj-vfader[aria-disabled="true"] { cursor: default; opacity: 0.5; }
+.kd-dj-vfader:focus-visible {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--kd-text) 42%, transparent);
+}
+.kd-dj-vfader::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: color-mix(in srgb, var(--kd-fader-track) 88%, transparent);
+}
+.kd-dj-vfader-ticks { position: absolute; inset: 0; pointer-events: none; }
+.kd-dj-vfader-ticks > u {
+  position: absolute;
+  left: 50%;
+  width: 0.5rem;
+  margin-left: -0.25rem;
+  height: 1px;
+  background: color-mix(in srgb, var(--kd-fader-track) 72%, transparent);
+}
+.kd-dj-vfader-ticks > u:nth-child(1) { top: 0; }
+.kd-dj-vfader-ticks > u:nth-child(2) { top: 25%; }
+.kd-dj-vfader-ticks > u:nth-child(3) { top: 50%; }
+.kd-dj-vfader-ticks > u:nth-child(4) { top: 75%; }
+.kd-dj-vfader-ticks > u:nth-child(5) { top: 100%; }
+.kd-dj-vfader-thumb {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  width: 100%;
+  height: 0.52rem;
+  transform: translate(-50%, 50%);
+  border: 1px solid var(--kd-fader-thumb-border);
+  border-radius: 0.18rem !important;
+  background: var(--kd-fader-thumb);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+.kd-dj-vfader-thumb::after {
+  content: "";
+  position: absolute;
+  left: 0.14rem;
+  right: 0.14rem;
+  top: 50%;
+  height: 1px;
+  background: rgba(10, 12, 16, 0.55);
+}
+.kd-dj-vfader-thumb[data-center="true"] {
+  border-color: #1f9d55;
+  background: #2fce6b;
+}
+/* TEMPO 装饰层：0% 零位线、SYNC 锁点、硬件接管的影子行程与虚线柄。 */
+.kd-dj-vfader-zero {
+  position: absolute;
+  left: 50%;
+  width: 0.92rem;
+  margin-left: -0.46rem;
+  height: 1px;
+  margin-bottom: -0.5px;
+  background: var(--kd-text-subtle);
+  pointer-events: none;
+}
+.kd-dj-vfader-lock {
+  position: absolute;
+  left: 0;
+  width: 0.2rem;
+  height: 0.2rem;
+  margin-bottom: -0.1rem;
+  background: #39404a;
+  pointer-events: none;
+}
+.kd-dj-vfader-lock[data-active="true"] { background: #2fce6b; }
+.kd-dj-vfader-takeover {
+  position: absolute;
+  left: 50%;
+  width: 1px;
+  background: color-mix(in srgb, var(--kd-text-subtle) 55%, transparent);
+  pointer-events: none;
+}
+.kd-dj-vfader-ghost {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  width: 100%;
+  height: 0.52rem;
+  transform: translate(-50%, 50%);
+  border: 1px dashed var(--kd-fader-thumb);
+  pointer-events: none;
+}
+/* ==== 响度推子：通道音量与电平合一。两条并排对称条——此刻（快攻快放）与
+   上一刻（滞后包络）轮巡追赶呈现晃动；顶部红色段即 >0dBFS 爆音区（条体自己
+   变红，不加外框）；整条竖拖调音量，横杠手柄压在双条上。 ==== */
+.kd-dj-metfader {
+  position: relative;
+  width: 1.5rem;
+  min-height: 5.6rem;
+  align-self: stretch;
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+  overflow: hidden;
+  border: 1px solid var(--kd-border-subtle);
+  background: #10151b;
+}
+.kd-dj-metfader:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--kd-text) 40%, transparent);
+}
+.kd-dj-metfader-bars {
+  position: absolute;
+  inset: 0.14rem 0.18rem;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.1rem;
+}
+.kd-dj-metfader-bars,
+.kd-dj-metfader-clip { display: none; }
+.kd-dj-metfader-lane { position: relative; display: block; min-width: 0; }
+.kd-dj-metfader-lane > .kd-dj-metfader-bar { position: absolute; inset: 0; }
+.kd-dj-metfader-bar {
+  display: block;
+  clip-path: inset(100% 0 0 0);
+  /* 色带锚定 24 格刻度：顶部 3 格红（≈-5dB 起）、3 格琥珀、2 格黄绿。 */
+  background: linear-gradient(
+    to top,
+    #22d85b 0%,
+    #31dd62 45%,
+    #a8e53b 64%,
+    #e8e632 74%,
+    #ffb52f 84%,
+    #f04452 100%
+  );
+  -webkit-mask-image: linear-gradient(to top, #000 64%, transparent 64%);
+  -webkit-mask-size: 100% calc(100% / 24);
+  mask-image: linear-gradient(to top, #000 64%, transparent 64%);
+  mask-size: 100% calc(100% / 24);
+  will-change: clip-path;
+}
+/* 削波锁亮：顶部三格整红，与条体同格距，不加任何外框。 */
+.kd-dj-metfader-clip {
+  position: absolute;
+  top: 0.14rem;
+  left: 0.16rem;
+  right: 0.16rem;
+  height: calc((100% - 0.28rem) / 8);
+  background: #f04452;
+  -webkit-mask-image: linear-gradient(to top, #000 64%, transparent 64%);
+  -webkit-mask-size: 100% calc(100% / 3);
+  mask-image: linear-gradient(to top, #000 64%, transparent 64%);
+  mask-size: 100% calc(100% / 3);
+  opacity: 0;
+  transition: opacity 100ms;
+  pointer-events: none;
+}
+.kd-dj-metfader[data-clipping="true"] .kd-dj-metfader-clip { opacity: 1; }
+.kd-dj-metfader-thumb {
+  position: absolute;
+  z-index: 2;
+  left: 0.04rem;
+  right: 0.04rem;
+  height: 0.3rem;
+  transform: translateY(50%);
+  border: 1px solid var(--kd-fader-thumb-border);
+  border-radius: 999px !important;
+  background: var(--kd-fader-thumb);
+  text-decoration: none;
+  pointer-events: none;
+}
+/* ==== 圆弧旋钮（ArcKnob）：外圈轨道环 + 着色值弧 + 实心内圆 + 指针线 ==== */
+.kd-dj-arcknob {
+  /* 根元素定宽：SVG 百分比宽在 max-content 列里会按替换元素默认 300px 计算。 */
+  display: grid;
+  justify-items: center;
+  justify-self: center;
+  align-content: start;
+  gap: 0.16rem;
+  width: 2.3rem;
+  min-width: 0;
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+}
+.kd-dj-arcknob > svg {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  height: auto;
+}
+.kd-dj-arcknob[data-size="sm"] { width: 2.2rem; }
+.kd-dj-arcknob[data-size="lg"] { width: 2.95rem; }
+.kd-dj-arcknob[data-size="xs"] { width: 1.45rem; }
+.kd-dj-arcknob[data-size="xl"] { width: 3rem; }
+.kd-dj-arcknob-track {
+  stroke: color-mix(in srgb, var(--kd-fader-track) 80%, transparent);
+  stroke-width: 2.2;
+}
+.kd-dj-arcknob:focus-visible .kd-dj-arcknob-track { stroke: color-mix(in srgb, var(--kd-text) 55%, transparent); }
+.kd-dj-arcknob-value {
+  stroke: var(--kd-text);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+}
+.kd-dj-arcknob[data-boost="true"] .kd-dj-arcknob-value { stroke: var(--kd-knob-boost); }
+.kd-dj-arcknob[data-cut="true"] .kd-dj-arcknob-value { stroke: var(--kd-knob-cut); }
+.kd-dj-arcknob[data-stem="drums"] .kd-dj-arcknob-value { stroke: #d59d6b; }
+.kd-dj-arcknob[data-stem="bass"] .kd-dj-arcknob-value { stroke: #d08088; }
+.kd-dj-arcknob[data-stem="other"] .kd-dj-arcknob-value { stroke: #93a3d8; }
+.kd-dj-arcknob[data-stem="vocals"] .kd-dj-arcknob-value { stroke: #82c49e; }
+.kd-dj-arcknob-body {
+  fill: var(--kd-panel-raised);
+  stroke: var(--kd-border-subtle);
+  stroke-width: 1;
+}
+.kd-dj-arcknob-needle {
+  stroke: #fff;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.kd-dj-arcknob > b {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--kd-text-subtle);
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.05em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-dj-arcknob[data-boost="true"] > b,
+.kd-dj-arcknob[data-cut="true"] > b { color: var(--kd-dj-accent, var(--kd-text-subtle)); }
+.kd-dj-arcknob[data-disabled="true"] { opacity: 0.42; cursor: default; }
+.kd-performance-channel-stem {
+  min-width: 0;
+  width: min(100%, 22rem);
+  justify-self: center;
+  display: block;
+  margin-bottom: 0.12rem;
+  padding-bottom: 0.12rem;
+  border-bottom: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-stem-toggle {
+  --kd-stem: #82c49e;
+  min-width: 2.3rem;
+  min-height: 1.05rem;
+  padding: 0.08rem 0.2rem;
+  border: 1px solid var(--kd-border-subtle);
+  color: var(--kd-text-subtle);
+  background: var(--kd-panel-inset);
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  letter-spacing: 0.04em;
+}
+.kd-performance-stem-toggle:hover:not(:disabled) { color: var(--kd-text); }
+.kd-performance-stem-toggle[data-active="true"] {
+  color: var(--kd-stem);
+  border-color: color-mix(in srgb, var(--kd-stem) 48%, var(--kd-border-subtle));
+  background: color-mix(in srgb, var(--kd-stem) 10%, var(--kd-panel-inset));
+}
+.kd-performance-stem-toggle[data-loading="true"] { cursor: progress; }
+.kd-performance-stem-toggle:disabled { opacity: 0.48; }
+.kd-performance-stem-eq[data-midi="true"] {
+  background: color-mix(in srgb, var(--kd-text) 6%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-text) 16%, transparent);
+}
+.kd-performance-stem-eq > header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.22rem;
+}
+.kd-performance-stem-eq > header > b {
+  color: var(--kd-text-subtle);
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  letter-spacing: 0.1em;
+}
+.kd-performance-stem-eq[data-midi="true"] > header > b { color: var(--kd-text); }
+.kd-performance-mixer-layout .kd-performance-stem-eq {
+  min-width: 0;
+  width: 100%;
+  display: grid;
+  grid-template-rows: auto auto;
+  justify-items: stretch;
+  gap: 0.14rem;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: transparent;
+}
+.kd-performance-mixer-layout .kd-performance-stem-eq > header { justify-content: flex-start; }
+.kd-performance-mixer-layout .kd-performance-stem-eq > div {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
+  justify-content: center;
+  column-gap: 0.5rem;
+  width: 100%;
+  height: auto;
+}
+.kd-performance-mixer-layout .kd-performance-stem-toggle {
+  align-self: end;
+  min-width: 2.35rem;
+}
+
+.kd-performance-stem-wave-toggle {
+  min-height: 1.25rem;
+  padding: 0.14rem 0.46rem;
+  border: 1px solid var(--kd-border-subtle);
+  color: var(--kd-text-subtle);
+  background: transparent;
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+}
+.kd-performance-stem-wave-toggle[data-active="true"] {
+  color: #9bd6ae;
+  border-color: color-mix(in srgb, #82c49e 52%, var(--kd-border-subtle));
+  background: color-mix(in srgb, #82c49e 10%, transparent);
+}
+.kd-performance-other-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.2rem 0.5rem 0.3rem;
+}
+/* 分段开关组：STEM / 人声波形 / 量化，三段一体、细边框、激活着色。 */
+.kd-performance-toggle-group {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0.3rem 0.5rem 0.1rem;
+  border: 1px solid var(--kd-border-subtle);
+  background: var(--kd-panel-inset);
+}
+.kd-performance-toggle-group > button {
+  min-width: 0;
+  min-height: 1.5rem;
+  padding: 0.14rem 0.2rem;
+  border: 0;
+  border-right: 1px solid var(--kd-border-subtle);
+  color: var(--kd-text-subtle);
+  background: transparent;
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+  letter-spacing: 0.05em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kd-performance-toggle-group > button:last-child { border-right: 0; }
+.kd-performance-toggle-group > button:hover:not(:disabled) { color: var(--kd-text); }
+.kd-performance-toggle-group > button[data-active="true"] {
+  color: #9bd6ae;
+  background: color-mix(in srgb, #82c49e 12%, transparent);
+  box-shadow: inset 0 -2px 0 #82c49e;
+}
+.kd-performance-toggle-group > button[data-loading="true"] { cursor: progress; }
+.kd-performance-toggle-group > button:disabled { opacity: 0.48; }
+.kd-performance-other-settings .kd-dj-slide {
+  height: 1.7rem;
+  grid-template-columns: 3.4rem minmax(0, 1fr) 3.2rem;
+}
+
+.kd-performance-monitor-block > .kd-performance-output-strips {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.55rem;
+}
+.kd-performance-monitor-block .kd-performance-output-strips label {
+  grid-template-columns: 4.2rem minmax(0, 1fr);
+}
+.kd-performance-monitor-block .kd-performance-output-strips input {
+  width: 100%;
+}
+
+:root[data-theme="light"] .kd-performance-controls-surface {
+  --kd-fader-track: #9aa3ae;
+  --kd-fader-thumb: #ffffff;
+  --kd-fader-thumb-border: rgba(0, 0, 0, 0.28);
+  --kd-knob-boost: #d1242f;
+  --kd-knob-cut: #1f6feb;
+  background: var(--kd-bg);
+}
+:root[data-theme="light"] .kd-performance-control-host,
+:root[data-theme="light"] .kd-performance-control-block {
+  background: var(--kd-panel);
+}
+
+/* 主 DJ 板块的演奏控制：原右侧 PERFORMANCE 内容改为全宽紧凑三栏。
+   三块等高但各自按内容排布，不再为旁路滚动容器预留整列空白。 */
+.kd-performance-workspace > .kd-performance-controls-surface {
+  flex: 0 0 auto;
+  width: 100%;
+  min-height: 0;
+  border-top: 4px solid #06080b;
+  background: #080b0f;
+}
+.kd-performance-workspace > .kd-performance-controls-surface > .kd-performance-side-toolbar {
+  min-height: 1.45rem;
+  padding: 0.1rem 0.45rem;
+}
+.kd-performance-workspace > .kd-performance-controls-surface > .kd-performance-control-scroll {
+  flex: 0 0 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(16rem, 0.82fr) minmax(22rem, 1.08fr) minmax(24rem, 1.3fr);
+  align-items: stretch;
+  gap: 0.32rem;
+  padding: 0.34rem 0.55rem 0.42rem;
+  overflow: visible;
+}
+.kd-performance-workspace > .kd-performance-controls-surface .kd-performance-control-block {
+  height: 100%;
+  overflow: hidden;
+}
+.kd-performance-workspace > .kd-performance-controls-surface .kd-performance-cue-loop-deck {
+  grid-template-rows: minmax(3.7rem, 1fr) auto;
+  gap: 0.24rem;
+  padding: 0.3rem 0.34rem;
+}
+.kd-performance-workspace > .kd-performance-controls-surface .kd-performance-fx-sampler-block {
+  padding-block: 0.3rem;
+}
+.kd-performance-workspace > .kd-performance-controls-surface .kd-performance-toggle-group {
+  margin-top: 0.24rem;
+}
+
+@media (max-width: 1100px) {
+  .kd-performance-workspace > .kd-performance-controls-surface > .kd-performance-control-scroll {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .kd-performance-workspace > .kd-performance-controls-surface .kd-performance-fx-sampler-block {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 760px) {
+  .kd-performance-workspace > .kd-performance-controls-surface > .kd-performance-control-scroll {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .kd-performance-workspace > .kd-performance-controls-surface .kd-performance-fx-sampler-block {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 640px) {
+  .kd-performance-control-scroll { padding: 0.28rem; }
+  .kd-performance-control-block > header > span { display: none; }
+  .kd-performance-control-block > .kd-performance-deck-controls { padding: 0.22rem; }
+  .kd-performance-cue-loop-deck {
+    grid-template-rows: minmax(3.8rem, 1fr) auto;
+    padding: 0.26rem;
+  }
+  .kd-performance-mixer-layout {
+    grid-template-columns: minmax(2.9rem, 3.4rem) minmax(0, 1fr) minmax(2.9rem, 3.4rem);
+    gap: 0.08rem;
+  }
+  .kd-performance-mixer-layout > .kd-performance-mixer-cluster {
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    width: 100%;
+  }
+  .kd-performance-channel-column { padding-inline: 0.16rem; }
+  .kd-performance-central-faders {
+    grid-template-columns: repeat(2, minmax(1.55rem, 1fr));
+    gap: 0.08rem;
+    padding-inline: 0.08rem;
+  }
+  .kd-performance-mixer-layout .kd-dj-vfader { width: 1.1rem; min-height: 4.6rem; }
+  .kd-dj-metfader { width: 1.3rem; min-height: 4.6rem; }
+  .kd-dj-slide {
+    grid-template-columns: 1.9rem minmax(0, 1fr) 1.9rem;
+    gap: 0.2rem;
+  }
+  .kd-dj-slide > b,
+  .kd-dj-slide > output { font-size: calc(var(--kd-dj-xs) * 0.9); }
+  .kd-performance-channel-stem {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .kd-performance-channel-stem > .kd-performance-stem-toggle {
+    width: 100%;
+    min-width: 0;
+  }
+  .kd-performance-channel-column[data-side="b"] .kd-performance-channel-stem {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .kd-performance-channel-column[data-side="b"] .kd-performance-channel-stem > .kd-performance-stem-eq,
+  .kd-performance-channel-column[data-side="b"] .kd-performance-channel-stem > .kd-performance-stem-toggle {
+    grid-column: 1;
+  }
+  .kd-performance-channel-column[data-side="b"] .kd-performance-channel-stem > .kd-performance-stem-toggle { grid-row: 2; }
+  .kd-performance-mixer-tempo > .kd-performance-tempo {
+    width: min(100%, 3.7rem);
+  }
+  .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-copy {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-copy > span {
+    display: none;
+  }
+  .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-grid {
+    --kd-dock-vinyl-size: 3.15rem;
+    --kd-dock-transport-size: 3.7rem;
+    gap: 0.22rem;
+    padding-inline: 0.35rem;
+  }
+  .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info {
+    grid-template-rows: 1.25rem 2.42rem;
+    min-height: 3.95rem;
+    gap: 0.28rem;
+  }
+  .kd-performance-trackline {
+    gap: 0.25rem;
+    margin-right: 0;
+    padding-inline: 0.38rem;
+  }
+  .kd-performance-dock-transport { gap: 0.12rem; }
+  .kd-performance-dock-transport > button {
+    font-size: var(--kd-dj-xs);
+  }
+  .kd-performance-info[data-side="b"] .kd-performance-trackline {
+    margin-left: 0;
+  }
+  .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-copy > strong {
+    font-size: var(--kd-dj-md);
+  }
+  .kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata { display: none; }
+  .kd-performance-dock-crossfader {
+    bottom: 0.18rem;
+  }
+}
+
+/* Performance v4 — 参考 djay 的分层镜像控制台：信息、主 Deck、走带、扩展控制各自成行。 */
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-grid {
+  --kd-dock-vinyl-size: 4.2rem;
+  padding: 0.36rem 0.55rem 0.42rem;
+  gap: 0;
+  border-top: 4px solid #06080b;
+  border-bottom: 1px solid var(--kd-border-subtle);
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info {
+  grid-template-columns: var(--kd-dock-vinyl-size) minmax(0, 1fr);
+  grid-template-rows: minmax(2.2rem, auto) 1.25rem;
+  grid-template-areas:
+    "vinyl track"
+    "vinyl preview";
+  min-height: 4.2rem;
+  gap: 0.28rem 0.62rem;
+  padding: 0.12rem 0.55rem 0.12rem 0;
+  border-right: 1px solid var(--kd-border-subtle);
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info[data-side="b"] {
+  grid-template-columns: minmax(0, 1fr) var(--kd-dock-vinyl-size);
+  grid-template-areas:
+    "track vinyl"
+    "preview vinyl";
+  padding: 0.12rem 0 0.12rem 0.55rem;
+  border-right: 0;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info > .kd-performance-dock-transport {
+  display: none;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info .kd-performance-vinyl,
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info .kd-performance-vinyl-record {
+  width: var(--kd-dock-vinyl-size);
+  height: var(--kd-dock-vinyl-size);
+  border-radius: 50% !important;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info .kd-performance-vinyl-record {
+  animation: kd-player-vinyl-spin 2.8s linear infinite paused;
+  box-shadow:
+    0 3px 10px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info .kd-performance-vinyl-record[data-spinning="true"] { animation-play-state: running; }
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info .kd-performance-vinyl-record img {
+  width: 68%;
+  height: 68%;
+  border-radius: 50% !important;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info .kd-performance-trackline {
+  align-self: end;
+  padding: 0;
+}
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-info[data-side="b"] .kd-performance-trackline {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.kd-performance-main-decks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+  border-bottom: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-main-deck {
+  position: relative;
+  min-width: 0;
+  min-height: 12.4rem;
+  display: grid;
+  grid-template-columns: minmax(3.7rem, 4.7rem) minmax(15rem, 1.5fr) minmax(12rem, 0.92fr);
+  align-items: stretch;
+  background: color-mix(in srgb, var(--kd-panel) 78%, transparent);
+}
+.kd-performance-main-deck[data-kd-pointer-track-over="deck"]::after,
+.kd-performance-main-deck[data-kd-native-track-over="true"]::after {
+  content: "";
+  position: absolute;
+  z-index: 30;
+  inset: 0.18rem;
+  pointer-events: none;
+  border: 1px solid rgba(174, 164, 255, 0.82);
+  background: rgba(154, 140, 255, 0.075);
+  box-shadow: inset 0 0 18px rgba(154, 140, 255, 0.12);
+}
+.kd-performance-main-deck[data-side="b"] {
+  grid-template-columns: minmax(12rem, 0.92fr) minmax(15rem, 1.5fr) minmax(3.7rem, 4.7rem);
+}
+.kd-performance-main-deck + .kd-performance-main-deck {
+  border-left: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-main-deck[data-side="a"] > .kd-performance-mixer-tempo { grid-column: 1; }
+.kd-performance-main-deck[data-side="a"] > .kd-performance-deck-pad-bank { grid-column: 2; }
+.kd-performance-main-deck[data-side="a"] > .kd-performance-deck-mix-module { grid-column: 3; }
+.kd-performance-main-deck[data-side="b"] > .kd-performance-deck-mix-module { grid-column: 1; }
+.kd-performance-main-deck[data-side="b"] > .kd-performance-deck-pad-bank { grid-column: 2; }
+.kd-performance-main-deck[data-side="b"] > .kd-performance-mixer-tempo { grid-column: 3; }
+.kd-performance-main-deck > * { grid-row: 1; min-width: 0; }
+
+.kd-performance-main-deck .kd-performance-mixer-tempo {
+  width: 100%;
+  padding-block: 0.42rem;
+  background: var(--kd-panel-inset);
+}
+.kd-performance-main-deck[data-side="b"] .kd-performance-mixer-tempo {
+  flex-direction: row-reverse;
+  border-right: 0;
+  border-left: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-main-deck .kd-performance-tempo {
+  width: 100%;
+  min-height: 0;
+  border: 0;
+}
+.kd-performance-main-deck[data-side="b"] .kd-performance-tempo {
+  flex-direction: row-reverse;
+}
+.kd-performance-main-deck .kd-performance-tempo {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 1.85rem auto auto minmax(5.2rem, 1fr) 1.45rem;
+  align-items: center;
+  gap: 0.16rem;
+  padding: 0.42rem 0.48rem 0.34rem;
+}
+.kd-performance-main-deck .kd-performance-tempo-side { display: contents; }
+.kd-performance-main-deck .kd-performance-tempo .kd-performance-sync {
+  grid-column: 1;
+  grid-row: 1;
+  width: 100%;
+  height: 1.85rem;
+  border-radius: 0.32rem;
+  background: var(--kd-panel-raised);
+  font-size: var(--kd-dj-md);
+}
+.kd-performance-main-deck .kd-performance-tempo-bpm {
+  grid-column: 1;
+  grid-row: 2;
+  font-size: calc(var(--kd-dj-xl) * 1.3);
+}
+.kd-performance-main-deck .kd-performance-tempo-pct {
+  grid-column: 1;
+  grid-row: 3;
+}
+.kd-performance-main-deck .kd-performance-tempo > .kd-dj-vfader {
+  grid-column: 1;
+  grid-row: 4;
+  justify-self: center;
+  width: 3.35rem;
+  min-height: 5.2rem;
+}
+.kd-performance-main-deck .kd-performance-tempo-steps {
+  grid-column: 1;
+  grid-row: 5;
+  width: 100%;
+  gap: 0.35rem;
+}
+.kd-performance-main-deck .kd-performance-tempo-steps > button {
+  height: 1.45rem;
+  border: 0;
+}
+.kd-performance-main-deck .kd-performance-tempo-steps > button > svg {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+.kd-performance-main-deck .kd-dj-vfader-ticks > u {
+  width: 2.9rem;
+  margin-left: -1.45rem;
+  background: color-mix(in srgb, var(--kd-fader-track) 62%, transparent);
+}
+.kd-performance-main-deck .kd-dj-vfader-thumb {
+  width: 3rem;
+  height: 0.82rem;
+  border-radius: 0.42rem !important;
+}
+.kd-performance-main-deck .kd-dj-vfader-zero { width: 3.25rem; margin-left: -1.625rem; }
+.kd-performance-deck-pad-bank,
+.kd-performance-deck-fx-bank {
+  display: grid;
+  grid-template-rows: 1.45rem minmax(0, 1fr);
+  min-width: 0;
+  border-right: 1px solid var(--kd-border-subtle);
+  background: color-mix(in srgb, var(--kd-panel-raised) 72%, transparent);
+}
+.kd-performance-main-deck[data-side="b"] .kd-performance-deck-pad-bank {
+  border-right: 0;
+  border-left: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-deck-pad-bank > header,
+.kd-performance-deck-fx-bank > header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-bottom: 1px solid var(--kd-border-subtle);
+  color: #70cfff;
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+}
+.kd-performance-pad-page-tabs {
+  display: flex !important;
+  align-items: stretch;
+  justify-content: flex-start !important;
+  padding: 0 !important;
+}
+.kd-performance-pad-page-tabs > button {
+  width: 3rem;
+  min-width: 3rem;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-right: 1px solid var(--kd-border-subtle);
+  color: var(--kd-text-subtle);
+  background: transparent;
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+}
+.kd-performance-pad-page-tabs > button > svg { display: block; margin: auto; }
+.kd-performance-pad-page-tabs > button > b { font: 900 var(--kd-dj-sm)/1 var(--kd-font-mono); }
+.kd-performance-pad-page-tabs > button:last-child { border-right: 0; }
+.kd-performance-pad-page-tabs > button[data-active="true"] {
+  color: #70cfff;
+  background: color-mix(in srgb, #70cfff 8%, transparent);
+  box-shadow: inset 0 -2px 0 #70cfff;
+}
+.kd-performance-pad-page-content {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.kd-performance-pad-page-content > .kd-performance-cues {
+  grid-column: auto;
+  grid-row: auto;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 0.28rem;
+}
+.kd-performance-pad-page-content .kd-performance-cues-bank > span {
+  height: 100%;
+  min-height: 0;
+}
+.kd-performance-main-deck[data-side="b"] .kd-performance-pad-page-content > .kd-performance-cues { direction: rtl; }
+.kd-performance-main-deck[data-side="b"] .kd-performance-pad-page-content > .kd-performance-cues > * { direction: ltr; }
+.kd-performance-loop-pads,
+.kd-performance-deck-fx-page .kd-performance-pad-fx,
+.kd-performance-deck-fx-page .kd-performance-sampler-pads {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  width: 100%;
+  height: 100%;
+  padding: 0.28rem;
+  background: var(--kd-border-subtle);
+}
+.kd-performance-loop-pads > button {
+  min-width: 0;
+  display: grid;
+  place-content: center;
+  gap: 0.2rem;
+  border: 0;
+  color: var(--kd-text-subtle);
+  background: var(--kd-panel-inset);
+  font-family: var(--kd-font-mono);
+}
+.kd-performance-loop-pads > button > b { color: var(--kd-text); font-size: var(--kd-dj-lg); }
+.kd-performance-loop-pads > button > span { font-size: var(--kd-dj-xs); }
+.kd-performance-loop-pads > button[data-active="true"] {
+  color: #fff;
+  background: color-mix(in srgb, #7567cf 72%, var(--kd-panel-inset));
+}
+.kd-performance-loop-pads > button:disabled { opacity: 0.42; }
+.kd-performance-deck-fx-page {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 1.4rem minmax(0, 1fr);
+}
+.kd-performance-deck-fx-page > .kd-performance-fx-toolbar {
+  margin: 0;
+  border-bottom: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-deck-fx-page .kd-performance-fx-modes {
+  width: 100%;
+  height: 100%;
+}
+.kd-performance-deck-fx-page .kd-performance-fx-modes > button {
+  flex: 1 1 0;
+  min-height: 0;
+  border-block: 0;
+}
+.kd-performance-deck-fx-page > .kd-performance-deck-fx-bank {
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+  border: 0;
+}
+.kd-performance-deck-fx-page > .kd-performance-deck-fx-bank > header { display: none; }
+.kd-performance-deck-fx-page .kd-performance-pad-fx > button,
+.kd-performance-deck-fx-page .kd-performance-sampler-pads > button { min-height: 0; }
+.kd-performance-deck-fx-bank:not([data-targeted="true"]) { opacity: 0.48; }
+.kd-performance-deck-fx-bank .kd-performance-fx-knobs {
+  display: grid;
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  background: var(--kd-border-subtle);
+}
+.kd-performance-deck-fx-bank .kd-performance-fx-slot {
+  grid-template-columns: 2rem minmax(3.8rem, 0.55fr) minmax(3.8rem, 1fr) minmax(3.8rem, 1fr);
+  gap: 0.3rem;
+  padding: 0.16rem 0.42rem;
+}
+.kd-performance-deck-fx-bank .kd-performance-fx-slot[data-kind="vocal"] {
+  grid-template-columns: 2rem minmax(3.8rem, 0.65fr) minmax(5rem, 1.6fr);
+}
+.kd-performance-deck-fx-bank .kd-performance-fx-slot .kd-dj-slide {
+  grid-template-columns: 1.35rem minmax(0, 1fr) 1.5rem;
+  gap: 0.14rem;
+}
+
+.kd-performance-platter {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--kd-border-subtle);
+  background: #101419;
+}
+.kd-performance-main-deck[data-side="b"] .kd-performance-platter {
+  border-right: 0;
+  border-left: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-platter .kd-performance-vinyl-record {
+  width: min(7.6rem, calc(100% - 0.8rem));
+  height: auto;
+  aspect-ratio: 1;
+  opacity: 0.72;
+}
+.kd-performance-platter .kd-performance-vinyl-record img {
+  width: 72%;
+  height: 72%;
+}
+.kd-performance-platter-brand {
+  position: relative;
+  z-index: 1;
+  color: #8b929c;
+  font: 900 clamp(1.25rem, 2vw, 1.75rem)/1 var(--kd-font-mono);
+  letter-spacing: 0.015em;
+  text-shadow: 0 1px 0 #000;
+}
+.kd-performance-platter[data-empty="true"] .kd-performance-vinyl-record {
+  width: 7.5rem;
+  height: 7.5rem;
+  max-width: calc(100% - 0.8rem);
+  max-height: calc(100% - 0.8rem);
+  opacity: 1;
+  border: 0.22rem solid #080a0d;
+  background:
+    radial-gradient(circle at center,
+      #1a1e23 0 43%,
+      #111419 44% 51%,
+      #030405 52% 76%,
+      #171b20 77% 79%,
+      #050607 80% 100%);
+  box-shadow:
+    0 0 0 2px #171b20,
+    0 2px 7px rgba(0, 0, 0, 0.6),
+    inset 0 0 0 2px rgba(255, 255, 255, 0.035);
+}
+.kd-performance-platter > strong {
+  position: absolute;
+  color: #f4f7fb;
+  font: 850 var(--kd-dj-xl)/1 var(--kd-font-mono);
+  text-shadow: 0 1px 3px #000;
+}
+.kd-performance-platter > span:last-child {
+  position: absolute;
+  bottom: 1.05rem;
+  color: var(--kd-text-subtle);
+  font: 700 var(--kd-dj-sm)/1 var(--kd-font-mono);
+}
+
+.kd-performance-deck-mix-module {
+  display: grid;
+  grid-template-columns: minmax(4.4rem, 1fr) 3.15rem;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0.25rem;
+  min-width: 0;
+  padding: 0.3rem 0.34rem;
+  background: color-mix(in srgb, var(--kd-panel) 88%, transparent);
+}
+.kd-performance-main-deck[data-side="b"] .kd-performance-deck-mix-module {
+  grid-template-columns: 3.15rem minmax(4.4rem, 1fr);
+}
+.kd-performance-deck-mix-module > .kd-performance-strip {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+}
+.kd-performance-deck-mix-module > .kd-performance-gain-fader {
+  grid-column: 2;
+  grid-row: 1;
+}
+.kd-performance-main-deck[data-side="b"] .kd-performance-deck-mix-module > .kd-performance-strip { grid-column: 2; }
+.kd-performance-main-deck[data-side="b"] .kd-performance-deck-mix-module > .kd-performance-gain-fader { grid-column: 1; }
+.kd-performance-deck-mix-module .kd-performance-strip-knobs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(5.1rem, 1fr) auto;
+  align-items: stretch;
+  justify-items: stretch;
+  gap: 0.16rem;
+  height: 100%;
+}
+.kd-dj-eq-chart {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  min-height: 5.1rem;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: #0b1015;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  outline: none;
+}
+.kd-dj-eq-chart[data-dragging="true"] {
+  cursor: ns-resize;
+}
+.kd-dj-eq-spectrum {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+.kd-dj-eq-spectrum > path {
+  fill: none;
+  stroke-width: 2.1;
+  vector-effect: non-scaling-stroke;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0;
+  transition: opacity 120ms linear;
+}
+.kd-dj-eq-zero {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
+  pointer-events: none;
+}
+.kd-dj-eq-guides { position: absolute; z-index: 2; inset: 0; pointer-events: none; }
+.kd-dj-eq-guides > i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.045);
+}
+.kd-dj-eq-guides > i[data-kind="major"] {
+  background: rgba(255, 255, 255, 0.11);
+}
+.kd-dj-eq-curve {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+.kd-dj-eq-curve > path {
+  fill: none;
+  stroke: #cbd2d9;
+  stroke-width: 1.65;
+  vector-effect: non-scaling-stroke;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.kd-dj-eq-knobs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  justify-items: center;
+  gap: 0.06rem;
+  min-width: 0;
+}
+.kd-performance-deck-mix-module .kd-dj-eq-knobs > .kd-dj-arcknob {
+  width: min(2.2rem, 100%);
+  gap: 0.06rem;
+}
+.kd-performance-deck-mix-module .kd-dj-eq-knobs > .kd-dj-arcknob > b { letter-spacing: 0; }
+.kd-performance-gain-fader {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  justify-items: center;
+  gap: 0.25rem;
+  box-sizing: border-box;
+  padding-inline: 0.24rem;
+  background: color-mix(in srgb, var(--kd-panel-inset) 58%, transparent);
+}
+.kd-performance-main-deck[data-side="a"] .kd-performance-gain-fader {
+  border-left: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-main-deck[data-side="b"] .kd-performance-gain-fader {
+  border-right: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-gain-stack {
+  width: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  justify-items: center;
+  gap: 0.25rem;
+}
+.kd-performance-gain-stack > .kd-dj-arcknob[data-size="xs"] {
+  width: 2.6rem !important;
+  grid-template-rows: 2.2rem;
+  align-items: center;
+  gap: 0;
+}
+.kd-performance-gain-stack > .kd-dj-arcknob[data-size="xs"] > svg { align-self: center; }
+.kd-performance-gain-stack > .kd-dj-arcknob[data-size="xs"] > svg {
+  width: 1.45rem !important;
+  height: 1.45rem !important;
+}
+.kd-performance-gain-stack > .kd-dj-arcknob[data-size="xs"] > b {
+  display: none;
+}
+.kd-performance-gain-fader > .kd-dj-arcknob[data-size="xl"] { width: 3rem !important; }
+.kd-performance-gain-fader > .kd-dj-arcknob > b {
+  width: 2.6rem;
+  max-width: none;
+  overflow: visible;
+  text-align: center;
+  text-overflow: clip;
+}
+.kd-performance-gain-stack > .kd-performance-channel-fader {
+  width: 100%;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+  padding: 0;
+}
+.kd-performance-gain-stack > .kd-performance-channel-fader > b { display: none; }
+.kd-performance-gain-fader .kd-performance-channel-fader .kd-dj-vfader {
+  justify-self: center;
+  width: 1rem;
+  min-height: 3.7rem;
+}
+.kd-performance-gain-fader .kd-performance-channel-fader .kd-dj-vfader-ticks > u {
+  width: 1.45rem;
+  margin-left: -0.725rem;
+  background: color-mix(in srgb, var(--kd-fader-track) 70%, transparent);
+}
+.kd-performance-gain-fader .kd-performance-channel-fader .kd-dj-vfader-thumb {
+  width: 1.5rem;
+  height: 0.42rem;
+  border-radius: 0.21rem !important;
+  background: var(--kd-fader-thumb);
+}
+.kd-performance-gain-fader .kd-performance-channel-fader .kd-dj-vfader::after { content: none; }
+
+.kd-performance-transport-layout {
+  display: grid;
+  /* Match the combined width of the two mixer tracks above: each half reserves 4.7rem for
+     TEMPO, then gives MIX 0.92 of the remaining 2.42fr. */
+  grid-template-columns:
+    minmax(0, 1fr)
+    max(24rem, calc(38.0165% - 3.5736rem))
+    minmax(0, 1fr);
+  align-items: stretch;
+  min-width: 0;
+  border-bottom: 1px solid var(--kd-border-subtle);
+  background: var(--kd-panel-raised);
+}
+.kd-performance-deck-transport-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0.34rem 0.4rem 0.24rem;
+}
+.kd-performance-deck-transport-row[data-side="b"] { flex-direction: row-reverse; }
+.kd-performance-deck-transport-row > .kd-performance-dock-transport {
+  flex: 0 1 7rem;
+  min-width: 5.8rem;
+  min-height: 2.35rem;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.3rem;
+}
+.kd-performance-deck-transport-row > .kd-performance-dock-transport > button {
+  border: 1px solid var(--kd-border-subtle);
+  background: var(--kd-panel-inset);
+}
+.kd-performance-deck-transport-row > .kd-performance-loop {
+  flex: 1 1 auto;
+  grid-column: auto;
+  grid-row: auto;
+  max-width: 18rem;
+}
+.kd-performance-deck-transport-row .kd-performance-loop {
+  align-items: start;
+  gap: 0.5rem;
+}
+.kd-performance-deck-transport-row .kd-performance-loop-stepper,
+.kd-performance-deck-transport-row .kd-performance-loop-jump {
+  grid-template-rows: 2.15rem auto;
+  min-width: 0;
+}
+.kd-performance-deck-transport-row .kd-performance-loop-stepper > span,
+.kd-performance-deck-transport-row .kd-performance-loop-jump > span:first-child {
+  min-height: 2.15rem;
+  border-color: #05070a;
+  border-radius: 0.46rem;
+  background: color-mix(in srgb, var(--kd-panel-raised) 94%, #fff 2%);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-border-subtle) 82%, transparent);
+}
+.kd-performance-deck-transport-row .kd-performance-loop-stepper > span {
+  grid-template-columns: 2rem minmax(2.8rem, 1fr) 2rem;
+}
+.kd-performance-deck-transport-row .kd-performance-loop-jump > span:first-child {
+  grid-template-columns: repeat(2, minmax(2.8rem, 1fr));
+}
+.kd-performance-deck-transport-row .kd-performance-loop-stepper button,
+.kd-performance-deck-transport-row .kd-performance-loop-jump button {
+  min-height: 2.15rem;
+  color: #d8dee7;
+  font-size: 1.08rem;
+  background: transparent;
+}
+.kd-performance-deck-transport-row .kd-performance-loop-stepper button:hover:not(:disabled),
+.kd-performance-deck-transport-row .kd-performance-loop-jump button:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.055);
+}
+.kd-performance-deck-transport-row .kd-performance-loop-toggle {
+  font-size: var(--kd-dj-lg) !important;
+}
+.kd-performance-deck-transport-row .kd-performance-loop-stepper > em,
+.kd-performance-deck-transport-row .kd-performance-loop-jump-size {
+  padding-top: 0.22rem;
+  color: #7f8996;
+  letter-spacing: 0.08em;
+}
+.kd-performance-deck-transport-row .kd-performance-loop-jump-size > button {
+  height: 1.15rem;
+  min-height: 0;
+  font-size: var(--kd-dj-lg);
+}
+.kd-performance-deck-transport-row[data-side="b"] > .kd-performance-loop { direction: rtl; }
+.kd-performance-deck-transport-row[data-side="b"] > .kd-performance-loop > * { direction: ltr; }
+.kd-performance-transport-layout > .kd-performance-dock-crossfader {
+  position: relative;
+  inset: auto;
+  align-self: center;
+  width: 100%;
+  height: 100%;
+  min-height: 2.7rem;
+  padding: 0.3rem 0.48rem;
+  transform: none;
+  border-inline: 1px solid var(--kd-border-subtle);
+  background: var(--kd-panel-inset);
+}
+
+.kd-performance-lower-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(18rem, 0.5fr) minmax(0, 1fr);
+  align-items: stretch;
+  min-width: 0;
+  gap: 1px;
+  background: var(--kd-border-subtle);
+}
+.kd-performance-deck-lower-band,
+.kd-performance-global-controls {
+  min-width: 0;
+  background: var(--kd-panel);
+}
+.kd-performance-deck-lower-band {
+  display: grid;
+  grid-template-rows: auto;
+  align-items: center;
+  gap: 0.28rem;
+  padding: 0.36rem 0.44rem;
+}
+.kd-performance-deck-lower-band > .kd-performance-deck-fx-bank {
+  border: 0;
+}
+.kd-performance-deck-lower-band .kd-performance-deck-fx-bank .kd-performance-fx-knobs {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: minmax(0, 1fr);
+}
+.kd-performance-deck-lower-band .kd-performance-deck-fx-bank .kd-performance-fx-slot {
+  grid-template-columns: 1.8rem minmax(3.4rem, 1fr);
+  grid-template-rows: auto auto;
+}
+.kd-performance-deck-lower-band .kd-performance-deck-fx-bank .kd-performance-fx-slot .kd-dj-slide {
+  grid-column: 1 / -1;
+}
+.kd-performance-stem-band {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.kd-performance-stem-band .kd-dj-slide {
+  grid-template-columns: 3.4rem minmax(0, 1fr) 1.8rem;
+  gap: 0.22rem;
+}
+.kd-performance-stem-band[data-side="b"] { direction: rtl; }
+.kd-performance-stem-band[data-side="b"] > * { direction: ltr; }
+.kd-performance-global-controls {
+  display: block;
+}
+.kd-performance-global-controls .kd-performance-control-block {
+  height: auto;
+  overflow: hidden;
+  border: 0;
+  border-bottom: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-global-controls .kd-performance-control-block:last-child { border-bottom: 0; }
+.kd-performance-global-controls .kd-performance-fx-sampler-block { padding: 0.3rem 0.38rem; }
+.kd-performance-global-controls .kd-performance-fx-toolbar { margin: 0; }
+.kd-performance-global-controls .kd-performance-monitor-block { position: relative; }
+.kd-performance-global-controls .kd-performance-monitor-block > .kd-performance-midi {
+  position: absolute;
+  top: 0.15rem;
+  right: 0.2rem;
+  z-index: 2;
+}
+.kd-performance-global-controls .kd-performance-toggle-group { margin: 0.24rem 0.35rem 0.08rem; }
+.kd-performance-global-controls .kd-performance-other-settings {
+  gap: 0.3rem;
+  padding: 0.14rem 0.35rem 0.25rem;
+}
+.kd-performance-global-controls .kd-performance-other-settings .kd-dj-slide {
+  grid-template-columns: 2.8rem minmax(0, 1fr) 2.1rem;
+  gap: 0.18rem;
+}
+
+@media (max-width: 1200px) {
+  .kd-performance-main-deck {
+    grid-template-columns: minmax(3.5rem, 4.2rem) minmax(11rem, 1fr) minmax(10rem, 0.85fr);
+    grid-template-rows: minmax(12.4rem, auto);
+  }
+  .kd-performance-main-deck[data-side="b"] {
+    grid-template-columns: minmax(10rem, 0.85fr) minmax(11rem, 1fr) minmax(3.5rem, 4.2rem);
+  }
+  .kd-performance-transport-layout {
+    /* Medium layout uses MIX 0.85 of the 1.85fr left after the 4.2rem TEMPO track. */
+    grid-template-columns:
+      minmax(0, 1fr)
+      max(20rem, calc(45.946% - 3.86rem))
+      minmax(0, 1fr);
+  }
+  .kd-performance-main-deck[data-side="a"] > .kd-performance-mixer-tempo { grid-column: 1; grid-row: 1; }
+  .kd-performance-main-deck[data-side="a"] > .kd-performance-deck-mix-module { grid-column: 3; grid-row: 1; }
+  .kd-performance-main-deck[data-side="a"] > .kd-performance-deck-pad-bank { grid-column: 2; grid-row: 1; }
+  .kd-performance-main-deck[data-side="b"] > .kd-performance-deck-mix-module { grid-column: 1; grid-row: 1; }
+  .kd-performance-main-deck[data-side="b"] > .kd-performance-mixer-tempo { grid-column: 3; grid-row: 1; }
+  .kd-performance-main-deck[data-side="b"] > .kd-performance-deck-pad-bank { grid-column: 2; grid-row: 1; }
+  .kd-performance-lower-layout { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kd-performance-global-controls { grid-column: 1 / -1; grid-row: 2; grid-template-columns: minmax(0, 0.7fr) minmax(0, 1fr); grid-template-rows: auto; }
+}
+
+@media (max-width: 980px) {
+  .kd-performance-transport-layout { grid-template-columns: minmax(0, 1fr); }
+  .kd-performance-transport-layout > .kd-performance-dock-crossfader {
+    grid-row: 2;
+    border-inline: 0;
+    border-block: 1px solid var(--kd-border-subtle);
+  }
+  .kd-performance-deck-transport-row[data-side="b"] { grid-row: 3; }
+}
+
+@media (max-width: 760px) {
+  .kd-performance-main-decks { grid-template-columns: minmax(0, 1fr); }
+  .kd-performance-main-deck + .kd-performance-main-deck { border-left: 0; border-top: 1px solid var(--kd-border-subtle); }
+  .kd-performance-deck-fx-bank .kd-performance-fx-knobs {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(3, auto);
+  }
+  .kd-performance-deck-fx-bank .kd-performance-fx-slot {
+    grid-template-columns: 1.8rem minmax(3.4rem, 0.55fr) minmax(3.4rem, 1fr) minmax(3.4rem, 1fr);
+    grid-template-rows: auto;
+  }
+  .kd-performance-deck-fx-bank .kd-performance-fx-slot .kd-dj-slide { grid-column: auto; }
+  .kd-performance-lower-layout { grid-template-columns: minmax(0, 1fr); }
+  .kd-performance-global-controls { grid-column: auto; grid-row: auto; grid-template-columns: minmax(0, 1fr); }
+}
+
+/* DJ 曲库保留用户配置的完整列宽；超出当前板块时由既有 .kd-scroll 横向浏览。 */
