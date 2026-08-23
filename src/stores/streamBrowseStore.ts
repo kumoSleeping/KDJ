@@ -9,7 +9,7 @@ import { create } from "zustand";
 import { api } from "../lib/api";
 import type { Account, Platform, StreamPlaylist } from "../types";
 
-export const STREAM_BROWSE_PLATFORMS = ["wyy", "qqm"] as const;
+export const STREAM_BROWSE_PLATFORMS = ["wyy", "qqm", "bilibili"] as const;
 export type StreamBrowsePlatform = Extract<
   Platform,
   (typeof STREAM_BROWSE_PLATFORMS)[number]
@@ -82,7 +82,7 @@ interface StreamBrowseStore {
   /** 二级分组独立折叠；与平台根节点分开，宽/窄侧栏共享当前会话状态。 */
   sectionExpanded: PlatformMap<SectionMap<boolean>>;
   /** 最近点开的远程歌单，仅用于侧栏高亮，不代表本地曲库选择。 */
-  active: StreamPlaylist | null;
+  active: ActiveStreamPlaylist | null;
   accountKeys: PlatformMap<string | null>;
   cacheSignatures: PlatformMap<string | null>;
   updatedAt: PlatformMap<number>;
@@ -111,12 +111,12 @@ interface StreamBrowseStore {
     section: StreamPlaylistSectionId,
     expanded: boolean,
   ): void;
-  setActive(playlist: StreamPlaylist | null): void;
+  setActive(playlist: ActiveStreamPlaylist | null): void;
   setError(platform: StreamBrowsePlatform, error: string): void;
 }
 
-function platformMap<T>(wyy: T, qqm: T): PlatformMap<T> {
-  return { wyy, qqm };
+function platformMap<T>(wyy: T, qqm: T, bilibili: T): PlatformMap<T> {
+  return { wyy, qqm, bilibili };
 }
 
 function defaultSectionExpanded(): SectionMap<boolean> {
@@ -130,8 +130,12 @@ interface PersistedBrowseLayout {
 
 function defaultBrowseLayout(): PersistedBrowseLayout {
   return {
-    expanded: platformMap(false, false),
-    sectionExpanded: platformMap(defaultSectionExpanded(), defaultSectionExpanded()),
+    expanded: platformMap(false, false, false),
+    sectionExpanded: platformMap(
+      defaultSectionExpanded(),
+      defaultSectionExpanded(),
+      defaultSectionExpanded(),
+    ),
   };
 }
 
@@ -266,7 +270,7 @@ function browserStorage(): Storage | null {
   }
 }
 
-/** 展开态只含布尔偏好，不绑定账号；NetEase 与 Q Music、各二级文件夹分别记忆。 */
+/** 展开态只含布尔偏好，不绑定账号；各在线来源和二级文件夹分别记忆。 */
 function readPersistedBrowseLayout(): PersistedBrowseLayout {
   const fallback = defaultBrowseLayout();
   const storage = browserStorage();
@@ -413,18 +417,18 @@ function persistPlatform(
 const initialBrowseLayout = readPersistedBrowseLayout();
 
 export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
-  playlists: platformMap(null, null),
-  loading: platformMap(false, false),
-  errors: platformMap("", ""),
+  playlists: platformMap(null, null, null),
+  loading: platformMap(false, false, false),
+  errors: platformMap("", "", ""),
   expanded: initialBrowseLayout.expanded,
   sectionExpanded: initialBrowseLayout.sectionExpanded,
   active: null,
-  accountKeys: platformMap(null, null),
-  cacheSignatures: platformMap(null, null),
-  updatedAt: platformMap(0, 0),
-  lastAttemptAt: platformMap(0, 0),
-  calibratedAccountKeys: platformMap(null, null),
-  revisions: platformMap(0, 0),
+  accountKeys: platformMap(null, null, null),
+  cacheSignatures: platformMap(null, null, null),
+  updatedAt: platformMap(0, 0, 0),
+  lastAttemptAt: platformMap(0, 0, 0),
+  calibratedAccountKeys: platformMap(null, null, null),
+  revisions: platformMap(0, 0, 0),
 
   async bindAccount(platform, binding) {
     const before = get();

@@ -31,6 +31,8 @@ export function isEditable(target: EventTarget | null): boolean {
 export type SearchListClipboard = {
   /** 中间栏正显示搜索结果。 */
   active: () => boolean;
+  /** 多板块同时可见且键盘焦点不在表内时，当前是否以在线结果为主板块。 */
+  preferred?: () => boolean;
   selectAll: () => void;
   chosenSources: () => SongSource[];
   /** 把当前勾选加入下载队列（不立刻开下，等「开始下载」）。 */
@@ -81,6 +83,7 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
       const inOneLibrary = Boolean(target?.closest?.('[data-kind="onelibrary"]'));
       const oneLibraryTarget = usePlaylistStore.getState().selectedTarget;
       const searchActive = search?.active() ?? false;
+      const searchPreferred = searchActive && (search?.preferred?.() ?? false);
       const chosen = searchActive ? search!.chosenSources() : [];
       const librarySelected = useLibraryStore.getState().selectedIds.length > 0;
       // 点在哪张表就听哪张；否则有勾选的那边优先；都没有时搜索开着归搜索。
@@ -88,6 +91,8 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
         ? searchActive
         : inLibrary
           ? false
+          : searchPreferred
+            ? true
           : chosen.length > 0
             ? true
             : librarySelected

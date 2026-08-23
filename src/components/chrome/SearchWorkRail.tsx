@@ -147,13 +147,14 @@ export function SearchWorkRail({
         </span>,
       );
       if (openedCollection) {
+        const unit = openedCollection.platform === "bilibili" ? "个视频" : "首";
         texts.push(
           <span
             key="opened-collection"
             className="kd-activity-text kd-truncate"
-            title={`${openedCollection.title} · ${openedCollection.groups.length} 首`}
+            title={`${openedCollection.title} · ${openedCollection.groups.length} ${unit}`}
           >
-            {openedCollection.title} · {openedCollection.groups.length} 首
+            {openedCollection.title} · {openedCollection.groups.length} {unit}
           </span>,
         );
       }

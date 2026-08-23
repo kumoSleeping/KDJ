@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt as _;
 use kdj_core::models::{
     Account, AccountState, Platform, QrSession, QrStateValue, ResolveKind, ResolveResponse,
-    SongSource, VideoDownloadRequest, VideoInfo, VideoPage,
+    SongSource, StreamPlaylist, StreamPlaylistResponse, VideoDownloadRequest, VideoInfo, VideoPage,
 };
 use kdj_core::paths::{finalize_filename, sanitize_filename_value};
 use serde_json::Value;
@@ -31,8 +31,8 @@ use super::{login, qn_for_height};
 use crate::ffmpeg;
 use crate::net::{create_download_writer, ensure_media_url, AtomicDownload};
 use crate::provider::{
-    effective_limit, full_listing, qr_data_url_from_text, str_field, unique_download_path,
-    Capabilities, DownloadJob, MusicProvider, ProgressSink, ProviderContext,
+    effective_limit, full_listing, loose_int, qr_data_url_from_text, str_field,
+    unique_download_path, Capabilities, DownloadJob, MusicProvider, ProgressSink, ProviderContext,
 };
 
 const LABEL: &str = "哔哩哔哩";
@@ -735,6 +735,44 @@ impl BilibiliProvider {
         let args = ffmpeg::extract_audio_args(source, staged, false, offset_ms);
         ffmpeg::run(&args, log_path, cancel).await
     }
+
+    /// 收藏夹标题与视频。侧栏和粘贴链接共用同一条分页/归一化路径，避免两处
+    /// 对失效视频、封面和时长的处理逐渐漂移。空收藏夹允许返回空列表；链接解析
+    /// 是否把它视为错误由调用方决定。
+    async fn favorite_folder_contents(
+        &self,
+        media_id: &str,
+        limit: usize,
+    ) -> Result<(String, Vec<SongSource>)> {
+        let title = match self.client.fav_folder_info(media_id).await {
+            Ok(info) => str_field(&info, "title")
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("哔哩哔哩收藏夹 {media_id}")),
+            Err(_) => format!("哔哩哔哩收藏夹 {media_id}"),
+        };
+        let limit = full_listing(limit);
+        let mut sources = Vec::new();
+        // 每页 20 条是 B 站硬限制；翻页直到空页。500 页只用于防御异常回包。
+        for page in 1..=500i64 {
+            if sources.len() >= limit {
+                break;
+            }
+            let medias = self.client.fav_resource_list(media_id, page).await?;
+            if medias.is_empty() {
+                break;
+            }
+            for item in &medias {
+                if let Some(source) = favorite_media_source(item) {
+                    sources.push(source);
+                }
+                if sources.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok((title, sources))
+    }
 }
 
 #[async_trait]
@@ -773,6 +811,14 @@ impl MusicProvider for BilibiliProvider {
             );
         }
         let mut account = Account::new(Platform::Bilibili, LABEL, AccountState::Valid, "");
+        account.account_key = data
+            .get("mid")
+            .map(|value| match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            })
+            .filter(|value| !value.is_empty() && value != "null")
+            .unwrap_or_default();
         account.nickname = data
             .get("uname")
             .and_then(Value::as_str)
@@ -897,6 +943,48 @@ impl MusicProvider for BilibiliProvider {
             .collect())
     }
 
+    async fn stream_playlists(&self) -> Result<Vec<StreamPlaylist>> {
+        let nav = self.client.nav().await?;
+        if nav.get("isLogin").and_then(Value::as_bool) != Some(true) {
+            bail!("登录哔哩哔哩后才能查看收藏夹");
+        }
+        let mid = loose_int(nav.get("mid"));
+        if mid <= 0 {
+            bail!("哔哩哔哩账号信息缺少用户 ID");
+        }
+        let mut playlists: Vec<StreamPlaylist> = self
+            .client
+            .fav_created_folders(mid)
+            .await?
+            .iter()
+            .filter_map(favorite_folder_playlist)
+            .collect();
+        playlists.sort_by(|left, right| {
+            (!left.is_favorite)
+                .cmp(&(!right.is_favorite))
+                .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+        });
+        Ok(playlists)
+    }
+
+    async fn stream_playlist_tracks(
+        &self,
+        key: &str,
+        limit: usize,
+    ) -> Result<Option<StreamPlaylistResponse>> {
+        let media_id = key.trim();
+        if media_id.is_empty() || !media_id.chars().all(|ch| ch.is_ascii_digit()) {
+            return Ok(None);
+        }
+        let (title, sources) = self.favorite_folder_contents(media_id, limit).await?;
+        Ok(Some(StreamPlaylistResponse {
+            platform: Platform::Bilibili,
+            key: media_id.to_string(),
+            title,
+            sources,
+        }))
+    }
+
     /// B 站链接由 `/api/video/resolve` 单独处理，音乐管线这里只认领收藏夹：
     /// 贴 `space.bilibili.com/{mid}/favlist?fid={fid}` 或纯数字 fid，整包
     /// 展开成歌单来源（payload 带 bvid），后续逐条走下载管线。
@@ -904,61 +992,7 @@ impl MusicProvider for BilibiliProvider {
         let Some(fid) = pick_favlist_id(url) else {
             return Ok(None);
         };
-        let limit = full_listing(limit);
-        // 标题拿不到不致命：用 fid 兑底，内容照常展开。
-        let title = match self.client.fav_folder_info(&fid).await {
-            Ok(info) => str_field(&info, "title")
-                .filter(|text| !text.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("哔哩哔哩收藏夹 {fid}")),
-            Err(_) => format!("哔哩哔哩收藏夹 {fid}"),
-        };
-        let mut sources: Vec<SongSource> = Vec::new();
-        // 每页 20 条是 B 站硬限制；翻页直到空页。上限防御异常回包。
-        for page in 1..=500i64 {
-            if sources.len() >= limit {
-                break;
-            }
-            let medias = self.client.fav_resource_list(&fid, page).await?;
-            if medias.is_empty() {
-                break;
-            }
-            for item in medias {
-                let Some(bvid) = str_field(&item, "bvid").map(str::to_string) else {
-                    continue;
-                };
-                if bvid.is_empty() {
-                    // 失效视频没有 bvid，跳过；标题会写「已失效视频」。
-                    continue;
-                }
-                let author = item
-                    .pointer("/upper/name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                let mut payload = serde_json::Map::new();
-                payload.insert("bvid".into(), Value::String(bvid.clone()));
-                sources.push(SongSource {
-                    platform: Platform::Bilibili,
-                    key: bvid,
-                    title: strip_search_markup(str_field(&item, "title").unwrap_or("")),
-                    artists: if author.is_empty() { vec![] } else { vec![author] },
-                    album: String::new(),
-                    // 收藏夹接口的 duration 是秒，搜索接口是钟面串——别搞混。
-                    duration: item.get("duration").and_then(Value::as_f64),
-                    cover: normalize_pic(
-                        item.get("cover").and_then(Value::as_str).unwrap_or_default(),
-                    ),
-                    max_quality: None,
-                    vip: false,
-                    payload,
-                });
-                if sources.len() >= limit {
-                    break;
-                }
-            }
-        }
+        let (title, sources) = self.favorite_folder_contents(&fid, limit).await?;
         if sources.is_empty() {
             bail!("哔哩哔哩收藏夹 {fid} 里没有可下载的视频（私密的收藏夹需要先登录）");
         }
@@ -984,12 +1018,24 @@ impl MusicProvider for BilibiliProvider {
                 .get("page_index")
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as usize,
-            // 搜索结果没有逐条选画质的入口，1080 是不吃亏的默认
-            max_height: 1080,
+            // 批量入口把全局视频画质写进 payload；旧客户端没有时保持 1080P。
+            max_height: job
+                .source
+                .payload
+                .get("max_height")
+                .and_then(Value::as_i64)
+                .filter(|height| *height > 0)
+                .unwrap_or(1080),
             audio_only: job
                 .source
                 .payload
                 .get("audio_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            transcode: job
+                .source
+                .payload
+                .get("transcode")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             title: job.source.title.clone(),
@@ -1002,6 +1048,65 @@ impl MusicProvider for BilibiliProvider {
 }
 
 // ---------------------------------------------------------------- 纯函数
+
+fn favorite_folder_playlist(item: &Value) -> Option<StreamPlaylist> {
+    // 收藏夹列表里的 `id` 是完整 media_id；`fid` 是原始短 ID，不能拿去读资源。
+    let media_id = loose_int(item.get("id"));
+    if media_id <= 0 {
+        return None;
+    }
+    let title = str_field(item, "title")?.trim();
+    if title.is_empty() {
+        return None;
+    }
+    // attr 位 1：0 = 默认收藏夹，1 = 其它收藏夹；位 0 是私密标记。
+    let is_default = loose_int(item.get("attr")) & 0b10 == 0;
+    Some(StreamPlaylist {
+        platform: Platform::Bilibili,
+        key: media_id.to_string(),
+        title: title.to_string(),
+        cover: String::new(),
+        count: loose_int(item.get("media_count")).max(0) as usize,
+        is_favorite: is_default,
+        origin: if is_default { "favorite" } else { "created" }.into(),
+    })
+}
+
+fn favorite_media_source(item: &Value) -> Option<SongSource> {
+    let bvid = str_field(item, "bvid")?.trim();
+    if bvid.is_empty() {
+        // 失效视频没有 bvid，不能构造一个必然下载失败的选择项。
+        return None;
+    }
+    let author = item
+        .pointer("/upper/name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let mut payload = serde_json::Map::new();
+    payload.insert("bvid".into(), Value::String(bvid.to_string()));
+    Some(SongSource {
+        platform: Platform::Bilibili,
+        key: bvid.to_string(),
+        title: strip_search_markup(str_field(item, "title").unwrap_or(bvid)),
+        artists: if author.is_empty() {
+            Vec::new()
+        } else {
+            vec![author.to_string()]
+        },
+        album: String::new(),
+        // 收藏夹接口的 duration 是秒，搜索接口才是钟面串。
+        duration: item.get("duration").and_then(Value::as_f64),
+        cover: normalize_pic(
+            item.get("cover")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
+        max_quality: None,
+        vip: false,
+        payload,
+    })
+}
 
 /// 搜索结果的 `duration` 摊成字符串，对应 Python 的 `str(item.get("duration") or "")`。
 ///
@@ -1109,6 +1214,43 @@ mod tests {
         assert_eq!(stringify_duration(Some(&json!(null))), "");
         assert_eq!(stringify_duration(None), "");
         assert_eq!(parse_clock(&stringify_duration(None)), None);
+    }
+
+    #[test]
+    fn favorite_folders_use_the_full_media_id_and_mark_the_default() {
+        let default = favorite_folder_playlist(&json!({
+            "id": 987654321, "fid": 123, "title": "默认收藏夹",
+            "attr": 1, "media_count": 42
+        }))
+        .unwrap();
+        assert_eq!(default.key, "987654321");
+        assert_eq!(default.count, 42);
+        assert!(default.is_favorite);
+        assert_eq!(default.origin, "favorite");
+
+        let other = favorite_folder_playlist(&json!({
+            "id": 987654322, "title": "现场", "attr": 3, "media_count": 7
+        }))
+        .unwrap();
+        assert!(!other.is_favorite);
+        assert_eq!(other.origin, "created");
+    }
+
+    #[test]
+    fn favorite_media_skips_dead_entries_and_keeps_video_metadata() {
+        assert!(favorite_media_source(&json!({"title": "已失效视频"})).is_none());
+        let source = favorite_media_source(&json!({
+            "bvid": "BV1L94y1H7CV",
+            "title": "现场录像",
+            "duration": 232,
+            "cover": "//i2.hdslb.com/x.jpg",
+            "upper": {"name": "UP主"}
+        }))
+        .unwrap();
+        assert_eq!(source.key, "BV1L94y1H7CV");
+        assert_eq!(source.artists, vec!["UP主"]);
+        assert_eq!(source.duration, Some(232.0));
+        assert_eq!(source.cover, "https://i2.hdslb.com/x.jpg");
     }
 
     #[test]

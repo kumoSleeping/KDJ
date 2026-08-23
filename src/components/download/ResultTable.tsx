@@ -50,6 +50,9 @@ import {
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import { collectionToken } from "../../lib/searchCollections";
 import { CoverImage } from "../common/VinylPlaceholder";
+import { selectableGroups, selectionKey } from "../../lib/resultSelection";
+
+export { selectableGroups, selectionKey } from "../../lib/resultSelection";
 
 const KIND_LABEL: Record<IntakeKind, string> = {
   search: "搜索",
@@ -61,30 +64,6 @@ const KIND_LABEL: Record<IntakeKind, string> = {
   unknown: "链接",
   error: "失败",
 };
-
-/** 选中键：group_id 在不同 item 之间可能重复（同一首歌被两条关键词搜到）。 */
-export function selectionKey(itemIndex: number, groupId: string): string {
-  return `${itemIndex}:${groupId}`;
-}
-
-/**
- * 能进"勾选 → 批量入队"那条路的组。
- *
- * 视频行被排除在外：画质 / 只要音轨 / 分 P 是逐条选的，批量入队那条接口
- * （`/download` 收的是 `SongSource`）带不上这些参数。两条路并存的话，
- * 用户在行里调完画质再去按底下那颗「加入队列」，调的东西会被无声丢掉。
- * 所以视频行没有勾选框，只有它自己那颗「下载」。
- * 已入库歌曲也不进入“全选/全部下载”，避免整张歌单重复排队；它自己的行菜单
- * 仍保留下载动作，需要覆盖或补文件时可以显式重下。
- */
-export function selectableGroups(item: IntakeItem): MergedGroup[] {
-  return item.groups.filter(
-    (group) =>
-      !isVideoGroup(group) &&
-      !group.in_library &&
-      group.sources.some((source) => source.platform !== "local"),
-  );
-}
 
 function isResolvedCollectionItem(item: IntakeItem): boolean {
   return (
@@ -342,8 +321,7 @@ export function ResultTable({
 
   // 单条关键词搜索就是普通列表，不套壳——套一层"包"只会平白多一行。
   const flat = items.length === 1 && items[0].kind === "search";
-  // 全选只管得着有勾选框的那些行，视频行不算在内，否则搜出来一屏视频时
-  // 表头那个框会永远勾不满
+  // 全选只管得着可下载且尚未入库的行；歌曲与 B 站视频使用同一组选择键。
   const selectableTotal = items.reduce((sum, item) => sum + selectableGroups(item).length, 0);
   const allSelected =
     selectableTotal > 0 &&
@@ -478,7 +456,9 @@ export function ResultTable({
           <strong className="kd-truncate" title={item.title || item.entry}>
             {item.title || item.entry}
           </strong>
-          <span className="kd-faint">{item.groups.length} 首</span>
+          <span className="kd-faint">
+            {item.groups.length} {item.platform === "bilibili" ? "个视频" : "首"}
+          </span>
           {pickableCount > 0 ? (
             <button
               type="button"
@@ -627,6 +607,11 @@ export function ResultTable({
                       totalColumns={totalColumns}
                       layout={layout}
                       rowNumber={flatRowOffset + position + 1}
+                      selectable={!group.in_library}
+                      selected={selected.has(selectionKey(index, group.group_id))}
+                      selectionMode={selectionMode}
+                      onToggleSelect={() => onToggleSelect(selectionKey(index, group.group_id))}
+                      onEnterSelection={() => onSelectionModeChange(true)}
                     />
                   ) : (
                     <MergedGroupRow

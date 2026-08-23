@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { Copy, Download } from "lucide-react";
+import { Check, Copy, Download } from "lucide-react";
 import { api } from "../../lib/api";
 import { copyText } from "../../lib/copyText";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
@@ -84,6 +84,12 @@ export interface VideoResultRowProps extends VideoSeed {
   layout: LayoutMode;
   /** 当前结果列表中的序号。 */
   rowNumber: number;
+  /** 收藏夹/搜索返回的视频可进入与歌曲相同的全选和批量下载流程。 */
+  selectable?: boolean;
+  selected?: boolean;
+  selectionMode?: boolean;
+  onToggleSelect?(): void;
+  onEnterSelection?(): void;
   /** @deprecated 保留兼容；请用 totalColumns。 */
   colSpan?: number;
 }
@@ -104,6 +110,11 @@ export function VideoResultRow({
   totalColumns,
   layout,
   rowNumber,
+  selectable = false,
+  selected = false,
+  selectionMode = false,
+  onToggleSelect,
+  onEnterSelection,
 }: VideoResultRowProps) {
   const settings = useAppStore((state) => state.settings);
   const openQueuePanel = useAppStore((state) => state.openQueuePanel);
@@ -153,12 +164,12 @@ export function VideoResultRow({
       page_index: 0,
       max_height: effectiveHeight,
       audio_only: false,
-      transcode: true,
+      transcode: settings?.video_transcode ?? false,
       title: title.trim() || undefined,
       artist: author.trim() || undefined,
       cover: cover.trim() || undefined,
     };
-  }, [bvid, effectiveHeight, title, author, cover]);
+  }, [bvid, effectiveHeight, settings?.video_transcode, title, author, cover]);
 
   const download = useCallback(async () => {
     setSending(true);
@@ -193,7 +204,7 @@ export function VideoResultRow({
         page_index: 0,
         max_height: effectiveHeight,
         audio_only: false,
-        transcode: true,
+        transcode: settings?.video_transcode ?? false,
       },
       { title, artist: author, cover },
       (error) => setSendError(`拖入失败：${errorText(error)}`),
@@ -216,6 +227,8 @@ export function VideoResultRow({
       <tr
         ref={rowRef}
         data-video="true"
+        data-selecting={selectionMode ? "true" : undefined}
+        aria-selected={selected}
         onContextMenu={(event) => {
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
           event.preventDefault();
@@ -228,10 +241,12 @@ export function VideoResultRow({
           }
           if (!bvid) return;
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+          if (selectionMode) return;
           if (playClick === "double") requestVideoPreview({ bvid, title, author, page: 0, cover });
         }}
         onPointerDown={(event) => {
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+          if (selectionMode) return;
           bindPointerDrag(event);
         }}
         onClick={(event) => {
@@ -241,6 +256,11 @@ export function VideoResultRow({
           }
           if (!bvid) return;
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
+          if (selectable && (selectionMode || event.metaKey || event.ctrlKey)) {
+            onToggleSelect?.();
+            return;
+          }
+          if (selectionMode) return;
           // 窄屏单击即播，双点的第二个 click 必须吞掉，避免视频重新装载两次。
           if (playClick === "single" && event.detail > 1) return;
           if (playClick === "single") requestVideoPreview({ bvid, title, author, page: 0, cover });
@@ -251,7 +271,21 @@ export function VideoResultRow({
             : "双击预览视频；点下载加入队列后可在队列里调分 P / 画质 / Offset"
         }
       >
-        <td className="kd-selection-cell" {...cellDrag} />
+        <td
+          className="kd-selection-cell"
+          data-active={selectionMode ? "true" : undefined}
+          {...cellDrag}
+        >
+          {selectionMode && selectable ? (
+            <input
+              type="checkbox"
+              checked={selected}
+              aria-label={`选择 ${title}`}
+              onChange={() => onToggleSelect?.()}
+              onClick={(event) => event.stopPropagation()}
+            />
+          ) : null}
+        </td>
         <td className="kd-result-lead" data-col="index" {...cellDrag}>
           <span className="kd-result-index">{rowNumber}</span>
         </td>
@@ -355,6 +389,19 @@ export function VideoResultRow({
             <Copy size={12} />
             复制标题
           </button>
+          {selectable ? (
+            <button
+              type="button"
+              onClick={() => {
+                onEnterSelection?.();
+                if (!selected) onToggleSelect?.();
+                setRowMenu(null);
+              }}
+            >
+              <Check size={12} />
+              选择
+            </button>
+          ) : null}
           {author ? (
             <button
               type="button"

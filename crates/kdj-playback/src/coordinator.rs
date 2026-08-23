@@ -3239,15 +3239,24 @@ impl Actor {
         let front = self.front;
         if let Some(runtime) = self.decks[front as usize].clone() {
             let start_frame = runtime.frame_for_seconds(position);
-            let installed = self.player.as_mut().ok_or_else(|| "原生音频输出未初始化".to_string())
-                .and_then(|player| {
-                    player
-                        .install_stream(front, Arc::clone(&runtime.source), start_frame)
-                        .map_err(|err| err.to_string())
+            let installed = self
+                .player
+                .as_mut()
+                .ok_or_else(|| "原生音频输出未初始化".to_string())
+                .and_then(|player| match &runtime.source {
+                    PlaybackStream::Stereo(source) => player
+                        .install_stream(front, Arc::clone(source), start_frame)
+                        .map_err(|err| err.to_string()),
+                    PlaybackStream::Stems(source) => player
+                        .install_stem_stream(front, Arc::clone(source), start_frame)
+                        .map_err(|err| err.to_string()),
                 });
             match installed {
                 Ok(source_id) => {
-                    self.decks[front as usize] = Some(DeckRuntime { source_id, ..runtime });
+                    self.decks[front as usize] = Some(DeckRuntime {
+                        source_id,
+                        ..runtime
+                    });
                     self.state.desired_playing = resume;
                     if let Err(restore_error) = self.activate(front, Activation::Hard, position) {
                         self.fail(format!(
@@ -3270,19 +3279,24 @@ impl Actor {
         if let Some(runtime) = self.decks[back as usize].clone() {
             let start_frame = runtime.frame_for_seconds(runtime.request.position);
             let installed = self.player.as_mut().and_then(|player| {
-                player
-                    .install_stream(back, Arc::clone(&runtime.source), start_frame)
-                    .map_err(|err| err.to_string())
-                    .ok()
+                match &runtime.source {
+                    PlaybackStream::Stereo(source) => {
+                        player.install_stream(back, Arc::clone(source), start_frame)
+                    }
+                    PlaybackStream::Stems(source) => {
+                        player.install_stem_stream(back, Arc::clone(source), start_frame)
+                    }
+                }
+                .map_err(|err| err.to_string())
+                .ok()
             });
             match installed {
                 Some(source_id) => {
-                    self.decks[back as usize] = Some(DeckRuntime { source_id, ..runtime });
-                    let _ = self.send(RtCommand::SetEq {
-                        deck: back,
-                        low_db: self.eq.0,
-                        high_db: self.eq.1,
+                    self.decks[back as usize] = Some(DeckRuntime {
+                        source_id,
+                        ..runtime
                     });
+                    let _ = self.apply_deck_mixer(back, self.deck_mixers[back as usize]);
                 }
                 None => {
                     self.decks[back as usize] = None;
@@ -6110,9 +6124,12 @@ mod tests {
         let snapshot = knobs.snapshot.lock().unwrap();
         assert_eq!(snapshot.deck_source_ids[DeckId::A as usize], new_source_id);
         assert!((snapshot.deck_frames[DeckId::A as usize] as f64 / 48_000.0 - 42.5).abs() < 0.1);
-        assert!(knobs.sent.lock().unwrap().iter().any(
-            |command| matches!(command, RtCommand::SetPlaying { playing: true, .. })
-        ));
+        assert!(knobs
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| matches!(command, RtCommand::SetPlaying { playing: true, .. })));
     }
 
     /// 设备枚举滞后时重开要退避重试；全部失败才落 Error，且错误里带上两次原因。

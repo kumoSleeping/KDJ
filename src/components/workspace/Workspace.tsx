@@ -46,7 +46,11 @@ import {
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useUpdateStore } from "../../stores/updateStore";
-import type { ActiveStreamPlaylist } from "../../stores/streamBrowseStore";
+import {
+  STREAM_BROWSE_PLATFORMS,
+  type ActiveStreamPlaylist,
+  type StreamBrowsePlatform,
+} from "../../stores/streamBrowseStore";
 import { useLayoutSignals } from "../../lib/useLayoutMode";
 import {
   shouldPinDetailOnClick,
@@ -154,14 +158,26 @@ function errorText(error: unknown): string {
  * 只是那一条长得像视频（见 VideoResultRow）。
  */
 const BILI_RE = /bilibili\.com|b23\.tv|^\s*(?:BV[0-9A-Za-z]{10}|av\d+)\s*$/i;
-const BILI_FAVLIST_RE = /favlist\?fid=\d+|^\s*\d{6,}\s*$/;
+const BILI_FAVLIST_RE = /\/favlist(?:[/?#]|$)[^\s]*[?&]fid=\d+|^\s*\d{6,}\s*$/i;
 
-/** 入队前给 B 站来源盖上 audio_only 标记；其它平台原样保留。 */
-function stampBilibiliAudioOnly(sources: SongSource[], audioOnly: boolean): SongSource[] {
-  if (!audioOnly) return sources;
+/** 批量入口没有逐行视频设置，把现有全局画质/转码与「只下音频」写进来源。 */
+function stampBilibiliDownloadSettings(
+  sources: SongSource[],
+  audioOnly: boolean,
+  maxHeight: number,
+  transcode: boolean,
+): SongSource[] {
   return sources.map((source) =>
     source.platform === "bilibili"
-      ? { ...source, payload: { ...source.payload, audio_only: true } }
+      ? {
+          ...source,
+          payload: {
+            ...source.payload,
+            audio_only: audioOnly,
+            max_height: maxHeight,
+            transcode,
+          },
+        }
       : source,
   );
 }
@@ -757,10 +773,15 @@ export function Workspace({
   }, [query, platforms, batch, searchKind, searchCapabilities, settings, revealSearchPane]);
 
   /**
-   * 左侧网易云 / QQ 歌单只是远程浏览入口：点开后复用搜索结果这张表和下载队列，
+   * 左侧平台歌单/收藏夹只是远程浏览入口：点开后复用搜索结果这张表和下载队列，
    * 不写本地曲库，也不恢复已经退役的 stream_library 持久化表。
    */
   const openStreamPlaylist = useCallback(async (playlist: StreamPlaylist) => {
+    const browsePlatform = STREAM_BROWSE_PLATFORMS.includes(
+      playlist.platform as StreamBrowsePlatform,
+    )
+      ? (playlist.platform as StreamBrowsePlatform)
+      : null;
     const requestId = ++resultRequestSeqRef.current;
     streamOpenNavigationRef.current = true;
     queueMicrotask(() => {
@@ -777,8 +798,8 @@ export function Workspace({
     setLoadingCollections(new Set());
     setSearchError("");
     revealSearchPane();
-    if (playlist.platform === "wyy" || playlist.platform === "qqm") {
-      setActiveStreamPlaylist({ platform: playlist.platform, key: playlist.key });
+    if (browsePlatform) {
+      setActiveStreamPlaylist({ platform: browsePlatform, key: playlist.key });
     }
     try {
       const response = await api.streamPlaylist(playlist, 0);
@@ -809,8 +830,8 @@ export function Workspace({
           error: "",
         },
       ]);
-      if (playlist.platform === "wyy" || playlist.platform === "qqm") {
-        setActiveStreamPlaylist({ platform: playlist.platform, key: playlist.key });
+      if (browsePlatform) {
+        setActiveStreamPlaylist({ platform: browsePlatform, key: playlist.key });
       }
     } catch (error) {
       if (requestId !== resultRequestSeqRef.current) return;
@@ -1812,7 +1833,12 @@ export function Workspace({
     try {
       // 不报"已加入 N 个任务"：右边那栏就是队列，任务当场排进去，
       // 而且勾选被清空、这条动作栏跟着收起来，做成了看得一清二楚
-      await enqueue(stampBilibiliAudioOnly(chosenSources, bilibiliAudioOnly), {
+      await enqueue(stampBilibiliDownloadSettings(
+        chosenSources,
+        bilibiliAudioOnly,
+        settings?.video_max_height ?? 1080,
+        settings?.video_transcode ?? false,
+      ), {
         quality: settings?.default_quality ?? null,
         one_library_target: oneLibraryPaneVisible ? selectedOneLibrary : null,
       });
@@ -1824,11 +1850,12 @@ export function Workspace({
     } catch (error) {
       setQueueError(`加入队列失败：${errorText(error)}`);
     }
-  }, [chosenSources, settings?.default_quality, oneLibraryPaneVisible, selectedOneLibrary, enqueue, openQueuePanel, refreshStats, bilibiliAudioOnly]);
+  }, [chosenSources, settings?.default_quality, settings?.video_max_height, settings?.video_transcode, oneLibraryPaneVisible, selectedOneLibrary, enqueue, openQueuePanel, refreshStats, bilibiliAudioOnly]);
 
   // 曲目表 / 搜索结果：Cmd/Ctrl + A · C · X · V（Option+V 强制移动）。
   useLibraryClipboard({
     active: () => Boolean(searchPaneVisible && items && items.length > 0),
+    preferred: () => activeWorkspacePane === "search",
     selectAll: () => {
       setSearchSelectionMode(true);
       selectAllSearch();
@@ -1855,7 +1882,12 @@ export function Workspace({
       if (!sources.length) return;
       setQueueError("");
       try {
-        await enqueue(sources, {
+        await enqueue(stampBilibiliDownloadSettings(
+          sources,
+          bilibiliAudioOnly,
+          settings?.video_max_height ?? 1080,
+          settings?.video_transcode ?? false,
+        ), {
           quality: settings?.default_quality ?? null,
           one_library_target: oneLibraryPaneVisible ? selectedOneLibrary : null,
         });
@@ -1865,7 +1897,7 @@ export function Workspace({
         setQueueError(`整包下载失败：${errorText(error)}`);
       }
     },
-    [items, sourceIndex, settings?.default_quality, oneLibraryPaneVisible, selectedOneLibrary, enqueue, openQueuePanel, refreshStats],
+    [items, sourceIndex, settings?.default_quality, settings?.video_max_height, settings?.video_transcode, oneLibraryPaneVisible, selectedOneLibrary, enqueue, openQueuePanel, refreshStats, bilibiliAudioOnly],
   );
 
   const downloadGroup = useCallback(

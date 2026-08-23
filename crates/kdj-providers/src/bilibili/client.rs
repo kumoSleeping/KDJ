@@ -209,6 +209,21 @@ impl BiliClient {
         .await
     }
 
+    /// 当前用户创建的全部收藏夹。`up_mid` 来自已登录账号的 nav 回包；返回项里的
+    /// `id` 才是后续 `fav/resource/list` 所需的完整 media_id。
+    pub async fn fav_created_folders(&self, up_mid: i64) -> Result<Vec<Value>> {
+        let data = self
+            .get_json(&format!(
+                "https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid={up_mid}&type=2"
+            ))
+            .await?;
+        Ok(data
+            .get("list")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
     /// 收藏夹内容列表（WBI 签名）。公开收藏夹匿名可读；私有的需要登录 Cookie，
     /// 未登录时接口回 code=-403 由上层报错。
     /// 每页最多 20 条（B 站硬限制），翻页由调用方拼 medias。

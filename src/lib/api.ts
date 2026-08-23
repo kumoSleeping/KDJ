@@ -491,7 +491,7 @@ export const api = {
   /** 检查更新走后端：CSP/证书链三个壳一条路，见 routes.rs::update_check。 */
   checkUpdate: () => request<UpdateInfo>("/update/check"),
 
-  streamPlaylists: (platform: Exclude<Platform, "local" | "bilibili">) =>
+  streamPlaylists: (platform: Exclude<Platform, "local">) =>
     request<StreamPlaylist[]>(`/stream/playlists/${platform}`),
   streamPlaylist: (playlist: StreamPlaylist, limit = 0) =>
     post<StreamPlaylistResponse>("/stream/playlist", {

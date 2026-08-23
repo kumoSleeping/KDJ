@@ -395,7 +395,7 @@ export interface VjExportRequest {
 }
 
 export interface StreamPlaylist {
-  platform: Exclude<Platform, "local" | "bilibili">;
+  platform: Exclude<Platform, "local">;
   key: string;
   title: string;
   cover: string;
@@ -406,7 +406,7 @@ export interface StreamPlaylist {
 }
 
 export interface StreamPlaylistResponse {
-  platform: Exclude<Platform, "local" | "bilibili">;
+  platform: Exclude<Platform, "local">;
   key: string;
   title: string;
   sources: SongSource[];

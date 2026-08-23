@@ -77,6 +77,7 @@ const ALL_TRACKS_DROP_TARGET = "__kd_all_tracks__";
 const STREAM_ROOTS: ReadonlyArray<{ id: StreamBrowsePlatform; label: string }> = [
   { id: "wyy", label: "NetEase" },
   { id: "qqm", label: "Q Music" },
+  { id: "bilibili", label: "哔哩哔哩" },
 ];
 
 const NARROW_RAIL_SOURCE_KEY = "kd-narrow-rail-source-v1";
@@ -98,7 +99,10 @@ interface StreamPlaylistSection {
   playlists: StreamPlaylist[];
 }
 
-function streamPlaylistSections(playlists: StreamPlaylist[]): StreamPlaylistSection[] {
+function streamPlaylistSections(
+  playlists: StreamPlaylist[],
+  platform: StreamBrowsePlatform,
+): StreamPlaylistSection[] {
   const created = playlists.filter(
     (playlist) => !playlist.is_favorite && playlist.origin === "created",
   );
@@ -111,7 +115,11 @@ function streamPlaylistSections(playlists: StreamPlaylist[]): StreamPlaylistSect
   const known = new Set([...favorite, ...created, ...collected]);
   const other = playlists.filter((playlist) => !known.has(playlist));
   return [
-    { id: "created", label: "创建的歌单", playlists: created },
+    {
+      id: "created",
+      label: platform === "bilibili" ? "收藏夹" : "创建的歌单",
+      playlists: created,
+    },
     { id: "collected", label: "收藏的歌单", playlists: collected },
     { id: "other", label: "其他歌单", playlists: other },
   ].filter((section) => section.playlists.length > 0) as StreamPlaylistSection[];
@@ -119,6 +127,10 @@ function streamPlaylistSections(playlists: StreamPlaylist[]): StreamPlaylistSect
 
 function accountCanBrowse(state: AccountState | undefined): boolean {
   return state === "valid" || state === "unknown";
+}
+
+function streamPlaylistCountLabel(playlist: StreamPlaylist): string {
+  return `${playlist.count} ${playlist.platform === "bilibili" ? "个视频" : "首"}`;
 }
 
 function readNarrowRailSource(): NarrowRailSource | null {
@@ -133,9 +145,10 @@ function readNarrowRailSource(): NarrowRailSource | null {
     const record = value as Record<string, unknown>;
     if (
       record.kind === "stream" &&
-      (record.platform === "wyy" || record.platform === "qqm")
+      typeof record.platform === "string" &&
+      STREAM_BROWSE_PLATFORMS.includes(record.platform as StreamBrowsePlatform)
     ) {
-      return { kind: "stream", platform: record.platform };
+      return { kind: "stream", platform: record.platform as StreamBrowsePlatform };
     }
     if (record.kind === "onelibrary") return { kind: "onelibrary" };
     if (
@@ -173,12 +186,14 @@ function useStreamBrowseLifecycle(enabled: boolean) {
   );
   const wyyAccount = accounts.find((account) => account.platform === "wyy");
   const qqmAccount = accounts.find((account) => account.platform === "qqm");
+  const bilibiliAccount = accounts.find((account) => account.platform === "bilibili");
 
   useEffect(() => {
     if (!enabled) return;
     const bindings = [
       ["wyy", wyyAccount],
       ["qqm", qqmAccount],
+      ["bilibili", bilibiliAccount],
     ] as const;
     for (const [platform, account] of bindings) {
       if (account) {
@@ -192,6 +207,7 @@ function useStreamBrowseLifecycle(enabled: boolean) {
   }, [
     accountsError,
     appBooting,
+    bilibiliAccount,
     bindStreamAccount,
     enabled,
     qqmAccount,
@@ -337,8 +353,7 @@ export function NarrowFolderRail({
   const [narrowDrop, setNarrowDrop] = useState("");
   const cachedNarrowActiveStreamPlaylist =
     cachedActiveStreamPlaylist &&
-    (cachedActiveStreamPlaylist.platform === "wyy" ||
-      cachedActiveStreamPlaylist.platform === "qqm")
+    STREAM_BROWSE_PLATFORMS.includes(cachedActiveStreamPlaylist.platform)
       ? {
           platform: cachedActiveStreamPlaylist.platform,
           key: cachedActiveStreamPlaylist.key,
@@ -429,7 +444,7 @@ export function NarrowFolderRail({
     platform: StreamBrowsePlatform,
     playlist: StreamPlaylist,
   ) => {
-    setActiveStreamPlaylist(playlist);
+    setActiveStreamPlaylist({ platform, key: playlist.key });
     setStreamError(platform, "");
     try {
       const opening = onOpenStreamPlaylist?.(playlist);
@@ -526,7 +541,7 @@ export function NarrowFolderRail({
     const favoritePlaylists = (playlists ?? []).filter(
       (playlist) => playlist.is_favorite || playlist.origin === "favorite",
     );
-    const sections = streamPlaylistSections(playlists ?? []);
+    const sections = streamPlaylistSections(playlists ?? [], platform);
 
     return (
       <>
@@ -594,7 +609,7 @@ export function NarrowFolderRail({
                 data-active={active || undefined}
                 data-stream-platform={platform}
                 {...midiBrowseItemProps("search", `search:playlist:${platform}:${playlist.key}`)}
-                title={`${playlist.title} · ${playlist.count} 首`}
+                title={`${playlist.title} · ${streamPlaylistCountLabel(playlist)}`}
                 onClick={() => openStreamPlaylist(platform, playlist)}
               >
                 <Heart size={14} />
@@ -633,7 +648,7 @@ export function NarrowFolderRail({
                         data-active={active || undefined}
                         data-stream-platform={platform}
                         {...midiBrowseItemProps("search", `search:playlist:${platform}:${playlist.key}`)}
-                        title={`${playlist.title} · ${playlist.count} 首`}
+                        title={`${playlist.title} · ${streamPlaylistCountLabel(playlist)}`}
                         onClick={() => openStreamPlaylist(platform, playlist)}
                       >
                         <ListMusic size={14} />
@@ -938,10 +953,6 @@ export function FolderTree({
    * 弹窗飘走之后用户只剩一个没变化的界面。
    */
   const [notice, setNotice] = useState("");
-  const wyyAccount = accounts.find((account) => account.platform === "wyy");
-  const qqmAccount = accounts.find((account) => account.platform === "qqm");
-  const wyyAccountState = wyyAccount?.state;
-  const qqmAccountState = qqmAccount?.state;
   const effectiveActiveStreamPlaylist =
     activeStreamPlaylist === undefined ? cachedActiveStreamPlaylist : activeStreamPlaylist;
 
@@ -1101,7 +1112,7 @@ export function FolderTree({
     platform: StreamBrowsePlatform,
     playlist: StreamPlaylist,
   ) => {
-    setActiveStreamPlaylist(playlist);
+    setActiveStreamPlaylist({ platform, key: playlist.key });
     setStreamError(platform, "");
     try {
       const opening = onOpenStreamPlaylist?.(playlist);
@@ -1122,15 +1133,13 @@ export function FolderTree({
     const playlists = streamPlaylists[platform];
     const loading = streamLoading[platform];
     const error = streamErrors[platform];
-    const accountState =
-      platform === "wyy" ? wyyAccountState : qqmAccountState;
+    const accountState = accounts.find((account) => account.platform === platform)?.state;
     const canBrowse = accountCanBrowse(accountState);
-    // “我的收藏”在网易云与 QQ 都是账号唯一的系统歌单，直接作为可点击歌单
-    // 展示；不再套一层只有一个子项的可折叠目录。
+    // 平台的默认收藏直接作为可点击项展示；不再套一层只有一个子项的目录。
     const favoritePlaylists = (playlists ?? []).filter(
       (playlist) => playlist.is_favorite || playlist.origin === "favorite",
     );
-    const sections = streamPlaylistSections(playlists ?? []);
+    const sections = streamPlaylistSections(playlists ?? [], platform);
     const count = playlists?.length;
     const rootHint = !accountState
       ? accountsError || "正在读取账号状态"
@@ -1288,7 +1297,7 @@ export function FolderTree({
                 data-active={active || undefined}
                 data-stream-platform={platform}
                 {...midiBrowseItemProps("search", `search:playlist:${platform}:${playlist.key}`)}
-                title={`${playlist.title} · ${playlist.count} 首`}
+                title={`${playlist.title} · ${streamPlaylistCountLabel(playlist)}`}
                 onClick={() => openStreamPlaylist(platform, playlist)}
               >
                 <span className="kd-folder-caret" />
@@ -1336,7 +1345,7 @@ export function FolderTree({
                         data-active={active || undefined}
                         data-stream-platform={platform}
                         {...midiBrowseItemProps("search", `search:playlist:${platform}:${playlist.key}`)}
-                        title={`${playlist.title} · ${playlist.count} 首`}
+                        title={`${playlist.title} · ${streamPlaylistCountLabel(playlist)}`}
                         onClick={() => openStreamPlaylist(platform, playlist)}
                       >
                         <span className="kd-folder-caret" />
