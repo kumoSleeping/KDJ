@@ -26,6 +26,9 @@ const SEEK_BUFFER_MS: u64 = 40;
 /// 同曲 seek 的互补平滑换手时长：短到无感，长到足以消掉随机采样点之间的阶跃。
 const SEEK_HANDOFF_MS: u64 = 5;
 const TRANSPORT_FADE_MS: u64 = 120;
+/// 拔掉耳机/切换输出设备后，系统枚举新默认设备有滞后；重开输出按这个节奏退避重试。
+const DEVICE_RECOVERY_ATTEMPTS: usize = 8;
+const DEVICE_RECOVERY_BACKOFF: Duration = Duration::from_millis(150);
 
 type CommandReply = SyncSender<Result<CommandAck, String>>;
 type StateReply = SyncSender<PlaybackSnapshot>;
@@ -344,8 +347,7 @@ impl Actor {
                 }
             }
             Request::DeviceError(error) => {
-                self.player.take();
-                self.fail(format!("系统音频设备中断：{error}"));
+                self.recover_from_device_error(error);
                 self.bump_sequence();
                 self.publish(true);
             }
@@ -1146,6 +1148,97 @@ impl Actor {
         };
     }
 
+    /// 耳机拔出/输出设备切换后，cpal 旧流回调错误。走带位置和 Deck 数据源
+    /// 都还活着，直接落 Error 会让用户拔次耳机就得重新点歌。这里原位重建：
+    /// 重开新默认设备（系统枚举有滞后，带退避重试），front Deck 从断点装回
+    /// 接着播，预备 Deck 也原位装回。重建失败才落 Error——之后用户手动
+    /// 切歌会走 load→open_output 再次尝试。
+    fn recover_from_device_error(&mut self, error: String) {
+        // 断点必须在旧 player 还在时取：take 之后快照就没了。
+        self.refresh_from_audio();
+        let resume = self.state.desired_playing || self.state.is_playing;
+        let position = self.state.current_time;
+        self.player.take();
+        self.state.buffering = false;
+        self.state.is_playing = false;
+
+        let mut reopen_error = String::new();
+        for attempt in 0..DEVICE_RECOVERY_ATTEMPTS {
+            if attempt > 0 {
+                std::thread::sleep(DEVICE_RECOVERY_BACKOFF);
+            }
+            match self.open_output() {
+                Ok(()) => {
+                    reopen_error.clear();
+                    break;
+                }
+                Err(err) => reopen_error = err,
+            }
+        }
+        if !reopen_error.is_empty() {
+            self.fail(format!("系统音频设备中断：{error}；{reopen_error}"));
+            return;
+        }
+
+        // 先把 front Deck 装进新 player（旧 source_id 已随旧 player 作废），
+        // 再从断点激活；activate 会按 desired_playing 恢复播放状态。
+        let front = self.front;
+        if let Some(runtime) = self.decks[front as usize].clone() {
+            let start_frame = runtime.frame_for_seconds(position);
+            let installed = self.player.as_mut().ok_or_else(|| "原生音频输出未初始化".to_string())
+                .and_then(|player| {
+                    player
+                        .install_stream(front, Arc::clone(&runtime.source), start_frame)
+                        .map_err(|err| err.to_string())
+                });
+            match installed {
+                Ok(source_id) => {
+                    self.decks[front as usize] = Some(DeckRuntime { source_id, ..runtime });
+                    self.state.desired_playing = resume;
+                    if let Err(restore_error) = self.activate(front, Activation::Hard, position) {
+                        self.fail(format!(
+                            "系统音频设备中断：{error}；恢复播放失败：{restore_error}"
+                        ));
+                        return;
+                    }
+                }
+                Err(restore_error) => {
+                    self.fail(format!(
+                        "系统音频设备中断：{error}；恢复播放失败：{restore_error}"
+                    ));
+                    return;
+                }
+            }
+        }
+        // 后台预备的 Deck 原位装回（不激活）；装不回就只丢预备态，
+        // 不影响正在听的这首。
+        let back = front.other();
+        if let Some(runtime) = self.decks[back as usize].clone() {
+            let start_frame = runtime.frame_for_seconds(runtime.request.position);
+            let installed = self.player.as_mut().and_then(|player| {
+                player
+                    .install_stream(back, Arc::clone(&runtime.source), start_frame)
+                    .map_err(|err| err.to_string())
+                    .ok()
+            });
+            match installed {
+                Some(source_id) => {
+                    self.decks[back as usize] = Some(DeckRuntime { source_id, ..runtime });
+                    let _ = self.send(RtCommand::SetEq {
+                        deck: back,
+                        low_db: self.eq.0,
+                        high_db: self.eq.1,
+                    });
+                }
+                None => {
+                    self.decks[back as usize] = None;
+                    self.invalidate(back);
+                    self.state.prepared_track_id = None;
+                }
+            }
+        }
+    }
+
     fn fail(&mut self, error: String) {
         self.state.phase = PlaybackPhase::Error;
         self.state.is_playing = false;
@@ -1273,6 +1366,8 @@ mod tests {
         fail_send: AtomicBool,
         sent: Mutex<Vec<RtCommand>>,
         snapshot: Mutex<TransportSnapshot>,
+        /// 最近一次 open 存下的错误回调，测试用它模拟系统报“设备没了”。
+        error_hook: Mutex<Option<Box<dyn FnMut(String) + Send>>>,
     }
 
     impl Default for FakeKnobs {
@@ -1281,6 +1376,7 @@ mod tests {
                 fail_send: AtomicBool::new(false),
                 sent: Mutex::new(Vec::new()),
                 snapshot: Mutex::new(TransportSnapshot::default()),
+                error_hook: Mutex::new(None),
             }
         }
     }
@@ -1341,19 +1437,20 @@ mod tests {
 
     struct FakeFactory {
         knobs: Arc<FakeKnobs>,
-        taken: Mutex<bool>,
+        /// 每次开设备弹出一条：非空表示这次打开失败（模拟设备枚举滞后），
+        /// 空队列表示成功。
+        open_failures: Mutex<Vec<String>>,
     }
 
     impl PlaybackOutputFactory for FakeFactory {
         fn open(
             &self,
-            _on_error: Box<dyn FnMut(String) + Send>,
+            on_error: Box<dyn FnMut(String) + Send>,
         ) -> Result<Box<dyn PlaybackOutput>, String> {
-            let mut taken = self.taken.lock().unwrap();
-            if *taken {
-                return Err("测试输出只能取走一次".to_string());
+            if let Some(error) = self.open_failures.lock().unwrap().pop() {
+                return Err(error);
             }
-            *taken = true;
+            *self.knobs.error_hook.lock().unwrap() = Some(on_error);
             Ok(Box::new(FakeOutput {
                 knobs: Arc::clone(&self.knobs),
                 next_source_id: 0,
@@ -1366,7 +1463,7 @@ mod tests {
         let emit: StateEmitter = Arc::new(|_| {});
         let factory = FakeFactory {
             knobs: Arc::clone(knobs),
-            taken: Mutex::new(false),
+            open_failures: Mutex::new(Vec::new()),
         };
         Actor::new(sender, receiver, emit, Arc::new(factory))
     }
@@ -1863,12 +1960,80 @@ mod tests {
             .any(|command| matches!(command, RtCommand::SetPlaying { playing: false, .. })));
     }
 
+    /// 拔掉耳机后设备错误不应终结播放：front Deck 要在新默认设备上从断点接着播。
+    #[test]
+    fn device_error_reopens_output_and_resumes_from_breakpoint() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        let runtime = live_runtime(1, 0.0);
+        let source_id = runtime.source_id;
+        actor.decks[DeckId::A as usize] = Some(runtime);
+        actor.front = DeckId::A;
+        actor.state.track_id = Some(1);
+        actor.state.desired_playing = true;
+        actor.state.phase = PlaybackPhase::Playing;
+        // 旧 player 的走带快照：A 台在 42.5s 处发声。恢复必须从这里接上。
+        {
+            let mut snapshot = knobs.snapshot.lock().unwrap();
+            snapshot.playing = true;
+            snapshot.active_deck = DeckId::A;
+            snapshot.deck_source_ids[DeckId::A as usize] = source_id;
+            snapshot.deck_frames[DeckId::A as usize] = (42.5_f64 * 48_000.0).round() as u64;
+        }
+
+        actor.recover_from_device_error("设备已拔出".into());
+
+        assert_eq!(actor.state.phase, PlaybackPhase::Playing);
+        assert!(actor.state.is_playing);
+        assert!((actor.state.current_time - 42.5).abs() < 0.01);
+        assert_eq!(actor.state.error, "");
+        // 新 player 里 front Deck 装回了新 source_id，且从断点附近起播。
+        let new_source_id = actor.decks[DeckId::A as usize].as_ref().unwrap().source_id;
+        let snapshot = knobs.snapshot.lock().unwrap();
+        assert_eq!(snapshot.deck_source_ids[DeckId::A as usize], new_source_id);
+        assert!((snapshot.deck_frames[DeckId::A as usize] as f64 / 48_000.0 - 42.5).abs() < 0.1);
+        assert!(knobs.sent.lock().unwrap().iter().any(
+            |command| matches!(command, RtCommand::SetPlaying { playing: true, .. })
+        ));
+    }
+
+    /// 设备枚举滞后时重开要退避重试；全部失败才落 Error，且错误里带上两次原因。
+    #[test]
+    fn device_error_falls_back_to_error_phase_when_reopen_keeps_failing() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let (sender, receiver) = mpsc::channel();
+        let emit: StateEmitter = Arc::new(|_| {});
+        let factory = FakeFactory {
+            knobs: Arc::clone(&knobs),
+            open_failures: Mutex::new(vec![
+                "no default audio output device".into(),
+                "no default audio output device".into(),
+                "no default audio output device".into(),
+                "no default audio output device".into(),
+                "no default audio output device".into(),
+                "no default audio output device".into(),
+                "no default audio output device".into(),
+                "no default audio output device".into(),
+                "no default audio output device".into(),
+            ]),
+        };
+        let mut actor = Actor::new(sender, receiver, emit, Arc::new(factory));
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.0));
+
+        actor.recover_from_device_error("设备已拔出".into());
+
+        assert_eq!(actor.state.phase, PlaybackPhase::Error);
+        assert!(actor.player.is_none());
+        assert!(actor.state.error.contains("系统音频设备中断"));
+        assert!(actor.state.error.contains("no default audio output device"));
+    }
+
     #[test]
     fn platform_commands_do_not_consume_frontend_command_ids() {
         let knobs = Arc::new(FakeKnobs::default());
         let factory = Arc::new(FakeFactory {
             knobs,
-            taken: Mutex::new(false),
+            open_failures: Mutex::new(Vec::new()),
         });
         let coordinator =
             PlaybackCoordinator::spawn_with_factory(|_| {}, factory).expect("启动测试协调器");

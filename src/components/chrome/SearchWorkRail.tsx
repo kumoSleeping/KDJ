@@ -16,6 +16,7 @@ const COLLECTION_LABEL = {
   playlist: "歌单",
   artist: "艺术家",
   album: "专辑",
+  radio: "播客",
 } as const;
 
 function countSourcesByPlatform(items: IntakeItem[]): Partial<Record<Platform, number>> {
@@ -46,6 +47,10 @@ export interface SearchWorkRailProps {
   queueError: string;
   onDismissQueueError(): void;
   chosenReady: boolean;
+  /** 勾选里有 B 站来源时才出现：批量下载只要音轨（m4a）。 */
+  showBilibiliAudioOnly?: boolean;
+  bilibiliAudioOnly?: boolean;
+  onToggleBilibiliAudioOnly?(value: boolean): void;
   /** 本地面板不可见时，仍把右侧详情栏开关留在当前工作条。 */
   asideToggle?: ReactNode;
   onClose(): void;
@@ -66,6 +71,9 @@ export function SearchWorkRail({
   queueError,
   onDismissQueueError,
   chosenReady,
+  showBilibiliAudioOnly = false,
+  bilibiliAudioOnly = false,
+  onToggleBilibiliAudioOnly,
   asideToggle,
   onClose,
 }: SearchWorkRailProps) {
@@ -92,6 +100,17 @@ export function SearchWorkRail({
         actions={
           <>
             <InlineNotice text={queueError} onDismiss={onDismissQueueError} />
+            {showBilibiliAudioOnly ? (
+              <label className="kd-muted" style={{ cursor: "pointer", fontSize: 11 }}>
+                <input
+                  type="checkbox"
+                  checked={bilibiliAudioOnly}
+                  onChange={(event) => onToggleBilibiliAudioOnly?.(event.target.checked)}
+                  style={{ marginRight: 4 }}
+                />
+                B站只下音频
+              </label>
+            ) : null}
             <Button variant="primary" size="sm" disabled={!chosenReady} onClick={onAddToQueue}>
               <Download size={13} /> 加入队列
             </Button>

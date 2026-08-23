@@ -183,6 +183,7 @@ fn default_platform_priority() -> Vec<String> {
         "wyy".to_string(),
         "qqm".to_string(),
         "soundcloud".to_string(),
+        "ytm".to_string(),
         "bilibili".to_string(),
         "local".to_string(),
     ]

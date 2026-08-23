@@ -26,8 +26,8 @@ use super::client::{new_search_id, Credential, QqClient, QqPlatform};
 use super::login;
 use crate::net::{create_download_writer, host_is, AtomicDownload};
 use crate::provider::{
-    effective_limit, first_truthy, is_truthy, loose_int, qr_data_url_from_png, str_field,
-    unique_download_path, Capabilities, DownloadJob, MusicProvider, ProviderContext,
+    effective_limit, first_truthy, full_listing, is_truthy, loose_int, qr_data_url_from_png,
+    str_field, unique_download_path, Capabilities, DownloadJob, MusicProvider, ProviderContext,
 };
 use crate::tags;
 
@@ -271,7 +271,8 @@ impl QqMusicProvider {
             SearchKind::Artist => 1,
             SearchKind::Album => 2,
             SearchKind::Playlist => 3,
-            SearchKind::Song => return Ok(Vec::new()),
+            // 播客/电台只有网易云支持
+            SearchKind::Radio | SearchKind::Song => return Ok(Vec::new()),
         };
         let data = self
             .client
@@ -1016,6 +1017,9 @@ impl MusicProvider for QqMusicProvider {
                             }
                         }
                     }
+                    // 创建的歌单带正 dirid；收藏来的歌单只有 tid/dissid（dirid 为 0
+                    // 或缺失）。按这个特征分类，侧栏「收藏的歌单」分组才有内容。
+                    let origin = qq_playlist_origin(entry).to_string();
                     playlists.push(StreamPlaylist {
                         platform: Platform::Qqm,
                         key: key.clone(),
@@ -1032,7 +1036,7 @@ impl MusicProvider for QqMusicProvider {
                         )
                         .max(0) as usize,
                         is_favorite: false,
-                        origin: "created".into(),
+                        origin,
                     });
                 }
             }
@@ -1053,7 +1057,7 @@ impl MusicProvider for QqMusicProvider {
         if !credential.is_present() {
             return Ok(None);
         }
-        let limit = effective_limit(limit, 500);
+        let limit = full_listing(limit);
         let (title, entries) = if key == "__qq_favorite__" {
             self.favorite_tracks(limit).await?
         } else {
@@ -1090,12 +1094,12 @@ impl MusicProvider for QqMusicProvider {
         {
             return Ok(None);
         }
-        let limit = effective_limit(limit, 500);
+        let limit = full_listing(limit);
         let (title, entries) = match kind {
             SearchKind::Playlist => self.playlist_tracks(key, limit).await?,
             SearchKind::Album => self.album_tracks(key, limit).await?,
             SearchKind::Artist => self.artist_tracks(key, limit).await?,
-            SearchKind::Song => return Ok(None),
+            SearchKind::Radio | SearchKind::Song => return Ok(None),
         };
         if entries.is_empty() {
             bail!("QQ 音乐集合没有可用歌曲（{key}）");
@@ -1327,7 +1331,7 @@ fn qq_collection_entries(data: &Value, kind: SearchKind) -> Option<&Vec<Value>> 
         ],
         SearchKind::Artist => &["/body/singer", "/body/item_singer", "/singer"],
         SearchKind::Album => &["/body/item_album", "/body/album", "/item_album"],
-        SearchKind::Song => return None,
+        SearchKind::Radio | SearchKind::Song => return None,
     };
     pointers
         .iter()
@@ -1439,7 +1443,7 @@ fn qq_collection_results(data: &Value, kind: SearchKind, limit: usize) -> Vec<Co
                         });
                     (key, title, format!("{count} 首 · {artist}"), cover, count)
                 }
-                SearchKind::Song => return None,
+                SearchKind::Radio | SearchKind::Song => return None,
             };
             Some(CollectionResult {
                 kind,
@@ -1527,6 +1531,16 @@ fn qq_song_primary_artist(song: &Value) -> Option<&str> {
 
 fn is_qq_favorite_playlist(entry: &Value) -> bool {
     loose_int(entry.get("dirid").or_else(|| entry.get("dirId"))) == 201
+}
+
+/// 创建的歌单带正 dirid；收藏来的歌单只有 tid/dissid（dirid 为 0 或缺失）。
+/// 与网易云侧的 origin 取值对齐：前端 FolderTree 按 created/collected 分组。
+fn qq_playlist_origin(entry: &Value) -> &'static str {
+    if loose_int(entry.get("dirid").or_else(|| entry.get("dirId"))) > 0 {
+        "created"
+    } else {
+        "collected"
+    }
 }
 
 /// `GetPlaylistByUin` 的返回字段在桌面端和移动端版本间漂移过：有的版本把
@@ -2158,6 +2172,14 @@ mod tests {
         assert_eq!(source.title, "真名");
         assert_eq!(source.key, "4321", "空 mid 必须退到 id，否则这首歌下不下来");
         assert_eq!(source.album, "专辑别名");
+    }
+
+    #[test]
+    fn playlist_origin_separates_created_from_collected() {
+        // 创建的歌单带正 dirid；收藏来的只有 tid（dirid 为 0 或缺失）。
+        assert_eq!(qq_playlist_origin(&json!({"tid": "1", "dirid": 201})), "created");
+        assert_eq!(qq_playlist_origin(&json!({"tid": "2", "dirid": 0})), "collected");
+        assert_eq!(qq_playlist_origin(&json!({"dissid": "3"})), "collected");
     }
 
     #[test]

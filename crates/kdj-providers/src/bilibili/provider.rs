@@ -1,8 +1,8 @@
 //! 哔哩哔哩 provider：视频解析 + 下载 + 音乐管线入口。
 //!
-//! 「视频就是视频」——B 站来源在音乐下载管线里也**永远下完整视频**，
-//! 画面不在下载环节丢掉。落到视频目录、照样入库，播放时曲库自己取音轨。
-//! 想要纯 m4a 走视频面板里的「只要音轨」。
+//! 默认「视频就是视频」——音乐下载管线里 B 站来源下完整视频，画面不在
+//! 下载环节丢掉。来源 payload 里带 `audio_only: true` 时（收藏夹批量下载的
+//! 「只要音频」开关）改下纯音轨 m4a。单视频的音/视频选择仍在视频面板。
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -13,8 +13,8 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
 use kdj_core::models::{
-    Account, AccountState, Platform, QrSession, QrStateValue, ResolveResponse, SongSource,
-    VideoDownloadRequest, VideoInfo, VideoPage,
+    Account, AccountState, Platform, QrSession, QrStateValue, ResolveKind, ResolveResponse,
+    SongSource, VideoDownloadRequest, VideoInfo, VideoPage,
 };
 use kdj_core::paths::{finalize_filename, sanitize_filename_value};
 use serde_json::Value;
@@ -24,15 +24,15 @@ use tokio_util::sync::CancellationToken;
 use super::client::BiliClient;
 use super::streams::{self, MediaStream, PlayUrlData};
 use super::url::{
-    normalize_bvid, normalize_pic, parse_clock, resolve_video_target, strip_search_markup,
-    USER_AGENT,
+    normalize_bvid, normalize_pic, parse_clock, pick_favlist_id, resolve_video_target,
+    strip_search_markup, USER_AGENT,
 };
 use super::{login, qn_for_height};
 use crate::ffmpeg;
 use crate::net::{create_download_writer, ensure_media_url, AtomicDownload};
 use crate::provider::{
-    effective_limit, qr_data_url_from_text, str_field, unique_download_path, Capabilities,
-    DownloadJob, MusicProvider, ProgressSink, ProviderContext,
+    effective_limit, full_listing, qr_data_url_from_text, str_field, unique_download_path,
+    Capabilities, DownloadJob, MusicProvider, ProgressSink, ProviderContext,
 };
 
 const LABEL: &str = "哔哩哔哩";
@@ -897,12 +897,81 @@ impl MusicProvider for BilibiliProvider {
             .collect())
     }
 
-    /// B 站链接由 `/api/video/resolve` 单独处理，音乐管线这里不认领。
-    async fn resolve(&self, _url: &str, _limit: usize) -> Result<Option<ResolveResponse>> {
-        Ok(None)
+    /// B 站链接由 `/api/video/resolve` 单独处理，音乐管线这里只认领收藏夹：
+    /// 贴 `space.bilibili.com/{mid}/favlist?fid={fid}` 或纯数字 fid，整包
+    /// 展开成歌单来源（payload 带 bvid），后续逐条走下载管线。
+    async fn resolve(&self, url: &str, limit: usize) -> Result<Option<ResolveResponse>> {
+        let Some(fid) = pick_favlist_id(url) else {
+            return Ok(None);
+        };
+        let limit = full_listing(limit);
+        // 标题拿不到不致命：用 fid 兑底，内容照常展开。
+        let title = match self.client.fav_folder_info(&fid).await {
+            Ok(info) => str_field(&info, "title")
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("哔哩哔哩收藏夹 {fid}")),
+            Err(_) => format!("哔哩哔哩收藏夹 {fid}"),
+        };
+        let mut sources: Vec<SongSource> = Vec::new();
+        // 每页 20 条是 B 站硬限制；翻页直到空页。上限防御异常回包。
+        for page in 1..=500i64 {
+            if sources.len() >= limit {
+                break;
+            }
+            let medias = self.client.fav_resource_list(&fid, page).await?;
+            if medias.is_empty() {
+                break;
+            }
+            for item in medias {
+                let Some(bvid) = str_field(&item, "bvid").map(str::to_string) else {
+                    continue;
+                };
+                if bvid.is_empty() {
+                    // 失效视频没有 bvid，跳过；标题会写「已失效视频」。
+                    continue;
+                }
+                let author = item
+                    .pointer("/upper/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let mut payload = serde_json::Map::new();
+                payload.insert("bvid".into(), Value::String(bvid.clone()));
+                sources.push(SongSource {
+                    platform: Platform::Bilibili,
+                    key: bvid,
+                    title: strip_search_markup(str_field(&item, "title").unwrap_or("")),
+                    artists: if author.is_empty() { vec![] } else { vec![author] },
+                    album: String::new(),
+                    // 收藏夹接口的 duration 是秒，搜索接口是钟面串——别搞混。
+                    duration: item.get("duration").and_then(Value::as_f64),
+                    cover: normalize_pic(
+                        item.get("cover").and_then(Value::as_str).unwrap_or_default(),
+                    ),
+                    max_quality: None,
+                    vip: false,
+                    payload,
+                });
+                if sources.len() >= limit {
+                    break;
+                }
+            }
+        }
+        if sources.is_empty() {
+            bail!("哔哩哔哩收藏夹 {fid} 里没有可下载的视频（私密的收藏夹需要先登录）");
+        }
+        Ok(Some(ResolveResponse {
+            kind: ResolveKind::Playlist,
+            platform: Platform::Bilibili,
+            title,
+            sources,
+        }))
     }
 
-    /// 音乐下载管线的统一入口：B 站来源永远下**完整视频**。
+    /// 音乐下载管线的统一入口：默认下**完整视频**；来源 payload 带
+    /// `audio_only: true` 时改下纯音轨 m4a（收藏夹批量下载的「只要音频」）。
     ///
     /// `quality` 对 B 站没有意义，收下忽略，保持和网易云/QQ 同一个签名，
     /// 让 downloader 不用特判平台。
@@ -917,6 +986,12 @@ impl MusicProvider for BilibiliProvider {
                 .unwrap_or(0) as usize,
             // 搜索结果没有逐条选画质的入口，1080 是不吃亏的默认
             max_height: 1080,
+            audio_only: job
+                .source
+                .payload
+                .get("audio_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             title: job.source.title.clone(),
             artist: job.source.artist_text(),
             cover: job.source.cover.clone(),

@@ -198,6 +198,46 @@ impl BiliClient {
         .await
     }
 
+    /// 收藏夹元信息（标题等）。公开收藏夹匿名可读。
+    pub async fn fav_folder_info(&self, media_id: &str) -> Result<Value> {
+        self.get_json(&format!(
+            "https://api.bilibili.com/x/v3/fav/folder/info?media_id={media_id}"
+        ))
+        .await
+    }
+
+    /// 收藏夹内容列表（WBI 签名）。公开收藏夹匿名可读；私有的需要登录 Cookie，
+    /// 未登录时接口回 code=-403 由上层报错。
+    /// 每页最多 20 条（B 站硬限制），翻页由调用方拼 medias。
+    pub async fn fav_resource_list(&self, media_id: &str, page: i64) -> Result<Vec<Value>> {
+        let mixin = self.wbi.get(&self.http, &self.cookie_header()).await?;
+        let query = sign_params(
+            &[
+                ("media_id", media_id.to_string()),
+                ("pn", page.to_string()),
+                ("ps", "20".to_string()),
+                ("keyword", String::new()),
+                ("order", "mtime".to_string()),
+                ("type", "0".to_string()),
+                ("tid", "0".to_string()),
+                ("platform", "web".to_string()),
+                ("jsonp", "jsonp".to_string()),
+            ],
+            &mixin,
+            now_secs(),
+        );
+        let data = self
+            .get_json(&format!(
+                "https://api.bilibili.com/x/v3/fav/resource/list?{query}"
+            ))
+            .await?;
+        Ok(data
+            .get("medias")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
     pub async fn search_videos(&self, keyword: &str) -> Result<Vec<Value>> {
         let mixin = self.wbi.get(&self.http, &self.cookie_header()).await?;
         let query = sign_params(

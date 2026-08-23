@@ -133,9 +133,22 @@ function errorText(error: unknown): string {
 /**
  * B 站输入的识别。音乐/视频不再是手动切的开关：
  * 贴的是 B 站链接或 BV 号，那就是要下视频，没有第二种解释。
- * 结果照样落在「搜索」标签里，只是那一条长得像视频（见 VideoResultRow）。
+ * 例外是收藏夹链接（favlist?fid=…）：那是一包视频，走歌单解析整包展开，
+ * 音/视频在加入队列时选。结果照样落在「搜索」标签里，
+ * 只是那一条长得像视频（见 VideoResultRow）。
  */
 const BILI_RE = /bilibili\.com|b23\.tv|^\s*(?:BV[0-9A-Za-z]{10}|av\d+)\s*$/i;
+const BILI_FAVLIST_RE = /favlist\?fid=\d+|^\s*\d{6,}\s*$/;
+
+/** 入队前给 B 站来源盖上 audio_only 标记；其它平台原样保留。 */
+function stampBilibiliAudioOnly(sources: SongSource[], audioOnly: boolean): SongSource[] {
+  if (!audioOnly) return sources;
+  return sources.map((source) =>
+    source.platform === "bilibili"
+      ? { ...source, payload: { ...source.payload, audio_only: true } }
+      : source,
+  );
+}
 
 const MULTI_PANE_MODE_KEY = "kd-workspace-multi-pane-v2";
 const LEGACY_SPLIT_MODE_KEY = "kd-middle-split-mode";
@@ -277,6 +290,8 @@ export function Workspace() {
    */
   const [searchError, setSearchError] = useState("");
   const [queueError, setQueueError] = useState("");
+  /** B 站批量下载的「只要音频」：入队时盖进来源 payload，后端据此下 m4a。 */
+  const [bilibiliAudioOnly, setBilibiliAudioOnly] = useState(false);
   const [reorderError, setReorderError] = useState("");
   const [folderDropError, setFolderDropError] = useState("");
   const [localDropActive, setLocalDropActive] = useState(false);
@@ -630,7 +645,8 @@ export function Workspace() {
     // B 站链接/BV 号 → 解析成一条视频结果，和搜索结果同在「搜索」标签里。
     // 解析要往 B 站跑一趟，所以先切标签再等结果：不然按下回车后有一两秒
     // 界面上什么都不变，像是没接住这次输入。
-    if (BILI_RE.test(text)) {
+    // 收藏夹链接不是单条视频，交给通用链接解析（B 站 provider 会展开成歌单）。
+    if (BILI_RE.test(text) && !BILI_FAVLIST_RE.test(text)) {
       setBusy(true);
       setSearchError("");
       setItems(null);
@@ -668,9 +684,13 @@ export function Workspace() {
       .sort((a, b) => priority.indexOf(a) - priority.indexOf(b));
     // 链接由后端按 URL 自己识别类型（即使下拉框还停在“单曲”也能解析专辑）；
     // 关键词搜索则剥掉不支持所选类型的平台，保留其余来源继续返回结果。
+    // 收藏夹链接必须带 B 站：即使用户没勾它，解析也只认领得了 B 站。
+    const isFavlistInput = BILI_FAVLIST_RE.test(text);
     const isLinkInput = /https?:\/\//i.test(text);
     const requestPlatforms = isLinkInput
-      ? orderedPlatforms
+      ? orderedPlatforms.includes("bilibili") || !isFavlistInput
+        ? orderedPlatforms
+        : ([...orderedPlatforms, "bilibili"] as typeof orderedPlatforms)
       : orderedPlatforms.filter((platform) =>
           (searchCapabilities[platform] ?? ["song"]).includes(requestedKind),
         );
@@ -733,7 +753,7 @@ export function Workspace() {
       setActiveStreamPlaylist({ platform: playlist.platform, key: playlist.key });
     }
     try {
-      const response = await api.streamPlaylist(playlist, 500);
+      const response = await api.streamPlaylist(playlist, 0);
       if (requestId !== resultRequestSeqRef.current) return;
       const token = `${response.platform}:playlist:${response.key}`;
       const inLibrary = new Set(response.in_library_source_keys ?? []);
@@ -1593,7 +1613,7 @@ export function Workspace() {
     setSearchError("");
     setLoadingCollections((current) => new Set(current).add(token));
     try {
-      const response = await api.resolveCollection(collection, 500);
+      const response = await api.resolveCollection(collection, 0);
       if (resultGeneration !== resultRequestSeqRef.current) return;
       const resolved = resolvedCollectionItem(collection, response);
       setItems((current) =>
@@ -1643,6 +1663,11 @@ export function Workspace() {
     });
     return picked;
   }, [items, chosen, sourceIndex]);
+  /** 勾选里有 B 站来源时，动作栏才需要「只下音频」开关。 */
+  const chosenHasBilibili = useMemo(
+    () => chosenSources.some((source) => source.platform === "bilibili"),
+    [chosenSources],
+  );
 
   const addToQueue = useCallback(async () => {
     if (chosenSources.length === 0) return;
@@ -1650,18 +1675,19 @@ export function Workspace() {
     try {
       // 不报"已加入 N 个任务"：右边那栏就是队列，任务当场排进去，
       // 而且勾选被清空、这条动作栏跟着收起来，做成了看得一清二楚
-      await enqueue(chosenSources, {
+      await enqueue(stampBilibiliAudioOnly(chosenSources, bilibiliAudioOnly), {
         quality: settings?.default_quality ?? null,
         one_library_target: oneLibraryPaneVisible ? selectedOneLibrary : null,
       });
       openQueuePanel();
       setChosen(new Set());
       setSearchSelectionMode(false);
+      setBilibiliAudioOnly(false);
       void refreshStats();
     } catch (error) {
       setQueueError(`加入队列失败：${errorText(error)}`);
     }
-  }, [chosenSources, settings?.default_quality, oneLibraryPaneVisible, selectedOneLibrary, enqueue, openQueuePanel, refreshStats]);
+  }, [chosenSources, settings?.default_quality, oneLibraryPaneVisible, selectedOneLibrary, enqueue, openQueuePanel, refreshStats, bilibiliAudioOnly]);
 
   // 曲目表 / 搜索结果：Cmd/Ctrl + A · C · X · V（Option+V 强制移动）。
   useLibraryClipboard({
@@ -2122,6 +2148,9 @@ export function Workspace() {
                         queueError={queueError}
                         onDismissQueueError={() => setQueueError("")}
                         chosenReady={chosenSources.length > 0}
+                        showBilibiliAudioOnly={chosenHasBilibili}
+                        bilibiliAudioOnly={bilibiliAudioOnly}
+                        onToggleBilibiliAudioOnly={setBilibiliAudioOnly}
                         asideToggle={
                           !localPaneVisible && !oneLibraryPaneVisible && !showAside
                             ? asideToggle

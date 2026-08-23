@@ -73,6 +73,32 @@ pub fn pick_bilibili_url(text: &str) -> String {
     String::new()
 }
 
+/// 收藏夹链接里的 fid。认两种写法：
+/// - `space.bilibili.com/{mid}/favlist?fid={fid}`（www 前缀也行）
+/// - 纯数字 fid（用户从收藏夹页地址栏手抠出来的那串）
+///
+/// 注意 fid 不是 mid：同一用户的多个收藏夹各有各的 fid。
+pub fn pick_favlist_id(text: &str) -> Option<String> {
+    let text = text.trim();
+    if let Some(position) = text.find("favlist") {
+        let query = &text[position..];
+        if let Some(fid_start) = query.find("fid=") {
+            let rest = &query[fid_start + 4..];
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if !digits.is_empty() {
+                return Some(digits);
+            }
+        }
+        return None;
+    }
+    // 没有 favlist 字样时，接受纯数字输入当 fid。
+    let trimmed = text.trim();
+    if !trimmed.is_empty() && trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
 fn extract_urls(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let bytes = text.as_bytes();
@@ -317,6 +343,21 @@ mod tests {
             normalize_pic("https://i2.hdslb.com/x.jpg"),
             "https://i2.hdslb.com/x.jpg"
         );
+    }
+
+    #[test]
+    fn favlist_ids_are_picked_from_links_or_bare_numbers() {
+        assert_eq!(
+            pick_favlist_id("https://space.bilibili.com/12345/favlist?fid=987654"),
+            Some("987654".into())
+        );
+        assert_eq!(
+            pick_favlist_id("https://space.bilibili.com/12345/upload/video"),
+            None,
+            "没有 favlist 字样且不是纯数字的不认"
+        );
+        assert_eq!(pick_favlist_id("987654"), Some("987654".into()));
+        assert_eq!(pick_favlist_id("BV1L94y1H7CV"), None);
     }
 
     #[tokio::test]

@@ -36,6 +36,7 @@ fn default_priority(platform: Platform) -> f64 {
         Platform::Wyy => 1.0,
         Platform::Qqm => 0.95,
         Platform::Soundcloud => 0.8,
+        Platform::Ytm => 0.7,
         Platform::Bilibili => 0.5,
         Platform::Local => 0.4,
     }
@@ -576,6 +577,7 @@ fn priority_table(priority: &[Platform]) -> BTreeMap<Platform, f64> {
         Platform::Wyy,
         Platform::Qqm,
         Platform::Soundcloud,
+        Platform::Ytm,
         Platform::Bilibili,
         Platform::Local,
     ]
@@ -1058,6 +1060,7 @@ fn search_kind_label(kind: SearchKind) -> &'static str {
         SearchKind::Playlist => "歌单",
         SearchKind::Artist => "艺术家",
         SearchKind::Album => "专辑",
+        SearchKind::Radio => "播客",
     }
 }
 

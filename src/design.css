@@ -1234,6 +1234,10 @@ textarea {
   background: #ff8800;
   color: #2b1600;
 }
+.kd-segment > button[data-platform="ytm"][aria-pressed="true"] {
+  background: #ff2b2b;
+  color: #fff;
+}
 .kd-segment > button[data-platform="bilibili"][aria-pressed="true"] {
   background: #fb7299;
   color: #fff;
@@ -4907,6 +4911,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-activity-plat[data-platform="soundcloud"] {
   color: #ff5500;
 }
+.kd-activity-plat[data-platform="ytm"] {
+  color: #ff0000;
+}
 .kd-activity-plat[data-platform="bilibili"] {
   color: #fb7299;
 }
@@ -5280,6 +5287,9 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 }
 .kd-source-dot[data-platform="soundcloud"] {
   color: #ff5500;
+}
+.kd-source-dot[data-platform="ytm"] {
+  color: #ff0000;
 }
 .kd-source-dot[data-platform="bilibili"] {
   color: #fb7299;
@@ -6843,6 +6853,9 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 }
 .kd-plat[aria-pressed="true"][data-platform="soundcloud"] {
   color: #ff5500;
+}
+.kd-plat[aria-pressed="true"][data-platform="ytm"] {
+  color: #ff0000;
 }
 .kd-plat[aria-pressed="true"][data-platform="bilibili"] {
   color: #fb7299;

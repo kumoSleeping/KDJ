@@ -4,7 +4,7 @@ import { FolderOpen, LoaderCircle } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
 import { useAppStore } from "../../stores/appStore";
-import type { Account, AccountState, Platform, QrStateValue } from "../../types";
+import type { Account, AccountState, Platform, QrStateValue, YtmDeviceLogin } from "../../types";
 import { Button, InlineNotice } from "../common";
 import { PLATFORM_BRAND, PlatformMark } from "../download/PlatformMark";
 
@@ -162,6 +162,9 @@ export function AccountRow({ account }: { account: Account }) {
   const [busy, setBusy] = useState(false);
   const [qrBusy, setQrBusy] = useState(false);
   const [oauthBusy, setOauthBusy] = useState(false);
+  const [deviceBusy, setDeviceBusy] = useState(false);
+  /** YouTube Music 设备码登录的在途会话；null = 没有进行中的登录。 */
+  const [deviceSession, setDeviceSession] = useState<YtmDeviceLogin | null>(null);
   /** 打开用（安卓可能是 content URI）。 */
   const [savedPath, setSavedPath] = useState("");
   /** 给用户看的路径；没有就退化成 savedPath。 */
@@ -407,6 +410,66 @@ export function AccountRow({ account }: { account: Account }) {
   };
 
   const oauthAccount = account.login_method === "oauth" || account.platform === "soundcloud";
+  const deviceAccount = account.login_method === "device";
+
+  /**
+   * YouTube Music 的 Google 设备码登录：后端申请 user_code，
+   * 用户在任何浏览器打开 youtube.com/activate 输入，本行轮询直到成功。
+   */
+  const deviceLogin = async () => {
+    const generation = ++qrGenerationRef.current;
+    setDeviceBusy(true);
+    setDeviceSession(null);
+    setNotice("");
+    try {
+      const session = await api.ytmDeviceLoginStart();
+      if (generation !== qrGenerationRef.current) return;
+      setDeviceSession(session);
+      const bridge = getBridge();
+      if (bridge.openExternal) {
+        await bridge.openExternal(session.verification_url);
+      } else {
+        setNotice(`请在浏览器打开 ${session.verification_url} 输入 ${session.user_code}`);
+      }
+      const poll = async () => {
+        if (generation !== qrGenerationRef.current) return;
+        try {
+          const status = await api.ytmDeviceLoginStatus(session.device_code);
+          if (generation !== qrGenerationRef.current) return;
+          if (status.status === "done") {
+            setDeviceBusy(false);
+            setDeviceSession(null);
+            await refreshAccounts();
+            return;
+          }
+          if (status.status === "error") {
+            setDeviceBusy(false);
+            setDeviceSession(null);
+            setNotice(status.message || "YouTube Music 登录失败");
+            return;
+          }
+          window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
+        } catch (error) {
+          if (generation === qrGenerationRef.current) {
+            setDeviceBusy(false);
+            setDeviceSession(null);
+            setNotice(
+              `YouTube Music 登录状态检查失败：${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      };
+      window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
+    } catch (error) {
+      if (generation === qrGenerationRef.current) {
+        setDeviceBusy(false);
+        setDeviceSession(null);
+        setNotice(
+          `发起 YouTube Music 登录失败：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  };
 
   return (
     <div style={settingRow.row}>
@@ -463,6 +526,13 @@ export function AccountRow({ account }: { account: Account }) {
                 : (qrState && QR_STATE_TEXT[qrState]) || "等待扫码"}
             </div>
           )}
+          {deviceSession && !loggedIn && (
+            <div style={settingRow.hint}>
+              在浏览器打开 {deviceSession.verification_url} 输入{" "}
+              <b style={{ letterSpacing: "0.08em" }}>{deviceSession.user_code}</b>
+              {" · "}等待授权
+            </div>
+          )}
           {/* 贴在状态行下面，而不是塞进右边那一列：那一列只有按钮那么宽，
               一句"退出失败：连接被拒绝"进去就只剩省略号了 */}
           <InlineNotice text={notice} onDismiss={() => setNotice("")} />
@@ -481,6 +551,11 @@ export function AccountRow({ account }: { account: Account }) {
           <Button size="sm" variant="ghost" disabled={oauthBusy} onClick={() => void oauthLogin()}>
             {oauthBusy && <LoaderCircle size={13} className="kd-spin" />}
             {oauthBusy ? "等待授权" : "使用 SoundCloud 登录"}
+          </Button>
+        ) : deviceAccount ? (
+          <Button size="sm" variant="ghost" disabled={deviceBusy} onClick={() => void deviceLogin()}>
+            {deviceBusy && <LoaderCircle size={13} className="kd-spin" />}
+            {deviceBusy ? "等待授权" : "使用 Google 登录"}
           </Button>
         ) : savedPath ? (
           <Button
