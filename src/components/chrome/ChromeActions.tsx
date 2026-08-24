@@ -54,19 +54,15 @@ export function ChromeActions({
     <div className="kd-chrome-actions" role="group" aria-label="顶栏工具">
       <button
         type="button"
-        className="kd-work-mode-switch"
+        className="kd-chrome-btn kd-work-mode-switch"
         data-mode={workMode}
         aria-label={workMode === "manager" ? "切换到 DJ 模式" : "切换到管理器模式"}
         title={workMode === "manager" ? "进入 DJ 模式" : "返回管理器模式"}
         onClick={() => onWorkModeChange(workMode === "manager" ? "dj" : "manager")}
       >
-        <span data-active={workMode === "manager" ? "true" : undefined}>
-          <Library size={12} aria-hidden="true" />
-          管理
-        </span>
-        <span data-active={workMode === "dj" ? "true" : undefined}>
-          <Disc3 size={12} aria-hidden="true" />
-          DJ
+        <span className="kd-work-mode-glyph" aria-hidden="true">
+          <Library className="kd-work-mode-manager" size={17} />
+          <Disc3 className="kd-work-mode-dj" size={17} />
         </span>
       </button>
       {updateReady ? (
