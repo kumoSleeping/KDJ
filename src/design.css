@@ -818,6 +818,10 @@ textarea {
 .kd-narrow-source-children button[data-stream-platform="qqm"] > svg {
   color: #31c27c;
 }
+.kd-narrow-source-roots button[data-stream-platform="bilibili"] > svg,
+.kd-narrow-source-children button[data-stream-platform="bilibili"] > svg {
+  color: #fb7299;
+}
 .kd-narrow-rail-sep {
   flex: none;
   width: 1.8rem;
@@ -8417,6 +8421,9 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 }
 .kd-folder-stream-root[data-stream-platform="qqm"] > svg {
   color: #31c27c;
+}
+.kd-folder-stream-root[data-stream-platform="bilibili"] > svg {
+  color: #fb7299;
 }
 .kd-folder-stream-root:focus-within .kd-folder-more {
   display: inline-flex;
