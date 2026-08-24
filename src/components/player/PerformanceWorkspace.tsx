@@ -1049,6 +1049,7 @@ function DeckInfo({ deck, side, preserveBarPhase, quantize, onSeek, onTogglePlay
         {track ? (
           <Waveform
             trackId={track.id}
+            renderProfile="release-overview"
             track={track}
             position={deck.position}
             duration={deck.duration}
@@ -1062,7 +1063,6 @@ function DeckInfo({ deck, side, preserveBarPhase, quantize, onSeek, onTogglePlay
             playbackRate={deck.rate}
             onSeek={(detail) => onSeek(side, detail)}
             className="kd-performance-overview-wave"
-            verticalInsetRatio={0.12}
           />
         ) : null}
       </div>

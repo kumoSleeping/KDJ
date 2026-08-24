@@ -2396,6 +2396,16 @@ struct OneLibraryWaveformParams {
     playback_id: i64,
     #[serde(default = "default_buckets")]
     buckets: usize,
+    #[serde(default)]
+    profile: WaveformRequestProfile,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum WaveformRequestProfile {
+    #[default]
+    Current,
+    ReleaseOverview,
 }
 
 /// rbox 为每次 `OneLibrary::new` 建独立 r2d2 池；同一加密库被列表轮询、封面缩略图
@@ -2812,19 +2822,36 @@ async fn one_library_waveform(
     let buckets = params
         .buckets
         .clamp(64, crate::waveform::MAX_WAVEFORM_BUCKETS);
-    let waveform = state
-        .waveforms
-        .get_or_compute_detached(
-            file.cache_id,
-            file.legacy_cache_id,
-            file.path,
-            buckets,
-            state.config.data_dir.join("waveform-onelibrary"),
-            file.portable_waveform_dir,
-        )
-        .await
-        .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("{error:#}")))?;
-    let mut waveform = crate::waveform::fit_waveform_columns(waveform, buckets);
+    let waveform = if params.profile == WaveformRequestProfile::ReleaseOverview {
+        state
+            .waveforms
+            .get_release_overview_detached(
+                file.cache_id,
+                file.legacy_cache_id,
+                file.path,
+                state.config.data_dir.join("waveform-onelibrary"),
+                file.portable_waveform_dir,
+            )
+            .await
+    } else {
+        state
+            .waveforms
+            .get_or_compute_detached(
+                file.cache_id,
+                file.legacy_cache_id,
+                file.path,
+                buckets,
+                state.config.data_dir.join("waveform-onelibrary"),
+                file.portable_waveform_dir,
+            )
+            .await
+    }
+    .map_err(|error| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("{error:#}")))?;
+    let mut waveform = if params.profile == WaveformRequestProfile::ReleaseOverview {
+        waveform
+    } else {
+        crate::waveform::fit_waveform_columns(waveform, buckets)
+    };
     waveform.track_id = params.playback_id;
     Ok(Json(waveform))
 }
@@ -4327,6 +4354,8 @@ async fn library_set_cover(
 struct WaveformParams {
     #[serde(default = "default_buckets")]
     buckets: usize,
+    #[serde(default)]
+    profile: WaveformRequestProfile,
 }
 fn default_buckets() -> usize {
     640
@@ -4354,11 +4383,18 @@ async fn library_waveform(
     }
 
     let cache_dir = state.config.data_dir.join("waveform");
-    let wave = state
-        .waveforms
-        .get_or_compute(id, path, buckets, cache_dir)
-        .await
-        .map_err(|err| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("{err:#}")))?;
+    let wave = if params.profile == WaveformRequestProfile::ReleaseOverview {
+        state
+            .waveforms
+            .get_release_overview(id, path, cache_dir)
+            .await
+    } else {
+        state
+            .waveforms
+            .get_or_compute(id, path, buckets, cache_dir)
+            .await
+    }
+    .map_err(|err| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("{err:#}")))?;
     Ok(Json(wave))
 }
 

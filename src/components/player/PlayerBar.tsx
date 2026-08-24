@@ -4846,6 +4846,7 @@ export function PlayerBar({
           {pipDriving && pipSession?.source === "local" ? (
           <Waveform
             className="kd-player-wave"
+            renderProfile="release-overview"
             trackId={pipSession.trackId}
             track={track?.id === pipSession.trackId ? track : undefined}
             position={pipPosition}
@@ -4907,6 +4908,7 @@ export function PlayerBar({
         ) : displayTrack && !streaming ? (
           <Waveform
             className="kd-player-wave"
+            renderProfile="release-overview"
             trackId={displayTrack.id}
             track={displayTrack}
             position={track?.id === displayTrack.id ? position : 0}
@@ -4931,6 +4933,7 @@ export function PlayerBar({
         ) : track && streaming ? (
           <Waveform
             className="kd-player-wave"
+            renderProfile="release-overview"
             trackId={track.id}
             track={track}
             position={position}

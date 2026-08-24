@@ -60,7 +60,7 @@ test("OneLibrary negative ids request the dedicated complete waveform instead of
 
   const [
     { oneLibraryPlayableTrack },
-    { loadWaveformForTrack, streamWaveformSnapshot },
+    { loadReleaseOverviewForTrack, loadWaveformForTrack, streamWaveformSnapshot },
     { mediaUrlForTrack },
     { api },
   ] = await Promise.all([
@@ -122,4 +122,11 @@ test("OneLibrary negative ids request the dedicated complete waveform instead of
     requested.some((value) => value.includes(`/api/library/waveform/${track.id}`)),
     false,
   );
+
+  const releaseOverview = await loadReleaseOverviewForTrack(track);
+  assert.equal(releaseOverview.amp.length, 640);
+  assert.equal(requested.length, 2, "release overview must not reuse the current detail cache");
+  const releaseUrl = new URL(requested[1]);
+  assert.equal(releaseUrl.pathname, "/api/library/onelibrary/waveform");
+  assert.equal(releaseUrl.searchParams.get("profile"), "release-overview");
 });

@@ -422,8 +422,14 @@ export const api = {
       `/library/analyze/cancel${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`,
     ),
   writeTags: (id: number) => post<Track>(`/library/tracks/${id}/write-tags`),
-  waveform: (id: number, buckets = 640) =>
-    request<Waveform>(`/library/waveform/${id}?buckets=${buckets}`),
+  waveform: (
+    id: number,
+    buckets = 640,
+    profile: "current" | "release-overview" = "current",
+  ) =>
+    request<Waveform>(
+      `/library/waveform/${id}?buckets=${buckets}&profile=${profile}`,
+    ),
   stemRuntimeStatus: () => request<StemRuntimeStatus>("/stems/runtime"),
   resetStemRuntime: () => post<StemRuntimeStatus>("/stems/runtime/reset", {}),
   trackStemStatus: (
@@ -473,12 +479,14 @@ export const api = {
     contentId: number,
     playbackId: number,
     buckets = 640,
+    profile: "current" | "release-overview" = "current",
   ) => {
     const query = new URLSearchParams({
       device_path: devicePath,
       content_id: String(contentId),
       playback_id: String(playbackId),
       buckets: String(buckets),
+      profile,
     });
     return request<Waveform>(`/library/onelibrary/waveform?${query}`);
   },

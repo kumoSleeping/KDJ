@@ -16,6 +16,9 @@ use crate::dsp::{self, percentile};
 /// 合成测试和显式降采样调用方的参考采样率。产品装轨快路径保留音源 native rate，
 /// 避免为了展示波形跑整轨 sinc resample。
 pub const WAVEFORM_SR: u32 = 22_050;
+/// v0.2.41 整曲预览的固定采样率。普通/DJ overview 继续用这条历史路径，
+/// 高密度滚动波形则保持 native-rate Mixxx 路径。
+pub const RELEASE_OVERVIEW_SR: u32 = 16_000;
 /// 普通歌曲按 100 列/秒保存详细波形；十分钟以上曲目再受总列数上限保护。
 pub const DETAIL_WAVEFORM_COLUMNS_PER_SECOND: f64 = 100.0;
 pub const MAX_WAVEFORM_BUCKETS: usize = 24_000;
@@ -240,6 +243,169 @@ fn peak_band_frames(samples: &[f32], sr: f64) -> [Vec<f64>; 4] {
     peaks
 }
 
+// ---------------------------------------------------------------- v0.2.41 整曲预览
+
+const RELEASE_N_FFT: usize = 1024;
+const RELEASE_HOP: usize = 512;
+const RELEASE_XOVER_LOW: f64 = 200.0;
+const RELEASE_XOVER_HIGH: f64 = 1500.0;
+const RELEASE_AMP_GAMMA: f64 = 1.2;
+const RELEASE_COLOR_GAMMA: f64 = 6.0;
+const RELEASE_COLOR_FLOOR: f64 = 0.12;
+
+/// v0.2.41 的整曲预览算法：16 kHz STFT、P5–P99 幅度拉伸，以及相对本曲
+/// 常态占比的高饱和 RGB。只给 overview 使用；DJ 滚动主波形仍走 band_waveform。
+pub fn release_overview_waveform(samples: &[f32], sr: f64, buckets: usize) -> Waveform {
+    let buckets = buckets.clamp(64, 2000);
+    let energies = release_band_energy_frames(samples, sr, RELEASE_N_FFT, RELEASE_HOP);
+    let n_frames = energies[0].len();
+    if n_frames == 0 {
+        return Waveform::default();
+    }
+
+    // 与 v0.2.41 一致：按整数步长聚合，尾巴不足一格时不补零。
+    let step = (n_frames / buckets).max(1);
+    let count = n_frames / step;
+    if count == 0 {
+        return Waveform::default();
+    }
+    let mut bands = [
+        vec![0.0f64; count],
+        vec![0.0f64; count],
+        vec![0.0f64; count],
+    ];
+    for (band, source) in bands.iter_mut().zip(&energies) {
+        for (index, slot) in band.iter_mut().enumerate() {
+            let start = index * step;
+            *slot = source[start..start + step].iter().sum::<f64>() / step as f64;
+        }
+    }
+
+    let mut amp: Vec<f64> = (0..count)
+        .map(|i| (bands[0][i] + bands[1][i] + bands[2][i]).sqrt())
+        .collect();
+    let mut sorted = amp.clone();
+    sorted.sort_by(f64::total_cmp);
+    let hi = {
+        let value = percentile(&sorted, 99.0);
+        if value > 0.0 {
+            value
+        } else {
+            1.0
+        }
+    };
+    let lo = percentile(&sorted, 5.0);
+    for value in amp.iter_mut() {
+        *value = ((*value - lo) / (hi - lo).max(1e-9))
+            .clamp(0.0, 1.0)
+            .powf(RELEASE_AMP_GAMMA);
+    }
+
+    let mut mag: [Vec<f64>; 3] = [
+        bands[0].iter().map(|value| value.sqrt()).collect(),
+        bands[1].iter().map(|value| value.sqrt()).collect(),
+        bands[2].iter().map(|value| value.sqrt()).collect(),
+    ];
+    let span = ((count / 128).max(3)) | 1;
+    if count > span {
+        for row in mag.iter_mut() {
+            *row = dsp::moving_average(row, span);
+        }
+    }
+
+    let share: [Vec<f64>; 3] = {
+        let mut out = [vec![0.0; count], vec![0.0; count], vec![0.0; count]];
+        for i in 0..count {
+            let total = (mag[0][i] + mag[1][i] + mag[2][i]).max(1e-12);
+            for band in 0..3 {
+                out[band][i] = mag[band][i] / total;
+            }
+        }
+        out
+    };
+    let reference: [f64; 3] = std::array::from_fn(|band| {
+        let mut values = share[band].clone();
+        let value = dsp::median(&mut values);
+        if value <= 0.0 {
+            1.0
+        } else {
+            value
+        }
+    });
+
+    let mut r = vec![0u8; count];
+    let mut g = vec![0u8; count];
+    let mut b = vec![0u8; count];
+    for i in 0..count {
+        let dev: [f64; 3] = std::array::from_fn(|band| {
+            (share[band][i] / reference[band]).powf(RELEASE_COLOR_GAMMA)
+        });
+        let peak = dev.iter().cloned().fold(0.0f64, f64::max).max(1e-9);
+        let channels: [u8; 3] = std::array::from_fn(|band| {
+            let normalized = (dev[band] / peak).clamp(0.0, 1.0);
+            let lifted = RELEASE_COLOR_FLOOR + (1.0 - RELEASE_COLOR_FLOOR) * normalized;
+            (lifted * 255.0).round() as u8
+        });
+        r[i] = channels[0];
+        g[i] = channels[1];
+        b[i] = channels[2];
+    }
+
+    Waveform {
+        track_id: 0,
+        duration: ((samples.len() as f64 / sr) * 1000.0).round() / 1000.0,
+        amp: amp
+            .into_iter()
+            .map(|value| ((value * 10_000.0).round() / 10_000.0) as f32)
+            .collect(),
+        r,
+        g,
+        b,
+    }
+}
+
+fn release_band_energy_frames(samples: &[f32], sr: f64, n_fft: usize, hop: usize) -> [Vec<f64>; 3] {
+    use rustfft::num_complex::Complex32;
+    use rustfft::FftPlanner;
+
+    if samples.len() < n_fft {
+        return Default::default();
+    }
+    let bins = n_fft / 2 + 1;
+    let frames = 1 + (samples.len() - n_fft) / hop;
+    let window = dsp::hann_window(n_fft);
+    let mut energies = [
+        vec![0.0f64; frames],
+        vec![0.0f64; frames],
+        vec![0.0f64; frames],
+    ];
+    let mut planner = FftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(n_fft);
+    let mut scratch = vec![Complex32::new(0.0, 0.0); fft.get_inplace_scratch_len()];
+    let mut buffer = vec![Complex32::new(0.0, 0.0); n_fft];
+
+    for frame in 0..frames {
+        let start = frame * hop;
+        for (index, slot) in buffer.iter_mut().enumerate() {
+            *slot = Complex32::new(samples[start + index] * window[index] as f32, 0.0);
+        }
+        fft.process_with_scratch(&mut buffer, &mut scratch);
+        for (bin, value) in buffer.iter().take(bins).enumerate() {
+            let hz = bin as f64 * sr / n_fft as f64;
+            let band = if hz < RELEASE_XOVER_LOW {
+                0
+            } else if hz < RELEASE_XOVER_HIGH {
+                1
+            } else {
+                2
+            };
+            let magnitude = value.norm() as f64;
+            energies[band][frame] += magnitude * magnitude;
+        }
+    }
+    energies
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +536,28 @@ mod tests {
     fn too_short_input_returns_an_empty_waveform_instead_of_panicking() {
         let wave = band_waveform(&[0.0; 100], WAVEFORM_SR as f64, 200);
         assert!(wave.amp.is_empty());
+    }
+
+    #[test]
+    fn release_overview_restores_the_v0241_structure_and_colour_contract() {
+        let sr = RELEASE_OVERVIEW_SR as f64;
+        let mut samples = vec![0.0; (sr * 2.0) as usize];
+        samples.extend(tone(100.0, 4.0, sr).into_iter().map(|sample| sample * 0.35));
+        samples.extend(tone(5000.0, 4.0, sr));
+        let wave = release_overview_waveform(&samples, sr, 200);
+        assert!(!wave.amp.is_empty());
+        assert!(wave
+            .amp
+            .iter()
+            .take(wave.amp.len() / 6)
+            .all(|value| *value <= 0.01));
+        let bass = wave.amp.len() / 2;
+        let treble = wave.amp.len() * 5 / 6;
+        assert!(wave.r[bass] > wave.b[bass]);
+        assert!(wave.b[treble] > wave.r[treble]);
+        let floor = (RELEASE_COLOR_FLOOR * 255.0).round() as u8;
+        assert!(wave.r.iter().all(|value| *value >= floor));
+        assert!(wave.g.iter().all(|value| *value >= floor));
+        assert!(wave.b.iter().all(|value| *value >= floor));
     }
 }

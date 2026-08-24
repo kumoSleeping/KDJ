@@ -19,6 +19,17 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
 }
 
+/** v0.2.41 overview treated cached RGB as literal screen colour; do not soften it. */
+export function releaseOverviewWaveformDisplayRgb(
+  lowValue: number,
+  midValue: number,
+  highValue: number,
+): WaveformDisplayRgb {
+  return [lowValue, midValue, highValue].map((value) =>
+    Math.round(clamp(value, 0, 255))
+  ) as unknown as WaveformDisplayRgb;
+}
+
 export function waveformDisplayRgb(
   lowValue: number,
   midValue: number,

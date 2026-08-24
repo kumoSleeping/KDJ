@@ -1,6 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import {
   cachedWaveform,
+  cachedReleaseOverviewWaveform,
+  loadReleaseOverviewById,
+  loadReleaseOverviewForTrack,
   loadWaveformForTrack,
   loadWaveformById,
   streamWaveformSnapshot,
@@ -35,6 +38,7 @@ import {
 import { beatGridMarkers } from "../../lib/performanceCues";
 import { barPhaseAlignedSeek } from "../../lib/beatGridSync";
 import {
+  releaseOverviewWaveformDisplayRgb,
   vocalGuideWaveformDisplayRgb,
   waveformDisplayRgb,
 } from "../../lib/waveformPalette";
@@ -129,6 +133,8 @@ export interface WaveformProps {
   interactiveScrub?: boolean;
   /** Skip CSS rail interpolation for this paint — SYNC/seek landings must not slide then bounce. */
   snapRail?: boolean;
+  /** 整曲预览专用：恢复 v0.2.41 的 STFT 数据、原始高饱和 RGB 与像素汇聚。 */
+  renderProfile?: "current" | "release-overview";
 }
 
 function draw(
@@ -143,6 +149,7 @@ function draw(
   timeStart: number | null = null,
   timeEnd: number | null = null,
   palette: "rgb" | "vocal-guide" = "rgb",
+  releaseOverview = false,
 ) {
   const dpr = window.devicePixelRatio || 1;
   // 局部 DJ 轨道会比视口宽数倍；限制 backing store，避免长曲在 Retina 屏上
@@ -164,7 +171,9 @@ function draw(
   if (n === 0) return;
   const mid = cssHeight / 2;
   const inset = Math.min(0.45, Math.max(0, verticalInsetRatio)) * cssHeight;
-  const availableHalfHeight = Math.max(0.5, mid - inset - 1);
+  const availableHalfHeight = releaseOverview
+    ? Math.max(0.5, mid - 1)
+    : Math.max(0.5, mid - inset - 1);
   const width = Math.max(1, Math.floor(Math.min(cssWidth, canvas.width)));
   const columnCssWidth = cssWidth / width;
   const waveDuration = wave.duration > 0 ? wave.duration : 0;
@@ -193,7 +202,7 @@ function draw(
       }
       from = Math.max(0, Math.floor((Math.max(0, t0) / waveDuration) * n));
       to = Math.min(n, Math.max(from + 1, Math.ceil((Math.min(waveDuration, t1) / waveDuration) * n)));
-    } else if (width > n) {
+    } else if (width > n && !releaseOverview) {
       const source = width > 1 ? (x * (n - 1)) / (width - 1) : 0;
       const left = Math.max(0, Math.min(n - 1, Math.floor(source)));
       const right = Math.max(0, Math.min(n - 1, left + 1));
@@ -255,9 +264,11 @@ function draw(
         columns.map((column) => column.known),
       )
     : null;
-  const displayRgb = palette === "vocal-guide"
-    ? vocalGuideWaveformDisplayRgb
-    : waveformDisplayRgb;
+  const displayRgb = releaseOverview
+    ? releaseOverviewWaveformDisplayRgb
+    : palette === "vocal-guide"
+      ? vocalGuideWaveformDisplayRgb
+      : waveformDisplayRgb;
   for (let x = 0; x < columns.length; x += 1) {
     const column = columns[x];
     if (!column.known) {
@@ -311,7 +322,12 @@ function draw(
       0.5,
       column.amp * (edgeScales?.[x] ?? 1) * availableHalfHeight,
     );
-    ctx.fillRect(x * columnCssWidth, mid - half, columnCssWidth, half * 2);
+    ctx.fillRect(
+      releaseOverview ? x : x * columnCssWidth,
+      mid - half,
+      releaseOverview ? 1 : columnCssWidth,
+      half * 2,
+    );
   }
 }
 
@@ -464,12 +480,16 @@ export function Waveform({
   palette = "rgb",
   interactiveScrub = false,
   snapRail = false,
+  renderProfile = "current",
 }: WaveformProps) {
   const oneLibraryTrack =
     track?.id === trackId && isOneLibraryPlaybackTrack(track) ? track : null;
   const progressiveStream = trackId < 0 && oneLibraryTrack === null;
+  const releaseOverview = renderProfile === "release-overview";
   const [wave, setWave] = useState<WaveformData | null>(() =>
-    providedWaveform ?? cachedWaveform(trackId, buckets),
+    providedWaveform ?? (releaseOverview
+      ? cachedReleaseOverviewWaveform(trackId)
+      : cachedWaveform(trackId, buckets)),
   );
   const [streamSnapshot, setStreamSnapshot] = useState<StreamWaveformSnapshot | null>(() =>
     progressiveStream ? streamWaveformSnapshot(trackId) : null,
@@ -616,6 +636,25 @@ export function Waveform({
       return;
     }
     let alive = true;
+    if (releaseOverview) {
+      const cached = cachedReleaseOverviewWaveform(trackId);
+      setWave(cached);
+      setError("");
+      if (cached) return;
+      const request = oneLibraryTrack
+        ? loadReleaseOverviewForTrack(oneLibraryTrack)
+        : loadReleaseOverviewById(trackId);
+      void request
+        .then((result) => {
+          if (alive) setWave(result);
+        })
+        .catch((reason: unknown) => {
+          if (alive) setError(reason instanceof Error ? reason.message : String(reason));
+        });
+      return () => {
+        alive = false;
+      };
+    }
     // Performance 的局部滚动波形会按曲长要 100 列/秒，但曲库分析预先写好的是 640 桶。
     // 先拿 canonical 预览立即画，再在它之后后台升级；旧逻辑直接等详细档，等于
     // 每次装盘都绕开已有缓存现场整轨解码，overview 还会再用 960 解第二次。
@@ -652,7 +691,14 @@ export function Waveform({
       alive = false;
       if (detailTimer !== null) window.clearTimeout(detailTimer);
     };
-  }, [trackId, oneLibraryTrack?.source_key, progressiveStream, buckets, providedWaveform]);
+  }, [
+    trackId,
+    oneLibraryTrack?.source_key,
+    progressiveStream,
+    buckets,
+    providedWaveform,
+    releaseOverview,
+  ]);
 
   useEffect(() => {
     if (!progressiveStream) {
@@ -819,6 +865,7 @@ export function Waveform({
         bake?.startSec ?? null,
         bake?.endSec ?? null,
         palette,
+        releaseOverview,
       );
     };
     render();
@@ -833,6 +880,7 @@ export function Waveform({
     silenceThreshold,
     placeholder,
     palette,
+    releaseOverview,
     viewport.active,
     bake?.startSec,
     bake?.endSec,

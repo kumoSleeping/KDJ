@@ -12,6 +12,9 @@ const CACHE_LIMIT = 24;
 const DEFAULT_WAVEFORM_BUCKETS = 640;
 const cache = new Map<string, Waveform>();
 const inflight = new Map<string, Promise<Waveform>>();
+/** v0.2.41 整曲预览和当前高密度波形不能互相派生或覆盖。 */
+const releaseOverviewCache = new Map<number, Waveform>();
+const releaseOverviewInflight = new Map<number, Promise<Waveform>>();
 
 function normalizedBuckets(buckets: number): number {
   return Math.min(24_000, Math.max(64, Math.round(Number.isFinite(buckets) ? buckets : DEFAULT_WAVEFORM_BUCKETS)));
@@ -501,6 +504,22 @@ function remember(trackId: number, buckets: number, wave: Waveform): Waveform {
   return wave;
 }
 
+function rememberReleaseOverview(trackId: number, wave: Waveform): Waveform {
+  releaseOverviewCache.delete(trackId);
+  releaseOverviewCache.set(trackId, wave);
+  while (releaseOverviewCache.size > CACHE_LIMIT) {
+    const oldest = releaseOverviewCache.keys().next().value as number | undefined;
+    if (oldest === undefined) break;
+    releaseOverviewCache.delete(oldest);
+  }
+  return wave;
+}
+
+export function cachedReleaseOverviewWaveform(trackId: number): Waveform | null {
+  const hit = releaseOverviewCache.get(trackId);
+  return hit ? rememberReleaseOverview(trackId, hit) : null;
+}
+
 export function cachedWaveform(trackId: number, buckets = DEFAULT_WAVEFORM_BUCKETS): Waveform | null {
   const key = waveformCacheKey(trackId, buckets);
   const hit = cache.get(key);
@@ -610,12 +629,71 @@ export function loadWaveformForTrack(track: Track, buckets = DEFAULT_WAVEFORM_BU
 }
 
 /**
+ * 普通底栏和 DJ A/B overview 的专用资产。它不复用 detail cache，避免当前高密度
+ * Mixxx 波形再次覆盖用户要求恢复的 v0.2.41 整曲结构。
+ */
+export function loadReleaseOverviewForTrack(track: Track): Promise<Waveform> {
+  if (isStreamTrack(track) && !isOneLibraryPlaybackTrack(track)) {
+    const snapshot = streamWaveformSnapshot(track.id);
+    return snapshot
+      ? Promise.resolve(snapshot.waveform)
+      : Promise.reject(new Error("在线试听波形正在随媒体缓存生成"));
+  }
+  if (!isOneLibraryPlaybackTrack(track)) {
+    return loadReleaseOverviewById(track.id);
+  }
+  const hit = cachedReleaseOverviewWaveform(track.id);
+  if (hit) return Promise.resolve(hit);
+  const pending = releaseOverviewInflight.get(track.id);
+  if (pending) return pending;
+  const source = oneLibraryPlaybackSource(track);
+  if (!source) return Promise.reject(new Error("OneLibrary 播放来源无效"));
+  const request = api.oneLibraryWaveform(
+    source.devicePath,
+    source.contentId,
+    track.id,
+    DEFAULT_WAVEFORM_BUCKETS,
+    "release-overview",
+  );
+  const tracked = request
+    .then((wave) => {
+      releaseOverviewInflight.delete(track.id);
+      return rememberReleaseOverview(track.id, wave);
+    })
+    .catch((error: unknown) => {
+      releaseOverviewInflight.delete(track.id);
+      throw error;
+    });
+  releaseOverviewInflight.set(track.id, tracked);
+  return tracked;
+}
+
+export function loadReleaseOverviewById(trackId: number): Promise<Waveform> {
+  const hit = cachedReleaseOverviewWaveform(trackId);
+  if (hit) return Promise.resolve(hit);
+  const pending = releaseOverviewInflight.get(trackId);
+  if (pending) return pending;
+  const tracked = api
+    .waveform(trackId, DEFAULT_WAVEFORM_BUCKETS, "release-overview")
+    .then((wave) => {
+      releaseOverviewInflight.delete(trackId);
+      return rememberReleaseOverview(trackId, wave);
+    })
+    .catch((error: unknown) => {
+      releaseOverviewInflight.delete(trackId);
+      throw error;
+    });
+  releaseOverviewInflight.set(trackId, tracked);
+  return tracked;
+}
+
+/**
  * Current and predicted tracks only prefetch the canonical first-paint waveform. A detailed
  * master is requested by a mounted rail after it has stayed visible; eagerly decoding every
  * current/predicted Deck made one load compete with the other Deck's live transport.
  */
 export function prefetchWaveform(track: Track | null | undefined): void {
   if (!track || isStreamTrack(track)) return;
-  void loadWaveformForTrack(track, DEFAULT_WAVEFORM_BUCKETS)
+  void loadReleaseOverviewForTrack(track)
     .catch(() => undefined);
 }

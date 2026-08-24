@@ -2,9 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  releaseOverviewWaveformDisplayRgb,
   vocalGuideWaveformDisplayRgb,
   waveformDisplayRgb,
 } from "../src/lib/waveformPalette";
+
+test("v0.2.41 overview keeps its original saturated RGB values", () => {
+  assert.deepEqual(releaseOverviewWaveformDisplayRgb(255, 31, 80), [255, 31, 80]);
+  assert.deepEqual(releaseOverviewWaveformDisplayRgb(31, 92, 255), [31, 92, 255]);
+});
 
 test("waveform palette keeps unmistakable RGB frequency identities", () => {
   const low = waveformDisplayRgb(255, 0, 0);
