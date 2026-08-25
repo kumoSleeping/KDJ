@@ -4073,23 +4073,25 @@ export function PlayerBar({
 
   const togglePerformanceLoop = (side: 0 | 1, length: number, quantize: boolean) => {
     const deckTrack = performanceDecks[side].track;
-    if (!deckTrack) return;
+    if (!deckTrack) return Promise.resolve();
     if (playerRuntime.state().decks[side].trackId !== deckTrack.id) {
       // A replacement acknowledgement can lead the React row by one paint. This is a stale
       // generation, not an operational failure; the physical binding will reconcile next.
-      return;
+      return Promise.resolve();
     }
-    void playerRuntime.toggleDeckLoop(side, length, quantize).catch((error: unknown) => {
+    return playerRuntime.toggleDeckLoop(side, length, quantize).then(() => undefined).catch((error: unknown) => {
       setNotice("LOOP 失败：" + (error instanceof Error ? error.message : String(error)));
+      throw error;
     });
   };
 
   const resizePerformanceLoop = (side: 0 | 1, length: number) => {
     const deckTrack = performanceDecks[side].track;
-    if (!deckTrack) return;
-    if (playerRuntime.state().decks[side].trackId !== deckTrack.id) return;
-    void playerRuntime.resizeDeckLoop(side, length).catch((error: unknown) => {
+    if (!deckTrack) return Promise.resolve();
+    if (playerRuntime.state().decks[side].trackId !== deckTrack.id) return Promise.resolve();
+    return playerRuntime.resizeDeckLoop(side, length).then(() => undefined).catch((error: unknown) => {
       setNotice("调整 LOOP 失败：" + (error instanceof Error ? error.message : String(error)));
+      throw error;
     });
   };
 

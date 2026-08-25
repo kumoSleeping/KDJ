@@ -227,8 +227,8 @@ export interface PerformanceWorkspaceProps {
   onMasterVolumeChange: (volume: number) => void;
   onToggleStemAll: (side: 0 | 1) => void;
   onDeckPfl: (side: 0 | 1, enabled: boolean) => void;
-  onToggleLoop: (side: 0 | 1, length: number, quantize: boolean) => void;
-  onResizeLoop: (side: 0 | 1, length: number) => void;
+  onToggleLoop: (side: 0 | 1, length: number, quantize: boolean) => void | Promise<void>;
+  onResizeLoop: (side: 0 | 1, length: number) => void | Promise<void>;
   onSaveCuePoints: (track: Track, cues: CuePoint[]) => Promise<void>;
   onSaveMainCue: (track: Track, cueMs: number) => Promise<void>;
 }
@@ -2918,7 +2918,16 @@ export function PerformanceWorkspace({
       setLoopBeats(next);
     }
     const length = boundedBeats * beat;
-    onResizeLoop(side, length);
+    const acknowledgedBeats = boundedLoopBeats(
+      decks[side].loopLength !== null ? decks[side].loopLength / beat : boundedBeats,
+      beat,
+    );
+    void Promise.resolve(onResizeLoop(side, length)).catch(() => {
+      const next: [number, number] = [loopBeatsRef.current[0], loopBeatsRef.current[1]];
+      next[side] = acknowledgedBeats;
+      loopBeatsRef.current = next;
+      setLoopBeats(next);
+    });
   };
   const handleLoopToggle = (side: 0 | 1) => {
     const deck = decks[side];
@@ -2935,7 +2944,7 @@ export function PerformanceWorkspace({
       setLoopBeats(next);
     }
     const length = boundedBeats * beat;
-    onToggleLoop(side, length, quantize);
+    void Promise.resolve(onToggleLoop(side, length, quantize)).catch(() => {});
   };
   const handleManualPlatter: PerformanceWorkspaceProps["onPlatter"] = (side, event) => {
     cancelPendingSyncCorrection();
