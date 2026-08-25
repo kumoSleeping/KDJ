@@ -10,19 +10,13 @@ export function liveWaveformPlaybackRate(
   scratchActive = false,
 ): number {
   const target = Number.isFinite(targetRate) && targetRate > 0 ? targetRate : null;
-  if (scratchActive && Number.isFinite(audibleRate)) {
-    return audibleRate;
-  }
-  // A parked Deck publishes audibleRate=0. Do not fall back to TEMPO — that kept the
-  // compositor walking after natural end / pause.
-  if (Number.isFinite(audibleRate) && Math.abs(audibleRate) <= 0.02) {
-    return audibleRate;
-  }
-  if (Number.isFinite(audibleRate) && (audibleRate <= 0 || (target != null && Math.abs(audibleRate - target) > 0.25))) {
-    return audibleRate;
-  }
-  if (target != null) return target;
+  void scratchActive;
+  // Post-Rubber-Band PCM can trail a target change by its bounded output cushion. Advancing the
+  // rail at target rate before those packets reach the DAC creates phase debt; touching the
+  // platter then reveals it as a small snap. The callback-tagged audible rate is always the
+  // timeline truth, including zero for a parked Deck and negative scratch motion.
   if (Number.isFinite(audibleRate)) return audibleRate;
+  if (target != null) return target;
   return 1;
 }
 

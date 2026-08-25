@@ -252,6 +252,15 @@ test("jog wheel carries touch separately, preserves edge nudge, and gives Shift 
   assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0x80, 6, 0])!, layers), [
     { type: "jogTouch", deck: 0, held: false },
   ]);
+  assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0xb1, 6, 127])!, layers), [
+    { type: "jog", deck: 1, delta: -1 },
+  ]);
+  assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0x91, 6, 127])!, layers), [
+    { type: "jogTouch", deck: 1, held: true },
+  ]);
+  assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0x81, 6, 0])!, layers), [
+    { type: "jogTouch", deck: 1, held: false },
+  ]);
   assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0xb0, 6, 1])!, { ...layers, shift: true }), [
     { type: "jogSeek", deck: 0, delta: 1 },
   ]);

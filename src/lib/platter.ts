@@ -14,6 +14,9 @@ export const PLATTER_MAX_RATE = 8;
 /** A MIDI touch-up can trail its final rotary packet by more than one USB frame. */
 export const PLATTER_RELEASE_MEMORY_MS = 160;
 const PLATTER_FALLBACK_SAMPLE_MS = 8;
+/** Three recent motion intervals suppress encoder/PointerEvent quantization without hand lag. */
+const PLATTER_VELOCITY_HISTORY_SAMPLES = 4;
+const PLATTER_VELOCITY_HISTORY_MS = 120;
 
 export type UnifiedPlatterEvent =
   | { phase: "start" }
@@ -48,31 +51,64 @@ export class PlatterVelocityTracker {
   private lastInputAt: number | null = null;
   private lastMotionAt: number | null = null;
   private velocity = 0;
+  private distance = 0;
+  private samples: Array<{ at: number; distance: number }> = [];
 
   start(at: number): void {
     const now = finiteTimestamp(at);
     this.lastInputAt = now;
     this.lastMotionAt = null;
     this.velocity = 0;
+    this.distance = 0;
+    this.samples = [{ at: now, distance: 0 }];
   }
 
   move(distanceSeconds: number, at: number): number {
-    const now = finiteTimestamp(at, this.lastInputAt ?? 0);
+    const observedAt = finiteTimestamp(at, this.lastInputAt ?? 0);
+    // WebKit may give every coalesced point the parent event timestamp; some MIDI backends also
+    // batch several values at one device tick. Give those samples a small monotonic interval so
+    // they do not later collapse into one infinite-speed history point.
+    const now = this.lastInputAt !== null && observedAt <= this.lastInputAt
+      ? this.lastInputAt + PLATTER_FALLBACK_SAMPLE_MS
+      : observedAt;
     const elapsed = this.lastInputAt === null
       ? PLATTER_FALLBACK_SAMPLE_MS
       : now - this.lastInputAt;
     const elapsedMs = Number.isFinite(elapsed) && elapsed > 0
       ? elapsed
       : PLATTER_FALLBACK_SAMPLE_MS;
+    const previousAt = this.lastInputAt ?? now - elapsedMs;
     this.lastInputAt = now;
     if (!Number.isFinite(distanceSeconds)) return this.velocity;
-    this.velocity = clampPlatterVelocity(distanceSeconds / (elapsedMs / 1_000));
+    const rawVelocity = clampPlatterVelocity(distanceSeconds / (elapsedMs / 1_000));
+    // A real direction reversal must not drag the previous direction through the averaging
+    // window. For same-direction motion, average three packet intervals: integer MIDI ticks and
+    // coalesced pointer batches then describe one continuous hand speed instead of a staircase.
+    if (rawVelocity * this.velocity < 0 && Math.abs(rawVelocity) > 0.05) {
+      this.samples = [{ at: previousAt, distance: this.distance }];
+    }
+    this.distance += distanceSeconds;
+    this.samples.push({ at: now, distance: this.distance });
+    while (this.samples.length > PLATTER_VELOCITY_HISTORY_SAMPLES) this.samples.shift();
+    while (
+      this.samples.length > 2
+      && now - this.samples[1].at > PLATTER_VELOCITY_HISTORY_MS
+    ) this.samples.shift();
+    const first = this.samples[0];
+    const windowMs = now - first.at;
+    const windowVelocity = windowMs > 0
+      ? (this.distance - first.distance) / (windowMs / 1_000)
+      : rawVelocity;
+    this.velocity = clampPlatterVelocity(windowVelocity);
     this.lastMotionAt = now;
     return this.velocity;
   }
 
   end(at: number): number {
-    const now = finiteTimestamp(at, this.lastInputAt ?? 0);
+    const now = Math.max(
+      finiteTimestamp(at, this.lastInputAt ?? 0),
+      this.lastInputAt ?? 0,
+    );
     const fresh = this.lastMotionAt !== null
       && now >= this.lastMotionAt
       && now - this.lastMotionAt <= PLATTER_RELEASE_MEMORY_MS;
@@ -85,5 +121,7 @@ export class PlatterVelocityTracker {
     this.lastInputAt = null;
     this.lastMotionAt = null;
     this.velocity = 0;
+    this.distance = 0;
+    this.samples = [];
   }
 }

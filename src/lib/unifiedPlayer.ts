@@ -17,6 +17,7 @@ import {
 import type { FilterResonance, Track } from "../types";
 import { clampPerformanceDeckPosition } from "./deckPosition";
 import { clampPlatterVelocity, type UnifiedPlatterEvent } from "./platter";
+import { MIDI_JOG_NUDGE_HOLD_MS } from "./midiJog";
 import { djEngine } from "./djMix";
 import { EQ_GRAPH_BAND_COUNT } from "./eqGraph";
 import { usesRemotePlaybackSource } from "./playbackTrackSource";
@@ -1563,6 +1564,12 @@ class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
     if (bounded === 0) return Promise.resolve(this.snapshot);
     if (this.deckScratchHeld[deck]) return Promise.resolve(this.snapshot);
     const audio = djEngine.deckElement(deck);
+    const pitchLocked = audio as HTMLAudioElement & {
+      preservesPitch?: boolean;
+      webkitPreservesPitch?: boolean;
+    };
+    pitchLocked.preservesPitch = true;
+    pitchLocked.webkitPreservesPitch = true;
     const sourceId = this.snapshot.decks[deck].trackId;
     audio.playbackRate = Math.max(0.5, Math.min(2, this.deckBaseRates[deck] * (1 + bounded * 0.18)));
     this.clearNudge(deck);
@@ -1571,7 +1578,7 @@ class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
       if (this.snapshot.decks[deck].trackId !== sourceId) return;
       audio.playbackRate = this.deckBaseRates[deck];
       void this.refresh();
-    }, 90);
+    }, MIDI_JOG_NUDGE_HOLD_MS);
     return Promise.resolve(this.snapshot);
   }
 

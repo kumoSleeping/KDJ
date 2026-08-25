@@ -22,10 +22,10 @@ pub const MAX_TEMPO_RATE: f32 = 2.0;
 const MAX_PROCESS_FRAMES: usize = 4_096;
 const RETRIEVE_FRAMES: usize = 4_096;
 /// Rubber Band R3 accepts dynamic ratios, but rebuilding its analysis plan for every MIDI/slider
-/// sample can discard more output than the callback ring can hide. Keep latest-value semantics and
-/// apply at most one ratio update per bounded source window (about 85 ms at 48 kHz). A single SYNC
-/// change therefore lands promptly, while dense control streams are coalesced.
-const MIN_RATE_UPDATE_SOURCE_FRAMES: usize = 4_096;
+/// sample can discard more output than the callback ring can hide. Latest-value controls are
+/// therefore sampled once per 2,048 source frames (~43 ms at 48 kHz): fast enough for a
+/// pitch-preserving edge jog, while leaving R3 analysis headroom for two Decks and STEM.
+const MIN_RATE_UPDATE_SOURCE_FRAMES: usize = 2_048;
 /// Below this, Rubber Band R3 is an identity with hop-rate phase artifacts. Pass PCM through.
 const UNITY_RATE_EPSILON: f32 = 0.0005;
 

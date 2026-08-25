@@ -30,7 +30,7 @@ export type MidiActionType =
   | "fxNext"
   | "fxEnabled"
   | "shiftHold"
-  /** 原始缓动盘转动；运行时根据电容触摸状态决定刮擦或 pitch bend。 */
+  /** 原始缓动盘转动；运行时根据电容触摸状态决定刮擦或保调变速。 */
   | "jog"
   /** 电容盘面的按下/松开状态。 */
   | "jogTouch"

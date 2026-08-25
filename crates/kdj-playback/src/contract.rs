@@ -247,8 +247,8 @@ pub enum PlaybackCommand {
         #[serde(default, rename = "playWhenReady")]
         play_when_ready: bool,
     },
-    /// Momentary edge-jog pitch bend. `amount` is normalized to -1..1 and never changes the
-    /// Deck's persisted TEMPO value.
+    /// Momentary, pitch-preserving edge-jog tempo. `amount` is normalized to -1..1 and never
+    /// changes the Deck's persisted TEMPO value.
     NudgeDeck {
         deck: u8,
         amount: f32,

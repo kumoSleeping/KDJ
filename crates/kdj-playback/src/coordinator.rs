@@ -65,9 +65,10 @@ const TRANSPORT_FADE_MS: u64 = 120;
 /// 拔掉耳机/切换输出设备后，系统枚举新默认设备有滞后；重开输出按这个节奏退避重试。
 const DEVICE_RECOVERY_ATTEMPTS: usize = 8;
 const DEVICE_RECOVERY_BACKOFF: Duration = Duration::from_millis(150);
-/// Edge-jog pitch bend persists just long enough for consecutive rotary packets to feel smooth,
-/// then automatically returns to the deck's actual TEMPO without a frontend timer race.
-const JOG_NUDGE_HOLD: Duration = Duration::from_millis(90);
+/// Pitch-preserving edge-jog tempo persists across ordinary MIDI packet gaps, then returns to the
+/// Deck's actual TEMPO without a frontend timer race.
+const JOG_NUDGE_HOLD: Duration = Duration::from_millis(180);
+const JOG_NUDGE_FAILSAFE: Duration = Duration::from_secs(2);
 const JOG_NUDGE_MAX_RATE_OFFSET: f32 = 0.18;
 /// A prepared replacement is aligned to the still-running original Deck. Late cache output is
 /// skipped forward; the transport clock is never pulled backwards.
@@ -360,6 +361,13 @@ struct NativeSyncGroup {
     aligning_follower: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct JogNudge {
+    target_revision: u64,
+    requested_at: Instant,
+    audible_at: Option<Instant>,
+}
+
 struct PendingStream {
     revision: u64,
     source: PlaybackStream,
@@ -457,8 +465,7 @@ struct Actor {
     scratch_gesture_sequences: [u64; 2],
     /// Negative requested Deck positions waiting for a frame-0 source to install.
     pending_preroll: [Option<f64>; 2],
-    jog_nudge_until: [Option<Instant>; 2],
-    jog_nudge_multipliers: [f32; 2],
+    jog_nudges: [Option<JogNudge>; 2],
     deck_mixers: [DeckMixer; 2],
     stem_pool: Option<(PathBuf, Arc<StemInferencePool>, StemPoolGuard)>,
     observed_stem_underruns: [u64; 2],
@@ -511,8 +518,7 @@ impl Actor {
             scratch_gesture_ids: [0; 2],
             scratch_gesture_sequences: [0; 2],
             pending_preroll: [None, None],
-            jog_nudge_until: [None, None],
-            jog_nudge_multipliers: [1.0; 2],
+            jog_nudges: [None, None],
             deck_mixers: [DeckMixer::default(); 2],
             stem_pool: None,
             observed_stem_underruns: stem_output_underruns_by_deck(),
@@ -1477,11 +1483,34 @@ impl Actor {
         if self.decks[index].is_none() {
             return Ok(());
         }
+        // `playback_control` and the gesture command lane are independent IPC requests. A nudge
+        // already in flight may therefore arrive just after platter Start. The physical platter
+        // owns velocity until coast/handoff completes; letting that late edge packet retarget
+        // tempo is the small jump heard on immediate re-touch.
+        if self.scratch_held[index] || self.scratch_coasting[index] {
+            return Ok(());
+        }
         self.enter_manual_mode();
         let amount = amount.clamp(-1.0, 1.0);
-        self.jog_nudge_multipliers[index] = 1.0 + amount * JOG_NUDGE_MAX_RATE_OFFSET;
+        // Edge jog is temporary *tempo*, not callback resampling. Feeding the existing Rubber
+        // Band lane changes speed while preserving key; the old phase-resampler route audibly
+        // bent pitch and left a fractional cursor that jumped on the next platter touch.
+        let base_rate = self.decks[index]
+            .as_ref()
+            .map(|runtime| runtime.request.rate)
+            .unwrap_or(self.state.decks[index].rate);
+        let target = (base_rate * (1.0 + amount * JOG_NUDGE_MAX_RATE_OFFSET)).clamp(0.5, 2.0);
+        self.set_transient_deck_rate(deck, target);
+        let target_revision = self.decks[index]
+            .as_ref()
+            .map(|runtime| runtime.tempo.revision())
+            .unwrap_or(0);
         self.set_sync_phase_correction(deck, 1.0);
-        self.jog_nudge_until[index] = Some(Instant::now() + JOG_NUDGE_HOLD);
+        self.jog_nudges[index] = Some(JogNudge {
+            target_revision,
+            requested_at: Instant::now(),
+            audible_at: None,
+        });
         Ok(())
     }
 
@@ -2171,10 +2200,14 @@ impl Actor {
 
     fn clear_jog_nudge(&mut self, deck: DeckId) {
         let index = deck as usize;
-        if self.jog_nudge_until[index].take().is_none() {
+        if self.jog_nudges[index].take().is_none() {
             return;
         }
-        self.jog_nudge_multipliers[index] = 1.0;
+        let base_rate = self.decks[index]
+            .as_ref()
+            .map(|runtime| runtime.request.rate)
+            .unwrap_or(self.state.decks[index].rate);
+        self.set_transient_deck_rate(deck, base_rate);
         self.set_sync_phase_correction(deck, 1.0);
     }
 
@@ -2197,11 +2230,7 @@ impl Actor {
         } else {
             1.0
         };
-        let combined = (multiplier * self.jog_nudge_multipliers[deck as usize]).clamp(0.75, 1.25);
-        let _ = self.send(RtCommand::SetDeckPhaseCorrection {
-            deck,
-            multiplier: combined,
-        });
+        let _ = self.send(RtCommand::SetDeckPhaseCorrection { deck, multiplier });
     }
 
     fn clear_native_sync(&mut self, restore_rate: bool) {
@@ -2259,13 +2288,20 @@ impl Actor {
         let now = Instant::now();
         for deck in [DeckId::A, DeckId::B] {
             let index = deck as usize;
-            let Some(until) = self.jog_nudge_until[index] else {
+            let Some(mut nudge) = self.jog_nudges[index] else {
                 continue;
             };
-            if until > now {
-                continue;
+            if nudge.audible_at.is_none()
+                && self.latest_audio.deck_audible_rate_revisions[index] >= nudge.target_revision
+            {
+                nudge.audible_at = Some(now);
             }
-            if self.jog_nudge_until[index].is_some() {
+            let audible_expired = nudge
+                .audible_at
+                .is_some_and(|audible_at| now.duration_since(audible_at) >= JOG_NUDGE_HOLD);
+            let failsafe_expired = now.duration_since(nudge.requested_at) >= JOG_NUDGE_FAILSAFE;
+            self.jog_nudges[index] = Some(nudge);
+            if audible_expired || failsafe_expired {
                 self.clear_jog_nudge(deck);
             }
         }
@@ -6102,21 +6138,44 @@ mod tests {
             (runtime.request.rate - 1.1).abs() < 0.001,
             "TEMPO 不得被缓动写回"
         );
-        assert!((runtime.tempo.rate() - 1.1).abs() < 0.001);
+        let nudged_rate = 1.1 * (1.0 + JOG_NUDGE_MAX_RATE_OFFSET);
+        assert!((runtime.tempo.rate() - nudged_rate).abs() < 0.001);
         assert!(knobs.sent.lock().unwrap().iter().any(|command| {
             matches!(
                 command,
-                RtCommand::SetDeckPhaseCorrection { deck: DeckId::A, multiplier }
-                    if (*multiplier - (1.0 + JOG_NUDGE_MAX_RATE_OFFSET)).abs() < 0.001
+                RtCommand::SetRate { deck: DeckId::A, rate }
+                    if (*rate - nudged_rate).abs() < 0.001
             )
         }));
+        assert!(
+            !knobs.sent.lock().unwrap().iter().any(|command| matches!(
+                command,
+                RtCommand::SetDeckPhaseCorrection { multiplier, .. }
+                    if (*multiplier - 1.0).abs() > 0.001
+            )),
+            "edge jog must preserve pitch instead of callback-resampling the Deck"
+        );
         assert!(
             actor.pending[DeckId::A as usize].is_none(),
             "缓动不得启动新的解码 worker"
         );
         assert!((actor.state.decks[DeckId::A as usize].rate - 1.1).abs() < 0.001);
 
-        actor.jog_nudge_until[DeckId::A as usize] = Some(Instant::now() - Duration::from_millis(1));
+        actor.release_expired_jog_nudges();
+        assert!(
+            actor.jog_nudges[DeckId::A as usize].is_some(),
+            "a queued pitch-preserved target must not expire before it reaches the DAC"
+        );
+        let target_revision = actor.decks[DeckId::A as usize]
+            .as_ref()
+            .unwrap()
+            .tempo
+            .revision();
+        actor.latest_audio.deck_audible_rate_revisions[DeckId::A as usize] = target_revision;
+        actor.jog_nudges[DeckId::A as usize]
+            .as_mut()
+            .unwrap()
+            .audible_at = Some(Instant::now() - JOG_NUDGE_HOLD - Duration::from_millis(1));
         actor.release_expired_jog_nudges();
 
         let runtime = actor.decks[DeckId::A as usize]
@@ -6131,6 +6190,21 @@ mod tests {
             Some(RtCommand::SetDeckPhaseCorrection { deck: DeckId::A, multiplier })
                 if (*multiplier - 1.0).abs() < 0.001
         ));
+        assert!(knobs.sent.lock().unwrap().iter().any(|command| matches!(
+            command,
+            RtCommand::SetRate { deck: DeckId::A, rate } if (*rate - 1.1).abs() < 0.001
+        )));
+
+        actor.start_deck_platter(DeckId::A as u8).expect("touch");
+        knobs.sent.lock().unwrap().clear();
+        actor
+            .nudge_deck(DeckId::A as u8, -1.0)
+            .expect("late edge packet is harmless");
+        assert!(actor.jog_nudges[DeckId::A as usize].is_none());
+        assert!(
+            knobs.sent.lock().unwrap().is_empty(),
+            "a nudge delivered after touch must not move the platter's tempo or cursor"
+        );
     }
 
     #[test]
@@ -6869,6 +6943,38 @@ mod tests {
         assert!(!sent
             .iter()
             .any(|command| matches!(command, RtCommand::SetDeckPlaying { .. })));
+    }
+
+    #[test]
+    fn paused_deck_b_uses_the_same_platter_generation_and_negative_velocity_path() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("open test output");
+        actor.decks[DeckId::B as usize] = Some(live_runtime(2, 0.0));
+        actor.state.decks[DeckId::B as usize].track_id = Some(2);
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [false, false];
+        knobs.sent.lock().unwrap().clear();
+
+        actor
+            .begin_deck_scratch(DeckId::B as u8, 42, Some(2))
+            .expect("Deck B touch");
+        actor
+            .update_deck_scratch(DeckId::B as u8, 42, 1, -1.0)
+            .expect("Deck B reverse into pre-roll");
+
+        assert!(!actor.scratch_held[0]);
+        assert!(actor.scratch_held[1]);
+        assert!(!actor.manual_desired_playing[1]);
+        let sent = knobs.sent.lock().unwrap();
+        assert!(sent.iter().any(|command| matches!(
+            command,
+            RtCommand::ControlDeckPlatter {
+                deck: DeckId::B,
+                phase: PlatterPhase::Move,
+                velocity,
+            } if (*velocity + 1.0).abs() < 0.001
+        )));
     }
 
     #[test]

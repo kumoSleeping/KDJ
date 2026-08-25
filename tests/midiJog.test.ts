@@ -10,6 +10,7 @@ import {
   midiJogNudgeAmount,
   midiJogNudgeRate,
   midiJogSeekSeconds,
+  midiJogUsesPlatter,
   midiJogVinylSeconds,
 } from "../src/lib/midiJog";
 import {
@@ -62,12 +63,32 @@ test("a faster flick produces more speed and release preserves only a fresh thro
   const slow = tracker.move(0.1, 100);
   const fast = tracker.move(0.1, 110);
   assert.ok(fast > slow);
-  assert.equal(fast, PLATTER_MAX_RATE, "stream-safe native speed is bounded");
-  assert.equal(tracker.end(110 + PLATTER_RELEASE_MEMORY_MS), PLATTER_MAX_RATE);
+  assert.equal(tracker.end(110 + PLATTER_RELEASE_MEMORY_MS), fast);
+
+  const bounded = new PlatterVelocityTracker();
+  bounded.start(0);
+  assert.equal(bounded.move(1, 1), PLATTER_MAX_RATE, "stream-safe native speed is bounded");
 
   tracker.start(1_000);
   tracker.move(0.1, 1_010);
   assert.equal(tracker.end(1_011 + PLATTER_RELEASE_MEMORY_MS), 0);
+});
+
+test("quantized packet timing is averaged but a real direction reversal stays immediate", () => {
+  const tracker = new PlatterVelocityTracker();
+  tracker.start(0);
+  assert.equal(tracker.move(0.01, 8), 1.25);
+  const averaged = tracker.move(0.01, 24);
+  assert.ok(averaged > 0.625 && averaged < 1.25, "two uneven packets should describe one stable window");
+  assert.equal(tracker.move(-0.01, 32), -1.25, "opposite hand motion must reset old history");
+});
+
+test("coalesced samples with one timestamp retain a finite continuous velocity", () => {
+  const tracker = new PlatterVelocityTracker();
+  tracker.start(100);
+  assert.equal(tracker.move(0.008, 100), 1);
+  assert.equal(tracker.move(0.008, 100), 1);
+  assert.equal(tracker.end(100), 1);
 });
 
 test("Shift quick search crosses a track in a bounded number of deliberate turns", () => {
@@ -94,11 +115,17 @@ test("fast relative vinyl packets keep their encoder ticks", () => {
   assert.equal(midiJogNudgeAmount(-99), -1);
 });
 
-test("edge pitch bend previews the native transient rate without changing TEMPO", () => {
+test("pitch-preserving edge nudge previews the native transient tempo without persisting it", () => {
   assert.ok(Math.abs(midiJogNudgeRate(1, 1) - 1.18) < 1e-12);
   assert.ok(Math.abs(midiJogNudgeRate(1.25, -1) - 1.025) < 1e-12);
   assert.equal(midiJogNudgeRate(2, 1), 2);
   assert.equal(midiJogNudgeRate(0.5, -1), 0.5);
+});
+
+test("both stopped Decks use platter motion even without a separate touch edge", () => {
+  assert.equal(midiJogUsesPlatter(true, true), true);
+  assert.equal(midiJogUsesPlatter(false, false), true);
+  assert.equal(midiJogUsesPlatter(false, true), false);
 });
 
 test("jog position stays inside the track and its bounded silent pre-roll", () => {

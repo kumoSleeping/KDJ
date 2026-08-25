@@ -19,8 +19,8 @@ const MAX_RELATIVE_TICKS_PER_MESSAGE = 64;
 const MAX_NUDGE_TICKS_PER_MESSAGE = 8;
 /** Edge-jog bursts share a cursor so 01h ticks accumulate. A held platter must ignore this. */
 export const MIDI_JOG_CURSOR_STALE_MS = 240;
-/** Must mirror the native callback window/rate in kdj-playback's JOG_NUDGE_* constants. */
-export const MIDI_JOG_NUDGE_HOLD_MS = 90;
+/** Must mirror the native pitch-preserving tempo window in kdj-playback's JOG_NUDGE_* constants. */
+export const MIDI_JOG_NUDGE_HOLD_MS = 180;
 export const MIDI_JOG_NUDGE_MAX_RATE_OFFSET = 0.18;
 
 export interface MidiJogCursor {
@@ -53,9 +53,14 @@ export function midiJogSeekSeconds(delta: number, duration: number): number {
   );
 }
 
-/** 边缘转动给原生引擎的归一化、瞬态 pitch-bend 幅度。 */
+/** 边缘转动给原生引擎的归一化、瞬态保调变速幅度。 */
 export function midiJogNudgeAmount(delta: number): number {
   return boundedNudgeTicks(delta) / MAX_NUDGE_TICKS_PER_MESSAGE;
+}
+
+/** A stopped transport has nothing to nudge; edge rotation must own the platter cursor instead. */
+export function midiJogUsesPlatter(surfaceHeld: boolean, transportRunning: boolean): boolean {
+  return surfaceHeld || !transportRunning;
 }
 
 /** Compositor preview of the native 90ms edge pitch bend; persistent TEMPO remains unchanged. */

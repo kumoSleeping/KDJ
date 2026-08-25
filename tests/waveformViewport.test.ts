@@ -267,8 +267,8 @@ test("the compositor clock follows the engine wrap instead of wrapping a linear 
   assert.ok(Math.abs(cleared.anchorPosition - 10.2) < 1e-12);
 });
 
-test("TEMPO plant lag must not pause/seek the live waveform compositor", () => {
-  assert.equal(liveWaveformPlaybackRate(1.08, 1.0), 1.08);
+test("the live waveform follows DAC-audible tempo instead of building target-rate phase debt", () => {
+  assert.equal(liveWaveformPlaybackRate(1.08, 1.0), 1.0);
   assert.equal(liveWaveformPlaybackRate(1, 0.4, true), 0.4);
   assert.equal(liveWaveformPlaybackRate(0, 0.94), 0.94);
   assert.equal(liveWaveformPlaybackRate(1, -1.4), -1.4);

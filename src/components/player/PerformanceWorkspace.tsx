@@ -91,6 +91,7 @@ import {
   midiJogCursorPosition,
   midiJogNudgeAmount,
   midiJogSeekSeconds,
+  midiJogUsesPlatter,
   midiJogVinylSeconds,
 } from "../../lib/midiJog";
 import { PlatterVelocityTracker, pointerPlatterDistance } from "../../lib/platter";
@@ -119,6 +120,8 @@ const TEMPO_STEP = 0.001;
 // A streamed seek needs a small initial output cushion. Sending another target before that
 // cushion exists simply cancels the last worker, so keep hardware jog seeks deliberately bounded.
 const MIDI_JOG_SEEK_INTERVAL_MS = 80;
+/** A stopped platter has no pitch-bend transport; edge rotation becomes a short vinyl gesture. */
+const PAUSED_JOG_PLATTER_RELEASE_MS = 140;
 
 function deckTempoRange(side: 0 | 1): { id: TempoRangeId; label: string; min: number; max: number } {
   const id = readTempoRanges()[side];
@@ -2299,6 +2302,10 @@ export function PerformanceWorkspace({
     decks[1].track?.id ?? null,
   ]);
   deckTrackIdsRef.current = [decks[0].track?.id ?? null, decks[1].track?.id ?? null];
+  const platterTrackIdsRef = useRef<[number | null, number | null]>([
+    decks[0].track?.id ?? null,
+    decks[1].track?.id ?? null,
+  ]);
   const jogTouchRef = useRef<[boolean, boolean]>([false, false]);
   const midiPlatterTrackersRef = useRef<[PlatterVelocityTracker, PlatterVelocityTracker]>([
     new PlatterVelocityTracker(),
@@ -2334,6 +2341,7 @@ export function PerformanceWorkspace({
   ]>([null, null]);
   const jogSeekTimerRef = useRef<[number | null, number | null]>([null, null]);
   const jogSeekSentAtRef = useRef<[number, number]>([0, 0]);
+  const pausedJogReleaseTimerRef = useRef<[number | null, number | null]>([null, null]);
   const scratchPreviewPendingRef = useRef<[number | null, number | null]>([null, null]);
   const scratchPreviewFrameRef = useRef<number | null>(null);
   const syncPlayingRef = useRef<[boolean, boolean] | null>(null);
@@ -2379,6 +2387,9 @@ export function PerformanceWorkspace({
       if (jogTimer !== null) window.clearTimeout(jogTimer);
       jogSeekTimerRef.current[side] = null;
       jogSeekPendingRef.current[side] = null;
+      const pausedJogTimer = pausedJogReleaseTimerRef.current[side];
+      if (pausedJogTimer !== null) window.clearTimeout(pausedJogTimer);
+      pausedJogReleaseTimerRef.current[side] = null;
       jogAtRef.current[side] = null;
       jogTouchRef.current[side] = false;
       midiPlatterTrackersRef.current[side].reset();
@@ -2631,8 +2642,15 @@ export function PerformanceWorkspace({
     jogSeekPendingRef.current[side] = null;
   };
 
+  const clearPausedJogRelease = (side: 0 | 1) => {
+    const timer = pausedJogReleaseTimerRef.current[side];
+    if (timer !== null) window.clearTimeout(timer);
+    pausedJogReleaseTimerRef.current[side] = null;
+  };
+
   const startMidiJogScratch = (side: 0 | 1, inputAt = performance.now()) => {
     cancelPendingSyncCorrection();
+    clearPausedJogRelease(side);
     if (jogTouchRef.current[side]) return;
     jogTouchRef.current[side] = true;
     midiPlatterTrackersRef.current[side].start(inputAt);
@@ -2658,6 +2676,7 @@ export function PerformanceWorkspace({
 
   const finishMidiJogScratch = (side: 0 | 1, inputAt = performance.now()) => {
     cancelPendingSyncCorrection();
+    clearPausedJogRelease(side);
     if (!jogTouchRef.current[side]) return;
     jogTouchRef.current[side] = false;
     const velocity = midiPlatterTrackersRef.current[side].end(inputAt);
@@ -2673,6 +2692,18 @@ export function PerformanceWorkspace({
     jogAtRef.current[side] = null;
   };
 
+  const movePausedJogPlatter = (side: 0 | 1, delta: number, inputAt: number) => {
+    if (!decksRef.current[side].track) return;
+    if (!jogTouchRef.current[side]) startMidiJogScratch(side, inputAt);
+    moveJogPosition(side, delta, false, false, inputAt);
+    clearPausedJogRelease(side);
+    pausedJogReleaseTimerRef.current[side] = window.setTimeout(() => {
+      // Keep the device timestamp domain used by the final packet. performance.now() is not
+      // guaranteed to share CoreMIDI's epoch and would incorrectly erase release velocity.
+      finishMidiJogScratch(side, inputAt + PAUSED_JOG_PLATTER_RELEASE_MS);
+    }, PAUSED_JOG_PLATTER_RELEASE_MS);
+  };
+
   useEffect(() => () => {
     if (scratchPreviewFrameRef.current !== null) {
       window.cancelAnimationFrame(scratchPreviewFrameRef.current);
@@ -2684,31 +2715,45 @@ export function PerformanceWorkspace({
       }
       const timer = jogSeekTimerRef.current[side];
       if (timer !== null) window.clearTimeout(timer);
+      clearPausedJogRelease(side);
     });
   }, []);
 
   useEffect(() => {
-    // A source change is a real gesture boundary. End the old generation before clearing local
-    // refs; the runtime/actor gesture ID makes this harmless if a newer physical source already
-    // won the race. Leaving the ref false without End orphaned the callback hold indefinitely.
+    const nextTrackIds: [number | null, number | null] = [
+      decks[0].track?.id ?? null,
+      decks[1].track?.id ?? null,
+    ];
+    const changed: [boolean, boolean] = [
+      platterTrackIdsRef.current[0] !== nextTrackIds[0],
+      platterTrackIdsRef.current[1] !== nextTrackIds[1],
+    ];
+    platterTrackIdsRef.current = nextTrackIds;
+    // A source change ends only that physical Deck's generation. Resetting both sides here made
+    // an unrelated Deck-A load silently forget a still-held Deck-B touch; following B ticks then
+    // became edge nudges and a paused B could no longer enter negative pre-roll.
     ([0, 1] as const).forEach((side) => {
+      if (!changed[side]) return;
       if (!jogTouchRef.current[side]) return;
       const velocity = midiPlatterTrackersRef.current[side].end(performance.now());
       onPlatterRef.current(side, { phase: "end", velocity });
     });
-    jogTouchRef.current = [false, false];
-    midiPlatterTrackersRef.current[0].reset();
-    midiPlatterTrackersRef.current[1].reset();
-    setMidiScratchActive([false, false]);
-    jogAtRef.current = [null, null];
+    setMidiScratchActive((current) => [
+      changed[0] ? false : current[0],
+      changed[1] ? false : current[1],
+    ]);
     ([0, 1] as const).forEach((side) => {
+      if (!changed[side]) return;
+      jogTouchRef.current[side] = false;
+      midiPlatterTrackersRef.current[side].reset();
+      jogAtRef.current[side] = null;
       const timer = jogSeekTimerRef.current[side];
       if (timer !== null) window.clearTimeout(timer);
       jogSeekTimerRef.current[side] = null;
       jogSeekPendingRef.current[side] = null;
+      clearPausedJogRelease(side);
+      updateScratchPreview(side, null);
     });
-    updateScratchPreview(0, null);
-    updateScratchPreview(1, null);
   }, [decks[0].track?.id, decks[1].track?.id, updateScratchPreview]);
 
   useEffect(() => {
@@ -3331,7 +3376,14 @@ export function PerformanceWorkspace({
         // Keep the runtime guard for custom mappings that only expose a Shift hold signal.
         if (shiftHeldRef.current) {
           moveJogPosition(action.deck, action.delta, true, !jogTouchRef.current[action.deck], inputAt);
-        } else if (isJogVinylMotion(action.deck)) {
+        } else if (midiJogUsesPlatter(
+          isJogVinylMotion(action.deck),
+          decksRef.current[action.deck].transportRunning,
+        )) {
+          if (!isJogVinylMotion(action.deck)) {
+            movePausedJogPlatter(action.deck, action.delta, inputAt);
+            return;
+          }
           moveJogPosition(action.deck, action.delta, false, false, inputAt);
         } else {
           cancelPendingSyncCorrection();
@@ -3350,7 +3402,14 @@ export function PerformanceWorkspace({
           moveJogPosition(action.deck, action.delta, true, !jogTouchRef.current[action.deck], inputAt);
           return;
         }
-        if (isJogVinylMotion(action.deck)) {
+        if (midiJogUsesPlatter(
+          isJogVinylMotion(action.deck),
+          decksRef.current[action.deck].transportRunning,
+        )) {
+          if (!isJogVinylMotion(action.deck)) {
+            movePausedJogPlatter(action.deck, action.delta, inputAt);
+            return;
+          }
           moveJogPosition(action.deck, action.delta, false, false, inputAt);
         } else {
           // Older mappings expose only a rotary "scratch" message and have no reliable release
@@ -3711,11 +3770,12 @@ export function PerformanceWorkspace({
             const seekPreview = scratchPreviews[side];
             const position = seekPreview ?? decks[side].position;
             const platterMotion = midiScratchActive[side] || viewDecks[side].scratchHeld;
+            const platterStartPending = midiScratchActive[side] && !viewDecks[side].scratchHeld;
             const interactiveScrub = platterMotion || seekPreview != null;
             // While scratching, motionRate is the smoothed engine audible rate. Otherwise the
             // hardware transport rate drives ordinary play — never TEMPO while parked.
             const motionRate = platterMotion
-              ? viewDecks[side].audibleRate
+              ? (platterStartPending ? 0 : viewDecks[side].audibleRate)
               : (viewDecks[side].transportRunning ? viewDecks[side].rate : 0);
             return (
               <PerformanceDeckWaves

@@ -152,7 +152,7 @@ const SCRATCH_TAPE_FRAMES: usize = 576_000;
 const SCRATCH_VELOCITY_MAX: f64 = 8.0;
 const SCRATCH_TAPE_FILL_FRAMES: usize = 16;
 /// A short acceleration constant keeps the platter physical without lagging behind the hand.
-const SCRATCH_RESPONSE_SECONDS: f64 = 0.006;
+const SCRATCH_RESPONSE_SECONDS: f64 = 0.010;
 /// Lift below this fraction of play speed snaps to transport. Above it is a real throw that
 /// coasts from the *current* velocity — never through a 0→1x motor startup.
 const SCRATCH_LIGHT_THROW_RATIO: f64 = 0.5;
@@ -1679,6 +1679,15 @@ impl AudioRenderer {
                     PlatterPhase::Start => {
                         // Instant stop under the finger without changing transport intent.
                         self.deck_scratch_held[index] = true;
+                        // A platter grab is a new clock owner. Drop any fractional phase-reader
+                        // state left by SYNC/legacy edge nudging and anchor at the last frame that
+                        // was actually audible; otherwise first contact can advance one tiny
+                        // buffered fraction before the hand starts moving.
+                        self.deck_phase_corrections[index] = 1.0;
+                        self.deck_phase_correction_targets[index] = 1.0;
+                        self.deck_phase_correction_steps[index] = 0.0;
+                        self.deck_phase_correction_remaining[index] = 0;
+                        self.deck_phase_resamplers[index] = DeckPhaseResampler::default();
                         self.reset_scratch_motion(index);
                     }
                     PlatterPhase::Move => {
@@ -2836,6 +2845,80 @@ mod tests {
     }
 
     #[test]
+    fn paused_deck_b_platter_can_pull_frame_zero_into_negative_preroll() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let silent =
+            DecodedTrack::from_interleaved_stereo([0.0, 0.0].repeat(48_000), 48_000).unwrap();
+        let track =
+            DecodedTrack::from_interleaved_stereo([0.5, -0.5].repeat(48_000), 48_000).unwrap();
+
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::B,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::B,
+                phase: PlatterPhase::Move,
+                velocity: -1.0,
+            })
+            .unwrap();
+        renderer.render_tracks(&silent, &track, &mut vec![0.0; 4_096], 48_000, 2);
+
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.deck_frames[0], 0, "Deck A must remain untouched");
+        assert!(
+            snapshot.deck_frames[1] < -500,
+            "paused Deck B must own the same negative timeline as Deck A, got {}",
+            snapshot.deck_frames[1]
+        );
+        assert!(
+            !snapshot.deck_playing[1],
+            "platter motion is not a hidden Play command"
+        );
+        assert!(snapshot.deck_scratch_held[1]);
+    }
+
+    #[test]
+    fn platter_start_anchors_without_consuming_a_fractional_nudge_frame() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let track =
+            DecodedTrack::from_interleaved_stereo([0.5, -0.5].repeat(48_000), 48_000).unwrap();
+        let silent = DecodedTrack::from_interleaved_stereo([0.0, 0.0].repeat(8), 48_000).unwrap();
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::SetDeckPhaseCorrection {
+                deck: DeckId::A,
+                multiplier: 1.18,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 1_024], 48_000, 2);
+        let before = renderer.deck_positions[0];
+        assert!(renderer.deck_phase_corrections[0] > 1.0);
+
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut [0.0; 2], 48_000, 2);
+
+        assert_eq!(renderer.deck_positions[0], before);
+        assert_eq!(renderer.deck_phase_corrections[0], 1.0);
+        assert_eq!(renderer.deck_phase_correction_remaining[0], 0);
+    }
+
+    #[test]
     fn light_touch_release_resumes_play_immediately() {
         let (mut controller, mut renderer) = command_channel(8);
         let track =
@@ -3111,7 +3194,10 @@ mod tests {
             frames > 700 && frames < 3_000,
             "a flick should accelerate the platter, not teleport to a hand target, got {frames}"
         );
-        assert!(controller.snapshot().deck_audible_rates[0] > 3.0);
+        assert!(
+            controller.snapshot().deck_audible_rates[0] > 2.0,
+            "the 10ms anti-jitter response must still feel like an immediate fast throw"
+        );
     }
 
     #[test]
