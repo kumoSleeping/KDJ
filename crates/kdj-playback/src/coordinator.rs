@@ -2860,9 +2860,9 @@ impl Actor {
             }
             .min(output_buffer_ms.saturating_sub(40))
         } else if matches!(activation, Some(Activation::Seek)) {
-            SEEK_BUFFER_MS.min(output_buffer_ms / 2)
+            SEEK_BUFFER_MS.min(output_buffer_ms.saturating_sub(8))
         } else {
-            STARTUP_BUFFER_MS.min(output_buffer_ms / 2)
+            STARTUP_BUFFER_MS.min(output_buffer_ms.saturating_sub(8))
         };
         let startup_buffer_frames = (u64::from(output_rate) * startup_ms / 1_000)
             .max(1)
