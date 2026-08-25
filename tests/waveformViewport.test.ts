@@ -157,22 +157,19 @@ test("long tracks preserve the requested viewport instead of changing scroll spe
   assert.equal(layout.playheadPercent, 50);
 });
 
-test("Performance tempo changes resize beat cells while preserving screen speed", () => {
+test("Performance tempo changes velocity without changing the source-time zoom", () => {
   const rates = [0.5, 1, 1.25, 2];
-  const screenSpeeds = rates.map((rate) =>
-    rate / performanceWaveformViewportSeconds(rate),
-  );
 
   assert.deepEqual(
     rates.map(performanceWaveformViewportSeconds),
-    [15, 30, 37.5, 60],
+    [30, 30, 30, 30],
   );
-  assert.ok(screenSpeeds.every((speed) => Math.abs(speed - 1 / 30) < 1e-12));
-  // 同一曲目的源拍间隔不变；升速后每一拍占据的屏幕宽度应按倍率缩短。
+  // The same source-time beat lattice stays fixed. TEMPO changes how quickly it crosses the
+  // needle; it must not make React resize every PCM/beat cell during a fader gesture.
   const beatSeconds = 60 / 120;
   const normalBeatWidth = beatSeconds / performanceWaveformViewportSeconds(1);
   const fastBeatWidth = beatSeconds / performanceWaveformViewportSeconds(1.25);
-  assert.ok(fastBeatWidth < normalBeatWidth);
+  assert.equal(fastBeatWidth, normalBeatWidth);
 
   const slowTrackBeatWidth = (60 / 100) / performanceWaveformViewportSeconds(1);
   const fastTrackBeatWidth = (60 / 160) / performanceWaveformViewportSeconds(1);

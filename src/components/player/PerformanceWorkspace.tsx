@@ -3782,18 +3782,19 @@ export function PerformanceWorkspace({
             // platter motion is velocity input and always follows the audio callback needle.
             const seekPreview = scratchPreviews[side];
             const position = seekPreview ?? decks[side].position;
-            const platterMotion = localPlatterActive[side] || viewDecks[side].scratchHeld;
-            const platterStartPending = localPlatterActive[side] && !viewDecks[side].scratchHeld;
+            const platterMotion = localPlatterActive[side] || decks[side].scratchHeld;
+            const platterStartPending = localPlatterActive[side] && !decks[side].scratchHeld;
             const interactiveScrub = platterMotion || seekPreview != null;
-            // While scratching, motionRate is the smoothed engine audible rate. Otherwise the
-            // hardware transport rate drives ordinary play — never TEMPO while parked.
+            // The callback/DAC rate is the only waveform velocity owner. The optimistic TEMPO
+            // preview remains useful for the fader and BPM readout, but letting it reach this rail
+            // made React and the live clock alternately overwrite the same WAAPI playbackRate.
             const motionRate = platterMotion
-              ? (platterStartPending ? 0 : viewDecks[side].audibleRate)
-              : (viewDecks[side].transportRunning ? viewDecks[side].rate : 0);
+              ? (platterStartPending ? 0 : decks[side].audibleRate)
+              : (decks[side].transportRunning ? decks[side].audibleRate : 0);
             return (
               <PerformanceDeckWaves
                 key={side}
-                deck={viewDecks[side]}
+                deck={decks[side]}
                 side={side}
                 position={position}
                 motionRate={motionRate}
@@ -3801,7 +3802,7 @@ export function PerformanceWorkspace({
                 interactiveScrub={interactiveScrub}
                 snapRail={seekPreview != null && !localPlatterActive[side]}
                 motionRevision={deckResetRevisions[side]
-                  + viewDecks[side].discontinuityRevision}
+                  + decks[side].discontinuityRevision}
                 onPlatter={handleManualPlatter}
                 onTrackLoad={handleManualTrackLoad}
               />

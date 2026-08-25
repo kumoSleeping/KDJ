@@ -23,16 +23,18 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 /**
- * Performance 波形固定屏幕移动速度。引擎位置按 playback rate 推进，因此可视的
- * “曲目秒数”也按同一倍率缩放：rate 越高，一屏包含的源音频越多，每个拍格越窄；
- * rate 越低则相反。这样 rate / viewport 始终不变，两台 Deck 每秒移动同样像素。
+ * Performance zoom is a source-time scale, not a transport-rate control.
  *
- * 这只应改内层 CSS `scaleX`，不得重绘波形 backing store，也不得改外层
- * 位移轨道的宽度。PCM 柱是源时间轴上的固定图；TEMPO 变化等于绕播放头缩放。
+ * Rekordbox/Mixxx-style rails keep the PCM and beat lattice fixed while TEMPO changes their
+ * velocity under the needle. Scaling the viewport on every fader packet made React zoom the rail
+ * at the requested rate while the DAC clock updated its translation at the audible rate. Those
+ * two owners produced a visible stop/start cadence on an otherwise idle Deck.
+ *
+ * Keep the argument for the stable public helper used by callers/tests, but deliberately ignore
+ * it until zoom becomes an explicit user preference.
  */
-export function performanceWaveformViewportSeconds(playbackRate: number): number {
-  const rate = Number.isFinite(playbackRate) && playbackRate > 0 ? playbackRate : 1;
-  return PERFORMANCE_WAVEFORM_SECONDS_PER_SCREEN * rate;
+export function performanceWaveformViewportSeconds(_playbackRate: number): number {
+  return PERFORMANCE_WAVEFORM_SECONDS_PER_SCREEN;
 }
 
 /**

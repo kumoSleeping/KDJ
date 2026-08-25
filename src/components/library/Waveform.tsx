@@ -630,18 +630,24 @@ export function Waveform({
     const rawTimelineTime = document.timeline?.currentTime;
     const timelineTime = typeof rawTimelineTime === "number" ? rawTimelineTime : null;
     if (sameAnimation) {
-      syncNativeAnimation(
-        owner.bake,
-        loopAnimationTime ?? bakeAnimationPosition * 1_000,
-        clock.snapped,
-        timelineTime,
-      );
-      syncNativeAnimation(
-        owner.rail,
-        loopAnimationTime ?? railAnimationPosition * 1_000,
-        clock.snapped,
-        timelineTime,
-      );
+      // A native Deck is retimed exclusively by its callback clock subscriber below. React still
+      // re-renders sparse snapshots and canvas metadata, but those commits must never write phase
+      // or playbackRate back into an already-running animation. Browser fallback has no native
+      // clock and retains the ordinary prop-driven path.
+      if (nativeDeck === undefined) {
+        syncNativeAnimation(
+          owner.bake,
+          loopAnimationTime ?? bakeAnimationPosition * 1_000,
+          clock.snapped,
+          timelineTime,
+        );
+        syncNativeAnimation(
+          owner.rail,
+          loopAnimationTime ?? railAnimationPosition * 1_000,
+          clock.snapped,
+          timelineTime,
+        );
+      }
       return;
     }
 
@@ -718,6 +724,7 @@ export function Waveform({
     loopReadyForCompositor,
     effectiveLoopGeneration,
     motionRevision,
+    nativeDeck,
     playbackRate,
     railPosition,
     total,
