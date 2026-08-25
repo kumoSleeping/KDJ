@@ -77,10 +77,10 @@ media-time PCM 到达后做 64 帧 crossfade 并释放 scratch owner。暂停 De
 位置建立新手势，因此 nudge 后立即触摸不会先跳一个小范围。
 
 波形只跟 callback/DAC 关联时钟。Tempo 不再改变 source-time zoom：PCM 与 beat lattice 固定，
-只有 callback audibleRate 改变滚动速度。原生 Deck 的既有 WAAPI timeline 只允许 live clock
-写 phase/rate，React 的 optimistic Tempo 只更新推子和 BPM 数字。Platter start 只在接管边界
-校准一次；小于 80 ms 的普通误差由最大 ±0.5% 的视觉 PLL 收敛，真正相位债务才单次落点。
-极短 Loop 继续按 callback 已生效的 generation/in/length 做 compositor modulo。
+只有 callback audibleRate 改变滚动速度。原生 Deck 每个 VSync 直接投影最新 DAC anchor，并同时
+写 PCM 与 beat rail 的 transform；没有保留的 WAAPI phase、PLL 或 React loop generation。
+因此普通播放、Seek 和快速 Loop 开关都只有一个显示 owner，React 的 optimistic Tempo 只更新
+推子和 BPM 数字。
 
 ## 关键不变量
 

@@ -2906,9 +2906,27 @@ fn stream_packet_loop_generation_is_current(
     desired_loop_generation: u64,
     looping: bool,
 ) -> bool {
-    (!looping && !source_timing.loop_active)
-        || source_timing.loop_generation == state.loop_generation
-        || source_timing.loop_generation == desired_loop_generation
+    if source_timing.loop_generation == desired_loop_generation {
+        return true;
+    }
+    if !looping && !source_timing.loop_active {
+        // Once LOOP is desired off, linear PCM is phase-continuous regardless of which disabled
+        // control generation tagged it. Intermediate off generations may be coalesced entirely.
+        return true;
+    }
+    if source_timing.loop_generation != state.loop_generation {
+        return false;
+    }
+    // One effective generation may bridge exactly one edge:
+    // - enabling waits on still-linear PCM until the first desired loop packet;
+    // - disabling lets the effective loop finish its current cycle before linear PCM resumes.
+    // Never retain an *active* old generation while another active generation is desired. Rapid
+    // off/on or resize clicks otherwise make stale loop PCM valid forever and jump between windows.
+    if looping {
+        !state.loop_active && !source_timing.loop_active
+    } else {
+        state.loop_active && source_timing.loop_active
+    }
 }
 
 fn stream_output_frame<F: FrameLerp>(
@@ -5682,6 +5700,99 @@ mod tests {
         assert_eq!(controller.snapshot().deck_loop_generations[0], 2);
         assert!(controller.snapshot().deck_loop_wrap_counts[0] >= 1);
         drop(writer);
+    }
+
+    #[test]
+    fn rapid_loop_reenable_rejects_the_previous_active_generation() {
+        let active = StreamPlaybackState {
+            loop_generation: 2,
+            loop_active: true,
+            ..StreamPlaybackState::default()
+        };
+        let timing = |generation, loop_active| crate::time_stretch::SourceTiming {
+            media_time: 1.0,
+            loop_generation: generation,
+            loop_active,
+            loop_wrapped: false,
+        };
+
+        assert!(
+            stream_packet_loop_generation_is_current(&active, timing(2, true), 4, false,),
+            "LOOP off may finish the effective cycle"
+        );
+        assert!(stream_packet_loop_generation_is_current(
+            &active,
+            timing(4, false),
+            4,
+            false,
+        ));
+        assert!(
+            !stream_packet_loop_generation_is_current(&active, timing(2, true), 6, true),
+            "re-enabling must not keep replaying stale active PCM"
+        );
+        assert!(
+            !stream_packet_loop_generation_is_current(&active, timing(4, false), 6, true),
+            "an intermediate off generation cannot become the new loop"
+        );
+        assert!(stream_packet_loop_generation_is_current(
+            &active,
+            timing(6, true),
+            6,
+            true,
+        ));
+
+        let linear = StreamPlaybackState {
+            loop_generation: 4,
+            loop_active: false,
+            ..StreamPlaybackState::default()
+        };
+        assert!(
+            stream_packet_loop_generation_is_current(&linear, timing(4, false), 6, true,),
+            "first enable may finish linear PCM before loop-out"
+        );
+    }
+
+    #[test]
+    fn rapid_loop_reenable_consumes_only_the_latest_active_pcm() {
+        let (stream, mut writer) = StreamSource::<[f32; 2]>::bounded(16);
+        let mut push = |sample, generation, loop_active| {
+            writer
+                .push_with_transport_timing(
+                    [sample, sample],
+                    1.0,
+                    0,
+                    crate::time_stretch::SourceTiming {
+                        media_time: 1.01,
+                        loop_generation: generation,
+                        loop_active,
+                        loop_wrapped: false,
+                    },
+                    || false,
+                )
+                .unwrap();
+        };
+        push(0.2, 2, true);
+        push(0.4, 4, false);
+        push(0.6, 6, true);
+
+        let mut state = StreamPlaybackState {
+            loop_generation: 2,
+            loop_active: true,
+            ..StreamPlaybackState::default()
+        };
+        let (frame, advanced) = stream_output_frame(
+            &mut state,
+            &stream,
+            48_000,
+            true,
+            Some(1.1),
+            6,
+            StreamRecoverPolicy::Immediate,
+        );
+        assert!(advanced);
+        assert_eq!(frame, [0.6, 0.6]);
+        assert_eq!(state.loop_generation, 6);
+        assert!(state.loop_active);
     }
 
     #[test]

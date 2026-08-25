@@ -22,6 +22,7 @@ import {
   liveWaveformPlaybackRate,
   loopedWaveformPosition,
   projectedLiveWaveformPosition,
+  projectedNativeWaveformPosition,
   shouldPauseLiveWaveformClock,
   shouldLandPlatterWaveform,
   updateWaveformMotionClock,
@@ -300,6 +301,23 @@ test("platter authority projects the queued callback cursor onto the client cloc
   assert.ok(Math.abs(projectedLiveWaveformPosition(10, 1_020, 1_000, 2, 180) - 9.96) < 1e-12);
   assert.ok(Math.abs(projectedLiveWaveformPosition(10, 1_000, 1_050, -2, 180) - 9.9) < 1e-12);
   assert.equal(projectedLiveWaveformPosition(179.9, 1_000, 1_200, 2, 180), 180);
+});
+
+test("native VSync projection has no stale phase across seek and rapid loop revisions", () => {
+  assert.ok(Math.abs(
+    projectedNativeWaveformPosition(42, 1_000, 1_016, 1, 180, null, null) - 42.016,
+  ) < 1e-9);
+  assert.equal(
+    projectedNativeWaveformPosition(90, 2_000, 2_000, 1, 180, null, null),
+    90,
+    "a seek is rendered from the new DAC anchor in the same frame",
+  );
+  assert.ok(Math.abs(
+    projectedNativeWaveformPosition(10.49, 3_000, 3_020, 1, 180, 10, 0.5) - 10.01,
+  ) < 1e-9);
+  assert.ok(Math.abs(
+    projectedNativeWaveformPosition(10.49, 3_000, 3_020, 1, 180, null, null) - 10.51,
+  ) < 1e-9, "effective LOOP off immediately removes modulo without retained animation state");
 });
 
 test("platter phase lands once at contact instead of seeking on every velocity sample", () => {

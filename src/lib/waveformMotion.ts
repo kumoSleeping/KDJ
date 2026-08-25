@@ -208,6 +208,29 @@ export function loopedWaveformPosition(
   return loopStart + (relative < 0 ? relative + loopLength : relative);
 }
 
+/** One VSync projection for a native Deck; no retained visual phase or loop generation exists. */
+export function projectedNativeWaveformPosition(
+  currentTime: number,
+  clientPresentationTimeMs: number,
+  nowMs: number,
+  rate: number,
+  duration: number,
+  loopStart: number | null,
+  loopLength: number | null,
+): number {
+  return loopedWaveformPosition(
+    projectedLiveWaveformPosition(
+      currentTime,
+      clientPresentationTimeMs,
+      nowMs,
+      rate,
+      duration,
+    ),
+    loopStart,
+    loopLength,
+  );
+}
+
 function loopDistance(from: number, to: number, loopStart: number | null, loopLength: number | null): number {
   if (
     loopStart === null

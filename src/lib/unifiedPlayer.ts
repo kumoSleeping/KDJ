@@ -17,6 +17,7 @@ import {
 import type { FilterResonance, Track } from "../types";
 import { clampPerformanceDeckPosition } from "./deckPosition";
 import { clampPlatterVelocity, type UnifiedPlatterEvent } from "./platter";
+import { LoopToggleParity } from "./loopToggleLane";
 import { MIDI_JOG_NUDGE_HOLD_MS } from "./midiJog";
 import { djEngine } from "./djMix";
 import { EQ_GRAPH_BAND_COUNT } from "./eqGraph";
@@ -841,8 +842,10 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private deckRateRevisions: [number, number] = [0, 0];
   private deckNudgeRevisions: [number, number] = [0, 0];
   private deckSeekRevisions: [number, number] = [0, 0];
-  /** Only resize is coalesced. Toggle is an edge and every press must reach Rust in order. */
+  /** Resize keeps only the latest value; queued toggle edges retain their final parity. */
   private loopRevisions: [number, number] = [0, 0];
+  /** Clicks queued behind one in-flight edge collapse by parity, preserving the final on/off. */
+  private loopToggleParity = [new LoopToggleParity(), new LoopToggleParity()] as const;
   /** 每个物理 Deck 的高频旋钮手势只让最新值进入 IPC，旧值不能排队追赶。 */
   private deckMixerRevisions: [number, number] = [0, 0];
   private deckFxRevisions: [number, number] = [0, 0];
@@ -994,6 +997,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     this.deckSeekRevisions[1] += 1;
     this.loopRevisions[0] += 1;
     this.loopRevisions[1] += 1;
+    this.loopToggleParity.forEach((lane) => lane.clear());
     this.deckMixerRevisions[0] += 1;
     this.deckMixerRevisions[1] += 1;
     this.deckFxRevisions[0] += 1;
@@ -1016,6 +1020,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     this.deckNudgeRevisions[deck] += 1;
     this.deckSeekRevisions[deck] += 1;
     this.loopRevisions[deck] += 1;
+    this.loopToggleParity[deck].clear();
     this.platterRevisions[deck] += 1;
     this.platterSessions[deck] = null;
     return this.command({ type: "loadDeck", deck, source: this.source(source) });
@@ -1336,11 +1341,19 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     length: number,
     quantize = false,
   ): Promise<UnifiedPlayerState> {
-    this.loopRevisions[deck] += 1;
-    return this.command({ type: "toggleDeckLoop", deck, length, quantize });
+    this.loopToggleParity[deck].push();
+    const revision = ++this.loopRevisions[deck];
+    return this.command(
+      { type: "toggleDeckLoop", deck, length, quantize },
+      () => {
+        if (this.loopRevisions[deck] !== revision) return false;
+        return this.loopToggleParity[deck].consume();
+      },
+    );
   }
 
   resizeDeckLoop(deck: 0 | 1, length: number): Promise<UnifiedPlayerState> {
+    this.loopToggleParity[deck].clear();
     const revision = ++this.loopRevisions[deck];
     return this.command(
       { type: "resizeDeckLoop", deck, length },
@@ -1401,6 +1414,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     this.deckSeekRevisions[1] += 1;
     this.loopRevisions[0] += 1;
     this.loopRevisions[1] += 1;
+    this.loopToggleParity.forEach((lane) => lane.clear());
     this.deckMixerRevisions[0] += 1;
     this.deckMixerRevisions[1] += 1;
     this.deckFxRevisions[0] += 1;

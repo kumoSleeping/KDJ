@@ -25,6 +25,7 @@ import {
   liveWaveformLoopAnimationTimeMs,
   liveWaveformPhaseError,
   liveWaveformPlaybackRate,
+  projectedNativeWaveformPosition,
   projectedLiveWaveformPosition,
   shouldLandPlatterWaveform,
   shouldPauseLiveWaveformClock,
@@ -447,7 +448,11 @@ export function Waveform({
     && railPosition < compositorLoopEnd
     && !interactiveScrub;
   const platterLive = interactiveScrub || Math.abs(Number(playbackRate) || 0) > 0.02;
+  const nativeVsyncMotion = nativeDeck !== undefined && viewport.active;
+  const nativeFallbackPositionRef = useRef(railPosition);
+  nativeFallbackPositionRef.current = railPosition;
   const continuousRailMotion = viewport.active
+    && !nativeVsyncMotion
     && typeof Element !== "undefined"
     && typeof Element.prototype.animate === "function"
     && railAnimationReady
@@ -505,6 +510,8 @@ export function Waveform({
 
   useLayoutEffect(() => {
     if (
+      nativeVsyncMotion
+      ||
       continuousRailMotion
       || !bakeRangeChanged
       || !animateRail
@@ -533,6 +540,7 @@ export function Waveform({
     bakeRangeChanged,
     continuousRailMotion,
     motionPosition,
+    nativeVsyncMotion,
     railPosition,
   ]);
 
@@ -732,8 +740,77 @@ export function Waveform({
     viewport.active,
   ]);
 
+  useLayoutEffect(() => {
+    if (!nativeVsyncMotion || nativeDeck === undefined || !bake || total <= 0) return;
+    const bakeElement = bakeRef.current;
+    const railElement = railRef.current;
+    if (!bakeElement || !railElement) return;
+
+    // Native playback has one display owner: each VSync projects the latest DAC-correlated clock
+    // directly into two static source-time rails. React never retargets this transform, and rapid
+    // loop revisions cannot pause or rebuild an animation from stale component state.
+    motionAnimationsRef.current?.bake?.cancel();
+    motionAnimationsRef.current?.rail?.cancel();
+    motionAnimationsRef.current = null;
+    let request = 0;
+    let lastBake = Number.NaN;
+    let lastRail = Number.NaN;
+    let bakeVisible = true;
+    const paint = () => {
+      const live = getLiveDeckClock(nativeDeck);
+      let sourcePosition = nativeFallbackPositionRef.current ?? 0;
+      if (live && live.trackId === trackId) {
+        const rate = liveWaveformPlaybackRate(
+          live.targetRate,
+          live.audibleRate,
+          live.scratchHeld,
+        );
+        sourcePosition = projectedNativeWaveformPosition(
+          live.currentTime,
+          live.clientPresentationTimeMs,
+          performance.now(),
+          rate,
+          total,
+          live.loopStart,
+          live.loopLength,
+        );
+      }
+
+      const inBake = sourcePosition >= bake.startSec && sourcePosition <= bake.endSec;
+      if (inBake !== bakeVisible) {
+        bakeVisible = inBake;
+        bakeElement.style.visibility = inBake ? "visible" : "hidden";
+      }
+      if (inBake) {
+        const nextBake = waveformBakeTranslatePercent(bake, sourcePosition);
+        if (Math.abs(nextBake - lastBake) > 1.0e-7) {
+          bakeElement.style.transform = "translate3d(-" + nextBake + "%, 0, 0)";
+          lastBake = nextBake;
+        }
+      }
+      const nextRail = sourcePosition / total * 100;
+      if (Math.abs(nextRail - lastRail) > 1.0e-7) {
+        railElement.style.transform = "translate3d(-" + nextRail + "%, 0, 0)";
+        lastRail = nextRail;
+      }
+      request = window.requestAnimationFrame(paint);
+    };
+    paint();
+    return () => {
+      window.cancelAnimationFrame(request);
+      bakeElement.style.visibility = "visible";
+    };
+  }, [
+    bake?.endSec,
+    bake?.startSec,
+    nativeDeck,
+    nativeVsyncMotion,
+    total,
+    trackId,
+  ]);
+
   useEffect(() => {
-    if (nativeDeck === undefined || !viewport.active) return;
+    if (nativeDeck === undefined || !viewport.active || nativeVsyncMotion) return;
     return subscribeLivePlaybackClock(() => {
       const live = getLiveDeckClock(nativeDeck);
       const owner = motionAnimationsRef.current;
@@ -872,7 +949,7 @@ export function Waveform({
         }
       });
     });
-  }, [nativeDeck, trackId, viewport.active]);
+  }, [nativeDeck, nativeVsyncMotion, trackId, viewport.active]);
 
   // Overview and DJ detail share frequency hues but deliberately keep different aggregation and
   // contrast policies: macro preview rejects sub-pixel outliers; the beat rail preserves peaks.
@@ -1053,8 +1130,8 @@ export function Waveform({
               bottom: 0,
               left: "50%",
               width: `${bake.widthScale * 100}%`,
-              transform: `translate3d(-${bake.translatePercent}%, 0, 0)`,
-              transition: !continuousRailMotion && animateRail && !bakeRangeChanged
+              transform: nativeVsyncMotion ? undefined : `translate3d(-${bake.translatePercent}%, 0, 0)`,
+              transition: !nativeVsyncMotion && !continuousRailMotion && animateRail && !bakeRangeChanged
                 ? `transform ${interactiveScrub ? PERFORMANCE_WAVEFORM_SCRATCH_SMOOTHING_MS : PERFORMANCE_WAVEFORM_SMOOTHING_MS}ms linear`
                 : "none",
               willChange: "transform",
@@ -1104,12 +1181,14 @@ export function Waveform({
           bottom: 0,
           left: viewport.active ? "50%" : 0,
           width: `${viewport.baseRailScale * 100}%`,
-          transform: viewport.active
-            ? `translate3d(-${motionViewport.railTranslatePercent}%, 0, 0)`
-            : "none",
+          transform: nativeVsyncMotion
+            ? undefined
+            : viewport.active
+              ? `translate3d(-${motionViewport.railTranslatePercent}%, 0, 0)`
+              : "none",
           // Loop/scratch and old WebView fallback: overlap sparse snapshots without queueing them.
           // Ordinary playback is owned by the continuous compositor animation above.
-          transition: !continuousRailMotion && animateRail
+          transition: !nativeVsyncMotion && !continuousRailMotion && animateRail
             ? `transform ${interactiveScrub ? PERFORMANCE_WAVEFORM_SCRATCH_SMOOTHING_MS : PERFORMANCE_WAVEFORM_SMOOTHING_MS}ms linear`
             : "none",
           willChange: viewport.active ? "transform" : undefined,

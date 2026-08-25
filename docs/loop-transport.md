@@ -35,7 +35,10 @@ Loop is not implemented as repeated media seek.
 - Every post-stretch packet carries an exact fractional source clock plus loop generation and wrap
   edge. Desired commands cannot relabel PCM from an older cached window. The callback publishes
   only the generation that has reached the DAC-facing ring, including wrap and stall counters.
-- The stereo post-tempo ring is 48 ms and the STEM ring is 160 ms. Rubber Band control blocks are
+- Rapid queued toggle clicks collapse by parity. At the callback, an old active generation may
+  finish only a direct LOOP-off edge; it is never accepted as a bridge to another active generation.
+  This prevents off/on/resize spam from replaying stale circular PCM under a new window.
+- The stereo post-tempo ring is 96 ms and the STEM ring is 160 ms. Rubber Band control blocks are
   capped at 512 source frames, and an active window interrupts obsolete output only once that PCM
   reaches loop-out; valid first-cycle audio is never dropped early.
 - A 64-frame maximum cyclic bridge smooths a discontinuous PCM seam without changing loop length
