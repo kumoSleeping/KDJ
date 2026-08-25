@@ -15,9 +15,11 @@ import {
 } from "../src/lib/midiJog";
 import {
   PLATTER_MAX_RATE,
-  PLATTER_RELEASE_MEMORY_MS,
+  PLATTER_MAX_VELOCITY_VALIDITY_MS,
+  PLATTER_MIN_VELOCITY_VALIDITY_MS,
   PLATTER_SECONDS_PER_REVOLUTION,
   PlatterVelocityTracker,
+  PointerPlatterTracker,
   pointerPlatterDistance,
 } from "../src/lib/platter";
 import { PERFORMANCE_PREROLL_SECONDS } from "../src/lib/deckPosition";
@@ -57,13 +59,14 @@ test("pointer and MIDI motion normalize to the same 1x platter velocity", () => 
   assert.ok(Math.abs(midiRate - 1) < 1e-12);
 });
 
-test("a faster flick produces more speed and release preserves only a fresh throw", () => {
+test("a faster flick produces more speed and release uses its real packet cadence", () => {
   const tracker = new PlatterVelocityTracker();
   tracker.start(0);
   const slow = tracker.move(0.1, 100);
   const fast = tracker.move(0.1, 110);
   assert.ok(fast > slow);
-  assert.equal(tracker.end(110 + PLATTER_RELEASE_MEMORY_MS), fast);
+  assert.equal(tracker.velocityValidityMs(), 25);
+  assert.equal(tracker.end(135), fast);
 
   const bounded = new PlatterVelocityTracker();
   bounded.start(0);
@@ -71,7 +74,33 @@ test("a faster flick produces more speed and release preserves only a fresh thro
 
   tracker.start(1_000);
   tracker.move(0.1, 1_010);
-  assert.equal(tracker.end(1_011 + PLATTER_RELEASE_MEMORY_MS), 0);
+  assert.equal(tracker.end(1_036), 0);
+});
+
+test("velocity validity adapts from fast pointer cadence to sparse MIDI, bounded at 100ms", () => {
+  const fast = new PlatterVelocityTracker();
+  fast.start(0);
+  fast.move(0.008, 8);
+  fast.move(0.008, 16);
+  assert.equal(fast.velocityValidityMs(), PLATTER_MIN_VELOCITY_VALIDITY_MS);
+  assert.notEqual(fast.end(40), 0);
+
+  const fastExpired = new PlatterVelocityTracker();
+  fastExpired.start(0);
+  fastExpired.move(0.008, 8);
+  fastExpired.move(0.008, 16);
+  assert.equal(fastExpired.end(41), 0);
+
+  const sparse = new PlatterVelocityTracker();
+  sparse.start(0);
+  sparse.move(0.05, 50);
+  assert.equal(sparse.velocityValidityMs(), PLATTER_MAX_VELOCITY_VALIDITY_MS);
+  assert.notEqual(sparse.end(150), 0);
+
+  const expired = new PlatterVelocityTracker();
+  expired.start(0);
+  expired.move(0.05, 50);
+  assert.equal(expired.end(151), 0);
 });
 
 test("quantized packet timing is averaged but a real direction reversal stays immediate", () => {
@@ -83,12 +112,34 @@ test("quantized packet timing is averaged but a real direction reversal stays im
   assert.equal(tracker.move(-0.01, 32), -1.25, "opposite hand motion must reset old history");
 });
 
-test("coalesced samples with one timestamp retain a finite continuous velocity", () => {
+test("equal device timestamps are retained instead of advancing by a synthetic interval", () => {
   const tracker = new PlatterVelocityTracker();
   tracker.start(100);
-  assert.equal(tracker.move(0.008, 100), 1);
-  assert.equal(tracker.move(0.008, 100), 1);
-  assert.equal(tracker.end(100), 1);
+  assert.equal(tracker.move(0.008, 100), 0, "elapsed time is unknown at the original timestamp");
+  assert.equal(tracker.move(0.008, 108), 1);
+  assert.equal(tracker.velocityValidityMs(), PLATTER_MIN_VELOCITY_VALIDITY_MS);
+});
+
+test("same-timestamp pointer points use one real parent-event interval", () => {
+  const tracker = new PointerPlatterTracker(0, 1_800, 100);
+  const velocity = tracker.move([
+    { clientX: -4, timeStamp: 100 },
+    { clientX: -8, timeStamp: 100 },
+  ], 108);
+  assert.ok(velocity !== null && Math.abs(velocity - 1) < 1e-12);
+  assert.ok(Math.abs(tracker.end(108) - 1) < 1e-12);
+});
+
+test("pointer batches preserve real reversals and report stationary only once", () => {
+  const tracker = new PointerPlatterTracker(0, 1_800, 100);
+  const reversed = tracker.move([
+    { clientX: -8, timeStamp: 108 },
+    { clientX: 0, timeStamp: 116 },
+  ], 116);
+  assert.ok(reversed !== null && Math.abs(reversed + 1) < 1e-12);
+  assert.equal(tracker.move([{ clientX: 0, timeStamp: 124 }], 124), 0);
+  assert.equal(tracker.move([{ clientX: 0, timeStamp: 132 }], 132), null);
+  assert.equal(tracker.end(132), 0);
 });
 
 test("Shift quick search crosses a track in a bounded number of deliberate turns", () => {

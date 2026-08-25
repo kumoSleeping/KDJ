@@ -94,7 +94,7 @@ import {
   midiJogMode,
   midiJogVinylSeconds,
 } from "../../lib/midiJog";
-import { PlatterVelocityTracker, pointerPlatterDistance } from "../../lib/platter";
+import { PlatterVelocityTracker, PointerPlatterTracker } from "../../lib/platter";
 import { usesLocalLibraryRecord } from "../../lib/playbackTrackSource";
 import { knobBias, snapKnobToCenter } from "../../lib/stemDeckLog";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
@@ -442,9 +442,7 @@ function DeckScratchSurface({
   const track = deck.track;
   const scratchRef = useRef<{
     pointerId: number;
-    lastX: number;
-    width: number;
-    tracker: PlatterVelocityTracker;
+    tracker: PointerPlatterTracker;
   } | null>(null);
   const onPlatterLiveRef = useRef(onPlatter);
   onPlatterLiveRef.current = onPlatter;
@@ -502,13 +500,9 @@ function DeckScratchSurface({
         if (event.button !== 0 || scratchRef.current) return;
         event.preventDefault();
         const rect = event.currentTarget.getBoundingClientRect();
-        const tracker = new PlatterVelocityTracker();
-        tracker.start(event.timeStamp);
         scratchRef.current = {
           pointerId: event.pointerId,
-          lastX: event.clientX,
-          width: rect.width,
-          tracker,
+          tracker: new PointerPlatterTracker(event.clientX, rect.width, event.timeStamp),
         };
         event.currentTarget.setPointerCapture(event.pointerId);
         // A real capacitive platter grabs on contact, not after an arbitrary drag threshold.
@@ -523,16 +517,7 @@ function DeckScratchSurface({
           ? native.getCoalescedEvents()
           : [];
         const points = coalesced.length > 0 ? coalesced : [native];
-        let velocity: number | null = null;
-        for (const point of points) {
-          const deltaX = point.clientX - gesture.lastX;
-          if (deltaX === 0) continue;
-          velocity = gesture.tracker.move(
-            pointerPlatterDistance(deltaX, gesture.width),
-            point.timeStamp,
-          );
-          gesture.lastX = point.clientX;
-        }
+        const velocity = gesture.tracker.move(points, native.timeStamp);
         if (velocity !== null) onPlatter(side, { phase: "move", velocity });
       }}
       onPointerUp={finishScratch}
