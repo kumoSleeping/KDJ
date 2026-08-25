@@ -16,6 +16,9 @@ import { useLyricsPrefs } from "./lib/lyricsPrefs";
 import { useUpdateStore } from "./stores/updateStore";
 import { readWorkMode, writeWorkMode, type WorkMode } from "./lib/workMode";
 
+const DEVICE_REFRESH_FALLBACK_MS = 60_000;
+const DEVICE_REFRESH_MIN_GAP_MS = 5_000;
+
 // 只有一个界面：工作台（曲库 + 搜索下载合一）。
 // 登录 / 队列从顶栏专用按钮进入；其余设置仍就地改。
 
@@ -98,15 +101,24 @@ export default function App() {
     return useUpdateStore.getState().startBackgroundChecks();
   }, [connected]);
 
-  // 外置卷的生命周期不属于任何一个面板。即使文件夹栏在窄屏下收起，也要持续
-  // 发现 Finder/资源管理器从应用外部完成的挂载与卸载，并清掉已断开的列表视图。
+  // 外置卷的生命周期不属于任何一个面板。启动、回到前台时立即同步；保持前台
+  // 时只留一分钟兜底，避免 macOS 每三秒完整枚举卷并触发 CacheDelete/CarbonCore。
   useEffect(() => {
     if (!connected) return;
+    let lastRefreshAt = 0;
     const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") void refreshOneLibraryDevices();
+      const now = Date.now();
+      if (
+        document.visibilityState !== "visible" ||
+        now - lastRefreshAt < DEVICE_REFRESH_MIN_GAP_MS
+      ) {
+        return;
+      }
+      lastRefreshAt = now;
+      void refreshOneLibraryDevices();
     };
     refreshWhenVisible();
-    const timer = window.setInterval(refreshWhenVisible, 3_000);
+    const timer = window.setInterval(refreshWhenVisible, DEVICE_REFRESH_FALLBACK_MS);
     window.addEventListener("focus", refreshWhenVisible);
     document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => {

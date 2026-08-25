@@ -11,6 +11,16 @@ use tauri::{AppHandle, Emitter, State};
 
 pub const MESSAGE_EVENT: &str = "midi-message";
 pub const DEVICES_EVENT: &str = "midi-devices";
+const MIDI_POLL_INITIAL: Duration = Duration::from_millis(1500);
+const MIDI_POLL_MAX: Duration = Duration::from_secs(5);
+
+fn next_poll_delay(current: Duration, devices_changed: bool) -> Duration {
+    if devices_changed {
+        MIDI_POLL_INITIAL
+    } else {
+        current.saturating_mul(2).min(MIDI_POLL_MAX)
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,9 +61,14 @@ impl MidiHub {
         let poller = Arc::clone(&hub);
         let _ = std::thread::Builder::new()
             .name("kdj-midi".into())
-            .spawn(move || loop {
-                poller.sync_ports();
-                std::thread::sleep(Duration::from_millis(1500));
+            .spawn(move || {
+                let mut delay = MIDI_POLL_INITIAL;
+                loop {
+                    // `spawn` 已同步扫描过一次；先等待，避免启动时连续创建两组
+                    // CoreMIDI clients。设备列表稳定时指数退避，插拔后恢复快速确认。
+                    std::thread::sleep(delay);
+                    delay = next_poll_delay(delay, poller.sync_ports());
+                }
             });
         hub
     }
@@ -74,12 +89,12 @@ impl MidiHub {
         }
     }
 
-    fn sync_ports(&self) {
+    fn sync_ports(&self) -> bool {
         let input_names = match list_input_names() {
             Ok(names) => names,
             Err(error) => {
                 tracing::debug!("枚举 MIDI 输入失败：{error}");
-                return;
+                return false;
             }
         };
         let output_names = match list_output_names() {
@@ -146,6 +161,7 @@ impl MidiHub {
         if changed {
             self.emit_devices();
         }
+        changed
     }
 
     fn send(&self, port: Option<String>, bytes: Vec<u8>) -> Result<(), String> {
@@ -262,4 +278,24 @@ pub fn midi_send(
     port: Option<String>,
 ) -> Result<(), String> {
     hub.send(port, bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stable_midi_polling_backs_off_and_stays_bounded() {
+        let mut delay = MIDI_POLL_INITIAL;
+        let expected = [3, 5, 5, 5, 5, 5];
+        for seconds in expected {
+            delay = next_poll_delay(delay, false);
+            assert_eq!(delay, Duration::from_secs(seconds));
+        }
+    }
+
+    #[test]
+    fn midi_device_change_restores_the_fast_poll_interval() {
+        assert_eq!(next_poll_delay(MIDI_POLL_MAX, true), MIDI_POLL_INITIAL);
+    }
 }

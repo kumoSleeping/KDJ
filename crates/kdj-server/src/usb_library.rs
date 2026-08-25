@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, RwLock};
+use std::sync::{LazyLock, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use kdj_core::models::{
@@ -38,6 +39,20 @@ static MANAGED_VIRTUAL_DISK: RwLock<Option<PathBuf>> = RwLock::new(None);
 /// 用户通过右侧 OneLibrary 面板明确选择过的卷。部分 USB SSD 在 Windows/macOS
 /// 会被 sysinfo 标成 fixed；显式选择后仍应作为真实移动存储出现。
 static AUTHORIZED_REMOVABLE_DISKS: RwLock<Vec<PathBuf>> = RwLock::new(Vec::new());
+
+/// 一次设备列表刷新后，紧随其后的 OneLibrary 只读请求复用同一份挂载快照。
+/// 前端会为每个卷请求列表；若这些请求各自重新创建 `sysinfo::Disks`，一次界面刷新
+/// 就会在 macOS 上变成多轮全卷枚举。写入仍由 `current_device(..., true)` 强制重扫。
+const DEVICE_READ_CACHE_TTL: Duration = Duration::from_secs(10);
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+struct CachedDeviceEnumeration {
+    refreshed_at: Instant,
+    devices: Vec<RemovableDevice>,
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+static DEVICE_ENUMERATION_CACHE: Mutex<Option<CachedDeviceEnumeration>> = Mutex::new(None);
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,6 +376,37 @@ fn supported_file_system(value: &str) -> bool {
     )
 }
 
+#[cfg(target_os = "macos")]
+fn macos_pseudo_or_system_volume(path: &Path) -> bool {
+    path == Path::new("/")
+        || path.starts_with("/System/Volumes")
+        || path == Path::new("/private/var/vm")
+        || path.starts_with("/private/var/folders")
+        || path.starts_with("/Library/Developer/CoreSimulator/Volumes")
+        || path.starts_with("/Volumes/.timemachine")
+        || path.starts_with("/Volumes/com.apple.TimeMachine.localsnapshots")
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn cached_removable_devices() -> Option<Vec<RemovableDevice>> {
+    DEVICE_ENUMERATION_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .filter(|cached| cached.refreshed_at.elapsed() <= DEVICE_READ_CACHE_TTL)
+        .map(|cached| cached.devices.clone())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn remember_removable_devices(devices: &[RemovableDevice]) {
+    *DEVICE_ENUMERATION_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(CachedDeviceEnumeration {
+        refreshed_at: Instant::now(),
+        devices: devices.to_vec(),
+    });
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn removable_devices() -> Vec<RemovableDevice> {
     let disks = sysinfo::Disks::new_with_refreshed_list();
@@ -369,6 +415,15 @@ pub fn removable_devices() -> Vec<RemovableDevice> {
     let mut devices: Vec<RemovableDevice> = disks
         .list()
         .iter()
+        .filter(|disk| {
+            #[cfg(target_os = "macos")]
+            {
+                if macos_pseudo_or_system_volume(disk.mount_point()) {
+                    return false;
+                }
+            }
+            true
+        })
         .filter(|disk| {
             disk.is_removable()
                 || authorized
@@ -411,6 +466,7 @@ pub fn removable_devices() -> Vec<RemovableDevice> {
         .collect();
     devices.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     devices.dedup_by(|a, b| a.path == b.path);
+    remember_removable_devices(&devices);
     devices
 }
 
@@ -485,7 +541,13 @@ fn current_device(requested: &str, require_writable: bool) -> Result<RemovableDe
     let requested = requested
         .canonicalize()
         .with_context(|| format!("U 盘已经断开或挂载点不可用：{}", requested.display()))?;
-    let device = removable_devices()
+    let devices = if require_writable {
+        // 写入边界不能依赖缓存：拔盘、重新挂载或只读状态变化都必须当场确认。
+        removable_devices()
+    } else {
+        cached_removable_devices().unwrap_or_else(removable_devices)
+    };
+    let device = devices
         .into_iter()
         .find(|device| {
             Path::new(&device.path)
@@ -3187,6 +3249,33 @@ mod tests {
         }
         for value in ["NTFS", "APFS", "ext4", ""] {
             assert!(!supported_file_system(value), "{value}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_volume_filter_rejects_system_mounts_without_name_guessing() {
+        for path in [
+            "/",
+            "/System/Volumes/Data",
+            "/System/Volumes/Preboot",
+            "/private/var/vm",
+            "/private/var/folders/zz/app-translocation",
+            "/Library/Developer/CoreSimulator/Volumes/iOS_22A3354",
+            "/Volumes/.timemachine/1234",
+            "/Volumes/com.apple.TimeMachine.localsnapshots/Backups.backupdb",
+        ] {
+            assert!(macos_pseudo_or_system_volume(Path::new(path)), "{path}");
+        }
+
+        // 卷名不能作为系统卷判据：用户完全可能把真实 U 盘命名为 Recovery/Data。
+        for path in [
+            "/Volumes/DJ USB",
+            "/Volumes/Recovery",
+            "/Volumes/Data",
+            "/mnt/custom-usb",
+        ] {
+            assert!(!macos_pseudo_or_system_volume(Path::new(path)), "{path}");
         }
     }
 
