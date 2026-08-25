@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { activeLrcIndex, parseLrc } from "../src/lib/lrc";
+import { activeLrcIndex, parseLrc, projectLoopedPlaybackTime } from "../src/lib/lrc";
 
 test("LRC positive offset makes QQ lyrics appear sooner", () => {
   const lines = parseLrc("[offset:+500]\n[00:01.00]第一句\n[00:02.250]第二句", {
@@ -30,4 +30,10 @@ test("LRC without an offset keeps its original timestamps", () => {
 test("other lyric sources keep the previous offset behavior", () => {
   const lines = parseLrc("[offset:+500]\n[00:01.00]不主动改动其它来源");
   assert.deepEqual(lines, [{ time: 1, text: "不主动改动其它来源" }]);
+});
+
+test("karaoke projection wraps active loops and becomes linear immediately on loop off", () => {
+  assert.ok(Math.abs(projectLoopedPlaybackTime(11.95, 0.1, 1, 8, 4) - 8.05) < 1e-12);
+  assert.ok(Math.abs(projectLoopedPlaybackTime(10.03, 0.1, 1, 10, 0.04) - 10.01) < 1e-12);
+  assert.ok(Math.abs(projectLoopedPlaybackTime(11.95, 0.1, 1, null, null) - 12.05) < 1e-12);
 });

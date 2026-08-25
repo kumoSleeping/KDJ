@@ -404,6 +404,9 @@ pub struct AudioRenderer {
     /// One-pole of published platter rate so the UI needle does not reverse on tick jitter.
     deck_audible_rate_smooth: [f32; 2],
     scratch_tapes: [ScratchTape; 2],
+    /// First media frame decoded by the installed stream. A freshly prepared cue has no PCM
+    /// before this point; the platter may still traverse that lead-in as silence down to t < 0.
+    deck_source_origin_frames: [f64; 2],
     transport_gain: f32,
     transport_ramp: Option<TransportRamp>,
     active_deck: DeckId,
@@ -499,6 +502,7 @@ fn make_channels(
             deck_scratch_input_at: [SCRATCH_NO_TICK; 2],
             deck_audible_rate_smooth: [0.0; 2],
             scratch_tapes: [ScratchTape::new(), ScratchTape::new()],
+            deck_source_origin_frames: [0.0; 2],
             transport_gain: 0.0,
             transport_ramp: None,
             active_deck: DeckId::A,
@@ -1178,8 +1182,26 @@ impl AudioRenderer {
             source,
             Some(CallbackSource::Stream(_) | CallbackSource::StemStream(_))
         ) {
-            self.fill_scratch_tape(index, source, next);
-            if next >= 0.0 && !self.scratch_tapes[index].contains_position(next) {
+            let fill_at =
+                if self.scratch_tapes[index].is_empty() && next < self.deck_positions[index] {
+                    self.deck_positions[index]
+                } else {
+                    next
+                };
+            self.fill_scratch_tape(index, source, fill_at);
+            let before_decode_origin =
+                self.scratch_tapes[index]
+                    .first_position()
+                    .is_some_and(|first| {
+                        first <= self.deck_source_origin_frames[index] + SCRATCH_GAP_FRAMES as f64
+                            && next < first
+                            && (self.deck_positions[index] < first
+                                || self.deck_scratch_velocity[index] < 0.0)
+                    });
+            if next >= 0.0
+                && !self.scratch_tapes[index].contains_position(next)
+                && !before_decode_origin
+            {
                 // The bounded post-tempo ring has not produced this future frame yet (or reverse
                 // reached the history edge). Hold the last real grain and cursor; never advance
                 // through digital zero and later jump when data arrives.
@@ -1538,6 +1560,7 @@ impl AudioRenderer {
             self.retire(previous);
         }
         self.deck_positions[index] = start_frame as f64;
+        self.deck_source_origin_frames[index] = start_frame as f64;
         self.deck_discontinuity_revisions[index] = self.deck_discontinuity_revisions[index]
             .wrapping_add(1)
             .max(1);
@@ -1586,6 +1609,7 @@ impl AudioRenderer {
         let previous = std::mem::take(&mut self.deck_sources[index]);
         let replacement = std::mem::take(&mut self.replacement_sources[index]);
         self.deck_positions[index] = 0.0;
+        self.deck_source_origin_frames[index] = 0.0;
         self.deck_discontinuity_revisions[index] = self.deck_discontinuity_revisions[index]
             .wrapping_add(1)
             .max(1);
@@ -1689,6 +1713,9 @@ impl AudioRenderer {
                         self.deck_phase_correction_remaining[index] = 0;
                         self.deck_phase_resamplers[index] = DeckPhaseResampler::default();
                         self.reset_scratch_motion(index);
+                        // Audio stops on this callback. Publish the same zero immediately rather
+                        // than decaying the pre-touch transport rate for another visual sample.
+                        self.deck_audible_rate_smooth[index] = 0.0;
                     }
                     PlatterPhase::Move => {
                         if self.deck_scratch_held[index]
@@ -1827,6 +1854,7 @@ impl AudioRenderer {
             RtCommand::SeekPrepared { deck, frame } => {
                 let index = deck as usize;
                 self.deck_positions[index] = frame as f64;
+                self.deck_source_origin_frames[index] = frame as f64;
                 self.reset_scratch_motion(index);
                 self.deck_eq[index].reset();
                 self.deck_peak_levels[index] = 0.0;
@@ -3389,7 +3417,8 @@ mod tests {
                 velocity: 6.25,
             })
             .unwrap();
-        renderer.render_tracks(&track, &silent, &mut vec![0.0; 64], 48_000, 2);
+        // One 10ms response window is enough to distinguish a real throw from contact jitter.
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 960], 48_000, 2);
         let spinning = controller.snapshot();
         assert!(
             spinning.deck_audible_rates[0] > 0.5,
@@ -3444,7 +3473,7 @@ mod tests {
                 velocity: 6.25,
             })
             .unwrap();
-        renderer.render_tracks(&track, &silent, &mut vec![0.0; 64], 48_000, 2);
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 960], 48_000, 2);
         let spinning = controller.snapshot();
         assert!(
             spinning.deck_audible_rates[0] > 0.5,
@@ -3757,6 +3786,48 @@ mod tests {
             longest_silence < 32,
             "back-and-forth streaming scratch must not insert a digital-zero gap, longest={longest_silence}"
         );
+        drop(writer);
+    }
+
+    #[test]
+    fn prepared_stream_can_cross_its_decode_origin_into_negative_preroll() {
+        let (stream, mut writer) = StreamSource::<[f32; 2]>::bounded(256);
+        for _ in 0..128 {
+            writer.push([0.4, -0.4], || false).unwrap();
+        }
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        let cue_frame = 48_000;
+        controller
+            .install_prepared(
+                DeckId::B,
+                93,
+                SourceKind::Stream,
+                Arc::as_ptr(&stream) as usize,
+                cue_frame,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::B,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::B,
+                phase: PlatterPhase::Move,
+                velocity: -8.0,
+            })
+            .unwrap();
+
+        renderer.render_prepared(&mut vec![0.0; 16_000], 48_000, 1);
+
+        assert!(
+            controller.snapshot().deck_frames[1] < 0,
+            "a paused prepared Deck must pass its cue/cache edge and own signed pre-roll"
+        );
+        assert!(controller.snapshot().deck_scratch_held[1]);
         drop(writer);
     }
 

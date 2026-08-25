@@ -1051,9 +1051,11 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
         velocity: 0,
         expectedTrackId: this.snapshot.decks[deck].trackId,
       };
-      const operation = this.command(command).catch((error: unknown) => {
+      // Touch is a realtime boundary, not a transport command. Keeping it off commandTail lets a
+      // prepared/paused Deck grab immediately even while unrelated state work is acknowledged.
+      const operation = this.control(command).catch((error: unknown) => {
         if (this.platterSessions[deck]?.id !== session.id) throw error;
-        return this.command(command);
+        return this.control(command);
       });
       this.platterTails[deck] = operation.then(() => undefined, () => undefined);
       return operation;
@@ -1078,12 +1080,15 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
         velocity: session.velocity,
       };
       const isCurrent = () => this.platterRevisions[deck] === revision;
-      const operation = this.command(command, isCurrent);
+      // Preserve Start → latest Move → End ordering within this Deck without joining the global
+      // load/seek command lane. End already carries the final velocity atomically.
+      const operation = this.platterTails[deck].then(() => this.control(command, isCurrent));
+      this.platterTails[deck] = operation.then(() => undefined, () => undefined);
       return operation.catch((error: unknown) => {
         // A full realtime ring drains at the next audio callback. Retry this non-idempotent
         // boundary once; silently losing note-off is worse than delaying it one callback.
         if (!isCurrent()) throw error;
-        return this.command(command, isCurrent);
+        return this.control(command, isCurrent);
       });
     }
 

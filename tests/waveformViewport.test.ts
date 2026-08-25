@@ -16,11 +16,14 @@ import {
 } from "../src/lib/waveformViewport";
 import {
   liveWaveformAnimationTimeMs,
+  liveWaveformLoopAnimationTimeMs,
   liveWaveformAuthoritySeconds,
   liveWaveformPlaybackRate,
+  loopedWaveformPosition,
   projectedLiveWaveformPosition,
   shouldPauseLiveWaveformClock,
   shouldRetargetLiveWaveformClock,
+  shouldLandPlatterWaveform,
   updateWaveformMotionClock,
   waveformMotionClockPosition,
 } from "../src/lib/waveformMotion";
@@ -229,7 +232,7 @@ test("the DJ visual clock walks continuously between ten-hertz native samples", 
   assert.ok(Math.abs(waveformMotionClockPosition(second, 1_150) - 10.15) < 1e-12);
 });
 
-test("the compositor clock follows the engine wrap instead of wrapping a linear clock", () => {
+test("the compositor clock wraps locally without waiting for a sparse engine sample", () => {
   const sample = {
     trackId: 7,
     position: 11.9,
@@ -241,15 +244,15 @@ test("the compositor clock follows the engine wrap instead of wrapping a linear 
     loopLength: 2,
   };
   const first = updateWaveformMotionClock(null, sample, 1_000);
-  assert.ok(Math.abs(waveformMotionClockPosition(first, 1_200) - 12.1) < 1e-12);
+  assert.ok(Math.abs(waveformMotionClockPosition(first, 1_200) - 10.1) < 1e-12);
 
   const wrappedSnapshot = updateWaveformMotionClock(
     first,
     { ...sample, position: 10.08 },
     1_200,
   );
-  assert.equal(wrappedSnapshot.snapped, true, "an engine wrap must land the compositor on the in-point");
-  assert.ok(Math.abs(waveformMotionClockPosition(wrappedSnapshot, 1_250) - 10.13) < 1e-12);
+  assert.equal(wrappedSnapshot.snapped, false, "the engine wrap must not restart an already-looping compositor");
+  assert.ok(Math.abs(waveformMotionClockPosition(wrappedSnapshot, 1_250) - 10.15) < 1e-12);
 
   const changedLoop = updateWaveformMotionClock(
     wrappedSnapshot,
@@ -265,6 +268,22 @@ test("the compositor clock follows the engine wrap instead of wrapping a linear 
   );
   assert.equal(cleared.snapped, true, "LOOP off must land on the engine needle, not the linear timer");
   assert.ok(Math.abs(cleared.anchorPosition - 10.2) < 1e-12);
+});
+
+test("sub-clock-interval loops retain exact modulo phase", () => {
+  assert.ok(Math.abs(loopedWaveformPosition(10.051, 10, 0.04) - 10.011) < 1e-12);
+  assert.ok(Math.abs((liveWaveformLoopAnimationTimeMs(10.051, 10, 0.04) ?? 0) - 11) < 1e-9);
+  const clock = updateWaveformMotionClock(null, {
+    trackId: 7,
+    position: 10.03,
+    duration: 180,
+    rate: 1,
+    playing: true,
+    discrete: false,
+    loopStart: 10,
+    loopLength: 0.04,
+  }, 1_000);
+  assert.ok(Math.abs(waveformMotionClockPosition(clock, 1_100) - 10.01) < 1e-12);
 });
 
 test("the live waveform follows DAC-audible tempo instead of building target-rate phase debt", () => {
@@ -296,6 +315,14 @@ test("live clock never seeks bake and beat-grid independently", () => {
     "a second currentTime landing after layout is the Play/Seek relative shake",
   );
   assert.equal(shouldRetargetLiveWaveformClock(2_000, true), false);
+});
+
+test("platter phase lands once at contact instead of seeking on every velocity sample", () => {
+  assert.equal(shouldLandPlatterWaveform(false, true, false), true);
+  assert.equal(shouldLandPlatterWaveform(true, true, false), false);
+  assert.equal(shouldLandPlatterWaveform(true, true, true), true);
+  assert.equal(shouldLandPlatterWaveform(true, false, false), true);
+  assert.equal(shouldLandPlatterWaveform(false, false, true), false);
 });
 
 test("a seek handoff must not pause the live waveform compositor", () => {

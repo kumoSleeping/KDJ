@@ -9,7 +9,7 @@ import {
 } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { api } from "../../lib/api";
-import { activeLrcIndex, lineFillProgress } from "../../lib/lrc";
+import { activeLrcIndex, lineFillProgress, projectLoopedPlaybackTime } from "../../lib/lrc";
 import { effectiveLyricExtra } from "../../lib/lyricsOverlay";
 import { paintCss, strokeCss } from "../../lib/lyricsColor";
 import {
@@ -42,11 +42,20 @@ function alignedText(
  * 播放状态事件大约 100ms 一拍；悬浮歌词逐字推进用墙钟把进度补到一帧一更。
  */
 function useSmoothPlaybackTime(playback: UnifiedPlayerState): number {
+  const activeDeck = playback.decks
+    .filter((deck) => deck.trackId === playback.trackId)
+    .sort((left, right) =>
+      Math.abs(left.currentTime - playback.currentTime)
+      - Math.abs(right.currentTime - playback.currentTime))[0];
+  const loopStart = activeDeck?.loopStart ?? null;
+  const loopLength = activeDeck?.loopLength ?? null;
   const [time, setTime] = useState(playback.currentTime);
   const anchorRef = useRef({
     media: playback.currentTime,
     wall: performance.now(),
     rate: playback.rate,
+    loopStart,
+    loopLength,
   });
 
   useEffect(() => {
@@ -54,16 +63,31 @@ function useSmoothPlaybackTime(playback: UnifiedPlayerState): number {
       media: playback.currentTime,
       wall: performance.now(),
       rate: playback.rate > 0 ? playback.rate : 1,
+      loopStart,
+      loopLength,
     };
     setTime(playback.currentTime);
-  }, [playback.currentTime, playback.rate, playback.trackId, playback.playing]);
+  }, [
+    playback.currentTime,
+    playback.rate,
+    playback.trackId,
+    playback.playing,
+    loopStart,
+    loopLength,
+  ]);
 
   useEffect(() => {
     if (!playback.playing) return;
     let frame = 0;
     const tick = () => {
       const anchor = anchorRef.current;
-      setTime(anchor.media + ((performance.now() - anchor.wall) / 1000) * anchor.rate);
+      setTime(projectLoopedPlaybackTime(
+        anchor.media,
+        (performance.now() - anchor.wall) / 1_000,
+        anchor.rate,
+        anchor.loopStart,
+        anchor.loopLength,
+      ));
       frame = window.requestAnimationFrame(tick);
     };
     frame = window.requestAnimationFrame(tick);

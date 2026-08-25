@@ -21,8 +21,10 @@ import { beatGridMarkers, type BeatGridMarker } from "../../lib/performanceCues"
 import { barPhaseAlignedSeek } from "../../lib/beatGridSync";
 import {
   liveWaveformAnimationTimeMs,
+  liveWaveformLoopAnimationTimeMs,
   liveWaveformPlaybackRate,
   projectedLiveWaveformPosition,
+  shouldLandPlatterWaveform,
   shouldPauseLiveWaveformClock,
   updateWaveformMotionClock,
   waveformMotionClockPosition,
@@ -220,6 +222,8 @@ export function Waveform({
   const motionClockRef = useRef<WaveformMotionClock | null>(null);
   const liveDiscontinuityRef = useRef<number | null>(null);
   const livePlatterActiveRef = useRef(false);
+  const interactiveScrubRef = useRef(interactiveScrub);
+  interactiveScrubRef.current = interactiveScrub;
   const motionAnimationsRef = useRef<{
     bake: Animation;
     rail: Animation;
@@ -410,7 +414,8 @@ export function Waveform({
       <= PERFORMANCE_WAVEFORM_SECONDS_PER_SCREEN * PERFORMANCE_WAVEFORM_BAKE_SCREENS
     && railPosition !== null
     && railPosition >= compositorLoopStart
-    && railPosition < compositorLoopEnd;
+    && railPosition < compositorLoopEnd
+    && !interactiveScrub;
   const platterLive = interactiveScrub || Math.abs(Number(playbackRate) || 0) > 0.02;
   const continuousRailMotion = viewport.active
     && typeof Element !== "undefined"
@@ -545,6 +550,14 @@ export function Waveform({
     );
     const bakeAnimationPosition = visualPosition - bake.startSec;
     const railAnimationPosition = visualPosition + railLeadInSec;
+    const loopingAnimation = clock.loopStart !== null && clock.loopLength !== null;
+    const loopAnimationTime = loopingAnimation
+      ? liveWaveformLoopAnimationTimeMs(
+          visualPosition,
+          clock.loopStart as number,
+          clock.loopLength as number,
+        )
+      : null;
     const owner = motionAnimationsRef.current;
     const sameAnimation = owner
       && owner.trackId === trackId
@@ -586,17 +599,31 @@ export function Waveform({
     const rawTimelineTime = document.timeline?.currentTime;
     const timelineTime = typeof rawTimelineTime === "number" ? rawTimelineTime : null;
     if (sameAnimation) {
-      syncNativeAnimation(owner.bake, bakeAnimationPosition * 1_000, clock.snapped, timelineTime);
-      syncNativeAnimation(owner.rail, railAnimationPosition * 1_000, clock.snapped, timelineTime);
+      syncNativeAnimation(
+        owner.bake,
+        loopAnimationTime ?? bakeAnimationPosition * 1_000,
+        clock.snapped,
+        timelineTime,
+      );
+      syncNativeAnimation(
+        owner.rail,
+        loopAnimationTime ?? railAnimationPosition * 1_000,
+        clock.snapped,
+        timelineTime,
+      );
       return;
     }
 
     cancelAnimations();
     if (!(bakeSpan > 0)) return;
-    const bakeAnimationStart = bake.startSec;
-    const bakeAnimationEnd = bake.endSec;
-    const railAnimationStart = -railLeadInSec;
-    const railAnimationEnd = total;
+    const bakeAnimationStart = loopingAnimation ? clock.loopStart as number : bake.startSec;
+    const bakeAnimationEnd = loopingAnimation
+      ? bakeAnimationStart + (clock.loopLength as number)
+      : bake.endSec;
+    const railAnimationStart = loopingAnimation ? clock.loopStart as number : -railLeadInSec;
+    const railAnimationEnd = loopingAnimation
+      ? railAnimationStart + (clock.loopLength as number)
+      : total;
     const bakeFrom = waveformBakeTranslatePercent(bake, bakeAnimationStart);
     const bakeTo = waveformBakeTranslatePercent(bake, bakeAnimationEnd);
     const railFrom = (railAnimationStart / total) * 100;
@@ -604,14 +631,17 @@ export function Waveform({
     const baseTiming = {
       easing: "linear" as const,
       fill: "both" as const,
-      iterations: 1,
+      iterations: loopingAnimation ? Infinity : 1,
     };
     const bakeAnimation = bakeElement.animate(
       [
         { transform: `translate3d(${-bakeFrom}%, 0, 0)` },
         { transform: `translate3d(${-bakeTo}%, 0, 0)` },
       ],
-      { ...baseTiming, duration: bakeSpan * 1_000 },
+      {
+        ...baseTiming,
+        duration: (loopingAnimation ? clock.loopLength as number : bakeSpan) * 1_000,
+      },
     );
     const railAnimation = railElement.animate(
       [
@@ -620,11 +650,21 @@ export function Waveform({
       ],
       {
         ...baseTiming,
-        duration: (total + railLeadInSec) * 1_000,
+        duration: (loopingAnimation ? clock.loopLength as number : total + railLeadInSec) * 1_000,
       },
     );
-    syncNativeAnimation(bakeAnimation, bakeAnimationPosition * 1_000, true, timelineTime);
-    syncNativeAnimation(railAnimation, railAnimationPosition * 1_000, true, timelineTime);
+    syncNativeAnimation(
+      bakeAnimation,
+      loopAnimationTime ?? bakeAnimationPosition * 1_000,
+      true,
+      timelineTime,
+    );
+    syncNativeAnimation(
+      railAnimation,
+      loopAnimationTime ?? railAnimationPosition * 1_000,
+      true,
+      timelineTime,
+    );
     motionAnimationsRef.current = {
       bake: bakeAnimation,
       rail: railAnimation,
@@ -642,6 +682,8 @@ export function Waveform({
     compositorLoopLength,
     compositorLoopStart,
     continuousRailMotion,
+    interactiveScrub,
+    loopReadyForCompositor,
     motionRevision,
     playbackRate,
     railPosition,
@@ -660,13 +702,9 @@ export function Waveform({
       const discontinuity = liveDiscontinuityRef.current !== live.discontinuityRevision;
       const rate = liveWaveformPlaybackRate(live.targetRate, live.audibleRate, live.scratchHeld);
       const visualRate = Math.abs(rate) < 0.001 ? (rate < 0 ? -0.001 : 0.001) : rate;
-      const platterAuthority = live.scratchHeld || livePlatterActiveRef.current;
+      const wasPlatterActive = livePlatterActiveRef.current;
       livePlatterActiveRef.current = live.scratchHeld;
-      if (platterAuthority) {
-        // During a grab/coast the callback position is authoritative. Rate-only animation drifts
-        // when MIDI packets are coalesced and is the reason the rail used to freeze, then jump on
-        // the next touch. Land PCM bake and beat-grid rail in the same JS task, then let both run
-        // at the same measured velocity until the next lightweight clock sample.
+      const landAtLiveClock = () => {
         const sourcePosition = projectedLiveWaveformPosition(
           live.currentTime,
           live.clientPresentationTimeMs,
@@ -674,26 +712,58 @@ export function Waveform({
           rate,
           owner.totalSec,
         );
-        const bakeTime = liveWaveformAnimationTimeMs(
+        const loopTime = owner.loopStartSec !== null && owner.loopLengthSec !== null
+          ? liveWaveformLoopAnimationTimeMs(
+              sourcePosition,
+              owner.loopStartSec,
+              owner.loopLengthSec,
+            )
+          : null;
+        const bakeTime = loopTime ?? liveWaveformAnimationTimeMs(
           sourcePosition - owner.bakeStartSec,
           owner.bakeEndSec - owner.bakeStartSec,
         );
-        const railTime = liveWaveformAnimationTimeMs(
+        const railTime = loopTime ?? liveWaveformAnimationTimeMs(
           sourcePosition + owner.railLeadInSec,
           owner.totalSec + owner.railLeadInSec,
         );
-        if (bakeTime !== null && railTime !== null) {
-          owner.bake.playbackRate = visualRate;
-          owner.rail.playbackRate = visualRate;
-          owner.bake.currentTime = bakeTime;
-          owner.rail.currentTime = railTime;
+        if (bakeTime === null || railTime === null) return;
+        animations.forEach((animation) => animation.pause());
+        owner.bake.currentTime = bakeTime;
+        owner.rail.currentTime = railTime;
+      };
+      if (interactiveScrubRef.current && !live.scratchHeld) {
+        // Pointer/note-on has already happened locally, but the callback acknowledgement is still
+        // in flight. Freeze the current compositor phase instead of letting one old transport
+        // sample walk forward and then snapping back when native Start arrives.
+        animations.forEach((animation) => animation.pause());
+        return;
+      }
+      if (live.scratchHeld) {
+        const land = shouldLandPlatterWaveform(
+          wasPlatterActive,
+          live.scratchHeld,
+          discontinuity,
+        );
+        if (land) {
+          // Grab establishes phase once. Subsequent 30 Hz samples update velocity only; assigning
+          // currentTime on every sample was the visible sawtooth during continuous rotation.
+          landAtLiveClock();
         }
         liveDiscontinuityRef.current = live.discontinuityRevision;
         animations.forEach((animation) => {
+          if (Math.abs(animation.playbackRate - visualRate) > 1e-6) {
+            animation.updatePlaybackRate(visualRate);
+          }
           if (Math.abs(rate) <= 0.02) animation.pause();
           else if (animation.playState !== "running") animation.play();
         });
         return;
+      }
+      if (shouldLandPlatterWaveform(wasPlatterActive, false, discontinuity)) {
+        // One exact handoff prevents piecewise 30 Hz velocity integration from becoming the next
+        // touch's phase jump. Unlike the old path, this happens once, not throughout rotation.
+        landAtLiveClock();
       }
       if (shouldPauseLiveWaveformClock(live.playing, live.scratchHeld, true, discontinuity, rate)) {
         liveDiscontinuityRef.current = live.discontinuityRevision;

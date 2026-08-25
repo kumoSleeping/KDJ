@@ -59,8 +59,15 @@ export function midiJogNudgeAmount(delta: number): number {
 }
 
 /** A stopped transport has nothing to nudge; edge rotation must own the platter cursor instead. */
-export function midiJogUsesPlatter(surfaceHeld: boolean, transportRunning: boolean): boolean {
-  return surfaceHeld || !transportRunning;
+export type MidiJogMode = "platter" | "nudge" | "idle";
+
+/**
+ * Capacitive touch is the only authority that turns rotary packets into vinyl motion. An edge
+ * packet can bend a running transport, but a stopped untouched Deck must remain completely idle.
+ */
+export function midiJogMode(surfaceHeld: boolean, transportRunning: boolean): MidiJogMode {
+  if (surfaceHeld) return "platter";
+  return transportRunning ? "nudge" : "idle";
 }
 
 /** Compositor preview of the native 90ms edge pitch bend; persistent TEMPO remains unchanged. */

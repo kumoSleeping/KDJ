@@ -71,6 +71,35 @@ export function activeLrcIndex(lines: LrcLine[], position: number): number {
   return hit;
 }
 
+/**
+ * Project a sparse player snapshot for karaoke rendering. Once transport enters an active loop,
+ * fold wall-clock progress into that exact source interval; clearing the loop immediately restores
+ * linear projection. This prevents the lyric clock from running past loop-out then snapping back.
+ */
+export function projectLoopedPlaybackTime(
+  anchorMedia: number,
+  elapsedSeconds: number,
+  rate: number,
+  loopStart: number | null | undefined,
+  loopLength: number | null | undefined,
+): number {
+  const anchor = Number.isFinite(anchorMedia) ? anchorMedia : 0;
+  const elapsed = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
+  const speed = Number.isFinite(rate) && rate > 0 ? rate : 1;
+  const linear = anchor + elapsed * speed;
+  if (
+    typeof loopStart !== "number"
+    || typeof loopLength !== "number"
+    || !Number.isFinite(loopStart)
+    || !Number.isFinite(loopLength)
+    || loopStart < 0
+    || loopLength <= 0
+    || linear < loopStart
+  ) return linear;
+  const relative = (linear - loopStart) % loopLength;
+  return loopStart + (relative < 0 ? relative + loopLength : relative);
+}
+
 /** 与 Android `LyricsOverlayRuntime.fillOf` 对齐：行内演唱进度 0..1。 */
 const MIN_FILL_SEC = 1.2;
 const PER_CHAR_SEC = 0.34;

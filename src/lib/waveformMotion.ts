@@ -30,6 +30,15 @@ export function shouldRetargetLiveWaveformClock(
   return false;
 }
 
+/** Platter phase is landed once at grab (or a real source discontinuity), never every clock tick. */
+export function shouldLandPlatterWaveform(
+  wasActive: boolean,
+  active: boolean,
+  discontinuity: boolean,
+): boolean {
+  return active ? !wasActive || discontinuity : wasActive;
+}
+
 /**
  * Seek replacements briefly report not-playing while the landing is already the authority.
  * Pausing the compositor there freezes the rail; the next in-range sample then jumps currentTime
@@ -106,6 +115,23 @@ export function liveWaveformAnimationTimeMs(
   return Math.max(0, Math.min(animationSpanSec, sourceSeconds)) * 1_000;
 }
 
+/** Local time for an infinitely repeating compositor loop. */
+export function liveWaveformLoopAnimationTimeMs(
+  sourceSeconds: number,
+  loopStart: number,
+  loopLength: number,
+): number | null {
+  if (
+    !Number.isFinite(sourceSeconds)
+    || !Number.isFinite(loopStart)
+    || !Number.isFinite(loopLength)
+    || loopLength <= 0
+    || sourceSeconds < loopStart - WAVEFORM_ANIMATION_EDGE_SLACK_SEC
+  ) return null;
+  const relative = (sourceSeconds - loopStart) % loopLength;
+  return (relative < 0 ? relative + loopLength : relative) * 1_000;
+}
+
 export interface WaveformMotionSample {
   trackId: number;
   position: number;
@@ -167,28 +193,16 @@ function normalizedLoop(
   return end > start ? { start, length: end - start } : null;
 }
 
-function loopedPosition(position: number, loopStart: number | null, loopLength: number | null): number {
-  // The engine playhead is the only wrap authority. A linear clock past loop-out must stay
-  // past loop-out until the callback reports the in-point packet.
-  void loopStart;
-  void loopLength;
-  return position;
-}
-
-function engineLoopWrapped(
-  previous: number,
-  next: number,
+export function loopedWaveformPosition(
+  position: number,
   loopStart: number | null,
   loopLength: number | null,
-): boolean {
-  if (loopStart === null || loopLength === null) return false;
-  const end = loopStart + loopLength;
-  return previous >= loopStart
-    && next >= loopStart
-    && next < end
-    && previous >= end - 0.25
-    && next < previous - 0.05
-    && previous - next < loopLength + 0.25;
+): number {
+  if (loopStart === null || loopLength === null || loopLength <= 0 || position < loopStart) {
+    return position;
+  }
+  const relative = (position - loopStart) % loopLength;
+  return loopStart + (relative < 0 ? relative + loopLength : relative);
 }
 
 function loopDistance(from: number, to: number, loopStart: number | null, loopLength: number | null): number {
@@ -213,7 +227,11 @@ export function waveformMotionClockPosition(
     (finiteNonNegative(nowMs, clock.anchorTimeMs) - clock.anchorTimeMs) / 1_000,
   );
   return clampPosition(
-    clock.anchorPosition + elapsed * clock.rate,
+    loopedWaveformPosition(
+      clock.anchorPosition + elapsed * clock.rate,
+      clock.loopStart,
+      clock.loopLength,
+    ),
     clock.duration,
   );
 }
@@ -222,7 +240,7 @@ function snappedClock(sample: WaveformMotionSample, nowMs: number): WaveformMoti
   const duration = finiteNonNegative(sample.duration);
   const loop = normalizedLoop(sample.loopStart, sample.loopLength, duration);
   const position = clampPosition(
-    loopedPosition(sample.position, loop?.start ?? null, loop?.length ?? null),
+    loopedWaveformPosition(sample.position, loop?.start ?? null, loop?.length ?? null),
     duration,
   );
   return {
@@ -257,7 +275,7 @@ export function updateWaveformMotionClock(
   const duration = finiteNonNegative(sample.duration);
   const loop = normalizedLoop(sample.loopStart, sample.loopLength, duration);
   const position = clampPosition(
-    loopedPosition(sample.position, loop?.start ?? null, loop?.length ?? null),
+    loopedWaveformPosition(sample.position, loop?.start ?? null, loop?.length ?? null),
     duration,
   );
   const rate = normalizedRate(sample.rate);
@@ -288,28 +306,6 @@ export function updateWaveformMotionClock(
     && predicted < previous.loopStart + previous.loopLength
     && position >= previous.loopStart
     && position < previous.loopStart + previous.loopLength;
-  if (
-    engineLoopWrapped(
-      previous.authoritativePosition,
-      position,
-      previous.loopStart,
-      previous.loopLength,
-    )
-  ) {
-    return {
-      trackId: sample.trackId,
-      anchorPosition: position,
-      anchorTimeMs: now,
-      authoritativePosition: position,
-      duration,
-      rate,
-      playing: true,
-      motionRevision: sample.motionRevision ?? 0,
-      loopStart: loop?.start ?? null,
-      loopLength: loop?.length ?? null,
-      snapped: true,
-    };
-  }
   if (
     !insideLoop
     && (

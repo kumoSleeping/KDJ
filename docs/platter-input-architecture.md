@@ -55,16 +55,17 @@ controlDeckPlatter(deck, { phase: start | move | end, velocity, gestureId, seque
 10 ms 响应、160 ms 停转判定和唱片质量 coast。流式音频只在必要时
 使用双向 ScratchTape；缓动回 transport 后，缓存读针追上 producer head 就原位交还正常流，
 不会重建 decoder，也不会永久留在 scratch voice。暂停 Deck 的 throw 会自然减速到零，但保持
-逻辑暂停；停播时边缘转动也按短暂 platter gesture 处理，因为没有正在运行的 transport 可供
-pitch-bend。
+逻辑暂停。只有电容触摸可建立 platter gesture：未触摸的边缘转动只 nudge 正在运行的 transport，
+暂停时直接丢弃，因此挪动机器不会让停播 Deck 发声。准备流从 Cue 才开始解码时，盘针仍可穿过
+该缓存原点前的静音 lead-in，并继续进入统一的负时间预卷。
 
 未触摸盘面的边缘加减速走同一个 Rubber Band R3 tempo lane，保持音高且不写回 TEMPO 推子；
 它不再使用 callback 线性重采样。盘面接触会清除任何残留的分数相位 reader，从最后实际发声
 位置建立新手势，因此 nudge 后立即触摸不会先跳一个小范围。
 
-波形只跟 callback/DAC 关联时钟。在 platter start/move/coast 期间，PCM bake 与 beat-grid rail
-在同一个 JS task 内同时校准到 callback position，再按 audible velocity 在 compositor 上连续运行。
-它不会跟鼠标绝对坐标走，也不会因 30 Hz 状态采样先冻结、下次触碰再跳转。
+波形只跟 callback/DAC 关联时钟。Platter start 只在接管边界校准一次 PCM bake 与 beat-grid rail；
+后续 30 Hz 样本只更新 compositor 速度，不反复写 `currentTime`。极短 Loop 则由同一个 compositor
+按 callback 发布的 in/length 做无限 modulo 动画，不等待下一次稀疏状态样本才回绕。
 
 ## 关键不变量
 

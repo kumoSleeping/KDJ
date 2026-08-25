@@ -215,10 +215,7 @@ fn publishes_control_snapshot(command: &PlaybackCommand) -> bool {
         PlaybackCommand::SetDeckRate { .. }
             | PlaybackCommand::SetDeckRates { .. }
             | PlaybackCommand::NudgeDeck { .. }
-            | PlaybackCommand::ControlDeckPlatter {
-                phase: PlaybackPlatterPhase::Move,
-                ..
-            }
+            | PlaybackCommand::ControlDeckPlatter { .. }
             | PlaybackCommand::SetDeckStems { .. }
             | PlaybackCommand::SetDeckFx { .. }
     )
@@ -1993,6 +1990,10 @@ impl Actor {
         if self.loop_windows[deck as usize].snapshot().is_some() {
             self.cancel_clocked_deck_seek(deck);
             self.enter_manual_mode();
+            // A loop command is acknowledged immediately. Refresh its position from the same
+            // callback clock first; after one wrap, publishing the previous actor sample here can
+            // be almost a whole loop away and makes every lyrics subscriber jump.
+            self.refresh_deck_clock_for_control(deck);
             return self.invalidate_loop(deck);
         }
         self.capture_deck_loop(deck, length)
@@ -2006,6 +2007,7 @@ impl Actor {
             .and_then(|runtime| runtime.loop_playback)
             .map(|looping| looping.start)
             .ok_or_else(|| "当前 Deck 没有活动循环".to_string())?;
+        self.refresh_deck_clock_for_control(deck);
         self.install_loop_window(deck, start, length)
     }
 
@@ -2046,6 +2048,7 @@ impl Actor {
             return Err("静音预卷期间不能建立循环".into());
         }
         let start = start_frame as f64 / f64::from(output_sample_rate.max(1));
+        self.adopt_deck_clock_sample(deck, audio);
         self.install_loop_window(deck, start, length)
     }
 
@@ -2179,6 +2182,30 @@ impl Actor {
         } else {
             state_time.max(played)
         }
+    }
+
+    fn adopt_deck_clock_sample(
+        &mut self,
+        deck: DeckId,
+        audio: kdj_player::TransportSnapshot,
+    ) -> Option<f64> {
+        let index = deck as usize;
+        self.latest_audio = audio;
+        let runtime = self.decks[index].as_ref()?;
+        if audio.deck_source_ids[index] != runtime.source_id {
+            return None;
+        }
+        let played = runtime.seconds_for_frame(audio.deck_frames[index]);
+        self.state.decks[index].current_time = played;
+        if self.front == deck {
+            self.state.current_time = played;
+        }
+        Some(played)
+    }
+
+    fn refresh_deck_clock_for_control(&mut self, deck: DeckId) -> Option<f64> {
+        let audio = self.player.as_mut()?.snapshot();
+        self.adopt_deck_clock_sample(deck, audio)
     }
 
     fn enter_manual_mode(&mut self) {
@@ -5692,6 +5719,28 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn loop_toggle_ack_uses_the_callback_phase_after_the_first_wrap() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[0].duration = 180.0;
+        set_fake_deck_clock(&knobs, DeckId::A, 101, 30.0);
+        actor.toggle_deck_loop(0, 2.0).unwrap();
+
+        // The actor's last periodic sample can still be near loop-out while the callback has
+        // already wrapped. A toggle ACK must never republish that stale phase to lyrics/UI.
+        actor.state.decks[0].current_time = 31.95;
+        actor.state.current_time = 31.95;
+        set_fake_deck_clock(&knobs, DeckId::A, 101, 30.125);
+        actor.toggle_deck_loop(0, 2.0).unwrap();
+
+        assert!((actor.state.decks[0].current_time - 30.125).abs() < 1e-9);
+        assert!((actor.state.current_time - 30.125).abs() < 1e-9);
+        assert!(actor.state.decks[0].loop_start.is_none());
     }
 
     #[test]

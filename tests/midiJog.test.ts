@@ -10,7 +10,7 @@ import {
   midiJogNudgeAmount,
   midiJogNudgeRate,
   midiJogSeekSeconds,
-  midiJogUsesPlatter,
+  midiJogMode,
   midiJogVinylSeconds,
 } from "../src/lib/midiJog";
 import {
@@ -122,10 +122,11 @@ test("pitch-preserving edge nudge previews the native transient tempo without pe
   assert.equal(midiJogNudgeRate(0.5, -1), 0.5);
 });
 
-test("both stopped Decks use platter motion even without a separate touch edge", () => {
-  assert.equal(midiJogUsesPlatter(true, true), true);
-  assert.equal(midiJogUsesPlatter(false, false), true);
-  assert.equal(midiJogUsesPlatter(false, true), false);
+test("capacitive touch is required for vinyl motion on a stopped Deck", () => {
+  assert.equal(midiJogMode(true, true), "platter");
+  assert.equal(midiJogMode(true, false), "platter");
+  assert.equal(midiJogMode(false, true), "nudge");
+  assert.equal(midiJogMode(false, false), "idle");
 });
 
 test("jog position stays inside the track and its bounded silent pre-roll", () => {
