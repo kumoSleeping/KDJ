@@ -34,10 +34,13 @@ const OPTION_PROCESS_REAL_TIME: i32 = 0x0000_0001;
 const OPTION_CHANNELS_TOGETHER: i32 = 0x1000_0000;
 const OPTION_ENGINE_FINER: i32 = 0x2000_0000;
 const OPTION_THREADING_NEVER: i32 = 0x0001_0000;
+/// R3 short-window mode trades a little low-frequency resolution for live-control latency.
+const OPTION_WINDOW_SHORT: i32 = 0x0010_0000;
 const RUBBER_BAND_OPTIONS: i32 = OPTION_PROCESS_REAL_TIME
     | OPTION_CHANNELS_TOGETHER
     | OPTION_ENGINE_FINER
-    | OPTION_THREADING_NEVER;
+    | OPTION_THREADING_NEVER
+    | OPTION_WINDOW_SHORT;
 
 type RubberBandState = *mut c_void;
 
@@ -418,11 +421,10 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
         Ok(processor)
     }
 
-    /// Eight-lane STEM primes Rubber Band at construction so the first TEMPO/SYNC move can
-    /// `set_time_ratio` without `reset()`. Unity playback still passthroughs to avoid burning a
-    /// core on R3 while the separator is already on the CPU.
+    /// Prime the worker-owned R3 state once at construction. Unity PCM still uses the direct
+    /// passthrough branch, so this removes first-fader reset latency without steady-state R3 CPU.
     fn keep_engine_primed() -> bool {
-        F::CHANNELS > 2
+        true
     }
 
     pub fn engine_version(&self) -> i32 {

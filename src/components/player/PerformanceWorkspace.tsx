@@ -2248,6 +2248,14 @@ export function PerformanceWorkspace({
   });
   const armTempoTakeover = (side: 0 | 1) => {
     tempoTakeoverRef.current.lanes[side].ignoreNext();
+    if (syncLockRef.current === null) {
+      setVisualRates((current) => {
+        if (current[side] === null) return current;
+        const next: [number | null, number | null] = [current[0], current[1]];
+        next[side] = null;
+        return next;
+      });
+    }
     const unit = tempoTakeoverRef.current.hardwareUnit[side];
     setTempoHardwareUnit((prev) => {
       if (prev[side] === unit) return prev;
@@ -2797,19 +2805,21 @@ export function PerformanceWorkspace({
     && decks[0].track?.first_beat != null
     && decks[1].track?.first_beat != null,
   );
-  const previewDeckRate = (side: 0 | 1, rate: number): number => {
+  const previewDeckRate = (side: 0 | 1, rate: number, publishVisual = true): number => {
     const bpms = [decks[0].track?.bpm, decks[1].track?.bpm] as const;
     const paired = syncLock
       ? linkedDeckRates(side, rate, bpms, syncLock, ENGINE_TEMPO_MIN, ENGINE_TEMPO_MAX)
       : null;
     const shownRate = paired?.[side] ?? rate;
-    setVisualRates((current) => {
-      const next: [number | null, number | null] = [
-        paired ? paired[0] : side === 0 ? shownRate : current[0],
-        paired ? paired[1] : side === 1 ? shownRate : current[1],
-      ];
-      return next[0] === current[0] && next[1] === current[1] ? current : next;
-    });
+    if (publishVisual || paired) {
+      setVisualRates((current) => {
+        const next: [number | null, number | null] = [
+          paired ? paired[0] : side === 0 ? shownRate : current[0],
+          paired ? paired[1] : side === 1 ? shownRate : current[1],
+        ];
+        return next[0] === current[0] && next[1] === current[1] ? current : next;
+      });
+    }
     return shownRate;
   };
 
@@ -3519,6 +3529,9 @@ export function PerformanceWorkspace({
     syncLock,
   ]);
 
+  // The fader owns its local draft. An unlinked software gesture must not re-render the entire
+  // workspace at pointer frequency; hardware and linked Decks still publish a shared optimistic
+  // value because another control surface must move with them.
   const renderTempo = (side: 0 | 1) => (
     <div className="kd-performance-mixer-tempo" data-side={side === 0 ? "a" : "b"}>
       <TempoPanel
@@ -3528,7 +3541,7 @@ export function PerformanceWorkspace({
         syncEnabled={syncEnabled}
         onToggleSync={toggleSyncLock}
         onRateChange={handleDeckRateChange}
-        onPreviewRate={previewDeckRate}
+        onPreviewRate={(deckSide, rate) => previewDeckRate(deckSide, rate, syncLock !== null)}
         hardwareUnit={tempoHardwareUnit[side]}
         onSoftwareTempoOverride={armTempoTakeover}
       />

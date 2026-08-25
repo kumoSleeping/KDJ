@@ -10,8 +10,8 @@ use crate::manual_fx::DeckManualFx;
 use crate::state::{OutputCallbackTiming, SharedState, SharedTransportState};
 use crate::stream::{FrameLerp, StemFrame, STEM_GAIN_MAX, STEM_LANES};
 use crate::{
-    DeckId, DecodedTrack, PlatterPhase, PlayerMode, RtCommand, StreamSource, TransitionPlan,
-    TransportSnapshot,
+    DeckId, DecodedTrack, PlatterPhase, PlayerMode, RtCommand, ScratchPcmCache, StreamSource,
+    TransitionPlan, TransportSnapshot,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,12 +49,25 @@ impl PlayerController {
         address: usize,
         start_frame: u64,
     ) -> Result<(), CommandError> {
+        self.install_prepared_with_scratch(deck, source_id, source_kind, address, 0, start_frame)
+    }
+
+    pub(crate) fn install_prepared_with_scratch(
+        &mut self,
+        deck: DeckId,
+        source_id: u64,
+        source_kind: SourceKind,
+        address: usize,
+        scratch_address: usize,
+        start_frame: u64,
+    ) -> Result<(), CommandError> {
         self.producer
             .push(EngineCommand::InstallPrepared {
                 deck,
                 source_id,
                 source_kind,
                 address,
+                scratch_address,
                 start_frame,
             })
             .map_err(|_| CommandError::Full)
@@ -85,6 +98,7 @@ struct InstalledSource {
     id: u64,
     kind: SourceKind,
     address: usize,
+    scratch_address: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -179,6 +193,7 @@ const SCRATCH_NO_TICK: u64 = u64::MAX;
 /// Silent lead-in before source frame 0. Must match the coordinator's Performance pre-roll.
 pub const PERFORMANCE_PREROLL_SECONDS: f64 = 30.0;
 const SCRATCH_GAP_FRAMES: i64 = 64;
+const SCRATCH_HANDOFF_FADE_FRAMES: u32 = 64;
 
 /// Bidirectional PCM cache around the needle, Mixxx CachingReader-style.
 /// Indexed by integer output-rate media frames so reverse/coast can replay history and
@@ -418,6 +433,12 @@ pub struct AudioRenderer {
     deck_scratch_playthrough: [bool; 2],
     deck_scratch_input_at: [u64; 2],
     deck_scratch_valid_frames: [u64; 2],
+    deck_scratch_handoff_armed: [bool; 2],
+    deck_scratch_handoff_generation: [u64; 2],
+    deck_scratch_handoff_remaining: [u32; 2],
+    deck_scratch_handoff_hold: [[f32; 2]; 2],
+    deck_scratch_cache_active: [bool; 2],
+    deck_scratch_cache_fade_remaining: [u32; 2],
     /// One-pole of published platter rate so the UI needle does not reverse on tick jitter.
     deck_audible_rate_smooth: [f32; 2],
     scratch_tapes: [ScratchTape; 2],
@@ -527,6 +548,12 @@ fn make_channels(
             deck_scratch_playthrough: [false; 2],
             deck_scratch_input_at: [SCRATCH_NO_TICK; 2],
             deck_scratch_valid_frames: [0; 2],
+            deck_scratch_handoff_armed: [false; 2],
+            deck_scratch_handoff_generation: [0; 2],
+            deck_scratch_handoff_remaining: [0; 2],
+            deck_scratch_handoff_hold: [[0.0; 2]; 2],
+            deck_scratch_cache_active: [false; 2],
+            deck_scratch_cache_fade_remaining: [0; 2],
             deck_audible_rate_smooth: [0.0; 2],
             scratch_tapes: [ScratchTape::new(), ScratchTape::new()],
             deck_source_origin_frames: [0.0; 2],
@@ -1237,7 +1264,7 @@ impl AudioRenderer {
         if !self.playing {
             return ([0.0; 2], false);
         }
-        let (raw, advanced) = if self.deck_positions[index] >= 0.0
+        let (mut raw, advanced) = if self.deck_positions[index] >= 0.0
             && matches!(
                 source,
                 Some(CallbackSource::Stream(_) | CallbackSource::StemStream(_))
@@ -1255,6 +1282,7 @@ impl AudioRenderer {
             let media_advance = self.deck_media_advance(index);
             self.scratch_tapes[index].push_at(position, raw, media_advance);
         }
+        raw = self.apply_scratch_handoff_fade(index, raw);
         (raw, advanced)
     }
 
@@ -1263,6 +1291,9 @@ impl AudioRenderer {
         index: usize,
         source: Option<CallbackSource>,
     ) -> ([f32; 2], bool) {
+        if let Some(handoff) = self.try_scratch_handoff(index, source) {
+            return handoff;
+        }
         let mut next = self.next_scratch_position(index);
         if let Some(CallbackSource::Decoded(track)) = source {
             next = self.clamp_decoded_scratch_end(index, next, track.frames());
@@ -1271,6 +1302,45 @@ impl AudioRenderer {
             source,
             Some(CallbackSource::Stream(_) | CallbackSource::StemStream(_))
         ) {
+            if next >= 0.0
+                && (self.deck_scratch_cache_active[index]
+                    || self.deck_scratch_velocity[index].abs() > SCRATCH_STATIONARY_VELOCITY)
+            {
+                if let Some(raw_cache_sample) = self
+                    .scratch_cache(index)
+                    .and_then(|cache| cache.sample(next, self.deck_scratch_velocity[index]))
+                {
+                    if !self.deck_scratch_cache_active[index] {
+                        self.deck_scratch_cache_active[index] = true;
+                        self.deck_scratch_cache_fade_remaining[index] = SCRATCH_HANDOFF_FADE_FRAMES;
+                    }
+                    let remaining = self.deck_scratch_cache_fade_remaining[index];
+                    let audible =
+                        if remaining > 0 && self.scratch_tapes[index].contains_position(next) {
+                            let old = self.scratch_tapes[index].get(next);
+                            let elapsed = SCRATCH_HANDOFF_FADE_FRAMES
+                                .saturating_sub(remaining)
+                                .saturating_add(1);
+                            let mix = elapsed as f32 / SCRATCH_HANDOFF_FADE_FRAMES as f32;
+                            self.deck_scratch_cache_fade_remaining[index] = remaining - 1;
+                            [
+                                old[0] * (1.0 - mix) + raw_cache_sample[0] * mix,
+                                old[1] * (1.0 - mix) + raw_cache_sample[1] * mix,
+                            ]
+                        } else {
+                            self.deck_scratch_cache_fade_remaining[index] = 0;
+                            raw_cache_sample
+                        };
+                    self.scratch_tapes[index].push_at(
+                        next,
+                        raw_cache_sample,
+                        self.deck_scratch_velocity[index].abs().max(1.0),
+                    );
+                    self.deck_positions[index] = next;
+                    self.wrap_deck_loop(index);
+                    return (audible, false);
+                }
+            }
             let fill_at =
                 if self.scratch_tapes[index].is_empty() && next < self.deck_positions[index] {
                     self.deck_positions[index]
@@ -1287,20 +1357,17 @@ impl AudioRenderer {
                             && (self.deck_positions[index] < first
                                 || self.deck_scratch_velocity[index] < 0.0)
                     });
-            if next >= 0.0
-                && !self.scratch_tapes[index].contains_position(next)
-                && !before_decode_origin
-            {
-                // The bounded post-tempo ring has not produced this future frame yet (or reverse
-                // reached the history edge). Hold the last real grain and cursor; never advance
-                // through digital zero and later jump when data arrives.
-                self.deck_scratch_velocity[index] = 0.0;
-                if self.scratch_tapes[index]
-                    .first_position()
-                    .is_some_and(|first| next < first)
-                {
-                    self.deck_scratch_target_velocity[index] = 0.0;
+            if next >= 0.0 && !self.scratch_tapes[index].contains_position(next) {
+                if before_decode_origin && self.scratch_cache(index).is_none() {
+                    // Compatibility for synthetic/non-seekable streams with no random source:
+                    // their declared decode origin remains a silent lead-in. Seekable production
+                    // Decks freeze here until real pre-cue PCM is published instead.
+                    self.deck_positions[index] = next;
+                    return ([0.0; 2], false);
                 }
+                // A compressed random seek is still in flight. Freeze only the cursor; retaining
+                // target velocity is essential, otherwise the newly published window can never
+                // resume the same physical hand motion.
                 let parked = self.deck_positions[index];
                 return (self.scratch_tapes[index].get(parked), false);
             }
@@ -1309,6 +1376,106 @@ impl AudioRenderer {
         self.deck_positions[index] = next;
         self.wrap_deck_loop(index);
         (sample, false)
+    }
+
+    fn try_scratch_handoff(
+        &mut self,
+        index: usize,
+        source: Option<CallbackSource>,
+    ) -> Option<([f32; 2], bool)> {
+        if !self.deck_scratch_handoff_armed[index] || !self.deck_scratch_playthrough[index] {
+            return None;
+        }
+        let stream_generation = match source {
+            Some(CallbackSource::Stream(stream)) => stream.generation(),
+            Some(CallbackSource::StemStream(stream)) => stream.generation(),
+            _ => return None,
+        };
+        if stream_generation < self.deck_scratch_handoff_generation[index] {
+            return None;
+        }
+        let position = self.deck_positions[index];
+        let outgoing = if position < 0.0 {
+            [0.0; 2]
+        } else if self.scratch_tapes[index].contains_position(position) {
+            self.scratch_tapes[index].get(position)
+        } else {
+            self.scratch_cache(index)
+                .and_then(|cache| cache.sample(position, self.deck_scratch_velocity[index]))
+                .unwrap_or([0.0; 2])
+        };
+        let sample_rate = f64::from(self.output_sample_rate.max(1));
+        let tolerance = sample_rate * 0.005;
+        let mut matched = None;
+        // Drain a bounded burst so newly-seeked PCM can catch the cached needle instead of
+        // retaining a constant pipeline-latency offset forever. The callback still has a hard
+        // upper bound and does no allocation or locking.
+        for _ in 0..32 {
+            let (incoming, advanced) = self.callback_source_frame(index, source);
+            if !advanced {
+                break;
+            }
+            let media_time = match source {
+                Some(CallbackSource::Stream(_)) => self.stream_playback[index].media_time,
+                Some(CallbackSource::StemStream(_)) => self.stem_stream_playback[index].media_time,
+                _ => return None,
+            };
+            if !media_time.is_finite() {
+                continue;
+            }
+            let incoming_position = media_time * sample_rate;
+            if (incoming_position - position).abs() <= tolerance {
+                matched = Some((incoming, incoming_position));
+                break;
+            }
+            // Old pre-seek and early post-seek packets are discarded while cached scratch remains
+            // audible. A packet ahead of the needle is also left for the next seek generation
+            // rather than accepting a visible forward jump.
+        }
+        let (incoming, incoming_position) = matched?;
+
+        self.deck_positions[index] = incoming_position;
+        self.deck_discontinuity_revisions[index] = self.deck_discontinuity_revisions[index]
+            .wrapping_add(1)
+            .max(1);
+        let playing = self.deck_playing[index];
+        self.end_scratch_voice(index);
+        if !playing {
+            return Some(([0.0; 2], false));
+        }
+        self.deck_scratch_handoff_hold[index] = outgoing;
+        self.deck_scratch_handoff_remaining[index] = SCRATCH_HANDOFF_FADE_FRAMES;
+        Some((self.apply_scratch_handoff_fade(index, incoming), true))
+    }
+
+    fn apply_scratch_handoff_fade(&mut self, index: usize, incoming: [f32; 2]) -> [f32; 2] {
+        let remaining = self.deck_scratch_handoff_remaining[index];
+        if remaining == 0 {
+            return incoming;
+        }
+        let elapsed = SCRATCH_HANDOFF_FADE_FRAMES
+            .saturating_sub(remaining)
+            .saturating_add(1);
+        let mix = elapsed as f32 / SCRATCH_HANDOFF_FADE_FRAMES.max(1) as f32;
+        let outgoing = self.deck_scratch_handoff_hold[index];
+        self.deck_scratch_handoff_remaining[index] = remaining - 1;
+        if remaining == 1 {
+            self.deck_scratch_handoff_hold[index] = [0.0; 2];
+        }
+        [
+            outgoing[0] * (1.0 - mix) + incoming[0] * mix,
+            outgoing[1] * (1.0 - mix) + incoming[1] * mix,
+        ]
+    }
+
+    fn scratch_cache(&self, index: usize) -> Option<&ScratchPcmCache> {
+        let address = self.deck_sources[index].scratch_address;
+        if address == 0 {
+            return None;
+        }
+        // SAFETY: DynamicPlayer retains the matching cache in OwnedSource until this installed
+        // source ID is acknowledged through the callback retirement queue.
+        Some(unsafe { &*(address as *const ScratchPcmCache) })
     }
 
     fn scratch_sample(
@@ -1586,8 +1753,16 @@ impl AudioRenderer {
                     source_id,
                     source_kind,
                     address,
+                    scratch_address,
                     start_frame,
-                } => self.install_prepared(deck, source_id, source_kind, address, start_frame),
+                } => self.install_prepared(
+                    deck,
+                    source_id,
+                    source_kind,
+                    address,
+                    scratch_address,
+                    start_frame,
+                ),
                 EngineCommand::ClearPrepared { deck } => self.clear_prepared(deck),
             }
         }
@@ -1610,6 +1785,7 @@ impl AudioRenderer {
         source_id: u64,
         source_kind: SourceKind,
         address: usize,
+        scratch_address: usize,
         start_frame: u64,
     ) {
         let index = deck as usize;
@@ -1623,6 +1799,7 @@ impl AudioRenderer {
                 id: source_id,
                 kind: source_kind,
                 address,
+                scratch_address,
             },
         );
         if previous.id != 0 && was_playing {
@@ -1798,6 +1975,9 @@ impl AudioRenderer {
                         self.deck_phase_correction_remaining[index] = 0;
                         self.deck_phase_resamplers[index] = DeckPhaseResampler::default();
                         self.reset_scratch_motion(index);
+                        if let Some(cache) = self.scratch_cache(index) {
+                            cache.request_touch(self.deck_positions[index]);
+                        }
                         // Audio stops on this callback. Publish the same zero immediately rather
                         // than decaying the pre-touch transport rate for another visual sample.
                         self.deck_audible_rate_smooth[index] = 0.0;
@@ -1850,6 +2030,16 @@ impl AudioRenderer {
                     && !self.deck_scratch_playthrough[index]
                 {
                     self.set_platter_velocity(index, velocity, valid_for_seconds);
+                }
+            }
+            RtCommand::ArmDeckPlatterHandoff {
+                deck,
+                minimum_stream_generation,
+            } => {
+                let index = deck as usize;
+                if self.deck_scratch_held[index] {
+                    self.deck_scratch_handoff_armed[index] = true;
+                    self.deck_scratch_handoff_generation[index] = minimum_stream_generation;
                 }
             }
             RtCommand::SetRate { deck, rate } => {
@@ -2152,6 +2342,12 @@ impl AudioRenderer {
         self.deck_scratch_target_velocity[index] = 0.0;
         self.deck_scratch_input_at[index] = SCRATCH_NO_TICK;
         self.deck_scratch_valid_frames[index] = 0;
+        self.deck_scratch_handoff_armed[index] = false;
+        self.deck_scratch_handoff_generation[index] = 0;
+        self.deck_scratch_handoff_remaining[index] = 0;
+        self.deck_scratch_handoff_hold[index] = [0.0; 2];
+        self.deck_scratch_cache_active[index] = false;
+        self.deck_scratch_cache_fade_remaining[index] = 0;
     }
 
     fn end_scratch_voice(&mut self, index: usize) {
@@ -2173,7 +2369,10 @@ impl AudioRenderer {
     }
 
     fn scratch_playthrough_ready(&self, index: usize) -> bool {
-        if !self.deck_scratch_playthrough[index] || !self.deck_playing[index] {
+        if !self.deck_scratch_playthrough[index]
+            || !self.deck_playing[index]
+            || self.deck_scratch_cache_active[index]
+        {
             return false;
         }
         let desired = self.scratch_play_velocity(index);
@@ -2213,6 +2412,12 @@ impl AudioRenderer {
             SCRATCH_STATIONARY_VELOCITY
         };
 
+        if !self.deck_playing[index] && velocity.abs() <= SCRATCH_STATIONARY_VELOCITY {
+            // A stationary paused touch changed no source position. There is nothing to catch up
+            // or seek, so release immediately even for a streaming Deck.
+            self.end_scratch_voice(index);
+            return;
+        }
         if difference <= handoff_epsilon
             || self.deck_playing[index] && velocity.abs() <= SCRATCH_CONTACT_JITTER_VELOCITY
         {
@@ -2223,15 +2428,6 @@ impl AudioRenderer {
             }
             return;
         }
-        if !self.deck_playing[index] && velocity.abs() <= SCRATCH_STATIONARY_VELOCITY {
-            if self.deck_uses_scratch_tape(index) {
-                self.enter_scratch_playthrough(index, 0.0);
-            } else {
-                self.end_scratch_voice(index);
-            }
-            return;
-        }
-
         self.deck_scratch_releasing[index] = true;
         self.deck_scratch_playthrough[index] = false;
         let linear = (difference / SCRATCH_COAST_REFERENCE_DIFFERENCE).clamp(0.0, 1.0);
@@ -2522,6 +2718,7 @@ impl AudioRenderer {
             deck_audible_rate_revisions,
             self.deck_discontinuity_revisions,
             [self.platter_active(0), self.platter_active(1)],
+            self.deck_scratch_held,
             self.deck_effective_loop_generations,
             self.deck_effective_looping,
             self.deck_effective_loop_start_frames,
@@ -3997,6 +4194,177 @@ mod tests {
         assert!(
             longest_silence < 32,
             "back-and-forth streaming scratch must not insert a digital-zero gap, longest={longest_silence}"
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn streaming_reverse_extends_past_a_fresh_tape_from_source_indexed_pcm() {
+        let (stream, mut writer) = StreamSource::<[f32; 2]>::bounded(2_048);
+        for offset in 0..1_024 {
+            writer
+                .push_at([0.4, -0.4], 10.0 + offset as f64 / 48_000.0, || false)
+                .unwrap();
+        }
+        let cache = Arc::new(ScratchPcmCache::new(48_000));
+        cache.request_prefetch(10.0 * 48_000.0);
+        let mut seen = 0;
+        let (generation, _) = cache.next_request(&mut seen).unwrap();
+        assert!(cache.publish(
+            generation,
+            &crate::DecodedScratchWindow {
+                start_frame: 0,
+                frames: vec![[0.4, -0.4]; cache.capacity_frames()],
+            },
+        ));
+
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared_with_scratch(
+                DeckId::A,
+                94,
+                SourceKind::Stream,
+                Arc::as_ptr(&stream) as usize,
+                Arc::as_ptr(&cache) as usize,
+                480_000,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
+        renderer.render_prepared(&mut vec![0.0; 64], 48_000, 1);
+        let started = controller.snapshot().deck_frames[0];
+
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::UpdateDeckPlatter {
+                deck: DeckId::A,
+                velocity: -1.0,
+                valid_for_seconds: 0.25,
+            })
+            .unwrap();
+        let mut reversed = vec![0.0; 4_800];
+        renderer.render_prepared(&mut reversed, 48_000, 1);
+        let after = controller.snapshot().deck_frames[0];
+        assert!(
+            after < started - 2_000,
+            "a fresh stream must reverse into prefetched source PCM ({started} -> {after})"
+        );
+        assert!(
+            reversed.iter().any(|sample| sample.abs() > 0.05),
+            "random-cache reverse must remain audible"
+        );
+        assert!(
+            longest_near_zero_run(&reversed) < 32,
+            "seekable pre-cue PCM must replace the old silent decode-origin lead-in"
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn scratch_handoff_discards_old_packets_and_crossfades_matching_transport() {
+        let (stream, mut writer) = StreamSource::<[f32; 2]>::bounded(512);
+        for offset in 0..4 {
+            writer
+                .push_at([0.8, -0.8], 20.0 + offset as f64 / 48_000.0, || false)
+                .unwrap();
+        }
+        writer.push_at([0.2, -0.2], 10.0, || false).unwrap();
+        for offset in 1..128 {
+            writer
+                .push_at([0.2, -0.2], 10.0 + offset as f64 / 48_000.0, || false)
+                .unwrap();
+        }
+        let cache = Arc::new(ScratchPcmCache::new(48_000));
+        cache.request_prefetch(480_000.0);
+        let mut seen = 0;
+        let (generation, _) = cache.next_request(&mut seen).unwrap();
+        assert!(cache.publish(
+            generation,
+            &crate::DecodedScratchWindow {
+                start_frame: 0,
+                frames: vec![[0.4, -0.4]; cache.capacity_frames()],
+            },
+        ));
+
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(16, 8);
+        controller
+            .install_prepared_with_scratch(
+                DeckId::A,
+                95,
+                SourceKind::Stream,
+                Arc::as_ptr(&stream) as usize,
+                Arc::as_ptr(&cache) as usize,
+                480_000,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::UpdateDeckPlatter {
+                deck: DeckId::A,
+                velocity: -0.25,
+                valid_for_seconds: 0.25,
+            })
+            .unwrap();
+        renderer.render_prepared(&mut vec![0.0; 32], 48_000, 1);
+        renderer.deck_scratch_playthrough[0] = true;
+        renderer.deck_scratch_velocity[0] = 1.0;
+        controller
+            .send(RtCommand::ArmDeckPlatterHandoff {
+                deck: DeckId::A,
+                minimum_stream_generation: 1,
+            })
+            .unwrap();
+
+        let mut old_generation = vec![0.0; 32];
+        renderer.render_prepared(&mut old_generation, 48_000, 1);
+        let snapshot = controller.snapshot();
+        assert!(
+            renderer.deck_scratch_held[0],
+            "a coincident old packet must not beat the requested seek generation"
+        );
+        assert!(!snapshot.deck_scratch_held[0]);
+        assert!(snapshot.deck_scratch_voice_active[0]);
+        writer.begin_discontinuity();
+        for offset in 0..128 {
+            writer
+                .push_at([0.2, -0.2], 10.0 + offset as f64 / 48_000.0, || false)
+                .unwrap();
+        }
+        let mut handoff = vec![0.0; 96];
+        renderer.render_prepared(&mut handoff, 48_000, 1);
+        assert!(
+            !controller.snapshot().deck_scratch_held[0],
+            "matching media-time PCM must release the cached scratch owner"
+        );
+        let largest_step = handoff
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            largest_step < 0.1,
+            "the 64-frame handoff must not expose a hard sample edge, step={largest_step}"
         );
         drop(writer);
     }

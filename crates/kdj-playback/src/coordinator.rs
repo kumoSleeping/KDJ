@@ -9,9 +9,10 @@ use kdj_core::FilterResonance;
 #[cfg(test)]
 use kdj_player::DecodedTrack;
 use kdj_player::{
-    decode_file_streaming_seekable, decode_live_stem_streaming, decode_source_streaming_seekable,
-    format_loop_clock, run_pitch_preserving_pipeline, DeckFxKind, DeckFxSlot, DeckId, LoopWindow,
-    PlatterPhase, PlayerMode, RtCommand, StemFrame, StreamMetadata, StreamSeekControl,
+    decode_file_scratch_window, decode_file_streaming_seekable, decode_live_stem_streaming,
+    decode_source_scratch_window, decode_source_streaming_seekable, format_loop_clock,
+    run_pitch_preserving_pipeline, DeckFxKind, DeckFxSlot, DeckId, LoopWindow, PlatterPhase,
+    PlayerMode, RtCommand, ScratchPcmCache, StemFrame, StreamMetadata, StreamSeekControl,
     StreamSource, StreamWriter, TempoControl, TransitionPlan, DEFAULT_FILTER_RESONANCE_Q,
     DEFAULT_STREAM_BUFFER_SECONDS, FILTER_RESONANCE_HIGH_Q, FILTER_RESONANCE_LOW_Q,
     FILTER_RESONANCE_MEDIUM_Q, LOOP_CAPTURE_HISTORY_SECONDS, MAX_TRANSPORT_LOOP_PCM_BYTES,
@@ -42,7 +43,7 @@ const LEVEL_INTERVAL: Duration = Duration::from_millis(33);
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 // A long raw PCM ring absorbs decode/network jitter. The final post-Rubber-Band ring is
 // intentionally short, so a new fader target cannot wait behind seconds of old-tempo PCM.
-const TEMPO_OUTPUT_BUFFER_MS: u64 = 48;
+const TEMPO_OUTPUT_BUFFER_MS: u64 = 96;
 const STARTUP_BUFFER_MS: u64 = 120;
 const SEEK_BUFFER_MS: u64 = 120;
 /// Vinyl coast must be audible before the coordinator may rebuild a decoder at the needle.
@@ -82,9 +83,9 @@ const STEM_SEEK_CATCHUP_STALL: Duration = Duration::from_millis(40);
 const STEM_RECOVERY_BASE_DELAY: Duration = Duration::from_millis(900);
 const STEM_RECOVERY_MAX_DELAY: Duration = Duration::from_secs(8);
 const AUDIO_CRITICAL_BUFFER_MS: u64 = 30;
-const AUDIO_LOW_BUFFER_MS: u64 = 40;
+const AUDIO_LOW_BUFFER_MS: u64 = 60;
 const STEM_AUDIO_LOW_BUFFER_MS: u64 = 100;
-const AUDIO_RECOVER_BUFFER_MS: u64 = 44;
+const AUDIO_RECOVER_BUFFER_MS: u64 = 80;
 const STEM_AUDIO_RECOVER_BUFFER_MS: u64 = 140;
 
 type CommandReply = SyncSender<Result<CommandAck, String>>;
@@ -260,6 +261,13 @@ impl PlaybackStream {
         }
     }
 
+    fn generation(&self) -> u64 {
+        match self {
+            Self::Stereo(source) => source.generation(),
+            Self::Stems(source) => source.generation(),
+        }
+    }
+
     fn drained(&self) -> bool {
         match self {
             Self::Stereo(source) => source.drained(),
@@ -293,6 +301,7 @@ struct DeckRuntime {
     cancel: Arc<AtomicU64>,
     /// Deck seek. First enablement may bridge through ORG; an active STEM seek uses a shadow stream.
     seek: StreamSeekControl,
+    scratch_cache: Option<Arc<ScratchPcmCache>>,
 }
 
 /// Transport loop on the current source. Times are track seconds, not a replacement slice.
@@ -399,6 +408,7 @@ struct PendingStream {
     release_scratch_hold: bool,
     clocked_seek: Option<ClockedDeckSeek>,
     seek: StreamSeekControl,
+    scratch_cache: Option<Arc<ScratchPcmCache>>,
 }
 
 struct DeferredStream {
@@ -476,6 +486,7 @@ struct Actor {
     /// True once the callback has acknowledged this grab. A stale snapshot still showing
     /// `held=false` must not be treated as an instant tap.
     scratch_saw_engine_hold: [bool; 2],
+    scratch_handoff_requested: [bool; 2],
     scratch_gesture_ids: [u64; 2],
     scratch_gesture_sequences: [u64; 2],
     /// Negative requested Deck positions waiting for a frame-0 source to install.
@@ -530,6 +541,7 @@ impl Actor {
             scratch_coasting: [false; 2],
             scratch_coast_started: [None, None],
             scratch_saw_engine_hold: [false; 2],
+            scratch_handoff_requested: [false; 2],
             scratch_gesture_ids: [0; 2],
             scratch_gesture_sequences: [0; 2],
             pending_preroll: [None, None],
@@ -664,6 +676,9 @@ impl Actor {
                 }
                 if let Err(error) = result {
                     let failed = self.pending[deck as usize].take();
+                    if let Some(failed) = &failed {
+                        cancel_stream(&failed.cancel);
+                    }
                     self.pending_preroll[deck as usize] = None;
                     let activation = failed.as_ref().and_then(|pending| pending.activation);
                     let failed_stem = failed
@@ -1055,6 +1070,7 @@ impl Actor {
             self.scratch_coast_started[index] = None;
             self.scratch_gesture_ids[index] = 0;
             self.scratch_gesture_sequences[index] = 0;
+            self.scratch_handoff_requested[index] = false;
         }
         self.manual_desired_playing[index] = playing;
         self.state.decks[index].desired_playing = playing;
@@ -1120,6 +1136,7 @@ impl Actor {
         self.scratch_coasting[index] = false;
         self.scratch_coast_started[index] = None;
         self.scratch_saw_engine_hold[index] = false;
+        self.scratch_handoff_requested[index] = false;
         Ok(())
     }
 
@@ -1229,6 +1246,7 @@ impl Actor {
         self.scratch_held[index] = false;
         self.scratch_coasting[index] = true;
         self.scratch_coast_started[index] = Some(Instant::now());
+        self.scratch_handoff_requested[index] = false;
         self.scratch_gesture_ids[index] = 0;
         self.scratch_gesture_sequences[index] = 0;
         Ok(())
@@ -1249,6 +1267,7 @@ impl Actor {
         self.scratch_coast_started[index] = None;
         self.scratch_gesture_ids[index] = 0;
         self.scratch_gesture_sequences[index] = 0;
+        self.scratch_handoff_requested[index] = false;
     }
 
     fn handoff_settled_scratch_coasts(&mut self) {
@@ -1256,10 +1275,10 @@ impl Actor {
             if !self.scratch_coasting[index] || self.scratch_held[index] {
                 continue;
             }
-            if self.latest_audio.deck_scratch_held[index] {
+            if self.latest_audio.deck_scratch_voice_active[index] {
                 self.scratch_saw_engine_hold[index] = true;
             }
-            if !self.latest_audio.deck_scratch_held[index] {
+            if !self.latest_audio.deck_scratch_voice_active[index] {
                 if !self.scratch_saw_engine_hold[index]
                     && self.scratch_coast_started[index]
                         .is_none_or(|started| started.elapsed() < Duration::from_millis(80))
@@ -1268,10 +1287,12 @@ impl Actor {
                     // snapshot for an already-finished tap.
                     continue;
                 }
-                // Capacitive lift never rebuilds a decoder. Streaming Decks keep ScratchTape
-                // playthrough in-engine; seeking here was the playback-key "woom".
+                // The callback is the only authority that knows whether cached playthrough has
+                // really handed back to transport. Public physical platter motion may already be
+                // false, so use the separate scratch-voice bit here.
                 self.scratch_coasting[index] = false;
                 self.scratch_coast_started[index] = None;
+                self.scratch_handoff_requested[index] = false;
                 continue;
             }
             if self.pending[index].is_some() || self.decks[index].is_none() {
@@ -1293,10 +1314,37 @@ impl Actor {
             if !settled {
                 continue;
             }
-            // Engine is already at transport speed on the scratch voice. Clear the coast
-            // window only — leftover jog ticks stop, and no seek/worker spawn.
-            self.scratch_coasting[index] = false;
-            self.scratch_coast_started[index] = None;
+            if self.scratch_handoff_requested[index] {
+                continue;
+            }
+            let Some((seek, output_sample_rate, stream_generation)) =
+                self.decks[index].as_ref().map(|runtime| {
+                    (
+                        runtime.seek.clone(),
+                        runtime.output_sample_rate,
+                        runtime.source.generation(),
+                    )
+                })
+            else {
+                continue;
+            };
+            let position = (self.latest_audio.deck_frames[index] as f64
+                / f64::from(output_sample_rate.max(1)))
+            .max(0.0);
+            // Retarget the already-running seekable worker instead of spawning a replacement.
+            // Cached raw PCM remains audible until matching post-R3 packets reach the callback;
+            // only then does one 64-frame bridge release the scratch voice.
+            seek.request(position);
+            let deck = if index == 0 { DeckId::A } else { DeckId::B };
+            if self
+                .send(RtCommand::ArmDeckPlatterHandoff {
+                    deck,
+                    minimum_stream_generation: stream_generation.wrapping_add(1),
+                })
+                .is_ok()
+            {
+                self.scratch_handoff_requested[index] = true;
+            }
         }
     }
 
@@ -2928,6 +2976,10 @@ impl Actor {
         let tempo = TempoControl::for_deck(deck as usize, request.rate);
         let cancel = Arc::new(AtomicU64::new(revision));
         let seek = StreamSeekControl::new();
+        let scratch_cache = Arc::new(ScratchPcmCache::new(output_rate));
+        if request.source_kind == PlaybackSourceKind::Local && activation.is_some() {
+            scratch_cache.request_prefetch(request.position * f64::from(output_rate));
+        }
         self.pending[deck as usize] = Some(PendingStream {
             revision,
             source: source.clone(),
@@ -2941,7 +2993,14 @@ impl Actor {
             release_scratch_hold: false,
             clocked_seek: None,
             seek: seek.clone(),
+            scratch_cache: Some(Arc::clone(&scratch_cache)),
         });
+        spawn_scratch_cache_worker(
+            request.clone(),
+            Arc::clone(&scratch_cache),
+            Arc::clone(&cancel),
+            revision,
+        );
         let sender = self.sender.clone();
         std::thread::Builder::new()
             .name(format!("kdj-stream-{}-{revision}", request.track_id))
@@ -3411,10 +3470,20 @@ impl Actor {
                     }
                     match &pending.source {
                         PlaybackStream::Stereo(source) => player
-                            .install_stream(deck, Arc::clone(source), start_frame)
+                            .install_stream_with_scratch(
+                                deck,
+                                Arc::clone(source),
+                                pending.scratch_cache.clone(),
+                                start_frame,
+                            )
                             .map_err(|error| error.to_string()),
                         PlaybackStream::Stems(source) => player
-                            .install_stem_stream(deck, Arc::clone(source), start_frame)
+                            .install_stem_stream_with_scratch(
+                                deck,
+                                Arc::clone(source),
+                                pending.scratch_cache.clone(),
+                                start_frame,
+                            )
                             .map_err(|error| error.to_string()),
                     }
                 });
@@ -3455,6 +3524,7 @@ impl Actor {
                 }),
                 cancel: pending.cancel,
                 seek: pending.seek,
+                scratch_cache: pending.scratch_cache,
             });
             self.state.decks[deck as usize].stem_enabled = pending.request.stem_enabled;
             let preroll = self.pending_preroll[deck as usize].take();
@@ -3689,6 +3759,12 @@ impl Actor {
                     runtime.output_sample_rate,
                 );
                 view.output_underruns = audio.deck_output_underruns[index];
+                if let Some(cache) = &runtime.scratch_cache {
+                    view.scratch_cache_requests = cache.request_count();
+                    view.scratch_cache_misses = cache.miss_count();
+                    view.scratch_cache_loads = cache.load_count();
+                    view.scratch_cache_failures = cache.failure_count();
+                }
                 view.peak_level = audio.deck_peak_levels[index];
                 view.applied_rate = runtime.tempo.applied_rate();
                 view.audible_rate = audio.deck_audible_rates[index];
@@ -4035,6 +4111,7 @@ impl Actor {
         self.scratch_held[deck as usize] = false;
         self.scratch_coasting[deck as usize] = false;
         self.scratch_coast_started[deck as usize] = None;
+        self.scratch_handoff_requested[deck as usize] = false;
         self.state.decks[deck as usize] = crate::contract::PlaybackDeckSnapshot {
             rate: 1.0,
             ..crate::contract::PlaybackDeckSnapshot::default()
@@ -4149,10 +4226,20 @@ impl Actor {
                 .ok_or_else(|| "原生音频输出未初始化".to_string())
                 .and_then(|player| match &runtime.source {
                     PlaybackStream::Stereo(source) => player
-                        .install_stream(front, Arc::clone(source), start_frame)
+                        .install_stream_with_scratch(
+                            front,
+                            Arc::clone(source),
+                            runtime.scratch_cache.clone(),
+                            start_frame,
+                        )
                         .map_err(|err| err.to_string()),
                     PlaybackStream::Stems(source) => player
-                        .install_stem_stream(front, Arc::clone(source), start_frame)
+                        .install_stem_stream_with_scratch(
+                            front,
+                            Arc::clone(source),
+                            runtime.scratch_cache.clone(),
+                            start_frame,
+                        )
                         .map_err(|err| err.to_string()),
                 });
             match installed {
@@ -4184,12 +4271,18 @@ impl Actor {
             let start_frame = runtime.frame_for_seconds(runtime.request.position);
             let installed = self.player.as_mut().and_then(|player| {
                 match &runtime.source {
-                    PlaybackStream::Stereo(source) => {
-                        player.install_stream(back, Arc::clone(source), start_frame)
-                    }
-                    PlaybackStream::Stems(source) => {
-                        player.install_stem_stream(back, Arc::clone(source), start_frame)
-                    }
+                    PlaybackStream::Stereo(source) => player.install_stream_with_scratch(
+                        back,
+                        Arc::clone(source),
+                        runtime.scratch_cache.clone(),
+                        start_frame,
+                    ),
+                    PlaybackStream::Stems(source) => player.install_stem_stream_with_scratch(
+                        back,
+                        Arc::clone(source),
+                        runtime.scratch_cache.clone(),
+                        start_frame,
+                    ),
                 }
                 .map_err(|err| err.to_string())
                 .ok()
@@ -4426,6 +4519,79 @@ fn validate_source(source: &PlaybackSource) -> Result<(), String> {
 
 fn cancel_stream(token: &Arc<AtomicU64>) {
     token.store(0, Ordering::Release);
+}
+
+fn spawn_scratch_cache_worker(
+    request: PlaybackSource,
+    cache: Arc<ScratchPcmCache>,
+    cancel: Arc<AtomicU64>,
+    revision: u64,
+) {
+    let track_id = request.track_id;
+    let name = format!("kdj-scratch-cache-{track_id}-{revision}");
+    if let Err(error) = std::thread::Builder::new().name(name).spawn(move || {
+        kdj_core::thread_qos::prefer_background();
+        let cancelled = || cancel.load(Ordering::Acquire) != revision;
+        // Let the transport build its startup cushion first. A real touch marks the cache urgent
+        // and cuts this delay to at most one 5ms poll.
+        for _ in 0..24 {
+            if cancelled() || cache.urgent() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut seen_generation = 0;
+        while !cancelled() {
+            let Some((generation, start_frame)) = cache.next_request(&mut seen_generation) else {
+                std::thread::sleep(Duration::from_millis(4));
+                continue;
+            };
+            let position = start_frame as f64 / f64::from(cache.sample_rate());
+            let decoded = match request.source_kind {
+                PlaybackSourceKind::Local => decode_file_scratch_window(
+                    &PathBuf::from(&request.path),
+                    position,
+                    cache.sample_rate(),
+                    cache.capacity_frames(),
+                    cancelled,
+                ),
+                PlaybackSourceKind::Remote => {
+                    HttpRangeSource::open(&request.path, Arc::clone(&cancel), revision)
+                        .map_err(anyhow::Error::new)
+                        .and_then(|opened| {
+                            decode_source_scratch_window(
+                                Box::new(opened.source),
+                                opened.hint_extension.as_deref(),
+                                &request.path,
+                                position,
+                                cache.sample_rate(),
+                                cache.capacity_frames(),
+                                cancelled,
+                            )
+                        })
+                }
+            };
+            match decoded {
+                Ok(window) => {
+                    cache.publish(generation, &window);
+                }
+                Err(error) if !cancelled() => {
+                    cache.record_failure(generation);
+                    tracing::debug!(
+                        track_id = request.track_id,
+                        position,
+                        error = %error,
+                        "platter random PCM window unavailable"
+                    );
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                Err(_) => break,
+            }
+        }
+    }) {
+        // The transport source remains fully usable without the optional random cache.
+        tracing::warn!(track_id, error = %error, "scratch cache worker unavailable");
+    }
 }
 
 fn stem_followup_lead_seconds() -> f64 {
@@ -5144,6 +5310,7 @@ mod tests {
                 catchup_progress_at: None,
             }),
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         });
 
         actor.set_deck_rate(0, 1.08).expect("单路 TEMPO");
@@ -5181,6 +5348,7 @@ mod tests {
             release_scratch_hold: false,
             clocked_seek: None,
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         });
         let captured = Arc::new(Mutex::new(None));
         let emit_captured = Arc::clone(&captured);
@@ -5238,6 +5406,7 @@ mod tests {
                 catchup_progress_at: None,
             }),
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         });
         actor.sync_group = Some(NativeSyncGroup {
             leader: DeckId::B,
@@ -5314,6 +5483,7 @@ mod tests {
             loop_playback: None,
             cancel: Arc::new(AtomicU64::new(1)),
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         }
     }
 
@@ -5329,6 +5499,7 @@ mod tests {
             loop_playback: None,
             cancel: Arc::new(AtomicU64::new(1)),
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         }
     }
 
@@ -5592,6 +5763,7 @@ mod tests {
             release_scratch_hold: false,
             clocked_seek: None,
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         });
 
         actor.handle(Request::WorkerFinished {
@@ -6976,6 +7148,7 @@ mod tests {
             release_scratch_hold: false,
             clocked_seek: None,
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         });
         {
             let mut snapshot = knobs.snapshot.lock().unwrap();
@@ -7387,6 +7560,7 @@ mod tests {
         assert!(actor.scratch_coasting[DeckId::A as usize]);
 
         actor.latest_audio.deck_scratch_held[DeckId::A as usize] = false;
+        actor.latest_audio.deck_scratch_voice_active[DeckId::A as usize] = false;
         actor.latest_audio.deck_audible_rates[DeckId::A as usize] = 1.0;
         actor.scratch_saw_engine_hold[DeckId::A as usize] = true;
         // Needle moved during the grab — previously this path seek-rebuilt the decoder.
@@ -7406,7 +7580,7 @@ mod tests {
     }
 
     #[test]
-    fn settled_throw_coast_does_not_seek_rebuild() {
+    fn settled_throw_retargets_the_same_worker_and_waits_for_callback_handoff() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
         actor.open_output().expect("打开测试输出");
@@ -7427,6 +7601,7 @@ mod tests {
         assert!(actor.scratch_coasting[DeckId::A as usize]);
 
         actor.latest_audio.deck_scratch_held[DeckId::A as usize] = true;
+        actor.latest_audio.deck_scratch_voice_active[DeckId::A as usize] = true;
         actor.latest_audio.deck_audible_rates[DeckId::A as usize] = 1.0;
         actor.scratch_saw_engine_hold[DeckId::A as usize] = true;
         actor.scratch_coast_started[DeckId::A as usize] =
@@ -7434,18 +7609,33 @@ mod tests {
         knobs.sent.lock().unwrap().clear();
         actor.handoff_settled_scratch_coasts();
 
-        assert!(!actor.scratch_coasting[DeckId::A as usize]);
+        assert!(actor.scratch_coasting[DeckId::A as usize]);
+        assert!(actor.scratch_handoff_requested[DeckId::A as usize]);
         assert!(
             actor.pending[DeckId::A as usize].is_none(),
-            "settled throw must clear coast without spawning a worker"
+            "settled throw must reuse the installed worker instead of spawning a replacement"
         );
         let sent = knobs.sent.lock().unwrap();
+        assert!(sent.iter().any(|command| matches!(
+            command,
+            RtCommand::ArmDeckPlatterHandoff {
+                deck: DeckId::A,
+                ..
+            }
+        )));
         assert!(
             !sent
                 .iter()
                 .any(|command| matches!(command, RtCommand::SeekPrepared { .. })),
             "settled throw must not seek a replacement source"
         );
+        drop(sent);
+        actor.latest_audio.deck_scratch_held[DeckId::A as usize] = false;
+        actor.latest_audio.deck_scratch_voice_active[DeckId::A as usize] = false;
+        actor.latest_audio.deck_discontinuity_revisions[DeckId::A as usize] = 1;
+        actor.handoff_settled_scratch_coasts();
+        assert!(!actor.scratch_coasting[DeckId::A as usize]);
+        assert!(!actor.scratch_handoff_requested[DeckId::A as usize]);
     }
 
     #[test]
@@ -7509,6 +7699,7 @@ mod tests {
             release_scratch_hold: true,
             clocked_seek: None,
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         });
         actor.promote_ready_streams();
         assert!(!actor.scratch_held[DeckId::A as usize]);
@@ -7643,6 +7834,7 @@ mod tests {
             release_scratch_hold: false,
             clocked_seek: None,
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         });
 
         knobs.snapshot.lock().unwrap().deck_source_ids[0] = 101;
@@ -7691,6 +7883,7 @@ mod tests {
             release_scratch_hold: false,
             clocked_seek: None,
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         });
 
         match actor.stem_handoff_for(
@@ -7732,6 +7925,7 @@ mod tests {
             release_scratch_hold: false,
             clocked_seek: None,
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         };
 
         assert!(matches!(
@@ -7771,6 +7965,7 @@ mod tests {
             release_scratch_hold: false,
             clocked_seek: None,
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         };
 
         assert!(matches!(
@@ -7827,6 +8022,7 @@ mod tests {
                 catchup_progress_at: None,
             }),
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         });
 
         let before = Instant::now();
@@ -7897,6 +8093,7 @@ mod tests {
                 catchup_progress_at: None,
             }),
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         });
 
         actor.promote_ready_streams();
@@ -7968,6 +8165,7 @@ mod tests {
                 catchup_progress_at: None,
             }),
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         });
 
         actor.promote_ready_streams();
@@ -8031,6 +8229,7 @@ mod tests {
                 catchup_progress_at: None,
             }),
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         });
 
         actor.promote_ready_streams();
@@ -8077,6 +8276,7 @@ mod tests {
             release_scratch_hold: false,
             clocked_seek: None,
             seek: StreamSeekControl::new(),
+            scratch_cache: None,
         });
         assert!(
             !actor.state.decks[DeckId::A as usize].stem_enabled,

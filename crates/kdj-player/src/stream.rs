@@ -30,6 +30,7 @@ use symphonia::core::probe::Hint;
 use symphonia::core::units::{Time, TimeBase};
 
 use crate::time_stretch::{PitchPreservingStretcher, SourceTiming, TempoControl, TimeStretchFrame};
+use crate::DecodedScratchWindow;
 
 /// Default read-ahead owned by one streaming Deck. The queue stores stereo output frames, so its
 /// memory is fixed regardless of track length (four seconds at 48 kHz is about 1.5 MiB).
@@ -385,6 +386,10 @@ impl<F: Copy> StreamSource<F> {
         self.counters.ended.load(Ordering::Acquire)
     }
 
+    pub fn generation(&self) -> u64 {
+        self.counters.generation.load(Ordering::Acquire)
+    }
+
     pub fn drained(&self) -> bool {
         self.ended() && self.buffered_frames() == 0
     }
@@ -414,13 +419,17 @@ impl<F: Copy> StreamSource<F> {
     fn pop_consumer_packet(&self) -> Option<StreamPacket<F>> {
         // SAFETY: documented by the type-level invariant above.
         let consumer = unsafe { &mut *self.consumer.get() };
-        loop {
+        // A seek can invalidate an entire output cushion. Never let one hardware frame drain an
+        // unbounded stale ring on the realtime callback; later frames continue from the same SPSC
+        // cursor. Scratch handoff performs its own bounded burst on top of this small budget.
+        for _ in 0..32 {
             let packet = consumer.pop().ok()?;
             self.counters.consumed.fetch_add(1, Ordering::Release);
             if packet.generation == self.counters.generation.load(Ordering::Acquire) {
                 return Some(packet);
             }
         }
+        None
     }
 
     fn pop_consumer_timed(&self) -> Option<(F, f32, u64, SourceTiming)> {
@@ -654,7 +663,7 @@ impl<F: Copy> StreamWriter<F> {
 
     /// Make every already-buffered packet stale at a loop/seek discontinuity. The callback remains
     /// the sole ring consumer and discards stale packets before returning the first new frame.
-    fn begin_discontinuity(&mut self) {
+    pub(crate) fn begin_discontinuity(&mut self) {
         self.generation = self
             .counters
             .generation
@@ -1214,16 +1223,18 @@ where
                         source_timing,
                         &*cancelled,
                         || {
-                            loop_window.as_ref().is_some_and(|window| {
-                                let (generation, snapshot) = window.versioned_snapshot();
-                                snapshot.is_some_and(|window| {
-                                    generation != packet_loop_generation
-                                        && source_timing.media_time.is_finite()
-                                        && source_timing.media_time
-                                            + 0.5 / f64::from(output_sample_rate.max(1))
-                                            >= window.end()
+                            seek.as_ref()
+                                .is_some_and(|control| control.generation() != seen_seek)
+                                || loop_window.as_ref().is_some_and(|window| {
+                                    let (generation, snapshot) = window.versioned_snapshot();
+                                    snapshot.is_some_and(|window| {
+                                        generation != packet_loop_generation
+                                            && source_timing.media_time.is_finite()
+                                            && source_timing.media_time
+                                                + 0.5 / f64::from(output_sample_rate.max(1))
+                                                >= window.end()
+                                    })
                                 })
-                            })
                         },
                     )?;
                     superseded = !delivered;
@@ -1437,6 +1448,87 @@ where
     )?;
     writer.finish();
     Ok(metadata)
+}
+
+/// Decode one bounded source-time window for the platter's random-access cache.
+///
+/// This runs only on the dedicated cache worker. Absolute media timestamps from the same
+/// resampler used by transport become the cache index, so a compressed seek landing can never be
+/// mistaken for the requested frame. Gaps shorter than a decoder packet are filled on the worker;
+/// the audio callback only sees one dense immutable window.
+pub fn decode_source_scratch_window<F>(
+    source: Box<dyn StreamingMediaSource>,
+    hint_extension: Option<&str>,
+    source_label: &str,
+    position: f64,
+    output_sample_rate: u32,
+    frame_limit: usize,
+    cancelled: F,
+) -> Result<DecodedScratchWindow>
+where
+    F: Fn() -> bool + Copy,
+{
+    if frame_limit == 0 {
+        bail!("scratch window frame limit must be non-zero");
+    }
+    let mut start_frame = None;
+    let mut frames = Vec::with_capacity(frame_limit);
+    decode_source_core(
+        source,
+        hint_extension,
+        source_label,
+        position,
+        output_sample_rate,
+        Some(frame_limit as u64),
+        |frame, media_time| {
+            let absolute = (media_time * f64::from(output_sample_rate.max(1))).round() as i64;
+            let first = *start_frame.get_or_insert(absolute.max(0));
+            let expected = first.saturating_add(frames.len() as i64);
+            if absolute < expected {
+                return Ok(());
+            }
+            let fill = frames.last().copied().unwrap_or([0.0; 2]);
+            while frames.len() < frame_limit && first + (frames.len() as i64) < absolute {
+                frames.push(fill);
+            }
+            if frames.len() < frame_limit {
+                frames.push(frame);
+            }
+            Ok(())
+        },
+        cancelled,
+        None,
+    )?;
+    if frames.is_empty() {
+        bail!("decoded scratch window is empty");
+    }
+    Ok(DecodedScratchWindow {
+        start_frame: start_frame.unwrap_or(0),
+        frames,
+    })
+}
+
+pub fn decode_file_scratch_window<F>(
+    path: &Path,
+    position: f64,
+    output_sample_rate: u32,
+    frame_limit: usize,
+    cancelled: F,
+) -> Result<DecodedScratchWindow>
+where
+    F: Fn() -> bool + Copy,
+{
+    let file = File::open(path).with_context(|| format!("open audio: {}", path.display()))?;
+    let extension = path.extension().and_then(|value| value.to_str());
+    decode_source_scratch_window(
+        Box::new(file),
+        extension,
+        &path.display().to_string(),
+        position,
+        output_sample_rate,
+        frame_limit,
+        cancelled,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

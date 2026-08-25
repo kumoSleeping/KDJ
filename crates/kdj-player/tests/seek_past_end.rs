@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use kdj_player::{decode_file_streaming, StreamSource};
+use kdj_player::{decode_file_scratch_window, decode_file_streaming, StreamSource};
 
 fn write_wav(path: &Path, seconds: f64) {
     let rate = 44_100u32;
@@ -89,4 +89,25 @@ fn seek_past_end_compressed_samples() {
             assert!(buffered > 0);
         }
     }
+}
+
+#[test]
+fn scratch_window_keeps_absolute_output_frame_alignment_after_seek() {
+    let path = std::env::temp_dir().join("kdj-scratch-window-regression.wav");
+    write_wav(&path, 3.0);
+    let rate = 48_000;
+    let requested = 1.25;
+    let window = decode_file_scratch_window(&path, requested, rate, rate as usize, || false)
+        .expect("bounded random PCM decode");
+    let expected = (requested * f64::from(rate)).round() as i64;
+    assert!(
+        (window.start_frame - expected).abs() <= 1,
+        "random cache index must use decoder media time: {} vs {expected}",
+        window.start_frame
+    );
+    assert_eq!(window.frames.len(), rate as usize);
+    assert!(window
+        .frames
+        .iter()
+        .any(|frame| frame[0].abs() > 0.01 || frame[1].abs() > 0.01));
 }

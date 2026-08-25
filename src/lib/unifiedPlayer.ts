@@ -76,6 +76,10 @@ export interface UnifiedDeckState {
   outputBufferMs: number;
   minimumOutputBufferMs: number;
   outputUnderruns: number;
+  scratchCacheRequests: number;
+  scratchCacheMisses: number;
+  scratchCacheLoads: number;
+  scratchCacheFailures: number;
   /** Post-EQ peak in linear full scale; values >= 1 indicate clipping. */
   peakLevel: number;
   rate: number;
@@ -267,6 +271,10 @@ const INITIAL_STATE: UnifiedPlayerState = {
     outputBufferMs: 0,
     minimumOutputBufferMs: 0,
     outputUnderruns: 0,
+    scratchCacheRequests: 0,
+    scratchCacheMisses: 0,
+    scratchCacheLoads: 0,
+    scratchCacheFailures: 0,
     peakLevel: 0,
     rate: 1,
     appliedRate: 1,
@@ -589,6 +597,10 @@ interface DesktopDeckSnapshotRaw {
   outputBufferMs?: number;
   minimumOutputBufferMs?: number;
   outputUnderruns?: number;
+  scratchCacheRequests?: number;
+  scratchCacheMisses?: number;
+  scratchCacheLoads?: number;
+  scratchCacheFailures?: number;
   peakLevel?: number;
   loopStart?: number | null;
   loopLength?: number | null;
@@ -762,6 +774,10 @@ function normalizedDesktop(raw: DesktopPlaybackSnapshotRaw): UnifiedPlayerState 
       outputBufferMs: Math.max(0, deck.outputBufferMs ?? 0),
       minimumOutputBufferMs: Math.max(0, deck.minimumOutputBufferMs ?? 0),
       outputUnderruns: Math.max(0, deck.outputUnderruns ?? 0),
+      scratchCacheRequests: Math.max(0, deck.scratchCacheRequests ?? 0),
+      scratchCacheMisses: Math.max(0, deck.scratchCacheMisses ?? 0),
+      scratchCacheLoads: Math.max(0, deck.scratchCacheLoads ?? 0),
+      scratchCacheFailures: Math.max(0, deck.scratchCacheFailures ?? 0),
       peakLevel: Number.isFinite(deck.peakLevel) ? Math.max(0, deck.peakLevel ?? 0) : 0,
       rate: Number.isFinite(deck.rate) && deck.rate > 0 ? deck.rate : 1,
       appliedRate: Number.isFinite(deck.appliedRate) && (deck.appliedRate ?? 0) > 0
@@ -1507,6 +1523,10 @@ class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
       outputBufferMs: 0,
       minimumOutputBufferMs: 0,
       outputUnderruns: 0,
+      scratchCacheRequests: 0,
+      scratchCacheMisses: 0,
+      scratchCacheLoads: 0,
+      scratchCacheFailures: 0,
       peakLevel: 0,
       rate: this.deckBaseRates[deck],
       appliedRate: this.deckBaseRates[deck],

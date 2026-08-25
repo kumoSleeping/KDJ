@@ -34,6 +34,8 @@ pub struct TransportSnapshot {
     pub deck_audible_rate_revisions: [u64; 2],
     pub deck_discontinuity_revisions: [u64; 2],
     pub deck_scratch_held: [bool; 2],
+    /// Internal cached/coasting voice ownership. This may outlive public physical platter motion.
+    pub deck_scratch_voice_active: [bool; 2],
     /// Loop generation and window that have actually reached the DAC-facing callback.
     pub deck_loop_generations: [u64; 2],
     pub deck_loop_active: [bool; 2],
@@ -74,6 +76,7 @@ pub(crate) struct SharedState {
     deck_audible_rate_revisions: [AtomicU64; 2],
     deck_discontinuity_revisions: [AtomicU64; 2],
     deck_scratch_held: [AtomicBool; 2],
+    deck_scratch_voice_active: [AtomicBool; 2],
     deck_loop_generations: [AtomicU64; 2],
     deck_loop_active: [AtomicBool; 2],
     deck_loop_start_frames: [AtomicU64; 2],
@@ -114,6 +117,7 @@ impl Default for SharedState {
             deck_audible_rate_revisions: std::array::from_fn(|_| AtomicU64::new(0)),
             deck_discontinuity_revisions: std::array::from_fn(|_| AtomicU64::new(0)),
             deck_scratch_held: std::array::from_fn(|_| AtomicBool::new(false)),
+            deck_scratch_voice_active: std::array::from_fn(|_| AtomicBool::new(false)),
             deck_loop_generations: std::array::from_fn(|_| AtomicU64::new(0)),
             deck_loop_active: std::array::from_fn(|_| AtomicBool::new(false)),
             deck_loop_start_frames: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -153,6 +157,7 @@ impl SharedState {
         deck_audible_rate_revisions: [u64; 2],
         deck_discontinuity_revisions: [u64; 2],
         deck_scratch_held: [bool; 2],
+        deck_scratch_voice_active: [bool; 2],
         deck_loop_generations: [u64; 2],
         deck_loop_active: [bool; 2],
         deck_loop_start_frames: [u64; 2],
@@ -206,6 +211,8 @@ impl SharedState {
             self.deck_discontinuity_revisions[index]
                 .store(deck_discontinuity_revisions[index], Ordering::Relaxed);
             self.deck_scratch_held[index].store(deck_scratch_held[index], Ordering::Relaxed);
+            self.deck_scratch_voice_active[index]
+                .store(deck_scratch_voice_active[index], Ordering::Relaxed);
             self.deck_loop_generations[index]
                 .store(deck_loop_generations[index], Ordering::Relaxed);
             self.deck_loop_active[index].store(deck_loop_active[index], Ordering::Relaxed);
@@ -298,6 +305,9 @@ impl SharedState {
                 deck_scratch_held: std::array::from_fn(|index| {
                     self.deck_scratch_held[index].load(Ordering::Relaxed)
                 }),
+                deck_scratch_voice_active: std::array::from_fn(|index| {
+                    self.deck_scratch_voice_active[index].load(Ordering::Relaxed)
+                }),
                 deck_loop_generations: std::array::from_fn(|index| {
                     self.deck_loop_generations[index].load(Ordering::Relaxed)
                 }),
@@ -374,6 +384,7 @@ mod tests {
             [1, 1],
             [1, 1],
             [0, 0],
+            [false, false],
             [false, false],
             [0, 0],
             [false, false],

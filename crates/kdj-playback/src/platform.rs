@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use kdj_player::{
-    open_dynamic_default, DeckId, DecodedTrack, DynamicPlayer, RtCommand, StemFrame, StreamSource,
-    TransportSnapshot,
+    open_dynamic_default, DeckId, DecodedTrack, DynamicPlayer, RtCommand, ScratchPcmCache,
+    StemFrame, StreamSource, TransportSnapshot,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -23,12 +23,32 @@ pub trait PlaybackOutput {
         source: Arc<StreamSource>,
         start_frame: u64,
     ) -> Result<u64, String>;
+    fn install_stream_with_scratch(
+        &mut self,
+        deck: DeckId,
+        source: Arc<StreamSource>,
+        scratch: Option<Arc<ScratchPcmCache>>,
+        start_frame: u64,
+    ) -> Result<u64, String> {
+        let _ = scratch;
+        self.install_stream(deck, source, start_frame)
+    }
     fn install_stem_stream(
         &mut self,
         deck: DeckId,
         source: Arc<StreamSource<StemFrame>>,
         start_frame: u64,
     ) -> Result<u64, String>;
+    fn install_stem_stream_with_scratch(
+        &mut self,
+        deck: DeckId,
+        source: Arc<StreamSource<StemFrame>>,
+        scratch: Option<Arc<ScratchPcmCache>>,
+        start_frame: u64,
+    ) -> Result<u64, String> {
+        let _ = scratch;
+        self.install_stem_stream(deck, source, start_frame)
+    }
     /// Installs a bounded in-memory source for specialist/offline paths. Normal transport loops
     /// stay on the streaming source and use its worker-owned PCM reservoir.
     fn install_decoded(
@@ -82,6 +102,17 @@ impl PlaybackOutput for DynamicPlayer {
             .map_err(|error| error.to_string())
     }
 
+    fn install_stream_with_scratch(
+        &mut self,
+        deck: DeckId,
+        source: Arc<StreamSource>,
+        scratch: Option<Arc<ScratchPcmCache>>,
+        start_frame: u64,
+    ) -> Result<u64, String> {
+        DynamicPlayer::install_stream_with_scratch(self, deck, source, scratch, start_frame)
+            .map_err(|error| error.to_string())
+    }
+
     fn install_stem_stream(
         &mut self,
         deck: DeckId,
@@ -89,6 +120,17 @@ impl PlaybackOutput for DynamicPlayer {
         start_frame: u64,
     ) -> Result<u64, String> {
         DynamicPlayer::install_stem_stream(self, deck, source, start_frame)
+            .map_err(|error| error.to_string())
+    }
+
+    fn install_stem_stream_with_scratch(
+        &mut self,
+        deck: DeckId,
+        source: Arc<StreamSource<StemFrame>>,
+        scratch: Option<Arc<ScratchPcmCache>>,
+        start_frame: u64,
+    ) -> Result<u64, String> {
+        DynamicPlayer::install_stem_stream_with_scratch(self, deck, source, scratch, start_frame)
             .map_err(|error| error.to_string())
     }
 

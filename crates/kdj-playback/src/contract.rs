@@ -481,6 +481,11 @@ pub struct PlaybackDeckSnapshot {
     pub minimum_output_buffer_ms: u64,
     /// Number of transitions into an empty output ring for the installed source.
     pub output_underruns: u64,
+    /// Source-indexed platter cache diagnostics, sampled off the realtime callback.
+    pub scratch_cache_requests: u64,
+    pub scratch_cache_misses: u64,
+    pub scratch_cache_loads: u64,
+    pub scratch_cache_failures: u64,
     /// Post-EQ, pre-channel-fader peak level in linear full scale; values >= 1 indicate clipping.
     pub peak_level: f32,
     /// Installed callback source kind. Pending replacements do not change this until promotion,

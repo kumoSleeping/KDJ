@@ -9,6 +9,7 @@ mod dsp;
 mod engine;
 mod manual_fx;
 mod output;
+mod scratch_cache;
 mod state;
 mod stream;
 mod stretch;
@@ -40,12 +41,14 @@ pub use output::{
     open_dynamic_default, open_prepared_default, DeviceOutput, DynamicPlayer, OutputError,
     OutputSpec,
 };
+pub use scratch_cache::{DecodedScratchWindow, ScratchPcmCache, SCRATCH_CACHE_WINDOW_SECONDS};
 pub use state::{OutputCallbackTiming, TransportSnapshot};
 pub use stream::{
-    decode_file_streaming, decode_file_streaming_seekable, decode_live_stem_streaming,
-    decode_source_streaming, decode_source_streaming_seekable, decode_stem_cache_streaming,
-    format_loop_clock, run_pitch_preserving_pipeline, FrameLerp, LoopWindow, StemFrame,
-    StreamMetadata, StreamSeekControl, StreamSource, StreamWriter, StreamingMediaSource,
+    decode_file_scratch_window, decode_file_streaming, decode_file_streaming_seekable,
+    decode_live_stem_streaming, decode_source_scratch_window, decode_source_streaming,
+    decode_source_streaming_seekable, decode_stem_cache_streaming, format_loop_clock,
+    run_pitch_preserving_pipeline, FrameLerp, LoopWindow, StemFrame, StreamMetadata,
+    StreamSeekControl, StreamSource, StreamWriter, StreamingMediaSource,
     DEFAULT_STREAM_BUFFER_SECONDS, LOOP_CAPTURE_HISTORY_SECONDS, MAX_TRANSPORT_LOOP_PCM_BYTES,
     MAX_TRANSPORT_LOOP_SECONDS, STEM_GAIN_MAX, STEM_LANES,
 };

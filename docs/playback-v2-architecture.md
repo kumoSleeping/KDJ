@@ -54,16 +54,22 @@ The callback is the only consumer and never allocates, locks, decodes or perform
 - A later request invalidates the worker fence; its late result is ignored.
 - Full decoded PCM remains available to specialist/offline paths, but is no longer a prerequisite
   for play, pause, ordinary skip or seek.
+- Each installed Deck also owns two fixed 12-second raw-stereo scratch windows. A background
+  seekable decoder fills the inactive window around the needle and atomically publishes it; reverse
+  cache misses retain hand velocity and resume when data arrives. Release retargets the installed
+  worker in place and crossfades only after matching media-time PCM reaches the callback.
 
 Streaming pitch-preserving tempo conversion runs through the vendored Rubber Band 4 R3 engine on a
-bounded worker between the decoder's four-second raw PCM ring and a short callback-facing output
-ring. Tempo faders, BPM Sync and momentary nudges update one atomic target; R3 observes it before its
-next input block while the callback continues to pop one hardware-rate PCM frame with no C++ call,
+bounded worker between the decoder's four-second raw PCM ring and a 96 ms ordinary / 160 ms STEM
+callback-facing ring. Every R3 state is short-window configured and primed once at construction;
+unity PCM still bypasses processing, while the first non-unity fader packet no longer resets and
+replans the engine. Tempo controls use a 16 ms latest-value lane and R3 samples them on bounded
+512-frame source blocks. The callback still pops one hardware-rate PCM frame with no C++ call,
 allocation, lock, decoder reset, or pitch-changing resample. Real-time start padding, output-delay
 trimming, EOF drain and explicit seek reset are owned by the worker adapter.
 The two physical Deck targets and background-analysis admission are coordinated by
 [`work-scheduler.md`](work-scheduler.md). Dense MIDI/slider changes are latest-value coalesced, and
-crossing the unity detent does not repeatedly reset an already-engaged R3 stream.
+crossing the unity detent does not reset the already-primed R3 stream.
 
 Each post-stretch ring packet also carries the source-frame advance represented by that rendered
 PCM frame. The callback advances its published playhead from this value, not from the newest UI

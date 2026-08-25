@@ -11,7 +11,7 @@ use crate::engine::{dynamic_command_channel, AudioRenderer};
 use crate::stream::StemFrame;
 use crate::{
     command_channel, CommandError, DeckId, DecodedTrack, OutputCallbackTiming, PlayerController,
-    RtCommand, StreamSource, TransportSnapshot,
+    RtCommand, ScratchPcmCache, StreamSource, TransportSnapshot,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,8 +75,8 @@ pub struct DynamicPlayer {
 
 enum OwnedSource {
     Decoded(Arc<DecodedTrack>),
-    Stream(Arc<StreamSource>),
-    StemStream(Arc<StreamSource<StemFrame>>),
+    Stream(Arc<StreamSource>, Option<Arc<ScratchPcmCache>>),
+    StemStream(Arc<StreamSource<StemFrame>>, Option<Arc<ScratchPcmCache>>),
 }
 
 /// Opens a complete two-deck native output path for already decoded tracks.
@@ -154,16 +154,31 @@ impl DynamicPlayer {
         source: Arc<StreamSource>,
         start_frame: u64,
     ) -> Result<u64, CommandError> {
+        self.install_stream_with_scratch(deck, source, None, start_frame)
+    }
+
+    pub fn install_stream_with_scratch(
+        &mut self,
+        deck: DeckId,
+        source: Arc<StreamSource>,
+        scratch: Option<Arc<ScratchPcmCache>>,
+        start_frame: u64,
+    ) -> Result<u64, CommandError> {
         self.collect_retired();
         let source_id = self.next_source_id;
         self.next_source_id = self.next_source_id.wrapping_add(1).max(1);
         let address = Arc::as_ptr(&source) as usize;
-        self.sources.insert(source_id, OwnedSource::Stream(source));
-        if let Err(error) = self.controller.install_prepared(
+        let scratch_address = scratch
+            .as_ref()
+            .map_or(0, |cache| Arc::as_ptr(cache) as usize);
+        self.sources
+            .insert(source_id, OwnedSource::Stream(source, scratch));
+        if let Err(error) = self.controller.install_prepared_with_scratch(
             deck,
             source_id,
             SourceKind::Stream,
             address,
+            scratch_address,
             start_frame,
         ) {
             self.sources.remove(&source_id);
@@ -178,17 +193,31 @@ impl DynamicPlayer {
         source: Arc<StreamSource<StemFrame>>,
         start_frame: u64,
     ) -> Result<u64, CommandError> {
+        self.install_stem_stream_with_scratch(deck, source, None, start_frame)
+    }
+
+    pub fn install_stem_stream_with_scratch(
+        &mut self,
+        deck: DeckId,
+        source: Arc<StreamSource<StemFrame>>,
+        scratch: Option<Arc<ScratchPcmCache>>,
+        start_frame: u64,
+    ) -> Result<u64, CommandError> {
         self.collect_retired();
         let source_id = self.next_source_id;
         self.next_source_id = self.next_source_id.wrapping_add(1).max(1);
         let address = Arc::as_ptr(&source) as usize;
+        let scratch_address = scratch
+            .as_ref()
+            .map_or(0, |cache| Arc::as_ptr(cache) as usize);
         self.sources
-            .insert(source_id, OwnedSource::StemStream(source));
-        if let Err(error) = self.controller.install_prepared(
+            .insert(source_id, OwnedSource::StemStream(source, scratch));
+        if let Err(error) = self.controller.install_prepared_with_scratch(
             deck,
             source_id,
             SourceKind::StemStream,
             address,
+            scratch_address,
             start_frame,
         ) {
             self.sources.remove(&source_id);

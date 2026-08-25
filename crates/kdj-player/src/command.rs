@@ -149,6 +149,12 @@ pub enum RtCommand {
         velocity: f64,
         valid_for_seconds: f32,
     },
+    /// The control thread has retargeted the seekable transport worker to the scratch needle.
+    /// Keep speaking from cache until matching PCM reaches the callback, then crossfade once.
+    ArmDeckPlatterHandoff {
+        deck: DeckId,
+        minimum_stream_generation: u64,
+    },
     SetRate {
         deck: DeckId,
         rate: f32,
@@ -246,6 +252,7 @@ pub(crate) enum EngineCommand {
         source_id: u64,
         source_kind: SourceKind,
         address: usize,
+        scratch_address: usize,
         start_frame: u64,
     },
     ClearPrepared {

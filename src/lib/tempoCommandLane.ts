@@ -20,8 +20,8 @@ const browserClock: TempoLaneClock = {
   clearTimeout: (timer) => window.clearTimeout(timer as unknown as number),
 };
 
-/** 30 Hz is comfortably above a motorised DJ fader's useful audio-control bandwidth. */
-export const TEMPO_COMMAND_INTERVAL_MS = 33;
+/** One latest value per display frame keeps a physical/software fader smooth without queuing. */
+export const TEMPO_COMMAND_INTERVAL_MS = 16;
 
 export class LatestTempoCommandLane {
   private pending: number | null = null;
