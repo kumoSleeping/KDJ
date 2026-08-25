@@ -171,9 +171,9 @@ const SCRATCH_HANDOFF_RATE_EPSILON: f64 = 0.08;
 /// reverse on encoder Δt jitter between packets.
 const SCRATCH_AUDIBLE_RATE_SMOOTH_SECONDS: f64 = 0.004;
 const SCRATCH_STATIONARY_VELOCITY: f64 = 1.0e-4;
-/// Native callback safety net after the input-side adaptive validity deadline. Sparse low-speed
-/// MIDI remains valid for at most 100 ms; once stale, the record settles promptly under a finger.
-const SCRATCH_STILL_SECONDS: f64 = 0.10;
+const SCRATCH_MIN_VALID_SECONDS: f64 = 0.024;
+const SCRATCH_MAX_VALID_SECONDS: f64 = 0.250;
+const SCRATCH_DEFAULT_VALID_SECONDS: f64 = 0.100;
 const SCRATCH_STILL_FRICTION_SECONDS: f64 = 0.04;
 const SCRATCH_NO_TICK: u64 = u64::MAX;
 /// Silent lead-in before source frame 0. Must match the coordinator's Performance pre-roll.
@@ -417,6 +417,7 @@ pub struct AudioRenderer {
     /// A settled streaming scratch replays cached history only until it catches the source head.
     deck_scratch_playthrough: [bool; 2],
     deck_scratch_input_at: [u64; 2],
+    deck_scratch_valid_frames: [u64; 2],
     /// One-pole of published platter rate so the UI needle does not reverse on tick jitter.
     deck_audible_rate_smooth: [f32; 2],
     scratch_tapes: [ScratchTape; 2],
@@ -525,6 +526,7 @@ fn make_channels(
             deck_scratch_release_decay: [0.0; 2],
             deck_scratch_playthrough: [false; 2],
             deck_scratch_input_at: [SCRATCH_NO_TICK; 2],
+            deck_scratch_valid_frames: [0; 2],
             deck_audible_rate_smooth: [0.0; 2],
             scratch_tapes: [ScratchTape::new(), ScratchTape::new()],
             deck_source_origin_frames: [0.0; 2],
@@ -1200,13 +1202,20 @@ impl AudioRenderer {
         mixed
     }
 
-    fn set_platter_velocity(&mut self, index: usize, velocity: f64) {
+    fn set_platter_velocity(&mut self, index: usize, velocity: f64, valid_for_seconds: f32) {
         if !velocity.is_finite() {
             return;
         }
         let normalized = velocity.clamp(-SCRATCH_VELOCITY_MAX, SCRATCH_VELOCITY_MAX);
         self.deck_scratch_target_velocity[index] = normalized * self.source_rate_ratios[index];
         self.deck_scratch_input_at[index] = self.output_frames;
+        let valid = if valid_for_seconds.is_finite() {
+            f64::from(valid_for_seconds).clamp(SCRATCH_MIN_VALID_SECONDS, SCRATCH_MAX_VALID_SECONDS)
+        } else {
+            SCRATCH_DEFAULT_VALID_SECONDS
+        };
+        self.deck_scratch_valid_frames[index] =
+            (valid * f64::from(self.output_sample_rate.max(1))).ceil() as u64;
     }
 
     fn play_or_scratch(
@@ -1798,14 +1807,22 @@ impl AudioRenderer {
                             && !self.deck_scratch_releasing[index]
                             && !self.deck_scratch_playthrough[index]
                         {
-                            self.set_platter_velocity(index, velocity);
+                            self.set_platter_velocity(
+                                index,
+                                velocity,
+                                SCRATCH_DEFAULT_VALID_SECONDS as f32,
+                            );
                         }
                     }
                     PlatterPhase::End => {
                         if self.deck_scratch_held[index] && !self.deck_scratch_playthrough[index] {
                             // End owns the final source-timestamped observation. Apply it before
                             // selecting coast/light-touch behavior; no earlier move ACK is needed.
-                            self.set_platter_velocity(index, velocity);
+                            self.set_platter_velocity(
+                                index,
+                                velocity,
+                                SCRATCH_DEFAULT_VALID_SECONDS as f32,
+                            );
                             self.deck_scratch_velocity[index] =
                                 self.deck_scratch_target_velocity[index];
                             self.release_scratch_to_transport(index);
@@ -1820,6 +1837,19 @@ impl AudioRenderer {
                         }
                         self.end_scratch_voice(index);
                     }
+                }
+            }
+            RtCommand::UpdateDeckPlatter {
+                deck,
+                velocity,
+                valid_for_seconds,
+            } => {
+                let index = deck as usize;
+                if self.deck_scratch_held[index]
+                    && !self.deck_scratch_releasing[index]
+                    && !self.deck_scratch_playthrough[index]
+                {
+                    self.set_platter_velocity(index, velocity, valid_for_seconds);
                 }
             }
             RtCommand::SetRate { deck, rate } => {
@@ -2121,6 +2151,7 @@ impl AudioRenderer {
         self.deck_scratch_velocity[index] = 0.0;
         self.deck_scratch_target_velocity[index] = 0.0;
         self.deck_scratch_input_at[index] = SCRATCH_NO_TICK;
+        self.deck_scratch_valid_frames[index] = 0;
     }
 
     fn end_scratch_voice(&mut self, index: usize) {
@@ -2277,7 +2308,7 @@ impl AudioRenderer {
             } else {
                 self.output_frames.saturating_sub(last) as f64
             };
-            let input_fresh = idle < sample_rate * SCRATCH_STILL_SECONDS;
+            let input_fresh = idle < self.deck_scratch_valid_frames[index] as f64;
             let target = if input_fresh {
                 self.deck_scratch_target_velocity[index]
             } else {
@@ -3529,6 +3560,45 @@ mod tests {
         assert!(
             (controller.snapshot().deck_frames[0] - parked).abs() <= 2,
             "a parked finger must friction to rest, not keep flying"
+        );
+    }
+
+    #[test]
+    fn sparse_platter_observation_keeps_its_device_derived_lifetime() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let track =
+            DecodedTrack::from_interleaved_stereo([0.5, -0.5].repeat(48_000), 48_000).unwrap();
+        let silent = DecodedTrack::from_interleaved_stereo([0.0, 0.0].repeat(8), 48_000).unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::UpdateDeckPlatter {
+                deck: DeckId::A,
+                velocity: 0.25,
+                valid_for_seconds: 0.25,
+            })
+            .unwrap();
+
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 480], 48_000, 2);
+        let first = controller.snapshot().deck_frames[0];
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 17_280], 48_000, 2);
+        let after_180_ms = controller.snapshot().deck_frames[0];
+        assert!(
+            after_180_ms > first + 1_000,
+            "a low-speed encoder interval above 100ms must not self-brake"
+        );
+
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 48_000], 48_000, 2);
+        let parked = controller.snapshot().deck_frames[0];
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 9_600], 48_000, 2);
+        assert!(
+            (controller.snapshot().deck_frames[0] - parked).abs() <= 2,
+            "the same observation must still expire and settle after its 250ms horizon"
         );
     }
 

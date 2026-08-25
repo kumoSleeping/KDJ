@@ -142,6 +142,13 @@ pub enum RtCommand {
         phase: PlatterPhase,
         velocity: f64,
     },
+    /// Atomic high-rate platter observation. Start/End remain ordered gesture edges above, while
+    /// each replaceable Move carries its own device-derived freshness horizon.
+    UpdateDeckPlatter {
+        deck: DeckId,
+        velocity: f64,
+        valid_for_seconds: f32,
+    },
     SetRate {
         deck: DeckId,
         rate: f32,

@@ -815,8 +815,8 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
   private platterTails: [Promise<void>, Promise<void>] = [Promise.resolve(), Promise.resolve()];
   private platterRevisions: [number, number] = [0, 0];
   private platterSessions: [
-    { id: number; sequence: number; velocity: number } | null,
-    { id: number; sequence: number; velocity: number } | null,
+    { id: number; sequence: number; velocity: number; validForMs: number } | null,
+    { id: number; sequence: number; velocity: number; validForMs: number } | null,
   ] = [null, null];
   private nextScratchGestureId = 1;
   /** 高频 jog seek 只保留尚未进入 IPC 的最后一个位置。 */
@@ -1078,7 +1078,12 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
       this.deckSeekRevisions[deck] += 1;
       this.deckNudgeRevisions[deck] += 1;
       this.platterRevisions[deck] += 1;
-      const session = { id: this.nextScratchGestureId++, sequence: 0, velocity: 0 };
+      const session = {
+        id: this.nextScratchGestureId++,
+        sequence: 0,
+        velocity: 0,
+        validForMs: 100,
+      };
       this.platterSessions[deck] = session;
       const command = {
         type: "controlDeckPlatter",
@@ -1102,6 +1107,9 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     const session = this.platterSessions[deck];
     if (!session) return Promise.resolve(this.snapshot);
     session.velocity = clampPlatterVelocity(event.velocity);
+    if (event.phase === "move" && Number.isFinite(event.validForMs)) {
+      session.validForMs = Math.max(24, Math.min(250, event.validForMs as number));
+    }
     session.sequence += 1;
 
     if (event.phase === "end") {
@@ -1141,6 +1149,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
       gestureId,
       sequence,
       velocity,
+      validForMs: session.validForMs,
     }, () => this.platterRevisions[deck] === revision
       && this.platterSessions[deck]?.id === gestureId));
     this.platterTails[deck] = operation.then(() => undefined, () => undefined);

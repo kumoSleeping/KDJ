@@ -77,7 +77,7 @@ test("a faster flick produces more speed and release uses its real packet cadenc
   assert.equal(tracker.end(1_036), 0);
 });
 
-test("velocity validity adapts from fast pointer cadence to sparse MIDI, bounded at 100ms", () => {
+test("velocity validity adapts from fast pointer cadence to sparse MIDI, bounded at 250ms", () => {
   const fast = new PlatterVelocityTracker();
   fast.start(0);
   fast.move(0.008, 8);
@@ -93,14 +93,14 @@ test("velocity validity adapts from fast pointer cadence to sparse MIDI, bounded
 
   const sparse = new PlatterVelocityTracker();
   sparse.start(0);
-  sparse.move(0.05, 50);
+  sparse.move(0.05, 120);
   assert.equal(sparse.velocityValidityMs(), PLATTER_MAX_VELOCITY_VALIDITY_MS);
-  assert.notEqual(sparse.end(150), 0);
+  assert.notEqual(sparse.end(370), 0);
 
   const expired = new PlatterVelocityTracker();
   expired.start(0);
-  expired.move(0.05, 50);
-  assert.equal(expired.end(151), 0);
+  expired.move(0.05, 120);
+  assert.equal(expired.end(371), 0);
 });
 
 test("quantized packet timing is averaged but a real direction reversal stays immediate", () => {

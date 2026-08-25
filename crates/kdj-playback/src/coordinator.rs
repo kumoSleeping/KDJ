@@ -760,6 +760,7 @@ impl Actor {
                 gesture_id,
                 sequence,
                 velocity,
+                valid_for_ms,
                 expected_track_id,
             } => self.control_deck_platter(
                 deck,
@@ -767,6 +768,7 @@ impl Actor {
                 gesture_id,
                 sequence,
                 velocity,
+                valid_for_ms,
                 expected_track_id,
             ),
             PlaybackCommand::SeekDeck {
@@ -1128,6 +1130,7 @@ impl Actor {
         gesture_id: u64,
         sequence: u64,
         velocity: f64,
+        valid_for_ms: f64,
         expected_track_id: Option<i64>,
     ) -> Result<(), String> {
         match phase {
@@ -1135,7 +1138,7 @@ impl Actor {
                 self.begin_deck_scratch(deck, gesture_id, expected_track_id)
             }
             PlaybackPlatterPhase::Move => {
-                self.update_deck_scratch(deck, gesture_id, sequence, velocity)
+                self.update_deck_scratch(deck, gesture_id, sequence, velocity, valid_for_ms)
             }
             PlaybackPlatterPhase::End => {
                 self.end_deck_scratch(deck, gesture_id, sequence, velocity)
@@ -1171,6 +1174,7 @@ impl Actor {
         gesture_id: u64,
         sequence: u64,
         velocity: f64,
+        valid_for_ms: f64,
     ) -> Result<(), String> {
         let deck_id = deck_id(deck)?;
         let index = deck_id as usize;
@@ -1186,7 +1190,7 @@ impl Actor {
             return Ok(());
         }
         self.scratch_gesture_sequences[index] = sequence;
-        self.set_deck_platter_velocity(deck, velocity)
+        self.set_deck_platter_velocity(deck, velocity, valid_for_ms)
     }
 
     fn end_deck_scratch(
@@ -1482,7 +1486,12 @@ impl Actor {
         }
     }
 
-    fn set_deck_platter_velocity(&mut self, deck: u8, velocity: f64) -> Result<(), String> {
+    fn set_deck_platter_velocity(
+        &mut self,
+        deck: u8,
+        velocity: f64,
+        valid_for_ms: f64,
+    ) -> Result<(), String> {
         let deck = deck_id(deck)?;
         if !velocity.is_finite() {
             return Err("缓动盘速度无效".into());
@@ -1495,10 +1504,15 @@ impl Actor {
         if !self.scratch_held[index] {
             return Ok(());
         }
-        self.send(RtCommand::ControlDeckPlatter {
+        let valid_for_seconds = if valid_for_ms.is_finite() {
+            (valid_for_ms / 1_000.0).clamp(0.024, 0.250) as f32
+        } else {
+            0.100
+        };
+        self.send(RtCommand::UpdateDeckPlatter {
             deck,
-            phase: PlatterPhase::Move,
             velocity: velocity.clamp(-8.0, 8.0),
+            valid_for_seconds,
         })?;
         Ok(())
     }
@@ -5051,24 +5065,22 @@ mod tests {
         actor.state.decks[0].track_id = Some(1);
         actor.begin_deck_scratch(0, 7, Some(1)).expect("第一轮手势");
         actor
-            .update_deck_scratch(0, 7, 1, 0.1)
+            .update_deck_scratch(0, 7, 1, 0.1, 100.0)
             .expect("第一轮 tick");
         actor.begin_deck_scratch(0, 8, Some(1)).expect("第二轮手势");
         actor
-            .update_deck_scratch(0, 7, 2, 9.0)
+            .update_deck_scratch(0, 7, 2, 9.0, 100.0)
             .expect("旧 tick 应被静默丢弃");
-        actor.update_deck_scratch(0, 8, 1, 0.2).expect("新 tick");
+        actor
+            .update_deck_scratch(0, 8, 1, 0.2, 100.0)
+            .expect("新 tick");
         let velocities: Vec<f64> = knobs
             .sent
             .lock()
             .unwrap()
             .iter()
             .filter_map(|command| match command {
-                RtCommand::ControlDeckPlatter {
-                    phase: PlatterPhase::Move,
-                    velocity,
-                    ..
-                } => Some(*velocity),
+                RtCommand::UpdateDeckPlatter { velocity, .. } => Some(*velocity),
                 _ => None,
             })
             .collect();
@@ -7138,7 +7150,7 @@ mod tests {
             .start_deck_platter(DeckId::A as u8)
             .expect("paused platter should own the callback cursor");
         actor
-            .set_deck_platter_velocity(DeckId::A as u8, -1.0)
+            .set_deck_platter_velocity(DeckId::A as u8, -1.0, 100.0)
             .expect("paused platter motion should reach the callback");
 
         assert!(actor.scratch_held[DeckId::A as usize]);
@@ -7159,10 +7171,10 @@ mod tests {
         )));
         assert!(sent.iter().any(|command| matches!(
             command,
-            RtCommand::ControlDeckPlatter {
+            RtCommand::UpdateDeckPlatter {
                 deck: DeckId::A,
-                phase: PlatterPhase::Move,
                 velocity,
+                ..
             } if (*velocity + 1.0).abs() < 0.001
         )));
         assert!(!sent
@@ -7185,7 +7197,7 @@ mod tests {
             .begin_deck_scratch(DeckId::B as u8, 42, Some(2))
             .expect("Deck B touch");
         actor
-            .update_deck_scratch(DeckId::B as u8, 42, 1, -1.0)
+            .update_deck_scratch(DeckId::B as u8, 42, 1, -1.0, 100.0)
             .expect("Deck B reverse into pre-roll");
 
         assert!(!actor.scratch_held[0]);
@@ -7194,10 +7206,10 @@ mod tests {
         let sent = knobs.sent.lock().unwrap();
         assert!(sent.iter().any(|command| matches!(
             command,
-            RtCommand::ControlDeckPlatter {
+            RtCommand::UpdateDeckPlatter {
                 deck: DeckId::B,
-                phase: PlatterPhase::Move,
                 velocity,
+                ..
             } if (*velocity + 1.0).abs() < 0.001
         )));
     }
@@ -7220,7 +7232,7 @@ mod tests {
             .expect("按住盘面只接管游标");
         knobs.sent.lock().unwrap().clear();
         actor
-            .set_deck_platter_velocity(DeckId::A as u8, -1.0)
+            .set_deck_platter_velocity(DeckId::A as u8, -1.0, 100.0)
             .expect("按住转动应立刻送给引擎");
 
         assert!(
@@ -7235,10 +7247,10 @@ mod tests {
         assert!(
             sent.iter().any(|command| matches!(
                 command,
-                RtCommand::ControlDeckPlatter {
+                RtCommand::UpdateDeckPlatter {
                     deck: DeckId::A,
-                    phase: PlatterPhase::Move,
                     velocity,
+                    ..
                 } if (*velocity + 1.0).abs() < 0.001
             )),
             "held platter motion must become a realtime scratch tick, got {sent:?}",
@@ -7258,7 +7270,7 @@ mod tests {
         actor.scratch_held[DeckId::A as usize] = true;
 
         actor
-            .set_deck_platter_velocity(DeckId::A as u8, -8.0)
+            .set_deck_platter_velocity(DeckId::A as u8, -8.0, 100.0)
             .expect("reverse vinyl may enter silent lead-in");
 
         assert!(
@@ -7268,10 +7280,10 @@ mod tests {
         let sent = knobs.sent.lock().unwrap();
         assert!(sent.iter().any(|command| matches!(
             command,
-            RtCommand::ControlDeckPlatter {
+            RtCommand::UpdateDeckPlatter {
                 deck: DeckId::A,
-                phase: PlatterPhase::Move,
                 velocity,
+                ..
             } if *velocity < 0.0
         )));
     }
@@ -7323,7 +7335,7 @@ mod tests {
 
         actor.start_deck_platter(DeckId::A as u8).expect("hold");
         actor
-            .set_deck_platter_velocity(DeckId::A as u8, -2.0)
+            .set_deck_platter_velocity(DeckId::A as u8, -2.0, 100.0)
             .expect("velocity");
         knobs.sent.lock().unwrap().clear();
         actor.begin_scratch_coast(DeckId::A, -2.0).expect("release");
@@ -7409,7 +7421,7 @@ mod tests {
 
         actor.start_deck_platter(DeckId::A as u8).expect("hold");
         actor
-            .set_deck_platter_velocity(DeckId::A as u8, -4.0)
+            .set_deck_platter_velocity(DeckId::A as u8, -4.0, 100.0)
             .expect("throw");
         actor.begin_scratch_coast(DeckId::A, -4.0).expect("release");
         assert!(actor.scratch_coasting[DeckId::A as usize]);
@@ -7448,23 +7460,19 @@ mod tests {
 
         actor.start_deck_platter(DeckId::A as u8).expect("hold");
         actor
-            .set_deck_platter_velocity(DeckId::A as u8, -2.0)
+            .set_deck_platter_velocity(DeckId::A as u8, -2.0, 100.0)
             .expect("move");
         actor.begin_scratch_coast(DeckId::A, -2.0).expect("release");
         knobs.sent.lock().unwrap().clear();
         actor
-            .set_deck_platter_velocity(DeckId::A as u8, -8.0)
+            .set_deck_platter_velocity(DeckId::A as u8, -8.0, 100.0)
             .expect("late move");
 
         let sent = knobs.sent.lock().unwrap();
         assert!(
-            !sent.iter().any(|command| matches!(
-                command,
-                RtCommand::ControlDeckPlatter {
-                    phase: PlatterPhase::Move,
-                    ..
-                }
-            )),
+            !sent
+                .iter()
+                .any(|command| matches!(command, RtCommand::UpdateDeckPlatter { .. })),
             "a late move from the old gesture must not overwrite the atomic end velocity"
         );
     }

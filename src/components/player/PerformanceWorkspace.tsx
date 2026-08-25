@@ -518,7 +518,13 @@ function DeckScratchSurface({
           : [];
         const points = coalesced.length > 0 ? coalesced : [native];
         const velocity = gesture.tracker.move(points, native.timeStamp);
-        if (velocity !== null) onPlatter(side, { phase: "move", velocity });
+        if (velocity !== null) {
+          onPlatter(side, {
+            phase: "move",
+            velocity,
+            validForMs: gesture.tracker.velocityValidityMs(),
+          });
+        }
       }}
       onPointerUp={finishScratch}
       onPointerCancel={finishScratch}
@@ -3210,7 +3216,11 @@ export function PerformanceWorkspace({
         midiJogVinylSeconds(delta),
         now,
       );
-      onPlatterRef.current(side, { phase: "move", velocity });
+      onPlatterRef.current(side, {
+        phase: "move",
+        velocity,
+        validForMs: midiPlatterTrackersRef.current[side].velocityValidityMs(),
+      });
       return;
     }
     const from = midiJogCursorPosition(

@@ -13,8 +13,8 @@ export const PLATTER_SECONDS_PER_REVOLUTION = 60 / PLATTER_RPM;
 export const PLATTER_MAX_RATE = 8;
 /** Fast pointer/encoder streams must stop carrying a stale velocity almost immediately. */
 export const PLATTER_MIN_VELOCITY_VALIDITY_MS = 24;
-/** Sparse low-speed MIDI packets may need a longer release window, but never beyond this. */
-export const PLATTER_MAX_VELOCITY_VALIDITY_MS = 100;
+/** Sparse low-speed MIDI packets may need several detent intervals before the next observation. */
+export const PLATTER_MAX_VELOCITY_VALIDITY_MS = 250;
 const PLATTER_VELOCITY_VALIDITY_INTERVALS = 3;
 const PLATTER_VELOCITY_VALIDITY_MULTIPLIER = 2.5;
 /** Three recent motion intervals suppress encoder/PointerEvent quantization without hand lag. */
@@ -23,7 +23,7 @@ const PLATTER_VELOCITY_HISTORY_MS = 120;
 
 export type UnifiedPlatterEvent =
   | { phase: "start" }
-  | { phase: "move"; velocity: number }
+  | { phase: "move"; velocity: number; validForMs?: number }
   | { phase: "end"; velocity: number };
 
 function finiteTimestamp(value: number, fallback = 0): number {
@@ -219,5 +219,9 @@ export class PointerPlatterTracker {
 
   end(at: number): number {
     return this.tracker.end(at);
+  }
+
+  velocityValidityMs(): number {
+    return this.tracker.velocityValidityMs();
   }
 }

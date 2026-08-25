@@ -121,6 +121,10 @@ fn default_rate() -> f32 {
     1.0
 }
 
+fn default_platter_valid_for_ms() -> f64 {
+    100.0
+}
+
 fn default_beats_per_bar() -> u8 {
     4
 }
@@ -241,6 +245,11 @@ pub enum PlaybackCommand {
         sequence: u64,
         #[serde(default)]
         velocity: f64,
+        /// Device-timestamp-derived lifetime of this velocity observation. Fast packet streams
+        /// stop promptly; a slowly turning detented platter may legitimately wait longer than
+        /// 100 ms for its next tick.
+        #[serde(default = "default_platter_valid_for_ms", rename = "validForMs")]
+        valid_for_ms: f64,
         #[serde(default, rename = "expectedTrackId")]
         expected_track_id: Option<i64>,
     },
@@ -625,7 +634,7 @@ mod tests {
             }
         ));
         let update: PlaybackCommand = serde_json::from_str(
-            r#"{"type":"controlDeckPlatter","deck":1,"phase":"move","gestureId":77,"sequence":3,"velocity":-2.5}"#,
+            r#"{"type":"controlDeckPlatter","deck":1,"phase":"move","gestureId":77,"sequence":3,"velocity":-2.5,"validForMs":225}"#,
         ).expect("generation-safe platter move should parse");
         assert!(matches!(
             update,
@@ -634,8 +643,10 @@ mod tests {
                 gesture_id: 77,
                 sequence: 3,
                 velocity,
+                valid_for_ms,
                 ..
             } if (velocity + 2.5).abs() < f64::EPSILON
+                && (valid_for_ms - 225.0).abs() < f64::EPSILON
         ));
         let end: PlaybackCommand = serde_json::from_str(
             r#"{"type":"controlDeckPlatter","deck":1,"phase":"end","gestureId":77,"sequence":4,"velocity":-1.75}"#,
