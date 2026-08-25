@@ -1069,8 +1069,8 @@ impl<T: Copy + FrameLerp> PcmLoopReader<T> {
                         active.cursor += 1;
                         let wrapped = active.wrap_pending;
                         active.wrap_pending = false;
-                        let wraps_again = !active.exit_after_cycle
-                            && active.frames.len() >= active.target_frames;
+                        let wraps_again =
+                            !active.exit_after_cycle && active.frames.len() >= active.target_frames;
                         return Some(TimedPcm {
                             frame: if wraps_again {
                                 Self::replay_frame(active, cursor)
@@ -3224,9 +3224,7 @@ mod tests {
                 length: 0.256,
             },
             target_frames: 256,
-            frames: (0..256)
-                .map(|index| [index as f32 / 255.0; 2])
-                .collect(),
+            frames: (0..256).map(|index| [index as f32 / 255.0; 2]).collect(),
             mode: PcmLoopMode::Replay,
             cursor: 255,
             exit_after_cycle: true,
