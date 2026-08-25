@@ -1,7 +1,8 @@
 //! 真机冒烟：cargo run -p kdj-providers --example smoke_ytm -- <关键词或链接>
 use kdj_core::models::Quality;
 use kdj_providers::{
-    youtubemusic::YoutubeMusicProvider, DownloadJob, MusicProvider, ProviderContext,
+    youtubemusic::{auth::YoutubeAuth, YoutubeMusicProvider},
+    DownloadJob, MusicProvider, ProviderContext,
 };
 
 #[tokio::main]
@@ -18,11 +19,13 @@ async fn main() -> anyhow::Result<()> {
             soundcloud_client_id: String::new(),
             soundcloud_client_secret: String::new(),
             ytm_enabled: true,
+            youtube_enabled: false,
             video_dir: None,
             video_format: "mp4".into(),
         },
     );
-    let provider = YoutubeMusicProvider::new(ctx)?;
+    let auth = std::sync::Arc::new(YoutubeAuth::new(&ctx, kdj_core::models::Platform::Ytm)?);
+    let provider = YoutubeMusicProvider::new(ctx, auth)?;
     let keyword = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "lofi hip hop".into());

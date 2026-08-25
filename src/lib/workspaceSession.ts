@@ -1,0 +1,217 @@
+import type { OneLibraryTarget, StreamPlaylist } from "../types";
+import { writeLocalStorageNow, writeLocalStorageSoon } from "./storageWrite";
+
+const STORAGE_KEY = "kd-workspace-session-v1";
+const MAX_TEXT = 4_096;
+const MAX_SCROLL = 1_000_000_000;
+
+export type RestorableWorkspaceSource = "local" | "onelibrary" | "stream";
+
+export interface LocalWorkspaceSession {
+  folder: string;
+  folderDeep: boolean;
+  sort: string;
+  order: "asc" | "desc";
+  sort2: string | null;
+  order2: "asc" | "desc";
+  selectedId: number | null;
+  scrollTop: number;
+}
+
+export interface OneLibraryWorkspaceSession {
+  target: OneLibraryTarget | null;
+  focusedContentId: number | null;
+  scrollTop: number;
+}
+
+export interface StreamWorkspaceSession {
+  playlist: StreamPlaylist | null;
+  inspectedGroup: string | null;
+  scrollTop: number;
+}
+
+export interface WorkspaceSession {
+  version: 1;
+  source: RestorableWorkspaceSource;
+  local: LocalWorkspaceSession;
+  oneLibrary: OneLibraryWorkspaceSession;
+  stream: StreamWorkspaceSession;
+}
+
+export const DEFAULT_WORKSPACE_SESSION: WorkspaceSession = {
+  version: 1,
+  source: "local",
+  local: {
+    folder: "",
+    folderDeep: true,
+    sort: "added_at",
+    order: "desc",
+    sort2: null,
+    order2: "asc",
+    selectedId: null,
+    scrollTop: 0,
+  },
+  oneLibrary: {
+    target: null,
+    focusedContentId: null,
+    scrollTop: 0,
+  },
+  stream: {
+    playlist: null,
+    inspectedGroup: null,
+    scrollTop: 0,
+  },
+};
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function text(value: unknown, fallback = ""): string {
+  return typeof value === "string" && value.length <= MAX_TEXT ? value : fallback;
+}
+
+function positiveId(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function scroll(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(MAX_SCROLL, Math.max(0, value))
+    : 0;
+}
+
+function target(value: unknown): OneLibraryTarget | null {
+  const item = record(value);
+  if (!item) return null;
+  const devicePath = text(item.device_path);
+  const deviceName = text(item.device_name);
+  const playlistName = text(item.playlist_name);
+  const playlistId = positiveId(item.playlist_id);
+  if (!devicePath || !playlistId || typeof item.is_virtual !== "boolean") return null;
+  return {
+    device_path: devicePath,
+    device_name: deviceName,
+    is_virtual: item.is_virtual,
+    playlist_id: playlistId,
+    playlist_name: playlistName,
+  };
+}
+
+function playlist(value: unknown): StreamPlaylist | null {
+  const item = record(value);
+  if (!item || !["wyy", "qqm", "bilibili"].includes(String(item.platform))) return null;
+  const key = text(item.key);
+  const title = text(item.title);
+  const cover = text(item.cover);
+  if (!key || !title) return null;
+  return {
+    platform: item.platform as StreamPlaylist["platform"],
+    key,
+    title,
+    cover,
+    count:
+      typeof item.count === "number" && Number.isFinite(item.count)
+        ? Math.max(0, Math.trunc(item.count))
+        : 0,
+    is_favorite: item.is_favorite === true,
+    origin: text(item.origin),
+  };
+}
+
+export function normalizeWorkspaceSession(value: unknown): WorkspaceSession {
+  const root = record(value);
+  const local = record(root?.local);
+  const oneLibrary = record(root?.oneLibrary);
+  const streamState = record(root?.stream);
+  const source = root?.source === "onelibrary" || root?.source === "stream"
+    ? root.source
+    : "local";
+  return {
+    version: 1,
+    source,
+    local: {
+      folder: text(local?.folder),
+      folderDeep: local?.folderDeep !== false,
+      sort: text(local?.sort, "added_at"),
+      order: local?.order === "asc" ? "asc" : "desc",
+      sort2: typeof local?.sort2 === "string" ? text(local.sort2) || null : null,
+      order2: local?.order2 === "desc" ? "desc" : "asc",
+      selectedId: positiveId(local?.selectedId),
+      scrollTop: scroll(local?.scrollTop),
+    },
+    oneLibrary: {
+      target: target(oneLibrary?.target),
+      focusedContentId: positiveId(oneLibrary?.focusedContentId),
+      scrollTop: scroll(oneLibrary?.scrollTop),
+    },
+    stream: {
+      playlist: playlist(streamState?.playlist),
+      inspectedGroup:
+        typeof streamState?.inspectedGroup === "string"
+          ? text(streamState.inspectedGroup) || null
+          : null,
+      scrollTop: scroll(streamState?.scrollTop),
+    },
+  };
+}
+
+function storage(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+let cached: WorkspaceSession | null = null;
+
+export function readWorkspaceSession(): WorkspaceSession {
+  if (!cached) {
+    try {
+      cached = normalizeWorkspaceSession(
+        JSON.parse(storage()?.getItem(STORAGE_KEY) ?? "null"),
+      );
+    } catch {
+      cached = normalizeWorkspaceSession(null);
+    }
+  }
+  return structuredClone(cached);
+}
+
+function commit(next: WorkspaceSession): void {
+  cached = normalizeWorkspaceSession(next);
+  const value = JSON.stringify(cached);
+  // 部分 Node 单测只提供最小 window/localStorage stub，没有浏览器 timer。
+  if (typeof window !== "undefined" && typeof window.setTimeout === "function") {
+    writeLocalStorageSoon(STORAGE_KEY, value, 300);
+  } else {
+    writeLocalStorageNow(STORAGE_KEY, value);
+  }
+}
+
+export function setRestorableWorkspaceSource(source: RestorableWorkspaceSource): void {
+  commit({ ...readWorkspaceSession(), source });
+}
+
+export function updateLocalWorkspaceSession(patch: Partial<LocalWorkspaceSession>): void {
+  const current = readWorkspaceSession();
+  commit({ ...current, local: { ...current.local, ...patch } });
+}
+
+export function updateOneLibraryWorkspaceSession(
+  patch: Partial<OneLibraryWorkspaceSession>,
+): void {
+  const current = readWorkspaceSession();
+  commit({ ...current, oneLibrary: { ...current.oneLibrary, ...patch } });
+}
+
+export function updateStreamWorkspaceSession(
+  patch: Partial<StreamWorkspaceSession>,
+): void {
+  const current = readWorkspaceSession();
+  commit({ ...current, stream: { ...current.stream, ...patch } });
+}

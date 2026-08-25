@@ -58,6 +58,10 @@ import { DASH, formatBpm, formatDuration, isVideoTrack, thumbUrl } from "../../l
 import { playClickForLayout, useTrackClickPrefs } from "../../lib/trackClickPrefs";
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import { shouldHandleWorkspaceDelete } from "../../lib/workspacePanes";
+import {
+  readWorkspaceSession,
+  updateLocalWorkspaceSession,
+} from "../../lib/workspaceSession";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import {
@@ -231,6 +235,7 @@ function loadColumnPrefs(): ColumnPrefs {
 
 export interface TrackTableProps {
   tracks: Track[];
+  total: number;
   loading: boolean;
   /**
    * 当前布局档位，原样落到 `<table data-layout>` 上给 CSS 当判据。
@@ -496,6 +501,7 @@ function isPendingForFolder(task: DownloadTask, filterFolder: string, tracks: Tr
 
 export function TrackTable({
   tracks,
+  total,
   loading,
   layout,
   fitWidth = false,
@@ -946,6 +952,8 @@ export function TrackTable({
 
   /* ------------------------------------------------ 回到正在播的那首 */
   const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const restoredScrollTopRef = useRef(readWorkspaceSession().local.scrollTop);
+  const scrollRestoreDoneRef = useRef(restoredScrollTopRef.current <= 0);
   /** 虚拟滚动需要的滚动位置/视口高度；一帧最多重算一次（见 onScroll）。 */
   const [view, setView] = useState({ top: 0, height: 0 });
   const [rowH, setRowH] = useState(FALLBACK_ROW_H);
@@ -1029,7 +1037,8 @@ export function TrackTable({
       }
     };
 
-    scrollTrackIntoCenter(selectedIdRef.current);
+    // 有精确的关闭前滚动位置时优先恢复它；没有存档才按选中行居中。
+    if (scrollRestoreDoneRef.current) scrollTrackIntoCenter(selectedIdRef.current);
     const onDetail = (event: Event) => {
       const detail = (event as CustomEvent<DetailEventDetail>).detail;
       requestAnimationFrame(() => {
@@ -1039,6 +1048,21 @@ export function TrackTable({
     window.addEventListener(DETAIL_EVENT, onDetail);
     return () => window.removeEventListener(DETAIL_EVENT, onDetail);
   }, []);
+
+  useEffect(() => {
+    if (loading || scrollRestoreDoneRef.current) return;
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const desired = restoredScrollTopRef.current;
+    const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    scroller.scrollTop = Math.min(desired, maxTop);
+    if (maxTop + 1 >= desired || tracks.length >= total) {
+      scrollRestoreDoneRef.current = true;
+      return;
+    }
+    // 深位置尚未有足够分页撑起滚动高度，继续拉一页再重试。
+    onScrollEnd();
+  }, [loading, onScrollEnd, total, tracks.length]);
 
   /* ---------------------------------------------------- 列拖排 / 显隐 / 列宽 */
   const [colPrefs, setColPrefs] = useState(loadColumnPrefs);
@@ -1275,6 +1299,7 @@ export function TrackTable({
         // 横滚完全不影响虚拟窗口，必须在进入 React/预取路径前同步退出。
         if (top === scrollTopRef.current) return;
         scrollTopRef.current = top;
+        updateLocalWorkspaceSession({ scrollTop: top });
         // 距底 200px 就预取下一页，滚到底再等请求会有明显空白
         if (el.scrollHeight - top - el.clientHeight < 200) onScrollEnd();
         // 竖向滚动事件比帧率高得多；只对真正变化的 scrollTop 一帧合并一次。

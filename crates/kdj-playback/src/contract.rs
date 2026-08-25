@@ -11,12 +11,63 @@ pub struct PlaybackLevels {
     pub bands: [[f32; EQ_SPECTRUM_BANDS]; 2],
 }
 
+/// Lightweight audio-authority event. The two positions and rates are sampled from one callback
+/// seqlock snapshot, so waveform consumers never compare Decks from different output quanta.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackClock {
+    pub output_frame: u64,
+    pub output_sample_rate: u32,
+    pub callback_time_ns: u64,
+    pub presentation_time_ns: u64,
+    pub decks: [PlaybackDeckClock; 2],
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackDeckClock {
+    pub track_id: Option<i64>,
+    pub source_id: u64,
+    pub current_time: f64,
+    pub target_rate: f32,
+    pub applied_rate: f32,
+    pub audible_rate: f32,
+    pub target_revision: u64,
+    pub applied_revision: u64,
+    pub audible_revision: u64,
+    pub discontinuity_revision: u64,
+    pub playing: bool,
+    pub scratch_held: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum PlaybackSourceKind {
     #[default]
     Local,
     Remote,
+}
+
+/// Explicit musical grid attached to a Deck source. Beat phase and downbeat phase are separate:
+/// an analyzer that only knows regular beats must leave downbeat_origin empty rather than painting
+/// every arbitrary fourth beat as a musically trustworthy bar line.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackBeatGrid {
+    pub bpm: f64,
+    pub beat_origin: f64,
+    #[serde(default)]
+    pub downbeat_origin: Option<f64>,
+    #[serde(default = "default_beats_per_bar")]
+    pub beats_per_bar: u8,
+    #[serde(default)]
+    pub confidence: f64,
+    #[serde(default)]
+    pub beats: Vec<f64>,
+    #[serde(default)]
+    pub downbeats: Vec<f64>,
+    #[serde(default)]
+    pub revision: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -41,6 +92,8 @@ pub struct PlaybackSource {
     #[serde(default = "default_rate")]
     pub rate: f32,
     #[serde(default)]
+    pub beat_grid: Option<PlaybackBeatGrid>,
+    #[serde(default)]
     pub autoplay: bool,
     /// The original path remains in `path`; enabling stems switches only the worker input.
     #[serde(default)]
@@ -64,6 +117,62 @@ fn default_rate() -> f32 {
 
 fn default_beats_per_bar() -> u8 {
     4
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum PlaybackPlatterPhase {
+    #[default]
+    Start,
+    Move,
+    End,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum PlaybackFxKind {
+    #[default]
+    Echo,
+    Reverb,
+    Flanger,
+    Phaser,
+    BitCrusher,
+    Gate,
+    Alarm,
+    Hydrant,
+    Rocket,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackFxSlot {
+    #[serde(default)]
+    pub kind: PlaybackFxKind,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_fx_control")]
+    pub mix: f32,
+    #[serde(default = "default_fx_control", alias = "depth")]
+    pub parameter: f32,
+}
+
+impl Default for PlaybackFxSlot {
+    fn default() -> Self {
+        Self {
+            kind: PlaybackFxKind::Echo,
+            enabled: false,
+            mix: default_fx_control(),
+            parameter: default_fx_control(),
+        }
+    }
+}
+
+fn default_fx_control() -> f32 {
+    0.5
+}
+
+fn default_fx_slots() -> [PlaybackFxSlot; 3] {
+    [PlaybackFxSlot::default(); 3]
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -110,18 +219,24 @@ pub enum PlaybackCommand {
     PauseDeck {
         deck: u8,
     },
-    /// Capacitive platter contact freezes the callback cursor without changing `playing` or the
-    /// Deck's desired transport state. Releasing a moved platter is followed by an ordinary
-    /// seek, which keeps this hold until its replacement source is ready.
-    SetDeckScratchHeld {
+    SetDeckPfl {
         deck: u8,
-        held: bool,
+        enabled: bool,
     },
-    /// Relative platter motion in track seconds. Applied immediately to a held Deck without
-    /// rebuilding its decoder; note-off still seeks once to resync the streaming worker.
-    ScratchDeck {
+    /// The only platter wire API. Pointer, touch and MIDI all provide signed velocity where 1.0
+    /// is nominal forward playback. Gesture/sequence fencing makes stale independent IPC lanes
+    /// harmless, and End carries the final velocity atomically so a throw cannot collapse to 0.
+    ControlDeckPlatter {
         deck: u8,
-        delta: f64,
+        phase: PlaybackPlatterPhase,
+        #[serde(rename = "gestureId")]
+        gesture_id: u64,
+        #[serde(default)]
+        sequence: u64,
+        #[serde(default)]
+        velocity: f64,
+        #[serde(default, rename = "expectedTrackId")]
+        expected_track_id: Option<i64>,
     },
     SeekDeck {
         deck: u8,
@@ -163,6 +278,8 @@ pub enum PlaybackCommand {
         #[serde(default = "default_beats_per_bar", rename = "beatsPerBar")]
         beats_per_bar: u8,
     },
+    /// Disable the persistent native Sync Group and restore the follower's uncorrected tempo.
+    ClearSync,
     SetDeckMixer {
         deck: u8,
         #[serde(rename = "channelGain")]
@@ -179,15 +296,8 @@ pub enum PlaybackCommand {
     },
     SetDeckFx {
         deck: u8,
-        echo: f32,
-        #[serde(rename = "echoParameter")]
-        echo_parameter: f32,
-        reverb: f32,
-        #[serde(rename = "reverbParameter")]
-        reverb_parameter: f32,
-        gater: f32,
-        #[serde(rename = "gaterParameter")]
-        gater_parameter: f32,
+        #[serde(default = "default_fx_slots")]
+        slots: [PlaybackFxSlot; 3],
         pad: u8,
         #[serde(rename = "beatSeconds")]
         beat_seconds: f32,
@@ -208,17 +318,16 @@ pub enum PlaybackCommand {
         #[serde(default = "default_stem_gains")]
         gains: [f32; 4],
     },
-    /// Engage a transport loop over `[start, start + length]` seconds of the deck's current
-    /// source. The running decoder, EQ and STEM session stay in place; only the playhead wraps.
-    SetDeckLoop {
-        #[serde(rename = "trackId")]
-        track_id: i64,
-        start: f64,
+    /// Atomically toggle Auto Loop. Enabling samples loop-in from the native callback clock; the
+    /// frontend supplies only the duration and can never inject a stale playhead.
+    ToggleDeckLoop {
+        deck: u8,
         length: f64,
     },
-    ClearDeckLoop {
-        #[serde(rename = "trackId")]
-        track_id: i64,
+    /// Resize the active loop while preserving its native loop-in frame.
+    ResizeDeckLoop {
+        deck: u8,
+        length: f64,
     },
     Seek {
         position: f64,
@@ -261,6 +370,48 @@ pub enum PlaybackPhase {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlaybackSyncPhase {
+    #[default]
+    Disabled,
+    Acquiring,
+    Locked,
+    Correcting,
+    Suspended,
+    Degraded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackSyncSnapshot {
+    pub enabled: bool,
+    pub leader: u8,
+    pub follower: u8,
+    pub phase: PlaybackSyncPhase,
+    pub phase_error_seconds: f64,
+    pub correction_rate: f32,
+    /// Shared effective BPM both Decks play toward while SYNC is locked.
+    pub target_bpm: f64,
+    /// Half/double-time fold: leader effective BPM = multiple × follower effective BPM.
+    pub multiple: f64,
+}
+
+impl Default for PlaybackSyncSnapshot {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            leader: 0,
+            follower: 1,
+            phase: PlaybackSyncPhase::Disabled,
+            phase_error_seconds: 0.0,
+            correction_rate: 1.0,
+            target_bpm: 0.0,
+            multiple: 1.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackSnapshot {
@@ -283,6 +434,7 @@ pub struct PlaybackSnapshot {
     pub volume: f32,
     pub transport_fade_enabled: bool,
     pub error: String,
+    pub sync: PlaybackSyncSnapshot,
     /// Performance 模式固定的两侧 Deck 状态；普通播放也会反映实际物理 Deck。
     pub decks: [PlaybackDeckSnapshot; 2],
 }
@@ -296,6 +448,15 @@ pub struct PlaybackDeckSnapshot {
     pub desired_playing: bool,
     pub is_playing: bool,
     pub rate: f32,
+    /// Rubber Band worker target already adopted; old-rate PCM may still be queued afterward.
+    pub applied_rate: f32,
+    /// Rate tagged on the PCM currently consumed by the audio callback.
+    pub audible_rate: f32,
+    pub target_rate_revision: u64,
+    pub applied_rate_revision: u64,
+    pub audible_rate_revision: u64,
+    pub discontinuity_revision: u64,
+    pub scratch_held: bool,
     pub buffering: bool,
     /// Current callback-facing PCM cushion in milliseconds.
     pub output_buffer_ms: u64,
@@ -335,8 +496,11 @@ impl Default for PlaybackSnapshot {
             volume: 1.0,
             transport_fade_enabled: false,
             error: String::new(),
+            sync: PlaybackSyncSnapshot::default(),
             decks: std::array::from_fn(|_| PlaybackDeckSnapshot {
                 rate: 1.0,
+                applied_rate: 1.0,
+                audible_rate: 1.0,
                 ..PlaybackDeckSnapshot::default()
             }),
         }
@@ -345,7 +509,30 @@ impl Default for PlaybackSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{PlaybackCommand, PlaybackLevels};
+    use super::{PlaybackCommand, PlaybackFxKind, PlaybackLevels, PlaybackPlatterPhase};
+
+    #[test]
+    fn manual_fx_wire_contract_preserves_three_slots_and_camel_case_kinds() {
+        let command: PlaybackCommand = serde_json::from_str(
+            r#"{"type":"setDeckFx","deck":1,"slots":[{"kind":"bitCrusher","enabled":true,"mix":0.25,"parameter":0.75},{"kind":"hydrant","enabled":false,"mix":0.5,"parameter":0.6},{"kind":"rocket","enabled":true,"mix":1.0,"parameter":0.9}],"pad":0,"beatSeconds":0.48}"#,
+        )
+        .expect("三槽效果器命令应可解析");
+        assert!(matches!(
+            command,
+            PlaybackCommand::SetDeckFx {
+                deck: 1,
+                slots,
+                pad: 0,
+                beat_seconds,
+            } if slots[0].kind == PlaybackFxKind::BitCrusher
+                && slots[0].enabled
+                && slots[1].kind == PlaybackFxKind::Hydrant
+                && slots[2].kind == PlaybackFxKind::Rocket
+                && (slots[0].mix - 0.25).abs() < f32::EPSILON
+                && (slots[0].parameter - 0.75).abs() < f32::EPSILON
+                && (beat_seconds - 0.48).abs() < f32::EPSILON
+        ));
+    }
 
     #[test]
     fn scratch_release_seek_uses_the_camel_case_wire_flag() {
@@ -364,16 +551,27 @@ mod tests {
     }
 
     #[test]
-    fn capacitive_scratch_hold_is_a_distinct_transport_command() {
+    fn loop_wire_contract_targets_a_physical_deck_not_an_ambiguous_track_id() {
         let command: PlaybackCommand =
-            serde_json::from_str(r#"{"type":"setDeckScratchHeld","deck":1,"held":true}"#)
-                .expect("前端 jog touch 命令应可解析");
+            serde_json::from_str(r#"{"type":"toggleDeckLoop","deck":1,"length":2.0}"#)
+                .expect("Deck-addressed LOOP command should parse");
         assert!(matches!(
             command,
-            PlaybackCommand::SetDeckScratchHeld {
+            PlaybackCommand::ToggleDeckLoop {
                 deck: 1,
-                held: true
-            }
+                length,
+            } if (length - 2.0).abs() < f64::EPSILON
+        ));
+
+        let resize: PlaybackCommand =
+            serde_json::from_str(r#"{"type":"resizeDeckLoop","deck":1,"length":4.0}"#)
+                .expect("Deck-addressed LOOP resize should parse");
+        assert!(matches!(
+            resize,
+            PlaybackCommand::ResizeDeckLoop {
+                deck: 1,
+                length,
+            } if (length - 4.0).abs() < f64::EPSILON
         ));
     }
 
@@ -395,16 +593,44 @@ mod tests {
     }
 
     #[test]
-    fn capacitive_scratch_tick_is_a_relative_platter_command() {
-        let command: PlaybackCommand =
-            serde_json::from_str(r#"{"type":"scratchDeck","deck":0,"delta":-0.01}"#)
-                .expect("前端 jog 刮擦 tick 应可解析");
+    fn normalized_platter_wire_contract_unifies_start_move_and_end() {
+        let begin: PlaybackCommand = serde_json::from_str(
+            r#"{"type":"controlDeckPlatter","deck":1,"phase":"start","gestureId":77,"expectedTrackId":9}"#,
+        ).expect("generation-safe platter start should parse");
         assert!(matches!(
-            command,
-            PlaybackCommand::ScratchDeck {
-                deck: 0,
-                delta,
-            } if (delta + 0.01).abs() < f64::EPSILON
+            begin,
+            PlaybackCommand::ControlDeckPlatter {
+                deck: 1,
+                phase: PlaybackPlatterPhase::Start,
+                gesture_id: 77,
+                expected_track_id: Some(9),
+                velocity: 0.0,
+                ..
+            }
+        ));
+        let update: PlaybackCommand = serde_json::from_str(
+            r#"{"type":"controlDeckPlatter","deck":1,"phase":"move","gestureId":77,"sequence":3,"velocity":-2.5}"#,
+        ).expect("generation-safe platter move should parse");
+        assert!(matches!(
+            update,
+            PlaybackCommand::ControlDeckPlatter {
+                phase: PlaybackPlatterPhase::Move,
+                gesture_id: 77,
+                sequence: 3,
+                velocity,
+                ..
+            } if (velocity + 2.5).abs() < f64::EPSILON
+        ));
+        let end: PlaybackCommand = serde_json::from_str(
+            r#"{"type":"controlDeckPlatter","deck":1,"phase":"end","gestureId":77,"sequence":4,"velocity":-1.75}"#,
+        ).expect("platter end should carry the final throw atomically");
+        assert!(matches!(
+            end,
+            PlaybackCommand::ControlDeckPlatter {
+                phase: PlaybackPlatterPhase::End,
+                velocity,
+                ..
+            } if (velocity + 1.75).abs() < f64::EPSILON
         ));
     }
 

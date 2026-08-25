@@ -47,10 +47,27 @@ export function channelFaderGain(value: number): number {
   return x ** 3;
 }
 
-/** DJ 通道 EQ：中位 0 dB，线性扫到 −24 dB / +6 dB。 */
+/** Boost ceiling. Pioneer DJM channel EQ is +6; Mixxx Biquad allows +12. */
+const EQ_BOOST_DB = 9;
+/**
+ * Pioneer DJM / rekordbox EQ mode and Mixxx Biquad channel EQ all stop at −26 dB.
+ * Full-silence kill is isolator mode or a kill switch, not the last few percent of this knob.
+ * Mixxx itself backed the biquad floor off from −36 to −26 for the same reason.
+ */
+const EQ_CUT_DB = -26;
+
+/**
+ * DJ 通道 EQ：中位 0 dB。提升仍按线性 dB 到 +9。
+ * 切除是一条连续的幅度锥形（1 → 10^(−26/20)），前半段轻、末端也不做断崖。
+ * Mixxx Full Kill 前 75% 也是线性增益；它最后 25% 的陡降只掉到 −23 dB，
+ * 并且靠 isolator 真正切死——不能把那一段拉到 −48 dB。
+ */
 export function eqBandDb(value: number): number {
   const x = Math.min(1, Math.max(-1, Number.isFinite(value) ? value : 0));
-  return x < 0 ? x * 24 : x * 6;
+  if (x >= 0) return x * EQ_BOOST_DB;
+  const minGain = 10 ** (EQ_CUT_DB / 20);
+  const gain = 1 + (minGain - 1) * -x;
+  return 20 * Math.log10(gain);
 }
 
 /** 不同曲目永远装入另一侧；同曲恢复和第一首保留当前侧。 */
@@ -127,8 +144,7 @@ export function validateCuePoints(cues: readonly CuePoint[]): string[] {
   return errors;
 }
 
-/** Engine DJ 风格 Quantize：用首拍作为网格原点，把位置吸附到最近一拍。 */
-export function snapCueSeconds(
+function snapGridSeconds(
   positionSec: number,
   bpm: number | null,
   firstBeatSec: number | null,
@@ -145,7 +161,19 @@ export function snapCueSeconds(
   ) return safePosition;
   const interval = 60 / bpm;
   const origin = firstBeatSec;
-  return Math.max(0, origin + Math.round((safePosition - origin) / interval) * interval);
+  const beats = (safePosition - origin) / interval;
+  const snapped = Math.round(beats);
+  return Math.max(0, origin + snapped * interval);
+}
+
+/** Engine DJ 风格 Quantize：用首拍作为网格原点，把位置吸附到最近一拍。 */
+export function snapCueSeconds(
+  positionSec: number,
+  bpm: number | null,
+  firstBeatSec: number | null,
+  enabled: boolean,
+): number {
+  return snapGridSeconds(positionSec, bpm, firstBeatSec, enabled);
 }
 
 export function upsertHotCue(
@@ -183,19 +211,22 @@ export function updateHotCueComment(
   );
 }
 
-/** 滚动波形以播放头为原点做相对刮擦；向右拖波形就是回到更早的位置。 */
-export function scratchPosition(
-  startPosition: number,
-  deltaX: number,
-  width: number,
-  viewportSeconds: number,
-  duration: number,
-): number {
-  const safeStart = Number.isFinite(startPosition) ? Math.max(0, startPosition) : 0;
-  if (!Number.isFinite(deltaX) || !Number.isFinite(width) || width <= 0) return safeStart;
-  const span = Number.isFinite(viewportSeconds) && viewportSeconds > 0 ? viewportSeconds : 12;
-  const end = Number.isFinite(duration) && duration > 0 ? duration : Number.POSITIVE_INFINITY;
-  return Math.min(end, Math.max(0, safeStart - deltaX / width * span));
+/**
+ * A leftover overlay on the positive side while TIME (engine) is already in
+ * silent lead-in is what made −0:05 share the screen with bar 5.
+ *
+ * Keep a landing that is *ahead* of a stale engine (preview already negative,
+ * engine still ≥ 0). Drop the inverse: engine owns the clock the user can read.
+ */
+export function shouldDropSeekPreview(
+  preview: number | null,
+  enginePosition: number,
+  held: boolean,
+): boolean {
+  if (preview === null || held) return false;
+  if (!Number.isFinite(preview) || !Number.isFinite(enginePosition)) return true;
+  if (Math.abs(preview - enginePosition) < 0.08) return true;
+  return preview >= 0 && enginePosition < -0.15;
 }
 
 export function beatGridMarkers(
@@ -222,20 +253,20 @@ export function beatGridMarkers(
   let origin = firstBeatSec % bar;
   if (origin < 0) origin += bar;
 
-  const rangeStart = Number.isFinite(rangeStartSec) ? Math.max(0, rangeStartSec) : 0;
-  const rangeEnd = Number.isFinite(rangeEndSec) ? Math.min(durationSec, rangeEndSec) : durationSec;
-  if (rangeEnd < rangeStart || rangeEnd < origin) return [];
+  const rangeStart = Number.isFinite(rangeStartSec) ? rangeStartSec : 0;
+  const rangeEnd = Number.isFinite(rangeEndSec) ? rangeEndSec : durationSec;
+  if (rangeEnd < rangeStart) return [];
 
-  // 直接从可见窗口的首拍开始，不再为整首歌创建数组后过滤；index 仍以整轨
-  // 首拍为基准，因而 beat/bar 编号不会随窗口滚动而跳回 1。
-  const firstIndex = Math.max(0, Math.ceil((rangeStart - origin) / interval - 1e-9));
-  const lastIndex = Math.max(-1, Math.floor((rangeEnd - origin) / interval + 1e-9));
+  // Mixxx / Rekordbox keep one absolute beat grid through silent lead-in. Negative time is the
+  // same lattice extending backward, not a clamped restart at bar 1.
+  const firstIndex = Math.ceil((rangeStart - origin) / interval - 1e-9);
+  const lastIndex = Math.max(firstIndex - 1, Math.floor((rangeEnd - origin) / interval + 1e-9));
   const count = Math.min(MAX_BEAT_MARKERS, Math.max(0, lastIndex - firstIndex + 1));
   return Array.from({ length: count }, (_, offset) => {
     const index = firstIndex + offset;
     return {
-      positionSec: origin + index * interval,
-      beat: (index % 4 + 1) as 1 | 2 | 3 | 4,
+      positionSec: Math.round((origin + index * interval) * 1e9) / 1e9,
+      beat: (((index % 4 + 4) % 4) + 1) as 1 | 2 | 3 | 4,
       bar: Math.floor(index / 4) + 1,
     };
   });

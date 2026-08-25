@@ -2,14 +2,41 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  performanceDetailWaveformDisplayRgb,
   releaseOverviewWaveformDisplayRgb,
-  vocalGuideWaveformDisplayRgb,
   waveformDisplayRgb,
 } from "../src/lib/waveformPalette";
 
-test("v0.2.41 overview keeps its original saturated RGB values", () => {
-  assert.deepEqual(releaseOverviewWaveformDisplayRgb(255, 31, 80), [255, 31, 80]);
-  assert.deepEqual(releaseOverviewWaveformDisplayRgb(31, 92, 255), [31, 92, 255]);
+test("v0.2.41 overview keeps its identity with restrained saturation", () => {
+  assert.deepEqual(releaseOverviewWaveformDisplayRgb(255, 31, 80), [218, 45, 86]);
+  assert.deepEqual(releaseOverviewWaveformDisplayRgb(31, 92, 255), [46, 97, 234]);
+  assert.deepEqual(releaseOverviewWaveformDisplayRgb(92, 255, 31), [97, 234, 46]);
+
+  const softened = releaseOverviewWaveformDisplayRgb(255, 31, 31);
+  assert.ok(softened[0] > softened[1] && softened[0] > softened[2]);
+  assert.ok(Math.max(...softened) >= 205, "overview should remain clear rather than pale");
+});
+
+test("performance detail shares overview hues but keeps navigation contrast", () => {
+  const inputs = [
+    [255, 31, 31],
+    [31, 255, 31],
+    [31, 31, 255],
+  ] as const;
+  for (const input of inputs) {
+    const overview = releaseOverviewWaveformDisplayRgb(...input);
+    const detail = performanceDetailWaveformDisplayRgb(...input, 1);
+    const overviewDominant = overview.indexOf(Math.max(...overview));
+    const detailDominant = detail.indexOf(Math.max(...detail));
+    assert.equal(detailDominant, overviewDominant, "frequency identity must not change by zoom");
+    assert.ok(Math.max(...detail) >= 225, "detail remains legible below beat-grid lines");
+    const overviewChroma = (Math.max(...overview) - Math.min(...overview)) / Math.max(...overview);
+    const detailChroma = (Math.max(...detail) - Math.min(...detail)) / Math.max(...detail);
+    assert.ok(detailChroma < overviewChroma, "detail lifts secondary bands to avoid RGB confetti");
+  }
+
+  const neutral = performanceDetailWaveformDisplayRgb(255, 255, 255, 1);
+  assert.ok(Math.min(...neutral) >= 175 && Math.max(...neutral) <= 190);
 });
 
 test("waveform palette keeps unmistakable RGB frequency identities", () => {
@@ -63,27 +90,4 @@ test("different frequency balances remain visibly distinct", () => {
 
 test("silent colour input remains black", () => {
   assert.deepEqual(waveformDisplayRgb(0, 0, 0, 1), [0, 0, 0]);
-});
-
-test("vocal guide palette stays vivid from yellow through green", () => {
-  const warm = vocalGuideWaveformDisplayRgb(255, 0, 0, 1);
-  const presence = vocalGuideWaveformDisplayRgb(0, 255, 0, 1);
-  const air = vocalGuideWaveformDisplayRgb(0, 0, 255, 1);
-  const broadband = vocalGuideWaveformDisplayRgb(255, 255, 255, 1);
-
-  for (const colour of [warm, presence, air, broadband]) {
-    assert.ok(Math.max(...colour) >= 230, "guide remains bright");
-    assert.ok(colour[2] <= 90, "guide never drifts into blue/cyan");
-  }
-  assert.ok(warm[0] > warm[1] && warm[1] > warm[2] * 8, "warm vocals read yellow");
-  assert.ok(presence[1] > presence[0] && presence[0] > presence[2] * 5, "presence reads yellow-green");
-  assert.ok(air[1] > air[0] * 4 && air[1] > air[2] * 2, "air reads green");
-});
-
-test("vocal guide brightness is stable because amplitude already controls height", () => {
-  const quiet = vocalGuideWaveformDisplayRgb(90, 210, 35, 0);
-  const loud = vocalGuideWaveformDisplayRgb(90, 210, 35, 1);
-  assert.ok(loud.every((channel, index) => channel >= quiet[index]));
-  assert.ok(loud.every((channel, index) => channel - quiet[index] <= 26));
-  assert.deepEqual(vocalGuideWaveformDisplayRgb(0, 0, 0, 1), [0, 0, 0]);
 });

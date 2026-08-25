@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { CuePoint } from "../src/types";
-import { beatGridMarkers, channelFaderGain, crossfaderChannelGains, eqBandDb, HOT_CUE_COLORS, HOT_CUE_PAD_COUNT, nextLoadedDeckIndex, performanceLoadDeckIndex, removeHotCue, scratchPosition, snapCueSeconds, updateHotCueComment, upsertHotCue, validateCuePoints } from "../src/lib/performanceCues";
+import { beatGridMarkers, channelFaderGain, crossfaderChannelGains, eqBandDb, HOT_CUE_COLORS, HOT_CUE_PAD_COUNT, nextLoadedDeckIndex, performanceLoadDeckIndex, removeHotCue, shouldDropSeekPreview, snapCueSeconds, updateHotCueComment, upsertHotCue, validateCuePoints } from "../src/lib/performanceCues";
 
 const cue = (values: Partial<CuePoint>): CuePoint => ({ id: 1, hot_cue: null, start_ms: 0, end_ms: null, color_index: null, color: "", comment: "", active_loop: false, ...values });
 
@@ -23,6 +23,7 @@ test("beat grid marks each fourth beat as a new bar", () => {
 
 test("beat grid keeps first_beat as the downbeat instead of wrapping it into one beat", () => {
   assert.deepEqual(beatGridMarkers(2.6, 120, 0.6), [
+    { positionSec: 0.1, beat: 4, bar: 0 },
     { positionSec: 0.6, beat: 1, bar: 1 },
     { positionSec: 1.1, beat: 2, bar: 1 },
     { positionSec: 1.6, beat: 3, bar: 1 },
@@ -37,6 +38,26 @@ test("beat grid can generate only a visible window without resetting bar numbers
     { positionSec: 4.6, beat: 2, bar: 3 },
     { positionSec: 5.1, beat: 3, bar: 3 },
   ]);
+});
+
+test("beat grid extends infinitely through silent lead-in with negative bar numbers", () => {
+  const markers = beatGridMarkers(20, 120, 0.1, -4.0, 0.2);
+  assert.deepEqual(
+    markers.filter((marker) => marker.beat === 1),
+    [
+      { positionSec: -3.9, beat: 1, bar: -1 },
+      { positionSec: -1.9, beat: 1, bar: 0 },
+      { positionSec: 0.1, beat: 1, bar: 1 },
+    ],
+  );
+});
+
+test("a leftover positive overlay is dropped once TIME is already in preroll", () => {
+  assert.equal(shouldDropSeekPreview(5, -5, false), true);
+  assert.equal(shouldDropSeekPreview(-5, 5, false), false, "keep a reverse landing until the engine catches up");
+  assert.equal(shouldDropSeekPreview(5, -5, true), false, "an active search still owns the overlay");
+  assert.equal(shouldDropSeekPreview(-5.02, -5, false), true);
+  assert.equal(shouldDropSeekPreview(null, -5, false), false);
 });
 
 test("beat grid does not invent phase or show a rejected low-confidence fit", () => {
@@ -86,13 +107,6 @@ test("hot cue comments are immutable and trimmed", () => {
   assert.equal(updated[0].comment, "drop here");
 });
 
-test("rolling waveform scratch is relative and clamped", () => {
-  assert.equal(scratchPosition(30, 100, 1_000, 12, 180), 28.8);
-  assert.equal(scratchPosition(30, -100, 1_000, 12, 180), 31.2);
-  assert.equal(scratchPosition(0.5, 100, 100, 12, 180), 0);
-  assert.equal(scratchPosition(179, -100, 100, 12, 180), 180);
-});
-
 test("crossfader keeps both decks full at center and cubes only the opposite deck down", () => {
   assert.deepEqual(crossfaderChannelGains(-1), [1, 0]);
   const center = crossfaderChannelGains(0);
@@ -118,13 +132,18 @@ test("channel fader stays quiet through the first half and opens near the top", 
   assert.ok(channelFaderGain(0.5) < channelFaderGain(0.7));
 });
 
-test("DJ EQ maps the knob linearly to -24 dB / +6 dB", () => {
+test("DJ EQ uses a continuous Pioneer/Mixxx audio taper, not a last-quarter dump", () => {
+  const cutGain = (throwAmount: number) => 1 + (10 ** (-26 / 20) - 1) * throwAmount;
+  const cutDb = (throwAmount: number) => 20 * Math.log10(cutGain(throwAmount));
   assert.equal(eqBandDb(0), 0);
-  assert.equal(eqBandDb(1), 6);
-  assert.equal(eqBandDb(-1), -24);
-  assert.equal(eqBandDb(0.5), 3);
-  assert.equal(eqBandDb(-0.5), -12);
-  assert.ok(Math.abs(eqBandDb(-0.2) + 4.8) < 1e-9);
+  assert.equal(eqBandDb(1), 9);
+  assert.ok(Math.abs(eqBandDb(-1) + 26) < 1e-9);
+  assert.equal(eqBandDb(0.5), 4.5);
+  assert.ok(Math.abs(eqBandDb(-0.2) - cutDb(0.2)) < 1e-9);
+  assert.ok(Math.abs(eqBandDb(-0.5) - cutDb(0.5)) < 1e-9);
+  assert.ok(eqBandDb(-0.2) > -2.5, "a slight cut must stay musical");
+  assert.ok(eqBandDb(-0.5) > -7, "halfway cut stays near Mixxx −6 dB, not −24");
+  assert.ok(eqBandDb(-1) - eqBandDb(-0.9) > -12, "last 10% must not dump more than a Pioneer step");
 });
 
 test("cue validation catches duplicate slots and invalid loops", () => {

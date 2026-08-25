@@ -4,11 +4,11 @@
  * 单击搜索结果不碰正在播的。
  */
 
-import { api } from "./api";
 import { playTrack } from "./playTrack";
 import {
   makePendingSongStreamTrack,
   makeSongStreamTrack,
+  preloadStreamTrack,
   setStreamNextTrack,
 } from "./streamTrack";
 import type { SongSource } from "../types";
@@ -91,46 +91,45 @@ let seq = 0;
 
 /**
  * 把一首在线来源送进主播放条。失败时把原因抛给调用方（行上可自行提示）。
+ *
+ * YouTube Music 等平台解析直链可能要等 BotGuard / poToken，不能把唱盘反馈绑在
+ * 这次网络完成上。先用已有封面标题占位装盘，真正的媒体由 PlayerBar 等直链就绪后 load。
  */
 export async function playSongPreview(request: SongPreviewRequest): Promise<void> {
   const mySeq = ++seq;
   const key = sourceKey(request.source);
+  const normalize = (item: SongPreviewItem): SongSource => ({
+    ...item.source,
+    title: item.title || item.source.title,
+    artists: item.artist
+      ? item.artist.split(",").map((part) => part.trim()).filter(Boolean)
+      : item.source.artists,
+  });
+  const track = makeSongStreamTrack(
+    normalize(request),
+    "",
+    request.bypassCache === true,
+  );
+  const following = (request.queue ?? []).map((item) =>
+    makePendingSongStreamTrack(normalize(item)),
+  );
+  for (let index = 0; index < following.length - 1; index += 1) {
+    setStreamNextTrack(following[index], following[index + 1]);
+  }
+  setStreamNextTrack(track, following[0] ?? null);
   publishSongPreviewState({
     phase: "resolving",
     requestId: mySeq,
     sourceKey: key,
     request,
-    trackId: null,
+    trackId: track.id,
     error: "",
     canRetry: false,
   });
+  playTrack(track, request.autoPlay !== false);
   try {
-    const { url, waveform_token: waveformToken } = await api.songPreview(
-      request.source,
-      request.bypassCache === true,
-    );
+    await preloadStreamTrack(track);
     if (seq !== mySeq) return;
-    const normalize = (item: SongPreviewItem): SongSource => ({
-      ...item.source,
-      title: item.title || item.source.title,
-      artists: item.artist
-        ? item.artist.split(",").map((part) => part.trim()).filter(Boolean)
-        : item.source.artists,
-    });
-    const track = makeSongStreamTrack(
-      normalize(request),
-      url,
-      request.bypassCache === true,
-      waveformToken || "",
-    );
-    const following = (request.queue ?? []).map((item) =>
-      makePendingSongStreamTrack(normalize(item)),
-    );
-    for (let index = 0; index < following.length - 1; index += 1) {
-      setStreamNextTrack(following[index], following[index + 1]);
-    }
-    setStreamNextTrack(track, following[0] ?? null);
-    playTrack(track, request.autoPlay !== false);
     publishSongPreviewState({
       phase: "ready",
       requestId: mySeq,
@@ -147,7 +146,7 @@ export async function playSongPreview(request: SongPreviewRequest): Promise<void
         requestId: mySeq,
         sourceKey: key,
         request,
-        trackId: null,
+        trackId: track.id,
         error: errorText(reason),
         canRetry: true,
       });

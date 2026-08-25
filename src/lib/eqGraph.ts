@@ -8,8 +8,8 @@ export const EQ_GRAPH_FREQUENCIES = [
 ] as const;
 
 export const EQ_GRAPH_BAND_COUNT = EQ_GRAPH_FREQUENCIES.length;
-export const EQ_GRAPH_MIN_DB = -24;
-export const EQ_GRAPH_MAX_DB = 6;
+export const EQ_GRAPH_MIN_DB = -26;
+export const EQ_GRAPH_MAX_DB = 9;
 
 export interface EqGraphValues {
   low: number;
@@ -111,4 +111,115 @@ export function eqSpectrumLevelToRatio(level: number): number {
   if (!Number.isFinite(level) || level <= 0) return 0;
   const db = 20 * Math.log10(level);
   return clamp((db + 72) / 72);
+}
+
+/** Mirrors `kdj-player` channel FILTER: bipolar throw, centre detent, RBJ LPF/HPF. */
+export const CHANNEL_FILTER_CENTER_DEADZONE = 0.01;
+export const CHANNEL_FILTER_NEAR_CENTER_Q = Math.SQRT1_2;
+export const CHANNEL_FILTER_RESONANCE_RAMP_START = 0.1;
+export const CHANNEL_FILTER_RESONANCE_RAMP_END = 0.3;
+export const CHANNEL_FILTER_SAMPLE_RATE = 48_000;
+export const CHANNEL_FILTER_RESONANCE_Q = {
+  low: 0.72,
+  medium: 1.85,
+  high: 3.2,
+} as const;
+/** Mirrors `kdj-player`: both throws take the same 0.95 headroom scale. */
+export const CHANNEL_FILTER_RESONANCE_SCALE = 0.95;
+
+export type ChannelFilterResonance = keyof typeof CHANNEL_FILTER_RESONANCE_Q;
+
+export function channelFilterResonanceQ(setting: ChannelFilterResonance | undefined): number {
+  return CHANNEL_FILTER_RESONANCE_Q[setting ?? "high"];
+}
+
+export function effectiveChannelFilterQ(filter: number, selectedQ: number): number {
+  const amount = Math.abs(Number.isFinite(filter) ? filter : 0);
+  const linear = clamp(
+    (amount - CHANNEL_FILTER_RESONANCE_RAMP_START)
+      / (CHANNEL_FILTER_RESONANCE_RAMP_END - CHANNEL_FILTER_RESONANCE_RAMP_START),
+  );
+  const smooth = linear * linear * (3 - 2 * linear);
+  const scaledQ = selectedQ * CHANNEL_FILTER_RESONANCE_SCALE;
+  return CHANNEL_FILTER_NEAR_CENTER_Q
+    + (scaledQ - CHANNEL_FILTER_NEAR_CENTER_Q) * smooth;
+}
+
+export function channelFilterCutoffHz(filter: number): number | null {
+  const value = Number.isFinite(filter) ? Math.min(1, Math.max(-1, filter)) : 0;
+  if (value < -CHANNEL_FILTER_CENTER_DEADZONE) {
+    return 18_000 * (90 / 18_000) ** -value;
+  }
+  if (value > CHANNEL_FILTER_CENTER_DEADZONE) {
+    return 22 * (8_000 / 22) ** value;
+  }
+  return null;
+}
+
+function rbjLowPass(frequency: number, q: number): readonly [number, number, number, number, number] {
+  const omega = 2 * Math.PI * Math.min(CHANNEL_FILTER_SAMPLE_RATE * 0.45, Math.max(20, frequency))
+    / CHANNEL_FILTER_SAMPLE_RATE;
+  const cosine = Math.cos(omega);
+  const alpha = Math.sin(omega) / (2 * Math.max(0.1, q));
+  const a0 = 1 + alpha;
+  return [
+    (1 - cosine) * 0.5 / a0,
+    (1 - cosine) / a0,
+    (1 - cosine) * 0.5 / a0,
+    -2 * cosine / a0,
+    (1 - alpha) / a0,
+  ];
+}
+
+function rbjHighPass(frequency: number, q: number): readonly [number, number, number, number, number] {
+  const omega = 2 * Math.PI * Math.min(CHANNEL_FILTER_SAMPLE_RATE * 0.45, Math.max(20, frequency))
+    / CHANNEL_FILTER_SAMPLE_RATE;
+  const cosine = Math.cos(omega);
+  const alpha = Math.sin(omega) / (2 * Math.max(0.1, q));
+  const a0 = 1 + alpha;
+  return [
+    (1 + cosine) * 0.5 / a0,
+    -(1 + cosine) / a0,
+    (1 + cosine) * 0.5 / a0,
+    -2 * cosine / a0,
+    (1 - alpha) / a0,
+  ];
+}
+
+function biquadGainDb(
+  frequency: number,
+  [b0, b1, b2, a1, a2]: readonly [number, number, number, number, number],
+): number {
+  const omega = 2 * Math.PI * frequency / CHANNEL_FILTER_SAMPLE_RATE;
+  const cos = Math.cos(omega);
+  const sin = Math.sin(omega);
+  const cos2 = Math.cos(2 * omega);
+  const sin2 = Math.sin(2 * omega);
+  const numRe = b0 + b1 * cos + b2 * cos2;
+  const numIm = -(b1 * sin + b2 * sin2);
+  const denRe = 1 + a1 * cos + a2 * cos2;
+  const denIm = -(a1 * sin + a2 * sin2);
+  const mag = Math.hypot(numRe, numIm) / Math.max(1e-12, Math.hypot(denRe, denIm));
+  return 20 * Math.log10(Math.max(mag, 1e-9));
+}
+
+/** Magnitude of the live channel FILTER at one frequency, in dB. Centre detent is flat. */
+export function channelFilterDbAtFrequency(
+  frequency: number,
+  filter: number,
+  selectedQ: number,
+): number {
+  const cutoff = channelFilterCutoffHz(filter);
+  if (cutoff == null || !Number.isFinite(frequency) || frequency <= 0) return 0;
+  const q = effectiveChannelFilterQ(filter, selectedQ);
+  const coefficients = filter < 0 ? rbjLowPass(cutoff, q) : rbjHighPass(cutoff, q);
+  return biquadGainDb(frequency, coefficients);
+}
+
+export function channelFilterDbAtRatio(
+  filter: number,
+  selectedQ: number,
+  ratio: number,
+): number {
+  return channelFilterDbAtFrequency(eqFrequencyAtRatio(ratio), filter, selectedQ);
 }

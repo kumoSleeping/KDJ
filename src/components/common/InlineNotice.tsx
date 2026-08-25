@@ -9,6 +9,9 @@ export interface InlineNoticeProps {
   /** 独占一行时（面板底部、按钮下面）自己撑开一点内边距。 */
   block?: boolean;
   className?: string;
+  /** 默认 warn/出错；成功回执用 ok。 */
+  tone?: "warn" | "ok";
+  chip?: string;
 }
 
 /**
@@ -20,13 +23,20 @@ export interface InlineNoticeProps {
  * 用 warn 芯片而不是红字：红色在这个界面里只给"动作"，
  * 一个区域再多一块红，真正要被按的那个按钮就不显眼了。
  */
-export function InlineNotice({ text, onDismiss, block, className }: InlineNoticeProps) {
+export function InlineNotice({
+  text,
+  onDismiss,
+  block,
+  className,
+  tone = "warn",
+  chip,
+}: InlineNoticeProps) {
   if (!text) return null;
   const classes = ["kd-notice", className ?? ""].filter(Boolean).join(" ");
   return (
     <div className={classes} data-block={block || undefined} role="status">
-      <span className="kd-chip" data-tone="warn">
-        出错
+      <span className="kd-chip" data-tone={tone}>
+        {chip ?? (tone === "ok" ? "完成" : "出错")}
       </span>
       <span className="kd-notice-text kd-muted" title={text}>
         {text}

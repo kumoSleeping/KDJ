@@ -29,6 +29,7 @@
 
 - Frontend: `npm run typecheck` and `npm run tauri:web:build`.
 - Rust: use the narrowest relevant `cargo test`/`cargo check`, then workspace validation when appropriate.
+- Avoid `computer_use` unless GUI automation is strictly necessary; otherwise leave interactive testing to the player.
 - GUI automation on Apple Silicon: launch with `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="$PWD/scripts/tauri-dev-gui-runner.sh" npm run tauri:dev`; the Cargo runner keeps the executable in that current dev session but registers it as `/tmp/KDJ Dev.app` (`com.kdj.dev`), which `computer_use` can target. Before operating it, verify the PID/path and parent session with `ps`/`lsappinfo` and `computer_use.list_apps`; never target `com.kdj.app`, `/Applications/KDJ.app`, or another KDJ process, and stop rather than guess if the identities differ.
 - Pure frontend changes under `src/` or frontend CSS SHOULD use Vite HMR in the running Tauri dev session; do not fully restart the app for each frontend-only edit.
 - Rust backend, `src-tauri/`, Tauri configuration, native capability, or startup changes MUST be validated by fully stopping and restarting `npm run tauri:dev` before reporting completion.

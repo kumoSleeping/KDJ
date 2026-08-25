@@ -31,12 +31,12 @@ where
         if frame_index % 1_024 == 0 && cancelled() {
             bail!("tempo preparation cancelled");
         }
-        stretcher.push([frame[0], frame[1]], |frame, _| {
+        stretcher.push([frame[0], frame[1]], |frame, _, _| {
             output.extend_from_slice(&frame);
             Ok(())
         })?;
     }
-    stretcher.finish(|frame, _| {
+    stretcher.finish(|frame, _, _| {
         output.extend_from_slice(&frame);
         Ok(())
     })?;

@@ -8,7 +8,8 @@ download, accelerator setting, or whole-track analysis exists in the product pat
 The current production stage is **Test B: Redress soft spatial masking**. Performance's existing
 Vocal FX slot is the user control: enabling it mounts the classical stream, and its MIX control
 changes the vocal lane gain in the realtime mixer. There is no separate analysis button or lab
-panel. Original audio remains audible until the short classical buffer is ready.
+panel. STEM does not generate waveform assets, display scans, HTTP waveform payloads, or extra
+Canvas rails. Original audio remains audible until the short classical buffer is ready.
 
 ## Signal contract
 

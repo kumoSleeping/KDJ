@@ -15,6 +15,7 @@ pub enum Platform {
     Qqm,
     Soundcloud,
     Ytm,
+    Youtube,
     Bilibili,
     Local,
 }
@@ -26,6 +27,7 @@ impl Platform {
             Platform::Qqm => "qqm",
             Platform::Soundcloud => "soundcloud",
             Platform::Ytm => "ytm",
+            Platform::Youtube => "youtube",
             Platform::Bilibili => "bilibili",
             Platform::Local => "local",
         }
@@ -37,6 +39,7 @@ impl Platform {
             "qqm" => Some(Platform::Qqm),
             "soundcloud" => Some(Platform::Soundcloud),
             "ytm" => Some(Platform::Ytm),
+            "youtube" => Some(Platform::Youtube),
             "bilibili" => Some(Platform::Bilibili),
             "local" => Some(Platform::Local),
             _ => None,
@@ -51,6 +54,7 @@ impl Platform {
             Platform::Qqm => "qqmusic",
             Platform::Soundcloud => "soundcloud",
             Platform::Ytm => "youtubemusic",
+            Platform::Youtube => "youtube",
             Platform::Bilibili => "bilibili",
             Platform::Local => "local",
         }
@@ -229,12 +233,15 @@ pub struct Account {
     pub avatar: String,
     #[serde(default)]
     pub detail: String,
-    /// false = 该平台没有扫码登录，前端不显示登录按钮。
+    /// false = 该平台没有登录方式，前端不显示登录按钮。
     #[serde(default = "default_true")]
     pub supports_login: bool,
-    /// 登录交互：`qr` 走平台二维码，`oauth` 走浏览器 OAuth 回调。
+    /// 登录交互：`qr` 平台二维码、`oauth` OAuth、`browser` 桌面浏览器会话。
     #[serde(default = "default_login_method")]
     pub login_method: String,
+    /// 当前凭证能力，不把浏览器完整会话与仅限单一 provider 的 OAuth 混成一个“已登录”。
+    #[serde(default)]
+    pub credential_kind: String,
 }
 
 impl Account {
@@ -249,6 +256,7 @@ impl Account {
             detail: detail.to_string(),
             supports_login: true,
             login_method: "qr".into(),
+            credential_kind: String::new(),
         }
     }
 }
@@ -650,6 +658,8 @@ pub struct VideoStreamOption {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoInfo {
+    #[serde(default = "default_video_platform")]
+    pub platform: Platform,
     pub bvid: String,
     pub title: String,
     #[serde(default)]
@@ -666,8 +676,10 @@ pub struct VideoInfo {
     pub logged_in: bool,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct VideoDownloadRequest {
+    #[serde(default = "default_video_platform")]
+    pub platform: Platform,
     #[serde(default)]
     pub url: String,
     #[serde(default)]
@@ -695,6 +707,25 @@ pub struct VideoDownloadRequest {
     pub artist: String,
     #[serde(default)]
     pub cover: String,
+}
+
+impl Default for VideoDownloadRequest {
+    fn default() -> Self {
+        Self {
+            platform: default_video_platform(),
+            url: String::new(),
+            bvid: String::new(),
+            page_index: 0,
+            max_height: default_video_height(),
+            audio_only: false,
+            transcode: false,
+            offset_ms: 0,
+            dest_dir: String::new(),
+            title: String::new(),
+            artist: String::new(),
+            cover: String::new(),
+        }
+    }
 }
 
 /// 「按顺序导出 VJ」入队请求。
@@ -765,6 +796,16 @@ pub struct Track {
     pub bpm_confidence: Option<f64>,
     #[serde(default)]
     pub first_beat: Option<f64>,
+    #[serde(default)]
+    pub beat_origin: Option<f64>,
+    #[serde(default)]
+    pub beat_times: Vec<f64>,
+    #[serde(default)]
+    pub downbeat_origin: Option<f64>,
+    #[serde(default)]
+    pub downbeats: Vec<f64>,
+    #[serde(default)]
+    pub downbeat_confidence: Option<f64>,
     #[serde(default)]
     pub music_key: String,
     #[serde(default)]
@@ -1379,6 +1420,9 @@ fn default_max_entries() -> usize {
 fn default_qr_ttl() -> u32 {
     180
 }
+fn default_video_platform() -> Platform {
+    Platform::Bilibili
+}
 fn default_video_height() -> i64 {
     1080
 }
@@ -1402,7 +1446,15 @@ mod tests {
     #[test]
     fn platform_roundtrips_through_the_wire_names() {
         // 前端发来的就是这些字面量，改了就是契约破坏
-        for name in ["wyy", "qqm", "soundcloud", "ytm", "bilibili", "local"] {
+        for name in [
+            "wyy",
+            "qqm",
+            "soundcloud",
+            "ytm",
+            "youtube",
+            "bilibili",
+            "local",
+        ] {
             let parsed: Platform = serde_json::from_str(&format!("\"{name}\"")).unwrap();
             assert_eq!(
                 serde_json::to_string(&parsed).unwrap(),

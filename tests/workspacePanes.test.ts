@@ -4,11 +4,14 @@ import test from "node:test";
 import {
   createWorkspacePaneState,
   moveWorkspacePane,
+  normalizedWorkspacePaneFractions,
   restoreWorkspacePaneState,
   shouldHandleWorkspaceDelete,
   visibleWorkspacePanes,
 } from "../src/lib/workspacePanes.ts";
 import { virtualDiskGrowthOptions, virtualDiskSizeGib } from "../src/lib/virtualDisk.ts";
+import { normalizeSidebarTreeState } from "../src/lib/sidebarState.ts";
+import { normalizeWorkspaceSession } from "../src/lib/workspaceSession.ts";
 
 test("workspace pane state migrates the old two-slot layout and keeps all three preferences", () => {
   const state = restoreWorkspacePaneState(null, {
@@ -80,6 +83,93 @@ test("multi-pane visibility supports two and three panes without exceeding three
       onelibrary: true,
     }),
     ["local", "search", "onelibrary"],
+  );
+});
+
+test("visible pane fractions always fill the grid while preserving saved ratios", () => {
+  const weights = { local: 0.2, onelibrary: 2.6, search: 0.6 };
+
+  assert.deepEqual(normalizedWorkspacePaneFractions(["local"], weights), [1]);
+  assert.deepEqual(
+    normalizedWorkspacePaneFractions(["local", "search"], weights).map((value) =>
+      Number(value.toFixed(6)),
+    ),
+    [0.5, 1.5],
+  );
+  assert.deepEqual(
+    normalizedWorkspacePaneFractions(["local", "onelibrary", "search"], {
+      local: Number.NaN,
+      onelibrary: 1,
+      search: 1,
+    }),
+    [1, 1, 1],
+  );
+});
+
+test("sidebar expansion persistence keeps explicit closed roots distinct from unseen roots", () => {
+  const state = normalizeSidebarTreeState({
+    local: { expanded: ["/Music/Open"], knownRoots: ["/Music/Open", "/Music/Closed"] },
+    oneLibrary: {
+      open: false,
+      openDevices: ["/Volumes/KDJ"],
+      openFolders: ["/Volumes/KDJ\u00007"],
+      knownDevices: ["/Volumes/KDJ", "/Volumes/Closed"],
+    },
+  });
+
+  assert.deepEqual(state.local.expanded, ["/Music/Open"]);
+  assert.deepEqual(state.local.knownRoots, ["/Music/Open", "/Music/Closed"]);
+  assert.equal(state.oneLibrary.open, false);
+  assert.deepEqual(state.oneLibrary.openFolders, ["/Volumes/KDJ\u00007"]);
+});
+
+test("workspace session validates a restorable online playlist and selected row", () => {
+  const state = normalizeWorkspaceSession({
+    source: "stream",
+    local: { folder: "/Music/Set", selectedId: 42, scrollTop: 512 },
+    oneLibrary: {},
+    stream: {
+      playlist: {
+        platform: "qqm",
+        key: "123",
+        title: "收藏歌单",
+        cover: "",
+        count: 11,
+        is_favorite: false,
+        origin: "collected",
+      },
+      inspectedGroup: "0:qqm:123",
+      scrollTop: 320,
+    },
+  });
+
+  assert.equal(state.source, "stream");
+  assert.equal(state.local.selectedId, 42);
+  assert.equal(state.stream.playlist?.title, "收藏歌单");
+  assert.equal(state.stream.inspectedGroup, "0:qqm:123");
+  assert.equal(state.stream.scrollTop, 320);
+});
+
+test("single-pane intent switches to async content as soon as it becomes available", () => {
+  const state = createWorkspacePaneState(
+    ["local", "onelibrary", "search"],
+    "search",
+  );
+  assert.deepEqual(
+    visibleWorkspacePanes(state, false, {
+      local: true,
+      search: false,
+      onelibrary: false,
+    }),
+    ["local"],
+  );
+  assert.deepEqual(
+    visibleWorkspacePanes(state, false, {
+      local: true,
+      search: true,
+      onelibrary: false,
+    }),
+    ["search"],
   );
 });
 

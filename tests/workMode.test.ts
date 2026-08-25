@@ -32,6 +32,12 @@ test("manager with Performance popped open is a dual-deck session", () => {
   assert.equal(shouldDriveGlobalTransport("manager", true), false);
 });
 
+test("returning to manager restores single-track policy without making the view switch a command", () => {
+  assert.equal(isDualDeckSession("manager", false), false);
+  assert.equal(shouldReconcileSingleTrackOwner("manager", false), true);
+  assert.equal(shouldDriveGlobalTransport("manager", false), true);
+});
+
 test("work mode storage round trips without owning application state", () => {
   const values = new Map<string, string>();
   const storage = {

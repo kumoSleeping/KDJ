@@ -28,8 +28,7 @@ export function stemGainToEq(gain: number): number {
   return clampStemEq(clampStemGain(gain) - STEM_GAIN_UNITY);
 }
 
-/** A first knob move is retained while viewport separation is still running, then applied once
- * the matching track exposes its live model path. */
+/** Apply a gain request only after the matching Deck exposes its live runtime path. */
 export function stemGainRequestReady(
   status: { trackId: number; state: string } | null | undefined,
   trackId: number,

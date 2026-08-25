@@ -13,6 +13,7 @@ import {
   ENGINE_TEMPO_MIN,
   manualSyncBarInput,
   linkedDeckRates,
+  adoptNativeSyncRelation,
   msUntilNextBoundary,
   nearestGridSnap,
   phaseAlignedFollowerPosition,
@@ -45,12 +46,19 @@ test("bar phase is the fraction within the analyzed 4/4 bar", () => {
   assert.equal(barPhase(1, 120, null), null);
 });
 
-test("a waveform click lands at the same bar phase as the playhead", () => {
-  const playhead = 0.1 + 2 / 3;
+test("a waveform click lands at the same quarter-bar phase as the playhead", () => {
+  // 120 BPM, first beat 0.1s, beat = 0.5s. Playhead is 0.2s into a beat.
+  const playhead = 0.1 + 0.2;
   const click = 5.0;
   const landed = barPhaseAlignedSeek(click, playhead, 120, 0.1);
-  almost(barPhase(landed, 120, 0.1) ?? -1, 1 / 3);
-  almost(landed, 0.1 + 2 * 2 + 2 / 3);
+  almost(landed, 4.8);
+});
+
+test("phase-preserving seek uses a beat cell, not a whole numbered bar", () => {
+  // Playhead on a downbeat. Clicking 0.9s into the same bar lands on that beat
+  // line (0.6), instead of jumping back to the yellow bar line (0.1).
+  const landed = barPhaseAlignedSeek(1.0, 0.1, 120, 0.1);
+  almost(landed, 0.6);
 });
 
 test("phase-preserving seek falls back to the raw click without a grid", () => {
@@ -391,4 +399,24 @@ test("half-time bar lock prefers the downbeat over the follower's third beat", (
   assert.ok(lock);
   almost(Math.abs(lock.errorSec), 1.875, 1e-6);
   almost(phaseAlignedFollowerPosition(1.875, 1, lock.errorSec), 0);
+});
+
+test("native SYNC snapshot keeps the half/double fold instead of coercing to 1", () => {
+  assert.deepEqual(
+    adoptNativeSyncRelation({ enabled: true, follower: 0, multiple: 2 }),
+    { base: 0, multiple: 2 },
+  );
+  assert.deepEqual(
+    adoptNativeSyncRelation({ enabled: true, follower: 1, multiple: 0.5 }),
+    { base: 1, multiple: 0.5 },
+  );
+  assert.deepEqual(
+    adoptNativeSyncRelation({ enabled: true, follower: 0, multiple: 1 }),
+    { base: 0, multiple: 1 },
+  );
+  assert.equal(adoptNativeSyncRelation({ enabled: false, follower: 0, multiple: 2 }), null);
+  assert.deepEqual(
+    adoptNativeSyncRelation({ enabled: true, follower: 0 }),
+    { base: 0, multiple: 1 },
+  );
 });

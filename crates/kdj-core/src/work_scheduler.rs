@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-const CLASS_COUNT: usize = 9;
+const CLASS_COUNT: usize = 8;
 const WAIT_POLL: Duration = Duration::from_millis(20);
 
 /// Process-wide output-ring pressure published by the playback coordinator. The hardware callback
@@ -38,7 +38,6 @@ pub enum WorkClass {
     StemInstant,
     StemAudible,
     StemLookAhead,
-    StemViewport,
     InteractiveWaveform,
     NowPlayingAnalysis,
     LibraryAnalysis,
@@ -51,7 +50,6 @@ impl WorkClass {
         Self::StemInstant,
         Self::StemAudible,
         Self::StemLookAhead,
-        Self::StemViewport,
         Self::InteractiveWaveform,
         Self::NowPlayingAnalysis,
         Self::LibraryAnalysis,
@@ -68,11 +66,10 @@ impl WorkClass {
             Self::StemInstant => 1,
             Self::StemAudible => 2,
             Self::StemLookAhead => 3,
-            Self::StemViewport => 4,
-            Self::InteractiveWaveform => 5,
-            Self::NowPlayingAnalysis => 6,
-            Self::LibraryAnalysis => 7,
-            Self::Maintenance => 8,
+            Self::InteractiveWaveform => 4,
+            Self::NowPlayingAnalysis => 5,
+            Self::LibraryAnalysis => 6,
+            Self::Maintenance => 7,
         }
     }
 }
@@ -227,7 +224,7 @@ impl WorkScheduler {
     }
 
     /// Publish the exact number of live STEM Decks. This is pressure state for long background
-    /// analysis only; viewport/model dequeue never treats a lease as queued inference work.
+    /// analysis only; the model dequeue path never treats a lease as queued inference work.
     pub fn set_live_stem_decks(&self, decks: usize) {
         self.live_stem_decks.store(decks, Ordering::Release);
         let mut state = self.state.lock().unwrap();
@@ -401,8 +398,7 @@ fn pressure_allows(pressure: AudioPressure, class: WorkClass) -> bool {
         AudioPressure::Normal => true,
         AudioPressure::Low => !matches!(
             class,
-            WorkClass::StemViewport
-                | WorkClass::InteractiveWaveform
+            WorkClass::InteractiveWaveform
                 | WorkClass::NowPlayingAnalysis
                 | WorkClass::LibraryAnalysis
                 | WorkClass::Maintenance
@@ -514,18 +510,18 @@ mod tests {
     #[test]
     fn queued_work_transitions_to_active_and_releases() {
         let scheduler = WorkScheduler::new(1);
-        let queued = scheduler.queued(WorkClass::StemViewport);
+        let queued = scheduler.queued(WorkClass::StemLookAhead);
         assert_eq!(
-            scheduler.snapshot().classes[WorkClass::StemViewport.index()].queued,
+            scheduler.snapshot().classes[WorkClass::StemLookAhead.index()].queued,
             1
         );
         let active = queued.start();
         let snapshot = scheduler.snapshot();
-        assert_eq!(snapshot.classes[WorkClass::StemViewport.index()].queued, 0);
-        assert_eq!(snapshot.classes[WorkClass::StemViewport.index()].active, 1);
+        assert_eq!(snapshot.classes[WorkClass::StemLookAhead.index()].queued, 0);
+        assert_eq!(snapshot.classes[WorkClass::StemLookAhead.index()].active, 1);
         drop(active);
         assert_eq!(
-            scheduler.snapshot().classes[WorkClass::StemViewport.index()].active,
+            scheduler.snapshot().classes[WorkClass::StemLookAhead.index()].active,
             0
         );
     }
@@ -546,7 +542,6 @@ mod tests {
     fn low_audio_buffer_blocks_optional_work_but_keeps_audible_work_available() {
         let scheduler = WorkScheduler::new(2);
         scheduler.set_audio_pressure(AudioPressure::Low);
-        assert!(!scheduler.allows(WorkClass::StemViewport));
         assert!(!scheduler.allows(WorkClass::InteractiveWaveform));
         assert!(scheduler.allows(WorkClass::StemAudible));
 
@@ -568,18 +563,6 @@ mod tests {
         assert!(!scheduler.allows(WorkClass::StemLookAhead));
         assert!(scheduler.allows(WorkClass::TempoStretch));
         assert!(scheduler.allows(WorkClass::StemAudible));
-    }
-
-    #[test]
-    fn two_audio_decks_do_not_block_viewport_activity() {
-        let scheduler = WorkScheduler::new(1);
-        scheduler.set_live_stem_decks(2);
-        let viewport = scheduler.queued(WorkClass::StemViewport).start();
-        assert_eq!(
-            scheduler.snapshot().classes[WorkClass::StemViewport.index()].active,
-            1
-        );
-        drop(viewport);
     }
 
     #[test]

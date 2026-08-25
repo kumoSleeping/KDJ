@@ -8,15 +8,16 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-#[cfg(test)]
-use kdj_stems::SEGMENT_CONTEXT_SAMPLES;
 use kdj_stems::{
-    begin_live_stem_waveform, publish_live_stem_waveform_block, read_cache_header,
-    seek_cache_frame, stem_tile_cache_key, stem_tile_geometry, try_acquire_instant_admission,
-    InstantAdmissionGuard, InstantStemChunk, InstantStemPool, InstantTrack, StemChunk,
-    StemInferencePool, StemKind, StemWindowCursor, BYTES_PER_FRAME, INSTANT_HANDOFF_FRAMES,
-    INSTANT_HOP_BUDGET_MS, INSTANT_HOP_FRAMES, SAMPLE_RATE as STEM_SAMPLE_RATE,
-    SEGMENT_CORE_SAMPLES, SEGMENT_HANDOFF_SAMPLES, SEGMENT_SAMPLES,
+    begin_live_stem_audio_lease, read_cache_header, seek_cache_frame, stem_tile_cache_key,
+    stem_tile_geometry, try_acquire_instant_admission, InstantAdmissionGuard, InstantStemChunk,
+    InstantStemPool, InstantTrack, StemChunk, StemInferencePool, StemKind, StemWindowCursor,
+    BYTES_PER_FRAME, INSTANT_HANDOFF_FRAMES, INSTANT_HOP_BUDGET_MS, INSTANT_HOP_FRAMES,
+    SAMPLE_RATE as STEM_SAMPLE_RATE,
+};
+#[cfg(test)]
+use kdj_stems::{
+    SEGMENT_CONTEXT_SAMPLES, SEGMENT_CORE_SAMPLES, SEGMENT_HANDOFF_SAMPLES, SEGMENT_SAMPLES,
 };
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use symphonia::core::audio::SampleBuffer;
@@ -26,16 +27,13 @@ use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
+use symphonia::core::units::{Time, TimeBase};
 
-use crate::decode::DecodedTrack;
 use crate::time_stretch::{PitchPreservingStretcher, TempoControl, TimeStretchFrame};
 
 /// Default read-ahead owned by one streaming Deck. The queue stores stereo output frames, so its
 /// memory is fixed regardless of track length (four seconds at 48 kHz is about 1.5 MiB).
 pub const DEFAULT_STREAM_BUFFER_SECONDS: usize = 4;
-/// Publish each completed classical Redress tile to the waveform immediately; the audible ring is filled next.
-const LIVE_STEM_WAVEFORM_PUBLISH_LEAD_MS: u64 = 0;
 /// How many successor tiles stay in flight besides the tile currently being pushed into the ring.
 const LIVE_STEM_LOOKAHEAD_TILES: usize = 2;
 /// A seek invalidates both the raw and post-tempo generations. Refill the destination with dry
@@ -43,8 +41,7 @@ const LIVE_STEM_LOOKAHEAD_TILES: usize = 2;
 /// absorb its measured tail latency or a scheduler pre-emption.
 const LIVE_STEM_SEEK_PREFILL_MS: u64 = 250;
 
-/// One in-memory future classical Redress tile. The worker that publishes its waveform also hands the exact
-/// same PCM to playback, so a visual prefetch is never inferred a second time.
+/// One in-memory future classical Redress tile handed to playback when it becomes audible.
 struct LiveStemLookAhead {
     start: f64,
     result: Arc<Mutex<Option<Result<Arc<StemChunk>>>>>,
@@ -78,6 +75,8 @@ struct StreamPacket<F: Copy> {
     frame: F,
     generation: u64,
     media_advance: f32,
+    tempo_revision: u64,
+    media_time: f64,
 }
 
 /// Number of stems one STEM ring frame carries, in `StemKind::index` order.
@@ -85,54 +84,28 @@ pub const STEM_LANES: usize = 4;
 /// Linear STEM lane gain. `1.0` is the original mix; `2.0` is about +6 dB of STEM EQ boost.
 pub const STEM_GAIN_MAX: f32 = 2.0;
 
-/// Shared transport loop window observed by decode/Rubber Band workers without replacing the source.
+/// One source-time loop window shared with the PCM worker.
 ///
-/// Times are stored as microseconds so the coordinator can update in/out/playhead with atomics
-/// while a running decoder wraps at loop-out instead of waiting for a packet or STEM tile.
+/// The control thread only publishes immutable in/out coordinates and a generation. It never
+/// polls the playhead and never asks the media decoder to seek at loop-out. The pitch-preserving
+/// worker captures this region once and then reads that decoded PCM as a circular source.
 #[derive(Debug)]
 pub struct LoopWindow {
     generation: AtomicU64,
-    wrap_generation: AtomicU64,
     enabled: AtomicU8,
     start_us: AtomicU64,
     length_us: AtomicU64,
-    playhead_us: AtomicU64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LoopWindowSnapshot {
     pub start: f64,
     pub length: f64,
-    pub playhead: f64,
 }
 
 impl LoopWindowSnapshot {
     pub fn end(self) -> f64 {
         self.start + self.length
-    }
-
-    pub fn wrap(self, time: f64) -> f64 {
-        if !(self.length.is_finite() && self.length > 0.0) {
-            return self.start;
-        }
-        let mut relative = (time - self.start) % self.length;
-        if relative < 0.0 {
-            relative += self.length;
-        }
-        self.start + relative
-    }
-
-    /// Seek target when a loop is first engaged. Stay on the live playhead when it is still
-    /// inside the window so auto-loop does not jump; only wrap once the out point is reached.
-    /// A stale playhead left of loop-in (often 0) must not seek to the intro.
-    pub fn engage_target(self) -> f64 {
-        if self.playhead + 1e-4 >= self.end() {
-            self.wrap(self.playhead)
-        } else if self.playhead + 1e-4 < self.start {
-            self.start
-        } else {
-            self.playhead.max(0.0)
-        }
     }
 
     pub fn contains(self, time: f64) -> bool {
@@ -152,61 +125,81 @@ fn us_to_seconds(us: u64) -> f64 {
     us as f64 / 1_000_000.0
 }
 
+pub fn format_loop_clock(seconds: f64) -> String {
+    if !seconds.is_finite() {
+        return "--:--.--".to_string();
+    }
+    let centis = (seconds.max(0.0) * 100.0).round() as i64;
+    let cs = centis.rem_euclid(100);
+    let total_s = centis / 100;
+    let s = total_s.rem_euclid(60);
+    let m = total_s / 60;
+    format!("{m:02}:{s:02}.{cs:02}")
+}
+
 impl LoopWindow {
     pub fn new() -> Self {
         Self {
             generation: AtomicU64::new(0),
-            wrap_generation: AtomicU64::new(0),
             enabled: AtomicU8::new(0),
             start_us: AtomicU64::new(0),
             length_us: AtomicU64::new(0),
-            playhead_us: AtomicU64::new(0),
         }
     }
 
     pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+        self.versioned_snapshot().0
     }
 
-    pub fn wrap_generation(&self) -> u64 {
-        self.wrap_generation.load(Ordering::Acquire)
+    pub fn start(&self) -> f64 {
+        us_to_seconds(self.start_us.load(Ordering::Acquire))
     }
 
-    pub fn note_wrap(&self) {
-        self.wrap_generation.fetch_add(1, Ordering::AcqRel);
+    pub fn length(&self) -> f64 {
+        us_to_seconds(self.length_us.load(Ordering::Acquire))
     }
 
-    pub fn set(&self, start: f64, length: f64, playhead: f64) {
+    pub fn set(&self, start: f64, length: f64) {
         let start = start.max(0.0);
         let length = length.max(0.05);
+        // Odd revisions are writes in progress; readers retry until they observe one even,
+        // unchanged revision around the complete window.
+        self.generation.fetch_add(1, Ordering::AcqRel);
         self.start_us.store(seconds_to_us(start), Ordering::Release);
         self.length_us
             .store(seconds_to_us(length), Ordering::Release);
-        self.playhead_us
-            .store(seconds_to_us(playhead.max(0.0)), Ordering::Release);
         self.enabled.store(1, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn clear(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
         self.enabled.store(0, Ordering::Release);
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn snapshot(&self) -> Option<LoopWindowSnapshot> {
-        if self.enabled.load(Ordering::Acquire) == 0 {
-            return None;
+        self.versioned_snapshot().1
+    }
+
+    pub fn versioned_snapshot(&self) -> (u64, Option<LoopWindowSnapshot>) {
+        loop {
+            let before = self.generation.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let enabled = self.enabled.load(Ordering::Acquire) != 0;
+            let start = us_to_seconds(self.start_us.load(Ordering::Acquire));
+            let length = us_to_seconds(self.length_us.load(Ordering::Acquire));
+            let after = self.generation.load(Ordering::Acquire);
+            if before != after {
+                continue;
+            }
+            let snapshot =
+                (enabled && length > 0.0).then_some(LoopWindowSnapshot { start, length });
+            return (after, snapshot);
         }
-        let start = us_to_seconds(self.start_us.load(Ordering::Acquire));
-        let length = us_to_seconds(self.length_us.load(Ordering::Acquire));
-        if length <= 0.0 {
-            return None;
-        }
-        Some(LoopWindowSnapshot {
-            start,
-            length,
-            playhead: us_to_seconds(self.playhead_us.load(Ordering::Acquire)),
-        })
     }
 }
 
@@ -398,7 +391,7 @@ impl<F: Copy> StreamSource<F> {
         let mut dropped = 0;
         let mut media_advance = 0.0;
         while dropped < frames {
-            let Some((_, advance)) = self.pop_consumer_timed() else {
+            let Some((_, advance, _, _)) = self.pop_consumer_timed() else {
                 break;
             };
             dropped += 1;
@@ -407,20 +400,31 @@ impl<F: Copy> StreamSource<F> {
         (dropped, media_advance)
     }
 
-    fn pop_consumer_timed(&self) -> Option<(F, f32)> {
+    fn pop_consumer_packet(&self) -> Option<StreamPacket<F>> {
         // SAFETY: documented by the type-level invariant above.
         let consumer = unsafe { &mut *self.consumer.get() };
         loop {
             let packet = consumer.pop().ok()?;
             self.counters.consumed.fetch_add(1, Ordering::Release);
             if packet.generation == self.counters.generation.load(Ordering::Acquire) {
-                return Some((packet.frame, packet.media_advance));
+                return Some(packet);
             }
         }
     }
 
+    fn pop_consumer_timed(&self) -> Option<(F, f32, u64, f64)> {
+        self.pop_consumer_packet().map(|packet| {
+            (
+                packet.frame,
+                packet.media_advance,
+                packet.tempo_revision,
+                packet.media_time,
+            )
+        })
+    }
+
     pub(crate) fn pop_consumer(&self) -> Option<F> {
-        self.pop_consumer_timed().map(|(frame, _)| frame)
+        self.pop_consumer_timed().map(|(frame, _, _, _)| frame)
     }
 
     /// Compatibility spelling for module tests. Production callback reads timed packets.
@@ -429,7 +433,7 @@ impl<F: Copy> StreamSource<F> {
         self.pop_consumer()
     }
 
-    pub(crate) fn pop_callback_timed(&self) -> Option<(F, f32)> {
+    pub(crate) fn pop_callback_timed(&self) -> Option<(F, f32, u64, f64)> {
         self.pop_consumer_timed()
     }
 }
@@ -462,6 +466,21 @@ impl<F: Copy> StreamWriter<F> {
         self.push_with_media_advance(frame, 1.0, cancelled)
     }
 
+    pub fn push_at<G>(&mut self, frame: F, media_time: f64, cancelled: G) -> Result<()>
+    where
+        G: Fn() -> bool,
+    {
+        let _ = self.push_with_media_timing_interruptible(
+            frame,
+            1.0,
+            0,
+            media_time,
+            cancelled,
+            || false,
+        )?;
+        Ok(())
+    }
+
     fn push_interruptible<G, I>(&mut self, frame: F, cancelled: G, interrupted: I) -> Result<bool>
     where
         G: Fn() -> bool,
@@ -479,15 +498,66 @@ impl<F: Copy> StreamWriter<F> {
     where
         G: Fn() -> bool,
     {
-        let _ =
-            self.push_with_media_advance_interruptible(frame, media_advance, cancelled, || false)?;
+        let _ = self.push_with_media_timing_interruptible(
+            frame,
+            media_advance,
+            0,
+            f64::NAN,
+            cancelled,
+            || false,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn push_with_media_timing<G>(
+        &mut self,
+        frame: F,
+        media_advance: f32,
+        tempo_revision: u64,
+        media_time: f64,
+        cancelled: G,
+    ) -> Result<()>
+    where
+        G: Fn() -> bool,
+    {
+        let _ = self.push_with_media_timing_interruptible(
+            frame,
+            media_advance,
+            tempo_revision,
+            media_time,
+            cancelled,
+            || false,
+        )?;
         Ok(())
     }
 
     fn push_with_media_advance_interruptible<G, I>(
         &mut self,
+        frame: F,
+        media_advance: f32,
+        cancelled: G,
+        interrupted: I,
+    ) -> Result<bool>
+    where
+        G: Fn() -> bool,
+        I: Fn() -> bool,
+    {
+        self.push_with_media_timing_interruptible(
+            frame,
+            media_advance,
+            0,
+            f64::NAN,
+            cancelled,
+            interrupted,
+        )
+    }
+
+    fn push_with_media_timing_interruptible<G, I>(
+        &mut self,
         mut frame: F,
         media_advance: f32,
+        tempo_revision: u64,
+        media_time: f64,
         cancelled: G,
         interrupted: I,
     ) -> Result<bool>
@@ -511,6 +581,8 @@ impl<F: Copy> StreamWriter<F> {
                 frame,
                 generation: self.generation,
                 media_advance,
+                tempo_revision,
+                media_time,
             }) {
                 Ok(()) => {
                     self.counters.produced.fetch_add(1, Ordering::Release);
@@ -691,6 +763,253 @@ pub struct StreamMetadata {
     pub output_sample_rate: u32,
 }
 
+/// Maximum auto-loop length accepted by the native transport. Keeping this bounded makes the
+/// decoded loop reservoir predictable even for eight-channel STEM frames.
+pub const MAX_TRANSPORT_LOOP_SECONDS: f64 = 32.0;
+pub const MAX_TRANSPORT_LOOP_PCM_BYTES: usize = 96 * 1024 * 1024;
+const LOOP_CAPTURE_HISTORY_SECONDS: f64 = 2.0;
+
+#[derive(Clone, Copy)]
+struct TimedPcm<T: Copy> {
+    frame: T,
+    media_time: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PcmLoopMode {
+    Capture,
+    Replay,
+}
+
+struct PcmLoop<T: Copy> {
+    window: LoopWindowSnapshot,
+    target_frames: usize,
+    frames: Vec<T>,
+    mode: PcmLoopMode,
+    cursor: usize,
+    exit_after_cycle: bool,
+}
+
+/// Mixxx-style read-ahead loop for KDJ's bounded streaming pipeline.
+///
+/// Linear decode remains several seconds ahead and is never seeked by LOOP. This reader retains a
+/// short history so an in-point sampled from the audible callback is still available to the worker,
+/// captures exactly one half-open in/out PCM region, then serves that region circularly. The
+/// untouched raw ring remains parked at loop-out and resumes after the current cycle on LOOP off.
+struct PcmLoopReader<T: Copy> {
+    sample_rate: f64,
+    history_limit: usize,
+    history: std::collections::VecDeque<TimedPcm<T>>,
+    linear_pending: std::collections::VecDeque<TimedPcm<T>>,
+    seen_generation: Option<u64>,
+    active: Option<PcmLoop<T>>,
+}
+
+impl<T: Copy> PcmLoopReader<T> {
+    fn new(output_sample_rate: u32) -> Self {
+        let sample_rate = f64::from(output_sample_rate.max(1));
+        Self {
+            sample_rate,
+            history_limit: (sample_rate * LOOP_CAPTURE_HISTORY_SECONDS).ceil() as usize,
+            history: std::collections::VecDeque::new(),
+            linear_pending: std::collections::VecDeque::new(),
+            seen_generation: None,
+            active: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.history.clear();
+        self.linear_pending.clear();
+        self.seen_generation = None;
+        self.active = None;
+    }
+
+    fn sync(&mut self, generation: Option<u64>, window: Option<LoopWindowSnapshot>) {
+        if self.seen_generation == generation {
+            return;
+        }
+        self.seen_generation = generation;
+        let Some(window) = window else {
+            if let Some(active) = self.active.as_mut() {
+                if active.mode == PcmLoopMode::Replay {
+                    // A DJ loop exits at the next out-point. Jumping straight to decoder look-ahead
+                    // from the middle of a cycle would skip the remainder of the phrase.
+                    active.exit_after_cycle = true;
+                } else {
+                    // The first out-point was never crossed, so disabling is a true no-op.
+                    self.active = None;
+                }
+            }
+            return;
+        };
+
+        let target_frames = (window.length * self.sample_rate).round().max(1.0) as usize;
+        let prior = self.active.take();
+        if let Some(mut active) = prior
+            .filter(|active| (active.window.start - window.start).abs() <= 0.5 / self.sample_rate)
+        {
+            active.window = window;
+            active.target_frames = target_frames;
+            active.exit_after_cycle = false;
+            if active.frames.capacity() < target_frames {
+                active
+                    .frames
+                    .reserve_exact(target_frames.saturating_sub(active.frames.len()));
+            }
+            if active.frames.len() > target_frames {
+                active.frames.truncate(target_frames);
+            }
+            if active.frames.len() >= target_frames {
+                active.mode = PcmLoopMode::Replay;
+                active.cursor %= active.frames.len().max(1);
+            }
+            self.active = Some(active);
+            return;
+        }
+
+        let mut active = PcmLoop {
+            window,
+            target_frames,
+            frames: Vec::with_capacity(target_frames),
+            mode: PcmLoopMode::Capture,
+            cursor: 0,
+            exit_after_cycle: false,
+        };
+        for packet in &self.history {
+            Self::capture_packet(self.sample_rate, &mut active, *packet);
+            if active.frames.len() >= active.target_frames {
+                break;
+            }
+        }
+        if active.frames.len() >= active.target_frames {
+            active.mode = PcmLoopMode::Replay;
+        }
+        self.active = Some(active);
+    }
+
+    fn capture_packet(sample_rate: f64, active: &mut PcmLoop<T>, packet: TimedPcm<T>) {
+        if !packet.media_time.is_finite() || active.frames.len() >= active.target_frames {
+            return;
+        }
+        let tolerance = 0.51 / sample_rate;
+        let expected = active.window.start + active.frames.len() as f64 / sample_rate;
+        if packet.media_time + tolerance < expected {
+            return;
+        }
+        if packet.media_time > expected + tolerance {
+            // Decoder timestamps should be contiguous here. For a sub-frame timestamp hole, hold
+            // the previous sample rather than shortening the loop and accumulating phase error.
+            let fill = active.frames.last().copied().unwrap_or(packet.frame);
+            while active.frames.len() < active.target_frames {
+                let next = active.window.start + active.frames.len() as f64 / sample_rate;
+                if next + tolerance >= packet.media_time {
+                    break;
+                }
+                active.frames.push(fill);
+            }
+        }
+        if active.frames.len() < active.target_frames {
+            active.frames.push(packet.frame);
+        }
+    }
+
+    fn remember_linear(&mut self, packet: TimedPcm<T>) {
+        if !packet.media_time.is_finite() {
+            return;
+        }
+        if self
+            .history
+            .back()
+            .is_some_and(|last| packet.media_time + 1.0 / self.sample_rate < last.media_time)
+        {
+            self.history.clear();
+        }
+        self.history.push_back(packet);
+        while self.history.len() > self.history_limit {
+            self.history.pop_front();
+        }
+    }
+
+    fn pop_linear(&mut self, raw: &StreamSource<T>) -> Option<TimedPcm<T>> {
+        self.linear_pending.pop_front().or_else(|| {
+            raw.pop_consumer_packet().map(|packet| TimedPcm {
+                frame: packet.frame,
+                media_time: packet.media_time,
+            })
+        })
+    }
+
+    fn next(&mut self, raw: &StreamSource<T>) -> Option<TimedPcm<T>> {
+        loop {
+            if let Some(active) = self.active.as_mut() {
+                if active.mode == PcmLoopMode::Capture
+                    && active.frames.len() >= active.target_frames
+                {
+                    active.mode = PcmLoopMode::Replay;
+                    active.cursor = 0;
+                }
+                if active.mode == PcmLoopMode::Replay {
+                    if active.cursor >= active.frames.len() {
+                        if active.exit_after_cycle {
+                            self.active = None;
+                            continue;
+                        }
+                        if active.frames.len() < active.target_frames {
+                            // The user enlarged the active loop. Finish the old cycle, then consume
+                            // untouched linear PCM from the old out-point to the new out-point.
+                            active.mode = PcmLoopMode::Capture;
+                        } else {
+                            active.cursor = 0;
+                        }
+                    }
+                    if active.mode == PcmLoopMode::Replay {
+                        let cursor = active.cursor;
+                        active.cursor += 1;
+                        return Some(TimedPcm {
+                            frame: active.frames[cursor],
+                            media_time: active.window.start + cursor as f64 / self.sample_rate,
+                        });
+                    }
+                }
+            }
+
+            let packet = self.pop_linear(raw)?;
+            self.remember_linear(packet);
+            let Some(active) = self.active.as_mut() else {
+                return Some(packet);
+            };
+            if active.mode != PcmLoopMode::Capture {
+                continue;
+            }
+            if packet.media_time.is_finite()
+                && packet.media_time + 0.5 / self.sample_rate >= active.window.end()
+            {
+                if active.frames.is_empty() {
+                    // The history should always contain an audible in-point. Never fabricate a
+                    // loop from unrelated audio if that invariant is violated.
+                    self.active = None;
+                    return Some(packet);
+                }
+                let fill = *active.frames.last().expect("checked non-empty loop cache");
+                active.frames.resize(active.target_frames, fill);
+                active.mode = PcmLoopMode::Replay;
+                active.cursor = 0;
+                self.linear_pending.push_front(packet);
+                continue;
+            }
+            Self::capture_packet(self.sample_rate, active, packet);
+            return Some(packet);
+        }
+    }
+
+    fn is_replaying(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|active| active.mode == PcmLoopMode::Replay)
+    }
+}
+
 /// Connect a long decoded read-ahead ring to a short post-stretch ring consumed by the audio
 /// callback.
 ///
@@ -730,8 +1049,7 @@ where
     kdj_core::thread_qos::prefer_live_audio();
 
     let mut stretcher = PitchPreservingStretcher::new(tempo.clone(), output_sample_rate)?;
-    let mut seen_loop_generation = loop_window.as_ref().map(|window| window.generation());
-    let mut seen_wrap_generation = loop_window.as_ref().map(|window| window.wrap_generation());
+    let mut loop_reader = PcmLoopReader::new(output_sample_rate);
     let mut seen_seek = seek
         .as_ref()
         .map(StreamSeekControl::generation)
@@ -742,6 +1060,7 @@ where
         }
         if let Some(control) = &seek {
             if control.observe(&mut seen_seek).is_some() {
+                loop_reader.reset();
                 while raw.pop_consumer().is_some() {}
                 output_writer.begin_discontinuity();
                 stretcher.reset()?;
@@ -749,35 +1068,45 @@ where
                 continue;
             }
         }
-        let loop_generation = loop_window.as_ref().map(|window| window.generation());
-        if loop_generation != seen_loop_generation {
-            seen_loop_generation = loop_generation;
-            seen_wrap_generation = loop_window.as_ref().map(|window| window.wrap_generation());
-            while raw.pop_consumer().is_some() {}
-            output_writer.begin_discontinuity();
-            stretcher.reset()?;
-        }
-        let wrap_generation = loop_window.as_ref().map(|window| window.wrap_generation());
-        if wrap_generation != seen_wrap_generation {
-            seen_wrap_generation = wrap_generation;
-            output_writer.begin_discontinuity();
-            stretcher.reset()?;
-        }
-        if let Some(frame) = raw.pop_consumer() {
-            stretcher.push(frame, |output, media_advance| {
-                output_writer.push_with_media_advance(output, media_advance, &*cancelled)
-            })?;
+        let (loop_generation, loop_snapshot) = loop_window
+            .as_ref()
+            .map(|window| {
+                let (generation, snapshot) = window.versioned_snapshot();
+                (Some(generation), snapshot)
+            })
+            .unwrap_or((None, None));
+        loop_reader.sync(loop_generation, loop_snapshot);
+        if let Some(packet) = loop_reader.next(&raw) {
+            stretcher.push_timed(
+                packet.frame,
+                packet.media_time,
+                |output, media_advance, tempo_revision, out_time| {
+                    output_writer.push_with_media_timing(
+                        output,
+                        media_advance,
+                        tempo_revision,
+                        out_time,
+                        &*cancelled,
+                    )
+                },
+            )?;
             continue;
         }
-        if raw.ended() {
+        if raw.ended() && !loop_reader.is_replaying() {
             break;
         }
         // The producer may be decoding a compressed packet or waiting on HTTP. This is a worker
         // only; yielding here keeps it from stealing the UI/audio callback's time slice.
         thread::sleep(Duration::from_millis(1));
     }
-    stretcher.finish(|output, media_advance| {
-        output_writer.push_with_media_advance(output, media_advance, &*cancelled)
+    stretcher.finish_timed(|output, media_advance, tempo_revision, out_time| {
+        output_writer.push_with_media_timing(
+            output,
+            media_advance,
+            tempo_revision,
+            out_time,
+            &*cancelled,
+        )
     })?;
     output_writer.finish();
     decoder_result
@@ -842,7 +1171,7 @@ pub fn decode_source_streaming<F>(
 where
     F: Fn() -> bool + Copy,
 {
-    decode_source_streaming_looped(
+    decode_source_streaming_seekable(
         source,
         hint_extension,
         source_label,
@@ -854,11 +1183,65 @@ where
     )
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DecodeSeekLanding {
+    target: f64,
+    actual: f64,
+}
+
+fn timestamp_seconds(time_base: Option<TimeBase>, timestamp: u64, fallback: f64) -> f64 {
+    let Some(time_base) = time_base else {
+        return fallback;
+    };
+    let time = time_base.calc_time(timestamp);
+    time.seconds as f64 + time.frac
+}
+
+fn landing_output_position(landing: DecodeSeekLanding, source_sample_rate: u32) -> f64 {
+    if source_sample_rate == 0 {
+        0.0
+    } else {
+        ((landing.target - landing.actual).max(0.0) * f64::from(source_sample_rate)).ceil()
+    }
+}
+
+fn logical_media_time(
+    emit_start: f64,
+    next_output_position: f64,
+    clock_base_position: f64,
+    source_sample_rate: u32,
+) -> f64 {
+    if source_sample_rate == 0 {
+        emit_start
+    } else {
+        emit_start + (next_output_position - clock_base_position) / f64::from(source_sample_rate)
+    }
+}
+
+fn apply_decode_landing(
+    landing: DecodeSeekLanding,
+    source_sample_rate: u32,
+    origin: &mut f64,
+    emit_start: &mut f64,
+    source_index: &mut u64,
+    next_output_position: &mut f64,
+    clock_base_position: &mut f64,
+    previous: &mut Option<[f32; 2]>,
+) {
+    *origin = landing.actual;
+    *emit_start = landing.target;
+    *source_index = 0;
+    *next_output_position = landing_output_position(landing, source_sample_rate);
+    *clock_base_position = *next_output_position;
+    *previous = None;
+}
+
 fn seek_format_time(
     format: &mut dyn symphonia::core::formats::FormatReader,
     track_id: u32,
     mut position: f64,
-) -> Result<()> {
+    time_base: Option<TimeBase>,
+) -> Result<DecodeSeekLanding> {
     position = position.max(0.0);
     let mut attempt = position;
     loop {
@@ -869,7 +1252,12 @@ fn seek_format_time(
                 track_id: Some(track_id),
             },
         ) {
-            Ok(_) => return Ok(()),
+            Ok(seeked) => {
+                return Ok(DecodeSeekLanding {
+                    target: attempt,
+                    actual: timestamp_seconds(time_base, seeked.actual_ts, attempt).max(0.0),
+                });
+            }
             Err(error) => {
                 let next = (attempt - SEEK_RETRY_STEP_SECONDS).max(0.0);
                 if next >= attempt {
@@ -883,7 +1271,7 @@ fn seek_format_time(
 
 /// Decode at the hardware sample rate only. Tempo and BPM Sync are deliberately absent from this
 /// API: every non-unit playback rate is applied later by [`run_pitch_preserving_pipeline`].
-pub fn decode_source_streaming_looped<F>(
+pub fn decode_source_streaming_seekable<F>(
     source: Box<dyn StreamingMediaSource>,
     hint_extension: Option<&str>,
     source_label: &str,
@@ -891,7 +1279,7 @@ pub fn decode_source_streaming_looped<F>(
     output_sample_rate: u32,
     mut writer: StreamWriter,
     cancelled: F,
-    loop_window: Option<Arc<LoopWindow>>,
+    seek: Option<StreamSeekControl>,
 ) -> Result<StreamMetadata>
 where
     F: Fn() -> bool + Copy,
@@ -903,49 +1291,12 @@ where
         position,
         output_sample_rate,
         None,
-        |frame| writer.push(frame, cancelled),
+        |frame, media_time| writer.push_at(frame, media_time, cancelled),
         cancelled,
-        loop_window,
+        seek,
     )?;
     writer.finish();
     Ok(metadata)
-}
-
-/// Decodes one bounded region into memory. Used for engine-grade seamless loops: only the loop
-/// slice is rendered, so engaging a loop never waits for a whole-track render.
-pub fn decode_source_region<F>(
-    source: Box<dyn StreamingMediaSource>,
-    hint_extension: Option<&str>,
-    source_label: &str,
-    position: f64,
-    length: f64,
-    output_sample_rate: u32,
-    cancelled: F,
-) -> Result<DecodedTrack>
-where
-    F: Fn() -> bool + Copy,
-{
-    if !length.is_finite() || length <= 0.0 {
-        bail!("loop region length must be positive");
-    }
-    let target_frames = (length * f64::from(output_sample_rate)).ceil() as u64;
-    let mut samples = Vec::with_capacity(target_frames as usize * 2 + 2);
-    decode_source_core(
-        source,
-        hint_extension,
-        source_label,
-        position,
-        output_sample_rate,
-        Some(target_frames),
-        |frame| {
-            samples.push(frame[0]);
-            samples.push(frame[1]);
-            Ok(())
-        },
-        cancelled,
-        None,
-    )?;
-    DecodedTrack::from_interleaved_stereo(samples, output_sample_rate)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -958,10 +1309,10 @@ fn decode_source_core<S, F>(
     output_limit: Option<u64>,
     mut sink: S,
     cancelled: F,
-    loop_window: Option<Arc<LoopWindow>>,
+    seek: Option<StreamSeekControl>,
 ) -> Result<StreamMetadata>
 where
-    S: FnMut([f32; 2]) -> Result<()>,
+    S: FnMut([f32; 2], f64) -> Result<()>,
     F: Fn() -> bool + Copy,
 {
     if output_sample_rate == 0 {
@@ -1008,82 +1359,56 @@ where
     {
         position = position.min(limit - SEEK_END_MARGIN_SECONDS);
     }
-    if position > 0.0 {
-        seek_format_time(&mut *format, track_id, position)?;
-        decoder.reset();
-    }
-    let mut origin = position;
-    let mut seen_loop_generation = loop_window.as_ref().map(|window| window.generation());
-
     let mut source_sample_rate = params.sample_rate.filter(|rate| *rate > 0).unwrap_or(0);
+    let initial_landing = if position > 0.0 {
+        let landing = seek_format_time(&mut *format, track_id, position, params.time_base)?;
+        decoder.reset();
+        landing
+    } else {
+        DecodeSeekLanding {
+            target: 0.0,
+            actual: 0.0,
+        }
+    };
+    let mut origin = initial_landing.actual;
+    let mut emit_start = initial_landing.target;
+    let mut seen_seek = seek
+        .as_ref()
+        .map(StreamSeekControl::generation)
+        .unwrap_or(0);
+
     let mut conversion: Option<(SampleBuffer<f32>, u64, usize, u32)> = None;
     let mut previous: Option<[f32; 2]> = None;
     let mut source_index = 0u64;
-    let mut next_output_position = 0.0f64;
+    let mut next_output_position = landing_output_position(initial_landing, source_sample_rate);
+    let mut clock_base_position = next_output_position;
     let mut produced = 0u64;
 
     'packets: loop {
         if cancelled() {
             bail!("stream preparation cancelled");
         }
-        let loop_generation = loop_window.as_ref().map(|window| window.generation());
-        if loop_generation != seen_loop_generation {
-            seen_loop_generation = loop_generation;
-            if let Some(snap) = loop_window.as_ref().and_then(|window| window.snapshot()) {
-                let absolute = if source_sample_rate > 0 {
-                    origin + source_index as f64 / f64::from(source_sample_rate)
-                } else {
-                    origin
-                };
-                // Seek only when this producer is already outside the window. Using the stored
-                // playhead (often 0) jumped the audible stream to the intro on every Loop click.
-                if !snap.contains(absolute) {
-                    seek_format_time(&mut *format, track_id, snap.start)?;
-                    decoder.reset();
-                    if absolute + 1e-4 >= snap.end() {
-                        if let Some(window) = loop_window.as_ref() {
-                            window.note_wrap();
-                        }
-                    }
-                    origin = snap.start;
-                    source_index = 0;
-                    next_output_position = 0.0;
-                    previous = None;
-                }
-            }
-        } else if let Some(snap) = loop_window.as_ref().and_then(|window| window.snapshot()) {
-            if source_sample_rate > 0 {
-                let absolute = origin + source_index as f64 / f64::from(source_sample_rate);
-                if absolute + 1e-4 >= snap.end() {
-                    seek_format_time(&mut *format, track_id, snap.start)?;
-                    decoder.reset();
-                    if let Some(window) = loop_window.as_ref() {
-                        window.note_wrap();
-                    }
-                    origin = snap.start;
-                    source_index = 0;
-                    next_output_position = 0.0;
-                    previous = None;
-                    continue;
-                }
+        if let Some(control) = &seek {
+            if let Some(at) = control.observe(&mut seen_seek) {
+                let landing = seek_format_time(&mut *format, track_id, at, params.time_base)?;
+                decoder.reset();
+                apply_decode_landing(
+                    landing,
+                    source_sample_rate,
+                    &mut origin,
+                    &mut emit_start,
+                    &mut source_index,
+                    &mut next_output_position,
+                    &mut clock_base_position,
+                    &mut previous,
+                );
+                continue;
             }
         }
         let packet = match format.next_packet() {
             Ok(packet) => packet,
             Err(Error::IoError(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
-                if let Some(snap) = loop_window.as_ref().and_then(|window| window.snapshot()) {
-                    seek_format_time(&mut *format, track_id, snap.start)?;
-                    decoder.reset();
-                    if let Some(window) = loop_window.as_ref() {
-                        window.note_wrap();
-                    }
-                    origin = snap.start;
-                    source_index = 0;
-                    next_output_position = 0.0;
-                    previous = None;
-                    continue;
-                }
-                break;
+                break
             }
             Err(Error::ResetRequired) => {
                 decoder.reset();
@@ -1110,6 +1435,9 @@ where
         if source_sample_rate != 0 && source_sample_rate != spec.rate {
             bail!("sample rate changed within one track");
         }
+        if source_sample_rate == 0 {
+            next_output_position = ((emit_start - origin).max(0.0) * f64::from(spec.rate)).ceil();
+        }
         source_sample_rate = spec.rate;
         let channels = spec.channels.count().max(1);
         let required_capacity = decoded.capacity() as u64;
@@ -1130,21 +1458,6 @@ where
         buffer.copy_interleaved_ref(decoded);
         let step = f64::from(source_sample_rate) / f64::from(output_sample_rate);
         for input in buffer.samples().chunks_exact(channels) {
-            if let Some(snap) = loop_window.as_ref().and_then(|window| window.snapshot()) {
-                let absolute = origin + source_index as f64 / f64::from(source_sample_rate);
-                if absolute + 1e-4 >= snap.end() {
-                    seek_format_time(&mut *format, track_id, snap.start)?;
-                    decoder.reset();
-                    if let Some(window) = loop_window.as_ref() {
-                        window.note_wrap();
-                    }
-                    origin = snap.start;
-                    source_index = 0;
-                    next_output_position = 0.0;
-                    previous = None;
-                    continue 'packets;
-                }
-            }
             let current = if channels == 1 {
                 [finite(input[0]), finite(input[0])]
             } else {
@@ -1154,10 +1467,19 @@ where
                 while next_output_position <= source_index as f64 {
                     let fraction =
                         (next_output_position - (source_index - 1) as f64).clamp(0.0, 1.0) as f32;
-                    sink([
-                        before[0] + (current[0] - before[0]) * fraction,
-                        before[1] + (current[1] - before[1]) * fraction,
-                    ])?;
+                    let media_time = logical_media_time(
+                        emit_start,
+                        next_output_position,
+                        clock_base_position,
+                        source_sample_rate,
+                    );
+                    sink(
+                        [
+                            before[0] + (current[0] - before[0]) * fraction,
+                            before[1] + (current[1] - before[1]) * fraction,
+                        ],
+                        media_time,
+                    )?;
                     produced = produced.saturating_add(1);
                     if output_limit.is_some_and(|limit| produced >= limit) {
                         break 'packets;
@@ -1191,23 +1513,23 @@ pub fn decode_file_streaming<F>(
 where
     F: Fn() -> bool + Copy,
 {
-    decode_file_streaming_looped(path, position, output_sample_rate, writer, cancelled, None)
+    decode_file_streaming_seekable(path, position, output_sample_rate, writer, cancelled, None)
 }
 
-pub fn decode_file_streaming_looped<F>(
+pub fn decode_file_streaming_seekable<F>(
     path: &Path,
     position: f64,
     output_sample_rate: u32,
     writer: StreamWriter,
     cancelled: F,
-    loop_window: Option<Arc<LoopWindow>>,
+    seek: Option<StreamSeekControl>,
 ) -> Result<StreamMetadata>
 where
     F: Fn() -> bool + Copy,
 {
     let file = File::open(path).with_context(|| format!("open audio: {}", path.display()))?;
     let extension = path.extension().and_then(|value| value.to_str());
-    decode_source_streaming_looped(
+    decode_source_streaming_seekable(
         Box::new(file),
         extension,
         &path.display().to_string(),
@@ -1215,82 +1537,8 @@ where
         output_sample_rate,
         writer,
         cancelled,
-        loop_window,
+        seek,
     )
-}
-
-/// File adapter for loop slices from local media.
-pub fn decode_file_region<F>(
-    path: &Path,
-    position: f64,
-    length: f64,
-    output_sample_rate: u32,
-    cancelled: F,
-) -> Result<DecodedTrack>
-where
-    F: Fn() -> bool + Copy,
-{
-    let file = File::open(path).with_context(|| format!("open audio: {}", path.display()))?;
-    let extension = path.extension().and_then(|value| value.to_str());
-    decode_source_region(
-        Box::new(file),
-        extension,
-        &path.display().to_string(),
-        position,
-        length,
-        output_sample_rate,
-        cancelled,
-    )
-}
-
-/// Feed a decoded loop slice forever into a raw pipeline ring. The surrounding
-/// [`run_pitch_preserving_pipeline`] owns Rubber Band and the short audible ring, so changing TEMPO
-/// during a LOOP does not fall back to the old pitch-shifting callback cursor.
-pub fn stream_decoded_loop<F>(
-    track: Arc<DecodedTrack>,
-    start_frame: u64,
-    mut writer: StreamWriter,
-    cancelled: F,
-) -> Result<StreamMetadata>
-where
-    F: Fn() -> bool,
-{
-    let frames = track.frames();
-    if frames == 0 {
-        bail!("loop slice is empty");
-    }
-    let samples = track.interleaved();
-    let mut frame = (start_frame as usize) % frames;
-    loop {
-        if cancelled() {
-            bail!("loop stream preparation cancelled");
-        }
-        writer.push([samples[frame * 2], samples[frame * 2 + 1]], &cancelled)?;
-        frame += 1;
-        if frame == frames {
-            frame = 0;
-        }
-    }
-}
-
-/// Number of 44.1 kHz model frames to render before spending CPU on the first RGB waveform tile.
-/// It intentionally leaves headroom in the four-second output ring, so this function never waits
-/// for the callback to consume frames when a Deck is paused.
-fn initial_stem_frames_before_waveform_publish(
-    output_sample_rate: u32,
-    buffered_output_frames: u64,
-    available_source_frames: usize,
-) -> usize {
-    if output_sample_rate == 0 || available_source_frames == 0 {
-        return 0;
-    }
-    let target_output_frames =
-        u64::from(output_sample_rate).saturating_mul(LIVE_STEM_WAVEFORM_PUBLISH_LEAD_MS) / 1_000;
-    let missing_output_frames = target_output_frames.saturating_sub(buffered_output_frames);
-    let source_frames = ((missing_output_frames as f64 * f64::from(STEM_SAMPLE_RATE))
-        / f64::from(output_sample_rate))
-    .ceil() as usize;
-    source_frames.min(available_source_frames)
 }
 
 /// Runs the classical Redress background-cache path ahead of one live Deck.
@@ -1310,7 +1558,6 @@ pub fn decode_live_stem_streaming<F>(
     expected_epoch: u64,
     mut writer: StreamWriter<StemFrame>,
     cancelled: F,
-    loop_window: Option<Arc<LoopWindow>>,
     seek: Option<StreamSeekControl>,
 ) -> Result<StreamMetadata>
 where
@@ -1319,8 +1566,7 @@ where
     if output_sample_rate == 0 {
         bail!("output sample rate must be non-zero");
     }
-    let _wave_guard =
-        begin_live_stem_waveform(track_id, expected_epoch, position.max(0.0), duration);
+    let _audio_lease = begin_live_stem_audio_lease();
     let stride = live_stem_output_stride_frames();
     let stride_seconds = stride as f64 / f64::from(STEM_SAMPLE_RATE);
     let hop_epoch = Arc::new(AtomicU64::new(0));
@@ -1354,7 +1600,7 @@ where
             requested_start,
             cached_core_start,
             cached_offset,
-            "live STEM reused a completed viewport tile"
+            "live STEM reused a completed audio tile"
         );
         (cached_core_start, cached_offset, chunk)
     } else {
@@ -1397,120 +1643,42 @@ where
         }
         _ => None,
     };
-    let mut resampler = LiveStemResampler::new(output_sample_rate);
+    let mut resampler = LiveStemResampler::new(output_sample_rate, chunk_start);
     let mut remaining_source_frames = if duration.is_finite() && duration > 0.0 {
         ((duration - requested_start).max(0.0) * f64::from(STEM_SAMPLE_RATE)).ceil() as u64
     } else {
         u64::MAX
     };
-    let mut seen_loop_generation = loop_window.as_ref().map(|window| window.generation());
-    if let Some(snap) = loop_window.as_ref().and_then(|window| window.snapshot()) {
-        remaining_source_frames =
-            remaining_source_frames.min(loop_source_frames_remaining(snap, requested_start));
-    }
     let first_frames = remaining_source_frames.min((stride - first_offset) as u64) as usize;
-    // Previously this pushed the entire first model tile before publishing it. On a paused Deck
-    // the four-second ring fills and `StreamWriter::push` waits forever, so the visual lanes did
-    // not exist until the user pressed Play. Fill a safe audio cushion, publish the already-ready
-    // tile, then continue filling; visual availability is no longer coupled to transport drain.
-    let audio_prefix = initial_stem_frames_before_waveform_publish(
-        output_sample_rate,
-        writer.buffered_frames(),
-        first_frames,
-    );
-    let mut hold_chunk_start = false;
+    let mut hold_chunk_start;
     let mut look_aheads = Vec::new();
-    if audio_prefix > 0 {
-        let (_, outcome) = push_stem_range(
-            &current,
-            first_offset,
-            audio_prefix,
-            chunk_start,
-            loop_window.as_ref(),
-            seen_loop_generation,
-            &mut resampler,
-            &mut writer,
-            cancelled,
-            || stem_seek_pending(seek.as_ref(), seen_seek),
-        )?;
-        if matches!(outcome, StemPushOutcome::Interrupted) {
-            hold_chunk_start = true;
-        } else {
-            hold_chunk_start = live_stem_apply_loop_outcome(
-                loop_window.as_ref(),
-                outcome,
-                &mut chunk_start,
-                &mut remaining_source_frames,
-                &mut look_aheads,
-                &mut resampler,
-                duration,
-            );
-            if hold_chunk_start {
-                seen_loop_generation = loop_window.as_ref().map(|window| window.generation());
-            }
-        }
-    }
-    if !hold_chunk_start {
-        publish_live_stem_hop_waveform(
-            track_id,
-            expected_epoch,
-            chunk_start,
-            duration,
-            current.stems(),
-        );
-        if loop_window
-            .as_ref()
-            .and_then(|window| window.snapshot())
-            .is_none()
-        {
-            keep_live_stem_look_ahead(
-                path,
-                track_id,
-                expected_epoch,
-                chunk_start,
-                stride_seconds,
-                duration,
-                Arc::clone(&pool),
-                Arc::clone(&hop_epoch),
-                hop_expected,
-                cancelled,
-                &mut look_aheads,
-            )?;
-        }
-        if audio_prefix < first_frames {
-            let (pushed, outcome) = push_stem_range(
-                &current,
-                first_offset + audio_prefix,
-                first_frames - audio_prefix,
-                chunk_start,
-                loop_window.as_ref(),
-                seen_loop_generation,
-                &mut resampler,
-                &mut writer,
-                cancelled,
-                || stem_seek_pending(seek.as_ref(), seen_seek),
-            )?;
-            if matches!(outcome, StemPushOutcome::Interrupted) {
-                hold_chunk_start = true;
-            } else {
-                hold_chunk_start = live_stem_apply_loop_outcome(
-                    loop_window.as_ref(),
-                    outcome,
-                    &mut chunk_start,
-                    &mut remaining_source_frames,
-                    &mut look_aheads,
-                    &mut resampler,
-                    duration,
-                );
-                if hold_chunk_start {
-                    seen_loop_generation = loop_window.as_ref().map(|window| window.generation());
-                } else {
-                    remaining_source_frames = remaining_source_frames.saturating_sub(pushed as u64);
-                }
-            }
-        } else {
-            remaining_source_frames = remaining_source_frames.saturating_sub(first_frames as u64);
-        }
+    keep_live_stem_look_ahead(
+        path,
+        track_id,
+        chunk_start,
+        stride_seconds,
+        duration,
+        Arc::clone(&pool),
+        Arc::clone(&hop_epoch),
+        hop_expected,
+        cancelled,
+        &mut look_aheads,
+    )?;
+    let (pushed, outcome) = push_stem_range(
+        &current,
+        first_offset,
+        first_frames,
+        chunk_start,
+        &mut resampler,
+        &mut writer,
+        cancelled,
+        || stem_seek_pending(seek.as_ref(), seen_seek),
+    )?;
+    if matches!(outcome, StemPushOutcome::Interrupted) {
+        hold_chunk_start = true;
+    } else {
+        hold_chunk_start = false;
+        remaining_source_frames = remaining_source_frames.saturating_sub(pushed as u64);
     }
 
     while remaining_source_frames > 0 {
@@ -1522,22 +1690,18 @@ where
                 hop_expected = hop_expected.wrapping_add(1);
                 hop_epoch.store(hop_expected, Ordering::Release);
                 look_aheads.clear();
-                resampler.reset();
                 writer.begin_discontinuity();
                 wait_for_pipeline_seek_ack(seek.as_ref(), seen_seek, cancelled, || {
                     stem_seek_pending(seek.as_ref(), seen_seek)
                 })?;
                 cursor = StemWindowCursor::new();
                 chunk_start = at.max(0.0);
+                resampler.reset(chunk_start);
                 remaining_source_frames = if duration.is_finite() && duration > 0.0 {
                     ((duration - chunk_start).max(0.0) * f64::from(STEM_SAMPLE_RATE)).ceil() as u64
                 } else {
                     u64::MAX
                 };
-                if let Some(snap) = loop_window.as_ref().and_then(|window| window.snapshot()) {
-                    remaining_source_frames = remaining_source_frames
-                        .min(loop_source_frames_remaining(snap, chunk_start));
-                }
                 let frames = remaining_source_frames.min(stride as u64) as usize;
                 let key = stem_tile_cache_key(path, chunk_start);
                 let cached_refinement = pool.cached_for_key(&key);
@@ -1564,8 +1728,6 @@ where
                             &ticket,
                             chunk_start,
                             frames,
-                            loop_window.as_ref(),
-                            seen_loop_generation,
                             &mut resampler,
                             &mut writer,
                             Arc::clone(&hop_epoch),
@@ -1612,45 +1774,24 @@ where
                     hold_chunk_start = true;
                     continue;
                 }
-                if !matches!(bridge.outcome, StemPushOutcome::Complete) {
-                    hold_chunk_start = live_stem_apply_loop_outcome(
-                        loop_window.as_ref(),
-                        bridge.outcome,
-                        &mut chunk_start,
-                        &mut remaining_source_frames,
-                        &mut look_aheads,
-                        &mut resampler,
-                        duration,
-                    );
-                    continue;
-                }
-                if loop_window
-                    .as_ref()
-                    .and_then(|window| window.snapshot())
-                    .is_none()
-                {
-                    keep_live_stem_look_ahead(
-                        path,
-                        track_id,
-                        expected_epoch,
-                        chunk_start,
-                        stride_seconds,
-                        duration,
-                        Arc::clone(&pool),
-                        Arc::clone(&hop_epoch),
-                        hop_expected,
-                        cancelled,
-                        &mut look_aheads,
-                    )?;
-                }
+                keep_live_stem_look_ahead(
+                    path,
+                    track_id,
+                    chunk_start,
+                    stride_seconds,
+                    duration,
+                    Arc::clone(&pool),
+                    Arc::clone(&hop_epoch),
+                    hop_expected,
+                    cancelled,
+                    &mut look_aheads,
+                )?;
                 let (refined_pushed, outcome) = if bridge.pushed < frames {
                     push_stem_range(
                         &current,
                         bridge.pushed,
                         frames - bridge.pushed,
                         chunk_start,
-                        loop_window.as_ref(),
-                        seen_loop_generation,
                         &mut resampler,
                         &mut writer,
                         cancelled,
@@ -1663,57 +1804,14 @@ where
                     hold_chunk_start = true;
                     continue;
                 }
-                publish_live_stem_hop_waveform(
-                    track_id,
-                    expected_epoch,
-                    chunk_start,
-                    duration,
-                    current.stems(),
-                );
                 remaining_source_frames =
                     remaining_source_frames.saturating_sub((bridge.pushed + refined_pushed) as u64);
                 hold_chunk_start = false;
                 continue;
             }
         }
-        let loop_generation = loop_window.as_ref().map(|window| window.generation());
-        if loop_generation != seen_loop_generation {
-            seen_loop_generation = loop_generation;
-            if let Some(snap) = loop_window.as_ref().and_then(|window| window.snapshot()) {
-                if stem_tile_frame(chunk_start, snap.start).is_some() || snap.contains(chunk_start)
-                {
-                    remaining_source_frames =
-                        loop_source_frames_remaining(snap, chunk_start.max(snap.start)).max(1);
-                } else {
-                    hold_chunk_start = live_stem_apply_loop_outcome(
-                        loop_window.as_ref(),
-                        StemPushOutcome::LoopEnd,
-                        &mut chunk_start,
-                        &mut remaining_source_frames,
-                        &mut look_aheads,
-                        &mut resampler,
-                        duration,
-                    ) || hold_chunk_start;
-                }
-            }
-        }
         if !hold_chunk_start {
-            if let Some(snap) = loop_window.as_ref().and_then(|window| window.snapshot()) {
-                let next_start = chunk_start + stride as f64 / f64::from(STEM_SAMPLE_RATE);
-                if next_start + 1e-4 >= snap.end() {
-                    chunk_start = snap.start;
-                    look_aheads.clear();
-                    remaining_source_frames = loop_source_frames_remaining(snap, snap.start).max(1);
-                    resampler.reset();
-                    if let Some(window) = loop_window.as_ref() {
-                        window.note_wrap();
-                    }
-                } else {
-                    chunk_start = next_start;
-                }
-            } else {
-                chunk_start += stride as f64 / f64::from(STEM_SAMPLE_RATE);
-            }
+            chunk_start += stride as f64 / f64::from(STEM_SAMPLE_RATE);
         }
         hold_chunk_start = false;
         if let Some(at) = live_stem_skip_behind_start(
@@ -1724,32 +1822,18 @@ where
             stride_seconds,
             duration,
         ) {
-            publish_cached_skipped_stem_waveforms(
-                path,
-                track_id,
-                expected_epoch,
-                chunk_start,
-                at,
-                stride_seconds,
-                duration,
-                &pool,
-            );
             hop_expected = hop_expected.wrapping_add(1);
             hop_epoch.store(hop_expected, Ordering::Release);
             look_aheads.clear();
-            resampler.reset();
             writer.begin_discontinuity();
             cursor = StemWindowCursor::new();
             chunk_start = at;
+            resampler.reset(chunk_start);
             remaining_source_frames = if duration.is_finite() && duration > 0.0 {
                 ((duration - chunk_start).max(0.0) * f64::from(STEM_SAMPLE_RATE)).ceil() as u64
             } else {
                 u64::MAX
             };
-            if let Some(snap) = loop_window.as_ref().and_then(|window| window.snapshot()) {
-                remaining_source_frames =
-                    remaining_source_frames.min(loop_source_frames_remaining(snap, chunk_start));
-            }
         }
         let next_frames = remaining_source_frames.min(stride as u64) as usize;
         let next = if let Some(tile) = take_look_ahead_for(&mut look_aheads, chunk_start) {
@@ -1798,33 +1882,24 @@ where
                 Err(error) => return Err(error),
             }
         };
-        let looping = loop_window
-            .as_ref()
-            .and_then(|window| window.snapshot())
-            .is_some();
-        if !looping {
-            keep_live_stem_look_ahead(
-                path,
-                track_id,
-                expected_epoch,
-                chunk_start,
-                stride_seconds,
-                duration,
-                Arc::clone(&pool),
-                Arc::clone(&hop_epoch),
-                hop_expected,
-                cancelled,
-                &mut look_aheads,
-            )?;
-        }
+        keep_live_stem_look_ahead(
+            path,
+            track_id,
+            chunk_start,
+            stride_seconds,
+            duration,
+            Arc::clone(&pool),
+            Arc::clone(&hop_epoch),
+            hop_expected,
+            cancelled,
+            &mut look_aheads,
+        )?;
         let (pushed, outcome) = push_stem_overlap_range(
             &current,
             &next,
             0,
             next_frames,
             chunk_start,
-            loop_window.as_ref(),
-            seen_loop_generation,
             &mut resampler,
             &mut writer,
             cancelled,
@@ -1834,43 +1909,12 @@ where
             hold_chunk_start = true;
             continue;
         }
-        publish_live_stem_hop_waveform(
-            track_id,
-            expected_epoch,
-            chunk_start,
-            duration,
-            next.stems(),
-        );
         current = next;
-        if live_stem_apply_loop_outcome(
-            loop_window.as_ref(),
-            outcome,
-            &mut chunk_start,
-            &mut remaining_source_frames,
-            &mut look_aheads,
-            &mut resampler,
-            duration,
-        ) {
-            seen_loop_generation = loop_window.as_ref().map(|window| window.generation());
-            hold_chunk_start = true;
-            continue;
-        }
         remaining_source_frames = remaining_source_frames.saturating_sub(pushed as u64);
         if remaining_source_frames == 0 {
-            if let Some(snap) = loop_window.as_ref().and_then(|window| window.snapshot()) {
-                chunk_start = snap.start;
-                remaining_source_frames = loop_source_frames_remaining(snap, snap.start).max(1);
-                look_aheads.clear();
-                resampler.reset();
-                if let Some(window) = loop_window.as_ref() {
-                    window.note_wrap();
-                }
-                hold_chunk_start = true;
-                continue;
-            }
             break;
         }
-        if pushed < stride && !looping {
+        if pushed < stride {
             break;
         }
     }
@@ -1906,31 +1950,9 @@ fn live_stem_core_start(position: f64, stride_seconds: f64) -> f64 {
     (position / stride_seconds).floor() * stride_seconds
 }
 
-fn publish_cached_skipped_stem_waveforms(
-    path: &Path,
-    track_id: i64,
-    epoch: u64,
-    from: f64,
-    until: f64,
-    stride_seconds: f64,
-    duration: f64,
-    pool: &StemInferencePool,
-) {
-    if stride_seconds <= 0.0 {
-        return;
-    }
-    let mut start = from;
-    while start + 1e-3 < until {
-        if let Some(chunk) = pool.cached_for_key(&stem_tile_cache_key(path, start)) {
-            publish_live_stem_hop_waveform(track_id, epoch, start, duration, chunk.stems());
-        }
-        start += stride_seconds;
-    }
-}
-
 /// A tile whose retained core is already behind the audible needle must not occupy the
-/// accelerator. Inference slower than realtime used to walk the already-played intro while the
-/// playhead (and the 30s rail) had moved tens of seconds ahead.
+/// separator. Inference slower than realtime must not keep walking an already-played intro while
+/// the authoritative Deck clock has moved tens of seconds ahead.
 fn live_stem_skip_behind_start(
     chunk_start: f64,
     clock: f64,
@@ -1965,7 +1987,6 @@ fn take_look_ahead_for(
 fn keep_live_stem_look_ahead<F>(
     path: &Path,
     track_id: i64,
-    waveform_epoch: u64,
     current_start: f64,
     stride_seconds: f64,
     duration: f64,
@@ -1984,10 +2005,9 @@ where
         if tiles.iter().any(|tile| tile.is_for(start)) {
             continue;
         }
-        match prefetch_live_stem_waveform_block(
+        match prefetch_live_stem_block(
             path,
             track_id,
-            waveform_epoch,
             start,
             duration,
             Arc::clone(&pool),
@@ -2002,14 +2022,13 @@ where
     Ok(())
 }
 
-/// Queue one future classical Redress tile on the look-ahead lane and publish its waveform when ready.
-/// A full look-ahead queue means audio still owns both workers; this Deck retries later or submits
+/// Queue one future classical Redress tile on the look-ahead lane. A full look-ahead queue
+/// means audio still owns both workers; this Deck retries later or submits
 /// the same window as mandatory audio when it becomes the audible boundary.
 #[allow(clippy::too_many_arguments)]
-fn prefetch_live_stem_waveform_block<F>(
+fn prefetch_live_stem_block<F>(
     path: &Path,
     track_id: i64,
-    waveform_epoch: u64,
     start: f64,
     duration: f64,
     pool: Arc<StemInferencePool>,
@@ -2054,20 +2073,9 @@ where
         .name(format!("kdj-live-stem-lookahead-{track_id}-{hop_expected}"))
         .spawn(move || {
             let outcome = ticket.wait();
-            if let Ok(chunk) = &outcome {
-                if hop_epoch.load(Ordering::Acquire) == hop_expected {
-                    publish_live_stem_hop_waveform(
-                        track_id,
-                        waveform_epoch,
-                        start,
-                        duration,
-                        chunk.stems(),
-                    );
-                }
-            }
             *published_result.lock().unwrap() = Some(outcome);
         })
-        .context("启动 STEM 可视窗口预取 worker")?;
+        .context("启动 STEM look-ahead worker")?;
     Ok(Some(LiveStemLookAhead { start, result }))
 }
 
@@ -2118,8 +2126,6 @@ fn push_seek_bridge_until_refined<F, I>(
     ticket: &kdj_stems::StemInferenceTicket,
     chunk_start: f64,
     frames: usize,
-    loop_window: Option<&Arc<LoopWindow>>,
-    seen_loop_generation: Option<u64>,
     resampler: &mut LiveStemResampler,
     writer: &mut StreamWriter<StemFrame>,
     epoch: Arc<AtomicU64>,
@@ -2154,8 +2160,6 @@ where
             &dry,
             0,
             chunk_start,
-            loop_window,
-            seen_loop_generation,
             resampler,
             writer,
             cancelled,
@@ -2251,8 +2255,6 @@ where
                 pushed,
                 handoff,
                 chunk_start,
-                loop_window,
-                seen_loop_generation,
                 resampler,
                 writer,
                 cancelled,
@@ -2268,8 +2270,6 @@ where
             &bridge,
             pushed,
             chunk_start,
-            loop_window,
-            seen_loop_generation,
             resampler,
             writer,
             cancelled,
@@ -2392,8 +2392,6 @@ fn push_seek_bridge_frames<F, I>(
     bridge: &[StemFrame],
     source_offset: usize,
     chunk_start: f64,
-    loop_window: Option<&Arc<LoopWindow>>,
-    seen_loop_generation: Option<u64>,
     resampler: &mut LiveStemResampler,
     writer: &mut StreamWriter<StemFrame>,
     cancelled: F,
@@ -2404,15 +2402,13 @@ where
     I: Fn() -> bool + Copy,
 {
     for (offset, frame) in bridge.iter().copied().enumerate() {
-        if let Some(outcome) = seek_bridge_loop_outcome(
-            loop_window,
-            seen_loop_generation,
-            chunk_start,
-            source_offset + offset,
-        ) {
-            return Ok(outcome);
-        }
-        if !resampler.push(frame, writer, cancelled, interrupted)? {
+        if !resampler.push(
+            frame,
+            stem_frame_time(chunk_start, source_offset + offset),
+            writer,
+            cancelled,
+            interrupted,
+        )? {
             return Ok(StemPushOutcome::Interrupted);
         }
     }
@@ -2426,8 +2422,6 @@ fn push_refinement_handoff<F, I>(
     source_offset: usize,
     frames: usize,
     chunk_start: f64,
-    loop_window: Option<&Arc<LoopWindow>>,
-    seen_loop_generation: Option<u64>,
     resampler: &mut LiveStemResampler,
     writer: &mut StreamWriter<StemFrame>,
     cancelled: F,
@@ -2438,18 +2432,16 @@ where
     I: Fn() -> bool + Copy,
 {
     for offset in 0..frames {
-        if let Some(outcome) = seek_bridge_loop_outcome(
-            loop_window,
-            seen_loop_generation,
-            chunk_start,
-            source_offset + offset,
-        ) {
-            return Ok(outcome);
-        }
         let from = bridge[offset];
         let to = chunk_frame(refined, source_offset + offset);
         let frame = refinement_handoff_frame(from, to, offset, frames);
-        if !resampler.push(frame, writer, cancelled, interrupted)? {
+        if !resampler.push(
+            frame,
+            stem_frame_time(chunk_start, source_offset + offset),
+            writer,
+            cancelled,
+            interrupted,
+        )? {
             return Ok(StemPushOutcome::Interrupted);
         }
     }
@@ -2469,21 +2461,6 @@ fn refinement_handoff_frame(
     };
     let blend = linear * linear * (3.0 - 2.0 * linear);
     from.lerp(to, blend)
-}
-
-fn seek_bridge_loop_outcome(
-    loop_window: Option<&Arc<LoopWindow>>,
-    seen_generation: Option<u64>,
-    chunk_start: f64,
-    source_offset: usize,
-) -> Option<StemPushOutcome> {
-    let window = loop_window?;
-    if Some(window.generation()) != seen_generation {
-        return Some(StemPushOutcome::LoopChanged);
-    }
-    let snap = window.snapshot()?;
-    let time = stem_frame_time(chunk_start, source_offset);
-    (!snap.contains(time)).then_some(StemPushOutcome::LoopEnd)
 }
 
 fn wait_for_pipeline_seek_ack<F, I>(
@@ -2543,30 +2520,37 @@ where
 
 struct LiveStemResampler {
     previous: Option<StemFrame>,
+    previous_time: f64,
     source_index: u64,
     next_output_position: f64,
     step: f64,
+    media_origin: f64,
 }
 
 impl LiveStemResampler {
-    fn new(output_sample_rate: u32) -> Self {
+    fn new(output_sample_rate: u32, origin: f64) -> Self {
         Self {
             previous: None,
+            previous_time: origin,
             source_index: 0,
             next_output_position: 0.0,
             step: f64::from(STEM_SAMPLE_RATE) / f64::from(output_sample_rate),
+            media_origin: origin,
         }
     }
 
-    fn reset(&mut self) {
+    fn reset(&mut self, origin: f64) {
         self.previous = None;
+        self.previous_time = origin;
         self.source_index = 0;
         self.next_output_position = 0.0;
+        self.media_origin = origin;
     }
 
     fn push<F, I>(
         &mut self,
         current: StemFrame,
+        source_time: f64,
         writer: &mut StreamWriter<StemFrame>,
         cancelled: F,
         interrupted: I,
@@ -2579,8 +2563,18 @@ impl LiveStemResampler {
             while self.next_output_position <= self.source_index as f64 {
                 let fraction = (self.next_output_position - (self.source_index - 1) as f64)
                     .clamp(0.0, 1.0) as f32;
-                if !writer.push_interruptible(
+                let media_time = if self.previous_time.is_finite() && source_time.is_finite() {
+                    self.previous_time + (source_time - self.previous_time) * f64::from(fraction)
+                } else if source_time.is_finite() {
+                    source_time
+                } else {
+                    self.media_origin + self.next_output_position / f64::from(STEM_SAMPLE_RATE)
+                };
+                if !writer.push_with_media_timing_interruptible(
                     previous.lerp(current, fraction),
+                    1.0,
+                    0,
+                    media_time,
                     cancelled,
                     interrupted,
                 )? {
@@ -2590,32 +2584,12 @@ impl LiveStemResampler {
             }
         }
         self.previous = Some(current);
+        if source_time.is_finite() {
+            self.previous_time = source_time;
+        }
         self.source_index += 1;
         Ok(true)
     }
-}
-
-fn publish_live_stem_hop_waveform(
-    track_id: i64,
-    epoch: u64,
-    chunk_start: f64,
-    duration: f64,
-    stems: &[Vec<[f32; 2]>; 4],
-) {
-    let guard = 0;
-    let interior = stems[0].len();
-    let start = chunk_start;
-    let frames = if duration.is_finite() && duration > 0.0 {
-        ((duration - start).max(0.0) * f64::from(STEM_SAMPLE_RATE))
-            .ceil()
-            .min(interior as f64) as usize
-    } else {
-        interior
-    };
-    if frames == 0 {
-        return;
-    }
-    publish_live_stem_waveform_block(track_id, epoch, start, stems, guard, frames);
 }
 
 fn chunk_frame(chunk: &StemChunk, frame: usize) -> StemFrame {
@@ -2638,106 +2612,11 @@ fn chunk_frame(chunk: &StemChunk, frame: usize) -> StemFrame {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StemPushOutcome {
     Complete,
-    LoopEnd,
-    LoopChanged,
     Interrupted,
-}
-
-fn loop_source_frames_remaining(snap: LoopWindowSnapshot, at: f64) -> u64 {
-    let remaining = (snap.end() - at).max(0.0);
-    (remaining * f64::from(STEM_SAMPLE_RATE)).ceil() as u64
-}
-
-fn live_stem_apply_loop_outcome(
-    loop_window: Option<&Arc<LoopWindow>>,
-    outcome: StemPushOutcome,
-    chunk_start: &mut f64,
-    remaining_source_frames: &mut u64,
-    look_aheads: &mut Vec<LiveStemLookAhead>,
-    resampler: &mut LiveStemResampler,
-    duration: f64,
-) -> bool {
-    match outcome {
-        StemPushOutcome::Complete | StemPushOutcome::Interrupted => false,
-        StemPushOutcome::LoopChanged | StemPushOutcome::LoopEnd => {
-            if let Some(snap) = loop_window.and_then(|window| window.snapshot()) {
-                *chunk_start = snap.start;
-                *remaining_source_frames = loop_source_frames_remaining(snap, snap.start).max(1);
-                look_aheads.clear();
-                resampler.reset();
-                true
-            } else if duration.is_finite() && duration > 0.0 {
-                *remaining_source_frames = ((duration - *chunk_start).max(0.0)
-                    * f64::from(STEM_SAMPLE_RATE))
-                .ceil() as u64;
-                false
-            } else {
-                false
-            }
-        }
-    }
-}
-
-fn stem_tile_frame(origin: f64, time: f64) -> Option<usize> {
-    if !time.is_finite() || !origin.is_finite() {
-        return None;
-    }
-    let offset = (time - origin) * f64::from(STEM_SAMPLE_RATE);
-    if offset < -1e-6 || offset >= live_stem_output_stride_frames() as f64 {
-        None
-    } else {
-        Some(offset.round().clamp(0.0, (SEGMENT_SAMPLES - 1) as f64) as usize)
-    }
-}
-
-fn resolve_looped_stem_index(
-    loop_window: Option<&Arc<LoopWindow>>,
-    seen_generation: Option<u64>,
-    chunk_origin: f64,
-    frame_index: usize,
-) -> Result<usize, StemPushOutcome> {
-    let Some(window) = loop_window else {
-        return Ok(frame_index);
-    };
-    let Some(snap) = window.snapshot() else {
-        if Some(window.generation()) != seen_generation {
-            return Err(StemPushOutcome::LoopChanged);
-        }
-        return Ok(frame_index);
-    };
-    let time = stem_frame_time(chunk_origin, frame_index);
-    if snap.contains(time) {
-        return Ok(frame_index);
-    }
-    if time + 1e-4 < snap.start {
-        return stem_tile_frame(chunk_origin, snap.start).ok_or(StemPushOutcome::LoopChanged);
-    }
-    let wrapped = snap.wrap(time);
-    if let Some(mapped) = stem_tile_frame(chunk_origin, wrapped) {
-        if (wrapped - snap.start).abs() < 1.5 / f64::from(STEM_SAMPLE_RATE) {
-            window.note_wrap();
-        }
-        return Ok(mapped);
-    }
-    window.note_wrap();
-    Err(StemPushOutcome::LoopEnd)
 }
 
 fn stem_frame_time(chunk_origin: f64, frame_index: usize) -> f64 {
     chunk_origin + frame_index as f64 / f64::from(STEM_SAMPLE_RATE)
-}
-
-#[cfg(test)]
-fn observe_stem_loop(
-    loop_window: Option<&Arc<LoopWindow>>,
-    seen_generation: Option<u64>,
-    chunk_origin: f64,
-    frame_index: usize,
-) -> StemPushOutcome {
-    match resolve_looped_stem_index(loop_window, seen_generation, chunk_origin, frame_index) {
-        Ok(_) => StemPushOutcome::Complete,
-        Err(outcome) => outcome,
-    }
 }
 
 fn push_stem_range<F, I>(
@@ -2745,8 +2624,6 @@ fn push_stem_range<F, I>(
     start: usize,
     frames: usize,
     chunk_origin: f64,
-    loop_window: Option<&Arc<LoopWindow>>,
-    seen_generation: Option<u64>,
     resampler: &mut LiveStemResampler,
     writer: &mut StreamWriter<StemFrame>,
     cancelled: F,
@@ -2757,16 +2634,14 @@ where
     I: Fn() -> bool + Copy,
 {
     for offset in 0..frames {
-        let index = match resolve_looped_stem_index(
-            loop_window,
-            seen_generation,
-            chunk_origin,
-            start + offset,
-        ) {
-            Ok(index) => index,
-            Err(outcome) => return Ok((offset, outcome)),
-        };
-        if !resampler.push(chunk_frame(chunk, index), writer, cancelled, interrupted)? {
+        let index = start + offset;
+        if !resampler.push(
+            chunk_frame(chunk, index),
+            stem_frame_time(chunk_origin, index),
+            writer,
+            cancelled,
+            interrupted,
+        )? {
             return Ok((offset, StemPushOutcome::Interrupted));
         }
     }
@@ -2779,8 +2654,6 @@ fn push_stem_overlap_range<F, I>(
     start: usize,
     frames: usize,
     chunk_origin: f64,
-    loop_window: Option<&Arc<LoopWindow>>,
-    seen_generation: Option<u64>,
     resampler: &mut LiveStemResampler,
     writer: &mut StreamWriter<StemFrame>,
     cancelled: F,
@@ -2791,17 +2664,8 @@ where
     I: Fn() -> bool + Copy,
 {
     for offset in 0..frames {
-        let requested = start + offset;
-        let index = match resolve_looped_stem_index(
-            loop_window,
-            seen_generation,
-            chunk_origin,
-            requested,
-        ) {
-            Ok(index) => index,
-            Err(outcome) => return Ok((offset, outcome)),
-        };
-        let frame = if index == requested && index < stem_segment_handoff_frames() {
+        let index = start + offset;
+        let frame = if index < stem_segment_handoff_frames() {
             guarded_stem_handoff_frame(
                 chunk_frame(previous, live_stem_output_stride_frames() + index),
                 chunk_frame(current, index),
@@ -2810,7 +2674,13 @@ where
         } else {
             chunk_frame(current, index)
         };
-        if !resampler.push(frame, writer, cancelled, interrupted)? {
+        if !resampler.push(
+            frame,
+            stem_frame_time(chunk_origin, index),
+            writer,
+            cancelled,
+            interrupted,
+        )? {
             return Ok((offset, StemPushOutcome::Interrupted));
         }
     }
@@ -2923,83 +2793,6 @@ where
         source_sample_rate,
         output_sample_rate,
     })
-}
-
-/// Decodes one bounded STEM-cache region into an in-memory stereo track with per-lane gains
-/// baked in. This is the seamless-loop slice: only the loop window is rendered.
-pub fn decode_stem_cache_region<F>(
-    path: &Path,
-    gains: [f32; STEM_LANES],
-    position: f64,
-    length: f64,
-    output_sample_rate: u32,
-    cancelled: F,
-) -> Result<DecodedTrack>
-where
-    F: Fn() -> bool + Copy,
-{
-    if output_sample_rate == 0 {
-        bail!("output sample rate must be non-zero");
-    }
-    if !length.is_finite() || length <= 0.0 {
-        bail!("loop region length must be positive");
-    }
-    let header =
-        read_cache_header(path).with_context(|| format!("read STEM cache: {}", path.display()))?;
-    let source_sample_rate = header.sample_rate;
-    if source_sample_rate == 0 || header.frames == 0 {
-        bail!("STEM cache is empty");
-    }
-    let duration = header.frames as f64 / f64::from(source_sample_rate);
-    let clamped_position = position.max(0.0).min(duration);
-    let start_frame = (clamped_position * f64::from(source_sample_rate)).round() as u64;
-    let region_source_frames = ((length * f64::from(source_sample_rate)).ceil() as u64)
-        .min(header.frames.saturating_sub(start_frame));
-    if region_source_frames == 0 {
-        bail!("loop region is outside the STEM cache");
-    }
-    let target_frames = (length * f64::from(output_sample_rate)).ceil() as usize;
-    let mut samples = Vec::with_capacity(target_frames * 2 + 2);
-    let mut file =
-        File::open(path).with_context(|| format!("open STEM cache: {}", path.display()))?;
-    seek_cache_frame(&mut file, start_frame)?;
-
-    let mut remaining = region_source_frames;
-    let mut bytes = vec![0u8; 4096 * BYTES_PER_FRAME as usize];
-    let mut previous: Option<[f32; 2]> = None;
-    let mut source_index = 0u64;
-    let mut next_output_position = 0.0f64;
-    let step = f64::from(source_sample_rate) / f64::from(output_sample_rate);
-    while remaining > 0 {
-        if cancelled() {
-            bail!("loop region decode cancelled");
-        }
-        let frames = remaining.min(4096) as usize;
-        let count = frames * BYTES_PER_FRAME as usize;
-        file.read_exact(&mut bytes[..count])?;
-        for frame in bytes[..count].chunks_exact(BYTES_PER_FRAME as usize) {
-            let stems = stem_frame_from_cache(frame);
-            let mut current = [0.0f32; 2];
-            for lane in 0..STEM_LANES {
-                let gain = gains[lane].clamp(0.0, STEM_GAIN_MAX);
-                current[0] += stems.lanes[lane * 2] * gain;
-                current[1] += stems.lanes[lane * 2 + 1] * gain;
-            }
-            if let Some(before) = previous {
-                while next_output_position <= source_index as f64 {
-                    let fraction =
-                        (next_output_position - (source_index - 1) as f64).clamp(0.0, 1.0) as f32;
-                    samples.push(before[0] + (current[0] - before[0]) * fraction);
-                    samples.push(before[1] + (current[1] - before[1]) * fraction);
-                    next_output_position += step;
-                }
-            }
-            previous = Some(current);
-            source_index += 1;
-        }
-        remaining -= frames as u64;
-    }
-    DecodedTrack::from_interleaved_stereo(samples, output_sample_rate)
 }
 
 fn stem_frame_from_cache(frame: &[u8]) -> StemFrame {
@@ -3172,77 +2965,224 @@ mod tests {
     }
 
     #[test]
-    fn loop_window_wraps_playhead_into_the_active_range() {
-        let snap = LoopWindowSnapshot {
-            start: 10.0,
-            length: 2.0,
-            playhead: 12.0,
-        };
-        assert_eq!(snap.wrap(12.0), 10.0);
-        assert!((snap.wrap(11.25) - 11.25).abs() < 1e-9);
-        assert!((snap.wrap(14.5) - 10.5).abs() < 1e-9);
+    fn loop_window_publishes_one_atomic_in_out_generation() {
         let window = LoopWindow::new();
-        window.set(8.0, 4.0, 9.0);
-        let live = window.snapshot().expect("enabled window");
-        assert_eq!(live.start, 8.0);
-        assert_eq!(live.length, 4.0);
-        assert!((live.playhead - 9.0).abs() < 1e-6);
-        assert!((live.engage_target() - 9.0).abs() < 1e-9);
-        let past = LoopWindowSnapshot {
-            start: 10.0,
-            length: 2.0,
-            playhead: 12.0,
-        };
-        assert_eq!(past.engage_target(), 10.0);
-        let stale_zero = LoopWindowSnapshot {
-            start: 45.0,
-            length: 2.0,
-            playhead: 0.0,
-        };
+        let initial = window.generation();
+        window.set(8.0, 4.0);
         assert_eq!(
-            stale_zero.engage_target(),
-            45.0,
-            "过期的 0 播放头不得把 LOOP 拽到曲头"
+            window.snapshot(),
+            Some(LoopWindowSnapshot {
+                start: 8.0,
+                length: 4.0,
+            })
         );
+        assert!(window.generation() > initial);
+        let armed = window.generation();
         window.clear();
         assert!(window.snapshot().is_none());
+        assert!(window.generation() > armed);
+    }
+
+    fn timed_value(value: usize, sample_rate: u32) -> TimedPcm<[f32; 2]> {
+        TimedPcm {
+            frame: [value as f32, value as f32],
+            media_time: value as f64 / f64::from(sample_rate),
+        }
+    }
+
+    fn raw_ramp(
+        frames: usize,
+        sample_rate: u32,
+    ) -> (Arc<StreamSource<[f32; 2]>>, StreamWriter<[f32; 2]>) {
+        let (source, mut writer) = StreamSource::bounded(frames + 2);
+        for value in 0..frames {
+            let packet = timed_value(value, sample_rate);
+            writer
+                .push_at(packet.frame, packet.media_time, || false)
+                .unwrap();
+        }
+        (source, writer)
     }
 
     #[test]
-    fn loop_source_frames_stop_at_the_out_point() {
-        let snap = LoopWindowSnapshot {
-            start: 10.0,
-            length: 2.0,
-            playhead: 10.5,
-        };
-        assert_eq!(
-            loop_source_frames_remaining(snap, 11.5),
-            (0.5 * f64::from(STEM_SAMPLE_RATE)).ceil() as u64
-        );
+    fn pcm_loop_reader_captures_first_pass_then_replays_exact_half_open_region() {
+        let sample_rate = 10;
+        let (raw, writer) = raw_ramp(40, sample_rate);
         let window = Arc::new(LoopWindow::new());
-        window.set(10.0, 2.0, 10.5);
-        let generation = Some(window.generation());
+        let mut reader = PcmLoopReader::new(sample_rate);
+        reader.sync(Some(window.generation()), window.snapshot());
+
+        let linear: Vec<usize> = (0..10)
+            .map(|_| reader.next(&raw).unwrap().frame[0] as usize)
+            .collect();
+        assert_eq!(linear, (0..10).collect::<Vec<_>>());
+
+        window.set(1.0, 0.4);
+        reader.sync(Some(window.generation()), window.snapshot());
+        let played: Vec<usize> = (0..12)
+            .map(|_| reader.next(&raw).unwrap().frame[0] as usize)
+            .collect();
+        assert_eq!(played, vec![10, 11, 12, 13, 10, 11, 12, 13, 10, 11, 12, 13]);
+        drop(writer);
+    }
+
+    #[test]
+    fn pcm_loop_reader_uses_history_when_worker_is_ahead_of_the_audible_needle() {
+        let sample_rate = 10;
+        let (raw, writer) = raw_ramp(40, sample_rate);
+        let window = Arc::new(LoopWindow::new());
+        let mut reader = PcmLoopReader::new(sample_rate);
+        reader.sync(Some(window.generation()), window.snapshot());
+        for expected in 0..15 {
+            assert_eq!(reader.next(&raw).unwrap().frame[0] as usize, expected);
+        }
+
+        // The worker is at frame 15 while the callback command captures frame 10. History must
+        // supply 10..13; consuming unrelated frame 15 as loop-in would be a whole-song jump.
+        window.set(1.0, 0.4);
+        reader.sync(Some(window.generation()), window.snapshot());
+        let looped: Vec<usize> = (0..8)
+            .map(|_| reader.next(&raw).unwrap().frame[0] as usize)
+            .collect();
+        assert_eq!(looped, vec![10, 11, 12, 13, 10, 11, 12, 13]);
+        drop(writer);
+    }
+
+    #[test]
+    fn pcm_loop_reader_exits_at_out_and_resumes_untouched_linear_pcm() {
+        let sample_rate = 10;
+        let (raw, writer) = raw_ramp(40, sample_rate);
+        let window = Arc::new(LoopWindow::new());
+        let mut reader = PcmLoopReader::new(sample_rate);
+        reader.sync(Some(window.generation()), window.snapshot());
+        for _ in 0..10 {
+            reader.next(&raw).unwrap();
+        }
+        window.set(1.0, 0.4);
+        reader.sync(Some(window.generation()), window.snapshot());
+        for expected in [10.0, 11.0, 12.0, 13.0, 10.0, 11.0] {
+            assert_eq!(reader.next(&raw).unwrap().frame[0], expected);
+        }
+
+        window.clear();
+        reader.sync(Some(window.generation()), window.snapshot());
+        let exit: Vec<usize> = (0..5)
+            .map(|_| reader.next(&raw).unwrap().frame[0] as usize)
+            .collect();
+        assert_eq!(exit, vec![12, 13, 14, 15, 16]);
+        drop(writer);
+    }
+
+    #[test]
+    fn pcm_loop_reader_extends_only_the_out_point() {
+        let sample_rate = 10;
+        let (raw, writer) = raw_ramp(40, sample_rate);
+        let window = Arc::new(LoopWindow::new());
+        let mut reader = PcmLoopReader::new(sample_rate);
+        reader.sync(Some(window.generation()), window.snapshot());
+        for _ in 0..10 {
+            reader.next(&raw).unwrap();
+        }
+        window.set(1.0, 0.4);
+        reader.sync(Some(window.generation()), window.snapshot());
+        for expected in [10.0, 11.0, 12.0, 13.0] {
+            assert_eq!(reader.next(&raw).unwrap().frame[0], expected);
+        }
+
+        window.set(1.0, 0.6);
+        reader.sync(Some(window.generation()), window.snapshot());
+        let extended: Vec<usize> = (0..12)
+            .map(|_| reader.next(&raw).unwrap().frame[0] as usize)
+            .collect();
         assert_eq!(
-            observe_stem_loop(Some(&window), generation, 10.0, 0),
-            StemPushOutcome::Complete
+            extended,
+            vec![14, 15, 10, 11, 12, 13, 14, 15, 10, 11, 12, 13]
         );
-        let inside = STEM_SAMPLE_RATE as usize;
-        assert_eq!(
-            observe_stem_loop(Some(&window), generation, 10.0, inside),
-            StemPushOutcome::Complete,
-            "one second from loop-in is still inside this two-second loop"
+        drop(writer);
+    }
+
+    #[test]
+    fn pitch_preserving_pipeline_loops_pcm_without_seek_or_discontinuity() {
+        let sample_rate = 8_000;
+        let window = Arc::new(LoopWindow::new());
+        window.set(1.0, 0.05);
+        let seek = StreamSeekControl::new();
+        let (output, output_writer) = StreamSource::<[f32; 2]>::bounded(32);
+        let stop = Arc::new(AtomicBool::new(false));
+        let cancelled: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new({
+            let stop = Arc::clone(&stop);
+            move || stop.load(Ordering::Acquire)
+        });
+        let worker_window = Arc::clone(&window);
+        let worker_seek = seek.clone();
+        let handle = thread::spawn(move || {
+            run_pitch_preserving_pipeline(
+                TempoControl::new(1.25),
+                sample_rate,
+                256,
+                output_writer,
+                move |mut writer, cancelled| {
+                    for frame in 7_840..10_400 {
+                        writer.push_at(
+                            [frame as f32, frame as f32],
+                            frame as f64 / f64::from(sample_rate),
+                            &*cancelled,
+                        )?;
+                    }
+                    writer.finish();
+                    Ok(StreamMetadata {
+                        duration: Some(1.3),
+                        source_sample_rate: sample_rate,
+                        output_sample_rate: sample_rate,
+                    })
+                },
+                cancelled,
+                Some(worker_window),
+                Some(worker_seek),
+            )
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut times = Vec::new();
+        let mut cleared = false;
+        while std::time::Instant::now() < deadline {
+            if let Some((_frame, _advance, _revision, time)) = output.pop_callback_timed() {
+                if !cleared
+                    && times
+                        .last()
+                        .is_some_and(|previous| time + 0.005 < *previous)
+                {
+                    window.clear();
+                    cleared = true;
+                }
+                times.push(time);
+                continue;
+            }
+            if output.drained() {
+                break;
+            }
+            thread::yield_now();
+        }
+        if !output.drained() {
+            stop.store(true, Ordering::Release);
+            while output.pop_callback_timed().is_some() {}
+        }
+        handle.join().expect("loop pipeline thread").unwrap();
+
+        assert!(cleared, "the cached region must wrap at least once");
+        assert!(
+            times.iter().any(|time| *time >= 1.02),
+            "LOOP off must resume untouched linear PCM after out"
         );
-        let near_out = 12.0 - 1.0 / f64::from(STEM_SAMPLE_RATE);
         assert_eq!(
-            observe_stem_loop(Some(&window), generation, near_out, 1),
-            StemPushOutcome::LoopEnd,
-            "crossing loop-out must wrap to a new hop instead of reading past the out point"
+            seek.generation(),
+            0,
+            "natural wraps must not request decoder seek"
         );
-        window.set(20.0, 2.0, 20.0);
         assert_eq!(
-            observe_stem_loop(Some(&window), generation, 30.0, 0),
-            StemPushOutcome::LoopEnd,
-            "当前瓦片不含 loop-in 时才换瓦"
+            output.counters.generation.load(Ordering::Acquire),
+            0,
+            "natural wraps must not invalidate the callback ring"
         );
     }
 
@@ -3369,28 +3309,6 @@ mod tests {
         }
         assert_eq!(first.blend, 1.0);
         assert_eq!(source.produced_frames(), 8);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn stem_cache_region_bakes_lane_gains() {
-        let path =
-            std::env::temp_dir().join(format!("kdj-stem-region-{}.kdstem", std::process::id()));
-        write_test_cache(&path);
-        // 只留 drums(全音量) 和 vocals(半音量)。
-        let track = decode_stem_cache_region(
-            &path,
-            [1.0, 0.0, 0.0, 0.5],
-            0.0,
-            8.0 / 44_100.0,
-            44_100,
-            || false,
-        )
-        .unwrap();
-        assert_eq!(track.frames(), 8);
-        let expected = (1_000.0 + 4_000.0 * 0.5) / 32768.0;
-        assert!((track.interleaved()[0] - expected).abs() < 1e-6);
-        assert!((track.interleaved()[1] - expected).abs() < 1e-6);
         let _ = std::fs::remove_file(path);
     }
 }

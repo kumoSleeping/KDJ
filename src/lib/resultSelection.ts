@@ -5,6 +5,17 @@ export function selectionKey(itemIndex: number, groupId: string): string {
   return `${itemIndex}:${groupId}`;
 }
 
+/**
+ * 右键落在现有选区内时，行级动作必须作用于整个选区；落在选区外才只作用于该行。
+ * 这与本地曲库的多选菜单一致，也避免“全选后右键下载却只加入点中的一个”。
+ */
+export function resultRowActionUsesSelection(
+  selected: ReadonlySet<string>,
+  rowKey: string,
+): boolean {
+  return selected.has(rowKey);
+}
+
 /** 歌曲和 B 站视频共用批量选择；已入库及纯本地组不重复入队。 */
 export function selectableGroups(item: IntakeItem): MergedGroup[] {
   return item.groups.filter(

@@ -1,4 +1,4 @@
-import type { StreamAnalysisResult, StreamWaveformProgress } from "../types";
+import type { StreamAnalysisResult, StreamWaveformProgress, Track } from "../types";
 
 export type StreamAnalysisPhase = "idle" | "waiting" | "analyzing" | "ready" | "failed";
 
@@ -75,6 +75,37 @@ export function recordStreamAnalysisProgress(
 
 export function streamAnalysisSnapshot(trackId: number): StreamAnalysisSnapshot {
   return snapshots.get(trackId) ?? EMPTY_SNAPSHOT;
+}
+
+/** Project temporary full-file analysis onto the in-memory stream Track used by Performance. */
+export function trackWithStreamAnalysis(
+  track: Track,
+  snapshot: StreamAnalysisSnapshot = streamAnalysisSnapshot(track.id),
+): Track {
+  const result = snapshot.result;
+  if (snapshot.phase !== "ready" || !result) return track;
+  return {
+    ...track,
+    duration: track.duration ?? result.duration,
+    bpm: result.bpm ?? track.bpm,
+    bpm_v2: result.bpm !== null,
+    bpm_confidence: result.bpm_confidence ?? track.bpm_confidence,
+    first_beat: result.first_beat ?? track.first_beat,
+    beat_origin: result.beat_origin ?? track.beat_origin,
+    beat_times: result.beat_times,
+    downbeat_origin: result.downbeat_origin ?? track.downbeat_origin,
+    downbeats: result.downbeats ?? track.downbeats,
+    downbeat_confidence: result.downbeat_confidence ?? track.downbeat_confidence,
+    music_key: result.key || result.key_short || track.music_key,
+    camelot: result.camelot || track.camelot,
+    open_key: result.open_key || track.open_key,
+    key_confidence: result.key_confidence ?? track.key_confidence,
+    energy: result.energy ?? track.energy,
+    rms_db: result.rms_db ?? track.rms_db,
+    peak_db: result.peak_db ?? track.peak_db,
+    analyzed_at: snapshot.completedAt || track.analyzed_at,
+    analysis_error: snapshot.error || result.errors.join("；"),
+  };
 }
 
 export function subscribeStreamAnalysis(trackId: number, listener: () => void): () => void {

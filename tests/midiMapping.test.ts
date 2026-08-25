@@ -13,13 +13,12 @@ import {
   parseMidiBytes,
   resolveMidiActions,
   scaleUnitToRange,
-  toggleEqStemLayer,
   type MidiMapping,
 } from "../src/lib/midi/mapping";
 import { MIDI_PRESETS } from "../src/lib/midi/presets";
 import reloopBuddy from "../src/midi/reloop-buddy.json";
 
-const layers = { eqStem: ["eq", "eq"] as const };
+const layers = {};
 
 test("Buddy mapping matches the hardware port name", () => {
   assert.equal(mappingMatchesPort(reloopBuddy, "Reloop Buddy"), true);
@@ -36,65 +35,81 @@ test("note press toggles play; note off is ignored", () => {
   assert.deepEqual(resolveMidiActions(reloopBuddy, release, layers), []);
 });
 
-test("EQ knobs become bipolar STEM EQ after the headphone CUE layer switch", () => {
+test("EQ knobs remain EQ and the former STEM-layer buttons return to PFL", () => {
   const high = parseMidiBytes([0xb0, 23, 127])!;
   assert.deepEqual(resolveMidiActions(reloopBuddy, high, layers), [{ type: "eqHigh", deck: 0, value: 1 }]);
-  const stems = { eqStem: ["stems", "eq"] as const };
-  assert.deepEqual(resolveMidiActions(reloopBuddy, high, stems), [
-    { type: "stemGain", deck: 0, stems: ["vocals"], value: 1 },
+  assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0x90, 27, 127])!, layers), [
+    { type: "pflToggle", deck: 0 },
   ]);
-  const mid = parseMidiBytes([0xb0, 25, 0])!;
-  assert.deepEqual(resolveMidiActions(reloopBuddy, mid, stems), [
-    { type: "stemGain", deck: 0, stems: ["other", "bass"], value: -1 },
+  assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0x91, 27, 127])!, layers), [
+    { type: "pflToggle", deck: 1 },
   ]);
-  const unity = parseMidiBytes([0xb0, 26, 64])!;
-  const drums = resolveMidiActions(reloopBuddy, unity, stems);
-  assert.equal(drums.length, 1);
-  assert.equal(drums[0]?.type, "stemGain");
-  if (drums[0]?.type === "stemGain") {
-    assert.ok(Math.abs(drums[0].value) < 0.02);
-    assert.deepEqual(drums[0].stems, ["drums"]);
-  }
 });
 
-test("FX wet/dry is not mapped onto both deck filters", () => {
+test("Buddy FX LEVEL controls FX1 dry/wet and Shift changes FX1 parameter", () => {
   const message = parseMidiBytes([0xb8, 0, 64])!;
-  assert.deepEqual(resolveMidiActions(reloopBuddy, message, layers), []);
+  assert.deepEqual(resolveMidiActions(reloopBuddy, message, layers), [
+    { type: "fxMix", value: 64 / 127 },
+  ]);
+  assert.deepEqual(resolveMidiActions(reloopBuddy, message, { shift: true }), [
+    { type: "fxParameter", value: 64 / 127 },
+  ]);
 });
 
-test("loop encoder uses 01h/7Fh relative ticks", () => {
+test("Buddy FX arrows select FX1 and paddles expose HOLD/ON as absolute enable state", () => {
+  assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0x98, 5, 127])!, layers), [
+    { type: "fxPrevious" },
+  ]);
+  assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0x99, 6, 127])!, layers), [
+    { type: "fxNext" },
+  ]);
+  assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0x98, 0, 127])!, layers), [
+    { type: "fxEnabled", deck: 0, held: true },
+  ]);
+  assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0x88, 0, 0])!, layers), [
+    { type: "fxEnabled", deck: 0, held: false },
+  ]);
+  assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0x99, 0, 127])!, layers), [
+    { type: "fxEnabled", deck: 1, held: true },
+  ]);
+});
+
+test("relative controls use exact two's-complement magnitude", () => {
   assert.equal(decodeMidiValue(1, "relative"), 1);
   assert.equal(decodeMidiValue(127, "relative"), -1);
-  assert.equal(decodeMidiValue(64, "relative"), 0, "64-centered platters send 40h when stopped");
-  assert.equal(decodeMidiValue(65, "relative"), 1);
-  assert.equal(decodeMidiValue(63, "relative"), -1);
+  assert.equal(decodeMidiValue(63, "relative"), 63);
+  assert.equal(decodeMidiValue(65, "relative"), -63);
+  assert.equal(decodeMidiValue(64, "relative"), -64);
+  assert.equal(decodeMidiValue(65, "relativeCentered"), 1);
+  assert.equal(decodeMidiValue(63, "relativeCentered"), -1);
+  assert.equal(decodeMidiValue(64, "relativeCentered"), 0);
   const turn = parseMidiBytes([0xb4, 52, 127])!;
   assert.deepEqual(resolveMidiActions(reloopBuddy, turn, layers), [{ type: "loopSize", deck: 0, delta: -1 }]);
   const press = parseMidiBytes([0x94, 64, 127])!;
   assert.deepEqual(resolveMidiActions(reloopBuddy, press, layers), [{ type: "loopToggle", deck: 0 }]);
 });
 
-test("LED output follows play and stem-layer state", () => {
+test("LED output follows play, loop, and PFL state", () => {
   const outputs = collectMidiOutputs(reloopBuddy, {
     playing: [true, false],
     pausedLoaded: [false, true],
     syncing: [false, false],
     looping: [true, false],
-    eqStem: [true, false],
+    pfl: [true, false],
     crossfaderEnabled: true,
   });
   const playA = outputs.find((item) => item.channel === 0 && item.data === 0);
   const cueB = outputs.find((item) => item.channel === 1 && item.data === 1);
-  const stemA = outputs.find((item) => item.channel === 0 && item.data === 27);
+  const pflA = outputs.find((item) => item.channel === 0 && item.data === 27);
   const loopA = outputs.find((item) => item.channel === 4 && item.data === 64);
   assert.equal(playA?.value, 127);
   assert.equal(cueB?.value, 127);
-  assert.equal(stemA?.value, 127);
+  assert.equal(pflA?.value, 127);
   assert.equal(loopA?.value, 127);
   assert.deepEqual(encodeMidiOutput(playA!), [0x90, 0, 127]);
 });
 
-test("STEM LED note-on is not treated as the headphone CUE layer button", () => {
+test("PFL LED note-on echo is not treated as another headphone button press", () => {
   const echo = new MidiEchoGuard();
   const led = encodeMidiOutput({ kind: "note", channel: 0, data: 27, value: 127 });
   echo.recordOutput(led, 1_000);
@@ -103,7 +118,7 @@ test("STEM LED note-on is not treated as the headphone CUE layer button", () => 
   assert.equal(echo.isEcho(bounced, 1_020), false, "a real second press still toggles");
 });
 
-test("a late STEM button press is not swallowed as LED echo", () => {
+test("a late PFL button press is not swallowed as LED echo", () => {
   const echo = new MidiEchoGuard();
   echo.recordOutput(encodeMidiOutput({ kind: "note", channel: 0, data: 27, value: 127 }), 1_000);
   const press = parseMidiBytes([0x90, 27, 127])!;
@@ -117,11 +132,6 @@ test("dispatch ignores ports that are not in the mapping match list", () => {
   );
 });
 
-test("eq/stem layer flips", () => {
-  assert.equal(toggleEqStemLayer("eq"), "stems");
-  assert.equal(toggleEqStemLayer("stems"), "eq");
-});
-
 test("Shift hold plus the low knob becomes that deck's filter", () => {
   const press = parseMidiBytes([0x9e, 0, 127])!;
   const release = parseMidiBytes([0x8e, 0, 0])!;
@@ -132,8 +142,6 @@ test("Shift hold plus the low knob becomes that deck's filter", () => {
   assert.deepEqual(resolveMidiActions(reloopBuddy, low, { ...layers, shift: true }), [
     { type: "filter", deck: 0, value: 1 },
   ]);
-  const stems = { eqStem: ["stems", "eq"] as const, shift: true };
-  assert.deepEqual(resolveMidiActions(reloopBuddy, low, stems), [{ type: "filter", deck: 0, value: 1 }]);
 });
 
 test("crossfader enable is a master toggle that mappings can bind", () => {
@@ -154,7 +162,7 @@ test("crossfader enable is a master toggle that mappings can bind", () => {
     pausedLoaded: [false, false],
     syncing: [false, false],
     looping: [false, false],
-    eqStem: [false, false],
+    pfl: [false, false],
     crossfaderEnabled: true,
   });
   const off = collectMidiOutputs(mapping, {
@@ -162,7 +170,7 @@ test("crossfader enable is a master toggle that mappings can bind", () => {
     pausedLoaded: [false, false],
     syncing: [false, false],
     looping: [false, false],
-    eqStem: [false, false],
+    pfl: [false, false],
     crossfaderEnabled: false,
   });
   assert.equal(on[0]?.value, 127);
@@ -175,8 +183,6 @@ test("Shift hold plus the high knob becomes that deck's gain", () => {
   assert.deepEqual(resolveMidiActions(reloopBuddy, high, { ...layers, shift: true }), [
     { type: "gain", deck: 0, value: 1 },
   ]);
-  const stems = { eqStem: ["stems", "eq"] as const, shift: true };
-  assert.deepEqual(resolveMidiActions(reloopBuddy, high, stems), [{ type: "gain", deck: 0, value: 1 }]);
 });
 
 test("hardware Shift layer CCs map high to gain and low to filter", () => {
@@ -192,14 +198,14 @@ test("Buddy tempo uses 10-bit max 1023 with LSB 63 and invert", () => {
   assert.equal(top[0]?.type, "tempo");
   if (top[0]?.type === "tempo") {
     assert.ok(Math.abs(top[0].value - 1) < 0.02, `top should be 1, got ${top[0].value}`);
-    assert.ok(Math.abs(scaleUnitToRange(top[0].value, 0.9, 1.1) - 1.1) < 0.005);
+    assert.ok(Math.abs(scaleUnitToRange(top[0].value, 0.9, 1.1) - 0.9) < 0.005);
   }
   resolveMidiActions(reloopBuddy, parseMidiBytes([0xb0, 9, 7])!, layers, bits);
   const bottom = resolveMidiActions(reloopBuddy, parseMidiBytes([0xb0, 63, 127])!, layers, bits);
   assert.equal(bottom[0]?.type, "tempo");
   if (bottom[0]?.type === "tempo") {
     assert.ok(Math.abs(bottom[0].value) < 0.02, `bottom should be 0, got ${bottom[0].value}`);
-    assert.ok(Math.abs(scaleUnitToRange(bottom[0].value, 0.9, 1.1) - 0.9) < 0.005);
+    assert.ok(Math.abs(scaleUnitToRange(bottom[0].value, 0.9, 1.1) - 1.1) < 0.005);
   }
   resolveMidiActions(reloopBuddy, parseMidiBytes([0xb0, 9, 4])!, layers, bits);
   const center = resolveMidiActions(reloopBuddy, parseMidiBytes([0xb0, 63, 0])!, layers, bits);
@@ -210,15 +216,15 @@ test("Buddy tempo uses 10-bit max 1023 with LSB 63 and invert", () => {
   }
 });
 
-test("browse encoder 反转 is on by default so clockwise steps down the list", () => {
+test("browse encoder defaults to Pioneer polarity so clockwise steps down the list", () => {
   const cw = parseMidiBytes([0xbe, 0, 1])!;
   const ccw = parseMidiBytes([0xbe, 0, 127])!;
-  assert.equal(midiBindingInverts(reloopBuddy.bindings.find((binding) => binding.actions[0]?.type === "browseStep")!, "browseStep"), true);
+  assert.equal(midiBindingInverts(reloopBuddy.bindings.find((binding) => binding.actions[0]?.type === "browseStep")!, "browseStep"), false);
   assert.deepEqual(resolveMidiActions(reloopBuddy, cw, layers), [{ type: "browseStep", delta: 1 }]);
   assert.deepEqual(resolveMidiActions(reloopBuddy, ccw, layers), [{ type: "browseStep", delta: -1 }]);
 });
 
-test("browseStep stays inverted without an invert flag and can be turned off", () => {
+test("browseStep invert is off by default and actually reverses clockwise", () => {
   const mapping: MidiMapping = {
     name: "x",
     match: { portContains: ["x"] },
@@ -226,7 +232,7 @@ test("browseStep stays inverted without an invert flag and can be turned off", (
   };
   const cw = parseMidiBytes([0xb0, 0, 1])!;
   assert.deepEqual(resolveMidiActions(mapping, cw, layers), [{ type: "browseStep", delta: 1 }]);
-  mapping.bindings[0] = { ...mapping.bindings[0], invert: false };
+  mapping.bindings[0] = { ...mapping.bindings[0], invert: true };
   assert.deepEqual(resolveMidiActions(mapping, cw, layers), [{ type: "browseStep", delta: -1 }]);
 });
 
@@ -235,10 +241,10 @@ test("jog wheel carries touch separately, preserves edge nudge, and gives Shift 
     { type: "jog", deck: 0, delta: 1 },
   ]);
   assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0xb0, 6, 65])!, layers), [
-    { type: "jog", deck: 0, delta: 1 },
+    { type: "jog", deck: 0, delta: -63 },
   ]);
   assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0xb0, 6, 64])!, layers), [
-    { type: "jog", deck: 0, delta: 0 },
+    { type: "jog", deck: 0, delta: -64 },
   ]);
   assert.deepEqual(resolveMidiActions(reloopBuddy, parseMidiBytes([0x90, 6, 127])!, layers), [
     { type: "jogTouch", deck: 0, held: true },

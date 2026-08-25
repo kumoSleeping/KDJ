@@ -184,12 +184,6 @@ jobs:
           # 正式 tag 缺密钥必须失败，不能发布一个更新链断掉的版本。
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-          # YouTube Music 登录的 OAuth client（Google Console「电视和有限输入
-          # 设备」类型）。打包时经 option_env! 烧进二进制，运行时环境变量仍可
-          # 覆盖；分支构建缺失只警告（产物里登录不可用），正式 tag 缺失拒绝
-          # 发布——不能发一个登录按钮点了就报"未配置"的版本。
-          KDJ_YTM_OAUTH_CLIENT_ID: ${{ secrets.KDJ_YTM_OAUTH_CLIENT_ID }}
-          KDJ_YTM_OAUTH_CLIENT_SECRET: ${{ secrets.KDJ_YTM_OAUTH_CLIENT_SECRET }}
         run: |
           set -euo pipefail
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
@@ -200,13 +194,6 @@ jobs:
             echo "::warning::分支构建没有 TAURI_SIGNING_PRIVATE_KEY，本次只验证普通安装包"
             jq 'del(.bundle.createUpdaterArtifacts)' src-tauri/tauri.conf.json > /tmp/conf.json
             mv /tmp/conf.json src-tauri/tauri.conf.json
-          fi
-          if [ -z "${KDJ_YTM_OAUTH_CLIENT_ID:-}" ] || [ -z "${KDJ_YTM_OAUTH_CLIENT_SECRET:-}" ]; then
-            if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-              echo "::error::正式发行缺少 KDJ_YTM_OAUTH_CLIENT_ID/SECRET；YouTube Music 登录将不可用，拒绝发布"
-              exit 1
-            fi
-            echo "::warning::分支构建没有 YTM OAuth 凭据，产物里 YouTube Music 登录不可用（不影响匿名搜索）"
           fi
           run_tauri_build() {
             if node -e "process.exit((require('./package.json').scripts||{})['tauri:build']?0:1)"; then

@@ -43,12 +43,8 @@ impl PlayerScript {
     /// 解析 base.js。失败说明脚本形状已经变化，需要更新这里的提取规则。
     pub fn parse(js: &str) -> Result<PlayerScript> {
         let (functions, order) = extract_functions(js);
-        anyhow::ensure!(
-            !functions.is_empty(),
-            "播放器脚本里没有找到任何函数定义"
-        );
-        let entry =
-            find_entry(js, &functions, &order).context("找不到播放器签名入口函数")?;
+        anyhow::ensure!(!functions.is_empty(), "播放器脚本里没有找到任何函数定义");
+        let entry = find_entry(js, &functions, &order).context("找不到播放器签名入口函数")?;
         Ok(PlayerScript { functions, entry })
     }
 
@@ -281,11 +277,10 @@ fn exec_rotate(
     };
     let header = &statement[open + 1..close];
     // 循环体两种写法：带花括号 `{a.unshift(a.pop())}` 和单语句不带花括号
-    let body = if let Some(brace_open) = statement[close + 1..]
-        .find('{')
-        .map(|at| close + 1 + at)
-    {
-        take_brace_block(statement, brace_open).context("for 循环体没有闭合")?.0
+    let body = if let Some(brace_open) = statement[close + 1..].find('{').map(|at| close + 1 + at) {
+        take_brace_block(statement, brace_open)
+            .context("for 循环体没有闭合")?
+            .0
     } else {
         let rest = &statement[close + 1..];
         let end = rest.find(';').unwrap_or(rest.len());
@@ -335,11 +330,7 @@ fn exec_rotate(
 }
 
 /// `a.splice(START)` / `a.splice(START, COUNT)`。
-fn exec_splice(
-    rest: &str,
-    arr: &mut Vec<char>,
-    vars: &HashMap<String, TempValue>,
-) -> Result<()> {
+fn exec_splice(rest: &str, arr: &mut Vec<char>, vars: &HashMap<String, TempValue>) -> Result<()> {
     let args = rest
         .strip_suffix(')')
         .context("splice 缺少右括号")?
@@ -436,11 +427,7 @@ fn exec_array_assign(
 }
 
 /// `var c=a[I]` / `var c=N` 等临时变量定义。
-fn exec_var_assign(
-    rest: &str,
-    arr: &[char],
-    vars: &mut HashMap<String, TempValue>,
-) -> Result<()> {
+fn exec_var_assign(rest: &str, arr: &[char], vars: &mut HashMap<String, TempValue>) -> Result<()> {
     let Some((name, value)) = rest.split_once('=') else {
         bail!("变量定义不识别：{rest}");
     };
@@ -603,9 +590,7 @@ fn parse_primary(
             .take_while(|ch| ch.is_ascii_digit())
             .map(char::len_utf8)
             .sum::<usize>();
-        let number: i64 = rest[..number_len]
-            .parse()
-            .context("数字字面量解析失败")?;
+        let number: i64 = rest[..number_len].parse().context("数字字面量解析失败")?;
         return Ok((number, at + number_len));
     }
     // 标识符
@@ -667,7 +652,11 @@ mod tests {
 
     #[test]
     fn reverse_only_entry_works() {
-        let js = script("", "var rv=function(a){a=a.split(\"\");a.reverse();return a.join(\"\")};", "d.set(\"signature\",rv(x))");
+        let js = script(
+            "",
+            "var rv=function(a){a=a.split(\"\");a.reverse();return a.join(\"\")};",
+            "d.set(\"signature\",rv(x))",
+        );
         let parsed = PlayerScript::parse(&js).unwrap();
         assert_eq!(parsed.decipher("abc").unwrap(), "cba");
     }
@@ -818,7 +807,10 @@ mod tests {
     #[test]
     fn expression_evaluator_handles_precedence_and_modulo() {
         let vars = HashMap::from([("b".to_string(), TempValue::Num(41))]);
-        assert_eq!(eval_expr("(b%a.length+a.length)%a.length", 10, &vars).unwrap(), 1);
+        assert_eq!(
+            eval_expr("(b%a.length+a.length)%a.length", 10, &vars).unwrap(),
+            1
+        );
         assert_eq!(eval_expr("1+2*3", 10, &vars).unwrap(), 7);
         assert_eq!(eval_expr("a.length-1", 10, &vars).unwrap(), 9);
         assert!(eval_expr("nope+1", 10, &vars).is_err());

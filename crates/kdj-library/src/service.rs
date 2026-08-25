@@ -29,6 +29,22 @@ use crate::db::{Conn, Database};
 /// 就会重新进入渐进回填队列，同时 v1 仍可作为读取兜底。
 pub const BPM_KEY_V2_REVISION: &str = "kdj-rust-bpm-key-v2.0.0";
 
+#[derive(Default)]
+struct BpmKeyV2Overlay {
+    bpm: Option<f64>,
+    bpm_confidence: Option<f64>,
+    first_beat: Option<f64>,
+    beat_origin: Option<f64>,
+    beat_times: Vec<f64>,
+    downbeat_origin: Option<f64>,
+    downbeats: Vec<f64>,
+    downbeat_confidence: Option<f64>,
+    key: String,
+    camelot: String,
+    open_key: String,
+    key_confidence: Option<f64>,
+}
+
 /// 平台路径分隔符。曲库过滤按前缀匹配要用。
 const SEP: char = std::path::MAIN_SEPARATOR;
 
@@ -1027,23 +1043,13 @@ impl LibraryService {
         if tracks.is_empty() {
             return Ok(tracks);
         }
-        let mut by_id: HashMap<
-            i64,
-            (
-                Option<f64>,
-                Option<f64>,
-                Option<f64>,
-                String,
-                String,
-                String,
-                Option<f64>,
-            ),
-        > = HashMap::new();
+        let mut by_id: HashMap<i64, BpmKeyV2Overlay> = HashMap::new();
         for chunk in tracks.chunks(900) {
             let ids: Vec<i64> = chunk.iter().map(|track| track.id).collect();
             let placeholders = vec!["?"; ids.len()].join(",");
             let sql = format!(
-                "SELECT track_id, bpm, bpm_confidence, first_beat, music_key, camelot, open_key, \
+                "SELECT track_id, bpm, bpm_confidence, first_beat, beat_origin, beat_times_json, \
+                 downbeat_origin, downbeats_json, downbeat_confidence, music_key, camelot, open_key, \
                  key_confidence FROM track_bpm_key_analysis_v2 \
                  WHERE analyzer_revision = ? AND track_id IN ({placeholders})"
             );
@@ -1054,15 +1060,26 @@ impl LibraryService {
             for row in stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
-                    (
-                        row.get::<_, Option<f64>>(1)?,
-                        row.get::<_, Option<f64>>(2)?,
-                        row.get::<_, Option<f64>>(3)?,
-                        row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                        row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                        row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                        row.get::<_, Option<f64>>(7)?,
-                    ),
+                    BpmKeyV2Overlay {
+                        bpm: row.get(1)?,
+                        bpm_confidence: row.get(2)?,
+                        first_beat: row.get(3)?,
+                        beat_origin: row.get(4)?,
+                        beat_times: serde_json::from_str(
+                            &row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                        )
+                        .unwrap_or_default(),
+                        downbeat_origin: row.get(6)?,
+                        downbeats: serde_json::from_str(
+                            &row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                        )
+                        .unwrap_or_default(),
+                        downbeat_confidence: row.get(8)?,
+                        key: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                        camelot: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                        open_key: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                        key_confidence: row.get(12)?,
+                    },
                 ))
             })? {
                 let (id, values) = row?;
@@ -1070,22 +1087,25 @@ impl LibraryService {
             }
         }
         for track in &mut tracks {
-            let Some((bpm, bpm_confidence, first_beat, key, camelot, open_key, key_confidence)) =
-                by_id.remove(&track.id)
-            else {
+            let Some(overlay) = by_id.remove(&track.id) else {
                 continue;
             };
-            if bpm.is_some() {
-                track.bpm = bpm;
+            if overlay.bpm.is_some() {
+                track.bpm = overlay.bpm;
                 track.bpm_v2 = true;
-                track.bpm_confidence = bpm_confidence;
-                track.first_beat = first_beat;
+                track.bpm_confidence = overlay.bpm_confidence;
+                track.first_beat = overlay.first_beat;
+                track.beat_origin = overlay.beat_origin;
+                track.beat_times = overlay.beat_times;
+                track.downbeat_origin = overlay.downbeat_origin;
+                track.downbeats = overlay.downbeats;
+                track.downbeat_confidence = overlay.downbeat_confidence;
             }
-            if !key.is_empty() {
-                track.music_key = key;
-                track.camelot = camelot.to_uppercase();
-                track.open_key = open_key;
-                track.key_confidence = key_confidence;
+            if !overlay.key.is_empty() {
+                track.music_key = overlay.key;
+                track.camelot = overlay.camelot.to_uppercase();
+                track.open_key = overlay.open_key;
+                track.key_confidence = overlay.key_confidence;
             }
         }
         Ok(tracks)
@@ -1831,21 +1851,27 @@ impl LibraryService {
     pub fn save_bpm_key_analysis_v2(&self, track_id: i64, result: &AnalysisResult) -> Result<()> {
         let mut conn = self.db.conn()?;
         let beat_times = serde_json::to_string(&result.beat_times).context("序列化 v2 拍点失败")?;
+        let downbeats = serde_json::to_string(&result.downbeats).context("序列化 v2 小节拍失败")?;
         let chroma = serde_json::to_string(&result.chroma).context("序列化 v2 chroma 失败")?;
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO track_bpm_key_analysis_v2 (
                track_id, analyzer_revision, bpm, bpm_raw, bpm_confidence, first_beat,
-               beat_times_json, music_key, key_short, camelot, open_key, key_confidence,
+               beat_origin, beat_times_json, downbeat_origin, downbeats_json, downbeat_confidence,
+               music_key, key_short, camelot, open_key, key_confidence,
                chroma_json, analyzed_at, analysis_error
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(track_id) DO UPDATE SET
                analyzer_revision = excluded.analyzer_revision,
                bpm = excluded.bpm,
                bpm_raw = excluded.bpm_raw,
                bpm_confidence = excluded.bpm_confidence,
                first_beat = excluded.first_beat,
+               beat_origin = excluded.beat_origin,
                beat_times_json = excluded.beat_times_json,
+               downbeat_origin = excluded.downbeat_origin,
+               downbeats_json = excluded.downbeats_json,
+               downbeat_confidence = excluded.downbeat_confidence,
                music_key = excluded.music_key,
                key_short = excluded.key_short,
                camelot = excluded.camelot,
@@ -1861,7 +1887,11 @@ impl LibraryService {
                 result.bpm_raw,
                 result.bpm_confidence,
                 result.first_beat,
+                result.beat_origin,
                 beat_times,
+                result.downbeat_origin,
+                downbeats,
+                result.downbeat_confidence,
                 result.key,
                 result.key_short,
                 result.camelot.to_uppercase(),
@@ -2479,18 +2509,22 @@ impl LibraryService {
         conn.execute(
             "INSERT INTO track_bpm_key_analysis_v2 (
                track_id, analyzer_revision, bpm, bpm_raw, bpm_confidence, first_beat,
-               beat_times_json, music_key, key_short, camelot, open_key, key_confidence,
+               beat_origin, beat_times_json, downbeat_origin, downbeats_json, downbeat_confidence,
+               music_key, key_short, camelot, open_key, key_confidence,
                chroma_json, analyzed_at, analysis_error
              )
              SELECT ?, analyzer_revision, bpm, bpm_raw, bpm_confidence, first_beat,
-               beat_times_json, music_key, key_short, camelot, open_key, key_confidence,
+               beat_origin, beat_times_json, downbeat_origin, downbeats_json, downbeat_confidence,
+               music_key, key_short, camelot, open_key, key_confidence,
                chroma_json, analyzed_at, analysis_error
              FROM track_bpm_key_analysis_v2 WHERE track_id = ?
              ON CONFLICT(track_id) DO UPDATE SET
                analyzer_revision = excluded.analyzer_revision,
                bpm = excluded.bpm, bpm_raw = excluded.bpm_raw,
                bpm_confidence = excluded.bpm_confidence, first_beat = excluded.first_beat,
-               beat_times_json = excluded.beat_times_json, music_key = excluded.music_key,
+               beat_origin = excluded.beat_origin, beat_times_json = excluded.beat_times_json,
+               downbeat_origin = excluded.downbeat_origin, downbeats_json = excluded.downbeats_json,
+               downbeat_confidence = excluded.downbeat_confidence, music_key = excluded.music_key,
                key_short = excluded.key_short, camelot = excluded.camelot,
                open_key = excluded.open_key, key_confidence = excluded.key_confidence,
                chroma_json = excluded.chroma_json, analyzed_at = excluded.analyzed_at,
@@ -2570,6 +2604,11 @@ fn row_to_track(row: &Row) -> Track {
         bpm_v2: false,
         bpm_confidence: row.get("bpm_confidence").ok().flatten(),
         first_beat: row.get("first_beat").ok().flatten(),
+        beat_origin: None,
+        beat_times: Vec::new(),
+        downbeat_origin: None,
+        downbeats: Vec::new(),
+        downbeat_confidence: None,
         music_key: text(row, "music_key"),
         camelot: text(row, "camelot").to_uppercase(),
         open_key: text(row, "open_key"),
@@ -3943,7 +3982,11 @@ mod tests {
             bpm_raw: Some(126.247),
             bpm_confidence: Some(0.91),
             first_beat: Some(0.125),
+            beat_origin: Some(0.125),
             beat_times: vec![0.125, 0.6004],
+            downbeat_origin: Some(1.0758),
+            downbeats: vec![1.0758, 2.9774],
+            downbeat_confidence: Some(0.82),
             key: "E minor".into(),
             key_short: "Em".into(),
             camelot: "9A".into(),
@@ -3982,6 +4025,10 @@ mod tests {
 
         let effective = service.get(b).unwrap().unwrap();
         assert_eq!(effective.bpm, Some(126.25));
+        assert_eq!(effective.beat_times, vec![0.125, 0.6004]);
+        assert_eq!(effective.downbeat_origin, Some(1.0758));
+        assert_eq!(effective.downbeats, vec![1.0758, 2.9774]);
+        assert_eq!(effective.downbeat_confidence, Some(0.82));
         assert!(effective.bpm_v2, "当前修订的 V2 BPM 覆盖后要显式标记来源");
         assert_eq!(effective.music_key, "E minor");
         assert_eq!(effective.camelot, "9A");

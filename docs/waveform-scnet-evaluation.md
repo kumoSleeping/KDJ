@@ -40,7 +40,7 @@
 
 高密度输出多了约 37 倍，计算反而快约 14.4 倍。
 
-按实际调度先算 640、再算 23,970，两次都未命中波形缓存时，在文件已进入 OS page cache 后合计 0.81 秒（两个独立 benchmark 进程）。因此保留“先出概览”也没有越过 1.5 秒的高级波形目标。
+恢复 v0.2.41 release overview 后，两种视觉 profile 仍然独立存储，但交互冷命中不再独立解码。2026-08-25 在同一台 M2 上用 310.3 秒 MP3、热 OS page cache、7 轮中位数复测：`opt-level=2` 下分别解码 release/current 共 0.724 秒；共享一次 native PCM 解码并生成两份资产为 0.403 秒，节省 44.4%。此前体积优先的 `opt-level=z` 单算 release 就要 0.845 秒，因此 release 全局改为 level 2。相位累加器还把 44.1→16 kHz 的同一份 polyphase sinc 从 64.3 ms 降到 48.2 ms（1.34×），与逐样本坐标公式的输出最大误差为 0。
 
 用户截图里的《願いはShine On The Sea》也做了同宽度复算：旧渲染把 21,854 列直接按屏幕像素取 peak，1,812 个像素里有 79.2% 高于 0.8；新版先派生 960 列时间均值，再插值到屏幕，超过 0.8 的像素降到 36.2%。中位高度仍是 0.77，颜色不减采样，只把“几乎根根顶满”的垂直填充压下来。
 
@@ -54,13 +54,13 @@
 | 239.7 秒高级波形，23,970 列 | 167,820 bytes（163.9 KiB） |
 | 24,000 列上限 | 168,030 bytes（164.1 KiB） |
 
-前端四个 Number 数组的理论数据下限约 0.73 MiB/24,000 列，算上 JS 数组开销通常约 0.8–1.5 MiB/曲。Performance canvas 的 backing store 限制为 16,384 pixels；Retina、50 CSS px 高时，最坏约 6.25 MiB/Deck。两台 Deck 加波形数组，通常仍在十几 MiB 量级。
+二进制响应不再展开成四个 boxed Number 数组：amp 使用响应内的 `Float32Array` view，RGB 使用三个 `Uint8Array` view，四个通道共享原始 `ArrayBuffer`。24,000 列因此保持约 164 KiB wire 大小，而不是约 0.8–1.5 MiB/曲；JSON 兼容回退仍使用普通数组。Canvas 的屏幕列暂存也从五个 Float64 缓冲收紧为 Float32 amp/edge + Uint8 RGB/known。Performance canvas 的 backing store 限制为 16,384 pixels；Retina、50 CSS px 高时，最坏约 6.25 MiB/Deck，像素面仍是主要显存占用。
 
-24,000 列 v5 文件在本机做 20 次“磁盘读取 + 二进制展开 + JSON 编码”，median 20.16 ms、p95 20.50 ms；JSON body 约 691 KiB。它给本地 HTTP 和前端留出了足够余量，缓存命中目标仍是 100 ms 内。
+旧 HTTP 路径会把 24,000 列磁盘二进制重新编码成约 691 KiB JSON。现在前端显式请求 `application/vnd.kdj.waveform`：36-byte wire header 自描述格式版本、current/release profile 与算法 revision，随后仍是每列 7 bytes。24,000 列响应固定为 168,036 bytes；服务端不再生成大段 JSON 文本，WebView 也不再解析数万个数字 token。未升级的后端仍可回退到 JSON。
 
-正常用户不会再看到软件启动后逐首完整解码整个曲库。当前曲和预测下一首先到先算，单曲未命中约 0.6 秒；缓存命中只读一份约 164 KiB 的二进制文件。后台 BPM/Key 分析结束后也不再顺手排一遍全库波形。
+正常用户不会再看到软件启动后逐首完整解码整个曲库。当前曲和预测下一首先到先算；310 秒测试曲一次冷命中约 0.4 秒便同时得到 release overview 与 detail，普通长度歌曲更短。缓存命中只读一份最多约 164 KiB 的二进制文件。DJ detail 直接复用这份高密度资产，颜色沿用 overview 的 RGB 频段语言，但保留 peak 屏幕汇聚、100 列/秒、Beat Grid 与 GAIN 高度，不套用 overview 的中位值离群过滤。后台 BPM/Key 分析结束后也不再顺手排一遍全库波形。
 
-缓存算法版本现在是 v5。某一首歌的新 v5 文件原子写入成功后，才删除这首歌对应的 v2 JSON、v3 STFT 和 v4 重采样缓存。失败或中断不删旧文件，也不会动音频、BPM/Key、Cue 或曲库记录。没有装入过 Deck 的歌不会为了清旧文件而被全库重算；它第一次装轨成功后再完成替换和清理。
+当前 detail 缓存算法版本是 v6。某一首歌的新 v6 文件原子写入成功后，才删除这首歌对应的 v2 JSON、v3 STFT、v4 重采样和 v5 peak 缓存。失败或中断不删旧文件，也不会动音频、BPM/Key、Cue 或曲库记录。没有装入过 Deck 的歌不会为了清旧文件而被全库重算；它第一次装轨成功后再完成替换和清理。
 
 ## 2. Beat Grid
 
@@ -221,7 +221,7 @@ KDJ 当前只有 Rust + Tauri 是活动架构。若以后确认一个 SCNet 模�
 1. `crates/kdj-analysis` 负责模型 manifest、checkpoint hash、chunk inference 契约，不让 `kdj-player` 知道 PyTorch 或模型下载细节；
 2. `kdj-server` 增加独立 StemCoordinator，按 `(track, mtime, model hash, chunk start, chunk length)` 单飞和缓存。Hot Cue 请求抢占普通预热，但不能在音频 callback 里跑模型或写文件；
 3. `kdj-player` 只接收已经可读的四轨 PCM/ring buffer，在现有 engine/stream mixer 里做 Vocals / Drums / Bass / Other gain/mute。cache miss 时继续播原混音，四轨就绪后在 block 边界短 crossfade，不能阻塞设备线程；
-4. `PerformanceWorkspace` 读取同一个 stem state，画四条独立波形和开关。overview 仍来自 mix，不因某条 stem 尚未完成而空转整条 Deck；
+4. `PerformanceWorkspace` 只保留原曲波形；STEM state 仅驱动实时音频增益和 Vocal FX，不生成、传输或绘制分轨波形；
 5. 设置只允许下载和选中一个模型。模型切换后按 hash 隔离缓存，不设计运行时双模型兜底。
 
 完整 11 秒 float stem cache 已经是 14.8 MiB，整轨无压缩约 323 MiB。正式方案要么按 11 秒附近按需缓存并做 LRU，要么采用可随机访问的无损压缩；不能把全库四轨 float 当成和 164 KiB 波形缓存同一类资产。

@@ -17,7 +17,8 @@ export function burstToneForPlatforms(platforms: readonly Platform[]): SearchBur
     case "wyy":
       return "red";
     case "ytm":
-      // YouTube Music 也是经典红，和网易云共用红色系
+    case "youtube":
+      // YouTube Music 与普通 YouTube 都使用品牌红。
       return "red";
     case "qqm":
       return "green";

@@ -76,7 +76,11 @@ CREATE TABLE IF NOT EXISTS track_bpm_key_analysis_v2 (
   bpm_raw REAL,
   bpm_confidence REAL,
   first_beat REAL,
+  beat_origin REAL,
   beat_times_json TEXT NOT NULL DEFAULT '[]',
+  downbeat_origin REAL,
+  downbeats_json TEXT NOT NULL DEFAULT '[]',
+  downbeat_confidence REAL,
   music_key TEXT,
   key_short TEXT,
   camelot TEXT,
@@ -261,6 +265,25 @@ impl Database {
             if !existing.iter().any(|column| column == name) {
                 conn.execute_batch(&format!("ALTER TABLE tracks ADD COLUMN {name} {decl}"))
                     .with_context(|| format!("补列 {name} 失败"))?;
+            }
+        }
+
+        let analysis_columns: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(track_bpm_key_analysis_v2)")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for (name, decl) in [
+            ("beat_origin", "REAL"),
+            ("downbeat_origin", "REAL"),
+            ("downbeats_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("downbeat_confidence", "REAL"),
+        ] {
+            if !analysis_columns.iter().any(|column| column == name) {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE track_bpm_key_analysis_v2 ADD COLUMN {name} {decl}"
+                ))
+                .with_context(|| format!("补分析列 {name} 失败"))?;
             }
         }
 

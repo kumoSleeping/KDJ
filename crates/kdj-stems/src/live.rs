@@ -1,41 +1,21 @@
-use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use kdj_core::work_scheduler::{work_scheduler, QueuedWork, WorkClass};
-use rustfft::num_complex::Complex32;
-use rustfft::{Fft, FftPlanner};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::instant::instant_admission_active;
 use crate::runtime::{recommended_worker_count, PlatformEngine, RuntimeInfo};
 use crate::runtime::{stem_runtime_preference, StemRuntimePreference};
-use crate::{StemKind, StemWaveform, SAMPLE_RATE};
+use crate::SAMPLE_RATE;
 
-const LIVE_WAVE_COLUMNS_PER_SECOND: usize = 100;
-/// Keep the 30-second performance rail while the playhead walks the song; never retain a
-/// whole-track PCM/RGB session.
-const LIVE_WAVE_RETAIN_SECONDS: f64 = 30.0;
-/// The audio worker can finish while its bounded ring still plays the final seconds. Keep the
-/// compact completed session long enough for the next UI delta poll (and a quick panel remount)
-/// instead of deleting the song tail before it can be painted.
-const LIVE_WAVE_COMPLETION_RETENTION: Duration = Duration::from_secs(60);
-/// One 46 ms Hann window per 10 ms display column. This follows the same STFT + frequency-colour
-/// gradient family used by DJ waveform tools, but runs only on completed classical Redress PCM in memory.
-const LIVE_STEM_COLOR_FFT_SIZE: usize = 2_048;
-const LIVE_STEM_COLOR_MIN_HZ: f32 = 35.0;
-const LIVE_STEM_COLOR_MAX_HZ: f32 = 16_000.0;
-/// Match the original mix waveform: P99.5 height, then γ < 1 so quiet hits still read.
-const LIVE_AMP_GAMMA: f32 = 0.72;
-/// Same floor as `kdj_analysis::waveform::COLOR_FLOOR` so STEM rails are not a grey wash.
-const LIVE_COLOR_FLOOR: f32 = 0.12;
 /// One fixed classical Redress tile produces this much retained source. This is a background-cache budget,
 /// not callback latency or a promise that a cache miss is instantaneous.
 const DIAGNOSTIC_HISTORY: usize = 64;
@@ -149,17 +129,8 @@ pub fn stem_runtime_diagnostics() -> StemRuntimeDiagnostics {
     diagnostics
 }
 
-pub fn any_live_audio_lease_held() -> bool {
-    live_audio_lease_count() > 0
-}
-
-pub fn live_audio_lease_count() -> usize {
-    live_waves()
-        .lock()
-        .unwrap()
-        .values()
-        .filter(|session| session.audio_lease)
-        .count()
+fn live_audio_lease_count() -> usize {
+    LIVE_AUDIO_LEASES.load(Ordering::Acquire)
 }
 
 pub fn stem_output_underruns() -> u64 {
@@ -288,790 +259,23 @@ fn record_refinement_deferred() {
     diagnostics.refinement_deferred = diagnostics.refinement_deferred.saturating_add(1);
 }
 
-struct LiveWaveBlock {
-    revision: u64,
-    start: f64,
-    duration: f64,
-    /// Performance only exposes the vocal separation beside the mandatory original waveform.
-    /// Keeping the other three display envelopes would run three unnecessary FFT passes per tile.
-    vocals_amp: Vec<f32>,
-    vocals_rgb: Vec<[u8; 3]>,
-}
+static LIVE_AUDIO_LEASES: AtomicUsize = AtomicUsize::new(0);
 
-struct LiveWaveSession {
-    /// Stable public identity for this track's retained waveform timeline. Transport seeks do not
-    /// change it, so mounted clients can continue their append cursor without replaying a whole
-    /// song of JSON or clearing canvases.
-    epoch: u64,
-    /// Per-worker cancellation identity. A seek advances this even though the public timeline
-    /// epoch stays stable, preventing an old separator from publishing into the new transport.
-    worker_epoch: u64,
-    revision: u64,
-    start: f64,
-    duration: f64,
-    /// Live playback owns this lease. A completed audio worker may still keep the compact
-    /// session briefly so the UI can paint the last tile while the ring drains.
-    audio_lease: bool,
-    /// Display-only viewport scan. Released immediately on track switch; it must not keep
-    /// GPU/PCM tiles after the song has left the Deck.
-    scan_lease: bool,
-    scan_generation: u64,
-    finished_at: Option<Instant>,
-    blocks: VecDeque<LiveWaveBlock>,
-}
+/// Counts active audio STEM producers for scheduler pressure without retaining any display data.
+pub struct LiveStemAudioGuard;
 
-impl LiveWaveSession {
-    fn held(&self) -> bool {
-        self.audio_lease || self.scan_lease
-    }
-}
-
-/// Incremental waveform payload for the performance UI. Sending a complete 24,000-column RGB
-/// waveform every 200ms made JSON parsing and canvas redraws compete with the compositor. A
-/// point is therefore sent only once, when its real classical Redress tile is published.
-#[derive(Clone, Debug, Serialize)]
-pub struct LiveStemWaveformDelta {
-    pub track_id: i64,
-    pub epoch: u64,
-    pub duration: f64,
-    pub columns: usize,
-    pub revision: u64,
-    pub stems: Vec<LiveStemWaveformStem>,
-    pub analysis_start: f64,
-    pub analysis_frontier: f64,
-    pub analysis_back_frontier: f64,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct LiveStemWaveformStem {
-    pub stem: StemKind,
-    pub points: Vec<LiveStemWaveformPoint>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-pub struct LiveStemWaveformPoint {
-    pub index: usize,
-    pub amp: f32,
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-fn live_waves() -> &'static Mutex<HashMap<i64, LiveWaveSession>> {
-    static WAVES: OnceLock<Mutex<HashMap<i64, LiveWaveSession>>> = OnceLock::new();
-    WAVES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-static NEXT_LIVE_WAVE_EPOCH: AtomicU64 = AtomicU64::new(1);
-static NEXT_SCAN_GENERATION: AtomicU64 = AtomicU64::new(1);
-
-fn next_live_wave_epoch() -> u64 {
-    NEXT_LIVE_WAVE_EPOCH.fetch_add(1, Ordering::AcqRel).max(1)
-}
-
-fn next_scan_generation() -> u64 {
-    NEXT_SCAN_GENERATION.fetch_add(1, Ordering::AcqRel).max(1)
-}
-
-/// A runtime reset changes the meaning and number of every published lane. Retaining blocks across
-/// that boundary makes the new scanner treat old-runtime coverage as completed work, so invalidate
-/// the complete public timeline and force mounted clients onto a fresh epoch.
-pub(crate) fn invalidate_live_stem_waveforms(reason: &'static str) {
-    let mut sessions = live_waves().lock().unwrap();
-    let count = sessions.len();
-    sessions.clear();
-    drop(sessions);
-    work_scheduler().set_live_stem_decks(0);
-    tracing::info!(
-        target: "kdj_stem_lifecycle",
-        event = "waveform_sessions_invalidated",
-        count,
-        reason,
-        "old-runtime STEM waveform blocks and coverage were invalidated"
-    );
-}
-
-fn prune_finished_live_wave_sessions(sessions: &mut HashMap<i64, LiveWaveSession>) {
-    sessions.retain(|_, session| {
-        session.held()
-            || session
-                .finished_at
-                .is_some_and(|finished| finished.elapsed() < LIVE_WAVE_COMPLETION_RETENTION)
-    });
-}
-
-pub struct LiveStemWaveGuard {
-    track_id: i64,
-    worker_epoch: u64,
-}
-
-impl Drop for LiveStemWaveGuard {
+impl Drop for LiveStemAudioGuard {
     fn drop(&mut self) {
-        let mut sessions = live_waves().lock().unwrap();
-        if let Some(session) = sessions
-            .get_mut(&self.track_id)
-            .filter(|session| session.worker_epoch == self.worker_epoch)
-        {
-            session.audio_lease = false;
-            if !session.held() {
-                session.finished_at = Some(Instant::now());
-            }
-        }
-        let decks = sessions
-            .values()
-            .filter(|session| session.audio_lease)
-            .count();
-        drop(sessions);
-        work_scheduler().set_live_stem_decks(decks);
+        let previous = LIVE_AUDIO_LEASES.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "live STEM audio lease underflow");
+        work_scheduler().set_live_stem_decks(LIVE_AUDIO_LEASES.load(Ordering::Acquire));
     }
 }
 
-/// Display scan lease. Dropping it (or calling [`release_scan_stem_waveform`]) immediately
-/// discards in-memory tiles unless a live audio worker still holds the same track.
-pub struct StemScanGuard {
-    track_id: i64,
-    scan_generation: u64,
-}
-
-impl StemScanGuard {
-    pub fn generation(&self) -> u64 {
-        self.scan_generation
-    }
-}
-
-impl Drop for StemScanGuard {
-    fn drop(&mut self) {
-        release_scan_generation(self.track_id, self.scan_generation, true);
-    }
-}
-
-pub fn begin_live_stem_waveform(
-    track_id: i64,
-    epoch: u64,
-    start: f64,
-    duration: f64,
-) -> LiveStemWaveGuard {
-    let mut sessions = live_waves().lock().unwrap();
-    prune_finished_live_wave_sessions(&mut sessions);
-    let start = start.max(0.0);
-    let duration = duration.max(0.0);
-    if let Some(session) = sessions.get_mut(&track_id) {
-        // A live separator has no random-access separator cache, so a real seek needs a new worker
-        // epoch. Its already separated waveform columns are still valid for this exact audio
-        // file, though. Retaining them avoids blanking all rails every time the performer jogs or
-        // SYNC retargets the current Deck.
-        session.worker_epoch = epoch;
-        session.start = start;
-        session.duration = duration.max(session.duration);
-        session.audio_lease = true;
-        session.finished_at = None;
-    } else {
-        sessions.insert(
-            track_id,
-            LiveWaveSession {
-                epoch: next_live_wave_epoch(),
-                worker_epoch: epoch,
-                revision: 0,
-                start,
-                duration,
-                audio_lease: true,
-                scan_lease: false,
-                scan_generation: 0,
-                finished_at: None,
-                blocks: VecDeque::new(),
-            },
-        );
-    }
-    let decks = sessions
-        .values()
-        .filter(|session| session.audio_lease)
-        .count();
-    drop(sessions);
-    work_scheduler().set_live_stem_decks(decks);
-    LiveStemWaveGuard {
-        track_id,
-        worker_epoch: epoch,
-    }
-}
-
-/// Attach a display-only scan to this track's in-memory waveform. Existing tiles stay; a new
-/// song identity is created only when no session exists yet.
-pub fn begin_scan_stem_waveform(track_id: i64, duration: f64) -> StemScanGuard {
-    let mut sessions = live_waves().lock().unwrap();
-    prune_finished_live_wave_sessions(&mut sessions);
-    let duration = duration.max(0.0);
-    if let Some(session) = sessions.get_mut(&track_id) {
-        session.duration = duration.max(session.duration);
-        if !session.scan_lease {
-            session.scan_generation = next_scan_generation();
-        }
-        session.scan_lease = true;
-        session.finished_at = None;
-        StemScanGuard {
-            track_id,
-            scan_generation: session.scan_generation,
-        }
-    } else {
-        sessions.insert(
-            track_id,
-            LiveWaveSession {
-                epoch: next_live_wave_epoch(),
-                worker_epoch: 0,
-                revision: 0,
-                start: 0.0,
-                duration,
-                audio_lease: false,
-                scan_lease: true,
-                scan_generation: next_scan_generation(),
-                finished_at: None,
-                blocks: VecDeque::new(),
-            },
-        );
-        let scan_generation = sessions
-            .get(&track_id)
-            .expect("scan session inserted")
-            .scan_generation;
-        StemScanGuard {
-            track_id,
-            scan_generation,
-        }
-    }
-}
-
-/// Cancel in-flight display work and drop the tiles immediately when no audio worker remains.
-pub fn release_scan_stem_waveform(track_id: i64) {
-    let generation = {
-        let sessions = live_waves().lock().unwrap();
-        sessions
-            .get(&track_id)
-            .map(|session| session.scan_generation)
-    };
-    if let Some(generation) = generation {
-        release_scan_generation(track_id, generation, true);
-    }
-}
-
-fn release_scan_generation(track_id: i64, scan_generation: u64, immediate: bool) {
-    let mut sessions = live_waves().lock().unwrap();
-    let Some(session) = sessions.get_mut(&track_id) else {
-        return;
-    };
-    if session.scan_generation != scan_generation {
-        return;
-    }
-    session.scan_lease = false;
-    session.scan_generation = next_scan_generation();
-    if session.audio_lease {
-        prune_distant_live_wave_blocks(session, session.start);
-        return;
-    }
-    if immediate {
-        sessions.remove(&track_id);
-    } else {
-        session.finished_at = Some(Instant::now());
-    }
-}
-
-pub fn extend_scan_stem_waveform(track_id: i64, duration: f64) {
-    let mut sessions = live_waves().lock().unwrap();
-    if let Some(session) = sessions.get_mut(&track_id) {
-        session.duration = duration.max(session.duration);
-        session.finished_at = None;
-    }
-}
-
-pub fn publish_scan_stem_waveform_block(
-    track_id: i64,
-    scan_generation: u64,
-    start: f64,
-    stems: &[Vec<[f32; 2]>; 4],
-    frame_start: usize,
-    frames: usize,
-) {
-    publish_stem_waveform_block(track_id, start, stems, frame_start, frames, |session| {
-        session.scan_lease && session.scan_generation == scan_generation
-    });
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct LiveStemCoverage {
-    pub duration: f64,
-    pub ranges: Vec<(f64, f64)>,
-    pub covered_seconds: f64,
-}
-
-pub fn live_stem_coverage(track_id: i64) -> Option<LiveStemCoverage> {
-    let mut sessions = live_waves().lock().unwrap();
-    prune_finished_live_wave_sessions(&mut sessions);
-    let session = sessions.get(&track_id)?;
-    Some(coverage_from_session(session))
-}
-
-pub fn live_stem_range_covered(track_id: i64, start: f64, duration: f64) -> bool {
-    live_stem_coverage(track_id).is_some_and(|coverage| {
-        range_is_covered(
-            &coverage.ranges,
-            start,
-            (start + duration).min(coverage.duration),
-        )
-    })
-}
-
-fn coverage_from_session(session: &LiveWaveSession) -> LiveStemCoverage {
-    let mut ranges: Vec<(f64, f64)> = session
-        .blocks
-        .iter()
-        .map(|block| (block.start, block.start + block.duration))
-        .collect();
-    ranges.sort_by(|left, right| left.0.total_cmp(&right.0));
-    let merged = merge_ranges(&ranges);
-    let covered_seconds = merged
-        .iter()
-        .map(|(start, end)| (end - start).max(0.0))
-        .sum();
-    LiveStemCoverage {
-        duration: session.duration,
-        ranges: merged,
-        covered_seconds,
-    }
-}
-
-pub(crate) fn merge_ranges(ranges: &[(f64, f64)]) -> Vec<(f64, f64)> {
-    const EPSILON: f64 = 0.002;
-    let mut merged = Vec::<(f64, f64)>::new();
-    for &(start, end) in ranges {
-        if end <= start {
-            continue;
-        }
-        match merged.last_mut() {
-            Some((_, current_end)) if start <= *current_end + EPSILON => {
-                *current_end = current_end.max(end);
-            }
-            _ => merged.push((start, end)),
-        }
-    }
-    merged
-}
-
-pub(crate) fn range_is_covered(ranges: &[(f64, f64)], start: f64, end: f64) -> bool {
-    const EPSILON: f64 = 0.002;
-    if end <= start + EPSILON {
-        return true;
-    }
-    ranges.iter().any(|&(range_start, range_end)| {
-        range_start <= start + EPSILON && range_end + EPSILON >= end
-    })
-}
-
-pub fn publish_live_stem_waveform_block(
-    track_id: i64,
-    epoch: u64,
-    start: f64,
-    stems: &[Vec<[f32; 2]>; 4],
-    frame_start: usize,
-    frames: usize,
-) {
-    publish_stem_waveform_block(track_id, start, stems, frame_start, frames, |session| {
-        session.worker_epoch == epoch
-    });
-}
-
-fn publish_stem_waveform_block(
-    track_id: i64,
-    start: f64,
-    stems: &[Vec<[f32; 2]>; 4],
-    frame_start: usize,
-    frames: usize,
-    accept: impl Fn(&LiveWaveSession) -> bool,
-) {
-    if frames == 0 {
-        return;
-    }
-    let wave_frames = (SAMPLE_RATE as usize / LIVE_WAVE_COLUMNS_PER_SECOND).max(1);
-    let columns = frames.div_ceil(wave_frames);
-    let mut vocals_amp = vec![0.0f32; columns];
-    for offset in 0..frames {
-        let column = offset / wave_frames;
-        if let Some(frame) = stems[StemKind::Vocals.index()].get(frame_start + offset) {
-            vocals_amp[column] = vocals_amp[column].max(frame[0].abs()).max(frame[1].abs());
-        }
-    }
-    // Display analysis is worker-only, but it still competes for CPU with the live producer. One
-    // vocal FFT pass replaces the former four-lane pass now that non-vocal rails are not public.
-    let vocals_mono = (0..frames)
-        .map(|offset| {
-            stems[StemKind::Vocals.index()]
-                .get(frame_start + offset)
-                .map_or(0.0, |frame| (frame[0] + frame[1]) * 0.5)
-        })
-        .collect::<Vec<_>>();
-    let vocals_rgb = live_stem_waveform_colours(&vocals_mono, columns);
-    let mut sessions = live_waves().lock().unwrap();
-    prune_finished_live_wave_sessions(&mut sessions);
-    let Some(session) = sessions
-        .get_mut(&track_id)
-        .filter(|session| accept(session))
-    else {
-        return;
-    };
-    let duration = frames as f64 / f64::from(SAMPLE_RATE);
-    session.revision = session.revision.wrapping_add(1);
-    // A bounded look-ahead may publish a tile shortly before the audible worker reaches it.
-    // Replace that range rather than retaining duplicate columns, but give the replacement a new
-    // revision so an already-mounted client receives the authoritative values once more.
-    if let Some(index) = session.blocks.iter().position(|block| {
-        (block.start - start).abs() < 1.0 / f64::from(SAMPLE_RATE)
-            && (block.duration - duration).abs() < 1.0 / f64::from(SAMPLE_RATE)
-    }) {
-        session.blocks.remove(index);
-    }
-    session.blocks.push_back(LiveWaveBlock {
-        revision: session.revision,
-        start,
-        duration,
-        vocals_amp,
-        vocals_rgb,
-    });
-    if !session.scan_lease {
-        prune_distant_live_wave_blocks(session, start);
-    }
-    session
-        .blocks
-        .make_contiguous()
-        .sort_by(|left, right| left.start.total_cmp(&right.start));
-}
-
-fn prune_distant_live_wave_blocks(session: &mut LiveWaveSession, around: f64) {
-    let keep_start = (around - LIVE_WAVE_RETAIN_SECONDS).max(0.0);
-    let keep_end = around + LIVE_WAVE_RETAIN_SECONDS;
-    session
-        .blocks
-        .retain(|block| block.start + block.duration >= keep_start && block.start <= keep_end);
-}
-
-/// Return the contiguous regions actually backed by completed classical Redress tiles. These bounds must
-/// come from published blocks rather than elapsed wall-clock time: a slow separator must leave the
-/// frontier where data really ends instead of making the UI advertise an empty future as loaded.
-fn live_waveform_frontiers(session: &LiveWaveSession) -> (f64, f64) {
-    const EPSILON_SECONDS: f64 = 1.0 / SAMPLE_RATE as f64;
-
-    let mut forward = session.start;
-    for block in session
-        .blocks
-        .iter()
-        .filter(|block| block.start >= session.start - EPSILON_SECONDS)
-    {
-        if block.start > forward + EPSILON_SECONDS {
-            break;
-        }
-        forward = forward.max(block.start + block.duration);
-    }
-
-    let mut backward = session.start;
-    for block in session
-        .blocks
-        .iter()
-        .rev()
-        .filter(|block| block.start + block.duration <= session.start + EPSILON_SECONDS)
-    {
-        if block.start + block.duration < backward - EPSILON_SECONDS {
-            break;
-        }
-        backward = backward.min(block.start);
-    }
-
-    if session.duration > 0.0 {
-        (forward.min(session.duration), backward.max(0.0))
-    } else {
-        (forward, backward.max(0.0))
-    }
-}
-
-fn color_fft() -> &'static (std::sync::Arc<dyn Fft<f32>>, Vec<f32>) {
-    static FFT: OnceLock<(std::sync::Arc<dyn Fft<f32>>, Vec<f32>)> = OnceLock::new();
-    FFT.get_or_init(|| {
-        let mut planner = FftPlanner::<f32>::new();
-        let fft = planner.plan_fft_forward(LIVE_STEM_COLOR_FFT_SIZE);
-        let window: Vec<f32> = (0..LIVE_STEM_COLOR_FFT_SIZE)
-            .map(|index| {
-                0.5 - 0.5
-                    * (std::f32::consts::TAU * index as f32 / (LIVE_STEM_COLOR_FFT_SIZE - 1) as f32)
-                        .cos()
-            })
-            .collect();
-        (fft, window)
-    })
-}
-
-/// Map a live separated signal to colour by integrating its Hann-windowed FFT power over one
-/// shared logarithmic frequency → RGB gradient. It intentionally has no `StemKind` argument:
-/// every source follows the same rule, so hue is evidence from its audio rather than a label.
-fn live_stem_waveform_colours(samples: &[f32], columns: usize) -> Vec<[u8; 3]> {
-    if samples.is_empty() || columns == 0 {
-        return vec![[31, 31, 31]; columns];
-    }
-    let (fft, window) = color_fft();
-    let samples_per_column = samples.len() as f32 / columns as f32;
-    thread_local! {
-        static BUFFER: RefCell<Vec<Complex32>> = const { RefCell::new(Vec::new()) };
-    }
-    BUFFER.with(|cell| {
-        let mut buffer = cell.borrow_mut();
-        buffer.resize(LIVE_STEM_COLOR_FFT_SIZE, Complex32::default());
-        let mut colours = Vec::with_capacity(columns);
-        let mut loudness = Vec::with_capacity(columns);
-
-        for column in 0..columns {
-            let centre = ((column as f32 + 0.5) * samples_per_column).round() as isize;
-            for (offset, slot) in buffer.iter_mut().enumerate() {
-                let sample_index = centre + offset as isize - LIVE_STEM_COLOR_FFT_SIZE as isize / 2;
-                let value = if sample_index >= 0 {
-                    samples.get(sample_index as usize).copied().unwrap_or(0.0)
-                } else {
-                    0.0
-                };
-                *slot = Complex32::new(value * window[offset], 0.0);
-            }
-            fft.process(&mut buffer);
-
-            let mut total_weight = 0.0f32;
-            let mut total_power = 0.0f32;
-            let mut colour = [0.0f32; 3];
-            for bin in 1..=LIVE_STEM_COLOR_FFT_SIZE / 2 {
-                let frequency = bin as f32 * SAMPLE_RATE as f32 / LIVE_STEM_COLOR_FFT_SIZE as f32;
-                if !(LIVE_STEM_COLOR_MIN_HZ..=LIVE_STEM_COLOR_MAX_HZ).contains(&frequency) {
-                    continue;
-                }
-                let power = buffer[bin].norm_sqr();
-                // Power^0.275 is a log-like compressor. Octave balancing keeps dense treble bins and
-                // one enormous bass bin from making every source look like the same flat colour.
-                let weight = power.powf(0.275) * (200.0 / frequency).sqrt().clamp(0.18, 1.4);
-                if !weight.is_finite() || weight <= 0.0 {
-                    continue;
-                }
-                let bin_colour = spectral_gradient(frequency);
-                for channel in 0..3 {
-                    colour[channel] += weight * bin_colour[channel];
-                }
-                total_weight += weight;
-                total_power += power;
-            }
-            if total_weight > 1e-12 {
-                for channel in &mut colour {
-                    *channel /= total_weight;
-                }
-            }
-            colours.push(colour);
-            loudness.push(total_power.sqrt());
-        }
-
-        let mut sorted_loudness = loudness.clone();
-        sorted_loudness.sort_by(f32::total_cmp);
-        let reference = sorted_loudness[((sorted_loudness.len() as f32 * 0.95).floor() as usize)
-            .min(sorted_loudness.len() - 1)]
-        .max(1e-9);
-        let mut previous = [0.0f32; 3];
-        colours
-            .into_iter()
-            .zip(loudness)
-            .enumerate()
-            .map(|(index, (colour, energy))| {
-                // Smooth hue over 30 ms; amplitude still retains the 10 ms transient detail.
-                let hue = if index == 0 {
-                    colour
-                } else {
-                    std::array::from_fn(|channel| previous[channel] * 0.62 + colour[channel] * 0.38)
-                };
-                previous = hue;
-                if energy <= 1e-12 {
-                    return [18, 18, 18];
-                }
-                // Same vivid rule as the original mix waveform: the strongest band of this column
-                // reaches full scale, weaker bands keep a floor so the hue stays readable on a
-                // dark rail. Loudness only rides value, never desaturates the mix into grey.
-                let peak = hue.iter().copied().fold(0.0f32, f32::max).max(1e-6);
-                let value = LIVE_COLOR_FLOOR
-                    + (1.0 - LIVE_COLOR_FLOOR) * (energy / reference).clamp(0.0, 1.0).powf(0.45);
-                std::array::from_fn(|channel| {
-                    ((hue[channel] / peak) * value * 255.0)
-                        .round()
-                        .clamp(0.0, 255.0) as u8
-                })
-            })
-            .collect()
-    })
-}
-
-/// Shared log-frequency gradient: low = red, the vocal presence range moves through green/cyan,
-/// and high detail reaches blue/violet. The stops describe frequency alone, never a STEM identity.
-fn spectral_gradient(frequency: f32) -> [f32; 3] {
-    const STOPS: &[(f32, [f32; 3])] = &[
-        (35.0, [1.0, 0.08, 0.10]),
-        (180.0, [1.0, 0.12, 0.10]),
-        (600.0, [1.0, 0.48, 0.08]),
-        (1_400.0, [0.20, 0.95, 0.18]),
-        (3_200.0, [0.04, 0.92, 0.72]),
-        (6_500.0, [0.08, 0.38, 1.0]),
-        (16_000.0, [0.60, 0.18, 1.0]),
-    ];
-    let frequency = frequency.clamp(STOPS[0].0, STOPS[STOPS.len() - 1].0);
-    for pair in STOPS.windows(2) {
-        let (low_frequency, low_colour) = pair[0];
-        let (high_frequency, high_colour) = pair[1];
-        if frequency <= high_frequency {
-            let progress =
-                (frequency.ln() - low_frequency.ln()) / (high_frequency.ln() - low_frequency.ln());
-            return std::array::from_fn(|channel| {
-                low_colour[channel] + (high_colour[channel] - low_colour[channel]) * progress
-            });
-        }
-    }
-    STOPS[STOPS.len() - 1].1
-}
-
-/// Return only blocks that were published since `after_revision`. Unlike the legacy full
-/// waveform endpoint this has a bounded payload even for a long track: an ordinary 200ms poll
-/// is empty, and a completed classical Redress tile contributes only its own timeline columns.
-pub fn live_stem_waveform_delta(
-    track_id: i64,
-    columns: usize,
-    after_revision: u64,
-    expected_epoch: Option<u64>,
-) -> Option<LiveStemWaveformDelta> {
-    let mut sessions = live_waves().lock().unwrap();
-    prune_finished_live_wave_sessions(&mut sessions);
-    let session = sessions.get(&track_id)?;
-    let columns = columns.clamp(64, 24_000);
-    let duration = session.duration.max(0.001);
-    let mut vocals = Vec::new();
-    // Transport seeks advance only the private worker epoch; the public timeline epoch and append
-    // revision remain stable. A mounted client therefore receives just the newly separated block
-    // instead of replaying a whole song or clearing its STEM rails.
-    let after_revision = if expected_epoch == Some(session.epoch) {
-        after_revision
-    } else {
-        0
-    };
-    const MAX_BLOCKS_PER_DELTA: usize = 8;
-    let blocks: Vec<_> = session
-        .blocks
-        .iter()
-        .filter(|block| block.revision > after_revision)
-        .take(MAX_BLOCKS_PER_DELTA)
-        .collect();
-    let delivered_revision = blocks.last().map_or(after_revision, |block| block.revision);
-    for block in blocks {
-        let scale = block_amplitude_scale(&block.vocals_amp);
-        for (index, value) in block.vocals_amp.iter().enumerate() {
-            let time = block.start
-                + (index as f64 + 0.5) * block.duration / block.vocals_amp.len().max(1) as f64;
-            let output = ((time / duration) * columns as f64)
-                .floor()
-                .clamp(0.0, (columns - 1) as f64) as usize;
-            vocals.push(LiveStemWaveformPoint {
-                index: output,
-                amp: display_live_amplitude(*value, scale),
-                r: block.vocals_rgb.get(index).map_or(31, |color| color[0]),
-                g: block.vocals_rgb.get(index).map_or(31, |color| color[1]),
-                b: block.vocals_rgb.get(index).map_or(31, |color| color[2]),
-            });
-        }
-    }
-    let (analysis_frontier, analysis_back_frontier) = live_waveform_frontiers(session);
-    Some(LiveStemWaveformDelta {
-        track_id,
-        epoch: session.epoch,
-        duration: session.duration,
-        columns,
-        // The cursor acknowledges only the bounded batch above. A client that opens the lanes
-        // after idle whole-track preparation catches up over several small polls instead of
-        // parsing several megabytes of points in one compositor-blocking response.
-        revision: delivered_revision,
-        stems: vec![LiveStemWaveformStem {
-            stem: StemKind::Vocals,
-            points: vocals,
-        }],
-        analysis_start: session.start,
-        analysis_frontier,
-        analysis_back_frontier,
-    })
-}
-
-pub fn live_stem_waveform(track_id: i64, stem: StemKind, columns: usize) -> Option<StemWaveform> {
-    if stem != StemKind::Vocals {
-        return None;
-    }
-    let mut sessions = live_waves().lock().unwrap();
-    prune_finished_live_wave_sessions(&mut sessions);
-    let session = sessions.get(&track_id)?;
-    let requested = columns.clamp(64, 24_000);
-    let duration = session.duration.max(0.001);
-    let (analysis_frontier, analysis_back_frontier) = live_waveform_frontiers(session);
-    let mut amp = vec![0.0f32; requested];
-    let mut known = vec![false; requested];
-    let mut r = vec![31u8; requested];
-    let mut g = vec![31u8; requested];
-    let mut b = vec![31u8; requested];
-    let shared_values = session
-        .blocks
-        .iter()
-        .flat_map(|block| block.vocals_amp.iter().copied())
-        .collect::<Vec<_>>();
-    let shared_scale = block_amplitude_scale(&shared_values);
-    for block in &session.blocks {
-        let values = &block.vocals_amp;
-        for (index, value) in values.iter().enumerate() {
-            let time =
-                block.start + (index as f64 + 0.5) * block.duration / values.len().max(1) as f64;
-            let output = ((time / duration) * requested as f64)
-                .floor()
-                .clamp(0.0, (requested - 1) as f64) as usize;
-            if !known[output] || *value > amp[output] {
-                amp[output] = *value;
-                let colour = block.vocals_rgb.get(index).copied().unwrap_or([31, 31, 31]);
-                r[output] = colour[0];
-                g[output] = colour[1];
-                b[output] = colour[2];
-            }
-            known[output] = true;
-        }
-    }
-    for (value, known) in amp.iter_mut().zip(&known) {
-        *value = if *known {
-            display_live_amplitude(*value, shared_scale)
-        } else {
-            0.0
-        };
-    }
-    Some(StemWaveform {
-        track_id,
-        duration: session.duration,
-        r,
-        g,
-        b,
-        amp,
-        known,
-        analysis_start: Some(session.start),
-        analysis_frontier: Some(analysis_frontier),
-        analysis_back_frontier: Some(analysis_back_frontier),
-    })
-}
-
-fn block_amplitude_scale(values: &[f32]) -> f32 {
-    let mut sorted: Vec<f32> = values
-        .iter()
-        .copied()
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .collect();
-    if sorted.is_empty() {
-        return 1.0;
-    }
-    sorted.sort_by(f32::total_cmp);
-    sorted[((sorted.len() - 1) as f64 * 0.995).round() as usize].max(1e-6)
-}
-
-fn display_live_amplitude(value: f32, scale: f32) -> f32 {
-    (value / scale).clamp(0.0, 1.0).powf(LIVE_AMP_GAMMA)
+pub fn begin_live_stem_audio_lease() -> LiveStemAudioGuard {
+    LIVE_AUDIO_LEASES.fetch_add(1, Ordering::AcqRel);
+    work_scheduler().set_live_stem_decks(LIVE_AUDIO_LEASES.load(Ordering::Acquire));
+    LiveStemAudioGuard
 }
 
 /// One fixed classical Redress output tile in stable `Drums / Bass / Other / Vocals` slots. FFT-only
@@ -1110,27 +314,23 @@ struct InferenceJob {
     reply: SyncSender<Result<Arc<StemChunk>>>,
 }
 
-/// Audio-bound chunks must never queue behind optional waveform work. Fill is the current
-/// viewport display scan: it yields to both audible tiles and the one-block look-ahead cushion.
+/// Audio-bound chunks always overtake the bounded look-ahead queue.
 #[derive(Clone, Copy, Debug)]
 enum InferencePriority {
     Audio,
     LookAhead,
-    Fill,
 }
 
 fn separation_work_class(priority: InferencePriority) -> WorkClass {
     match priority {
         InferencePriority::Audio => WorkClass::StemAudible,
         InferencePriority::LookAhead => WorkClass::StemLookAhead,
-        InferencePriority::Fill => WorkClass::StemViewport,
     }
 }
 
 struct InferenceReceivers {
     audio: Mutex<Receiver<InferenceJob>>,
     look_ahead: Mutex<Receiver<InferenceJob>>,
-    fill: Mutex<Receiver<InferenceJob>>,
 }
 
 /// Result handle lets a playback worker submit overlapping chunks to two persistent separation workers
@@ -1155,16 +355,6 @@ impl StemInferenceTicket {
             .context("STEM 后台分离 worker 已退出")?
     }
 
-    /// Wait for at most `timeout` without losing the ticket. Display work uses this to re-check
-    /// its scan generation and shutdown state instead of becoming an unbounded `recv()`.
-    pub fn wait_timeout(&self, timeout: Duration) -> Result<Option<Arc<StemChunk>>> {
-        match self.receiver.recv_timeout(timeout) {
-            Ok(result) => result.map(Some),
-            Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => bail!("STEM 后台分离 worker 已退出"),
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn test_pair() -> (SyncSender<Result<Arc<StemChunk>>>, Self) {
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -1181,8 +371,8 @@ impl StemInferenceTicket {
 
 impl Drop for StemInferenceTicket {
     fn drop(&mut self) {
-        // A queued optional ticket that timed out or whose Deck was unmounted must not consume a
-        // later separation slot. Native separation itself is not pre-emptible, but its stale result
+        // A queued look-ahead ticket whose Deck was retargeted must not consume a later
+        // separation slot. Native separation itself is not pre-emptible, but its stale result
         // is discarded at the next cancellation fence.
         self.cancelled.store(true, Ordering::Release);
     }
@@ -1195,7 +385,6 @@ pub struct StemInferencePool {
     id: u64,
     audio_sender: SyncSender<InferenceJob>,
     look_ahead_sender: SyncSender<InferenceJob>,
-    fill_sender: SyncSender<InferenceJob>,
     cache: Arc<Mutex<TileCache>>,
     preference: StemRuntimePreference,
     instant: Option<Arc<crate::InstantStemPool>>,
@@ -1203,9 +392,8 @@ pub struct StemInferencePool {
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
 }
 
-// Two 30-second Deck viewports need about eight retained cores each, plus immediate future/audio
-// tiles. Twenty immutable results keep that rolling safety window useful without becoming a
-// whole-track cache; cancellation still drops each Deck's lease immediately.
+// Two Decks retain their current and immediate future audio tiles. Twenty immutable results
+// absorb quick seeks and handoffs without becoming a whole-track cache.
 const TILE_CACHE_CAPACITY: usize = 20;
 
 static NEXT_POOL_ID: AtomicU64 = AtomicU64::new(1);
@@ -1425,17 +613,15 @@ impl StemInferencePool {
         // Other platforms retain their two-worker accelerator path unless HS layering reserves the
         // CPU budget.
         let workers = effective_worker_count(workers);
-        // Queue capacities are bounded because each fixed classical Redress tile is large. Audible cache
-        // requests always overtake optional waveform preparation.
+        // Queue capacities are bounded because each fixed classical Redress tile is large.
+        // Audible cache requests always overtake look-ahead preparation.
         let (audio_sender, audio_receiver) =
             mpsc::sync_channel::<InferenceJob>(workers.saturating_mul(8));
         let (look_ahead_sender, look_ahead_receiver) =
             mpsc::sync_channel::<InferenceJob>(workers.max(1));
-        let (fill_sender, fill_receiver) = mpsc::sync_channel::<InferenceJob>(1);
         let receivers = Arc::new(InferenceReceivers {
             audio: Mutex::new(audio_receiver),
             look_ahead: Mutex::new(look_ahead_receiver),
-            fill: Mutex::new(fill_receiver),
         });
         let cache = Arc::new(Mutex::new(TileCache::default()));
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -1467,7 +653,6 @@ impl StemInferencePool {
             id,
             audio_sender,
             look_ahead_sender,
-            fill_sender,
             cache,
             preference,
             instant,
@@ -1541,7 +726,7 @@ impl StemInferencePool {
         self.submit_for(tile_key(&left, &right), left, right, epoch, expected_epoch)
     }
 
-    /// Reuse PCM already paid for by the visible viewport. This is intentionally an exact-key
+    /// Reuse PCM already paid for by the current Deck or its look-ahead. This is an exact-key
     /// lookup: callers may offset inside the retained core, but must never treat a nearby separator
     /// window as if it represented different source samples.
     pub fn cached_for_key(&self, key: &[u8; 32]) -> Option<Arc<StemChunk>> {
@@ -1596,36 +781,6 @@ impl StemInferencePool {
             epoch,
             expected_epoch,
             InferencePriority::LookAhead,
-        )
-    }
-
-    /// Lowest-priority viewport display work. A full queue means audio or look-ahead still owns
-    /// the device; the scanner retries later instead of blocking playback.
-    pub fn submit_fill(
-        &self,
-        left: Vec<f32>,
-        right: Vec<f32>,
-        epoch: Arc<AtomicU64>,
-        expected_epoch: u64,
-    ) -> Result<Option<StemInferenceTicket>> {
-        self.submit_fill_for(tile_key(&left, &right), left, right, epoch, expected_epoch)
-    }
-
-    pub fn submit_fill_for(
-        &self,
-        key: [u8; 32],
-        left: Vec<f32>,
-        right: Vec<f32>,
-        epoch: Arc<AtomicU64>,
-        expected_epoch: u64,
-    ) -> Result<Option<StemInferenceTicket>> {
-        self.submit_with_priority(
-            key,
-            left,
-            right,
-            epoch,
-            expected_epoch,
-            InferencePriority::Fill,
         )
     }
 
@@ -1708,11 +863,6 @@ impl StemInferencePool {
                 Err(TrySendError::Full(_)) => return Ok(None),
                 Err(TrySendError::Disconnected(_)) => bail!("STEM 后台分离 worker 已退出"),
             },
-            InferencePriority::Fill => match self.fill_sender.try_send(job) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => return Ok(None),
-                Err(TrySendError::Disconnected(_)) => bail!("STEM 后台分离 worker 已退出"),
-            },
         }
         Ok(Some(StemInferenceTicket {
             receiver,
@@ -1742,14 +892,9 @@ fn run_worker(
         "classical STEM worker started"
     );
     let mut engine: Option<PlatformEngine> = None;
-    // Audio always wins. Between optional lanes, give one ready viewport tile a turn after each
-    // look-ahead tile; otherwise a single fast macOS worker can keep seeing a freshly replenished
-    // look-ahead queue and the visible vocal rail appears to analyse slower than realtime.
-    let mut prefer_fill = false;
+    // Audio always wins; look-ahead runs only when the audible queue is empty.
     loop {
-        let Some(scheduled) =
-            next_separation_job_until(&receivers, Some(&shutdown), &mut prefer_fill)
-        else {
+        let Some(scheduled) = next_separation_job_until(&receivers, Some(&shutdown)) else {
             break;
         };
         let ScheduledInference { job, _slot } = scheduled;
@@ -1923,18 +1068,16 @@ fn tile_key(left: &[f32], right: &[f32]) -> [u8; 32] {
 }
 
 /// Workers always take ready audio work before look-ahead work. We intentionally poll instead of
-/// holding either receiver mutex in `recv`: two separation workers must be able to claim separate Deck
-/// jobs, and a new seek must not sit behind an idle worker waiting on the low-priority lane.
+/// holding either receiver mutex in `recv`: two separation workers must be able to claim separate
+/// Deck jobs, and a new seek must not sit behind an idle worker waiting on the low-priority lane.
 #[cfg(test)]
 fn next_separation_job(receivers: &InferenceReceivers) -> Option<ScheduledInference> {
-    let mut prefer_fill = false;
-    next_separation_job_until(receivers, None, &mut prefer_fill)
+    next_separation_job_until(receivers, None)
 }
 
 fn next_separation_job_until(
     receivers: &InferenceReceivers,
     shutdown: Option<&AtomicBool>,
-    prefer_fill: &mut bool,
 ) -> Option<ScheduledInference> {
     loop {
         if shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Acquire)) {
@@ -1946,8 +1089,7 @@ fn next_separation_job_until(
                 .ok()
                 .map(|_| RefinementSlot);
             if let Some(slot) = slot {
-                let audio = receivers.audio.lock().unwrap().try_recv();
-                match audio {
+                match receivers.audio.lock().unwrap().try_recv() {
                     Ok(job) => {
                         return Some(ScheduledInference {
                             job,
@@ -1956,15 +1098,10 @@ fn next_separation_job_until(
                     }
                     Err(TryRecvError::Disconnected) => {
                         drop(slot);
-                        let look_ahead_disconnected = matches!(
+                        if matches!(
                             receivers.look_ahead.lock().unwrap().try_recv(),
                             Err(TryRecvError::Disconnected)
-                        );
-                        let fill_disconnected = matches!(
-                            receivers.fill.lock().unwrap().try_recv(),
-                            Err(TryRecvError::Disconnected)
-                        );
-                        if look_ahead_disconnected && fill_disconnected {
+                        ) {
                             return None;
                         }
                     }
@@ -1978,19 +1115,11 @@ fn next_separation_job_until(
         if let Ok(job) = audio {
             return Some(ScheduledInference { job, _slot: None });
         }
-        // A lease means a Deck may need another tile soon; it does not mean that work is queued.
-        // Give an active Deck one short admission grace period, then keep the worker useful by
-        // draining optional work. The old `audio_leases == recommended_workers` fence could hold a
-        // submitted fill forever even though the effective macOS pool had one idle worker.
+        // A lease means a Deck may need another tile soon; give it one short admission grace
+        // period before allowing look-ahead to use an otherwise idle worker.
         if live_audio_lease_count() > 0 && !matches!(audio, Err(TryRecvError::Disconnected)) {
             thread::sleep(Duration::from_millis(1));
             if let Ok(job) = receivers.audio.lock().unwrap().try_recv() {
-                return Some(ScheduledInference { job, _slot: None });
-            }
-        }
-        if *prefer_fill && work_scheduler().allows(WorkClass::StemViewport) {
-            if let Ok(job) = receivers.fill.lock().unwrap().try_recv() {
-                *prefer_fill = false;
                 return Some(ScheduledInference { job, _slot: None });
             }
         }
@@ -2000,25 +1129,14 @@ fn next_separation_job_until(
             Err(TryRecvError::Empty)
         };
         if let Ok(job) = look_ahead {
-            *prefer_fill = true;
-            return Some(ScheduledInference { job, _slot: None });
-        }
-        let fill = if work_scheduler().allows(WorkClass::StemViewport) {
-            receivers.fill.lock().unwrap().try_recv()
-        } else {
-            Err(TryRecvError::Empty)
-        };
-        if let Ok(job) = fill {
-            *prefer_fill = false;
             return Some(ScheduledInference { job, _slot: None });
         }
         if matches!(audio, Err(TryRecvError::Disconnected))
             && matches!(look_ahead, Err(TryRecvError::Disconnected))
-            && matches!(fill, Err(TryRecvError::Disconnected))
         {
             return None;
         }
-        std::thread::sleep(Duration::from_millis(2));
+        thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -2039,7 +1157,7 @@ fn stem_pool_transition() -> &'static Mutex<()> {
     TRANSITION.get_or_init(|| Mutex::new(()))
 }
 
-/// Process-wide separation pool so display scan and live playback share the same worker set.
+/// Process-wide separation pool shared by the live audio Decks.
 pub struct StemPoolGuard {
     pool_id: u64,
     path: PathBuf,
@@ -2145,7 +1263,7 @@ pub fn acquire_stem_pool(path: &Path) -> Result<(StemPoolGuard, Arc<StemInferenc
     ))
 }
 
-/// Retire every classical worker and invalidate short-lived waveform state.
+/// Retire every classical worker and clear runtime diagnostics state.
 pub(crate) fn reset_current_stem_runtime(reason: &'static str) -> bool {
     let _transition = stem_pool_transition().lock().unwrap();
     let retired = shared_stem_pool().lock().unwrap().take();
@@ -2161,7 +1279,6 @@ pub(crate) fn reset_current_stem_runtime(reason: &'static str) -> bool {
         );
         retired.pool.shutdown(reason);
     }
-    invalidate_live_stem_waveforms(reason);
     changed
 }
 
@@ -2221,28 +1338,6 @@ mod tests {
             started.elapsed().as_secs_f64() * 1_000.0
         );
 
-        // Regression for the dual-Deck starvation path: production macOS has one effective
-        // worker even though two workers are recommended at acquisition. Two leases must not be
-        // mistaken for two queued audio jobs; an idle worker still completes viewport fill.
-        let _deck_a = begin_live_stem_waveform(-92_001, 1, 0.0, 120.0);
-        let _deck_b = begin_live_stem_waveform(-92_002, 1, 0.0, 120.0);
-        let mut fill_left = left.clone();
-        fill_left[0] = 0.25;
-        let fill_ticket = pool
-            .submit_fill(fill_left, right, Arc::clone(&epoch), 1)
-            .unwrap()
-            .expect("dual-Deck viewport fill should be admitted");
-        let fill_started = Instant::now();
-        let fill_chunk = loop {
-            if let Some(chunk) = fill_ticket.wait_timeout(Duration::from_millis(20)).unwrap() {
-                break chunk;
-            }
-            assert!(
-                fill_started.elapsed() < Duration::from_secs(2),
-                "dual-Deck viewport fill starved behind idle audio leases"
-            );
-        };
-        assert_eq!(fill_chunk.frames(), geometry.core + geometry.handoff);
         pool.shutdown("production_test_complete");
     }
 
@@ -2317,75 +1412,29 @@ mod tests {
     fn audio_chunk_overtakes_already_queued_look_ahead_work() {
         let (audio_sender, audio_receiver) = mpsc::sync_channel(2);
         let (look_ahead_sender, look_ahead_receiver) = mpsc::sync_channel(2);
-        let (fill_sender, fill_receiver) = mpsc::sync_channel(2);
         let receivers = InferenceReceivers {
             audio: Mutex::new(audio_receiver),
             look_ahead: Mutex::new(look_ahead_receiver),
-            fill: Mutex::new(fill_receiver),
         };
-        fill_sender.send(queued_job(9)).unwrap();
         look_ahead_sender.send(queued_job(10)).unwrap();
         audio_sender.send(queued_job(11)).unwrap();
 
         let first = next_separation_job(&receivers).expect("queued job");
         let second = next_separation_job(&receivers).expect("queued job");
-        let third = next_separation_job(&receivers).expect("queued job");
         assert_eq!(first.job.expected_epoch, 11);
         assert_eq!(second.job.expected_epoch, 10);
-        assert_eq!(third.job.expected_epoch, 9);
     }
 
     #[test]
-    fn viewport_fill_gets_one_turn_between_continuous_look_ahead_tiles() {
-        let (_audio_sender, audio_receiver) = mpsc::sync_channel(1);
-        let (look_ahead_sender, look_ahead_receiver) = mpsc::sync_channel(2);
-        let (fill_sender, fill_receiver) = mpsc::sync_channel(1);
-        let receivers = InferenceReceivers {
-            audio: Mutex::new(audio_receiver),
-            look_ahead: Mutex::new(look_ahead_receiver),
-            fill: Mutex::new(fill_receiver),
-        };
-        look_ahead_sender.send(queued_job(401)).unwrap();
-        look_ahead_sender.send(queued_job(402)).unwrap();
-        fill_sender.send(queued_job(303)).unwrap();
-
-        let mut prefer_fill = false;
-        assert_eq!(
-            next_separation_job_until(&receivers, None, &mut prefer_fill)
-                .unwrap()
-                .job
-                .expected_epoch,
-            401
-        );
-        assert_eq!(
-            next_separation_job_until(&receivers, None, &mut prefer_fill)
-                .unwrap()
-                .job
-                .expected_epoch,
-            303
-        );
-        assert_eq!(
-            next_separation_job_until(&receivers, None, &mut prefer_fill)
-                .unwrap()
-                .job
-                .expected_epoch,
-            402
-        );
-    }
-
-    #[test]
-    fn audio_jobs_from_two_decks_remain_fifo_ahead_of_display_fill() {
+    fn audio_jobs_from_two_decks_remain_fifo() {
         let (audio_sender, audio_receiver) = mpsc::sync_channel(2);
         let (_look_ahead_sender, look_ahead_receiver) = mpsc::sync_channel(1);
-        let (fill_sender, fill_receiver) = mpsc::sync_channel(1);
         let receivers = InferenceReceivers {
             audio: Mutex::new(audio_receiver),
             look_ahead: Mutex::new(look_ahead_receiver),
-            fill: Mutex::new(fill_receiver),
         };
         audio_sender.send(queued_job(101)).unwrap();
         audio_sender.send(queued_job(202)).unwrap();
-        fill_sender.send(queued_job(303)).unwrap();
 
         assert_eq!(
             next_separation_job(&receivers).unwrap().job.expected_epoch,
@@ -2395,61 +1444,26 @@ mod tests {
             next_separation_job(&receivers).unwrap().job.expected_epoch,
             202
         );
-        assert_eq!(
-            next_separation_job(&receivers).unwrap().job.expected_epoch,
-            303
-        );
     }
 
     #[test]
-    fn display_fill_runs_when_two_audio_leases_are_idle() {
-        let _guard_a = begin_live_stem_waveform(-91_001, 1, 0.0, 120.0);
-        let _guard_b = begin_live_stem_waveform(-91_002, 1, 0.0, 120.0);
-        assert!(live_audio_lease_count() >= 2);
-
-        let (_audio_sender, audio_receiver) = mpsc::sync_channel(1);
-        let (_look_ahead_sender, look_ahead_receiver) = mpsc::sync_channel(1);
-        let (fill_sender, fill_receiver) = mpsc::sync_channel(1);
-        let receivers = InferenceReceivers {
-            audio: Mutex::new(audio_receiver),
-            look_ahead: Mutex::new(look_ahead_receiver),
-            fill: Mutex::new(fill_receiver),
-        };
-        fill_sender.send(queued_job(303)).unwrap();
-
-        let started = Instant::now();
-        let scheduled = next_separation_job(&receivers).expect("idle worker should drain fill");
-        assert_eq!(scheduled.job.expected_epoch, 303);
-        assert!(started.elapsed() < Duration::from_millis(100));
-    }
-
-    #[test]
-    fn separation_ticket_timeout_is_bounded_and_drop_cancels_the_job() {
+    fn dropping_a_separation_ticket_cancels_the_job() {
         let (_sender, ticket) = StemInferenceTicket::test_pair();
         let cancelled = Arc::clone(&ticket.cancelled);
-        let started = Instant::now();
-        assert!(ticket
-            .wait_timeout(Duration::from_millis(10))
-            .unwrap()
-            .is_none());
-        assert!(started.elapsed() < Duration::from_millis(100));
         drop(ticket);
         assert!(cancelled.load(Ordering::Acquire));
     }
 
     #[test]
-    fn worker_exits_only_after_all_priority_lanes_close() {
+    fn worker_exits_only_after_both_audio_lanes_close() {
         let (audio_sender, audio_receiver) = mpsc::sync_channel(1);
         let (look_ahead_sender, look_ahead_receiver) = mpsc::sync_channel(1);
-        let (fill_sender, fill_receiver) = mpsc::sync_channel(1);
         let receivers = InferenceReceivers {
             audio: Mutex::new(audio_receiver),
             look_ahead: Mutex::new(look_ahead_receiver),
-            fill: Mutex::new(fill_receiver),
         };
         drop(audio_sender);
         drop(look_ahead_sender);
-        drop(fill_sender);
         assert!(next_separation_job(&receivers).is_none());
     }
 
@@ -2461,360 +1475,14 @@ mod tests {
     }
 
     #[test]
-    fn live_waveform_tracks_published_ranges_from_a_seek() {
-        let track_id = -88_001;
-        let guard = begin_live_stem_waveform(track_id, 7, 2.0, 10.0);
-        let empty = live_stem_waveform(track_id, StemKind::Vocals, 100).unwrap();
-        assert_eq!(empty.analysis_start, Some(2.0));
-        assert!(empty.known.iter().all(|known| !known));
-
-        let stems: [Vec<[f32; 2]>; 4] =
-            std::array::from_fn(|stem| vec![[0.1 * (stem + 1) as f32; 2]; SAMPLE_RATE as usize]);
-        publish_live_stem_waveform_block(track_id, 7, 2.0, &stems, 0, SAMPLE_RATE as usize);
-        publish_live_stem_waveform_block(track_id, 7, 1.0, &stems, 0, SAMPLE_RATE as usize);
-        let partial = live_stem_waveform(track_id, StemKind::Vocals, 100).unwrap();
-        assert!(partial.known.iter().any(|known| *known));
-        assert!(partial.known.iter().any(|known| !*known));
-        assert!(partial.analysis_frontier.unwrap() > 2.0);
-        assert!(partial.analysis_back_frontier.unwrap() < 2.0);
-
-        drop(guard);
-        assert!(
-            live_stem_waveform(track_id, StemKind::Vocals, 100).is_some(),
-            "the final completed range must survive the audio worker's ring drain"
-        );
-    }
-
-    #[test]
-    fn scan_release_drops_in_memory_tiles_immediately() {
-        let track_id = -88_041;
-        let guard = begin_scan_stem_waveform(track_id, 12.0);
-        let stems: [Vec<[f32; 2]>; 4] =
-            std::array::from_fn(|_| vec![[0.2, 0.2]; SAMPLE_RATE as usize]);
-        publish_scan_stem_waveform_block(
-            track_id,
-            guard.scan_generation,
-            0.0,
-            &stems,
-            0,
-            SAMPLE_RATE as usize,
-        );
-        assert!(live_stem_waveform(track_id, StemKind::Vocals, 100).is_some());
-        drop(guard);
-        assert!(
-            live_stem_waveform(track_id, StemKind::Vocals, 100).is_none(),
-            "switching songs must free the display scan instead of retaining it"
-        );
-    }
-
-    #[test]
-    fn recreated_waveform_session_rejects_late_old_scan_publication() {
-        let track_id = -88_044;
-        let stems: [Vec<[f32; 2]>; 4] = std::array::from_fn(|_| vec![[0.2, 0.2]]);
-        let first = begin_scan_stem_waveform(track_id, 12.0);
-        let first_generation = first.generation();
-        let first_epoch = live_stem_waveform_delta(track_id, 100, 0, None)
-            .expect("first session")
-            .epoch;
+    fn audio_lease_count_tracks_only_live_producers() {
+        let before = live_audio_lease_count();
+        let first = begin_live_stem_audio_lease();
+        let second = begin_live_stem_audio_lease();
+        assert_eq!(live_audio_lease_count(), before + 2);
         drop(first);
-
-        let second = begin_scan_stem_waveform(track_id, 12.0);
-        let second_epoch = live_stem_waveform_delta(track_id, 100, 0, None)
-            .expect("replacement session")
-            .epoch;
-        assert_ne!(first_epoch, second_epoch);
-        assert_ne!(first_generation, second.generation());
-
-        publish_scan_stem_waveform_block(track_id, first_generation, 0.0, &stems, 0, 1);
-        assert_eq!(live_stem_coverage(track_id).unwrap().covered_seconds, 0.0);
-        publish_scan_stem_waveform_block(track_id, second.generation(), 0.0, &stems, 0, 1);
-        assert!(live_stem_coverage(track_id).unwrap().covered_seconds > 0.0);
+        assert_eq!(live_audio_lease_count(), before + 1);
         drop(second);
-    }
-
-    #[test]
-    fn display_scan_retains_distant_tiles_while_the_track_is_mounted() {
-        let track_id = -88_042;
-        let guard = begin_scan_stem_waveform(track_id, 120.0);
-        let stems: [Vec<[f32; 2]>; 4] = std::array::from_fn(|_| vec![[0.2, 0.2]]);
-        publish_scan_stem_waveform_block(track_id, guard.scan_generation, 0.0, &stems, 0, 1);
-        publish_scan_stem_waveform_block(track_id, guard.scan_generation, 80.0, &stems, 0, 1);
-        let coverage = live_stem_coverage(track_id).unwrap();
-        assert!(coverage.ranges.iter().any(|(start, _)| *start < 0.01));
-        assert!(coverage.ranges.iter().any(|(start, _)| *start > 79.0));
-        drop(guard);
-    }
-
-    #[test]
-    fn a_late_delta_client_catches_up_in_bounded_batches() {
-        let track_id = -88_043;
-        let guard = begin_scan_stem_waveform(track_id, 120.0);
-        let stems: [Vec<[f32; 2]>; 4] = std::array::from_fn(|_| vec![[0.2, 0.2]]);
-        for index in 0..130 {
-            publish_scan_stem_waveform_block(
-                track_id,
-                guard.scan_generation,
-                index as f64,
-                &stems,
-                0,
-                1,
-            );
-        }
-
-        let first = live_stem_waveform_delta(track_id, 640, 0, None).unwrap();
-        assert_eq!(first.revision, 8);
-        let mut revision = first.revision;
-        while revision < 130 {
-            let next =
-                live_stem_waveform_delta(track_id, 640, revision, Some(first.epoch)).unwrap();
-            assert!(next.revision - revision <= 8);
-            revision = next.revision;
-        }
-        assert_eq!(revision, 130);
-        drop(guard);
-    }
-
-    #[test]
-    fn live_waveform_retains_nearby_completed_tiles() {
-        let track_id = -88_005;
-        let guard = begin_live_stem_waveform(track_id, 15, 0.0, 40.0);
-        let stems: [Vec<[f32; 2]>; 4] = std::array::from_fn(|_| vec![[0.1, 0.1]]);
-        publish_live_stem_waveform_block(track_id, 15, 0.0, &stems, 0, 1);
-        publish_live_stem_waveform_block(track_id, 15, 8.0, &stems, 0, 1);
-
-        let delta = live_stem_waveform_delta(track_id, 100, 0, Some(15)).unwrap();
-        for stem in &delta.stems {
-            assert!(stem.points.iter().any(|point| point.index == 0));
-            assert!(stem.points.iter().any(|point| point.index >= 19));
-        }
-        drop(guard);
-    }
-
-    #[test]
-    fn live_waveform_drops_tiles_outside_the_viewport() {
-        let track_id = -88_055;
-        let guard = begin_live_stem_waveform(track_id, 16, 0.0, 120.0);
-        let stems: [Vec<[f32; 2]>; 4] = std::array::from_fn(|_| vec![[0.1, 0.1]]);
-        publish_live_stem_waveform_block(track_id, 16, 0.0, &stems, 0, 1);
-        publish_live_stem_waveform_block(track_id, 16, 80.0, &stems, 0, 1);
-
-        let coverage = live_stem_coverage(track_id).unwrap();
-        assert!(
-            coverage.ranges.iter().all(|&(start, _)| start >= 60.0),
-            "distant tiles must not accumulate a whole-track session: {:?}",
-            coverage.ranges
-        );
-        drop(guard);
-    }
-
-    #[test]
-    fn legacy_live_waveform_reuses_published_frequency_colours() {
-        let track_id = -88_004;
-        let guard = begin_live_stem_waveform(track_id, 14, 0.0, 1.0);
-        let frequencies = [120.0, 900.0, 3_600.0, 8_500.0];
-        let stems: [Vec<[f32; 2]>; 4] = std::array::from_fn(|stem| {
-            (0..SAMPLE_RATE as usize)
-                .map(|index| {
-                    let sample = (std::f32::consts::TAU * frequencies[stem] * index as f32
-                        / SAMPLE_RATE as f32)
-                        .sin()
-                        * 0.2;
-                    [sample, sample]
-                })
-                .collect()
-        });
-        publish_live_stem_waveform_block(track_id, 14, 0.0, &stems, 0, SAMPLE_RATE as usize);
-        let legacy = live_stem_waveform(track_id, StemKind::Vocals, 200).unwrap();
-        let delta = live_stem_waveform_delta(track_id, 200, 0, None).unwrap();
-        let point = delta
-            .stems
-            .iter()
-            .find(|stem| stem.stem == StemKind::Vocals)
-            .and_then(|stem| stem.points.iter().find(|point| legacy.known[point.index]))
-            .expect("a revealed vocals point");
-        assert_eq!(
-            [
-                legacy.r[point.index],
-                legacy.g[point.index],
-                legacy.b[point.index]
-            ],
-            [point.r, point.g, point.b],
-        );
-        drop(guard);
-    }
-
-    #[test]
-    fn live_waveform_delta_sends_each_classical_block_once_and_recovers_after_an_epoch_change() {
-        let track_id = -88_002;
-        let guard = begin_live_stem_waveform(track_id, 11, 3.0, 20.0);
-        let stems: [Vec<[f32; 2]>; 4] =
-            std::array::from_fn(|stem| vec![[0.1 * (stem + 1) as f32; 2]; SAMPLE_RATE as usize]);
-        publish_live_stem_waveform_block(track_id, 11, 3.0, &stems, 0, SAMPLE_RATE as usize);
-
-        let initial = live_stem_waveform_delta(track_id, 2_000, 0, None).unwrap();
-        assert!(initial.epoch > 0);
-        assert_eq!(initial.revision, 1);
-        assert!(initial.stems.iter().all(|stem| !stem.points.is_empty()));
-        assert!(initial
-            .stems
-            .iter()
-            .flat_map(|stem| &stem.points)
-            .all(|point| point.index < initial.columns && point.amp > 0.0));
-
-        let unchanged =
-            live_stem_waveform_delta(track_id, 2_000, initial.revision, Some(initial.epoch))
-                .unwrap();
-        assert!(unchanged.stems.iter().all(|stem| stem.points.is_empty()));
-
-        publish_live_stem_waveform_block(track_id, 11, 4.0, &stems, 0, SAMPLE_RATE as usize);
-        let next = live_stem_waveform_delta(track_id, 2_000, initial.revision, Some(initial.epoch))
-            .unwrap();
-        assert_eq!(next.revision, 2);
-        assert!(next.stems.iter().all(|stem| !stem.points.is_empty()));
-
-        // A seek starts a new private producer epoch, but the public waveform cursor remains
-        // stable: mounted clients receive only the newly separated target window.
-        let next_guard = begin_live_stem_waveform(track_id, 12, 8.0, 20.0);
-        publish_live_stem_waveform_block(track_id, 12, 8.0, &stems, 0, SAMPLE_RATE as usize);
-        let after_seek =
-            live_stem_waveform_delta(track_id, 2_000, next.revision, Some(initial.epoch)).unwrap();
-        assert_eq!(
-            after_seek.epoch, initial.epoch,
-            "a seek must retain the public timeline epoch"
-        );
-        assert_eq!(
-            after_seek.revision, 3,
-            "a seek must retain the append revision"
-        );
-        assert!(after_seek.stems.iter().all(|stem| !stem.points.is_empty()));
-        for stem in &after_seek.stems {
-            assert!(
-                stem.points.iter().any(|point| point.index >= 750),
-                "the newly sought 8s tile must be appended"
-            );
-            assert!(
-                stem.points.iter().all(|point| point.index >= 750),
-                "an unchanged cursor must not replay the old 3s/4s tiles"
-            );
-        }
-        let retained = live_stem_waveform(track_id, StemKind::Vocals, 2_000).unwrap();
-        assert!(
-            retained.known[300],
-            "the original 3s tile must survive the seek"
-        );
-        assert!(
-            retained.known[800],
-            "the newly sought 8s tile must be retained too"
-        );
-
-        drop(guard);
-        drop(next_guard);
-        assert!(live_stem_waveform_delta(track_id, 2_000, 0, None).is_some());
-    }
-
-    #[test]
-    fn live_waveform_delta_exposes_only_vocals() {
-        let track_id = -88_021;
-        let guard = begin_live_stem_waveform(track_id, 21, 0.0, 1.0);
-        let stems: [Vec<[f32; 2]>; 4] = std::array::from_fn(|stem| {
-            (0..SAMPLE_RATE as usize)
-                .map(|index| {
-                    let scale = if stem == 0 { 0.18 } else { 0.018 };
-                    let sample = scale
-                        * (std::f32::consts::TAU * 220.0 * index as f32 / SAMPLE_RATE as f32).sin();
-                    [sample, sample]
-                })
-                .collect()
-        });
-        publish_live_stem_waveform_block(track_id, 21, 0.0, &stems, 0, SAMPLE_RATE as usize);
-        let delta = live_stem_waveform_delta(track_id, 200, 0, Some(21)).unwrap();
-        assert_eq!(delta.stems.len(), 1);
-        assert_eq!(delta.stems[0].stem, StemKind::Vocals);
-        let vocals_peak = delta.stems[0]
-            .points
-            .iter()
-            .map(|point| point.amp)
-            .fold(0.0f32, f32::max);
-        assert!(
-            vocals_peak > 0.9,
-            "vocal rail should normalize its visible signal"
-        );
-        assert!(live_stem_waveform(track_id, StemKind::Other, 200).is_none());
-        drop(guard);
-    }
-
-    #[test]
-    fn live_waveform_delta_carries_vocal_frequency_colours() {
-        let track_id = -88_003;
-        let guard = begin_live_stem_waveform(track_id, 13, 0.0, 4.0);
-        let stems: [Vec<[f32; 2]>; 4] = std::array::from_fn(|stem| {
-            (0..SAMPLE_RATE as usize)
-                .map(|index| {
-                    let frequency = if index < SAMPLE_RATE as usize / 2 {
-                        100.0
-                    } else {
-                        6_000.0
-                    };
-                    let sample = 0.2
-                        * (std::f32::consts::TAU * frequency * index as f32 / SAMPLE_RATE as f32)
-                            .sin();
-                    // Give every separated lane genuine audio to analyse, without borrowing the
-                    // original mix's colour values.
-                    [sample * (stem + 1) as f32 / 4.0; 2]
-                })
-                .collect()
-        });
-        publish_live_stem_waveform_block(track_id, 13, 0.0, &stems, 0, SAMPLE_RATE as usize);
-
-        let delta = live_stem_waveform_delta(track_id, 1_000, 0, Some(13)).unwrap();
-        let vocals = delta
-            .stems
-            .iter()
-            .find(|stem| stem.stem == StemKind::Vocals)
-            .unwrap();
-        let middle = vocals.points.len() / 2;
-        let bass_colour = vocals.points[middle / 2];
-        let treble_colour = vocals.points[middle + middle / 2];
-        assert!(bass_colour.r > bass_colour.b, "low band should read redder");
-        assert!(
-            treble_colour.b > treble_colour.r,
-            "high band should read bluer"
-        );
-
-        drop(guard);
-    }
-
-    #[test]
-    fn live_stem_palette_is_frequency_driven_without_source_labels() {
-        let tone = |frequency: f32| -> Vec<f32> {
-            (0..SAMPLE_RATE as usize)
-                .map(|index| {
-                    (std::f32::consts::TAU * frequency * index as f32 / SAMPLE_RATE as f32).sin()
-                        * 0.2
-                })
-                .collect()
-        };
-        let low = live_stem_waveform_colours(&tone(180.0), 100);
-        let mid = live_stem_waveform_colours(&tone(1_500.0), 100);
-        let high = live_stem_waveform_colours(&tone(8_000.0), 100);
-        let average = |colours: &[[u8; 3]], channel: usize| -> f32 {
-            colours
-                .iter()
-                .map(|colour| f32::from(colour[channel]))
-                .sum::<f32>()
-                / colours.len().max(1) as f32
-        };
-
-        // Any stem with the same spectrum gets the same hue; only frequency decides colour.
-        assert!(average(&low, 0) > average(&low, 1));
-        assert!(average(&mid, 1) > average(&mid, 0));
-        assert!(average(&high, 2) > average(&high, 1));
-        // Loud columns may reach full scale like the original mix; they must not wash out to white.
-        assert!(low
-            .iter()
-            .any(|colour| colour.iter().copied().max().unwrap_or(0) >= 200));
-        assert!(low
-            .iter()
-            .all(|colour| colour.iter().filter(|channel| **channel >= 250).count() < 3));
+        assert_eq!(live_audio_lease_count(), before);
     }
 }

@@ -1,4 +1,4 @@
-//! YouTube Music provider（InnerTube API + Google OAuth 设备码登录）。
+//! YouTube Music provider（InnerTube API + 独立浏览器 Cookie 会话）。
 
 pub mod auth;
 pub mod client;

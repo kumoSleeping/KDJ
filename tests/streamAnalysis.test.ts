@@ -3,8 +3,10 @@ import test from "node:test";
 import {
   recordStreamAnalysisProgress,
   streamAnalysisSnapshot,
+  trackWithStreamAnalysis,
 } from "../src/lib/streamAnalysis";
-import type { StreamAnalysisResult, StreamWaveformProgress } from "../src/types";
+import { beatGridMarkers } from "../src/lib/performanceCues";
+import type { StreamAnalysisResult, StreamWaveformProgress, Track } from "../src/types";
 
 const emptyProgress = {
   enabled: true,
@@ -60,6 +62,52 @@ test("stream analysis progresses from waiting to a retained ready snapshot", () 
   assert.equal(ready.result?.bpm, 128);
   assert.equal(ready.result?.camelot, "8A");
   assert.ok(ready.completedAt);
+});
+
+test("ready stream analysis becomes the Performance Deck BPM/key grid", () => {
+  const trackId = -98_763;
+  recordStreamAnalysisProgress(trackId, {
+    ...emptyProgress,
+    complete: true,
+    active: false,
+    analysis_status: "ready",
+    analysis: result,
+    analysis_error: "",
+  });
+  const track = {
+    id: trackId,
+    duration: 180,
+    bpm: null,
+    bpm_confidence: null,
+    first_beat: null,
+    music_key: "",
+    camelot: "",
+    open_key: "",
+    key_confidence: null,
+    energy: null,
+    rms_db: null,
+    peak_db: null,
+    analyzed_at: null,
+    analysis_error: "",
+  } as Track;
+
+  const analyzed = trackWithStreamAnalysis(track);
+  assert.equal(analyzed.bpm, 128);
+  assert.equal(analyzed.first_beat, 0.125);
+  assert.equal(analyzed.camelot, "8A");
+  assert.equal(analyzed.energy, 8);
+  assert.ok(analyzed.analyzed_at);
+  const markers = beatGridMarkers(
+    analyzed.duration ?? 0,
+    analyzed.bpm,
+    analyzed.first_beat,
+    0,
+    8,
+    analyzed.bpm_confidence,
+  );
+  assert.ok(markers.length > 4, "stream metadata drives the shared beat/bar renderer");
+  assert.equal(markers[0]?.beat, 1);
+  assert.equal(markers[4]?.bar, 2);
 });
 
 test("old backends without analysis fields do not erase a stream result", () => {

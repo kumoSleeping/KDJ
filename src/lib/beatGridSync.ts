@@ -1,5 +1,7 @@
 /** 4/4 网格相位：自动对拍时的跳转落点、SYNC 校正和接歌等待都走这里。 */
 
+import { clampPerformanceDeckPosition } from "./deckPosition";
+
 export const BEATS_PER_BAR = 4;
 /** 引擎保调变速的硬边界。SYNC 可以超出 TEMPO 推子量程，但不能超出这里。 */
 export const ENGINE_TEMPO_MIN = 0.5;
@@ -75,8 +77,8 @@ export function deckSyncRate(
 }
 
 /**
- * 点击落点 = 被点小节内、与当前播放头相同的相位。
- * 例如现在在小节 1/3 处，点到另一小节就落到那一小节的 1/3 处。
+ * 点击落点 = 被点 1/4 小节（一拍）内、与当前播放头相同的相位。
+ * 例如现在在拍内 1/3 处，点到另一拍就落到那一拍的 1/3 处。
  */
 export function barPhaseAlignedSeek(
   clickPositionSec: number,
@@ -85,14 +87,14 @@ export function barPhaseAlignedSeek(
   firstBeatSec: number | null | undefined,
 ): number {
   const click = Number.isFinite(clickPositionSec) ? Math.max(0, clickPositionSec) : 0;
-  const phase = barPhase(phaseSourcePositionSec, bpm, firstBeatSec);
-  const bar = barIntervalSec(bpm);
-  const beat = beatIntervalSec(bpm);
-  if (phase == null || bar == null || beat == null || firstBeatSec == null) return click;
-  const origin = gridOriginSec(firstBeatSec, bar);
-  const rel = click - origin;
-  const wrapped = ((rel % bar) + bar) % bar;
-  return Math.max(0, click - wrapped + phase * bar);
+  const cell = beatIntervalSec(bpm);
+  if (cell == null || firstBeatSec == null || !Number.isFinite(firstBeatSec)) return click;
+  const origin = gridOriginSec(firstBeatSec, cell);
+  const source = Number.isFinite(phaseSourcePositionSec) ? Math.max(0, phaseSourcePositionSec) : 0;
+  const sourceWrapped = (((source - origin) % cell) + cell) % cell;
+  const phase = sourceWrapped / cell;
+  const wrapped = (((click - origin) % cell) + cell) % cell;
+  return Math.max(0, click - wrapped + phase * cell);
 }
 
 /** 把误差折到 (-period/2, period/2]。 */
@@ -286,6 +288,24 @@ export interface DeckSyncRelation {
   multiple: number;
 }
 
+export interface NativeSyncRelationInput {
+  enabled: boolean;
+  follower: 0 | 1;
+  multiple?: number;
+}
+
+/**
+ * Native SYNC snapshot is the lock authority. Keep the half/double fold the coordinator stored;
+ * never coerce it to 1 or tempo gestures silently break a 70/140 lock.
+ */
+export function adoptNativeSyncRelation(
+  sync: NativeSyncRelationInput,
+): DeckSyncRelation | null {
+  if (!sync.enabled) return null;
+  const multiple = sync.multiple === 0.5 || sync.multiple === 2 ? sync.multiple : 1;
+  return { base: sync.follower, multiple };
+}
+
 export interface CrossfaderTempoPlan {
   rates: [number, number];
   relation: DeckSyncRelation;
@@ -464,9 +484,12 @@ export function scratchSnappedPosition(
   input: BarPhaseLockInput & { hard: boolean },
 ): number {
   const lock = barPhaseLock(input);
-  if (!lock) return Math.max(0, input.followerPositionSec);
+  if (!lock) return clampPerformanceDeckPosition(input.followerPositionSec, input.followerDurationSec ?? 0);
   const pull = scratchSnapAdjustment(lock.errorSec, lock.barSec, input.hard);
-  return phaseAlignedFollowerPosition(input.followerPositionSec, input.followerRate, pull);
+  return clampPerformanceDeckPosition(
+    input.followerPositionSec - pull * input.followerRate,
+    input.followerDurationSec ?? 0,
+  );
 }
 
 /**

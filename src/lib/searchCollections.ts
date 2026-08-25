@@ -5,6 +5,41 @@ import type {
   MergedGroup,
 } from "../types";
 
+export const RESOLVED_COLLECTION_PAGE_SIZE = 50;
+
+export interface CollectionPageWindow {
+  page: number;
+  pageCount: number;
+  start: number;
+  end: number;
+}
+
+/**
+ * 已完整载入的远程集合只分页渲染，下载、全选和试听队列仍使用完整曲目集。
+ * requestedPage 可能来自旧 UI state；集合刷新变短时在这里统一夹回有效页。
+ */
+export function collectionPageWindow(
+  total: number,
+  requestedPage: number | undefined,
+  pageSize = RESOLVED_COLLECTION_PAGE_SIZE,
+): CollectionPageWindow {
+  const safeTotal = Number.isFinite(total) ? Math.max(0, Math.trunc(total)) : 0;
+  const safePageSize = Number.isFinite(pageSize) ? Math.max(1, Math.trunc(pageSize)) : 1;
+  const pageCount = Math.max(1, Math.ceil(safeTotal / safePageSize));
+  const numericPage =
+    typeof requestedPage === "number" && Number.isFinite(requestedPage)
+      ? Math.trunc(requestedPage)
+      : 1;
+  const page = Math.min(pageCount, Math.max(1, numericPage));
+  const start = Math.min(safeTotal, (page - 1) * safePageSize);
+  return {
+    page,
+    pageCount,
+    start,
+    end: Math.min(safeTotal, start + safePageSize),
+  };
+}
+
 export function collectionToken(collection: CollectionResult): string {
   return `${collection.platform}:${collection.kind}:${collection.key}`;
 }

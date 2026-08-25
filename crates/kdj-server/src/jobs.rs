@@ -1,10 +1,13 @@
 //! 后台任务：扫描、分析。都会往事件总线上发进度。
 
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use kdj_analysis::engine::analyze_file;
+use kdj_analysis::engine::analyze_file_timed;
 use kdj_core::work_scheduler::{
     work_scheduler, WorkAcquireError, WorkActivityGuard, WorkClass, WorkRequest,
 };
@@ -16,6 +19,46 @@ use crate::state::AppState;
 
 fn new_job_id() -> String {
     format!("{:016x}", rand::random::<u64>())
+}
+
+fn write_kdj_log(data_dir: &Path, line: &str) {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = data_dir.join("kdj.log");
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{stamp} {line}");
+    }
+}
+
+fn process_rss_mb() -> Option<f64> {
+    let pid = sysinfo::Pid::from_u32(std::process::id());
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    sys.process(pid)
+        .map(|process| process.memory() as f64 / (1024.0 * 1024.0))
+}
+
+fn escape_log_file_name(name: &str) -> String {
+    name.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[derive(Default)]
+struct AnalysisBatchStats {
+    saved: usize,
+    failed: usize,
+    total_ms: u64,
+    probe_ms: u64,
+    decode_ms: u64,
+    tempo_ms: u64,
+    key_ms: u64,
+    loudness_ms: u64,
+    decoded_seconds: f64,
+    max_ms: u64,
 }
 
 /// 导入结束时那一条 `scan.progress`（`phase = "done"`）。
@@ -496,6 +539,15 @@ fn spawn_analysis_target(
     tokio::task::spawn_blocking(move || {
         let hub = state.hub.clone();
         let updated: Arc<std::sync::Mutex<Vec<i64>>> = Default::default();
+        let stats = Arc::new(Mutex::new(AnalysisBatchStats::default()));
+        let log_dir = state.config.data_dir.clone();
+        let batch_started = Instant::now();
+        let rss_before = process_rss_mb();
+        let version = if target == AnalysisWriteTarget::V1 {
+            "v1"
+        } else {
+            "v2"
+        };
 
         // 手工分块而不是拉 rayon：只有这一处需要并行，一个依赖不值得
         let analysis_workers = work_scheduler().snapshot().heavy_limit;
@@ -511,6 +563,8 @@ fn spawn_analysis_target(
                 let job = job.clone();
                 let done = done.clone();
                 let updated = updated.clone();
+                let stats = stats.clone();
+                let log_dir = log_dir.clone();
                 let cancel = cancel.clone();
                 scope.spawn(move || {
                     kdj_core::thread_qos::prefer_background();
@@ -540,7 +594,7 @@ fn spawn_analysis_target(
                             continue;
                         };
                         let path = std::path::PathBuf::from(&track.path);
-                        let result = analyze_file(&path, duration_limit);
+                        let (result, timing) = analyze_file_timed(&path, duration_limit);
                         let saved = match target {
                             AnalysisWriteTarget::V1 => {
                                 state.library.save_analysis(track_id, &result)
@@ -549,11 +603,14 @@ fn spawn_analysis_target(
                                 state.library.save_bpm_key_analysis_v2(track_id, &result)
                             }
                         };
-                        if let Err(err) = saved {
-                            tracing::warn!("保存分析结果失败 {track_id}：{err:#}");
-                            continue;
-                        }
-                        if target == AnalysisWriteTarget::V1 && write_tags {
+                        let saved_ok = match saved {
+                            Ok(()) => true,
+                            Err(err) => {
+                                tracing::warn!("保存分析结果失败 {track_id}：{err:#}");
+                                false
+                            }
+                        };
+                        if saved_ok && target == AnalysisWriteTarget::V1 && write_tags {
                             if kdj_providers::tags::write_analysis_tags(
                                 &path,
                                 result.bpm,
@@ -571,9 +628,61 @@ fn spawn_analysis_target(
                                 let _ = state.library.sync_file_stat(track_id);
                             }
                         }
+                        let errors = if result.errors.is_empty() {
+                            String::new()
+                        } else {
+                            result.errors.join(";").replace(' ', "_")
+                        };
+                        let line = format!(
+                            "analysis track job={job} id={track_id} file=\"{}\" total_ms={} probe_ms={} decode_ms={} tempo_ms={} key_ms={} loud_ms={} audio_s={:.1} offset_s={:.1} sr={} bpm={} camelot={} energy={} saved={} errors={errors}",
+                            escape_log_file_name(&track.filename),
+                            timing.total_ms,
+                            timing.probe_ms,
+                            timing.decode_ms,
+                            timing.tempo_ms,
+                            timing.key_ms,
+                            timing.loudness_ms,
+                            timing.decoded_seconds,
+                            timing.offset_seconds,
+                            timing.sample_rate,
+                            result
+                                .bpm
+                                .map(|value| format!("{value:.2}"))
+                                .unwrap_or_else(|| "-".into()),
+                            if result.camelot.is_empty() {
+                                "-"
+                            } else {
+                                result.camelot.as_str()
+                            },
+                            result
+                                .energy
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "-".into()),
+                            u8::from(saved_ok),
+                        );
+                        tracing::info!("{line}");
+                        write_kdj_log(&log_dir, &line);
+                        {
+                            let mut stats = stats.lock().expect("analysis batch stats");
+                            if saved_ok {
+                                stats.saved += 1;
+                            } else {
+                                stats.failed += 1;
+                            }
+                            stats.total_ms += timing.total_ms;
+                            stats.probe_ms += timing.probe_ms;
+                            stats.decode_ms += timing.decode_ms;
+                            stats.tempo_ms += timing.tempo_ms;
+                            stats.key_ms += timing.key_ms;
+                            stats.loudness_ms += timing.loudness_ms;
+                            stats.decoded_seconds += timing.decoded_seconds;
+                            stats.max_ms = stats.max_ms.max(timing.total_ms);
+                        }
                         // 波形不再随全库分析逐首预热。只有当前/下一 Deck 按需请求；否则
                         // 大曲库会在分析结束后继续完整解码数小时，还会抢装轨时的高密度波形。
-                        updated.lock().unwrap().push(track_id);
+                        if saved_ok {
+                            updated.lock().unwrap().push(track_id);
+                        }
 
                         let current = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                         hub.publish(
@@ -581,11 +690,7 @@ fn spawn_analysis_target(
                             &json!({
                                 "job_id": job, "done": current, "total": total,
                                 "current": track.filename, "track_id": track_id,
-                                "version": if target == AnalysisWriteTarget::V1 {
-                                    "v1"
-                                } else {
-                                    "v2"
-                                }
+                                "version": version
                             }),
                         );
                     }
@@ -608,15 +713,36 @@ fn spawn_analysis_target(
             "analyze.progress",
             &json!({"job_id": job, "done": total, "total": total, "current": "", "track_id": null}),
         );
-        // 这里**不发**"分析完成"的提示。前端现在会在空闲时一批 20 首地自动补齐，
-        // 一千多首的曲库要跑几十批；每批弹一句就是整夜刷屏。
-        // 跑完的证据是列表里的 BPM/调号直接出现了，那比一条会飘走的提示更实在。
-        let version = if target == AnalysisWriteTarget::V1 {
-            "v1"
+        let wall_ms = u64::try_from(batch_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let stats = stats.lock().expect("analysis batch stats");
+        let counted = stats.saved + stats.failed;
+        let avg_ms = if counted == 0 {
+            0
         } else {
-            "v2"
+            stats.total_ms / counted as u64
         };
-        tracing::info!("分析批次 {job}（{version}）结束：{} 首", ids.len());
+        let rss_after = process_rss_mb();
+        let rss = match (rss_before, rss_after) {
+            (Some(before), Some(after)) => format!("{before:.0}->{after:.0}"),
+            (None, Some(after)) => format!("{after:.0}"),
+            (Some(before), None) => format!("{before:.0}"),
+            (None, None) => "-".into(),
+        };
+        let summary = format!(
+            "analysis batch job={job} version={version} queued={total} saved={} failed={} wall_ms={wall_ms} cpu_ms={} avg_ms={avg_ms} max_ms={} probe_ms={} decode_ms={} tempo_ms={} key_ms={} loud_ms={} audio_s={:.1} rss_mb={rss} waveform=skipped",
+            stats.saved,
+            stats.failed,
+            stats.total_ms,
+            stats.max_ms,
+            stats.probe_ms,
+            stats.decode_ms,
+            stats.tempo_ms,
+            stats.key_ms,
+            stats.loudness_ms,
+            stats.decoded_seconds,
+        );
+        tracing::info!("{summary}");
+        write_kdj_log(&log_dir, &summary);
     });
     job_id
 }

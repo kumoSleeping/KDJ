@@ -10,6 +10,7 @@ import { overviewWaveformFromDetail } from "./waveformViewport";
 /** 当前曲、下一台 Deck 和最近查看过的歌曲足够；避免整晚演出后数组只增不减。 */
 const CACHE_LIMIT = 24;
 const DEFAULT_WAVEFORM_BUCKETS = 640;
+export const RELEASE_OVERVIEW_BUCKETS = 4_096;
 const cache = new Map<string, Waveform>();
 const inflight = new Map<string, Promise<Waveform>>();
 /** v0.2.41 整曲预览和当前高密度波形不能互相派生或覆盖。 */
@@ -39,7 +40,9 @@ function waveformKeyParts(key: string): [number, number] | null {
  * - HTMLMediaElement.buffered 只标记“媒体已缓存”，不冒充已经分析过的幅度；
  * - 未缓存区由组件画低透明占位。
  */
-const STREAM_BUCKETS = 640;
+// The bottom-bar overview uses the same 4,096-column asset shape for local and online tracks.
+// Progressive entries differ only in their known/unknown coverage, not in visual resolution.
+const STREAM_BUCKETS = RELEASE_OVERVIEW_BUCKETS;
 const STREAM_CACHE_LIMIT = 24;
 
 export interface StreamWaveformSample {
@@ -58,6 +61,8 @@ export interface StreamBufferedRange {
 
 export interface StreamWaveformSnapshot {
   waveform: Waveform;
+  /** 完整文件生成的高密度 DJ 主波形；overview 永远保留在 waveform。 */
+  detailWaveform: Waveform | null;
   /** 与 waveform.amp 等长；false 表示该桶还没有真实 analyser 或缓存 PCM 分析。 */
   known: readonly boolean[];
   /** 媒体元素当前实际缓存的秒区间，用来画“缓存到哪里”的低透明占位。 */
@@ -67,6 +72,7 @@ export interface StreamWaveformSnapshot {
 
 interface StreamWaveformEntry {
   snapshot: StreamWaveformSnapshot;
+  detailWaveform: Waveform | null;
   /** 同一时间桶会收到多帧 analyser 采样；频段做稳定均值，幅度保留峰值。 */
   counts: number[];
   rawAmp: number[];
@@ -91,6 +97,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function emptyStreamEntry(trackId: number, duration: number): StreamWaveformEntry {
+  const known = Array(STREAM_BUCKETS).fill(false) as boolean[];
   return {
     snapshot: {
       waveform: {
@@ -100,11 +107,14 @@ function emptyStreamEntry(trackId: number, duration: number): StreamWaveformEntr
         r: Array(STREAM_BUCKETS).fill(0),
         g: Array(STREAM_BUCKETS).fill(0),
         b: Array(STREAM_BUCKETS).fill(0),
+        known,
       },
-      known: Array(STREAM_BUCKETS).fill(false),
+      detailWaveform: null,
+      known,
       bufferedRanges: [],
       revision: 0,
     },
+    detailWaveform: null,
     counts: Array(STREAM_BUCKETS).fill(0),
     rawAmp: Array(STREAM_BUCKETS).fill(0),
     low: Array(STREAM_BUCKETS).fill(0),
@@ -271,7 +281,10 @@ function buildStreamSnapshot(
   overlayCachedPrefix(entry, total, amp, r, g, b, cacheKnown);
   const known = entry.analyserKnown.map((value, index) => value || cacheKnown[index]);
   return {
-    waveform: { track_id: trackId, duration: total, amp, r, g, b },
+    // Progressive coverage is part of the canonical Waveform contract. Renderers no longer need
+    // a stream-only side channel to decide which columns are real.
+    waveform: { track_id: trackId, duration: total, amp, r, g, b, known },
+    detailWaveform: entry.detailWaveform,
     known,
     bufferedRanges,
     revision,
@@ -421,6 +434,7 @@ export function mergeCachedStreamWaveform(
   waveform: Waveform,
   sourceRevision: number,
   bufferedRanges?: readonly StreamBufferedRange[],
+  detailWaveform?: Waveform | null,
 ): StreamWaveformSnapshot {
   if (trackId >= 0) throw new Error("渐进在线波形只接受负 track id");
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
@@ -453,6 +467,19 @@ export function mergeCachedStreamWaveform(
     coveredSeconds,
     revision: sourceRevision,
   };
+  if (
+    detailWaveform
+    && detailWaveform.amp.length > 0
+    && detailWaveform.r.length === detailWaveform.amp.length
+    && detailWaveform.g.length === detailWaveform.amp.length
+    && detailWaveform.b.length === detailWaveform.amp.length
+  ) {
+    entry.detailWaveform = {
+      ...detailWaveform,
+      track_id: trackId,
+      duration: total || detailWaveform.duration,
+    };
+  }
   entry.snapshot = buildStreamSnapshot(
     entry,
     trackId,
@@ -517,7 +544,12 @@ function rememberReleaseOverview(trackId: number, wave: Waveform): Waveform {
 
 export function cachedReleaseOverviewWaveform(trackId: number): Waveform | null {
   const hit = releaseOverviewCache.get(trackId);
-  return hit ? rememberReleaseOverview(trackId, hit) : null;
+  if (!hit) return null;
+  if (hit.amp.length !== RELEASE_OVERVIEW_BUCKETS) {
+    releaseOverviewCache.delete(trackId);
+    return null;
+  }
+  return rememberReleaseOverview(trackId, hit);
 }
 
 export function cachedWaveform(trackId: number, buckets = DEFAULT_WAVEFORM_BUCKETS): Waveform | null {
@@ -652,7 +684,7 @@ export function loadReleaseOverviewForTrack(track: Track): Promise<Waveform> {
     source.devicePath,
     source.contentId,
     track.id,
-    DEFAULT_WAVEFORM_BUCKETS,
+    RELEASE_OVERVIEW_BUCKETS,
     "release-overview",
   );
   const tracked = request
@@ -674,7 +706,7 @@ export function loadReleaseOverviewById(trackId: number): Promise<Waveform> {
   const pending = releaseOverviewInflight.get(trackId);
   if (pending) return pending;
   const tracked = api
-    .waveform(trackId, DEFAULT_WAVEFORM_BUCKETS, "release-overview")
+    .waveform(trackId, RELEASE_OVERVIEW_BUCKETS, "release-overview")
     .then((wave) => {
       releaseOverviewInflight.delete(trackId);
       return rememberReleaseOverview(trackId, wave);

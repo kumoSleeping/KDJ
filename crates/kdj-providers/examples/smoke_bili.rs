@@ -19,6 +19,7 @@ async fn main() -> anyhow::Result<()> {
             soundcloud_client_id: String::new(),
             soundcloud_client_secret: String::new(),
             ytm_enabled: false,
+            youtube_enabled: false,
             video_dir: Some(dir.join("video")),
             video_format: "mp4".into(),
         },

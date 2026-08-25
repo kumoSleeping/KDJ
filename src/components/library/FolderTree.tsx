@@ -36,6 +36,10 @@ import {
   SEARCH_DEFAULT_DOWNLOAD_SENTINEL,
 } from "../../lib/folderDrop";
 import { expandNewRootPaths } from "../../lib/folderExpansion";
+import {
+  readSidebarTreeState,
+  writeLocalFolderTreeState,
+} from "../../lib/sidebarState";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder, OUTSIDE_FOLDER } from "../../lib/outsideFolder";
 import {
@@ -77,7 +81,10 @@ const ALL_TRACKS_DROP_TARGET = "__kd_all_tracks__";
 const STREAM_ROOTS: ReadonlyArray<{ id: StreamBrowsePlatform; label: string }> = [
   { id: "wyy", label: "NetEase" },
   { id: "qqm", label: "Q Music" },
-  { id: "bilibili", label: "哔哩哔哩" },
+  { id: "soundcloud", label: "SoundCloud" },
+  { id: "ytm", label: "YouTube Music" },
+  { id: "youtube", label: "YouTube Video" },
+  { id: "bilibili", label: "Bilibili" },
 ];
 
 const NARROW_RAIL_SOURCE_KEY = "kd-narrow-rail-source-v1";
@@ -117,11 +124,15 @@ function streamPlaylistSections(
   return [
     {
       id: "created",
-      label: platform === "bilibili" ? "收藏夹" : "创建的歌单",
+      label: platform === "bilibili" ? "Favorite folders" : "创建的歌单",
       playlists: created,
     },
     { id: "collected", label: "收藏的歌单", playlists: collected },
-    { id: "other", label: "其他歌单", playlists: other },
+    {
+      id: "other",
+      label: platform === "ytm" || platform === "youtube" ? "播放列表" : "其他歌单",
+      playlists: other,
+    },
   ].filter((section) => section.playlists.length > 0) as StreamPlaylistSection[];
 }
 
@@ -130,7 +141,9 @@ function accountCanBrowse(state: AccountState | undefined): boolean {
 }
 
 function streamPlaylistCountLabel(playlist: StreamPlaylist): string {
-  return `${playlist.count} ${playlist.platform === "bilibili" ? "个视频" : "首"}`;
+  if (playlist.platform === "bilibili") return `${playlist.count} videos`;
+  const unit = playlist.platform === "youtube" ? "个视频" : "首";
+  return `${playlist.count} ${unit}`;
 }
 
 function readNarrowRailSource(): NarrowRailSource | null {
@@ -184,18 +197,10 @@ function useStreamBrowseLifecycle(enabled: boolean) {
   const refreshStreamPlaylistsIfStale = useStreamBrowseStore(
     (state) => state.refreshIfStale,
   );
-  const wyyAccount = accounts.find((account) => account.platform === "wyy");
-  const qqmAccount = accounts.find((account) => account.platform === "qqm");
-  const bilibiliAccount = accounts.find((account) => account.platform === "bilibili");
-
   useEffect(() => {
     if (!enabled) return;
-    const bindings = [
-      ["wyy", wyyAccount],
-      ["qqm", qqmAccount],
-      ["bilibili", bilibiliAccount],
-    ] as const;
-    for (const [platform, account] of bindings) {
+    for (const platform of STREAM_BROWSE_PLATFORMS) {
+      const account = accounts.find((candidate) => candidate.platform === platform);
       if (account) {
         // 先同步账号匹配的持久缓存，再由 store 为本次启动强制校准一次。
         void bindStreamAccount(platform, streamAccountBinding(account));
@@ -204,15 +209,7 @@ function useStreamBrowseLifecycle(enabled: boolean) {
         void bindStreamAccount(platform, null);
       }
     }
-  }, [
-    accountsError,
-    appBooting,
-    bilibiliAccount,
-    bindStreamAccount,
-    enabled,
-    qqmAccount,
-    wyyAccount,
-  ]);
+  }, [accounts, accountsError, appBooting, bindStreamAccount, enabled]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -587,16 +584,6 @@ export function NarrowFolderRail({
             <small>重试</small>
           </button>
         )}
-        {canBrowse && !loading && !platformError && playlists?.length === 0 && (
-          <button
-            type="button"
-            title="没有读取到歌单，点此刷新"
-            onClick={() => void loadStreamPlaylists(platform, true)}
-          >
-            <RefreshCw size={14} />
-            <small>刷新歌单</small>
-          </button>
-        )}
         {canBrowse &&
           favoritePlaylists.map((playlist) => {
             const active =
@@ -878,18 +865,34 @@ function reorder(names: string[], from: string, to: string, after: boolean): str
   return rest;
 }
 
-/** 展开状态存在组件里：刷新树（新建/改名/移动之后）不该把用户展开的分支收回去。 */
+type ExpandedUpdate = Set<string> | ((current: Set<string>) => Set<string>);
+
+/** 刷新树与重启应用都保留用户亲手展开/收起的本地文件夹分支。 */
 function useExpanded(roots: FolderNode[]) {
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const seenRootPaths = useRef<Set<string>>(new Set());
+  const restored = useRef(readSidebarTreeState().local);
+  const [expanded, setExpandedState] = useState<Set<string>>(
+    () => new Set(restored.current.expanded),
+  );
+  const seenRootPaths = useRef<Set<string>>(
+    new Set(restored.current.knownRoots),
+  );
+  const setExpanded = (update: ExpandedUpdate) => {
+    setExpandedState((current) => {
+      const next = typeof update === "function" ? update(current) : update;
+      writeLocalFolderTreeState(next, seenRootPaths.current);
+      return next;
+    });
+  };
   useEffect(() => {
     const rootPaths = roots.map((root) => root.path);
     const previouslySeen = seenRootPaths.current;
-    // 记住“见过哪些根”和“当前展开哪些节点”是两回事。歌曲更新会换一棵新的
-    // roots 数据树；若只检查 expanded，用户主动收起的根会被误判成新根并弹开。
-    // 真正第一次出现的根仍默认展开一层，普通刷新则原样保留所有分支状态。
-    seenRootPaths.current = new Set(rootPaths);
-    setExpanded((prev) => expandNewRootPaths(prev, previouslySeen, rootPaths));
+    // 已知但被用户收起的根不能在重启后被当成“新根”再次弹开；真正新增的根仍默认展开。
+    seenRootPaths.current = new Set([...previouslySeen, ...rootPaths]);
+    setExpandedState((current) => {
+      const next = expandNewRootPaths(current, previouslySeen, rootPaths);
+      writeLocalFolderTreeState(next, seenRootPaths.current);
+      return next;
+    });
   }, [roots]);
   return [expanded, setExpanded] as const;
 }
@@ -1178,7 +1181,7 @@ export function FolderTree({
           <span className="kd-folder-count">
             {loading && count === undefined
               ? "…"
-              : count !== undefined
+              : count !== undefined && count > 0
                 ? count
                 : !canBrowse && accountState
                   ? "登录"
@@ -1264,21 +1267,6 @@ export function FolderTree({
               onClick={() => refreshStreamRoot(platform)}
             >
               重试
-            </button>
-          </div>
-        )}
-
-        {open && canBrowse && !loading && !error && playlists?.length === 0 && (
-          <div className="kd-folder kd-stream-status">
-            <span className="kd-folder-caret" />
-            <ListMusic size={12} />
-            <span className="kd-truncate">没有读取到歌单</span>
-            <button
-              type="button"
-              className="kd-stream-inline-action"
-              onClick={() => refreshStreamRoot(platform)}
-            >
-              刷新
             </button>
           </div>
         )}

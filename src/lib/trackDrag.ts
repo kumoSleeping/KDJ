@@ -1,7 +1,11 @@
+import type { SongSource } from "../types";
+
 export const TRACK_DRAG_STATE_EVENT = "kd:track-drag-state";
 export const TRACK_TRASH_DROP_EVENT = "kd:track-trash-drop";
 /** Performance A/B Deck 接收曲库曲目的跨组件事件与落点标记。 */
 export const TRACK_DECK_DROP_EVENT = "kd:track-deck-drop";
+/** 在线 SongSource 不伪装成曲库 id；Deck 在落点处接收完整来源快照。 */
+export const STREAM_DECK_DROP_EVENT = "kd:stream-deck-drop";
 export const TRACK_DECK_DROP_TARGET_ATTR = "data-kd-track-deck-drop";
 /** 单个横向区域按落点中线分配到 Deck A/B。 */
 export const TRACK_DECK_SPLIT_DROP_TARGET = "split";
@@ -19,6 +23,11 @@ export interface TrackCoverDropDetail {
 
 export interface TrackDeckDropDetail {
   ids: number[];
+  side: 0 | 1;
+}
+
+export interface StreamDeckDropDetail {
+  source: SongSource;
   side: 0 | 1;
 }
 
@@ -162,6 +171,17 @@ export function dispatchTrackDeckDrop(ids: number[], side: 0 | 1): void {
   window.dispatchEvent(
     new CustomEvent<TrackDeckDropDetail>(TRACK_DECK_DROP_EVENT, {
       detail: { ids: [...ids], side },
+    }),
+  );
+}
+
+export function dispatchStreamDeckDrop(
+  source: SongSource,
+  side: 0 | 1,
+): void {
+  window.dispatchEvent(
+    new CustomEvent<StreamDeckDropDetail>(STREAM_DECK_DROP_EVENT, {
+      detail: { source, side },
     }),
   );
 }

@@ -33,6 +33,7 @@ const SETTINGS_FIELDS: &[&str] = &[
     "write_tags_after_analyze",
     "analysis_duration",
     "theme",
+    "experimental_dj_mode",
     "soundcloud_enabled",
     "netease_use_download_api",
     "video_max_height",
@@ -80,6 +81,9 @@ pub struct Settings {
     pub analysis_duration: f64,
     #[serde(default = "default_theme")]
     pub theme: Theme,
+    /// 是否向用户显示仍处于实验阶段的 DJ 工作模式入口。
+    #[serde(default)]
+    pub experimental_dj_mode: bool,
     #[serde(default)]
     pub soundcloud_enabled: bool,
     #[serde(default)]
@@ -137,6 +141,7 @@ impl Settings {
             write_tags_after_analyze: false,
             analysis_duration: default_analysis_duration(),
             theme: default_theme(),
+            experimental_dj_mode: false,
             soundcloud_enabled: false,
             netease_use_download_api: false,
             video_max_height: default_video_height(),
@@ -172,7 +177,7 @@ fn default_concurrent() -> u32 {
     3
 }
 fn default_analysis_duration() -> f64 {
-    240.0
+    90.0
 }
 fn default_theme() -> Theme {
     Theme::Light
@@ -189,6 +194,7 @@ fn default_platform_priority() -> Vec<String> {
         "qqm".to_string(),
         "soundcloud".to_string(),
         "ytm".to_string(),
+        "youtube".to_string(),
         "bilibili".to_string(),
         "local".to_string(),
     ]
@@ -517,6 +523,7 @@ mod tests {
         assert_eq!(config.to_settings().filter_resonance, FilterResonance::High);
         assert_eq!(config.to_settings().key_notation, KeyNotation::Camelot);
         assert!(config.to_settings().virtual_disk_auto_grow);
+        assert!(!config.to_settings().experimental_dj_mode);
     }
 
     #[test]
@@ -552,6 +559,7 @@ mod tests {
         settings.platform_priority = vec!["bilibili".into(), "wyy".into()];
         settings.stream_cache_enabled = true;
         settings.filter_resonance = FilterResonance::Medium;
+        settings.experimental_dj_mode = true;
         config.apply_settings(settings.clone());
 
         let reopened = AppConfig::create(dir.join("data"), dir.join("dl"), 0);

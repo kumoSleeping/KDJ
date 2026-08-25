@@ -200,10 +200,11 @@ impl NeteaseProvider {
             .unwrap_or_else(|| format!("网易云播客 {radio_id}"));
 
         let mut songs: Vec<Value> = Vec::new();
+        let mut seen_song_ids = std::collections::HashSet::new();
         let page_size = 100i64;
         let mut offset = 0i64;
         loop {
-            if songs.len() >= limit || offset > 10_000 {
+            if songs.len() >= limit {
                 break;
             }
             let body = self
@@ -227,13 +228,28 @@ impl NeteaseProvider {
             if programs.is_empty() {
                 break;
             }
+            let has_more = body
+                .get("more")
+                .or_else(|| body.get("hasMore"))
+                .and_then(Value::as_bool);
+            let before = songs.len();
             for program in &programs {
-                // 失效/无音频的节目没有 mainSong，跳过。
+                // 失效/无音频的节目没有 mainSong，跳过；接口偶尔重复上一页，
+                // 用歌曲 id 去重并在整页无新增时停止，避免无限翻页。
                 if let Some(main_song) = program.get("mainSong").filter(|song| song.is_object()) {
-                    songs.push(main_song.clone());
+                    let id = main_song.get("id").map(stringify_id).unwrap_or_default();
+                    if id.is_empty() || seen_song_ids.insert(id) {
+                        songs.push(main_song.clone());
+                    }
                 }
             }
             offset += page_size;
+            if songs.len() == before {
+                break;
+            }
+            if has_more == Some(false) || programs.len() < page_size as usize {
+                break;
+            }
         }
         songs.truncate(limit);
         Ok((title, songs))

@@ -9,7 +9,14 @@ import { create } from "zustand";
 import { api } from "../lib/api";
 import type { Account, Platform, StreamPlaylist } from "../types";
 
-export const STREAM_BROWSE_PLATFORMS = ["wyy", "qqm", "bilibili"] as const;
+export const STREAM_BROWSE_PLATFORMS = [
+  "wyy",
+  "qqm",
+  "soundcloud",
+  "ytm",
+  "youtube",
+  "bilibili",
+] as const;
 export type StreamBrowsePlatform = Extract<
   Platform,
   (typeof STREAM_BROWSE_PLATFORMS)[number]
@@ -28,7 +35,7 @@ export const STREAM_PLAYLIST_CACHE_TTL_MS = 10 * 60 * 1000;
 /** 自动刷新失败时，focus/visible 等信号至少隔五分钟再试。 */
 export const STREAM_PLAYLIST_AUTO_REFRESH_GAP_MS = 5 * 60 * 1000;
 
-const STREAM_PLAYLIST_CACHE_VERSION = 1;
+const STREAM_PLAYLIST_CACHE_VERSION = 2;
 const STREAM_PLAYLIST_CACHE_KEY = `kd-stream-playlist-directory-v${STREAM_PLAYLIST_CACHE_VERSION}`;
 const STREAM_BROWSE_LAYOUT_KEY = "kd-stream-browse-layout-v1";
 const MAX_CACHED_PLAYLISTS = 500;
@@ -115,8 +122,10 @@ interface StreamBrowseStore {
   setError(platform: StreamBrowsePlatform, error: string): void;
 }
 
-function platformMap<T>(wyy: T, qqm: T, bilibili: T): PlatformMap<T> {
-  return { wyy, qqm, bilibili };
+function platformMap<T>(create: (platform: StreamBrowsePlatform) => T): PlatformMap<T> {
+  return Object.fromEntries(
+    STREAM_BROWSE_PLATFORMS.map((platform) => [platform, create(platform)]),
+  ) as PlatformMap<T>;
 }
 
 function defaultSectionExpanded(): SectionMap<boolean> {
@@ -130,12 +139,8 @@ interface PersistedBrowseLayout {
 
 function defaultBrowseLayout(): PersistedBrowseLayout {
   return {
-    expanded: platformMap(false, false, false),
-    sectionExpanded: platformMap(
-      defaultSectionExpanded(),
-      defaultSectionExpanded(),
-      defaultSectionExpanded(),
-    ),
+    expanded: platformMap(() => false),
+    sectionExpanded: platformMap(() => defaultSectionExpanded()),
   };
 }
 
@@ -417,18 +422,18 @@ function persistPlatform(
 const initialBrowseLayout = readPersistedBrowseLayout();
 
 export const useStreamBrowseStore = create<StreamBrowseStore>()((set, get) => ({
-  playlists: platformMap(null, null, null),
-  loading: platformMap(false, false, false),
-  errors: platformMap("", "", ""),
+  playlists: platformMap(() => null),
+  loading: platformMap(() => false),
+  errors: platformMap(() => ""),
   expanded: initialBrowseLayout.expanded,
   sectionExpanded: initialBrowseLayout.sectionExpanded,
   active: null,
-  accountKeys: platformMap(null, null, null),
-  cacheSignatures: platformMap(null, null, null),
-  updatedAt: platformMap(0, 0, 0),
-  lastAttemptAt: platformMap(0, 0, 0),
-  calibratedAccountKeys: platformMap(null, null, null),
-  revisions: platformMap(0, 0, 0),
+  accountKeys: platformMap(() => null),
+  cacheSignatures: platformMap(() => null),
+  updatedAt: platformMap(() => 0),
+  lastAttemptAt: platformMap(() => 0),
+  calibratedAccountKeys: platformMap(() => null),
+  revisions: platformMap(() => 0),
 
   async bindAccount(platform, binding) {
     const before = get();

@@ -10,8 +10,8 @@ use crate::command::SourceKind;
 use crate::engine::{dynamic_command_channel, AudioRenderer};
 use crate::stream::StemFrame;
 use crate::{
-    command_channel, CommandError, DeckId, DecodedTrack, PlayerController, RtCommand, StreamSource,
-    TransportSnapshot,
+    command_channel, CommandError, DeckId, DecodedTrack, OutputCallbackTiming, PlayerController,
+    RtCommand, StreamSource, TransportSnapshot,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -235,6 +235,24 @@ impl Drop for DynamicPlayer {
 }
 
 impl DeviceOutput {
+    fn callback_timing(
+        info: &cpal::OutputCallbackInfo,
+        origin: &mut Option<cpal::StreamInstant>,
+    ) -> OutputCallbackTiming {
+        let timestamp = info.timestamp();
+        let origin = *origin.get_or_insert(timestamp.callback);
+        let nanos = |instant: cpal::StreamInstant| {
+            instant
+                .checked_duration_since(origin)
+                .map(|duration| duration.as_nanos().min(u128::from(u64::MAX)) as u64)
+                .unwrap_or(0)
+        };
+        OutputCallbackTiming {
+            callback_time_ns: nanos(timestamp.callback),
+            playback_time_ns: nanos(timestamp.playback),
+        }
+    }
+
     fn open_dynamic<E>(mut renderer: AudioRenderer, on_error: E) -> Result<Self, OutputError>
     where
         E: FnMut(cpal::Error) + Send + 'static,
@@ -264,24 +282,51 @@ impl DeviceOutput {
         let stream = match sample_format {
             SampleFormat::F32 => device.build_output_stream(
                 config,
-                move |samples: &mut [f32], _| {
-                    renderer.render_prepared(samples, spec.sample_rate, spec.channels);
+                {
+                    let mut origin = None;
+                    move |samples: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                        let timing = Self::callback_timing(info, &mut origin);
+                        renderer.render_prepared_timed(
+                            samples,
+                            spec.sample_rate,
+                            spec.channels,
+                            timing,
+                        );
+                    }
                 },
                 on_error,
                 None,
             )?,
             SampleFormat::I16 => device.build_output_stream(
                 config,
-                move |samples: &mut [i16], _| {
-                    renderer.render_prepared_i16(samples, spec.sample_rate, spec.channels);
+                {
+                    let mut origin = None;
+                    move |samples: &mut [i16], info: &cpal::OutputCallbackInfo| {
+                        let timing = Self::callback_timing(info, &mut origin);
+                        renderer.render_prepared_i16_timed(
+                            samples,
+                            spec.sample_rate,
+                            spec.channels,
+                            timing,
+                        );
+                    }
                 },
                 on_error,
                 None,
             )?,
             SampleFormat::U16 => device.build_output_stream(
                 config,
-                move |samples: &mut [u16], _| {
-                    renderer.render_prepared_u16(samples, spec.sample_rate, spec.channels);
+                {
+                    let mut origin = None;
+                    move |samples: &mut [u16], info: &cpal::OutputCallbackInfo| {
+                        let timing = Self::callback_timing(info, &mut origin);
+                        renderer.render_prepared_u16_timed(
+                            samples,
+                            spec.sample_rate,
+                            spec.channels,
+                            timing,
+                        );
+                    }
                 },
                 on_error,
                 None,

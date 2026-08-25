@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { LoaderCircle, PlugZap, RefreshCw } from "lucide-react";
 import { Button, EmptyState, ToastHost } from "./components/common";
 import { Workspace } from "./components/workspace/Workspace";
@@ -38,11 +38,15 @@ export default function App() {
   const booting = useAppStore((state) => state.booting);
   const bootError = useAppStore((state) => state.bootError);
   const connected = useAppStore(selectConnected);
+  const settings = useAppStore((state) => state.settings);
   const refreshOneLibraryDevices = usePlaylistStore((state) => state.refreshDevices);
   const { columns, chrome, portrait } = useLayoutSignals();
   const [retrying, setRetrying] = useState(false);
-  const [workMode, setWorkModeState] = useState<WorkMode>(() => readWorkMode());
-  const [performanceOpen, setPerformanceOpen] = useState(workMode === "dj");
+  // 在后端设置载入前一律留在管理器，避免默认关闭的实验功能闪现一帧。
+  const [workMode, setWorkModeState] = useState<WorkMode>("manager");
+  const [performanceOpen, setPerformanceOpen] = useState(false);
+  const workModePreferenceReady = useRef(false);
+  const experimentalDjMode = settings?.experimental_dj_mode ?? false;
   const platform = window.kdj?.platform;
   const isMac = platform === "darwin";
   const isMobile = platform === "android" || platform === "ios";
@@ -122,6 +126,18 @@ export default function App() {
     setPerformanceOpen(mode === "dj");
     writeWorkMode(mode);
   }, []);
+
+  useEffect(() => {
+    if (!settings) return;
+    if (!workModePreferenceReady.current) {
+      workModePreferenceReady.current = true;
+      setWorkMode(experimentalDjMode ? readWorkMode() : "manager");
+      return;
+    }
+    // 关掉实验入口时同步退出 DJ，不能留下一个无入口可退的隐藏模式。
+    if (!experimentalDjMode && workMode !== "manager") setWorkMode("manager");
+  }, [experimentalDjMode, setWorkMode, settings, workMode]);
+
   return (
     <div
       className="kd-app"

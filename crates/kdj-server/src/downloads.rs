@@ -1162,9 +1162,10 @@ pub fn enqueue_video(
             hint.to_string()
         }
     };
+    let platform = req.platform;
     let task = new_task(
         TaskKind::Video,
-        Platform::Bilibili,
+        platform,
         &title,
         req.artist.trim(),
         quality,
@@ -1198,7 +1199,11 @@ pub fn enqueue_video(
         } else {
             req.url.clone()
         };
-        match state.bilibili.resolve_video(&probe).await {
+        let resolved = match platform {
+            Platform::Youtube => state.youtube.resolve_video(&probe).await,
+            _ => state.bilibili.resolve_video(&probe).await,
+        };
+        match resolved {
             Ok(info) if !info.title.is_empty() => {
                 manager.update(&id, |task| {
                     // 入队时搜索结果可能已经盖过标题/封面；解析结果只补空缺，别把好的冲掉。
@@ -1225,11 +1230,16 @@ pub fn enqueue_video(
             progress_manager.progress(&progress_id, downloaded, total);
         });
 
-        match state
-            .bilibili
-            .download_video(&req, &cancel, &progress)
-            .await
-        {
+        let downloaded = match platform {
+            Platform::Youtube => state.youtube.download_video(&req, &cancel, &progress).await,
+            _ => {
+                state
+                    .bilibili
+                    .download_video(&req, &cancel, &progress)
+                    .await
+            }
+        };
+        match downloaded {
             // 和音频一路同理：取消撞上"最后一块刚好下完"不能算成功
             Ok(_) if cancel.is_cancelled() => {
                 manager.settle(&id, TaskState::Canceled, "已取消");
@@ -1250,7 +1260,10 @@ pub fn enqueue_video(
                 // 但拖进某个文件夹时用户就是要它出现在那里——dest_dir 非空也入库。
                 let should_import = req.audio_only || !req.dest_dir.trim().is_empty();
                 let track_id = if should_import {
-                    match state.library.upsert_file(&path, "bilibili", &req.bvid) {
+                    match state
+                        .library
+                        .upsert_file(&path, platform.as_str(), &req.bvid)
+                    {
                         Ok(id) => Some(id),
                         Err(err) => {
                             let message = format!("视频已下载，但加入曲库失败：{err:#}");

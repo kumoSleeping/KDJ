@@ -7,12 +7,30 @@
  * unknown bucket as known.
  */
 export function waveformEdgeScales(
-  amplitudes: readonly number[],
-  known: readonly boolean[],
+  amplitudes: ArrayLike<number>,
+  known: ArrayLike<boolean | number>,
+  edgePixels?: number,
+  audibleThreshold?: number,
+): number[];
+export function waveformEdgeScales<T extends Float32Array | Float64Array>(
+  amplitudes: ArrayLike<number>,
+  known: ArrayLike<boolean | number>,
+  edgePixels: number,
+  audibleThreshold: number,
+  output: T,
+): T;
+export function waveformEdgeScales(
+  amplitudes: ArrayLike<number>,
+  known: ArrayLike<boolean | number>,
   edgePixels = 4,
   audibleThreshold = 0.02,
-): number[] {
-  const scales = Array(amplitudes.length).fill(1) as number[];
+  output?: Float32Array | Float64Array,
+): number[] | Float32Array | Float64Array {
+  if (output && output.length !== amplitudes.length) {
+    throw new RangeError("waveform edge-scale buffer length does not match the rendered width");
+  }
+  const scales = output ?? new Array<number>(amplitudes.length);
+  scales.fill(1);
   let first = -1;
   let last = -1;
   for (let index = 0; index < amplitudes.length; index += 1) {
@@ -38,51 +56,26 @@ export function waveformEdgeScales(
 }
 
 /**
- * Locate the placeholder's source sample for one rendered pixel column.
- *
- * A DJ canvas can cover time before 0 or after the end of a track to keep its
- * playhead centered. The primary waveform correctly leaves those columns
- * unknown. A placeholder must use the same source-time window rather than
- * stretching its entire overview across the canvas, or it paints a phantom
- * waveform in that intentional blank lead-in/tail space.
+ * The requested surface owns the display profile. Online previews and local tracks shown in the
+ * same bottom-bar overview must use the same aggregation and palette; progressive coverage may
+ * still be incomplete, but known columns must not change visual language by source type.
  */
-export function waveformPlaceholderSampleIndex(
-  pixel: number,
-  pixelCount: number,
-  sampleCount: number,
-  duration: number,
-  sourceStart: number | null = null,
-  sourceEnd: number | null = null,
-): number | null {
-  const pixels = Math.floor(pixelCount);
-  const samples = Math.floor(sampleCount);
-  const index = Math.floor(pixel);
-  if (pixels <= 0 || samples <= 0 || index < 0 || index >= pixels) return null;
+export function waveformUsesReleaseOverviewPalette(
+  requestedProfile: "current" | "release-overview",
+): boolean {
+  return requestedProfile === "release-overview";
+}
 
-  if (sourceStart !== null || sourceEnd !== null) {
-    if (
-      sourceStart === null
-      || sourceEnd === null
-      || !Number.isFinite(sourceStart)
-      || !Number.isFinite(sourceEnd)
-      || sourceEnd <= sourceStart
-      || !Number.isFinite(duration)
-      || duration <= 0
-    ) {
-      return null;
-    }
-    const span = sourceEnd - sourceStart;
-    const start = sourceStart + index / pixels * span;
-    const end = sourceStart + (index + 1) / pixels * span;
-    // Do not borrow an overview sample for the deliberately blank part of a
-    // centered deck window. Sampling its first/last real pixel is sufficient
-    // for the sub-pixel column that crosses a track boundary.
-    if (end <= 0 || start >= duration) return null;
-    const midpoint = Math.min(duration, Math.max(0, (start + end) / 2));
-    return samples === 1 ? 0 : midpoint / duration * (samples - 1);
-  }
-
-  return samples === 1 ? 0 : index / Math.max(1, pixels - 1) * (samples - 1);
+/**
+ * The compromise-height performance rail keeps 70% of its vertical range at neutral trim,
+ * preserving the old waveform thickness while adding visible headroom. GAIN uses its real
+ * −24…+6 dB linear multiplier; boosted peaks that exceed the remaining room clip at the rail edge
+ * instead of changing the horizontal time scale.
+ */
+export function performanceWaveformAmplitudeScale(gain: number): number {
+  const normalized = Math.min(1, Math.max(-1, Number.isFinite(gain) ? gain : 0));
+  const trimDb = normalized < 0 ? normalized * 24 : normalized * 6;
+  return Math.min(1, 0.7 * 10 ** (trimDb / 20));
 }
 
 function smootherstep(value: number): number {

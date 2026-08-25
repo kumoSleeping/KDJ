@@ -29,8 +29,8 @@ pub trait PlaybackOutput {
         source: Arc<StreamSource<StemFrame>>,
         start_frame: u64,
     ) -> Result<u64, String>;
-    /// Installs an in-memory slice (engine loop region). The renderer wraps its cursor when the
-    /// matching `RtCommand::SetDeckLoop` arrives.
+    /// Installs a bounded in-memory source for specialist/offline paths. Normal transport loops
+    /// stay on the streaming source and use its worker-owned PCM reservoir.
     fn install_decoded(
         &mut self,
         deck: DeckId,

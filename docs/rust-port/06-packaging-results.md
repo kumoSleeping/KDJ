@@ -67,11 +67,13 @@ macOS 的 WebView 是系统的 WKWebView，不随包携带——这是和 Electr
 
 ## 2. `[profile.release]` 确认真的生效了
 
-根 `Cargo.toml` 的 profile 不是摆设。从构建时的 `ps` 抓到 rustc 的真实参数：
+根 `Cargo.toml` 的 profile 不是摆设。首轮体积验证时从构建进程抓到的参数是：
 
 ```
 -C opt-level=z -C panic=abort -C lto -C codegen-units=1 -C strip=symbols
 ```
+
+这组参数是本页安装包数字对应的历史基线。波形/解码实测证明 `z` 会让运行期 DSP 慢一倍以上后，当前 release 已改为 `-C opt-level=2`；LTO、单 codegen unit、abort 和 strip 不变。包体数字若要作为当前门禁基线，必须重新完整构建测量，不能直接沿用本页旧值。
 
 `src-tauri` 是 workspace 成员，所以根 profile 自动覆盖到壳；
 不需要在 `src-tauri/Cargo.toml` 里再写一份（写了反而会因为

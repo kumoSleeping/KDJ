@@ -7,19 +7,20 @@ export function parseWorkMode(value: unknown): WorkMode {
 }
 
 /**
- * Dual-deck session: full DJ work mode, or manager with the Performance panel
- * popped open. The library chrome can stay in manager; playback must not.
+ * A dual-deck session belongs to the visible Performance surface. Returning to the manager does
+ * not itself mutate either physical Deck, but subsequent manager actions regain single-track
+ * ownership instead of continuing to address a hidden DJ surface.
  */
 export function isDualDeckSession(mode: WorkMode, performanceOpen = false): boolean {
   return mode === "dj" || performanceOpen;
 }
 
-/** Manager has one canonical track owner; a dual-deck session has two independent Decks. */
+/** Manager has one canonical track owner; a visible dual-deck session has two independent Decks. */
 export function shouldReconcileSingleTrackOwner(mode: WorkMode, performanceOpen = false): boolean {
   return !isDualDeckSession(mode, performanceOpen);
 }
 
-/** Global play/pause owns one front track only; Performance uses side-addressed Deck commands. */
+/** Global play/pause owns the manager; Performance uses side-addressed Deck commands. */
 export function shouldDriveGlobalTransport(mode: WorkMode, performanceOpen = false): boolean {
   return !isDualDeckSession(mode, performanceOpen);
 }

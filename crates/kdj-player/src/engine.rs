@@ -6,10 +6,12 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::command::{EngineCommand, SourceKind};
 use crate::dsp::{DeckEq, DeckSpectrum, TransitionFx};
-use crate::state::{SharedState, SharedTransportState};
-use crate::stream::{FrameLerp, StemFrame, STEM_GAIN_MAX, STEM_LANES};
+use crate::manual_fx::DeckManualFx;
+use crate::state::{OutputCallbackTiming, SharedState, SharedTransportState};
+use crate::stream::{format_loop_clock, FrameLerp, StemFrame, STEM_GAIN_MAX, STEM_LANES};
 use crate::{
-    DeckId, DecodedTrack, PlayerMode, RtCommand, StreamSource, TransitionPlan, TransportSnapshot,
+    DeckId, DecodedTrack, PlatterPhase, PlayerMode, RtCommand, StreamSource, TransitionPlan,
+    TransportSnapshot,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,7 +98,7 @@ struct TransportRamp {
 /// Callback-local recovery state for one streaming Deck. The decoder's long raw read-ahead and
 /// worker-owned Rubber Band R3 stage have already produced hardware-rate, pitch-preserved PCM; the
 /// callback pops exactly one output frame and never performs tempo interpolation itself.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 struct StreamPlaybackState {
     rebuffering: bool,
     /// Output frames whose clock already advanced while this ring was empty.
@@ -107,85 +109,224 @@ struct StreamPlaybackState {
     /// carried with the rendered packet so queued old-rate audio cannot move the clock at a new
     /// target rate before it is actually heard.
     media_advance: f64,
+    tempo_revision: u64,
+    /// Absolute media time of the packet currently leaving the callback, in seconds.
+    media_time: f64,
 }
 
-const SCRATCH_TAPE_FRAMES: usize = 96_000;
-const SCRATCH_IDLE_SECONDS: f64 = 0.04;
-const SCRATCH_VELOCITY_DEADZONE: f64 = 0.02;
-const SCRATCH_VELOCITY_MAX: f64 = 8.0;
+impl Default for StreamPlaybackState {
+    fn default() -> Self {
+        Self {
+            rebuffering: false,
+            missed_frames: 0,
+            media_advance: 0.0,
+            tempo_revision: 0,
+            media_time: f64::NAN,
+        }
+    }
+}
 
-/// Recent stereo PCM for vinyl-style reverse/forward while a platter is held.
-/// Indexed by absolute output-rate media frames so a reverse tick can replay history
-/// without rebuilding the streaming decoder.
+#[derive(Clone, Copy, Debug, Default)]
+struct TimedStereoFrame {
+    frame: [f32; 2],
+    media_advance: f64,
+    tempo_revision: u64,
+    media_time: f64,
+}
+
+/// Fractional reader over already pitch-preserved PCM. SYNC phase correction is deliberately
+/// applied here: sending dozens of tiny ratio changes back through Rubber Band R3 repeatedly
+/// invalidates its look-ahead and is heard as severe stutter, especially for eight-lane STEM.
+#[derive(Clone, Copy, Debug, Default)]
+struct DeckPhaseResampler {
+    current: Option<TimedStereoFrame>,
+    next: Option<TimedStereoFrame>,
+    fraction: f64,
+}
+
+/// Twelve seconds covers the complete Performance detail viewport at ordinary zoom while keeping
+/// the callback cache bounded (~9 MiB for two stereo Decks).
+const SCRATCH_TAPE_FRAMES: usize = 576_000;
+/// Input is already normalized to velocity from source timestamps. Keep the maximum at half the
+/// sequential fill budget: a fast throw must accelerate, not outrun prepared PCM into zero.
+const SCRATCH_VELOCITY_MAX: f64 = 8.0;
+const SCRATCH_TAPE_FILL_FRAMES: usize = 16;
+/// A short acceleration constant keeps the platter physical without lagging behind the hand.
+const SCRATCH_RESPONSE_SECONDS: f64 = 0.006;
+/// Lift below this fraction of play speed snaps to transport. Above it is a real throw that
+/// coasts from the *current* velocity — never through a 0→1x motor startup.
+const SCRATCH_LIGHT_THROW_RATIO: f64 = 0.5;
+/// Mixxx scratchDisable ramp is a vinyl mass. Intensity is referenced to a brisk throw, not
+/// the absolute clamp, so a 30-second waveform flick does not coast for multiple seconds.
+const SCRATCH_COAST_MIN_SECONDS: f64 = 0.28;
+const SCRATCH_COAST_MAX_SECONDS: f64 = 0.9;
+const SCRATCH_COAST_REFERENCE_VELOCITY: f64 = 4.0;
+const SCRATCH_HANDOFF_RATE_EPSILON: f64 = 0.08;
+/// Published platter rate one-pole (~4 ms at 48 kHz) so the waveform compositor does not
+/// reverse on encoder Δt jitter between packets.
+const SCRATCH_AUDIBLE_RATE_SMOOTH_SECONDS: f64 = 0.004;
+const SCRATCH_STATIONARY_VELOCITY: f64 = 1.0e-4;
+/// Finger parked on the record: no ticks for this long, then friction toward 0.
+/// MIDI jog packets can gap 40–120 ms; 50 ms was braking a spinning platter before note-off.
+const SCRATCH_STILL_SECONDS: f64 = 0.16;
+const SCRATCH_STILL_FRICTION_SECONDS: f64 = 0.12;
+const SCRATCH_NO_TICK: u64 = u64::MAX;
+/// Silent lead-in before source frame 0. Must match the coordinator's Performance pre-roll.
+const PERFORMANCE_PREROLL_SECONDS: f64 = 30.0;
+const SCRATCH_GAP_FRAMES: i64 = 64;
+
+/// Bidirectional PCM cache around the needle, Mixxx CachingReader-style.
+/// Indexed by integer output-rate media frames so reverse/coast can replay history and
+/// append look-ahead without wiping on a non-monotonic read.
 struct ScratchTape {
     samples: Box<[[f32; 2]]>,
-    /// Next absolute media frame that will be written.
-    end: u64,
-    filled: u64,
+    /// Inclusive start of the valid media-frame range.
+    first_frame: i64,
+    /// Exclusive end of the valid media-frame range.
+    last_frame: i64,
 }
 
 impl ScratchTape {
     fn new() -> Self {
         Self {
             samples: vec![[0.0; 2]; SCRATCH_TAPE_FRAMES].into_boxed_slice(),
-            end: 0,
-            filled: 0,
+            first_frame: 0,
+            last_frame: 0,
         }
     }
 
     fn reset(&mut self) {
-        self.end = 0;
-        self.filled = 0;
+        self.first_frame = 0;
+        self.last_frame = 0;
     }
 
-    fn start(&self) -> u64 {
-        self.end.saturating_sub(self.filled)
+    fn is_empty(&self) -> bool {
+        self.last_frame <= self.first_frame
     }
 
-    fn push_at(&mut self, frame: u64, sample: [f32; 2]) {
-        let len = self.samples.len() as u64;
-        if self.filled == 0 {
-            self.samples[(frame % len) as usize] = sample;
-            self.end = frame.saturating_add(1);
-            self.filled = 1;
+    fn slot(frame: i64) -> usize {
+        let len = SCRATCH_TAPE_FRAMES as i64;
+        (((frame % len) + len) % len) as usize
+    }
+
+    fn contains_frame(&self, frame: i64) -> bool {
+        !self.is_empty() && frame >= self.first_frame && frame < self.last_frame
+    }
+
+    fn contains_position(&self, position: f64) -> bool {
+        position.is_finite()
+            && !self.is_empty()
+            && position >= self.first_frame as f64
+            && position <= self.last_frame as f64
+    }
+
+    fn first_position(&self) -> Option<f64> {
+        (!self.is_empty()).then_some(self.first_frame as f64)
+    }
+
+    fn end_position(&self) -> Option<f64> {
+        (!self.is_empty()).then_some(self.last_frame as f64)
+    }
+
+    fn write_frame(&mut self, frame: i64, sample: [f32; 2]) {
+        if frame < 0 {
             return;
         }
-        if frame > self.end.saturating_add(32) || frame < self.start() {
-            self.reset();
-            self.samples[(frame % len) as usize] = sample;
-            self.end = frame.saturating_add(1);
-            self.filled = 1;
+        let capacity = SCRATCH_TAPE_FRAMES as i64;
+        if self.is_empty() {
+            self.samples[Self::slot(frame)] = sample;
+            self.first_frame = frame;
+            self.last_frame = frame + 1;
             return;
         }
-        self.samples[(frame % len) as usize] = sample;
-        if frame >= self.end {
-            self.filled = self.filled.saturating_add(frame - self.end + 1).min(len);
-            self.end = frame.saturating_add(1);
+        if self.contains_frame(frame) {
+            self.samples[Self::slot(frame)] = sample;
+            return;
+        }
+        if frame == self.last_frame {
+            if self.last_frame - self.first_frame >= capacity {
+                self.first_frame += 1;
+            }
+            self.samples[Self::slot(frame)] = sample;
+            self.last_frame = frame + 1;
+            return;
+        }
+        if frame + 1 == self.first_frame {
+            if self.last_frame - self.first_frame >= capacity {
+                self.last_frame -= 1;
+            }
+            self.samples[Self::slot(frame)] = sample;
+            self.first_frame = frame;
+            return;
+        }
+        if frame > self.last_frame && frame <= self.last_frame + SCRATCH_GAP_FRAMES {
+            let fill = self.samples[Self::slot(self.last_frame - 1)];
+            while self.last_frame < frame {
+                if self.last_frame - self.first_frame >= capacity {
+                    self.first_frame += 1;
+                }
+                self.samples[Self::slot(self.last_frame)] = fill;
+                self.last_frame += 1;
+            }
+            self.write_frame(frame, sample);
+            return;
+        }
+        if frame < self.first_frame && frame + SCRATCH_GAP_FRAMES >= self.first_frame {
+            let fill = self.samples[Self::slot(self.first_frame)];
+            while self.first_frame > frame + 1 {
+                if self.last_frame - self.first_frame >= capacity {
+                    self.last_frame -= 1;
+                }
+                self.first_frame -= 1;
+                self.samples[Self::slot(self.first_frame)] = fill;
+            }
+            self.write_frame(frame, sample);
+            return;
+        }
+        self.samples[Self::slot(frame)] = sample;
+        self.first_frame = frame;
+        self.last_frame = frame + 1;
+    }
+
+    fn push_at(&mut self, position: f64, sample: [f32; 2], media_advance: f64) {
+        if !position.is_finite() || position < 0.0 {
+            return;
+        }
+        let frame = position.floor() as i64;
+        self.write_frame(frame, sample);
+        let extra = if media_advance.is_finite() && media_advance > 1.0 {
+            media_advance.floor() as i64
+        } else {
+            0
+        };
+        for offset in 1..=extra.min(SCRATCH_GAP_FRAMES) {
+            self.write_frame(frame + offset, sample);
         }
     }
 
     fn get(&self, position: f64) -> [f32; 2] {
-        if !position.is_finite() || self.filled == 0 {
+        if !position.is_finite() || self.is_empty() {
             return [0.0; 2];
         }
-        let start = self.start() as f64;
-        let end = self.end as f64;
-        if position < start || position >= end {
+        if position < self.first_frame as f64 || position > self.last_frame as f64 {
             return [0.0; 2];
         }
-        let len = self.samples.len() as u64;
-        let index = position.floor() as u64;
-        let fraction = (position - index as f64) as f32;
-        let current = self.samples[(index % len) as usize];
-        let next_index = index.saturating_add(1);
-        if next_index >= self.end {
-            return current;
-        }
-        let next = self.samples[(next_index % len) as usize];
-        [
-            current[0] + (next[0] - current[0]) * fraction,
-            current[1] + (next[1] - current[1]) * fraction,
-        ]
+        let floor = position.floor() as i64;
+        let frac = (position - floor as f64) as f32;
+        let a = if self.contains_frame(floor) {
+            self.samples[Self::slot(floor)]
+        } else if floor == self.last_frame && self.last_frame > self.first_frame {
+            self.samples[Self::slot(self.last_frame - 1)]
+        } else {
+            return [0.0; 2];
+        };
+        let next = floor + 1;
+        let b = if self.contains_frame(next) {
+            self.samples[Self::slot(next)]
+        } else {
+            a
+        };
+        [a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac]
     }
 }
 
@@ -236,193 +377,6 @@ impl StemGains {
     }
 }
 
-/// State owned exclusively by the platform audio callback.
-const MANUAL_FX_BUFFER_FRAMES: usize = 192_000;
-
-struct DeckManualFx {
-    echo_target: f32,
-    echo_parameter: f32,
-    reverb_target: f32,
-    reverb_parameter: f32,
-    gater_target: f32,
-    gater_parameter: f32,
-    echo: f32,
-    reverb: f32,
-    gater: f32,
-    pad: u8,
-    pad_mix: f32,
-    pad_target: f32,
-    beat_seconds: f32,
-    phase: u64,
-    echo_at: usize,
-    reverb_at: usize,
-    echo_buffer: Vec<[f32; 2]>,
-    reverb_buffer: Vec<[f32; 2]>,
-    filter_state: [f32; 2],
-}
-
-impl DeckManualFx {
-    fn new() -> Self {
-        Self {
-            echo_target: 0.0,
-            echo_parameter: 0.5,
-            reverb_target: 0.0,
-            reverb_parameter: 0.5,
-            gater_target: 0.0,
-            gater_parameter: 0.5,
-            echo: 0.0,
-            reverb: 0.0,
-            gater: 0.0,
-            pad: 0,
-            pad_mix: 0.0,
-            pad_target: 0.0,
-            beat_seconds: 0.5,
-            phase: 0,
-            echo_at: 0,
-            reverb_at: 0,
-            echo_buffer: vec![[0.0; 2]; MANUAL_FX_BUFFER_FRAMES],
-            reverb_buffer: vec![[0.0; 2]; MANUAL_FX_BUFFER_FRAMES],
-            filter_state: [0.0; 2],
-        }
-    }
-
-    fn configure(
-        &mut self,
-        echo: f32,
-        echo_parameter: f32,
-        reverb: f32,
-        reverb_parameter: f32,
-        gater: f32,
-        gater_parameter: f32,
-        pad: u8,
-        beat_seconds: f32,
-    ) {
-        self.echo_target = finite_unit(echo);
-        self.echo_parameter = finite_unit(echo_parameter);
-        self.reverb_target = finite_unit(reverb);
-        self.reverb_parameter = finite_unit(reverb_parameter);
-        self.gater_target = finite_unit(gater);
-        self.gater_parameter = finite_unit(gater_parameter);
-        if pad > 0 {
-            self.pad = pad.min(8);
-            self.pad_target = 1.0;
-        } else {
-            self.pad_target = 0.0;
-        }
-        self.beat_seconds = if beat_seconds.is_finite() {
-            beat_seconds.clamp(0.1, 4.0)
-        } else {
-            0.5
-        };
-    }
-
-    #[inline]
-    fn process(&mut self, input: [f32; 2], sample_rate: u32) -> [f32; 2] {
-        let ramp = 1.0 / (sample_rate.max(1) as f32 * 0.012);
-        self.echo += (self.echo_target - self.echo).clamp(-ramp, ramp);
-        self.reverb += (self.reverb_target - self.reverb).clamp(-ramp, ramp);
-        self.gater += (self.gater_target - self.gater).clamp(-ramp, ramp);
-        self.pad_mix += (self.pad_target - self.pad_mix).clamp(-ramp, ramp);
-        let pad_echo = matches!(self.pad, 1 | 2)
-            .then_some(self.pad_mix)
-            .unwrap_or(0.0);
-        let pad_reverb = matches!(self.pad, 3 | 4)
-            .then_some(self.pad_mix)
-            .unwrap_or(0.0);
-        let pad_gater = matches!(self.pad, 5 | 6)
-            .then_some(self.pad_mix)
-            .unwrap_or(0.0);
-
-        let echo_depth = self.echo.max(pad_echo);
-        let echo_division = if self.pad == 1 {
-            0.125
-        } else if self.pad == 2 {
-            0.25
-        } else {
-            0.0625 * 16.0f32.powf(self.echo_parameter)
-        };
-        let echo_frames = ((sample_rate as f32 * self.beat_seconds * echo_division) as usize)
-            .clamp(1, MANUAL_FX_BUFFER_FRAMES - 1);
-        let echo_read =
-            (self.echo_at + MANUAL_FX_BUFFER_FRAMES - echo_frames) % MANUAL_FX_BUFFER_FRAMES;
-        let delayed = self.echo_buffer[echo_read];
-        self.echo_buffer[self.echo_at] = [
-            input[0] + delayed[0] * (0.12 + 0.66 * self.echo_parameter),
-            input[1] + delayed[1] * (0.12 + 0.66 * self.echo_parameter),
-        ];
-        self.echo_at = (self.echo_at + 1) % MANUAL_FX_BUFFER_FRAMES;
-
-        let reverb_depth = self.reverb.max(pad_reverb);
-        let reverb_seconds = if self.pad == 3 {
-            0.11
-        } else if self.pad == 4 {
-            0.38
-        } else {
-            0.05 + self.reverb_parameter * 0.55
-        };
-        let reverb_frames =
-            ((sample_rate as f32 * reverb_seconds) as usize).clamp(1, MANUAL_FX_BUFFER_FRAMES - 1);
-        let reverb_read =
-            (self.reverb_at + MANUAL_FX_BUFFER_FRAMES - reverb_frames) % MANUAL_FX_BUFFER_FRAMES;
-        let reverbed = self.reverb_buffer[reverb_read];
-        self.reverb_buffer[self.reverb_at] = [
-            input[0] + reverbed[1] * (0.18 + 0.68 * self.reverb_parameter),
-            input[1] + reverbed[0] * (0.18 + 0.68 * self.reverb_parameter),
-        ];
-        self.reverb_at = (self.reverb_at + 1) % MANUAL_FX_BUFFER_FRAMES;
-
-        let gater_depth = self.gater.max(pad_gater);
-        let gate_division = if self.pad == 6 {
-            16.0
-        } else if self.pad == 5 {
-            8.0
-        } else {
-            4.0 * 8.0f32.powf(self.gater_parameter)
-        };
-        let gate_frames = (sample_rate as f32 * self.beat_seconds / gate_division).max(1.0) as u64;
-        let gate_open = (self.phase / gate_frames) % 2 == 0;
-        self.phase = self.phase.wrapping_add(1);
-        let gate_gain = if gate_open {
-            1.0
-        } else {
-            1.0 - gater_depth * 0.92
-        };
-
-        let mut out = [
-            (input[0] + delayed[0] * echo_depth * 0.7 + reverbed[0] * reverb_depth * 0.55)
-                * gate_gain,
-            (input[1] + delayed[1] * echo_depth * 0.7 + reverbed[1] * reverb_depth * 0.55)
-                * gate_gain,
-        ];
-        if (self.pad == 7 || self.pad == 8) && self.pad_mix > 0.0 {
-            let cutoff = if self.pad == 7 { 700.0 } else { 1_600.0 };
-            let alpha =
-                (std::f32::consts::TAU * cutoff / sample_rate.max(1) as f32).clamp(0.001, 0.45);
-            for channel in 0..2 {
-                self.filter_state[channel] += alpha * (out[channel] - self.filter_state[channel]);
-                let filtered = if self.pad == 7 {
-                    self.filter_state[channel]
-                } else {
-                    out[channel] - self.filter_state[channel]
-                };
-                out[channel] += (filtered - out[channel]) * self.pad_mix;
-            }
-        }
-        if self.pad_target == 0.0 && self.pad_mix <= f32::EPSILON {
-            self.pad = 0;
-        }
-        out
-    }
-}
-
-fn finite_unit(value: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}
-
 pub struct AudioRenderer {
     consumer: Consumer<EngineCommand>,
     retired: Option<Producer<u64>>,
@@ -436,17 +390,26 @@ pub struct AudioRenderer {
     mode: PlayerMode,
     playing: bool,
     deck_playing: [bool; 2],
+    deck_pfl: [bool; 2],
     /// A held capacitive platter owns this Deck's media cursor. Logical Play/Pause is unchanged;
     /// audio follows platter velocity instead of the persisted TEMPO.
     deck_scratch_held: [bool; 2],
     deck_scratch_velocity: [f64; 2],
-    deck_scratch_tick_frames: [f64; 2],
-    deck_scratch_tick_at: [u64; 2],
+    /// Latest normalized input observation converted to media frames per output frame.
+    deck_scratch_target_velocity: [f64; 2],
+    deck_scratch_releasing: [bool; 2],
+    /// A settled streaming scratch replays cached history only until it catches the source head.
+    deck_scratch_playthrough: [bool; 2],
+    deck_scratch_input_at: [u64; 2],
+    /// One-pole of published platter rate so the UI needle does not reverse on tick jitter.
+    deck_audible_rate_smooth: [f32; 2],
     scratch_tapes: [ScratchTape; 2],
     transport_gain: f32,
     transport_ramp: Option<TransportRamp>,
     active_deck: DeckId,
     output_frames: u64,
+    callback_timing: OutputCallbackTiming,
+    presentation_time_ns: u64,
     deck_output_underruns: [u64; 2],
     deck_min_buffered_frames: [u64; 2],
     deck_peak_levels: [f32; 2],
@@ -455,6 +418,13 @@ pub struct AudioRenderer {
     deck_positions: [f64; 2],
     deck_gains: [f32; 2],
     deck_rates: [f64; 2],
+    deck_phase_corrections: [f64; 2],
+    deck_phase_correction_targets: [f64; 2],
+    deck_phase_correction_steps: [f64; 2],
+    deck_phase_correction_remaining: [u32; 2],
+    deck_phase_resamplers: [DeckPhaseResampler; 2],
+    deck_rate_revisions: [u64; 2],
+    deck_discontinuity_revisions: [u64; 2],
     source_rate_ratios: [f64; 2],
     /// Encoded network streams may briefly starve. Hold the last sample and ramp its edge instead
     /// of hard-switching between an arbitrary sample and zero, which is perceived as crackle.
@@ -520,15 +490,21 @@ fn make_channels(
             mode: PlayerMode::Continuous,
             playing: false,
             deck_playing: [false; 2],
+            deck_pfl: [false; 2],
             deck_scratch_held: [false; 2],
             deck_scratch_velocity: [0.0; 2],
-            deck_scratch_tick_frames: [0.0; 2],
-            deck_scratch_tick_at: [0; 2],
+            deck_scratch_target_velocity: [0.0; 2],
+            deck_scratch_releasing: [false; 2],
+            deck_scratch_playthrough: [false; 2],
+            deck_scratch_input_at: [SCRATCH_NO_TICK; 2],
+            deck_audible_rate_smooth: [0.0; 2],
             scratch_tapes: [ScratchTape::new(), ScratchTape::new()],
             transport_gain: 0.0,
             transport_ramp: None,
             active_deck: DeckId::A,
             output_frames: 0,
+            callback_timing: OutputCallbackTiming::default(),
+            presentation_time_ns: 0,
             deck_output_underruns: [0; 2],
             deck_min_buffered_frames: [u64::MAX; 2],
             deck_peak_levels: [0.0; 2],
@@ -537,6 +513,13 @@ fn make_channels(
             deck_positions: [0.0; 2],
             deck_gains: [1.0; 2],
             deck_rates: [1.0; 2],
+            deck_phase_corrections: [1.0; 2],
+            deck_phase_correction_targets: [1.0; 2],
+            deck_phase_correction_steps: [0.0; 2],
+            deck_phase_correction_remaining: [0; 2],
+            deck_phase_resamplers: [DeckPhaseResampler::default(); 2],
+            deck_rate_revisions: [0; 2],
+            deck_discontinuity_revisions: [0; 2],
             source_rate_ratios: [1.0; 2],
             stream_edge_gains: [0.0; 2],
             stream_last_frames: [[0.0; 2]; 2],
@@ -575,6 +558,8 @@ impl AudioRenderer {
         let frame_count = complete_len / channels;
         for frame in 0..frame_count {
             let required = self.required_decks();
+            self.advance_deck_phase_correction(0);
+            self.advance_deck_phase_correction(1);
             let (transition_a, transition_b) = self.transition_gains();
             let index = frame * channels;
             let input_a = [
@@ -591,12 +576,12 @@ impl AudioRenderer {
                     .copied()
                     .unwrap_or(0.0),
             ];
-            let a = if required[0] && !self.deck_scratch_held[0] {
+            let a = if required[0] && !self.deck_scratch_held[0] && self.deck_positions[0] >= 0.0 {
                 self.deck_eq[0].process_stereo(input_a)
             } else {
                 [0.0; 2]
             };
-            let b = if required[1] && !self.deck_scratch_held[1] {
+            let b = if required[1] && !self.deck_scratch_held[1] && self.deck_positions[1] >= 0.0 {
                 self.deck_eq[1].process_stereo(input_b)
             } else {
                 [0.0; 2]
@@ -605,15 +590,8 @@ impl AudioRenderer {
             let b = self.deck_manual_fx[1].process(b, self.output_sample_rate);
             self.observe_deck_levels(a, b);
             for channel in 0..channels {
-                output[index + channel] = if self.playing {
-                    let side = channel.min(1);
-                    (a[side] * self.deck_gains[0] * transition_a
-                        + b[side] * self.deck_gains[1] * transition_b)
-                        * self.master_gain
-                        * self.transport_gain
-                } else {
-                    0.0
-                };
+                output[index + channel] =
+                    self.render_output_channel(a, b, [0.0; 2], channel, transition_a, transition_b);
             }
             self.advance_frame(
                 [
@@ -649,10 +627,11 @@ impl AudioRenderer {
         ];
         self.ensure_eq_sample_rate();
         self.drain_commands();
-        self.arm_scratch_velocity();
         let complete_len = output.len() - output.len() % output_channels;
         for frame in output[..complete_len].chunks_mut(output_channels) {
             let required = self.required_decks();
+            self.advance_deck_phase_correction(0);
+            self.advance_deck_phase_correction(1);
             let (transition_a, transition_b) = self.transition_gains();
             let a = if required[0] {
                 let raw = if self.deck_scratch_held[0] {
@@ -684,15 +663,8 @@ impl AudioRenderer {
             let b = self.deck_manual_fx[1].process(b, self.output_sample_rate);
             self.observe_deck_levels(a, b);
             for (channel, sample) in frame.iter_mut().enumerate() {
-                *sample = if self.playing {
-                    let side = channel.min(1);
-                    (a[side] * self.deck_gains[0] * transition_a
-                        + b[side] * self.deck_gains[1] * transition_b)
-                        * self.master_gain
-                        * self.transport_gain
-                } else {
-                    0.0
-                };
+                *sample =
+                    self.render_output_channel(a, b, [0.0; 2], channel, transition_a, transition_b);
             }
             self.advance_frame(
                 [
@@ -716,7 +688,28 @@ impl AudioRenderer {
         output_sample_rate: u32,
         output_channels: usize,
     ) {
-        self.render_prepared_as(output, output_sample_rate, output_channels, |sample| sample);
+        self.render_prepared_timed(
+            output,
+            output_sample_rate,
+            output_channels,
+            OutputCallbackTiming::default(),
+        );
+    }
+
+    pub(crate) fn render_prepared_timed(
+        &mut self,
+        output: &mut [f32],
+        output_sample_rate: u32,
+        output_channels: usize,
+        timing: OutputCallbackTiming,
+    ) {
+        self.render_prepared_as(
+            output,
+            output_sample_rate,
+            output_channels,
+            timing,
+            |sample| sample,
+        );
     }
 
     pub(crate) fn render_prepared_i16(
@@ -725,9 +718,28 @@ impl AudioRenderer {
         output_sample_rate: u32,
         output_channels: usize,
     ) {
-        self.render_prepared_as(output, output_sample_rate, output_channels, |sample| {
-            (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16
-        });
+        self.render_prepared_i16_timed(
+            output,
+            output_sample_rate,
+            output_channels,
+            OutputCallbackTiming::default(),
+        );
+    }
+
+    pub(crate) fn render_prepared_i16_timed(
+        &mut self,
+        output: &mut [i16],
+        output_sample_rate: u32,
+        output_channels: usize,
+        timing: OutputCallbackTiming,
+    ) {
+        self.render_prepared_as(
+            output,
+            output_sample_rate,
+            output_channels,
+            timing,
+            |sample| (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16,
+        );
     }
 
     pub(crate) fn render_prepared_u16(
@@ -736,9 +748,28 @@ impl AudioRenderer {
         output_sample_rate: u32,
         output_channels: usize,
     ) {
-        self.render_prepared_as(output, output_sample_rate, output_channels, |sample| {
-            ((sample.clamp(-1.0, 1.0) * 0.5 + 0.5) * f32::from(u16::MAX)).round() as u16
-        });
+        self.render_prepared_u16_timed(
+            output,
+            output_sample_rate,
+            output_channels,
+            OutputCallbackTiming::default(),
+        );
+    }
+
+    pub(crate) fn render_prepared_u16_timed(
+        &mut self,
+        output: &mut [u16],
+        output_sample_rate: u32,
+        output_channels: usize,
+        timing: OutputCallbackTiming,
+    ) {
+        self.render_prepared_as(
+            output,
+            output_sample_rate,
+            output_channels,
+            timing,
+            |sample| ((sample.clamp(-1.0, 1.0) * 0.5 + 0.5) * f32::from(u16::MAX)).round() as u16,
+        );
     }
 
     fn render_prepared_as<T, F>(
@@ -746,6 +777,7 @@ impl AudioRenderer {
         output: &mut [T],
         output_sample_rate: u32,
         output_channels: usize,
+        timing: OutputCallbackTiming,
         convert: F,
     ) where
         F: Fn(f32) -> T,
@@ -757,6 +789,13 @@ impl AudioRenderer {
             return;
         }
         self.output_sample_rate = output_sample_rate;
+        self.callback_timing = timing;
+        let callback_frames = output.len() / output_channels;
+        let buffer_ns = (callback_frames as u128).saturating_mul(1_000_000_000)
+            / u128::from(output_sample_rate);
+        self.presentation_time_ns = timing
+            .playback_time_ns
+            .saturating_add(buffer_ns.min(u128::from(u64::MAX)) as u64);
         self.drain_commands();
 
         let installed = self.deck_sources;
@@ -780,7 +819,6 @@ impl AudioRenderer {
             callback_source_ratio(sources[1], output_sample_rate),
         ];
         self.ensure_eq_sample_rate();
-        self.arm_scratch_velocity();
         let required_at_boundary = self.required_decks();
         if self.playing {
             for index in 0..2 {
@@ -796,10 +834,14 @@ impl AudioRenderer {
         let complete_len = output.len() - output.len() % output_channels;
         for frame in output[..complete_len].chunks_mut(output_channels) {
             let required = self.required_decks();
-            // Loop sources may be decoded slices or worker-streamed pitch-preserved rings. In
-            // both cases this is the authoritative *logical* media cursor used for snapshots.
+            // Decoded slices wrap the random-access cursor. Stream/STEM playheads follow the
+            // packet that just left the FIFO, so they must not be modulo'd independently.
             for index in 0..2 {
-                self.wrap_deck_loop(index);
+                if self.deck_scratch_held[index]
+                    || matches!(self.deck_sources[index].kind, SourceKind::Decoded)
+                {
+                    self.wrap_deck_loop(index);
+                }
             }
             let (raw_a, advance_a) = self.play_or_scratch(0, sources[0], required[0]);
             let raw_a = if self.deck_scratch_held[0] {
@@ -818,7 +860,7 @@ impl AudioRenderer {
             let transition_can_advance = self.transition.is_none()
                 || (!required[0] || advance_a) && (!required[1] || advance_b);
             let (transition_a, transition_b) = self.transition_gains();
-            let (a, b) = if self.playing {
+            let (a, b) = if self.rendering_active() {
                 (
                     self.deck_eq[0].process_stereo(raw_a),
                     self.deck_eq[1].process_stereo(raw_b),
@@ -843,16 +885,8 @@ impl AudioRenderer {
             let b = self.deck_manual_fx[1].process(b, self.output_sample_rate);
             self.observe_deck_levels(a, b);
             for (channel, sample) in frame.iter_mut().enumerate() {
-                let value = if self.playing {
-                    let side = channel.min(1);
-                    ((a[side] * self.deck_gains[0] * transition_a
-                        + b[side] * self.deck_gains[1] * transition_b)
-                        + wet[side])
-                        * self.master_gain
-                        * self.transport_gain
-                } else {
-                    0.0
-                };
+                let value =
+                    self.render_output_channel(a, b, wet, channel, transition_a, transition_b);
                 *sample = convert(value.clamp(-1.0, 1.0));
             }
             self.advance_frame(
@@ -953,7 +987,7 @@ impl AudioRenderer {
         // remains allocation/lock free; levels may exceed 1.0 so the UI can report clipping.
         const RELEASE_PER_FRAME: f32 = 0.999_94;
         for (index, input) in [a, b].into_iter().enumerate() {
-            let active = self.playing && self.deck_playing[index];
+            let active = self.playing && self.deck_playing[index] || self.platter_active(index);
             if !active {
                 if self.deck_levels_active[index] {
                     self.deck_peak_levels[index] = 0.0;
@@ -972,6 +1006,17 @@ impl AudioRenderer {
                 (self.deck_peak_levels[index] * RELEASE_PER_FRAME).max(peak);
             self.deck_spectrum[index].observe(input);
         }
+    }
+
+    fn deck_loop_out_seconds(&self, index: usize) -> Option<f64> {
+        if !self.deck_looping[index] || self.deck_loop_frames[index] == 0 {
+            return None;
+        }
+        let sample_rate = f64::from(self.output_sample_rate.max(1));
+        Some(
+            (self.deck_loop_start_frames[index] + self.deck_loop_frames[index]) as f64
+                / sample_rate,
+        )
     }
 
     fn mix_replacement(
@@ -996,19 +1041,25 @@ impl AudioRenderer {
                     true,
                 )
             }
-            Some(CallbackSource::Stream(stream)) => stream_output_frame(
-                &mut self.replacement_stream_playback[index],
-                stream,
-                self.output_sample_rate,
-                self.deck_looping[index],
-                StreamRecoverPolicy::PacketCushion,
-            ),
+            Some(CallbackSource::Stream(stream)) => {
+                let loop_out = self.deck_loop_out_seconds(index);
+                stream_output_frame(
+                    &mut self.replacement_stream_playback[index],
+                    stream,
+                    self.output_sample_rate,
+                    self.deck_looping[index],
+                    loop_out,
+                    StreamRecoverPolicy::PacketCushion,
+                )
+            }
             Some(CallbackSource::StemStream(stream)) => {
+                let loop_out = self.deck_loop_out_seconds(index);
                 let (raw, advanced) = stream_output_frame(
                     &mut self.replacement_stem_playback[index],
                     stream,
                     self.output_sample_rate,
                     self.deck_looping[index],
+                    loop_out,
                     StreamRecoverPolicy::Immediate,
                 );
                 if advanced {
@@ -1065,38 +1116,13 @@ impl AudioRenderer {
         mixed
     }
 
-    fn arm_scratch_velocity(&mut self) {
-        let sample_rate = f64::from(self.output_sample_rate.max(1));
-        let min_elapsed = sample_rate * 0.005;
-        let max_elapsed = sample_rate * 0.08;
-        for index in 0..2 {
-            if !self.deck_scratch_held[index] {
-                self.deck_scratch_tick_frames[index] = 0.0;
-                self.deck_scratch_velocity[index] = 0.0;
-                continue;
-            }
-            let pending = self.deck_scratch_tick_frames[index];
-            if pending.abs() > 0.0 {
-                let elapsed = (self
-                    .output_frames
-                    .saturating_sub(self.deck_scratch_tick_at[index])
-                    as f64)
-                    .clamp(min_elapsed, max_elapsed);
-                self.deck_scratch_velocity[index] =
-                    (pending / elapsed).clamp(-SCRATCH_VELOCITY_MAX, SCRATCH_VELOCITY_MAX);
-                self.deck_scratch_tick_frames[index] = 0.0;
-                self.deck_scratch_tick_at[index] = self.output_frames;
-            } else {
-                let idle = self
-                    .output_frames
-                    .saturating_sub(self.deck_scratch_tick_at[index])
-                    as f64
-                    / sample_rate;
-                if idle > SCRATCH_IDLE_SECONDS {
-                    self.deck_scratch_velocity[index] = 0.0;
-                }
-            }
+    fn set_platter_velocity(&mut self, index: usize, velocity: f64) {
+        if !velocity.is_finite() {
+            return;
         }
+        let normalized = velocity.clamp(-SCRATCH_VELOCITY_MAX, SCRATCH_VELOCITY_MAX);
+        self.deck_scratch_target_velocity[index] = normalized * self.source_rate_ratios[index];
+        self.deck_scratch_input_at[index] = self.output_frames;
     }
 
     fn play_or_scratch(
@@ -1105,16 +1131,36 @@ impl AudioRenderer {
         source: Option<CallbackSource>,
         required: bool,
     ) -> ([f32; 2], bool) {
-        if !self.playing || !required {
+        if !required {
             return ([0.0; 2], false);
+        }
+        self.advance_deck_phase_correction(index);
+        if self.scratch_playthrough_ready(index) {
+            self.end_scratch_voice(index);
         }
         if self.deck_scratch_held[index] {
             return self.scratch_output_frame(index, source);
         }
-        let (raw, advanced) = self.callback_source_frame(index, source);
+        if !self.playing {
+            return ([0.0; 2], false);
+        }
+        let (raw, advanced) = if self.deck_positions[index] >= 0.0
+            && matches!(
+                source,
+                Some(CallbackSource::Stream(_) | CallbackSource::StemStream(_))
+            )
+            && ((self.deck_phase_corrections[index] - 1.0).abs() > f64::EPSILON
+                || self.deck_phase_resamplers[index].current.is_some())
+        {
+            self.phase_corrected_stream_frame(index, source)
+        } else {
+            self.callback_source_frame(index, source)
+        };
         if advanced {
-            let frame = self.deck_positions[index].floor().max(0.0) as u64;
-            self.scratch_tapes[index].push_at(frame, raw);
+            self.apply_stream_media_playhead(index, source);
+            let position = self.deck_positions[index].max(0.0);
+            let media_advance = self.deck_media_advance(index);
+            self.scratch_tapes[index].push_at(position, raw, media_advance);
         }
         (raw, advanced)
     }
@@ -1124,12 +1170,30 @@ impl AudioRenderer {
         index: usize,
         source: Option<CallbackSource>,
     ) -> ([f32; 2], bool) {
-        let velocity = self.deck_scratch_velocity[index];
-        if velocity.abs() < SCRATCH_VELOCITY_DEADZONE {
-            return ([0.0; 2], false);
+        let mut next = self.next_scratch_position(index);
+        if let Some(CallbackSource::Decoded(track)) = source {
+            next = self.clamp_decoded_scratch_end(index, next, track.frames());
         }
-        let next =
-            (self.deck_positions[index] + velocity * self.source_rate_ratios[index]).max(0.0);
+        if matches!(
+            source,
+            Some(CallbackSource::Stream(_) | CallbackSource::StemStream(_))
+        ) {
+            self.fill_scratch_tape(index, source, next);
+            if next >= 0.0 && !self.scratch_tapes[index].contains_position(next) {
+                // The bounded post-tempo ring has not produced this future frame yet (or reverse
+                // reached the history edge). Hold the last real grain and cursor; never advance
+                // through digital zero and later jump when data arrives.
+                self.deck_scratch_velocity[index] = 0.0;
+                if self.scratch_tapes[index]
+                    .first_position()
+                    .is_some_and(|first| next < first)
+                {
+                    self.deck_scratch_target_velocity[index] = 0.0;
+                }
+                let parked = self.deck_positions[index];
+                return (self.scratch_tapes[index].get(parked), false);
+            }
+        }
         let sample = self.scratch_sample(index, source, next);
         self.deck_positions[index] = next;
         self.wrap_deck_loop(index);
@@ -1148,7 +1212,6 @@ impl AudioRenderer {
                 track_sample(track, position, 1),
             ],
             Some(CallbackSource::Stream(_) | CallbackSource::StemStream(_)) => {
-                self.fill_scratch_tape(index, source, position);
                 self.scratch_tapes[index].get(position)
             }
             None => [0.0; 2],
@@ -1159,16 +1222,22 @@ impl AudioRenderer {
         if !position.is_finite() || position < 0.0 {
             return;
         }
-        let needed = position.floor() as u64;
-        for _ in 0..16 {
-            if self.scratch_tapes[index].end > needed && self.scratch_tapes[index].filled > 0 {
+        let needed = position;
+        for _ in 0..SCRATCH_TAPE_FILL_FRAMES {
+            // Mixxx's CachingReader only fetches *ahead* of already-cached frames. A reverse
+            // lookup that is still inside the tape must not consume the forward stream.
+            if self.scratch_tapes[index].contains_position(needed) {
                 return;
             }
-            let write_at = if self.scratch_tapes[index].filled == 0 {
-                self.deck_positions[index].floor().max(0.0) as u64
-            } else {
-                self.scratch_tapes[index].end
-            };
+            if self.scratch_tapes[index]
+                .first_position()
+                .is_some_and(|first| needed < first)
+            {
+                return;
+            }
+            let write_at = self.scratch_tapes[index]
+                .end_position()
+                .unwrap_or_else(|| self.deck_positions[index].max(0.0));
             if write_at > needed {
                 return;
             }
@@ -1176,21 +1245,33 @@ impl AudioRenderer {
             if !advanced {
                 return;
             }
-            self.scratch_tapes[index].push_at(write_at, raw);
+            let media_advance = self.deck_media_advance(index);
+            self.scratch_tapes[index].push_at(write_at, raw, media_advance);
         }
     }
 
     fn decoded_scratch_frame(&mut self, index: usize, track: &DecodedTrack) -> [f32; 2] {
-        let velocity = self.deck_scratch_velocity[index];
-        if velocity.abs() < SCRATCH_VELOCITY_DEADZONE {
-            return [0.0; 2];
-        }
-        let next =
-            (self.deck_positions[index] + velocity * self.source_rate_ratios[index]).max(0.0);
+        let next = self.next_scratch_position(index);
+        let next = self.clamp_decoded_scratch_end(index, next, track.frames());
         let sample = [track_sample(track, next, 0), track_sample(track, next, 1)];
         self.deck_positions[index] = next;
         self.wrap_deck_loop(index);
         sample
+    }
+
+    fn clamp_decoded_scratch_end(&mut self, index: usize, next: f64, frames: usize) -> f64 {
+        if self.deck_looping[index] || frames == 0 {
+            return next;
+        }
+        let end = frames.saturating_sub(1) as f64;
+        if next <= end {
+            return next;
+        }
+        if self.deck_scratch_velocity[index] > 0.0 {
+            self.deck_scratch_velocity[index] = 0.0;
+            self.deck_scratch_target_velocity[index] = 0.0;
+        }
+        end
     }
 
     fn callback_source_frame(
@@ -1198,6 +1279,10 @@ impl AudioRenderer {
         index: usize,
         source: Option<CallbackSource>,
     ) -> ([f32; 2], bool) {
+        if self.deck_positions[index] < 0.0 {
+            // Advance the signed Deck clock through silence without consuming source frame 0.
+            return ([0.0; 2], true);
+        }
         match source {
             Some(CallbackSource::Decoded(track))
                 if self.deck_positions[index] < track.frames() as f64 =>
@@ -1212,11 +1297,13 @@ impl AudioRenderer {
             }
             Some(CallbackSource::Stream(stream)) => {
                 let was_rebuffering = self.stream_playback[index].rebuffering;
+                let loop_out = self.deck_loop_out_seconds(index);
                 let result = stream_output_frame(
                     &mut self.stream_playback[index],
                     stream,
                     self.output_sample_rate,
                     self.deck_looping[index],
+                    loop_out,
                     StreamRecoverPolicy::PacketCushion,
                 );
                 if !result.1 && !was_rebuffering && !stream.ended() {
@@ -1227,11 +1314,13 @@ impl AudioRenderer {
             }
             Some(CallbackSource::StemStream(stream)) => {
                 let was_rebuffering = self.stem_stream_playback[index].rebuffering;
+                let loop_out = self.deck_loop_out_seconds(index);
                 let (raw, advanced) = stream_output_frame(
                     &mut self.stem_stream_playback[index],
                     stream,
                     self.output_sample_rate,
                     self.deck_looping[index],
+                    loop_out,
                     StreamRecoverPolicy::PacketCushion,
                 );
                 if !advanced {
@@ -1246,6 +1335,128 @@ impl AudioRenderer {
             }
             _ => ([0.0; 2], false),
         }
+    }
+
+    fn phase_corrected_stream_frame(
+        &mut self,
+        index: usize,
+        source: Option<CallbackSource>,
+    ) -> ([f32; 2], bool) {
+        let correction = self.deck_phase_corrections[index].clamp(0.75, 1.25);
+        let mut cursor = self.deck_phase_resamplers[index];
+        if cursor.current.is_none() {
+            cursor.current = self.pop_timed_stream_frame(index, source);
+        }
+        if cursor.next.is_none() {
+            cursor.next = self.pop_timed_stream_frame(index, source);
+        }
+        let (Some(current), Some(next)) = (cursor.current, cursor.next) else {
+            self.deck_phase_resamplers[index] = cursor;
+            return ([0.0; 2], false);
+        };
+
+        let fraction = cursor.fraction.clamp(0.0, 1.0) as f32;
+        let output = current.frame.lerp(next.frame, fraction);
+        let media_advance = (current.media_advance
+            + (next.media_advance - current.media_advance) * f64::from(fraction))
+            * correction;
+        let media_time = if current.media_time.is_finite() && next.media_time.is_finite() {
+            current.media_time + (next.media_time - current.media_time) * f64::from(fraction)
+        } else if current.media_time.is_finite() {
+            current.media_time
+        } else {
+            next.media_time
+        };
+        // A mixed boundary is not fully at the newer revision until its older left endpoint has
+        // left the interpolation window. This keeps audible acknowledgements conservative.
+        let tempo_revision = current.tempo_revision;
+
+        cursor.fraction += correction;
+        while cursor.fraction >= 1.0 {
+            cursor.current = cursor.next;
+            cursor.next = self.pop_timed_stream_frame(index, source);
+            cursor.fraction -= 1.0;
+        }
+        self.deck_phase_resamplers[index] = cursor;
+        self.set_stream_output_timing(index, source, media_advance, tempo_revision, media_time);
+        (output, true)
+    }
+
+    fn pop_timed_stream_frame(
+        &mut self,
+        index: usize,
+        source: Option<CallbackSource>,
+    ) -> Option<TimedStereoFrame> {
+        let (frame, advanced) = self.callback_source_frame(index, source);
+        if !advanced {
+            return None;
+        }
+        let (media_advance, tempo_revision, media_time) = match source {
+            Some(CallbackSource::Stream(_)) => (
+                self.stream_playback[index].media_advance,
+                self.stream_playback[index].tempo_revision,
+                self.stream_playback[index].media_time,
+            ),
+            Some(CallbackSource::StemStream(_)) => (
+                self.stem_stream_playback[index].media_advance,
+                self.stem_stream_playback[index].tempo_revision,
+                self.stem_stream_playback[index].media_time,
+            ),
+            _ => return None,
+        };
+        Some(TimedStereoFrame {
+            frame,
+            media_advance,
+            tempo_revision,
+            media_time,
+        })
+    }
+
+    fn set_stream_output_timing(
+        &mut self,
+        index: usize,
+        source: Option<CallbackSource>,
+        media_advance: f64,
+        tempo_revision: u64,
+        media_time: f64,
+    ) {
+        let state = match source {
+            Some(CallbackSource::Stream(_)) => &mut self.stream_playback[index],
+            Some(CallbackSource::StemStream(_)) => &mut self.stem_stream_playback[index],
+            _ => return,
+        };
+        state.media_advance = media_advance;
+        state.tempo_revision = tempo_revision;
+        state.media_time = media_time;
+    }
+
+    fn apply_stream_media_playhead(&mut self, index: usize, source: Option<CallbackSource>) {
+        let media_time = match source {
+            Some(CallbackSource::Stream(_)) => self.stream_playback[index].media_time,
+            Some(CallbackSource::StemStream(_)) => self.stem_stream_playback[index].media_time,
+            _ => return,
+        };
+        if !(media_time.is_finite() && media_time >= 0.0) {
+            return;
+        }
+        let sample_rate = f64::from(self.output_sample_rate.max(1));
+        let next = media_time * sample_rate;
+        if self.deck_looping[index] {
+            let previous = self.deck_positions[index];
+            if previous.is_finite() && next + sample_rate * 0.02 < previous {
+                let start = self.deck_loop_start_frames[index] as f64 / sample_rate;
+                let length = self.deck_loop_frames[index] as f64 / sample_rate;
+                tracing::info!(
+                    "loop deck={} wrap in={} out={} playhead={} fifo={} producer=--:--.-- wrap=--",
+                    if index == 0 { 'A' } else { 'B' },
+                    format_loop_clock(start),
+                    format_loop_clock(start + length),
+                    format_loop_clock(media_time),
+                    format_loop_clock(media_time),
+                );
+            }
+        }
+        self.deck_positions[index] = next;
     }
 
     /// Applies per-lane STEM gains with a ~5 ms ramp: mutes land at the next callback frame and
@@ -1327,9 +1538,12 @@ impl AudioRenderer {
             self.retire(previous);
         }
         self.deck_positions[index] = start_frame as f64;
-        self.deck_scratch_velocity[index] = 0.0;
-        self.deck_scratch_tick_frames[index] = 0.0;
+        self.deck_discontinuity_revisions[index] = self.deck_discontinuity_revisions[index]
+            .wrapping_add(1)
+            .max(1);
+        self.reset_scratch_motion(index);
         self.scratch_tapes[index].reset();
+        self.deck_audible_rate_smooth[index] = 0.0;
         self.deck_looping[index] = false;
         self.deck_loop_start_frames[index] = 0;
         self.deck_loop_frames[index] = 0;
@@ -1355,6 +1569,11 @@ impl AudioRenderer {
         self.stream_last_frames[index] = [0.0; 2];
         self.stream_playback[index] = StreamPlaybackState::default();
         self.stem_stream_playback[index] = StreamPlaybackState::default();
+        self.deck_phase_corrections[index] = 1.0;
+        self.deck_phase_correction_targets[index] = 1.0;
+        self.deck_phase_correction_steps[index] = 0.0;
+        self.deck_phase_correction_remaining[index] = 0;
+        self.deck_phase_resamplers[index] = DeckPhaseResampler::default();
         self.deck_output_underruns[index] = 0;
         self.deck_min_buffered_frames[index] = u64::MAX;
         self.deck_peak_levels[index] = 0.0;
@@ -1367,10 +1586,12 @@ impl AudioRenderer {
         let previous = std::mem::take(&mut self.deck_sources[index]);
         let replacement = std::mem::take(&mut self.replacement_sources[index]);
         self.deck_positions[index] = 0.0;
+        self.deck_discontinuity_revisions[index] = self.deck_discontinuity_revisions[index]
+            .wrapping_add(1)
+            .max(1);
         self.deck_playing[index] = false;
         self.deck_scratch_held[index] = false;
-        self.deck_scratch_velocity[index] = 0.0;
-        self.deck_scratch_tick_frames[index] = 0.0;
+        self.reset_scratch_motion(index);
         self.scratch_tapes[index].reset();
         self.deck_looping[index] = false;
         self.deck_loop_start_frames[index] = 0;
@@ -1379,6 +1600,11 @@ impl AudioRenderer {
         self.stream_last_frames[index] = [0.0; 2];
         self.stream_playback[index] = StreamPlaybackState::default();
         self.stem_stream_playback[index] = StreamPlaybackState::default();
+        self.deck_phase_corrections[index] = 1.0;
+        self.deck_phase_correction_targets[index] = 1.0;
+        self.deck_phase_correction_steps[index] = 0.0;
+        self.deck_phase_correction_remaining[index] = 0;
+        self.deck_phase_resamplers[index] = DeckPhaseResampler::default();
         self.replacement_stream_playback[index] = StreamPlaybackState::default();
         self.replacement_stem_playback[index] = StreamPlaybackState::default();
         self.replacement_remaining[index] = 0;
@@ -1415,52 +1641,102 @@ impl AudioRenderer {
                 self.deck_gains[deck as usize] = normalized_gain(gain);
             }
             RtCommand::SetDeckPlaying { deck, playing } => {
+                let index = deck as usize;
                 self.mode = PlayerMode::RealtimeDj;
-                self.deck_playing[deck as usize] = playing;
+                self.deck_playing[index] = playing;
                 if !playing {
-                    self.deck_scratch_held[deck as usize] = false;
+                    // Pause leaves the scratch voice. A frozen Rubber Band ring is fine while
+                    // stopped; Play will rebuild through the normal seek/startup path.
+                    self.end_scratch_voice(index);
                 }
                 if playing {
                     self.active_deck = deck;
                     self.transport_gain = 1.0;
                     self.transport_ramp = None;
+                    if self.deck_scratch_held[index] && self.deck_scratch_playthrough[index] {
+                        // A paused streaming platter may be parked behind the producer head.
+                        // Accelerate through its cached history before handing back to the ring.
+                        self.deck_scratch_playthrough[index] = false;
+                        self.deck_scratch_releasing[index] = true;
+                    }
                 }
                 self.playing = self.deck_playing.into_iter().any(|value| value);
                 if !self.playing {
                     self.transport_gain = 0.0;
                 }
             }
-            RtCommand::SetDeckScratchHeld { deck, held } => {
+            RtCommand::SetDeckPfl { deck, enabled } => {
+                self.deck_pfl[deck as usize] = enabled;
+            }
+            RtCommand::ControlDeckPlatter {
+                deck,
+                phase,
+                velocity,
+            } => {
                 let index = deck as usize;
                 self.mode = PlayerMode::RealtimeDj;
-                self.deck_scratch_held[index] = held;
-                self.deck_scratch_velocity[index] = 0.0;
-                self.deck_scratch_tick_frames[index] = 0.0;
-                self.deck_scratch_tick_at[index] = self.output_frames;
-                // Re-ramp stream audio after release rather than jumping from the held sample to
-                // a later buffered frame.
-                if held {
-                    self.stream_edge_gains[index] = 0.0;
-                }
-            }
-            RtCommand::ScratchDeck { deck, delta_frames } => {
-                let index = deck as usize;
-                if self.deck_scratch_held[index] && delta_frames.is_finite() && delta_frames != 0.0
-                {
-                    self.mode = PlayerMode::RealtimeDj;
-                    self.deck_scratch_tick_frames[index] += delta_frames;
+                match phase {
+                    PlatterPhase::Start => {
+                        // Instant stop under the finger without changing transport intent.
+                        self.deck_scratch_held[index] = true;
+                        self.reset_scratch_motion(index);
+                    }
+                    PlatterPhase::Move => {
+                        if self.deck_scratch_held[index]
+                            && !self.deck_scratch_releasing[index]
+                            && !self.deck_scratch_playthrough[index]
+                        {
+                            self.set_platter_velocity(index, velocity);
+                        }
+                    }
+                    PlatterPhase::End => {
+                        if self.deck_scratch_held[index] && !self.deck_scratch_playthrough[index] {
+                            // End owns the final source-timestamped observation. Apply it before
+                            // selecting coast/light-touch behavior; no earlier move ACK is needed.
+                            self.set_platter_velocity(index, velocity);
+                            self.deck_scratch_velocity[index] =
+                                self.deck_scratch_target_velocity[index];
+                            self.release_scratch_to_transport(index);
+                        }
+                    }
+                    PlatterPhase::Cancel => {
+                        if self.deck_scratch_held[index] || self.deck_scratch_releasing[index] {
+                            self.deck_discontinuity_revisions[index] = self
+                                .deck_discontinuity_revisions[index]
+                                .wrapping_add(1)
+                                .max(1);
+                        }
+                        self.end_scratch_voice(index);
+                    }
                 }
             }
             RtCommand::SetRate { deck, rate } => {
                 if rate.is_finite() && rate > 0.0 {
                     self.deck_rates[deck as usize] = f64::from(rate);
+                    self.deck_rate_revisions[deck as usize] = self.deck_rate_revisions
+                        [deck as usize]
+                        .wrapping_add(1)
+                        .max(1);
                 }
             }
             RtCommand::SetDeckRates { rates } => {
                 for (deck, rate) in rates.into_iter().enumerate() {
                     if rate.is_finite() && rate > 0.0 {
                         self.deck_rates[deck] = f64::from(rate);
+                        self.deck_rate_revisions[deck] =
+                            self.deck_rate_revisions[deck].wrapping_add(1).max(1);
                     }
+                }
+            }
+            RtCommand::SetDeckPhaseCorrection { deck, multiplier } => {
+                if multiplier.is_finite() && (0.75..=1.25).contains(&multiplier) {
+                    let index = deck as usize;
+                    let target = f64::from(multiplier);
+                    let frames = (self.output_sample_rate / 200).max(1);
+                    self.deck_phase_correction_targets[index] = target;
+                    self.deck_phase_correction_steps[index] =
+                        (target - self.deck_phase_corrections[index]) / f64::from(frames);
+                    self.deck_phase_correction_remaining[index] = frames;
                 }
             }
             RtCommand::SetDeckStemGains { deck, gains } => {
@@ -1480,10 +1756,34 @@ impl AudioRenderer {
                 frames,
             } => {
                 let index = deck as usize;
-                self.deck_looping[index] = looping && frames > 0;
-                self.deck_loop_start_frames[index] = if looping { start_frames } else { 0 };
-                self.deck_loop_frames[index] = if looping { frames } else { 0 };
-                self.wrap_deck_loop(index);
+                let next_looping = looping && frames > 0;
+                let next_start = if next_looping { start_frames } else { 0 };
+                let next_frames = if next_looping { frames } else { 0 };
+                if self.deck_looping[index] != next_looping
+                    || self.deck_loop_start_frames[index] != next_start
+                    || self.deck_loop_frames[index] != next_frames
+                {
+                    self.deck_looping[index] = next_looping;
+                    self.deck_loop_start_frames[index] = next_start;
+                    self.deck_loop_frames[index] = next_frames;
+                    if matches!(self.deck_sources[index].kind, SourceKind::Decoded)
+                        && self.wrap_deck_loop(index)
+                    {
+                        self.deck_phase_resamplers[index] = DeckPhaseResampler::default();
+                    }
+                }
+            }
+            RtCommand::SetDeckPreroll { deck, frames } => {
+                let index = deck as usize;
+                self.deck_positions[index] = -(frames.min(i64::MAX as u64) as f64);
+                self.reset_scratch_motion(index);
+                self.scratch_tapes[index].reset();
+                self.stream_playback[index] = StreamPlaybackState::default();
+                self.stem_stream_playback[index] = StreamPlaybackState::default();
+                self.deck_phase_resamplers[index] = DeckPhaseResampler::default();
+                self.deck_discontinuity_revisions[index] = self.deck_discontinuity_revisions[index]
+                    .wrapping_add(1)
+                    .max(1);
             }
             RtCommand::SetFilterResonance { q } => {
                 self.filter_resonance = normalize_filter_resonance(q);
@@ -1509,36 +1809,27 @@ impl AudioRenderer {
             ),
             RtCommand::SetDeckFx {
                 deck,
-                echo,
-                echo_parameter,
-                reverb,
-                reverb_parameter,
-                gater,
-                gater_parameter,
+                slots,
                 pad,
                 beat_seconds,
             } => {
-                self.deck_manual_fx[deck as usize].configure(
-                    echo,
-                    echo_parameter,
-                    reverb,
-                    reverb_parameter,
-                    gater,
-                    gater_parameter,
-                    pad,
-                    beat_seconds,
-                );
+                self.deck_manual_fx[deck as usize].configure(slots, pad, beat_seconds);
             }
             RtCommand::SeekPrepared { deck, frame } => {
                 let index = deck as usize;
                 self.deck_positions[index] = frame as f64;
+                self.reset_scratch_motion(index);
                 self.deck_eq[index].reset();
                 self.deck_peak_levels[index] = 0.0;
                 self.deck_spectrum[index].reset();
                 self.scratch_tapes[index].reset();
                 self.stream_playback[index] = StreamPlaybackState::default();
                 self.stem_stream_playback[index] = StreamPlaybackState::default();
+                self.deck_phase_resamplers[index] = DeckPhaseResampler::default();
                 self.stream_edge_gains[index] = 0.0;
+                self.deck_discontinuity_revisions[index] = self.deck_discontinuity_revisions[index]
+                    .wrapping_add(1)
+                    .max(1);
                 if deck == self.active_deck {
                     self.transition = None;
                 }
@@ -1549,10 +1840,16 @@ impl AudioRenderer {
                 transition_frames,
                 plan,
             } => {
-                self.deck_positions[to as usize] = target_frame as f64;
-                self.deck_eq[to as usize].reset();
-                self.deck_peak_levels[to as usize] = 0.0;
-                self.deck_spectrum[to as usize].reset();
+                let index = to as usize;
+                self.deck_positions[index] = target_frame as f64;
+                self.deck_discontinuity_revisions[index] = self.deck_discontinuity_revisions[index]
+                    .wrapping_add(1)
+                    .max(1);
+                self.reset_scratch_motion(index);
+                self.deck_eq[index].reset();
+                self.deck_peak_levels[index] = 0.0;
+                self.deck_spectrum[index].reset();
+                self.deck_phase_resamplers[index] = DeckPhaseResampler::default();
                 if to == self.active_deck || transition_frames == 0 {
                     self.active_deck = to;
                     self.transition = None;
@@ -1639,15 +1936,265 @@ impl AudioRenderer {
         self.transport_ramp = None;
     }
 
-    fn wrap_deck_loop(&mut self, index: usize) {
-        if !self.deck_looping[index] || self.deck_loop_frames[index] == 0 {
+    #[inline]
+    fn rendering_active(&self) -> bool {
+        self.playing || (0..2).any(|index| self.platter_active(index))
+    }
+
+    #[inline]
+    fn output_transport_gain(&self) -> f32 {
+        // A paused Deck has transport_gain=0, but Mixxx-style scratch takes over speed and
+        // direction whether Play is on or off. Keep the logical transport paused while letting
+        // only the held platter speak.
+        if self.playing {
+            self.transport_gain
+        } else {
+            1.0
+        }
+    }
+
+    #[inline]
+    fn render_output_channel(
+        &self,
+        a: [f32; 2],
+        b: [f32; 2],
+        transition_wet: [f32; 2],
+        channel: usize,
+        transition_a: f32,
+        transition_b: f32,
+    ) -> f32 {
+        if !self.rendering_active() {
+            return 0.0;
+        }
+        let transport = self.output_transport_gain();
+        if channel < 2 {
+            let side = channel;
+            return ((a[side] * self.deck_gains[0] * transition_a
+                + b[side] * self.deck_gains[1] * transition_b)
+                + transition_wet[side])
+                * self.master_gain
+                * transport;
+        }
+        if channel < 4 {
+            let side = channel - 2;
+            let selected = usize::from(self.deck_pfl[0]) + usize::from(self.deck_pfl[1]);
+            if selected == 0 {
+                return 0.0;
+            }
+            let gain = if selected > 1 {
+                std::f32::consts::FRAC_1_SQRT_2
+            } else {
+                1.0
+            };
+            return (if self.deck_pfl[0] { a[side] } else { 0.0 }
+                + if self.deck_pfl[1] { b[side] } else { 0.0 })
+                * gain
+                * transport;
+        }
+        0.0
+    }
+
+    fn reset_scratch_motion(&mut self, index: usize) {
+        self.deck_scratch_releasing[index] = false;
+        self.deck_scratch_playthrough[index] = false;
+        self.deck_scratch_velocity[index] = 0.0;
+        self.deck_scratch_target_velocity[index] = 0.0;
+        self.deck_scratch_input_at[index] = SCRATCH_NO_TICK;
+    }
+
+    fn end_scratch_voice(&mut self, index: usize) {
+        self.deck_scratch_held[index] = false;
+        self.reset_scratch_motion(index);
+        self.deck_phase_resamplers[index] = DeckPhaseResampler::default();
+        self.deck_audible_rate_smooth[index] = 0.0;
+    }
+
+    fn scratch_play_velocity(&self, index: usize) -> f64 {
+        self.deck_rates[index] * self.source_rate_ratios[index] * self.deck_phase_corrections[index]
+    }
+
+    fn deck_uses_scratch_tape(&self, index: usize) -> bool {
+        matches!(
+            self.deck_sources[index].kind,
+            SourceKind::Stream | SourceKind::StemStream
+        )
+    }
+
+    fn scratch_playthrough_ready(&self, index: usize) -> bool {
+        if !self.deck_scratch_playthrough[index] || !self.deck_playing[index] {
+            return false;
+        }
+        let desired = self.scratch_play_velocity(index);
+        if desired <= SCRATCH_STATIONARY_VELOCITY {
+            return false;
+        }
+        self.scratch_tapes[index]
+            .end_position()
+            .is_some_and(|head| self.deck_positions[index] + desired.max(1.0) >= head - 1.0)
+    }
+
+    /// Replay cached history only until its cursor catches the still-buffered stream head.
+    fn enter_scratch_playthrough(&mut self, index: usize, desired: f64) {
+        self.deck_scratch_releasing[index] = false;
+        self.deck_scratch_playthrough[index] = true;
+        self.deck_scratch_velocity[index] = desired;
+        self.deck_scratch_target_velocity[index] = desired;
+        self.deck_scratch_input_at[index] = SCRATCH_NO_TICK;
+        let ratio = self.source_rate_ratios[index].max(f64::EPSILON);
+        self.deck_audible_rate_smooth[index] = (desired / ratio) as f32;
+    }
+
+    /// Capacitive note-off. Light lift snaps to play speed; a real throw coasts from the
+    /// *current* velocity. Streaming Decks stay on ScratchTape playthrough so Rubber Band
+    /// never restarts from an empty ring (that restart is the playback-key "woom").
+    fn release_scratch_to_transport(&mut self, index: usize) {
+        let desired = if self.deck_playing[index] {
+            self.scratch_play_velocity(index)
+        } else {
+            0.0
+        };
+        let throw = self.deck_scratch_velocity[index].abs();
+        let light = self.deck_playing[index]
+            && throw <= desired.abs() * SCRATCH_LIGHT_THROW_RATIO + f64::EPSILON;
+
+        if light {
+            // 1x → 0 → 1x in one callback. Never ramp from a zeroed grab through vinyl mass.
+            if self.deck_uses_scratch_tape(index) {
+                self.enter_scratch_playthrough(index, desired);
+            } else {
+                self.end_scratch_voice(index);
+            }
             return;
+        }
+        if !self.deck_playing[index] && throw <= SCRATCH_STATIONARY_VELOCITY {
+            if self.deck_uses_scratch_tape(index) {
+                self.enter_scratch_playthrough(index, 0.0);
+            } else {
+                self.end_scratch_voice(index);
+            }
+            return;
+        }
+
+        self.deck_scratch_releasing[index] = true;
+        self.deck_scratch_playthrough[index] = false;
+    }
+
+    fn advance_deck_phase_correction(&mut self, index: usize) {
+        let remaining = self.deck_phase_correction_remaining[index];
+        if remaining == 0 {
+            return;
+        }
+        self.deck_phase_corrections[index] += self.deck_phase_correction_steps[index];
+        self.deck_phase_correction_remaining[index] = remaining - 1;
+        if remaining == 1 {
+            self.deck_phase_corrections[index] = self.deck_phase_correction_targets[index];
+            self.deck_phase_correction_steps[index] = 0.0;
+        }
+    }
+
+    fn next_scratch_position(&mut self, index: usize) -> f64 {
+        let sample_rate = f64::from(self.output_sample_rate.max(1));
+        if self.deck_scratch_releasing[index] {
+            let desired = if self.deck_playing[index] {
+                self.scratch_play_velocity(index)
+            } else {
+                0.0
+            };
+            let velocity = self.deck_scratch_velocity[index];
+            let intensity =
+                ((velocity - desired).abs() / SCRATCH_COAST_REFERENCE_VELOCITY).clamp(0.0, 1.0);
+            let mass_seconds = SCRATCH_COAST_MIN_SECONDS
+                + (SCRATCH_COAST_MAX_SECONDS - SCRATCH_COAST_MIN_SECONDS) * intensity;
+            let attack_frames = (sample_rate * mass_seconds).max(1.0);
+            let mut next_velocity = velocity + (desired - velocity) / attack_frames;
+            let max_velocity = SCRATCH_VELOCITY_MAX * self.source_rate_ratios[index].max(1.0);
+            if next_velocity.abs() > max_velocity {
+                next_velocity = next_velocity.signum() * max_velocity;
+            }
+            if desired.abs() <= SCRATCH_STATIONARY_VELOCITY
+                && next_velocity.abs() <= SCRATCH_STATIONARY_VELOCITY
+            {
+                if !self.deck_uses_scratch_tape(index) {
+                    self.end_scratch_voice(index);
+                } else {
+                    self.enter_scratch_playthrough(index, 0.0);
+                }
+                return self.deck_positions[index];
+            }
+            if desired.abs() > SCRATCH_STATIONARY_VELOCITY
+                && (next_velocity - desired).abs() <= SCRATCH_HANDOFF_RATE_EPSILON
+                && next_velocity.signum() == desired.signum()
+            {
+                // Settled onto transport speed. A stream replays only the history between its
+                // scratched cursor and producer head, then leaves the scratch voice in-place.
+                if self.deck_uses_scratch_tape(index) {
+                    self.enter_scratch_playthrough(index, desired);
+                    return self
+                        .clamp_scratch_position(index, self.deck_positions[index] + desired);
+                }
+                self.end_scratch_voice(index);
+                return self.deck_positions[index] + self.scratch_play_velocity(index);
+            }
+            self.deck_scratch_velocity[index] = next_velocity;
+            return self.clamp_scratch_position(index, self.deck_positions[index] + next_velocity);
+        }
+
+        if !self.deck_scratch_playthrough[index] {
+            let last = self.deck_scratch_input_at[index];
+            let idle = if last == SCRATCH_NO_TICK {
+                f64::INFINITY
+            } else {
+                self.output_frames.saturating_sub(last) as f64
+            };
+            let input_fresh = idle < sample_rate * SCRATCH_STILL_SECONDS;
+            let target = if input_fresh {
+                self.deck_scratch_target_velocity[index]
+            } else {
+                0.0
+            };
+            let response_seconds = if input_fresh {
+                SCRATCH_RESPONSE_SECONDS
+            } else {
+                SCRATCH_STILL_FRICTION_SECONDS
+            };
+            let response_frames = (sample_rate * response_seconds).max(1.0);
+            let mut velocity = self.deck_scratch_velocity[index]
+                + (target - self.deck_scratch_velocity[index]) / response_frames;
+            if (velocity - target).abs() <= SCRATCH_STATIONARY_VELOCITY {
+                velocity = target;
+            }
+            self.deck_scratch_velocity[index] = velocity;
+        }
+
+        self.clamp_scratch_position(
+            index,
+            self.deck_positions[index] + self.deck_scratch_velocity[index],
+        )
+    }
+
+    fn clamp_scratch_position(&mut self, index: usize, mut next: f64) -> f64 {
+        let preroll = f64::from(self.output_sample_rate.max(1)) * PERFORMANCE_PREROLL_SECONDS;
+        if next < -preroll {
+            next = -preroll;
+            if self.deck_scratch_velocity[index] < 0.0 {
+                self.deck_scratch_velocity[index] = 0.0;
+            }
+        }
+        next
+    }
+
+    fn wrap_deck_loop(&mut self, index: usize) -> bool {
+        if !self.deck_looping[index] || self.deck_loop_frames[index] == 0 {
+            return false;
         }
         let start = self.deck_loop_start_frames[index] as f64;
         let length = self.deck_loop_frames[index] as f64;
         let position = self.deck_positions[index];
         if position >= start + length {
             self.deck_positions[index] = start + (position - start) % length;
+            true
+        } else {
+            false
         }
     }
 
@@ -1661,10 +2208,9 @@ impl AudioRenderer {
     }
 
     fn required_decks(&self) -> [bool; 2] {
-        if !self.playing {
-            return [false, false];
-        }
-        if let Some(transition) = self.transition {
+        let mut required = if !self.playing {
+            [false, false]
+        } else if let Some(transition) = self.transition {
             let mut required = [false, false];
             required[transition.from as usize] = true;
             required[transition.to as usize] = true;
@@ -1676,7 +2222,13 @@ impl AudioRenderer {
                 DeckId::A => [true, false],
                 DeckId::B => [false, true],
             }
+        };
+        for (index, held) in self.deck_scratch_held.into_iter().enumerate() {
+            if held {
+                required[index] = true;
+            }
         }
+        required
     }
 
     fn transition_gains(&self) -> (f32, f32) {
@@ -1719,11 +2271,22 @@ impl AudioRenderer {
 
     fn advance_frame(&mut self, advanced: [bool; 2], transition_can_advance: bool) {
         self.output_frames = self.output_frames.saturating_add(1);
+        for index in 0..2 {
+            self.smooth_audible_rate(index);
+        }
         if self.playing {
             let required = self.required_decks();
             for index in 0..2 {
                 if required[index] && advanced[index] {
+                    if self.stream_media_clock_active(index) {
+                        continue;
+                    }
+                    let was_preroll = self.deck_positions[index] < 0.0;
                     self.deck_positions[index] += self.deck_media_advance(index);
+                    if was_preroll && self.deck_positions[index] > 0.0 {
+                        // Never skip a fraction of source frame 0 when TEMPO crosses the boundary.
+                        self.deck_positions[index] = 0.0;
+                    }
                     self.wrap_deck_loop(index);
                 }
             }
@@ -1752,11 +2315,29 @@ impl AudioRenderer {
             SourceKind::StemStream if self.stem_stream_playback[index].media_advance > 0.0 => {
                 self.stem_stream_playback[index].media_advance
             }
-            _ => self.deck_rates[index] * self.source_rate_ratios[index],
+            _ => {
+                self.deck_rates[index]
+                    * self.source_rate_ratios[index]
+                    * self.deck_phase_corrections[index]
+            }
+        }
+    }
+
+    fn stream_media_clock_active(&self, index: usize) -> bool {
+        match self.deck_sources[index].kind {
+            SourceKind::Stream => self.stream_playback[index].media_time.is_finite(),
+            SourceKind::StemStream => self.stem_stream_playback[index].media_time.is_finite(),
+            _ => false,
         }
     }
 
     fn publish(&self) {
+        let deck_audible_rates = [
+            self.published_audible_rate(0),
+            self.published_audible_rate(1),
+        ];
+        let deck_audible_rate_revisions =
+            [self.audible_rate_revision(0), self.audible_rate_revision(1)];
         self.shared.publish(
             self.mode,
             self.playing,
@@ -1764,8 +2345,20 @@ impl AudioRenderer {
             self.active_deck,
             self.transition.map(|transition| transition.to),
             self.output_frames,
-            [self.deck_positions[0] as u64, self.deck_positions[1] as u64],
+            self.output_sample_rate,
+            self.callback_timing.callback_time_ns,
+            self.presentation_time_ns,
+            [
+                self.deck_positions[0].round() as i64,
+                self.deck_positions[1].round() as i64,
+            ],
             [self.deck_sources[0].id, self.deck_sources[1].id],
+            self.deck_rates.map(|rate| rate as f32),
+            deck_audible_rates,
+            self.deck_rate_revisions,
+            deck_audible_rate_revisions,
+            self.deck_discontinuity_revisions,
+            [self.platter_active(0), self.platter_active(1)],
             self.deck_output_underruns,
             self.deck_min_buffered_frames
                 .map(|frames| if frames == u64::MAX { 0 } else { frames }),
@@ -1775,6 +2368,63 @@ impl AudioRenderer {
                 self.deck_spectrum[1].levels(),
             ],
         );
+    }
+
+    fn raw_audible_rate(&self, index: usize) -> f32 {
+        if self.deck_scratch_held[index] {
+            let ratio = self.source_rate_ratios[index].max(f64::EPSILON);
+            return (self.deck_scratch_velocity[index] / ratio) as f32;
+        }
+        // Paused / stopped Decks must report 0. Publishing TEMPO here made the waveform
+        // compositor treat every parked Deck as a spinning platter.
+        if !self.deck_playing[index] {
+            return 0.0;
+        }
+        match self.deck_sources[index].kind {
+            SourceKind::Stream if self.stream_playback[index].media_advance > 0.0 => {
+                self.stream_playback[index].media_advance as f32
+            }
+            SourceKind::StemStream if self.stem_stream_playback[index].media_advance > 0.0 => {
+                self.stem_stream_playback[index].media_advance as f32
+            }
+            _ => (self.deck_rates[index] * self.deck_phase_corrections[index]) as f32,
+        }
+    }
+
+    fn platter_active(&self, index: usize) -> bool {
+        self.deck_scratch_held[index] && !self.deck_scratch_playthrough[index]
+    }
+
+    fn smooth_audible_rate(&mut self, index: usize) {
+        let raw = self.raw_audible_rate(index);
+        if self.deck_scratch_held[index] {
+            let sample_rate = f64::from(self.output_sample_rate.max(1));
+            let alpha = (1.0 / (sample_rate * SCRATCH_AUDIBLE_RATE_SMOOTH_SECONDS).max(1.0)) as f32;
+            let smooth = self.deck_audible_rate_smooth[index];
+            self.deck_audible_rate_smooth[index] = smooth + (raw - smooth) * alpha.clamp(0.0, 1.0);
+        } else {
+            self.deck_audible_rate_smooth[index] = raw;
+        }
+    }
+
+    fn published_audible_rate(&self, index: usize) -> f32 {
+        if self.deck_scratch_held[index] {
+            self.deck_audible_rate_smooth[index]
+        } else {
+            self.raw_audible_rate(index)
+        }
+    }
+
+    fn audible_rate(&self, index: usize) -> f32 {
+        self.published_audible_rate(index)
+    }
+
+    fn audible_rate_revision(&self, index: usize) -> u64 {
+        match self.deck_sources[index].kind {
+            SourceKind::Stream => self.stream_playback[index].tempo_revision,
+            SourceKind::StemStream => self.stem_stream_playback[index].tempo_revision,
+            _ => self.deck_rate_revisions[index],
+        }
     }
 }
 
@@ -1869,26 +2519,44 @@ enum StreamRecoverPolicy {
     Immediate,
 }
 
+fn stream_packet_past_loop_out(media_time: f64, loop_out: Option<f64>) -> bool {
+    // Half-open frame boundary: the final packet below out belongs to the loop. The former 100 µs
+    // tolerance discarded several valid 48 kHz frames on every cycle and made short loops drift.
+    loop_out.is_some_and(|out| media_time.is_finite() && media_time >= out)
+}
+
 fn stream_output_frame<F: FrameLerp>(
     state: &mut StreamPlaybackState,
     stream: &StreamSource<F>,
     output_sample_rate: u32,
     looping: bool,
+    loop_out: Option<f64>,
     policy: StreamRecoverPolicy,
 ) -> (F, bool) {
     state.media_advance = 0.0;
+    let loop_out = looping.then_some(loop_out).flatten();
     if policy == StreamRecoverPolicy::Immediate {
-        let Some((frame, media_advance)) = stream.pop_callback_timed() else {
-            state.rebuffering = !stream.ended();
-            if state.rebuffering {
-                state.missed_frames = state.missed_frames.saturating_add(1);
+        loop {
+            let Some((frame, media_advance, tempo_revision, media_time)) =
+                stream.pop_callback_timed()
+            else {
+                state.rebuffering = !stream.ended();
+                if state.rebuffering {
+                    state.missed_frames = state.missed_frames.saturating_add(1);
+                }
+                return (F::silence(), false);
+            };
+            // LOOP on must never play the linear look-ahead past out (blue zone behind the needle).
+            if stream_packet_past_loop_out(media_time, loop_out) {
+                continue;
             }
-            return (F::silence(), false);
-        };
-        state.rebuffering = false;
-        state.missed_frames = 0;
-        state.media_advance = f64::from(media_advance);
-        return (frame, true);
+            state.rebuffering = false;
+            state.missed_frames = 0;
+            state.media_advance = f64::from(media_advance);
+            state.tempo_revision = tempo_revision;
+            state.media_time = media_time;
+            return (frame, true);
+        }
     }
     // Once a worker misses the realtime reader, wait for a useful cushion instead of repeatedly
     // accepting one or two new frames. The latter produces a fade-in/fade-out pulse train heard as
@@ -1920,15 +2588,28 @@ fn stream_output_frame<F: FrameLerp>(
         return (F::silence(), false);
     }
 
-    let Some((frame, media_advance)) = stream.pop_callback_timed() else {
-        state.rebuffering = !stream.ended();
-        if state.rebuffering {
-            state.missed_frames = state.missed_frames.saturating_add(1);
+    loop {
+        let Some((frame, media_advance, tempo_revision, media_time)) = stream.pop_callback_timed()
+        else {
+            state.rebuffering = !stream.ended();
+            if state.rebuffering {
+                state.missed_frames = state.missed_frames.saturating_add(1);
+            }
+            return (F::silence(), false);
+        };
+        if stream_packet_past_loop_out(media_time, loop_out) {
+            if stream.buffered_frames() == 0 && !stream.ended() {
+                state.rebuffering = true;
+                state.missed_frames = state.missed_frames.saturating_add(1);
+                return (F::silence(), false);
+            }
+            continue;
         }
-        return (F::silence(), false);
-    };
-    state.media_advance = f64::from(media_advance);
-    (frame, true)
+        state.media_advance = f64::from(media_advance);
+        state.tempo_revision = tempo_revision;
+        state.media_time = media_time;
+        return (frame, true);
+    }
 }
 
 fn callback_source_ended(source: Option<CallbackSource>, position: f64, looping: bool) -> bool {
@@ -2031,9 +2712,10 @@ mod tests {
         assert_eq!(controller.snapshot().deck_frames, [4, 0]);
 
         controller
-            .send(RtCommand::SetDeckScratchHeld {
+            .send(RtCommand::ControlDeckPlatter {
                 deck: DeckId::A,
-                held: true,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
             })
             .unwrap();
         let mut held = [9.0; 4];
@@ -2049,9 +2731,10 @@ mod tests {
         );
 
         controller
-            .send(RtCommand::SetDeckScratchHeld {
+            .send(RtCommand::ControlDeckPlatter {
                 deck: DeckId::A,
-                held: false,
+                phase: PlatterPhase::Cancel,
+                velocity: 0.0,
             })
             .unwrap();
         let mut released = [0.0; 4];
@@ -2079,20 +2762,25 @@ mod tests {
         let frozen = controller.snapshot().deck_frames[0];
 
         controller
-            .send(RtCommand::SetDeckScratchHeld {
+            .send(RtCommand::ControlDeckPlatter {
                 deck: DeckId::A,
-                held: true,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
             })
             .unwrap();
         let mut held = [9.0; 4];
         renderer.render_tracks(&track, &silent, &mut held, 48_000, 2);
-        assert_eq!(held, [0.0; 4]);
+        assert!(
+            held.iter().any(|sample| sample.abs() > 0.0),
+            "a stationary held platter must keep speaking the grain under the needle"
+        );
         assert_eq!(controller.snapshot().deck_frames[0], frozen);
 
         controller
-            .send(RtCommand::ScratchDeck {
+            .send(RtCommand::ControlDeckPlatter {
                 deck: DeckId::A,
-                delta_frames: 240.0,
+                phase: PlatterPhase::Move,
+                velocity: 0.625,
             })
             .unwrap();
         let mut scratched = [0.0; 96];
@@ -2106,6 +2794,949 @@ mod tests {
             frozen,
             "the needle must follow platter motion instead of waiting for note-off"
         );
+    }
+
+    #[test]
+    fn paused_platter_scratch_is_audible_without_changing_play_intent() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let track =
+            DecodedTrack::from_interleaved_stereo([0.5, -0.5].repeat(48_000), 48_000).unwrap();
+        let silent = DecodedTrack::from_interleaved_stereo([0.0, 0.0].repeat(8), 48_000).unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: 0.625,
+            })
+            .unwrap();
+
+        let mut scratched = vec![0.0; 4_000];
+        renderer.render_tracks(&track, &silent, &mut scratched, 48_000, 2);
+        let snapshot = controller.snapshot();
+        assert!(scratched.iter().any(|sample| sample.abs() > 0.0));
+        assert!(
+            snapshot.deck_frames[0] > 0,
+            "a paused platter must move with the tick instead of waiting for note-off"
+        );
+        assert!(
+            !snapshot.playing,
+            "scratch must not become a global Play command"
+        );
+        assert!(
+            !snapshot.deck_playing[0],
+            "the paused Deck must stay logically paused"
+        );
+    }
+
+    #[test]
+    fn light_touch_release_resumes_play_immediately() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let track =
+            DecodedTrack::from_interleaved_stereo([0.5, -0.5].repeat(48_000), 48_000).unwrap();
+        let silent = DecodedTrack::from_interleaved_stereo([0.0, 0.0].repeat(8), 48_000).unwrap();
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 24_000], 48_000, 2);
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 64], 48_000, 2);
+        let frozen = controller.snapshot().deck_frames[0];
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::End,
+                velocity: 0.0,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 128], 48_000, 2);
+        let snapshot = controller.snapshot();
+        assert!(
+            !snapshot.deck_scratch_held[0],
+            "decoded tap leaves the scratch voice instead of a vinyl motor ramp"
+        );
+        assert!(
+            (snapshot.deck_audible_rates[0] - 1.0).abs() < 0.05,
+            "play speed must return immediately, got {}",
+            snapshot.deck_audible_rates[0]
+        );
+        assert!(
+            snapshot.deck_frames[0] >= frozen + 50,
+            "the needle must be walking at play speed after a tap ({frozen} -> {})",
+            snapshot.deck_frames[0]
+        );
+
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        // A few encoder jitter ticks must still count as a light touch, not a throw.
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: 0.10416666666666667,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 32], 48_000, 2);
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::End,
+                velocity: 0.10416666666666667,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 128], 48_000, 2);
+        let again = controller.snapshot();
+        assert!(
+            (again.deck_audible_rates[0] - 1.0).abs() < 0.05,
+            "repeated taps must not stack a slower and slower startup, got {}",
+            again.deck_audible_rates[0]
+        );
+    }
+
+    #[test]
+    fn streaming_light_touch_hands_back_at_the_buffered_head() {
+        let (stream, mut writer) = StreamSource::<[f32; 2]>::bounded(32_768);
+        for frame in 0..24_000 {
+            let sample = 0.2 + (frame as f32 / 24_000.0) * 0.6;
+            writer.push([sample, -sample], || false).unwrap();
+        }
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared(
+                DeckId::A,
+                77,
+                SourceKind::Stream,
+                Arc::as_ptr(&stream) as usize,
+                0,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        renderer.render_prepared(&mut vec![0.0; 8_000], 48_000, 1);
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        renderer.render_prepared(&mut vec![0.0; 64], 48_000, 1);
+        let frozen = controller.snapshot().deck_frames[0];
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::End,
+                velocity: 0.0,
+            })
+            .unwrap();
+        let mut out = vec![0.0; 2_048];
+        renderer.render_prepared(&mut out, 48_000, 1);
+        let snapshot = controller.snapshot();
+        assert!(
+            !snapshot.deck_scratch_held[0],
+            "a tap already at the buffered head should leave the temporary scratch voice"
+        );
+        assert!(
+            (snapshot.deck_audible_rates[0] - 1.0).abs() < 0.08,
+            "streaming tap must snap to play speed, got {}",
+            snapshot.deck_audible_rates[0]
+        );
+        assert!(
+            snapshot.deck_frames[0] >= frozen + 1_000,
+            "playthrough must keep walking ({frozen} -> {})",
+            snapshot.deck_frames[0]
+        );
+        assert!(
+            out.iter().any(|sample| sample.abs() > 0.05),
+            "scratch-tape playthrough must keep speaking after a light lift"
+        );
+    }
+
+    #[test]
+    fn streaming_throw_catches_the_buffered_head_after_inertia() {
+        let (stream, mut writer) = StreamSource::<[f32; 2]>::bounded(750_000);
+        for frame in 0..700_000 {
+            let sample = 0.2 + (frame as f32 / 700_000.0) * 0.6;
+            writer.push([sample, -sample], || false).unwrap();
+        }
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared(
+                DeckId::A,
+                78,
+                SourceKind::Stream,
+                Arc::as_ptr(&stream) as usize,
+                0,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        renderer.render_prepared(&mut vec![0.0; 8_000], 48_000, 1);
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: 8.0,
+            })
+            .unwrap();
+        renderer.render_prepared(&mut vec![0.0; 64], 48_000, 1);
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::End,
+                velocity: 8.0,
+            })
+            .unwrap();
+        // Vinyl mass approaches transport asymptotically; wait until the handoff snaps.
+        let mut audible = 0.0_f32;
+        for _ in 0..40 {
+            renderer.render_prepared(&mut vec![0.0; 24_000], 48_000, 1);
+            audible = controller.snapshot().deck_audible_rates[0];
+            if (audible - 1.0).abs() < 0.1 {
+                break;
+            }
+        }
+        assert!(
+            (audible - 1.0).abs() < 0.1,
+            "throw coast must settle onto play speed, got {audible}"
+        );
+        // Well past parked-finger still-friction (160ms). Playthrough must not brake to 0.
+        renderer.render_prepared(&mut vec![0.0; 24_000], 48_000, 1);
+        let settled = controller.snapshot();
+        assert!(
+            !settled.deck_scratch_held[0],
+            "once cached history catches the source head, scratch ownership must end"
+        );
+        assert!(
+            (settled.deck_audible_rates[0] - 1.0).abs() < 0.1,
+            "after inertia settles, play speed must stick — still-friction must not brake to 0, got {}",
+            settled.deck_audible_rates[0]
+        );
+        let at = settled.deck_frames[0];
+        renderer.render_prepared(&mut vec![0.0; 8_000], 48_000, 1);
+        assert!(
+            controller.snapshot().deck_frames[0] > at + 4_000,
+            "playthrough must keep walking after the coast window"
+        );
+    }
+
+    #[test]
+    fn paused_deck_reports_zero_audible_rate() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let track =
+            DecodedTrack::from_interleaved_stereo([0.5, -0.5].repeat(8_000), 48_000).unwrap();
+        let silent = DecodedTrack::from_interleaved_stereo([0.0; 8].to_vec(), 48_000).unwrap();
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 1_024], 48_000, 2);
+        assert!((controller.snapshot().deck_audible_rates[0] - 1.0).abs() < 0.05);
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: false,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 1_024], 48_000, 2);
+        assert!(
+            controller.snapshot().deck_audible_rates[0].abs() < 0.02,
+            "a parked Deck must not publish TEMPO as audible rate, got {}",
+            controller.snapshot().deck_audible_rates[0]
+        );
+    }
+
+    #[test]
+    fn a_fast_jog_burst_accelerates_instead_of_teleporting_to_the_hand() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let track =
+            DecodedTrack::from_interleaved_stereo([0.5, -0.5].repeat(96_000), 48_000).unwrap();
+        let silent = DecodedTrack::from_interleaved_stereo([0.0, 0.0].repeat(8), 48_000).unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        // A high-magnitude Reloop packet is a speed observation. It must ramp toward 8x rather
+        // than applying all encoded distance as an absolute playhead target.
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: 8.0,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 768], 48_000, 2);
+        let frames = controller.snapshot().deck_frames[0];
+        assert!(
+            frames > 700 && frames < 3_000,
+            "a flick should accelerate the platter, not teleport to a hand target, got {frames}"
+        );
+        assert!(controller.snapshot().deck_audible_rates[0] > 3.0);
+    }
+
+    #[test]
+    fn scratch_release_coasts_instead_of_jumping_to_transport_in_five_milliseconds() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let track =
+            DecodedTrack::from_interleaved_stereo([0.5, -0.5].repeat(480_000), 48_000).unwrap();
+        let silent = DecodedTrack::from_interleaved_stereo([0.0, 0.0].repeat(8), 48_000).unwrap();
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 24_000], 48_000, 2);
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: -6.25,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 64], 48_000, 2);
+        let released_at = controller.snapshot().deck_frames[0];
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::End,
+                velocity: -6.25,
+            })
+            .unwrap();
+        let mut bridge = vec![0.0; 2_000];
+        renderer.render_tracks(&track, &silent, &mut bridge, 48_000, 2);
+        let snapshot = controller.snapshot();
+        assert!(
+            snapshot.deck_scratch_held[0],
+            "Mixxx keeps scratch2_enable on through the disable ramp"
+        );
+        assert!(
+            snapshot.deck_audible_rates[0] < 0.5,
+            "vinyl mass must not snap back to +1x in a handful of milliseconds, got {}",
+            snapshot.deck_audible_rates[0]
+        );
+        assert!(
+            bridge.iter().any(|sample| sample.abs() > 0.05),
+            "coasting reverse must keep speaking already-decoded PCM"
+        );
+        assert!(snapshot.deck_frames[0] < released_at);
+
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 192_000], 48_000, 2);
+        let settled = controller.snapshot();
+        assert!(
+            settled.deck_audible_rates[0] > snapshot.deck_audible_rates[0],
+            "a playing spin-back must be ramping back toward transport, got {} from {}",
+            settled.deck_audible_rates[0],
+            snapshot.deck_audible_rates[0]
+        );
+        assert!(settled.deck_playing[0]);
+    }
+
+    #[test]
+    fn scratch_tape_keeps_history_across_reverse_lookups() {
+        let mut tape = ScratchTape::new();
+        tape.push_at(0.0, [0.0, 0.0], 1.0);
+        tape.push_at(1.0, [1.0, -1.0], 1.0);
+        tape.push_at(2.0, [2.0, -2.0], 1.0);
+        let middle = tape.get(0.5);
+        assert!((middle[0] - 0.5).abs() < 0.000_1, "{middle:?}");
+        assert!((middle[1] + 0.5).abs() < 0.000_1, "{middle:?}");
+        assert!(
+            tape.get(0.25)[0] > 0.0,
+            "a reverse lookup must replay history instead of going silent"
+        );
+
+        tape.push_at(1.0, [1.0, -1.0], 1.0);
+        assert!(
+            (tape.get(0.5)[0] - 0.5).abs() < 0.000_1,
+            "rewriting an interior frame must not wipe earlier vinyl history"
+        );
+        assert_eq!(tape.end_position(), Some(3.0));
+
+        tape.push_at(4.0, [4.0, -4.0], 1.0);
+        tape.push_at(3.0, [3.0, -3.0], 1.0);
+        assert_eq!(tape.get(4.0)[0], 4.0);
+        assert!(
+            (tape.get(0.5)[0] - 0.5).abs() < 0.000_1,
+            "appending and filling a one-frame hole must keep earlier history"
+        );
+
+        tape.push_at(10_000.0, [0.4, 0.4], 1.0);
+        assert_eq!(
+            tape.end_position(),
+            Some(10_001.0),
+            "a far seek starts a new cache window"
+        );
+        assert_eq!(tape.get(0.5), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn callback_snapshot_carries_dac_presentation_time() {
+        let (controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        let mut output = [0.0; 480];
+        renderer.render_prepared_timed(
+            &mut output,
+            48_000,
+            1,
+            OutputCallbackTiming {
+                callback_time_ns: 1_000_000,
+                playback_time_ns: 2_000_000,
+            },
+        );
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.callback_time_ns, 1_000_000);
+        assert_eq!(snapshot.presentation_time_ns, 12_000_000);
+        assert_eq!(snapshot.output_sample_rate, 48_000);
+    }
+
+    #[test]
+    fn held_platter_keeps_spinning_between_ticks_instead_of_stopping_on_the_hand() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let track =
+            DecodedTrack::from_interleaved_stereo([0.5, -0.5].repeat(48_000), 48_000).unwrap();
+        let silent = DecodedTrack::from_interleaved_stereo([0.0, 0.0].repeat(8), 48_000).unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: 1.25,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 480], 48_000, 2);
+        let after_tick = controller.snapshot().deck_frames[0];
+        assert!(after_tick > 0, "the first tick must start the platter");
+
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 480], 48_000, 2);
+        let between = controller.snapshot().deck_frames[0];
+        assert!(
+            between > after_tick,
+            "between ticks the needle must keep integrating velocity ({after_tick} -> {between})"
+        );
+
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 192_000], 48_000, 2);
+        let parked = controller.snapshot().deck_frames[0];
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 4_000], 48_000, 2);
+        assert!(
+            (controller.snapshot().deck_frames[0] - parked).abs() <= 2,
+            "a parked finger must friction to rest, not keep flying"
+        );
+    }
+
+    #[test]
+    fn releasing_while_the_platter_is_still_spinning_coasts() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let track =
+            DecodedTrack::from_interleaved_stereo([0.5, -0.5].repeat(48_000), 48_000).unwrap();
+        let silent = DecodedTrack::from_interleaved_stereo([0.0, 0.0].repeat(8), 48_000).unwrap();
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 8_000], 48_000, 2);
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: 6.25,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 64], 48_000, 2);
+        let spinning = controller.snapshot();
+        assert!(
+            spinning.deck_audible_rates[0] > 0.5,
+            "release must happen while the platter still has throw velocity, got {}",
+            spinning.deck_audible_rates[0]
+        );
+        let at_release = spinning.deck_frames[0];
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::End,
+                velocity: 6.25,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 8_000], 48_000, 2);
+        let coasting = controller.snapshot();
+        assert!(
+            coasting.deck_frames[0] > at_release,
+            "note-off must keep integrating the throw ({at_release} -> {})",
+            coasting.deck_frames[0]
+        );
+        assert!(
+            coasting.deck_playing[0],
+            "playing throw coast keeps transport intent"
+        );
+    }
+
+    #[test]
+    fn atomic_midi_note_off_preserves_final_velocity_after_delivery_gap() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let track =
+            DecodedTrack::from_interleaved_stereo([0.5, -0.5].repeat(480_000), 48_000).unwrap();
+        let silent = DecodedTrack::from_interleaved_stereo([0.0, 0.0].repeat(8), 48_000).unwrap();
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 8_000], 48_000, 2);
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: 6.25,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 64], 48_000, 2);
+        let spinning = controller.snapshot();
+        assert!(
+            spinning.deck_audible_rates[0] > 0.5,
+            "the throw must be armed before the capacitive lift gap, got {}",
+            spinning.deck_audible_rates[0]
+        );
+        // Simulate 220 ms of IPC/event delay. End carries the source-timestamped final velocity,
+        // so callback idling before delivery cannot turn the throw into zero.
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 10_560], 48_000, 2);
+        let at_release = controller.snapshot().deck_frames[0];
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::End,
+                velocity: 6.25,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 8_000], 48_000, 2);
+        let coasting = controller.snapshot();
+        assert!(
+            coasting.deck_frames[0] > at_release + 1_000,
+            "note-off after a MIDI-sized gap must keep the throw ({at_release} -> {})",
+            coasting.deck_frames[0]
+        );
+        assert!(
+            coasting.deck_audible_rates[0].abs() > 0.2,
+            "the restored throw must still be audible, got {}",
+            coasting.deck_audible_rates[0]
+        );
+    }
+
+    #[test]
+    fn maximum_pointer_velocity_stays_inside_decoded_audio() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let samples: Vec<f32> = (0..48_000)
+            .flat_map(|index| {
+                let value = (index as f32 / 48_000.0) * 0.8 + 0.1;
+                [value, -value]
+            })
+            .collect();
+        let track = DecodedTrack::from_interleaved_stereo(samples, 48_000).unwrap();
+        let silent = DecodedTrack::from_interleaved_stereo([0.0, 0.0].repeat(8), 48_000).unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: 8.0,
+            })
+            .unwrap();
+        let mut scratched = vec![0.0; 4_000];
+        renderer.render_tracks(&track, &silent, &mut scratched, 48_000, 2);
+        let peak = scratched
+            .iter()
+            .copied()
+            .map(f32::abs)
+            .fold(0.0_f32, f32::max);
+        assert!(
+            peak > 0.05,
+            "a maximum-speed flick must keep speaking instead of snapping past the file, peak={peak}"
+        );
+        let frames = controller.snapshot().deck_frames[0];
+        assert!(
+            frames <= 48_000,
+            "velocity clamp must keep the needle inside already-decoded PCM, got {frames}"
+        );
+    }
+
+    #[test]
+    fn paused_scratch_release_coasts_to_rest_without_starting_transport() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let track =
+            DecodedTrack::from_interleaved_stereo([0.5, -0.5].repeat(48_000), 48_000).unwrap();
+        let silent = DecodedTrack::from_interleaved_stereo([0.0, 0.0].repeat(8), 48_000).unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: 6.25,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 64], 48_000, 2);
+        let at_release = controller.snapshot().deck_frames[0];
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::End,
+                velocity: 6.25,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 8_000], 48_000, 2);
+        let coasting = controller.snapshot();
+        assert!(coasting.deck_scratch_held[0]);
+        assert!(coasting.deck_frames[0] > at_release);
+        for _ in 0..20 {
+            renderer.render_tracks(&track, &silent, &mut vec![0.0; 24_000], 48_000, 2);
+            if !controller.snapshot().deck_scratch_held[0] {
+                break;
+            }
+        }
+        let settled = controller.snapshot();
+        assert!(
+            !settled.deck_scratch_held[0],
+            "paused throw must eventually release the scratch voice"
+        );
+        assert!(
+            !settled.deck_playing[0],
+            "paused coast must not become a hidden Play command"
+        );
+        assert!(
+            settled.deck_audible_rates[0].abs() < 0.02,
+            "paused lift must report zero audible rate, got {}",
+            settled.deck_audible_rates[0]
+        );
+        assert!(
+            settled.deck_frames[0] > at_release,
+            "paused throw should coast audibly before stopping ({at_release} -> {})",
+            settled.deck_frames[0]
+        );
+        let mut parked = vec![1.0; 512];
+        renderer.render_tracks(&track, &silent, &mut parked, 48_000, 2);
+        assert!(
+            parked.iter().all(|sample| sample.abs() < f32::EPSILON),
+            "a settled paused platter must be silent"
+        );
+    }
+
+    #[test]
+    fn held_scratch_keeps_speaking_between_ticks() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let samples: Vec<f32> = (0..48_000)
+            .flat_map(|index| {
+                let value = (index as f32 / 48_000.0) * 0.8 + 0.1;
+                [value, -value]
+            })
+            .collect();
+        let track = DecodedTrack::from_interleaved_stereo(samples, 48_000).unwrap();
+        let silent = DecodedTrack::from_interleaved_stereo([0.0, 0.0].repeat(8), 48_000).unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: 0.625,
+            })
+            .unwrap();
+        let mut first = vec![0.0; 2_000];
+        renderer.render_tracks(&track, &silent, &mut first, 48_000, 2);
+        let mut gap = vec![0.0; 2_000];
+        renderer.render_tracks(&track, &silent, &mut gap, 48_000, 2);
+        assert!(
+            gap.iter().any(|sample| sample.abs() > 0.05),
+            "between ticks the platter must keep speaking the moving grain, not digital zero"
+        );
+    }
+
+    #[test]
+    fn reverse_platter_scratch_stays_audible_instead_of_dropping_to_silence() {
+        let (mut controller, mut renderer) = command_channel(8);
+        let samples: Vec<f32> = (0..48_000)
+            .flat_map(|index| {
+                let value = (index as f32 / 48_000.0) * 0.8 + 0.1;
+                [value, -value]
+            })
+            .collect();
+        let track = DecodedTrack::from_interleaved_stereo(samples, 48_000).unwrap();
+        let silent = DecodedTrack::from_interleaved_stereo([0.0, 0.0].repeat(8), 48_000).unwrap();
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        renderer.render_tracks(&track, &silent, &mut vec![0.0; 24_000], 48_000, 2);
+        let started = controller.snapshot().deck_frames[0];
+        assert!(started > 1_000);
+
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: -8.0,
+            })
+            .unwrap();
+        let mut reversed = vec![0.0; 512];
+        renderer.render_tracks(&track, &silent, &mut reversed, 48_000, 2);
+        assert!(
+            reversed.iter().any(|sample| sample.abs() > 0.05),
+            "reverse vinyl must keep speaking from already-decoded PCM"
+        );
+        let after_reverse = controller.snapshot().deck_frames[0];
+        assert!(after_reverse < started, "{after_reverse} vs {started}");
+
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: 6.25,
+            })
+            .unwrap();
+        let mut forward = vec![0.0; 512];
+        renderer.render_tracks(&track, &silent, &mut forward, 48_000, 2);
+        assert!(
+            forward.iter().any(|sample| sample.abs() > 0.05),
+            "a direction change must retarget rate, not output a silent gap"
+        );
+    }
+
+    #[test]
+    fn streaming_reverse_scratch_replays_tape_instead_of_going_silent() {
+        let (stream, mut writer) = StreamSource::<[f32; 2]>::bounded(32_768);
+        for frame in 0..16_000 {
+            let sample = 0.2 + (frame as f32 / 16_000.0) * 0.6;
+            writer.push([sample, -sample], || false).unwrap();
+        }
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared(
+                DeckId::A,
+                91,
+                SourceKind::Stream,
+                Arc::as_ptr(&stream) as usize,
+                0,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
+
+        renderer.render_prepared(&mut vec![0.0; 8_000], 48_000, 1);
+        let started = controller.snapshot().deck_frames[0];
+        assert!(
+            started > 7_000,
+            "forward stream must fill vinyl history first"
+        );
+        let consumed_before_hold = stream.consumed_frames();
+
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: -8.0,
+            })
+            .unwrap();
+        let mut reversed = vec![0.0; 512];
+        renderer.render_prepared(&mut reversed, 48_000, 1);
+        assert!(
+            reversed.iter().any(|sample| sample.abs() > 0.05),
+            "streaming reverse must speak ScratchTape history, not digital zero"
+        );
+        let after_reverse = controller.snapshot().deck_frames[0];
+        assert!(after_reverse < started, "{after_reverse} vs {started}");
+        assert_eq!(
+            stream.consumed_frames(),
+            consumed_before_hold,
+            "a reverse lookup inside the tape must not consume the forward ring"
+        );
+
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: 5.208333333333333,
+            })
+            .unwrap();
+        let mut forward = vec![0.0; 512];
+        renderer.render_prepared(&mut forward, 48_000, 1);
+        assert!(
+            forward.iter().any(|sample| sample.abs() > 0.05),
+            "turning the stream platter the other way must not wipe tape into silence"
+        );
+        let longest_silence = longest_near_zero_run(&reversed) + longest_near_zero_run(&forward);
+        assert!(
+            longest_silence < 32,
+            "back-and-forth streaming scratch must not insert a digital-zero gap, longest={longest_silence}"
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn fast_streaming_platter_holds_real_audio_when_future_pcm_is_not_ready() {
+        let (stream, mut writer) = StreamSource::<[f32; 2]>::bounded(512);
+        for _ in 0..256 {
+            writer.push([0.4, -0.4], || false).unwrap();
+        }
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared(
+                DeckId::A,
+                92,
+                SourceKind::Stream,
+                Arc::as_ptr(&stream) as usize,
+                0,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        renderer.render_prepared(&mut vec![0.0; 128], 48_000, 1);
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity: 8.0,
+            })
+            .unwrap();
+        let mut output = vec![0.0; 1_024];
+        renderer.render_prepared(&mut output, 48_000, 1);
+
+        assert!(
+            output.iter().any(|sample| sample.abs() > 0.2),
+            "a depleted future ring must hold the last real grain, not switch to digital zero"
+        );
+        assert!(
+            controller.snapshot().deck_frames[0] <= 256,
+            "the audio-authority cursor must not run beyond prepared PCM"
+        );
+        drop(writer);
+    }
+
+    fn longest_near_zero_run(samples: &[f32]) -> usize {
+        let mut longest = 0;
+        let mut current = 0;
+        for sample in samples {
+            if sample.abs() < 0.02 {
+                current += 1;
+                longest = longest.max(current);
+            } else {
+                current = 0;
+            }
+        }
+        longest
     }
 
     #[test]
@@ -2200,6 +3831,60 @@ mod tests {
     }
 
     #[test]
+    fn negative_preroll_is_silent_then_releases_source_frame_zero() {
+        let (mut controller, mut renderer) = command_channel(8);
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::SetDeckPreroll {
+                deck: DeckId::A,
+                frames: 3,
+            })
+            .unwrap();
+
+        let mut output = [0.0; 6];
+        renderer.render(&[1.0; 6], &[], &mut output, 1);
+
+        assert_eq!(&output[..3], &[0.0; 3]);
+        assert_eq!(&output[3..], &[1.0; 3]);
+        assert_eq!(controller.snapshot().deck_frames[0], 3);
+    }
+
+    #[test]
+    fn pfl_uses_output_pair_three_four_before_the_channel_fader() {
+        let (mut controller, mut renderer) = command_channel(8);
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::SetDeckGain {
+                deck: DeckId::A,
+                gain: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::SetDeckPfl {
+                deck: DeckId::A,
+                enabled: true,
+            })
+            .unwrap();
+
+        let mut output = [0.0; 4];
+        renderer.render(&[0.8, 0.4, 0.0, 0.0], &[], &mut output, 4);
+
+        assert_eq!(&output[..2], &[0.0, 0.0], "channel fader mutes only master");
+        assert!((output[2] - 0.8).abs() < 0.000_01);
+        assert!((output[3] - 0.4).abs() < 0.000_01);
+    }
+
+    #[test]
     fn deck_eq_command_changes_realtime_output_before_the_next_frame() {
         let (mut controller, mut renderer) = command_channel(8);
         controller
@@ -2239,22 +3924,29 @@ mod tests {
         controller
             .send(RtCommand::SetDeckFx {
                 deck: DeckId::A,
-                echo: 1.0,
-                echo_parameter: 0.0,
-                reverb: 0.0,
-                reverb_parameter: 0.5,
-                gater: 0.0,
-                gater_parameter: 0.5,
+                slots: [
+                    crate::DeckFxSlot {
+                        kind: crate::DeckFxKind::Echo,
+                        enabled: true,
+                        mix: 1.0,
+                        parameter: 0.0,
+                    },
+                    crate::DeckFxSlot::default(),
+                    crate::DeckFxSlot::default(),
+                ],
                 pad: 0,
                 beat_seconds: 0.1,
             })
             .unwrap();
+        // Let the newly selected PARAMETER/MIX controls finish their click-free ramp before the
+        // probe impulse, otherwise the changing delay time intentionally sweeps past that impulse.
+        renderer.render(&[0.0; 600], &[], &mut [0.0; 600], 1);
         let mut input = vec![0.0; 1_000];
         input[0] = 1.0;
         let mut output = vec![0.0; input.len()];
         renderer.render(&input, &[], &mut output, 1);
         assert!(
-            output.iter().skip(250).any(|sample| sample.abs() > 0.01),
+            output.iter().skip(500).any(|sample| sample.abs() > 0.01),
             "the manual echo must produce a delayed wet sample",
         );
     }
@@ -2505,7 +4197,7 @@ mod tests {
         assert!(!std::mem::needs_drop::<RtCommand>());
         // Deck spectrum and scratch commands carry fixed arrays; keep the enum within half a
         // cache line while preserving the no-allocation realtime contract.
-        assert!(std::mem::size_of::<RtCommand>() <= 32);
+        assert!(std::mem::size_of::<RtCommand>() <= 64);
     }
 
     #[test]
@@ -2654,7 +4346,7 @@ mod tests {
         let (stream, mut writer) = StreamSource::<[f32; 2]>::bounded(16_384);
         for _ in 0..12_000 {
             writer
-                .push_with_media_advance([0.5, 0.5], 1.5, || false)
+                .push_with_media_timing([0.5, 0.5], 1.5, 42, f64::NAN, || false)
                 .unwrap();
         }
         let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
@@ -2678,8 +4370,128 @@ mod tests {
         renderer.render_prepared(&mut output, 48_000, 1);
 
         assert!(output[300..].iter().all(|sample| *sample > 0.49));
-        assert!((controller.snapshot().deck_frames[0] as i64 - 768).abs() <= 2);
+        let snapshot = controller.snapshot();
+        assert!((snapshot.deck_frames[0] as i64 - 768).abs() <= 2);
+        assert!((snapshot.deck_audible_rates[0] - 1.5).abs() < 0.000_1);
+        assert_eq!(snapshot.deck_audible_rate_revisions[0], 42);
         drop(writer);
+    }
+
+    #[test]
+    fn callback_phase_correction_resamples_buffered_pcm_without_retargeting_rubber_band() {
+        let (stream, mut writer) = StreamSource::<[f32; 2]>::bounded(16_384);
+        for frame in 0..12_000 {
+            let sample = frame as f32 / 12_000.0;
+            writer
+                .push_with_media_timing([sample, sample], 1.0, 7, f64::NAN, || false)
+                .unwrap();
+        }
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared(
+                DeckId::A,
+                79,
+                SourceKind::Stream,
+                Arc::as_ptr(&stream) as usize,
+                0,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::SetDeckPhaseCorrection {
+                deck: DeckId::A,
+                multiplier: 1.01,
+            })
+            .unwrap();
+
+        let mut output = [0.0; 480];
+        renderer.render_prepared(&mut output, 48_000, 1);
+        let snapshot = controller.snapshot();
+        assert!(output[100..].windows(2).all(|pair| pair[1] >= pair[0]));
+        assert!((snapshot.deck_frames[0] - 484).abs() <= 2);
+        assert!((snapshot.deck_audible_rates[0] - 1.01).abs() < 0.000_1);
+        assert_eq!(snapshot.deck_audible_rate_revisions[0], 7);
+        assert!(stream.consumed_frames() <= 486);
+        drop(writer);
+    }
+
+    #[test]
+    fn repeated_sync_phase_corrections_do_not_starve_a_live_r3_ring() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        let sample_rate = 12_000u32;
+        let (stream, writer) = StreamSource::<[f32; 2]>::bounded(sample_rate as usize / 2);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let worker = std::thread::spawn(move || {
+            let cancelled: Arc<dyn Fn() -> bool + Send + Sync> =
+                Arc::new(move || worker_cancel.load(Ordering::Acquire));
+            crate::stream::run_pitch_preserving_pipeline(
+                crate::TempoControl::new(0.9),
+                sample_rate,
+                sample_rate as usize,
+                writer,
+                move |mut raw, cancelled| {
+                    for frame in 0..sample_rate as usize * 3 {
+                        let sample = (frame as f32 * 0.013).sin() * 0.5;
+                        raw.push([sample, sample], || cancelled())?;
+                    }
+                    raw.finish();
+                    Ok(crate::stream::StreamMetadata {
+                        duration: Some(3.0),
+                        source_sample_rate: sample_rate,
+                        output_sample_rate: sample_rate,
+                    })
+                },
+                cancelled,
+                None,
+                None,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while stream.buffered_frames() < u64::from(sample_rate) / 10 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(stream.buffered_frames() >= u64::from(sample_rate) / 10);
+
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(32, 8);
+        controller
+            .install_prepared(
+                DeckId::A,
+                80,
+                SourceKind::Stream,
+                Arc::as_ptr(&stream) as usize,
+                0,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
+        for step in 0..50 {
+            let multiplier = if step % 2 == 0 { 0.99 } else { 1.01 };
+            controller
+                .send(RtCommand::SetDeckPhaseCorrection {
+                    deck: DeckId::A,
+                    multiplier,
+                })
+                .unwrap();
+            let mut output = vec![0.0; sample_rate as usize / 50];
+            renderer.render_prepared(&mut output, sample_rate, 1);
+            assert!(output.iter().all(|sample| sample.is_finite()));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(controller.snapshot().deck_output_underruns[0], 0);
+        cancel.store(true, Ordering::Release);
+        let _ = worker.join();
     }
 
     #[test]
@@ -2882,6 +4694,83 @@ mod tests {
         let position = controller.snapshot().deck_frames[0];
         assert!(position < 96, "loop cursor wrapped, got {position}");
         assert!(controller.snapshot().playing);
+        assert_eq!(
+            controller.snapshot().deck_discontinuity_revisions[0],
+            1,
+            "a natural decoded loop wrap is not a seek"
+        );
+    }
+
+    #[test]
+    fn redundant_set_deck_loop_does_not_bump_discontinuity() {
+        let region =
+            Arc::new(DecodedTrack::from_interleaved_stereo([0.5, 0.5].repeat(96), 48_000).unwrap());
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared(
+                DeckId::A,
+                70,
+                SourceKind::Decoded,
+                Arc::as_ptr(&region) as usize,
+                0,
+            )
+            .unwrap();
+        let mut output = [0.0; 32];
+        renderer.render_prepared(&mut output, 48_000, 1);
+        let after_install = controller.snapshot().deck_discontinuity_revisions[0];
+        assert!(after_install >= 1);
+        controller
+            .send(RtCommand::SetDeckLoop {
+                deck: DeckId::A,
+                looping: false,
+                start_frames: 0,
+                frames: 0,
+            })
+            .unwrap();
+        renderer.render_prepared(&mut output, 48_000, 1);
+        assert_eq!(
+            controller.snapshot().deck_discontinuity_revisions[0],
+            after_install,
+            "install already cleared the loop; repeating SetDeckLoop(false) must not look like a seek"
+        );
+    }
+
+    #[test]
+    fn arming_loop_inside_the_window_does_not_bump_discontinuity() {
+        let region = Arc::new(
+            DecodedTrack::from_interleaved_stereo([0.5, 0.5].repeat(480), 48_000).unwrap(),
+        );
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared(
+                DeckId::A,
+                71,
+                SourceKind::Decoded,
+                Arc::as_ptr(&region) as usize,
+                24,
+            )
+            .unwrap();
+        let mut output = [0.0; 32];
+        renderer.render_prepared(&mut output, 48_000, 1);
+        let after_install = controller.snapshot().deck_discontinuity_revisions[0];
+        controller
+            .send(RtCommand::SetDeckLoop {
+                deck: DeckId::A,
+                looping: true,
+                start_frames: 0,
+                frames: 96,
+            })
+            .unwrap();
+        renderer.render_prepared(&mut output, 48_000, 1);
+        assert_eq!(
+            controller.snapshot().deck_discontinuity_revisions[0],
+            after_install,
+            "arming LOOP while the cursor is inside the window is not a seek"
+        );
+        assert!(
+            (controller.snapshot().deck_frames[0] - 24).abs() < 32,
+            "arming LOOP must not wrap the playhead back to loop-in"
+        );
     }
 
     #[test]
@@ -2921,5 +4810,116 @@ mod tests {
             "absolute loop window should wrap into [96, 144), got {position}"
         );
         assert!(controller.snapshot().playing);
+    }
+
+    #[test]
+    fn streaming_fifo_playhead_follows_packet_media_time_through_loop_out() {
+        let sample_rate = 48_000u32;
+        let (stream, mut writer) = StreamSource::<[f32; 2]>::bounded(16_384);
+        let loop_start = 1.0;
+        let loop_length = 0.1;
+        let loop_end = loop_start + loop_length;
+        for frame in 0..12_000 {
+            let linear = loop_start + f64::from(frame) / f64::from(sample_rate);
+            let cycles = ((linear - loop_start) / loop_length).floor();
+            let media_time = loop_start + (linear - loop_start - cycles * loop_length);
+            writer
+                .push_with_media_timing([0.5, 0.5], 1.0, 0, media_time, || false)
+                .unwrap();
+        }
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared(
+                DeckId::A,
+                80,
+                SourceKind::Stream,
+                Arc::as_ptr(&stream) as usize,
+                (loop_start * f64::from(sample_rate)).round() as u64,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::SetDeckLoop {
+                deck: DeckId::A,
+                looping: true,
+                start_frames: (loop_start * f64::from(sample_rate)).round() as u64,
+                frames: (loop_length * f64::from(sample_rate)).round() as u64,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
+
+        let mut output = [0.0; 6_000];
+        renderer.render_prepared(&mut output, sample_rate, 1);
+        let playhead = controller.snapshot().deck_frames[0] as f64 / f64::from(sample_rate);
+        assert!(
+            playhead >= loop_start && playhead < loop_end,
+            "stream playhead must stay inside the armed window, got {playhead}"
+        );
+        assert_eq!(
+            controller.snapshot().deck_discontinuity_revisions[0],
+            1,
+            "FIFO loop wrap must not bump discontinuity"
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn streaming_callback_discards_look_ahead_past_loop_out() {
+        let sample_rate = 48_000u32;
+        let (stream, mut writer) = StreamSource::<[f32; 2]>::bounded(16_384);
+        let loop_start = 1.0;
+        let loop_length = 0.1;
+        let loop_end = loop_start + loop_length;
+        // Audible ring already holds linear look-ahead past out (pre-arm decode).
+        for frame in 0..8_000 {
+            let media_time = loop_start + f64::from(frame) / f64::from(sample_rate);
+            writer
+                .push_with_media_timing([0.25, 0.25], 1.0, 0, media_time, || false)
+                .unwrap();
+        }
+        // Then the decoder's loop-in refill.
+        for frame in 0..4_000 {
+            let media_time = loop_start + f64::from(frame) / f64::from(sample_rate);
+            writer
+                .push_with_media_timing([0.75, 0.75], 1.0, 0, media_time, || false)
+                .unwrap();
+        }
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared(
+                DeckId::A,
+                81,
+                SourceKind::Stream,
+                Arc::as_ptr(&stream) as usize,
+                (loop_start * f64::from(sample_rate)).round() as u64,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::SetDeckLoop {
+                deck: DeckId::A,
+                looping: true,
+                start_frames: (loop_start * f64::from(sample_rate)).round() as u64,
+                frames: (loop_length * f64::from(sample_rate)).round() as u64,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::SetPlaying {
+                playing: true,
+                fade_frames: 0,
+            })
+            .unwrap();
+
+        let mut output = [0.0; 8_000];
+        renderer.render_prepared(&mut output, sample_rate, 1);
+        let playhead = controller.snapshot().deck_frames[0] as f64 / f64::from(sample_rate);
+        assert!(
+            playhead >= loop_start && playhead < loop_end,
+            "callback must skip FIFO past loop-out so the needle stays in the blue zone, got {playhead}"
+        );
+        drop(writer);
     }
 }

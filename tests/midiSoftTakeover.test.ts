@@ -47,10 +47,11 @@ test("a whip within the Mixxx window is accepted so slow MIDI does not re-arm ta
   assert.equal(takeover.ignore(0.5, 0.95, 80 + SOFT_TAKEOVER_WHIP_MS - 1), false);
 });
 
-test("scaleRangeToUnit pins overflow to the range edge used by the virtual thumb", () => {
+test("scaleRangeToUnit pins overflow to the Pioneer fader edge used by the virtual thumb", () => {
   assert.ok(Math.abs(scaleRangeToUnit(1, 0.9, 1.1) - 0.5) < 1e-12);
-  assert.equal(scaleRangeToUnit(1.1, 0.9, 1.1), 1);
-  assert.equal(scaleRangeToUnit(1.4, 0.9, 1.1), 1);
-  assert.equal(scaleRangeToUnit(0.7, 0.9, 1.1), 0);
-  assert.equal(scaleUnitToRange(1, 0.9, 1.1), 1.1);
+  assert.equal(scaleRangeToUnit(1.1, 0.9, 1.1), 0);
+  assert.equal(scaleRangeToUnit(1.4, 0.9, 1.1), 0);
+  assert.equal(scaleRangeToUnit(0.7, 0.9, 1.1), 1);
+  assert.equal(scaleUnitToRange(1, 0.9, 1.1), 0.9);
+  assert.equal(scaleUnitToRange(0, 0.9, 1.1), 1.1);
 });

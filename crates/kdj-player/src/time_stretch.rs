@@ -10,6 +10,8 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// The public performance control and DSP both use this deliberately bounded interval.
 pub const MIN_TEMPO_RATE: f32 = 0.5;
@@ -71,13 +73,19 @@ unsafe extern "C" {
 #[derive(Clone, Debug)]
 pub struct TempoControl {
     lane: TempoLane,
+    applied_rate_bits: Arc<AtomicU32>,
+    applied_revision: Arc<AtomicU64>,
     deck: Option<usize>,
 }
 
 impl TempoControl {
     pub fn new(rate: f32) -> Self {
+        let rate = normalize_rate(rate);
+        let lane = TempoLane::standalone(rate);
         Self {
-            lane: TempoLane::standalone(normalize_rate(rate)),
+            applied_rate_bits: Arc::new(AtomicU32::new(rate.to_bits())),
+            applied_revision: Arc::new(AtomicU64::new(lane.revision())),
+            lane,
             deck: None,
         }
     }
@@ -87,8 +95,11 @@ impl TempoControl {
     pub fn for_deck(deck: usize, rate: f32) -> Self {
         let rate = normalize_rate(rate);
         work_scheduler().publish_deck_tempo(deck, rate);
+        let lane = TempoLane::standalone(rate);
         Self {
-            lane: TempoLane::standalone(rate),
+            applied_rate_bits: Arc::new(AtomicU32::new(rate.to_bits())),
+            applied_revision: Arc::new(AtomicU64::new(lane.revision())),
+            lane,
             deck: Some(deck),
         }
     }
@@ -103,6 +114,29 @@ impl TempoControl {
 
     pub fn rate(&self) -> f32 {
         normalize_rate(self.lane.rate())
+    }
+
+    /// Monotonic latest-value revision written by the control thread.
+    pub fn revision(&self) -> u64 {
+        self.lane.revision()
+    }
+
+    /// Rate/revision that the worker has actually handed to Rubber Band. This is deliberately
+    /// separate from rate(): queued old-tempo PCM may still remain audible afterward.
+    pub fn applied_rate(&self) -> f32 {
+        normalize_rate(f32::from_bits(
+            self.applied_rate_bits.load(Ordering::Acquire),
+        ))
+    }
+
+    pub fn applied_revision(&self) -> u64 {
+        self.applied_revision.load(Ordering::Acquire)
+    }
+
+    fn mark_applied(&self, rate: f32, revision: u64) {
+        self.applied_rate_bits
+            .store(normalize_rate(rate).to_bits(), Ordering::Release);
+        self.applied_revision.store(revision, Ordering::Release);
     }
 
     pub fn is_unity(&self) -> bool {
@@ -158,6 +192,7 @@ pub struct PitchPreservingStretcher<F: TimeStretchFrame> {
     zero_ptrs: Vec<*const f32>,
     next_required: usize,
     applied_rate: f32,
+    applied_revision: u64,
     engine_engaged: bool,
     tempo_engaged: bool,
     source_frames_since_rate_update: usize,
@@ -165,6 +200,8 @@ pub struct PitchPreservingStretcher<F: TimeStretchFrame> {
     expected_output_frames: f64,
     emitted_output_frames: usize,
     rate_spans: VecDeque<RateSpan>,
+    source_times: VecDeque<f64>,
+    last_source_time: f64,
     realtime_activity: Option<WorkActivityGuard>,
     finished: bool,
     marker: PhantomData<F>,
@@ -174,6 +211,7 @@ pub struct PitchPreservingStretcher<F: TimeStretchFrame> {
 struct RateSpan {
     output_frames: f64,
     rate: f32,
+    revision: u64,
 }
 
 impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
@@ -186,6 +224,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
         }
 
         let rate = control.rate();
+        let revision = control.revision();
         // SAFETY: the vendored C API returns one uniquely-owned state or null on failure.
         let state = unsafe {
             rubberband_new(
@@ -214,6 +253,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
             zero_ptrs: vec![std::ptr::null(); F::CHANNELS],
             next_required: 1,
             applied_rate: rate,
+            applied_revision: revision,
             engine_engaged: !is_unity_rate(rate) || Self::keep_engine_primed(),
             tempo_engaged: !is_unity_rate(rate),
             source_frames_since_rate_update: 0,
@@ -221,6 +261,8 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
             expected_output_frames: 0.0,
             emitted_output_frames: 0,
             rate_spans: VecDeque::new(),
+            source_times: VecDeque::new(),
+            last_source_time: f64::NAN,
             realtime_activity: (!is_unity_rate(rate))
                 .then(|| work_scheduler().activity(WorkClass::TempoStretch)),
             finished: false,
@@ -232,6 +274,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
         }
         if !processor.engine_engaged {
             processor.applied_rate = 1.0;
+            processor.control.mark_applied(1.0, revision);
         } else {
             processor.configure_and_prime()?;
         }
@@ -258,14 +301,19 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
         self.expected_output_frames = 0.0;
         self.emitted_output_frames = 0;
         self.rate_spans.clear();
+        self.source_times.clear();
+        self.last_source_time = f64::NAN;
         self.source_frames_since_rate_update = 0;
         self.finished = false;
         let rate = self.control.rate();
+        let revision = self.control.revision();
         self.engine_engaged = !is_unity_rate(rate) || Self::keep_engine_primed();
         self.tempo_engaged = !is_unity_rate(rate);
         self.sync_realtime_activity(rate);
         if !self.engine_engaged {
             self.applied_rate = 1.0;
+            self.applied_revision = revision;
+            self.control.mark_applied(1.0, revision);
             self.remaining_start_delay = 0;
             self.next_required = 1;
             return Ok(());
@@ -278,10 +326,23 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
     /// Feed one hardware-rate source frame. Newly available output is delivered before return.
     pub fn push<S>(&mut self, frame: F, mut sink: S) -> Result<()>
     where
-        S: FnMut(F, f32) -> Result<()>,
+        S: FnMut(F, f32, u64) -> Result<()>,
+    {
+        self.push_timed(frame, f64::NAN, |frame, media_advance, revision, _| {
+            sink(frame, media_advance, revision)
+        })
+    }
+
+    pub fn push_timed<S>(&mut self, frame: F, media_time: f64, mut sink: S) -> Result<()>
+    where
+        S: FnMut(F, f32, u64, f64) -> Result<()>,
     {
         if self.finished {
             return Ok(());
+        }
+        if media_time.is_finite() {
+            self.source_times.push_back(media_time);
+            self.last_source_time = media_time;
         }
         let rate = self.control.rate();
         if !is_unity_rate(rate) {
@@ -290,7 +351,10 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
         self.sync_realtime_activity(rate);
         if is_unity_rate(rate) && !self.tempo_engaged {
             self.applied_rate = 1.0;
-            sink(frame, 1.0)?;
+            self.applied_revision = self.control.revision();
+            self.control.mark_applied(1.0, self.applied_revision);
+            let _ = self.source_times.pop_front();
+            sink(frame, 1.0, self.applied_revision, media_time)?;
             return Ok(());
         }
         if !self.engine_engaged {
@@ -313,7 +377,14 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
     /// Mark EOF, drain Rubber Band, and trim real-time mode's rounded final padding.
     pub fn finish<S>(&mut self, mut sink: S) -> Result<()>
     where
-        S: FnMut(F, f32) -> Result<()>,
+        S: FnMut(F, f32, u64) -> Result<()>,
+    {
+        self.finish_timed(|frame, media_advance, revision, _| sink(frame, media_advance, revision))
+    }
+
+    pub fn finish_timed<S>(&mut self, mut sink: S) -> Result<()>
+    where
+        S: FnMut(F, f32, u64, f64) -> Result<()>,
     {
         if self.finished {
             return Ok(());
@@ -331,7 +402,10 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
 
     fn configure_and_prime(&mut self) -> Result<()> {
         let rate = self.control.rate();
+        let revision = self.control.revision();
         self.applied_rate = rate;
+        self.applied_revision = revision;
+        self.control.mark_applied(rate, revision);
         self.source_frames_since_rate_update = 0;
         // SAFETY: all calls occur before this state's next real input block and on one thread.
         unsafe {
@@ -370,6 +444,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
 
     fn update_rate(&mut self, incoming_frames: usize) {
         let rate = self.control.rate();
+        let revision = self.control.revision();
         self.sync_realtime_activity(rate);
         self.source_frames_since_rate_update = self
             .source_frames_since_rate_update
@@ -382,7 +457,15 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
                 rubberband_set_time_ratio(self.state.as_ptr(), 1.0 / f64::from(rate));
             }
             self.applied_rate = rate;
+            self.applied_revision = revision;
+            self.control.mark_applied(rate, revision);
             self.source_frames_since_rate_update = 0;
+        } else if (rate - self.applied_rate).abs() <= f32::EPSILON
+            && revision != self.applied_revision
+        {
+            // Rewriting the same value still forms an ordering fence (for example a jog release).
+            self.applied_revision = revision;
+            self.control.mark_applied(rate, revision);
         }
     }
 
@@ -411,16 +494,16 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
         let output_frames = frames as f64 / f64::from(self.applied_rate);
         self.expected_output_frames += output_frames;
         if output_frames > 0.0 {
-            if let Some(last) = self
-                .rate_spans
-                .back_mut()
-                .filter(|last| (last.rate - self.applied_rate).abs() <= f32::EPSILON)
-            {
+            if let Some(last) = self.rate_spans.back_mut().filter(|last| {
+                (last.rate - self.applied_rate).abs() <= f32::EPSILON
+                    && last.revision == self.applied_revision
+            }) {
                 last.output_frames += output_frames;
             } else {
                 self.rate_spans.push_back(RateSpan {
                     output_frames,
                     rate: self.applied_rate,
+                    revision: self.applied_revision,
                 });
             }
         }
@@ -470,7 +553,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
 
     fn drain_output<S>(&mut self, final_limit: Option<usize>, sink: &mut S) -> Result<()>
     where
-        S: FnMut(F, f32) -> Result<()>,
+        S: FnMut(F, f32, u64, f64) -> Result<()>,
     {
         loop {
             let available = unsafe { rubberband_available(self.state.as_ptr()) };
@@ -496,16 +579,37 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
                 if final_limit.is_some_and(|limit| self.emitted_output_frames >= limit) {
                     continue;
                 }
-                let media_advance = self.next_media_advance();
-                sink(F::from_planar(&self.output, frame), media_advance)?;
+                let (media_advance, revision) = self.next_media_timing();
+                let media_time = self.take_source_time(media_advance);
+                sink(
+                    F::from_planar(&self.output, frame),
+                    media_advance,
+                    revision,
+                    media_time,
+                )?;
                 self.emitted_output_frames += 1;
             }
         }
     }
 
-    fn next_media_advance(&mut self) -> f32 {
+    fn take_source_time(&mut self, media_advance: f32) -> f64 {
+        let steps = media_advance.max(1.0).round() as usize;
+        let mut time = self.last_source_time;
+        for _ in 0..steps.max(1) {
+            if let Some(next) = self.source_times.pop_front() {
+                time = next;
+            }
+        }
+        if time.is_finite() {
+            self.last_source_time = time;
+        }
+        time
+    }
+
+    fn next_media_timing(&mut self) -> (f32, u64) {
         let mut output_remaining = 1.0f64;
         let mut media_advance = 0.0f64;
+        let mut revision = self.applied_revision;
         while output_remaining > 1e-9 {
             let Some(span) = self.rate_spans.front_mut() else {
                 media_advance += output_remaining * f64::from(self.applied_rate);
@@ -513,13 +617,14 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
             };
             let taken = span.output_frames.min(output_remaining);
             media_advance += taken * f64::from(span.rate);
+            revision = span.revision;
             span.output_frames -= taken;
             output_remaining -= taken;
             if span.output_frames <= 1e-9 {
                 self.rate_spans.pop_front();
             }
         }
-        media_advance as f32
+        (media_advance as f32, revision)
     }
 }
 
@@ -560,14 +665,14 @@ mod tests {
         let mut output = Vec::new();
         for frame in input {
             processor
-                .push(*frame, |frame, _| {
+                .push(*frame, |frame, _, _| {
                     output.push(frame);
                     Ok(())
                 })
                 .unwrap();
         }
         processor
-            .finish(|frame, _| {
+            .finish(|frame, _, _| {
                 output.push(frame);
                 Ok(())
             })
@@ -621,7 +726,7 @@ mod tests {
                 control.set(1.5);
             }
             processor
-                .push(frame, |frame, media_advance| {
+                .push(frame, |frame, media_advance, _| {
                     output.push(frame);
                     media_frames += f64::from(media_advance);
                     Ok(())
@@ -629,7 +734,7 @@ mod tests {
                 .unwrap();
         }
         processor
-            .finish(|frame, media_advance| {
+            .finish(|frame, media_advance, _| {
                 output.push(frame);
                 media_frames += f64::from(media_advance);
                 Ok(())
@@ -659,14 +764,14 @@ mod tests {
                 control.set(0.8 + triangle as f32 * 0.01);
             }
             processor
-                .push(frame, |frame, _| {
+                .push(frame, |frame, _, _| {
                     output.push(frame);
                     Ok(())
                 })
                 .unwrap();
         }
         processor
-            .finish(|frame, _| {
+            .finish(|frame, _, _| {
                 output.push(frame);
                 Ok(())
             })
@@ -712,14 +817,14 @@ mod tests {
             lanes[6] = signal;
             lanes[7] = signal;
             processor
-                .push(StemFrame::separated_with_gain(lanes, 1.2), |frame, _| {
+                .push(StemFrame::separated_with_gain(lanes, 1.2), |frame, _, _| {
                     output.push(frame);
                     Ok(())
                 })
                 .unwrap();
         }
         processor
-            .finish(|frame, _| {
+            .finish(|frame, _, _| {
                 output.push(frame);
                 Ok(())
             })
@@ -752,7 +857,7 @@ mod tests {
         let lanes = [0.11, -0.12, 0.21, -0.22, 0.31, -0.32, 0.41, -0.42];
         let mut output = Vec::new();
         processor
-            .push(StemFrame::separated(lanes), |frame, _| {
+            .push(StemFrame::separated(lanes), |frame, _, _| {
                 output.push(frame);
                 Ok(())
             })
@@ -778,14 +883,14 @@ mod tests {
             lanes[0] = signal;
             lanes[1] = signal;
             processor
-                .push(StemFrame::separated(lanes), |frame, _| {
+                .push(StemFrame::separated(lanes), |frame, _, _| {
                     output.push(frame);
                     Ok(())
                 })
                 .unwrap();
         }
         processor
-            .finish(|frame, _| {
+            .finish(|frame, _, _| {
                 output.push(frame);
                 Ok(())
             })
@@ -821,14 +926,14 @@ mod tests {
         let mut first = Vec::new();
         for frame in &input {
             processor
-                .push(*frame, |frame, _| {
+                .push(*frame, |frame, _, _| {
                     first.push(frame);
                     Ok(())
                 })
                 .unwrap();
         }
         processor
-            .finish(|frame, _| {
+            .finish(|frame, _, _| {
                 first.push(frame);
                 Ok(())
             })
@@ -838,14 +943,14 @@ mod tests {
         let mut second = Vec::new();
         for frame in &input {
             processor
-                .push(*frame, |frame, _| {
+                .push(*frame, |frame, _, _| {
                     second.push(frame);
                     Ok(())
                 })
                 .unwrap();
         }
         processor
-            .finish(|frame, _| {
+            .finish(|frame, _, _| {
                 second.push(frame);
                 Ok(())
             })

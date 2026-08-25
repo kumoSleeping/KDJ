@@ -24,6 +24,8 @@ pub struct MidiDevices {
 pub struct MidiMessageEvent {
     pub port: String,
     pub bytes: Vec<u8>,
+    /// Device callback time in microseconds. Only differences are consumed by the WebView.
+    pub timestamp_micros: u64,
 }
 
 struct MidiPorts {
@@ -216,7 +218,7 @@ fn connect_input(app: AppHandle, name: &str) -> Result<MidiInputConnection<()>, 
     midi.connect(
         &port,
         "kdj-midi-in",
-        move |_timestamp, message, _| {
+        move |timestamp, message, _| {
             if message.is_empty() || message[0] >= 0xf0 {
                 return;
             }
@@ -225,6 +227,7 @@ fn connect_input(app: AppHandle, name: &str) -> Result<MidiInputConnection<()>, 
                 MidiMessageEvent {
                     port: port_name.clone(),
                     bytes: message.to_vec(),
+                    timestamp_micros: timestamp,
                 },
             ) {
                 tracing::debug!("转发 MIDI 失败：{error}");

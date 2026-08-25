@@ -8,6 +8,11 @@ import {
 import { useAppStore } from "./appStore";
 import { useLibraryStore } from "./libraryStore";
 import { removePendingVirtualDiskDownloads } from "../lib/oneLibraryDownloadPersistence";
+import {
+  readWorkspaceSession,
+  setRestorableWorkspaceSource,
+  updateOneLibraryWorkspaceSession,
+} from "../lib/workspaceSession";
 import type {
   OneLibraryPlaylist,
   OneLibraryTarget,
@@ -55,6 +60,16 @@ function writeSelectedTarget(target: OneLibraryTarget | null): void {
     // 存储不可用不影响当前会话。
   }
 }
+
+const RESTORED_ONE_LIBRARY_SESSION = readWorkspaceSession().oneLibrary;
+const RESTORED_ONE_LIBRARY_TARGET =
+  readSelectedTarget() ?? RESTORED_ONE_LIBRARY_SESSION.target;
+const RESTORED_ONE_LIBRARY_FOCUS =
+  RESTORED_ONE_LIBRARY_TARGET &&
+  RESTORED_ONE_LIBRARY_SESSION.target?.device_path === RESTORED_ONE_LIBRARY_TARGET.device_path &&
+  RESTORED_ONE_LIBRARY_SESSION.target.playlist_id === RESTORED_ONE_LIBRARY_TARGET.playlist_id
+    ? RESTORED_ONE_LIBRARY_SESSION.focusedContentId
+    : null;
 
 export type OneLibrarySelectMode = "replace" | "toggle" | "range";
 
@@ -138,11 +153,11 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
   exporting: null,
   deviceError: "",
   lastExport: null,
-  selectedTarget: readSelectedTarget(),
+  selectedTarget: RESTORED_ONE_LIBRARY_TARGET,
   selectedTracks: [],
   visibleContentIds: null,
-  selectedContentIds: [],
-  focusedContentId: null,
+  selectedContentIds: RESTORED_ONE_LIBRARY_FOCUS ? [RESTORED_ONE_LIBRARY_FOCUS] : [],
+  focusedContentId: RESTORED_ONE_LIBRARY_FOCUS,
   selectionMode: false,
   tracksLoading: false,
   importing: false,
@@ -185,6 +200,10 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
       const selected = get().selectedTarget;
       if (selectedBeforeRefresh && !selected) {
         writeSelectedTarget(null);
+        updateOneLibraryWorkspaceSession({ target: null, focusedContentId: null, scrollTop: 0 });
+        if (readWorkspaceSession().source === "onelibrary") {
+          setRestorableWorkspaceSource("local");
+        }
       } else if (selected) {
         const playlist = playlistsByDevice[selected.device_path]?.find(
           (candidate) => candidate.id === selected.playlist_id && candidate.attribute === 0,
@@ -200,6 +219,7 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
             playlist_name: playlist.name,
           };
           writeSelectedTarget(restored);
+          updateOneLibraryWorkspaceSession({ target: restored });
           set((state) => ({
             selectedTarget: restored,
             tracksLoading: state.selectedTracks.length === 0,
@@ -227,6 +247,9 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
                 tracksLoading: false,
                 deviceError: "",
               };
+            });
+            updateOneLibraryWorkspaceSession({
+              focusedContentId: get().focusedContentId,
             });
           }
         }
@@ -317,7 +340,10 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
           }
         : {}),
     }));
-    if (!get().selectedTarget) writeSelectedTarget(null);
+    if (!get().selectedTarget) {
+      writeSelectedTarget(null);
+      updateOneLibraryWorkspaceSession({ target: null, focusedContentId: null, scrollTop: 0 });
+    }
     await get().refreshDevices();
   },
 
@@ -360,6 +386,8 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
 
   async openPlaylist(target) {
     writeSelectedTarget(target);
+    setRestorableWorkspaceSource("onelibrary");
+    updateOneLibraryWorkspaceSession({ target, focusedContentId: null, scrollTop: 0 });
     set({
       selectedTarget: target,
       selectedTracks: [],
@@ -513,6 +541,7 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
 
   selectTrack(contentId, mode = "replace") {
     if (contentId === null) {
+      updateOneLibraryWorkspaceSession({ focusedContentId: null });
       set({ selectedContentIds: [], focusedContentId: null, selectionMode: false });
       return;
     }
@@ -522,9 +551,11 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
       const next = has
         ? selectedContentIds.filter((id) => id !== contentId)
         : [...selectedContentIds, contentId];
+      const nextFocused = has ? (next[next.length - 1] ?? null) : contentId;
+      updateOneLibraryWorkspaceSession({ focusedContentId: nextFocused });
       set({
         selectedContentIds: next,
-        focusedContentId: has ? (next[next.length - 1] ?? null) : contentId,
+        focusedContentId: nextFocused,
       });
       return;
     }
@@ -533,6 +564,7 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
       const to = selectedTracks.findIndex((track) => track.content_id === contentId);
       if (from >= 0 && to >= 0) {
         const [lo, hi] = from <= to ? [from, to] : [to, from];
+        updateOneLibraryWorkspaceSession({ focusedContentId: contentId });
         set({
           selectedContentIds: selectedTracks
             .slice(lo, hi + 1)
@@ -542,17 +574,20 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
         return;
       }
     }
+    updateOneLibraryWorkspaceSession({ focusedContentId: contentId });
     set({ selectedContentIds: [contentId], focusedContentId: contentId });
   },
 
   selectAllTracks() {
     const { selectedTracks, visibleContentIds, focusedContentId } = get();
     const ids = visibleContentIds ?? selectedTracks.map((track) => track.content_id);
+    const nextFocused = focusedContentId !== null && ids.includes(focusedContentId)
+      ? focusedContentId
+      : (ids[0] ?? null);
+    updateOneLibraryWorkspaceSession({ focusedContentId: nextFocused });
     set({
       selectedContentIds: ids,
-      focusedContentId: focusedContentId !== null && ids.includes(focusedContentId)
-        ? focusedContentId
-        : (ids[0] ?? null),
+      focusedContentId: nextFocused,
       selectionMode: true,
     });
   },
@@ -576,6 +611,10 @@ export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({
 
   closePlaylist() {
     writeSelectedTarget(null);
+    updateOneLibraryWorkspaceSession({ target: null, focusedContentId: null, scrollTop: 0 });
+    if (readWorkspaceSession().source === "onelibrary") {
+      setRestorableWorkspaceSource("local");
+    }
     set({
       selectedTarget: null,
       selectedTracks: [],

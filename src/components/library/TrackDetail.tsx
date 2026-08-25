@@ -894,6 +894,8 @@ export function TrackDetail({ track }: { track: Track }) {
         {/* 波形独占底行。KEY 已由左侧圆图表达，不再重复。 */}
         <Waveform
           trackId={track.id}
+          track={track}
+          renderProfile="release-overview"
           position={position}
           duration={track.duration ?? 0}
           cueMs={track.cue_ms}

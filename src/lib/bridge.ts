@@ -184,6 +184,13 @@ async function createTauriBridge(): Promise<KdjBridge> {
       const picked = await tauriInvoke<unknown>("pick_folders");
       return Array.isArray(picked) ? picked.filter((p): p is string => typeof p === "string") : [];
     },
+    exportCliSkill: desktop
+      ? (options) =>
+          tauriInvoke<{ version: string; path: string; overwritten: boolean }>("export_cli_skill", {
+            preset: options.preset,
+            folder: options.folder,
+          })
+      : undefined,
     // 安卓：查询是否已授予媒体读取权限（供扫描 0 首时区分「没权限」和「真没歌」）。
     mediaPermissionGranted: android
       ? () => tauriInvoke<boolean>("media_permission_granted")

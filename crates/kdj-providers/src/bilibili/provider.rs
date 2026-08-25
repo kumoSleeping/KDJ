@@ -111,6 +111,7 @@ impl BilibiliProvider {
         let playurl = self.client.playurl(&target.bvid, cid, 127, true).await?;
 
         Ok(VideoInfo {
+            platform: Platform::Bilibili,
             // 空串要退回请求里的 BV 号（Python 的 `str(info.get("bvid") or target.bvid)`）
             bvid: str_field(&info, "bvid").unwrap_or(&target.bvid).to_string(),
             title: str_field(&info, "title")
@@ -745,11 +746,8 @@ impl BilibiliProvider {
         limit: usize,
     ) -> Result<(String, Vec<SongSource>)> {
         let title = match self.client.fav_folder_info(media_id).await {
-            Ok(info) => str_field(&info, "title")
-                .filter(|text| !text.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("哔哩哔哩收藏夹 {media_id}")),
-            Err(_) => format!("哔哩哔哩收藏夹 {media_id}"),
+            Ok(info) => favorite_folder_title(&info, media_id),
+            Err(_) => format!("Bilibili Favorites {media_id}"),
         };
         let limit = full_listing(limit);
         let mut sources = Vec::new();
@@ -1049,6 +1047,20 @@ impl MusicProvider for BilibiliProvider {
 
 // ---------------------------------------------------------------- 纯函数
 
+fn favorite_folder_title(info: &Value, media_id: &str) -> String {
+    let title = str_field(info, "title").unwrap_or_default().trim();
+    // Bilibili 的默认收藏夹是固定平台节点，不是用户命名内容；侧边栏链路统一
+    // 使用英文。用户自己创建的收藏夹标题必须原样保留，不能擅自翻译。
+    let is_default = info.get("attr").is_some() && loose_int(info.get("attr")) & 0b10 == 0;
+    if is_default || title == "默认收藏夹" {
+        "Favorites".into()
+    } else if title.is_empty() {
+        format!("Bilibili Favorites {media_id}")
+    } else {
+        title.to_string()
+    }
+}
+
 fn favorite_folder_playlist(item: &Value) -> Option<StreamPlaylist> {
     // 收藏夹列表里的 `id` 是完整 media_id；`fid` 是原始短 ID，不能拿去读资源。
     let media_id = loose_int(item.get("id"));
@@ -1064,7 +1076,11 @@ fn favorite_folder_playlist(item: &Value) -> Option<StreamPlaylist> {
     Some(StreamPlaylist {
         platform: Platform::Bilibili,
         key: media_id.to_string(),
-        title: title.to_string(),
+        title: if is_default {
+            "Favorites".into()
+        } else {
+            title.to_string()
+        },
         cover: String::new(),
         count: loose_int(item.get("media_count")).max(0) as usize,
         is_favorite: is_default,
@@ -1225,6 +1241,7 @@ mod tests {
         .unwrap();
         assert_eq!(default.key, "987654321");
         assert_eq!(default.count, 42);
+        assert_eq!(default.title, "Favorites");
         assert!(default.is_favorite);
         assert_eq!(default.origin, "favorite");
 
@@ -1232,8 +1249,17 @@ mod tests {
             "id": 987654322, "title": "现场", "attr": 3, "media_count": 7
         }))
         .unwrap();
+        assert_eq!(other.title, "现场", "用户命名的收藏夹不能被翻译");
         assert!(!other.is_favorite);
         assert_eq!(other.origin, "created");
+        assert_eq!(
+            favorite_folder_title(&json!({"title": "默认收藏夹", "attr": 1}), "123"),
+            "Favorites"
+        );
+        assert_eq!(
+            favorite_folder_title(&json!({"title": "现场", "attr": 3}), "456"),
+            "现场"
+        );
     }
 
     #[test]

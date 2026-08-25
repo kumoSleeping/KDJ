@@ -60,7 +60,7 @@ bounded worker between the decoder's four-second raw PCM ring and a short callba
 ring. Tempo faders, BPM Sync and momentary nudges update one atomic target; R3 observes it before its
 next input block while the callback continues to pop one hardware-rate PCM frame with no C++ call,
 allocation, lock, decoder reset, or pitch-changing resample. Real-time start padding, output-delay
-trimming, EOF drain and seek/loop reset are owned by the worker adapter.
+trimming, EOF drain and explicit seek reset are owned by the worker adapter.
 The two physical Deck targets and background-analysis admission are coordinated by
 [`work-scheduler.md`](work-scheduler.md). Dense MIDI/slider changes are latest-value coalesced, and
 crossing the unity detent does not repeatedly reset an already-engaged R3 stream.
@@ -68,7 +68,11 @@ crossing the unity detent does not repeatedly reset an already-engaged R3 stream
 Each post-stretch ring packet also carries the source-frame advance represented by that rendered
 PCM frame. The callback advances its published playhead from this value, not from the newest UI
 target, so audio already queued at the previous rate cannot make Sync/beat-grid clocks jump ahead.
-Loop/reset generations invalidate already-rendered packets from before the discontinuity.
+Explicit seek generations invalidate already-rendered packets. Auto Loop is not a seek: Rust
+captures its in-point from the callback clock, the worker retains a bounded decoded-PCM history,
+and one cached half-open region is read circularly while linear decode remains parked at loop-out.
+The complete transport invariants and research references are documented in
+[loop-transport.md](loop-transport.md).
 
 Ordinary sources enter one two-channel R3 session. A live STEM source enters one eight-channel R3
 session (Drums/Bass/Other/Vocals × left/right), so all lanes share the same stretch decisions and
@@ -121,3 +125,27 @@ native decode/network failure is visible; it must not silently create a second W
 The remaining PlayerBar cleanup is policy migration: automatic recommendation selection and ended
 handling still originate in shared UI code. They should move behind coordinator queue commands once
 the Rust library-selection service is exposed directly to the application layer.
+
+### Track/source normalization
+
+Frontend surfaces must not implement local, OneLibrary and provider-stream Decks as separate
+feature branches. `src/lib/playbackTrack.ts` is the adapter boundary:
+
+1. `PlaybackTrackRequest` normalizes a database id, an existing `Track`, or a provider
+   `SongSource` into one `Track` identity.
+2. `playbackSourceForTrack` performs lazy remote URL resolution and returns the same
+   `UnifiedPlayerSource` used by every coordinator load.
+3. `hydratePlaybackTrack` and `subscribePlaybackTrackMetadata` expose one BPM/key/downbeat
+   contract. Whether the values came from the library DB or temporary stream analysis is hidden
+   from Performance UI.
+
+After a load, `deckTrackBinding.ts` binds Track metadata to the coordinator's physical A/B
+`trackId`s. Retained rows, provider promises and React snapshots are candidates only; they can
+never address a side whose physical identity differs. Continuous controls carry the expected
+binding id and silently discard an obsolete generation rather than reporting a false Deck
+mismatch during a load acknowledgement.
+
+Waveform acquisition remains source-adapted, but the renderer consumes only the canonical
+`Waveform` shape. Progressive coverage lives in `Waveform.known`; unknown columns stay empty and
+do not create a stream-only centre rail. Canvas rendering, viewport motion, scratching, cue/loop
+markers and beat-grid rendering are therefore shared by every source.

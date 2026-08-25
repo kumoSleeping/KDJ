@@ -16,6 +16,8 @@
 #[cfg(target_os = "android")]
 mod android_media;
 #[cfg(desktop)]
+pub mod cli;
+#[cfg(desktop)]
 mod desktop_media;
 /// 桌面 + Android 共用 playback_* 命令；iOS 仍走 native-audio 插件。
 #[cfg(any(desktop, target_os = "android"))]
@@ -24,6 +26,19 @@ mod desktop_player;
 mod midi;
 #[cfg(desktop)]
 mod virtual_disk;
+#[cfg(desktop)]
+pub use cli::Launch;
+
+#[cfg(desktop)]
+static NO_GUI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(desktop)]
+pub fn set_no_gui(value: bool) {
+    NO_GUI.store(value, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(desktop)]
+struct RuntimeDir(PathBuf);
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -575,6 +590,22 @@ async fn pick_folders(app: tauri::AppHandle) -> Vec<String> {
     }
 }
 
+/// 把 CLI 指挥手册覆盖写入各家 Agent 的 skills/kdj/。
+#[cfg(desktop)]
+#[tauri::command]
+fn export_cli_skill(
+    preset: Option<String>,
+    folder: Option<String>,
+) -> Result<cli::SkillExportResult, String> {
+    if let Some(folder) = folder.filter(|value| !value.trim().is_empty()) {
+        return cli::export_skill_to(Path::new(&folder)).map_err(|err| format!("{err:#}"));
+    }
+    let Some(preset) = preset.as_deref().and_then(cli::SkillPreset::parse) else {
+        return Err("请选择 Claude Code / Codex / PI / Cursor，或自选文件夹".into());
+    };
+    cli::export_skill_preset(preset).map_err(|err| format!("{err:#}"))
+}
+
 /// 移动端可写、可扫的曲库候选根目录。
 #[cfg(any(target_os = "android", target_os = "ios"))]
 fn mobile_library_roots(app: &tauri::AppHandle) -> Vec<String> {
@@ -637,17 +668,9 @@ fn window_control(
                 Err(err) => Err(err),
             },
             "close" => {
-                // macOS：红灯/自绘关闭 = 藏到程序坞，播放继续；真退出走 Cmd+Q / 程序坞「退出」。
-                // 其它平台仍是关窗退出。
-                #[cfg(target_os = "macos")]
+                // 点叉 = 藏窗保活（分析/下载/CLI 还在）。真退出走菜单 / kdj quit。
                 if _window.label() == "main" {
                     return _window.hide().map_err(|err| err.to_string());
-                }
-                // 主窗口关闭时不能把透明歌词窗留成一个看不见入口的孤儿进程。
-                if _window.label() == "main" {
-                    if let Some(lyrics) = _app.get_webview_window("lyrics-overlay") {
-                        let _ = lyrics.close();
-                    }
                 }
                 _window.close()
             }
@@ -725,6 +748,66 @@ enum DesktopLyricsPosition {
 struct DesktopLyricsCoordinates {
     x: i32,
     y: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DesktopMonitorBounds {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+fn clamp_desktop_lyrics_coordinates(
+    monitors: &[DesktopMonitorBounds],
+    window_width: u32,
+    window_height: u32,
+    x: i32,
+    y: i32,
+) -> (i32, i32) {
+    let Some(target) = monitors.iter().max_by_key(|monitor| {
+        let left = i64::from(x).max(i64::from(monitor.x));
+        let top = i64::from(y).max(i64::from(monitor.y));
+        let right = (i64::from(x) + i64::from(window_width))
+            .min(i64::from(monitor.x) + i64::from(monitor.width));
+        let bottom = (i64::from(y) + i64::from(window_height))
+            .min(i64::from(monitor.y) + i64::from(monitor.height));
+        (right - left).max(0) * (bottom - top).max(0)
+    }) else {
+        return (x, y);
+    };
+    let min_x = i64::from(target.x);
+    let min_y = i64::from(target.y);
+    let max_x = (min_x + i64::from(target.width) - i64::from(window_width)).max(min_x);
+    let max_y = (min_y + i64::from(target.height) - i64::from(window_height)).max(min_y);
+    (
+        i64::from(x).clamp(min_x, max_x) as i32,
+        i64::from(y).clamp(min_y, max_y) as i32,
+    )
+}
+
+#[cfg(desktop)]
+fn restore_desktop_lyrics_position(
+    window: &tauri::WebviewWindow,
+    x: i32,
+    y: i32,
+) -> Result<(), String> {
+    let monitors = window
+        .available_monitors()
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .map(|monitor| DesktopMonitorBounds {
+            x: monitor.position().x,
+            y: monitor.position().y,
+            width: monitor.size().width,
+            height: monitor.size().height,
+        })
+        .collect::<Vec<_>>();
+    let size = window.outer_size().map_err(|err| err.to_string())?;
+    let (x, y) = clamp_desktop_lyrics_coordinates(&monitors, size.width, size.height, x, y);
+    window
+        .set_position(tauri::PhysicalPosition::new(x, y))
+        .map_err(|err| err.to_string())
 }
 
 #[cfg(desktop)]
@@ -811,7 +894,7 @@ fn set_desktop_lyrics(
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::Moved(position) = event {
                         let _ = moved_app.emit_to(
-                            "lyrics-overlay",
+                            "main",
                             "desktop-lyrics-moved",
                             DesktopLyricsCoordinates {
                                 x: position.x,
@@ -835,9 +918,7 @@ fn set_desktop_lyrics(
             .map_err(|err| err.to_string())?;
         if reposition {
             if let (Some(x), Some(y)) = (x, y) {
-                window
-                    .set_position(tauri::PhysicalPosition::new(x, y))
-                    .map_err(|err| err.to_string())?;
+                restore_desktop_lyrics_position(&window, x, y)?;
             } else {
                 position_desktop_lyrics(&window, position)?;
             }
@@ -1091,17 +1172,45 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
     let config = Arc::new(AppConfig::create(data_dir, download_dir, 0));
     // show() 前要用这份主题垫原生底色，否则浅色用户会先看到配置默认底闪一下。
     let theme = config.to_settings().theme;
-    // serve() 内部 tokio::spawn，需要运行时上下文；Tauri 的全局运行时就是 tokio。
-    // 返回的 JoinHandle 故意丢掉——tokio 里 drop JoinHandle 不会取消任务，
-    // 服务的生命周期跟着进程走，和 Electron 版 sidecar 跟着主进程走是一个意思。
-    let (port, _serve_task) = tauri::async_runtime::block_on(kdj_server::serve(config))?;
+    let data_dir_for_runtime = config.data_dir.clone();
+    let (port, _serve_task, control_rx) =
+        tauri::async_runtime::block_on(kdj_server::serve(config))?;
+    let base_url = format!("http://127.0.0.1:{port}");
 
-    Ok((
-        Bridge {
-            base_url: format!("http://127.0.0.1:{port}"),
-        },
-        theme,
-    ))
+    #[cfg(desktop)]
+    {
+        let gui = !NO_GUI.load(std::sync::atomic::Ordering::SeqCst);
+        if let Err(err) = cli::write_runtime(&data_dir_for_runtime, &base_url, gui) {
+            tracing::warn!("写 runtime.json 失败：{err:#}");
+        }
+        app.manage(RuntimeDir(data_dir_for_runtime.clone()));
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut rx = control_rx;
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    kdj_server::state::UiControl::Show => {
+                        if let Some(window) = handle.get_webview_window("main") {
+                            let _ = window.unminimize();
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    kdj_server::state::UiControl::Quit => {
+                        cli::remove_runtime(&data_dir_for_runtime);
+                        handle.exit(0);
+                    }
+                }
+            }
+        });
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = control_rx;
+        let _ = data_dir_for_runtime;
+    }
+
+    Ok((Bridge { base_url }, theme))
 }
 
 /// Activity 的全局 JNI 引用。局部引用只在创建它的 Java 线程内有效，
@@ -1199,6 +1308,11 @@ pub fn run() {
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,kdj=debug".into()))
         .init();
 
+    #[cfg(desktop)]
+    if cli::maybe_handoff_gui() {
+        return;
+    }
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
@@ -1243,16 +1357,19 @@ pub fn run() {
                 if let Err(err) = apply_main_window_background(&window, resolved) {
                     tracing::warn!("启动时设置窗口底色失败：{err}");
                 }
-                // Mac 用 Overlay + 红绿灯即可；Windows / Linux 的 Overlay/hiddenTitle
-                // 无效，系统标题栏会画出图标和「KDJ」。关掉 decorations，由前端自绘三键。
                 #[cfg(not(target_os = "macos"))]
                 if let Err(err) = window.set_decorations(false) {
                     tracing::warn!("关闭系统标题栏失败：{err}");
                 }
+                if !NO_GUI.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = window.show();
+                }
             }
             #[cfg(not(desktop))]
-            let _ = theme;
-            let _ = window.show();
+            {
+                let _ = theme;
+                let _ = window.show();
+            }
         }
         Ok(())
     });
@@ -1270,6 +1387,7 @@ pub fn run() {
         apply_update,
         pick_folder,
         pick_folders,
+        export_cli_skill,
         window_control,
         set_window_background,
         set_desktop_lyrics,
@@ -1324,8 +1442,8 @@ pub fn run() {
         set_desktop_lyrics
     ]);
 
-    // macOS：点红灯只藏主窗，别拆 WebView——否则桌面播放/歌词还在跑、进程却半死不活。
-    #[cfg(all(desktop, target_os = "macos"))]
+    // 点叉只藏主窗，别拆 WebView——播放/分析/CLI 还在跑。
+    #[cfg(desktop)]
     let builder = builder.on_window_event(|window, event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             if window.label() == "main" {
@@ -1342,6 +1460,9 @@ pub fn run() {
             .expect("KDJ 启动失败");
         app.run(|app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = &event {
+                if let Some(dir) = app_handle.try_state::<RuntimeDir>() {
+                    cli::remove_runtime(&dir.0);
+                }
                 virtual_disk::eject_on_exit(app_handle);
             }
             #[cfg(target_os = "macos")]
@@ -1363,4 +1484,35 @@ pub fn run() {
     builder
         .run(tauri::generate_context!())
         .expect("KDJ 启动失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_desktop_lyrics_coordinates, DesktopMonitorBounds};
+
+    #[test]
+    fn desktop_lyrics_restore_stays_on_an_available_monitor() {
+        let monitors = [
+            DesktopMonitorBounds {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            DesktopMonitorBounds {
+                x: 1920,
+                y: 0,
+                width: 2560,
+                height: 1440,
+            },
+        ];
+        assert_eq!(
+            clamp_desktop_lyrics_coordinates(&monitors, 900, 100, 2500, 1200),
+            (2500, 1200),
+        );
+        assert_eq!(
+            clamp_desktop_lyrics_coordinates(&monitors[..1], 900, 100, 2500, 1200),
+            (1020, 980),
+        );
+    }
 }

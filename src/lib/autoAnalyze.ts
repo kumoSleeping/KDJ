@@ -27,6 +27,7 @@ import { useDownloadStore } from "../stores/downloadStore";
 import { selectAnalyzing, useLibraryStore } from "../stores/libraryStore";
 import { isOutsideFolder } from "./outsideFolder";
 import { isStreamTrack } from "./streamTrack";
+import { runtimePlayer } from "./unifiedPlayer";
 import type { Track } from "../types";
 
 /**
@@ -101,16 +102,33 @@ let backfillInFlight = false;
  */
 let viewportAt = 0;
 
+function autoAnalyzeAllowed(): boolean {
+  if (useLibraryStore.getState().autoAnalyzeSuspended) return false;
+  return useAppStore.getState().settings?.auto_analyze ?? true;
+}
+
 /**
  * 自动分析的总开关。
  *
  * `auto_analyze` 是设置里那条「自动分析」，扫描/下载后要不要顺带分析看的也是它。
  * `autoAnalyzeSuspended` 是用户刚按过「停止」——几秒后空闲探测又排一批上来的话，
  * 那个按钮等于没按。重新点「分析」才解除。
+ *
+ * 批量路径还要给正在响的 Deck 让路：旧版一开 Performance 就整库补齐，和
+ * Rubber Band/STEM 抢 CPU，听起来像 SYNC 卡拍。正在播的那一首走插队通道，
+ * 不走这条。
  */
+function autoBatchAllowed(): boolean {
+  if (!autoAnalyzeAllowed()) return false;
+  const playback = runtimePlayer().state();
+  if (playback.playing || playback.decks.some((deck) => deck.playing || deck.desiredPlaying)) {
+    return false;
+  }
+  return true;
+}
+
 function autoEnabled(): boolean {
-  if (useLibraryStore.getState().autoAnalyzeSuspended) return false;
-  return useAppStore.getState().settings?.auto_analyze ?? true;
+  return autoBatchAllowed();
 }
 
 /* ------------------------------------------------------------ 播放即分析 */
@@ -126,7 +144,7 @@ function autoEnabled(): boolean {
 export function analyzePlaying(track: Track): void {
   // 在线试听没有本地文件，分析接口只会 404
   if (isStreamTrack(track)) return;
-  if (!autoEnabled()) return;
+  if (!autoAnalyzeAllowed()) return;
   if (track.analyzed_at || jumped.has(track.id)) return;
   jumped.add(track.id);
   queued.add(track.id);

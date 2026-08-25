@@ -1,7 +1,7 @@
 //! provider 抽象层。
 //!
-//! 四家平台的形状差得比想象中多：网易云/QQ 是"搜索 → 拿直链 → 下音频"，
-//! B 站是"解析 → DASH 双流 → 混流成视频"，SoundCloud 干脆没有登录体系。
+//! 各平台的形状差得比想象中多：网易云/QQ 是"搜索 → 拿直链 → 下音频"，
+//! B 站/YouTube 是视频流，YTM 是音乐 InnerTube，SoundCloud 另走 OAuth。
 //! 所以这个 trait 的设计原则是**让能力差异显式化**（`Capabilities`），
 //! 而不是逼着 B 站假装自己是音乐平台、再在实现里到处抛 "不支持"。
 //!
@@ -18,6 +18,7 @@ use kdj_core::models::{
     QrStateValue, Quality, ResolveResponse, SearchKind, SongSource, StreamPlaylist,
     StreamPlaylistResponse,
 };
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 /// 下载过程中会读到的可变设置。放进 `Arc<RwLock<_>>`，所有 provider 的
@@ -32,9 +33,10 @@ pub struct ProviderLiveSettings {
     pub soundcloud_enabled: bool,
     pub soundcloud_client_id: String,
     pub soundcloud_client_secret: String,
-    /// YouTube Music 是否在「下载源」里开启。和 SoundCloud 一样是 opt-in 平台，
-    /// 关着时 provider 拒绝解析 / 下载 / 试听。
+    /// YouTube Music 是否在「下载源」里开启。
     pub ytm_enabled: bool,
+    /// 普通 YouTube 视频是否在「下载源」里开启；与 YTM 独立控制。
+    pub youtube_enabled: bool,
     /// 视频单独的落盘目录。None = 跟随 download_dir。
     pub video_dir: Option<PathBuf>,
     pub video_format: String,
@@ -101,6 +103,10 @@ impl ProviderContext {
 
     pub fn ytm_enabled(&self) -> bool {
         self.live().ytm_enabled
+    }
+
+    pub fn youtube_enabled(&self) -> bool {
+        self.live().youtube_enabled
     }
 
     pub fn video_format(&self) -> String {
@@ -224,6 +230,18 @@ impl<'a> DownloadJob<'a> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectedPreviewCipher {
+    pub signature_cipher: String,
+    pub player_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectedPreviewIdentity {
+    pub visitor_data: String,
+    pub data_sync_id: String,
+}
+
 #[async_trait]
 pub trait MusicProvider: Send + Sync {
     fn platform(&self) -> Platform;
@@ -303,6 +321,36 @@ pub trait MusicProvider: Send + Sync {
         _quality: Quality,
     ) -> Result<Option<String>> {
         self.preview_url(source).await
+    }
+
+    /// 需要 WebView 执行当前网页签名器的平台，先返回受保护的 cipher 与脚本地址。
+    async fn protected_preview_cipher(
+        &self,
+        _source: &SongSource,
+        _quality: Quality,
+        _po_token: &str,
+        _identity: &ProtectedPreviewIdentity,
+    ) -> Result<Option<ProtectedPreviewCipher>> {
+        Ok(None)
+    }
+
+    /// 读取上一步返回的受信任播放器脚本；默认平台不支持。
+    async fn protected_preview_player_script(&self, _player_url: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// 从已登录 YouTube Music 页面读取与 Cookie 同一会话的 Visitor/DataSync。
+    async fn protected_preview_identity(&self) -> Result<Option<ProtectedPreviewIdentity>> {
+        Ok(None)
+    }
+
+    /// 固定 YouTube BotGuard Create/GenerateIT RPC；不接受任意 URL。
+    async fn protected_preview_botguard(
+        &self,
+        _operation: &str,
+        _payload: &Value,
+    ) -> Result<Option<Value>> {
+        Ok(None)
     }
 
     /// 按平台歌曲 id / mid 取 LRC。没有歌词能力的平台默认 `Ok(None)`。
@@ -592,6 +640,7 @@ mod tests {
                 soundcloud_client_id: String::new(),
                 soundcloud_client_secret: String::new(),
                 ytm_enabled: false,
+                youtube_enabled: false,
                 video_dir: None,
                 video_format: "mp4".into(),
             },
@@ -634,6 +683,7 @@ mod tests {
         assert_eq!(Platform::Bilibili.download_dir_name(), "bilibili");
         assert_eq!(Platform::Soundcloud.download_dir_name(), "soundcloud");
         assert_eq!(Platform::Ytm.download_dir_name(), "youtubemusic");
+        assert_eq!(Platform::Youtube.download_dir_name(), "youtube");
     }
 
     #[test]

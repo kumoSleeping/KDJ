@@ -560,6 +560,62 @@ impl QqMusicProvider {
         Ok((title, tracks))
     }
 
+    /// QQ 把“自己创建的歌单”和“收藏的外部歌单”拆在两套接口里；
+    /// `GetPlaylistByUin` 只会返回前者，收藏目录必须单独分页读取。
+    async fn collected_playlists(&self) -> Result<Vec<Value>> {
+        const PAGE_SIZE: usize = 100;
+        const MAX_PAGES: usize = 100;
+
+        let credential = self.client.credential();
+        if !credential.is_present() {
+            return Ok(Vec::new());
+        }
+        let mut playlists = Vec::new();
+        let mut offset = 0usize;
+
+        for _ in 0..MAX_PAGES {
+            let data = self
+                .client
+                .call(
+                    "music.musicasset.PlaylistFavRead",
+                    "CgiGetPlaylistFavInfo",
+                    json!({
+                        "uin": credential.encrypt_uin.clone(),
+                        "offset": offset,
+                        "size": PAGE_SIZE,
+                    }),
+                    QqPlatform::Desktop,
+                )
+                .await
+                .context("读取 QQ 音乐收藏歌单失败")?;
+            let page = favorite_playlist_entries(&data)
+                .cloned()
+                .unwrap_or_default();
+            let fetched = page.len();
+            playlists.extend(page);
+
+            let next_offset = offset.saturating_add(fetched);
+            let total = loose_int(data.get("total")).max(0) as usize;
+            let has_more = data
+                .get("hasmore")
+                .or_else(|| data.get("hasMore"))
+                .map(|value| {
+                    value
+                        .as_bool()
+                        .unwrap_or_else(|| loose_int(Some(value)) != 0)
+                });
+            if fetched == 0
+                || has_more == Some(false)
+                || (total > 0 && next_offset >= total)
+                || (has_more.is_none() && fetched < PAGE_SIZE)
+            {
+                break;
+            }
+            offset = next_offset;
+        }
+        Ok(playlists)
+    }
+
     /// 按 flac → 320 → 128 依次要链接，拿到哪个就用哪个。
     async fn resolve_url(
         &self,
@@ -989,14 +1045,7 @@ impl MusicProvider for QqMusicProvider {
         {
             if let Some(entries) = playlist_entries(&data) {
                 for entry in entries {
-                    let Some(key) = entry
-                        .get("tid")
-                        .or_else(|| entry.get("dissid"))
-                        .or_else(|| entry.get("dirid"))
-                        .or_else(|| entry.get("id"))
-                        .map(qq_value_id)
-                        .filter(|value| !value.is_empty() && value != "0")
-                    else {
+                    let Some(key) = qq_playlist_key(entry) else {
                         continue;
                     };
                     let fallback_title = "QQ 音乐歌单";
@@ -1008,8 +1057,7 @@ impl MusicProvider for QqMusicProvider {
                     if is_qq_favorite_playlist(entry) || !seen_keys.insert(key.clone()) {
                         continue;
                     }
-                    // `GetPlaylistByUin` 的真实桌面回包通常只有 dirid/tid/song_num，
-                    // 名称要到同一歌单的详情接口 `CgiGetDiss.dirinfo` 才拿得到。
+                    // 老回包没有目录名时，再到同一歌单的详情接口补标题。
                     if title == fallback_title {
                         if let Ok((resolved, _)) = self.playlist_tracks(&key, 1).await {
                             if !resolved.trim().is_empty() {
@@ -1017,29 +1065,37 @@ impl MusicProvider for QqMusicProvider {
                             }
                         }
                     }
-                    // 创建的歌单带正 dirid；收藏来的歌单只有 tid/dissid（dirid 为 0
-                    // 或缺失）。按这个特征分类，侧栏「收藏的歌单」分组才有内容。
-                    let origin = qq_playlist_origin(entry).to_string();
                     playlists.push(StreamPlaylist {
                         platform: Platform::Qqm,
-                        key: key.clone(),
+                        key,
                         title,
-                        cover: str_field(entry, "logo")
-                            .or_else(|| str_field(entry, "cover"))
-                            .unwrap_or_default()
-                            .to_string(),
-                        count: loose_int(
-                            entry
-                                .get("song_num")
-                                .or_else(|| entry.get("songNum"))
-                                .or_else(|| entry.get("song_count")),
-                        )
-                        .max(0) as usize,
+                        cover: qq_playlist_cover(entry),
+                        count: qq_playlist_count(entry),
                         is_favorite: false,
-                        origin,
+                        origin: qq_playlist_origin(entry).to_string(),
                     });
                 }
             }
+        }
+
+        for entry in self.collected_playlists().await? {
+            let Some(key) = qq_playlist_key(&entry) else {
+                continue;
+            };
+            if !seen_keys.insert(key.clone()) {
+                continue;
+            }
+            playlists.push(StreamPlaylist {
+                platform: Platform::Qqm,
+                key,
+                title: qq_playlist_title(&entry)
+                    .unwrap_or("QQ 音乐歌单")
+                    .to_string(),
+                cover: qq_playlist_cover(&entry),
+                count: qq_playlist_count(&entry),
+                is_favorite: false,
+                origin: "collected".into(),
+            });
         }
         Ok(playlists)
     }
@@ -1529,6 +1585,35 @@ fn qq_song_primary_artist(song: &Value) -> Option<&str> {
         .and_then(|artist| qq_alias_text(artist, &["name", "singerName"]))
 }
 
+fn qq_playlist_key(entry: &Value) -> Option<String> {
+    first_truthy(entry, &["tid", "dissid", "dirid", "dirId", "id"])
+        .map(qq_value_id)
+        .filter(|value| !value.is_empty() && value != "0")
+}
+
+fn qq_playlist_cover(entry: &Value) -> String {
+    [
+        "picurl",
+        "picUrl",
+        "bigpicUrl",
+        "albumPicUrl",
+        "logo",
+        "cover",
+    ]
+    .into_iter()
+    .find_map(|key| str_field(entry, key))
+    .unwrap_or_default()
+    .to_string()
+}
+
+fn qq_playlist_count(entry: &Value) -> usize {
+    loose_int(first_truthy(
+        entry,
+        &["songnum", "songNum", "song_num", "song_count", "song_cnt"],
+    ))
+    .max(0) as usize
+}
+
 fn is_qq_favorite_playlist(entry: &Value) -> bool {
     loose_int(entry.get("dirid").or_else(|| entry.get("dirId"))) == 201
 }
@@ -1554,10 +1639,23 @@ fn playlist_entries(data: &Value) -> Option<&Vec<Value>> {
         .or_else(|| data.get("data").and_then(|nested| playlist_entries(nested)))
 }
 
+fn favorite_playlist_entries(data: &Value) -> Option<&Vec<Value>> {
+    data.get("v_list")
+        .or_else(|| data.get("v_playlist"))
+        .or_else(|| data.get("playlist"))
+        .or_else(|| data.get("playlists"))
+        .and_then(Value::as_array)
+        .or_else(|| {
+            data.get("data")
+                .and_then(|nested| favorite_playlist_entries(nested))
+        })
+}
+
 /// QQ 个人歌单名称也有 `dirname` / `dissname` / `title` 等多套命名，且
 /// 部分回包会把名称放进 `dirinfo`。空字符串必须继续向后回退。
 fn qq_playlist_title(entry: &Value) -> Option<&str> {
     str_field(entry, "dirname")
+        .or_else(|| str_field(entry, "dirName"))
         .or_else(|| str_field(entry, "dissname"))
         .or_else(|| str_field(entry, "diss_name"))
         .or_else(|| str_field(entry, "name"))
@@ -2177,9 +2275,34 @@ mod tests {
     #[test]
     fn playlist_origin_separates_created_from_collected() {
         // 创建的歌单带正 dirid；收藏来的只有 tid（dirid 为 0 或缺失）。
-        assert_eq!(qq_playlist_origin(&json!({"tid": "1", "dirid": 201})), "created");
-        assert_eq!(qq_playlist_origin(&json!({"tid": "2", "dirid": 0})), "collected");
+        assert_eq!(
+            qq_playlist_origin(&json!({"tid": "1", "dirid": 201})),
+            "created"
+        );
+        assert_eq!(
+            qq_playlist_origin(&json!({"tid": "2", "dirid": 0})),
+            "collected"
+        );
         assert_eq!(qq_playlist_origin(&json!({"dissid": "3"})), "collected");
+    }
+
+    #[test]
+    fn favorite_playlist_directory_accepts_the_live_schema() {
+        let data = json!({
+            "v_list": [{
+                "tid": 8674642290_u64,
+                "title": "收藏的外部歌单",
+                "picurl": "https://qpic.cn/cover.jpg",
+                "songnum": "42"
+            }],
+            "total": 1,
+            "hasmore": 0
+        });
+        let entry = &favorite_playlist_entries(&data).unwrap()[0];
+        assert_eq!(qq_playlist_key(entry).as_deref(), Some("8674642290"));
+        assert_eq!(qq_playlist_title(entry), Some("收藏的外部歌单"));
+        assert_eq!(qq_playlist_cover(entry), "https://qpic.cn/cover.jpg");
+        assert_eq!(qq_playlist_count(entry), 42);
     }
 
     #[test]

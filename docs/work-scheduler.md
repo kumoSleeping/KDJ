@@ -27,7 +27,7 @@ Spleeter/HS-TasNet 原生 session、整轨波形和曲库分析都有不同的�
 | 公共策略/状态 | `crates/kdj-core/src/work_scheduler.rs` | `WorkClass`、重型准入、状态快照、TEMPO lane |
 | TEMPO 执行 | `crates/kdj-player/src/time_stretch.rs` | 读取 Deck lane，在专用 worker 驱动 Rubber Band |
 | 播放状态 | `crates/kdj-playback/src/coordinator.rs` | 创建 Deck lane、发布 SYNC/TEMPO 最新目标 |
-| STEM 模型队列 | `crates/kdj-stems/src/live.rs` | Audio/LookAhead/Viewport 本地严格优先队列；向核心发布 queued/active |
+| STEM 模型队列 | `crates/kdj-stems/src/live.rs` | Audio/LookAhead 本地严格优先队列；向核心发布 queued/active |
 | 即时 STEM | `crates/kdj-stems/src/instant.rs` | HS-TasNet session 线程；推理时发布 `StemInstant` activity |
 | 曲库/波形分析 | `crates/kdj-server/src/jobs.rs`、`waveform.rs`、`stream_waveform.rs` | 通过统一重型准入后才开始整轨 CPU/IO 工作 |
 
@@ -42,13 +42,12 @@ Spleeter/HS-TasNet 原生 session、整轨波形和曲库分析都有不同的�
 | ---: | --- | --- | --- |
 | 0 | `TempoStretch` | 已进入非 1.0 的 Rubber Band Deck | 否，发布实时压力 |
 | 1 | `StemInstant` | HS-TasNet seek hop | 否，专用 session |
-| 2 | `StemAudible` | Spleeter 可听 tile/refinement | 否，STEM pool 自有 worker |
+| 2 | `StemAudible` | 当前可听 STEM tile/refinement | 否，STEM pool 自有 worker |
 | 3 | `StemLookAhead` | 下一块/下两块可听预取 | 否 |
-| 4 | `StemViewport` | 30 秒可见 STEM rail | 否 |
-| 5 | `InteractiveWaveform` | 用户正在等待的完整波形 | 是 |
-| 6 | `NowPlayingAnalysis` | 当前曲 BPM/Key 插队 | 是 |
-| 7 | `LibraryAnalysis` | 批量 BPM/Key、完整流分析 | 是 |
-| 8 | `Maintenance` | 波形预热/补齐 | 是 |
+| 4 | `InteractiveWaveform` | 用户正在等待的完整波形 | 是 |
+| 5 | `NowPlayingAnalysis` | 当前曲 BPM/Key 插队 | 是 |
+| 6 | `LibraryAnalysis` | 批量 BPM/Key、完整流分析 | 是 |
+| 7 | `Maintenance` | 波形预热/补齐 | 是 |
 
 音频 callback 不在表中，因为它从不排队：只消费预渲染 ring、读原子控制并报告 underrun。
 
@@ -62,15 +61,11 @@ Spleeter/HS-TasNet 原生 session、整轨波形和曲库分析都有不同的�
 - `NowPlayingAnalysis` 仍让位于 TEMPO 与可听模型 deadline。
 - `InteractiveWaveform` 是用户可见请求，可以取得一个有界重型 slot；它只避让正在执行
   或排队的可听/即时模型任务。
-- `StemViewport` 不走重型 gate。两个 audio lease 只是“可能很快需要音频”，不是排队的
-  推理；Audio 队列空时 viewport 必须继续。
-- 输出 ring 进入 `Low` 时不再启动 `StemViewport`、交互/当前曲/曲库波形分析和维护任务；
+- 两个 audio lease 只是“可能很快需要音频”，不是排队的推理；它们只阻止长时后台维护。
+- 输出 ring 进入 `Low` 时不再启动交互/当前曲/曲库波形分析和维护任务；
   `Critical` 时连 look-ahead 也让路，只保留 TEMPO、即时和当前可听 STEM。恢复阈值高于
   进入阈值，避免水位在边缘反复启动完整分析。该状态由 coordinator 发布，callback 本身
   仍只访问 ring 和 atomics。
-
-最后一条是双 Deck 锁死修复的核心约束。不要再把 `live_decks == recommended_workers`
-写成 viewport 的硬禁令。
 
 ## 4. 公共 API
 
@@ -89,7 +84,7 @@ drop(guard); // active 计数归还并唤醒等待者
 ### 4.2 专用优先队列发布 queued → active
 
 ```rust
-let queued = work_scheduler().queued(WorkClass::StemViewport);
+let queued = work_scheduler().queued(WorkClass::StemLookAhead);
 local_priority_queue.send((job, queued))?;
 
 // 专用 worker 真正取到它时
@@ -171,10 +166,8 @@ STEM 八通道始终共享一个 R3 state，不能把 lane 拆开变速。
 
 ## 6. 取消、deadline 与不可抢占区
 
-- STEM job 同时有 scan/stream epoch 和 ticket-local cancel。queued ticket 超时/drop 后不会在
-  将来占模型 slot；若已进入 ORT，只在 `predict()` 返回后的 fence 丢弃结果。
-- viewport ticket 每 20 ms 检查 generation，最长等待 10 秒；unmount/runtime switch 不再
-  阻塞在无限 `recv()`。
+- STEM job 同时有 stream epoch 和 ticket-local cancel。queued look-ahead ticket drop 后不会在
+  将来占模型 slot；若已进入分离器，只在当前 tile 返回后的 fence 丢弃结果。
 - 批量分析按“每首歌”取得 permit，取消至少在下一首前生效。当前 `analyze_file` 是整首
   不可抢占块；不要在线程外强杀它并留下部分数据库写入。
 - Rubber Band/ORT 的 native 调用不允许 holding scheduler mutex；guard 只保存计数。
@@ -193,7 +186,7 @@ STEM 八通道始终共享一个 R3 state，不能把 lane 拆开变速。
 
 - Deck TEMPO latest-value state；
 - Rubber Band realtime activity；
-- Spleeter Audio/LookAhead/Viewport queued/active；
+- classical Redress Audio/LookAhead queued/active；
 - HS-TasNet active；
 - 批量、当前曲、交互波形、波形预热和流分析的统一 heavy admission；
 - live STEM Deck 压力；
@@ -215,9 +208,8 @@ Rubber Band state、数据库事务和文件 decoder。
 
 - heavy 并发不超过平台 limit；
 - cancellation/deadline 在 bounded poll 内退出；
-- 两个 live STEM Deck 不阻塞 `StemViewport`；
-- Audio > LookAhead > Viewport；
-- ticket unmount/timeout 不无限等待。
+- Audio > LookAhead；
+- Deck retarget 后旧 look-ahead ticket 不进入后续分离槽。
 
 ### SYNC
 
@@ -230,6 +222,5 @@ Rubber Band state、数据库事务和文件 decoder。
 ### 双 Deck STEM
 
 - callback underrun = 0；
-- 实际单 worker + 两个 audio lease 时，缓存未命中的 viewport fill 仍有限完成；
-- 可听 job 已排队时，viewport 不能越过它；
-- 双 Deck rail 公平轮换，不先扫完整个 A 再开始 B。
+- 可听 job 已排队时，look-ahead 不能越过它；
+- 双 Deck 的可听 tile 保持 FIFO，不因另一台的预取而饿死。

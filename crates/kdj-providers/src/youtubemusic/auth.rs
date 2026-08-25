@@ -1,74 +1,379 @@
-//! Google OAuth 设备码登录（ytmusicapi 同款流程）。
+//! YouTube / YouTube Music 浏览器会话认证；两种来源分别实例化、分别落盘。
 //!
-//! 为什么是设备码而不是扫码/浏览器回调：
-//! - YouTube Music 没有自己的扫码登录，走的是 Google OAuth；
-//! - 设备码流程（RFC 8628）天生为电视/CLI 设计：后端拿到 `user_code`，
-//!   用户在任何设备的浏览器里打开 youtube.com/activate 输入即可，
-//!   不需要回调 URL、不需要注册自定义协议——桌面和安卓壳都能用；
-//! - 这就是 ytmusicapi `setup_oauth()` 与 yt-dlp `--username oauth` 的做法。
-//!
-//! OAuth client 凭据由开发/打包环境提供（和 SoundCloud 同一条规则）：
-//! 应用凭据不是用户偏好，不能写进 settings.json，更不能跟着
-//! GET /api/settings 回到 WebView。发布构建可在打包时注入
-//! `KDJ_YTM_OAUTH_CLIENT_ID` / `KDJ_YTM_OAUTH_CLIENT_SECRET`
-//! 烧进二进制作为默认值（见 provider 的 `oauth_credentials`），
-//! 运行时环境变量仍可覆盖。
+//! 社区客户端（ytmusicapi、YouTube.js、yt-dlp）现在普遍复用已经登录的
+//! youtube.com Cookie，而不是申请 Google OAuth client。请求 InnerTube 时从
+//! SAPISID 类 Cookie 动态生成 `SAPISIDHASH`；KDJ 不接触 Google 密码，也不把
+//! Cookie 暴露给 settings.json 或 WebView 的普通读取接口。
 
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::RwLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use sha1::{Digest, Sha1};
 
-/// OAuth 要申请的权限。ytmusicapi 用同一个 scope。
-pub const OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/youtube";
-const DEVICE_CODE_URL: &str = "https://www.youtube.com/o/oauth2/device/code";
-const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+pub use crate::browser::BrowserCatalog;
+use kdj_core::models::Platform;
 
-/// 登录态落盘文件里的形状（access + refresh 两个 token）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OAuthSession {
-    pub access_token: String,
+use crate::provider::ProviderContext;
+
+const YTM_SESSION_FILE: &str = "youtube-music-browser.json";
+const YOUTUBE_SESSION_FILE: &str = "youtube-video-browser.json";
+
+const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+                                  AppleWebKit/537.36 (KHTML, like Gecko) \
+                                  Chrome/131.0.0.0 Safari/537.36";
+const MAX_HEADERS_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserSession {
+    pub cookie: String,
+    #[serde(default = "default_auth_user")]
+    pub x_goog_authuser: String,
+    #[serde(default = "default_user_agent")]
+    pub user_agent: String,
     #[serde(default)]
-    pub refresh_token: String,
+    pub visitor_data: String,
     #[serde(default)]
-    pub expires_at: i64,
+    pub imported_from: String,
+    #[serde(default)]
+    pub created_at: i64,
 }
 
-impl OAuthSession {
-    /// access token 是否临近过期（还剩不到一分钟）。
-    pub fn expiring(&self) -> bool {
-        self.expires_at <= unix_now() + 60
+fn default_auth_user() -> String {
+    "0".into()
+}
+
+fn default_user_agent() -> String {
+    DEFAULT_USER_AGENT.into()
+}
+
+impl BrowserSession {
+    pub fn from_headers(raw: &str) -> Result<Self> {
+        let raw = raw.trim();
+        anyhow::ensure!(!raw.is_empty(), "请粘贴 YouTube 请求头");
+        anyhow::ensure!(
+            raw.len() <= MAX_HEADERS_BYTES,
+            "请求头内容过大，请只粘贴对应 YouTube 站点的请求头"
+        );
+
+        let headers = parse_headers(raw)?;
+        let cookie = headers
+            .get("cookie")
+            .cloned()
+            .or_else(|| looks_like_cookie(raw).then(|| raw.to_string()))
+            .unwrap_or_default();
+        let mut session = BrowserSession {
+            cookie: normalize_cookie(&cookie),
+            x_goog_authuser: headers
+                .get("x-goog-authuser")
+                .cloned()
+                .unwrap_or_else(default_auth_user),
+            user_agent: headers
+                .get("user-agent")
+                .cloned()
+                .unwrap_or_else(default_user_agent),
+            visitor_data: headers
+                .get("x-goog-visitor-id")
+                .cloned()
+                .unwrap_or_default(),
+            imported_from: "粘贴的浏览器请求头".into(),
+            created_at: unix_now(),
+        };
+        session.validate()?;
+        Ok(session)
+    }
+
+    pub fn validate(&mut self) -> Result<()> {
+        self.cookie = normalize_cookie(&self.cookie);
+        self.x_goog_authuser = self.x_goog_authuser.trim().to_string();
+        if self.x_goog_authuser.is_empty() {
+            self.x_goog_authuser = default_auth_user();
+        }
+        self.user_agent = self.user_agent.trim().to_string();
+        if self.user_agent.is_empty() {
+            self.user_agent = default_user_agent();
+        }
+        anyhow::ensure!(
+            !self.cookie.contains(['\r', '\n']) && !self.user_agent.contains(['\r', '\n']),
+            "请求头包含非法换行"
+        );
+        let cookies = cookie_map(&self.cookie);
+        anyhow::ensure!(
+            cookies.contains_key("SAPISID")
+                || cookies.contains_key("__Secure-3PAPISID")
+                || cookies.contains_key("__Secure-1PAPISID"),
+            "没有找到 SAPISID 登录 Cookie；请从已登录的 YouTube 站点复制 browse 请求头"
+        );
+        Ok(())
+    }
+
+    pub fn sid(&self) -> Option<String> {
+        let cookies = cookie_map(&self.cookie);
+        cookies
+            .get("SAPISID")
+            .or_else(|| cookies.get("__Secure-3PAPISID"))
+            .or_else(|| cookies.get("__Secure-1PAPISID"))
+            .cloned()
+    }
+
+    pub fn authorization(&self, origin: &str) -> Option<String> {
+        let sid = self.sid()?;
+        let timestamp = unix_now();
+        let digest = Sha1::digest(format!("{timestamp} {sid} {origin}").as_bytes());
+        Some(format!("SAPISIDHASH {timestamp}_{}", hex::encode(digest)))
     }
 }
 
-/// 一次设备码登录会话（内存态，进程内有效）。
-#[derive(Debug, Clone)]
-pub struct DeviceCode {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_url: String,
-    pub expires_in: u64,
-    pub created_at: Instant,
+/// 单个平台独占的一份浏览器会话。YouTube Music 与 YouTube 视频即使来源于
+/// 同一个浏览器 Profile，也分别落盘、登录和退出，不能互相改变账号状态。
+pub struct YoutubeAuth {
+    platform: Platform,
+    path: PathBuf,
+    session: RwLock<Option<BrowserSession>>,
 }
 
-impl DeviceCode {
-    pub fn expired(&self) -> bool {
-        self.created_at.elapsed() >= Duration::from_secs(self.expires_in.max(1))
+impl YoutubeAuth {
+    pub fn new(ctx: &ProviderContext, platform: Platform) -> Result<Self> {
+        let file = match platform {
+            Platform::Ytm => YTM_SESSION_FILE,
+            Platform::Youtube => YOUTUBE_SESSION_FILE,
+            _ => anyhow::bail!("YouTubeAuth 只支持 YouTube Music 或 YouTube 视频"),
+        };
+        let path = ctx.session_file(file);
+        let session =
+            std::fs::read_to_string(&path).ok().and_then(|text| {
+                match serde_json::from_str::<BrowserSession>(&text) {
+                    Ok(mut session) => match session.validate() {
+                        Ok(()) => Some(session),
+                        Err(err) => {
+                            tracing::warn!("YouTube 浏览器会话已失效：{err}");
+                            None
+                        }
+                    },
+                    Err(err) => {
+                        tracing::warn!("解析 YouTube 浏览器会话失败：{err}");
+                        None
+                    }
+                }
+            });
+        Ok(Self {
+            platform,
+            path,
+            session: RwLock::new(session),
+        })
+    }
+
+    pub fn snapshot(&self) -> Option<BrowserSession> {
+        self.session
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn is_logged_in(&self) -> bool {
+        self.snapshot().is_some()
+    }
+
+    pub fn save(&self, mut session: BrowserSession) -> Result<()> {
+        session.validate()?;
+        if session.created_at == 0 {
+            session.created_at = unix_now();
+        }
+        write_session_file(&self.path, &session)?;
+        *self
+            .session
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(session);
+        // 只由 YouTube Music 清理它自己的退休 OAuth token；普通 YouTube 不碰。
+        if self.platform == Platform::Ytm {
+            if let Some(parent) = self.path.parent() {
+                let _ = std::fs::remove_file(parent.join("ytmusic.json"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn clear(&self) {
+        *self
+            .session
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        let _ = std::fs::remove_file(&self.path);
+        if self.platform == Platform::Ytm {
+            if let Some(parent) = self.path.parent() {
+                let _ = std::fs::remove_file(parent.join("ytmusic.json"));
+            }
+        }
+    }
+
+    pub fn request_headers(&self, origin: &str) -> Vec<(String, String)> {
+        let Some(session) = self.snapshot() else {
+            return Vec::new();
+        };
+        let mut headers = vec![
+            ("Cookie".into(), session.cookie.clone()),
+            ("X-Goog-AuthUser".into(), session.x_goog_authuser.clone()),
+            ("Origin".into(), origin.to_string()),
+            ("X-Origin".into(), origin.to_string()),
+            ("User-Agent".into(), session.user_agent.clone()),
+        ];
+        if let Some(authorization) = session.authorization(origin) {
+            headers.push(("Authorization".into(), authorization));
+        }
+        if !session.visitor_data.is_empty() {
+            headers.push(("X-Goog-Visitor-Id".into(), session.visitor_data));
+        }
+        headers
+    }
+
+    pub fn browser_catalog() -> BrowserCatalog {
+        crate::browser::catalog()
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn import_browser(
+        &self,
+        browser: &str,
+        profile_id: Option<&str>,
+    ) -> Result<BrowserSession> {
+        let imported =
+            crate::browser::profile_cookies(browser, profile_id, vec!["youtube.com".to_string()])?;
+        let cookie = imported
+            .cookies
+            .into_iter()
+            .filter(|item| item.domain == "youtube.com" || item.domain.ends_with(".youtube.com"))
+            .map(|item| format!("{}={}", item.name, item.value))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let imported_from = imported.imported_from;
+        let mut session = BrowserSession {
+            cookie,
+            x_goog_authuser: default_auth_user(),
+            user_agent: default_user_agent(),
+            visitor_data: String::new(),
+            imported_from: imported_from.clone(),
+            created_at: unix_now(),
+        };
+        let label = if self.platform == Platform::Ytm {
+            "YouTube Music"
+        } else {
+            "YouTube"
+        };
+        session.validate().with_context(|| {
+            format!(
+                "没有从{imported_from}读取到已登录的 {label} 会话；请确认该 Profile 已登录 {label}，或在高级选项导入请求头"
+            )
+        })?;
+        Ok(session)
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pub fn import_browser(
+        &self,
+        _browser: &str,
+        _profile_id: Option<&str>,
+    ) -> Result<BrowserSession> {
+        let label = if self.platform == Platform::Ytm {
+            "YouTube Music"
+        } else {
+            "YouTube"
+        };
+        anyhow::bail!("移动端无法读取其它应用的浏览器会话；{label} 继续使用匿名访问")
     }
 }
 
-/// 轮询设备码的结果。
-#[derive(Debug)]
-pub enum DevicePoll {
-    /// 用户还没完成授权（或 Google 还没感知到），继续等。
-    Pending,
-    /// 服务端嫌轮询太快，下次间隔加长。
-    SlowDown,
-    /// 授权成功，拿到 token。
-    Done(OAuthSession),
-    /// 用户拒绝 / 会话过期。
-    Failed(String),
+fn parse_headers(raw: &str) -> Result<BTreeMap<String, String>> {
+    if raw.starts_with('{') {
+        let value: serde_json::Value =
+            serde_json::from_str(raw).context("请求头 JSON 格式不正确")?;
+        let object = value.as_object().context("请求头 JSON 必须是对象")?;
+        return Ok(object
+            .iter()
+            .filter_map(|(key, value)| {
+                value
+                    .as_str()
+                    .map(|value| (key.to_ascii_lowercase(), value.into()))
+            })
+            .collect());
+    }
+
+    let mut headers = BTreeMap::new();
+    for line in raw.lines() {
+        let line = line.trim().trim_end_matches('\\');
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            let key = key
+                .trim()
+                .trim_matches(|ch| matches!(ch, '\'' | '"'))
+                .trim_start_matches("-H ")
+                .trim_matches(|ch| matches!(ch, '\'' | '"'))
+                .to_ascii_lowercase();
+            if !key.is_empty() {
+                headers.insert(
+                    key,
+                    value
+                        .trim()
+                        .trim_matches(|ch| matches!(ch, '\'' | '"'))
+                        .to_string(),
+                );
+            }
+        }
+    }
+    Ok(headers)
+}
+
+fn looks_like_cookie(raw: &str) -> bool {
+    !raw.contains('\n') && raw.contains('=') && raw.contains(';')
+}
+
+fn normalize_cookie(raw: &str) -> String {
+    let mut values = BTreeMap::new();
+    for part in raw.split(';') {
+        let Some((name, value)) = part.trim().split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        let value = value.trim();
+        if !name.is_empty() && !value.is_empty() {
+            values.insert(name.to_string(), value.to_string());
+        }
+    }
+    values
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn write_session_file(path: &std::path::Path, session: &BrowserSession) -> Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("创建 YouTube 会话目录失败")?;
+    }
+    let body = serde_json::to_vec_pretty(session).context("序列化 YouTube 会话失败")?;
+    std::fs::write(&tmp, body).context("保存 YouTube 会话失败")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .context("保护 YouTube 会话失败")?;
+    }
+    std::fs::rename(&tmp, path).context("提交 YouTube 会话失败")?;
+    Ok(())
+}
+
+fn cookie_map(raw: &str) -> BTreeMap<String, String> {
+    raw.split(';')
+        .filter_map(|part| {
+            let (name, value) = part.trim().split_once('=')?;
+            Some((name.trim().to_string(), value.trim().to_string()))
+        })
+        .collect()
 }
 
 fn unix_now() -> i64 {
@@ -78,204 +383,95 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-/// 第一步：向 Google 申请一个设备码。
-pub async fn begin_device_code(
-    http: &reqwest::Client,
-    client_id: &str,
-) -> Result<DeviceCode> {
-    let response = http
-        .post(DEVICE_CODE_URL)
-        .form(&[("client_id", client_id), ("scope", OAUTH_SCOPE)])
-        .send()
-        .await
-        .context("申请 YouTube Music 登录码失败")?;
-    let status = response.status();
-    let body: Value = response
-        .json()
-        .await
-        .context("解析 YouTube Music 登录码响应失败")?;
-    if !status.is_success() {
-        bail!(
-            "申请 YouTube Music 登录码失败：{}",
-            oauth_error(&body)
-        );
-    }
-    let device_code = required_str(&body, "device_code", "device_code")?;
-    let user_code = required_str(&body, "user_code", "user_code")?;
-    let verification_url = required_str(&body, "verification_url", "verification_url")?;
-    let expires_in = body
-        .get("expires_in")
-        .and_then(Value::as_u64)
-        .unwrap_or(15 * 60);
-    Ok(DeviceCode {
-        device_code,
-        user_code,
-        verification_url,
-        expires_in,
-        created_at: Instant::now(),
-    })
-}
-
-/// 第二步起：用设备码轮询/兑换 token。
-pub async fn poll_device_code(
-    http: &reqwest::Client,
-    client_id: &str,
-    client_secret: &str,
-    device_code: &str,
-) -> Result<DevicePoll> {
-    let response = http
-        .post(TOKEN_URL)
-        .form(&[
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-            ("grant_type", "http://oauth.net/grant_type/device/1.0"),
-            ("code", device_code),
-        ])
-        .send()
-        .await
-        .context("检查 YouTube Music 登录状态失败")?;
-    let status = response.status();
-    let body: Value = response
-        .json()
-        .await
-        .context("解析 YouTube Music 登录状态响应失败")?;
-    if status.is_success() {
-        let access_token = required_str(&body, "access_token", "access_token")?;
-        let refresh_token = body
-            .get("refresh_token")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let expires_in = body
-            .get("expires_in")
-            .and_then(Value::as_i64)
-            .unwrap_or(3600);
-        return Ok(DevicePoll::Done(OAuthSession {
-            access_token,
-            refresh_token,
-            expires_at: unix_now() + expires_in,
-        }));
-    }
-    match body.get("error").and_then(Value::as_str).unwrap_or_default() {
-        // 还没授权完，继续等；Google 建议按 interval 轮询
-        "authorization_pending" => Ok(DevicePoll::Pending),
-        "slow_down" => Ok(DevicePoll::SlowDown),
-        "access_denied" => Ok(DevicePoll::Failed("已拒绝授权".into())),
-        "expired_token" => Ok(DevicePoll::Failed("登录码已过期，请重新发起".into())),
-        other => Ok(DevicePoll::Failed(format!(
-            "登录状态检查失败：{}",
-            oauth_error_hint(other, &body)
-        ))),
-    }
-}
-
-/// 刷新 access token（refresh token 通常长期有效）。
-pub async fn refresh_token(
-    http: &reqwest::Client,
-    client_id: &str,
-    client_secret: &str,
-    refresh_token: &str,
-) -> Result<OAuthSession> {
-    let response = http
-        .post(TOKEN_URL)
-        .form(&[
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-        ])
-        .send()
-        .await
-        .context("刷新 YouTube Music 登录态失败")?;
-    let status = response.status();
-    let body: Value = response
-        .json()
-        .await
-        .context("解析 YouTube Music 刷新响应失败")?;
-    if !status.is_success() {
-        bail!(
-            "YouTube Music 登录已过期：{}",
-            oauth_error(&body)
-        );
-    }
-    let access_token = required_str(&body, "access_token", "access_token")?;
-    let expires_in = body
-        .get("expires_in")
-        .and_then(Value::as_i64)
-        .unwrap_or(3600);
-    Ok(OAuthSession {
-        access_token,
-        // 部分 Google 客户端 refresh 时也回新的 refresh token
-        refresh_token: body
-            .get("refresh_token")
-            .and_then(Value::as_str)
-            .unwrap_or(refresh_token)
-            .to_string(),
-        expires_at: unix_now() + expires_in,
-    })
-}
-
-fn required_str(body: &Value, key: &str, what: &str) -> Result<String> {
-    body.get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .with_context(|| format!("登录响应缺少 {what}"))
-}
-
-fn oauth_error(body: &Value) -> String {
-    body.get("error_description")
-        .or_else(|| body.get("error"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("未知错误")
-        .to_string()
-}
-
-fn oauth_error_hint(code: &str, body: &Value) -> String {
-    if code.is_empty() {
-        oauth_error(body)
-    } else {
-        format!("{code}（{}）", oauth_error(body))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn session_expiry_is_checked_against_the_clock() {
-        let fresh = OAuthSession {
-            access_token: "a".into(),
-            refresh_token: "r".into(),
-            expires_at: unix_now() + 600,
-        };
-        assert!(!fresh.expiring());
-        let dying = OAuthSession {
-            access_token: "a".into(),
-            refresh_token: "r".into(),
-            expires_at: unix_now() + 10,
-        };
-        assert!(dying.expiring());
+    fn sample_cookie() -> &'static str {
+        "LOGIN_INFO=x; SAPISID=secret; __Secure-3PAPISID=backup"
     }
 
     #[test]
-    fn device_code_expiry_uses_its_own_clock() {
-        let code = DeviceCode {
-            device_code: "d".into(),
-            user_code: "ABCD-EFGH".into(),
-            verification_url: "https://www.youtube.com/activate".into(),
-            expires_in: 900,
-            created_at: Instant::now(),
-        };
-        assert!(!code.expired());
+    fn raw_and_json_headers_are_accepted() {
+        let raw = format!(
+            "cookie: {}\nx-goog-authuser: 1\nuser-agent: Test",
+            sample_cookie()
+        );
+        let session = BrowserSession::from_headers(&raw).unwrap();
+        assert_eq!(session.x_goog_authuser, "1");
+        assert_eq!(session.user_agent, "Test");
+
+        let json = serde_json::json!({"cookie": sample_cookie(), "x-goog-authuser": "0"});
+        assert!(BrowserSession::from_headers(&json.to_string()).is_ok());
     }
 
     #[test]
-    fn session_roundtrips_through_json_with_defaults() {
-        // 老版本文件没有 refresh_token 时也要能读
-        let parsed: OAuthSession = serde_json::from_str(r#"{"access_token":"a","expires_at":1}"#).unwrap();
-        assert_eq!(parsed.refresh_token, "");
+    fn missing_sapisid_is_rejected() {
+        let error = BrowserSession::from_headers("cookie: SID=x; LOGIN_INFO=y").unwrap_err();
+        assert!(error.to_string().contains("SAPISID"));
+    }
+
+    #[test]
+    fn sapisidhash_uses_origin_and_timestamp_shape() {
+        let session =
+            BrowserSession::from_headers(&format!("cookie: {}", sample_cookie())).unwrap();
+        let value = session.authorization("https://music.youtube.com").unwrap();
+        assert!(value.starts_with("SAPISIDHASH "));
+        assert_eq!(value.split('_').nth(1).unwrap().len(), 40);
+    }
+
+    #[test]
+    fn cookie_normalization_deduplicates_names_without_exposing_headers() {
+        assert_eq!(normalize_cookie(" A=1; B=2; A=3 "), "A=3; B=2");
+    }
+
+    #[test]
+    fn music_and_video_sessions_change_independently() {
+        use crate::provider::ProviderLiveSettings;
+
+        let root = std::env::temp_dir().join(format!(
+            "kdj-youtube-auth-split-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let ctx = ProviderContext::new(
+            root.clone(),
+            ProviderLiveSettings {
+                download_dir: root.join("downloads"),
+                filename_template: "{title}".into(),
+                default_quality: kdj_core::models::Quality::Q128,
+                netease_use_download_api: false,
+                soundcloud_enabled: false,
+                soundcloud_client_id: String::new(),
+                soundcloud_client_secret: String::new(),
+                ytm_enabled: true,
+                youtube_enabled: true,
+                video_dir: None,
+                video_format: "mp4".into(),
+            },
+        );
+        let music = YoutubeAuth::new(&ctx, Platform::Ytm).unwrap();
+        let video = YoutubeAuth::new(&ctx, Platform::Youtube).unwrap();
+        let session = |cookie: &str| BrowserSession {
+            cookie: format!("SAPISID={cookie}"),
+            x_goog_authuser: "0".into(),
+            user_agent: "Test".into(),
+            visitor_data: String::new(),
+            imported_from: "测试会话".into(),
+            created_at: 1,
+        };
+
+        music.save(session("music-session")).unwrap();
+        assert!(music.is_logged_in());
+        assert!(!video.is_logged_in());
+
+        video.save(session("video-session")).unwrap();
+        music.clear();
+        assert!(!music.is_logged_in());
+        assert!(video.is_logged_in());
+        assert!(!ctx.session_file(YTM_SESSION_FILE).exists());
+        assert!(ctx.session_file(YOUTUBE_SESSION_FILE).exists());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

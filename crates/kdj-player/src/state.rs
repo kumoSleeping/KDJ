@@ -3,6 +3,15 @@ use std::sync::Arc;
 
 use crate::{DeckId, PlayerMode, EQ_SPECTRUM_BANDS};
 
+/// CPAL stream-clock timing for one output callback. Values are nanoseconds from a stable origin
+/// chosen when the stream starts; only differences are meaningful outside the audio backend.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OutputCallbackTiming {
+    pub callback_time_ns: u64,
+    /// Predicted DAC time of the first frame in the callback buffer.
+    pub playback_time_ns: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TransportSnapshot {
     pub mode: PlayerMode,
@@ -12,8 +21,19 @@ pub struct TransportSnapshot {
     pub transitioning: bool,
     pub transition_to: DeckId,
     pub output_frames: u64,
-    pub deck_frames: [u64; 2],
+    pub output_sample_rate: u32,
+    pub callback_time_ns: u64,
+    /// Predicted DAC time of the media positions in this snapshot (end of the rendered buffer).
+    pub presentation_time_ns: u64,
+    /// Signed media clocks; negative frames are silent Performance pre-roll before source frame 0.
+    pub deck_frames: [i64; 2],
     pub deck_source_ids: [u64; 2],
+    pub deck_target_rates: [f32; 2],
+    pub deck_audible_rates: [f32; 2],
+    pub deck_rate_revisions: [u64; 2],
+    pub deck_audible_rate_revisions: [u64; 2],
+    pub deck_discontinuity_revisions: [u64; 2],
+    pub deck_scratch_held: [bool; 2],
     /// Callback-observed output-ring starvation transitions for the currently installed source.
     pub deck_output_underruns: [u64; 2],
     /// Lowest callback-boundary output-ring fill for the current source; zero means unobserved.
@@ -34,10 +54,19 @@ pub(crate) struct SharedState {
     transitioning: AtomicBool,
     transition_to: AtomicU8,
     output_frames: AtomicU64,
+    output_sample_rate: AtomicU32,
+    callback_time_ns: AtomicU64,
+    presentation_time_ns: AtomicU64,
     deck_a_frame: AtomicU64,
     deck_b_frame: AtomicU64,
     deck_a_source: AtomicU64,
     deck_b_source: AtomicU64,
+    deck_target_rates: [AtomicU32; 2],
+    deck_audible_rates: [AtomicU32; 2],
+    deck_rate_revisions: [AtomicU64; 2],
+    deck_audible_rate_revisions: [AtomicU64; 2],
+    deck_discontinuity_revisions: [AtomicU64; 2],
+    deck_scratch_held: [AtomicBool; 2],
     deck_a_output_underruns: AtomicU64,
     deck_b_output_underruns: AtomicU64,
     deck_a_min_buffered_frames: AtomicU64,
@@ -59,10 +88,19 @@ impl Default for SharedState {
             transitioning: AtomicBool::new(false),
             transition_to: AtomicU8::new(DeckId::A as u8),
             output_frames: AtomicU64::new(0),
+            output_sample_rate: AtomicU32::new(0),
+            callback_time_ns: AtomicU64::new(0),
+            presentation_time_ns: AtomicU64::new(0),
             deck_a_frame: AtomicU64::new(0),
             deck_b_frame: AtomicU64::new(0),
             deck_a_source: AtomicU64::new(0),
             deck_b_source: AtomicU64::new(0),
+            deck_target_rates: std::array::from_fn(|_| AtomicU32::new(1.0f32.to_bits())),
+            deck_audible_rates: std::array::from_fn(|_| AtomicU32::new(1.0f32.to_bits())),
+            deck_rate_revisions: std::array::from_fn(|_| AtomicU64::new(0)),
+            deck_audible_rate_revisions: std::array::from_fn(|_| AtomicU64::new(0)),
+            deck_discontinuity_revisions: std::array::from_fn(|_| AtomicU64::new(0)),
+            deck_scratch_held: std::array::from_fn(|_| AtomicBool::new(false)),
             deck_a_output_underruns: AtomicU64::new(0),
             deck_b_output_underruns: AtomicU64::new(0),
             deck_a_min_buffered_frames: AtomicU64::new(0),
@@ -85,8 +123,17 @@ impl SharedState {
         active_deck: DeckId,
         transition_to: Option<DeckId>,
         output_frames: u64,
-        deck_frames: [u64; 2],
+        output_sample_rate: u32,
+        callback_time_ns: u64,
+        presentation_time_ns: u64,
+        deck_frames: [i64; 2],
         deck_source_ids: [u64; 2],
+        deck_target_rates: [f32; 2],
+        deck_audible_rates: [f32; 2],
+        deck_rate_revisions: [u64; 2],
+        deck_audible_rate_revisions: [u64; 2],
+        deck_discontinuity_revisions: [u64; 2],
+        deck_scratch_held: [bool; 2],
         deck_output_underruns: [u64; 2],
         deck_min_buffered_frames: [u64; 2],
         deck_peak_levels: [f32; 2],
@@ -109,12 +156,32 @@ impl SharedState {
             Ordering::Relaxed,
         );
         self.output_frames.store(output_frames, Ordering::Relaxed);
-        self.deck_a_frame.store(deck_frames[0], Ordering::Relaxed);
-        self.deck_b_frame.store(deck_frames[1], Ordering::Relaxed);
+        self.output_sample_rate
+            .store(output_sample_rate, Ordering::Relaxed);
+        self.callback_time_ns
+            .store(callback_time_ns, Ordering::Relaxed);
+        self.presentation_time_ns
+            .store(presentation_time_ns, Ordering::Relaxed);
+        self.deck_a_frame
+            .store(deck_frames[0] as u64, Ordering::Relaxed);
+        self.deck_b_frame
+            .store(deck_frames[1] as u64, Ordering::Relaxed);
         self.deck_a_source
             .store(deck_source_ids[0], Ordering::Relaxed);
         self.deck_b_source
             .store(deck_source_ids[1], Ordering::Relaxed);
+        for index in 0..2 {
+            self.deck_target_rates[index]
+                .store(deck_target_rates[index].to_bits(), Ordering::Relaxed);
+            self.deck_audible_rates[index]
+                .store(deck_audible_rates[index].to_bits(), Ordering::Relaxed);
+            self.deck_rate_revisions[index].store(deck_rate_revisions[index], Ordering::Relaxed);
+            self.deck_audible_rate_revisions[index]
+                .store(deck_audible_rate_revisions[index], Ordering::Relaxed);
+            self.deck_discontinuity_revisions[index]
+                .store(deck_discontinuity_revisions[index], Ordering::Relaxed);
+            self.deck_scratch_held[index].store(deck_scratch_held[index], Ordering::Relaxed);
+        }
         self.deck_a_output_underruns
             .store(deck_output_underruns[0], Ordering::Relaxed);
         self.deck_b_output_underruns
@@ -166,14 +233,35 @@ impl SharedState {
                     _ => DeckId::A,
                 },
                 output_frames: self.output_frames.load(Ordering::Relaxed),
+                output_sample_rate: self.output_sample_rate.load(Ordering::Relaxed),
+                callback_time_ns: self.callback_time_ns.load(Ordering::Relaxed),
+                presentation_time_ns: self.presentation_time_ns.load(Ordering::Relaxed),
                 deck_frames: [
-                    self.deck_a_frame.load(Ordering::Relaxed),
-                    self.deck_b_frame.load(Ordering::Relaxed),
+                    self.deck_a_frame.load(Ordering::Relaxed) as i64,
+                    self.deck_b_frame.load(Ordering::Relaxed) as i64,
                 ],
                 deck_source_ids: [
                     self.deck_a_source.load(Ordering::Relaxed),
                     self.deck_b_source.load(Ordering::Relaxed),
                 ],
+                deck_target_rates: std::array::from_fn(|index| {
+                    f32::from_bits(self.deck_target_rates[index].load(Ordering::Relaxed))
+                }),
+                deck_audible_rates: std::array::from_fn(|index| {
+                    f32::from_bits(self.deck_audible_rates[index].load(Ordering::Relaxed))
+                }),
+                deck_rate_revisions: std::array::from_fn(|index| {
+                    self.deck_rate_revisions[index].load(Ordering::Relaxed)
+                }),
+                deck_audible_rate_revisions: std::array::from_fn(|index| {
+                    self.deck_audible_rate_revisions[index].load(Ordering::Relaxed)
+                }),
+                deck_discontinuity_revisions: std::array::from_fn(|index| {
+                    self.deck_discontinuity_revisions[index].load(Ordering::Relaxed)
+                }),
+                deck_scratch_held: std::array::from_fn(|index| {
+                    self.deck_scratch_held[index].load(Ordering::Relaxed)
+                }),
                 deck_output_underruns: [
                     self.deck_a_output_underruns.load(Ordering::Relaxed),
                     self.deck_b_output_underruns.load(Ordering::Relaxed),
@@ -218,11 +306,25 @@ mod tests {
         state.publish(
             PlayerMode::Continuous,
             true,
+            [true, false],
             DeckId::A,
             None,
             480,
+            48_000,
+            1_000_000,
+            1_010_000,
             [240, 120],
             [7, 9],
+            [1.0, 1.0],
+            [1.0, 1.0],
+            [1, 1],
+            [1, 1],
+            [0, 0],
+            [false, false],
+            [0, 0],
+            [0, 0],
+            [0.0, 0.0],
+            [[0.0; EQ_SPECTRUM_BANDS]; 2],
         );
         // 模拟回调线程在两次 fetch_add 之间被杀：generation 手动拨成奇数。
         state.generation.store(1, Ordering::Release);

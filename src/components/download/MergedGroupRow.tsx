@@ -1,4 +1,4 @@
-import { Fragment, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Check, Copy, Download, Play } from "lucide-react";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { api } from "../../lib/api";
@@ -18,6 +18,7 @@ export const PLATFORM_LABEL: Record<Platform, string> = {
   qqm: "QQ",
   soundcloud: "SC",
   ytm: "YTM",
+  youtube: "YT",
   bilibili: "B站",
   local: "本地",
 };
@@ -57,6 +58,11 @@ export interface MergedGroupRowProps {
   followingSongs?: SongPreviewItem[];
   onDragStart?(event: React.DragEvent<HTMLElement>): void;
   onDragEnd?(): void;
+  /** WKWebView pointer 主链路；返回清理函数供换页/卸载时释放全局监听。 */
+  onPointerDragStart?(
+    event: React.PointerEvent<HTMLElement>,
+    onActivated: () => void,
+  ): (() => void) | void;
 }
 
 function qualityLabel(source: SongSource): string {
@@ -86,10 +92,12 @@ export function MergedGroupRow({
   followingSongs = [],
   onDragStart,
   onDragEnd,
+  onPointerDragStart,
 }: MergedGroupRowProps) {
   const active = group.sources[sourceIndex] ?? group.sources[0];
   const multi = group.sources.length > 1;
   const pressTimerRef = useRef<number | null>(null);
+  const pointerDragCleanupRef = useRef<(() => void) | null>(null);
   const suppressClickRef = useRef(false);
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
 
@@ -103,6 +111,8 @@ export function MergedGroupRow({
       : (group.sources.find(
           (source) => source.platform !== "bilibili" && source.platform !== "local",
         ) ?? null);
+  useEffect(() => () => pointerDragCleanupRef.current?.(), []);
+
   const toggleSelection = () => {
     onToggleSelect();
   };
@@ -164,7 +174,7 @@ export function MergedGroupRow({
       <span
         className="kd-thumb"
         draggable={selectable}
-        title={selectable ? "拖到下载队列，或拖进左侧文件夹直接入队" : undefined}
+        title={selectable ? "拖到 DJ Deck 直接装盘，或拖到下载队列/文件夹" : undefined}
         onDragStart={(event) => {
           event.stopPropagation();
           clearTextSelection();
@@ -390,7 +400,14 @@ export function MergedGroupRow({
           setRowMenu({ x: event.clientX, y: event.clientY });
         }}
         onPointerDown={(event) => {
-          if (event.pointerType === "mouse") return;
+          if (event.pointerType === "mouse") {
+            if (!selectable || selectionMode) return;
+            pointerDragCleanupRef.current?.();
+            pointerDragCleanupRef.current = onPointerDragStart?.(event, () => {
+              suppressClickRef.current = true;
+            }) ?? null;
+            return;
+          }
           const x = event.clientX;
           const y = event.clientY;
           pressTimerRef.current = window.setTimeout(() => {

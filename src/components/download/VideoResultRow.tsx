@@ -30,6 +30,7 @@ export { VIDEO_DOWNLOAD_DND_TYPE } from "../../lib/searchDrag";
  * 贴链接解析出来的 `VideoInfo` 是它的超集，所以两条路共用同一个种子结构。
  */
 export interface VideoSeed {
+  platform: "bilibili" | "youtube";
   bvid: string;
   title: string;
   author: string;
@@ -38,21 +39,24 @@ export interface VideoSeed {
 }
 
 /**
- * 整组来源都是 B 站才当视频看。
+ * 整组来源都是同一种视频平台才按视频行展示。
  *
- * 混进了音乐平台的那种本质上是一首歌，B 站只是它可选的下载来源之一；
+ * 混进了音乐平台的那种本质上是一首歌，视频只是它可选的下载来源之一；
  * 按视频铺开反而会把"同一首歌有几家可选、默认走哪家"这件事藏起来。
  */
 export function isVideoGroup(group: MergedGroup): boolean {
+  const platform = group.sources[0]?.platform;
   return (
-    group.sources.length > 0 && group.sources.every((source) => source.platform === "bilibili")
+    (platform === "bilibili" || platform === "youtube") &&
+    group.sources.every((source) => source.platform === platform)
   );
 }
 
 export function videoSeedFromGroup(group: MergedGroup): VideoSeed {
   const source = group.sources[0];
   return {
-    bvid: String(source?.payload?.bvid ?? source?.key ?? ""),
+    platform: source?.platform === "youtube" ? "youtube" : "bilibili",
+    bvid: String(source?.payload?.bvid ?? source?.payload?.video_id ?? source?.key ?? ""),
     title: group.title,
     author: group.artists.join(", "),
     cover: group.cover,
@@ -62,6 +66,7 @@ export function videoSeedFromGroup(group: MergedGroup): VideoSeed {
 
 export function videoSeedFromInfo(info: VideoInfo): VideoSeed {
   return {
+    platform: info.platform,
     bvid: info.bvid,
     title: info.title,
     author: info.author,
@@ -70,7 +75,7 @@ export function videoSeedFromInfo(info: VideoInfo): VideoSeed {
   };
 }
 
-/** 解析结果按 bvid 缓存，避免滚回去又打一趟 B 站。 */
+/** 解析结果按平台 + 视频 ID 缓存。 */
 const resolvedCache = new Map<string, VideoInfo>();
 
 export interface VideoResultRowProps extends VideoSeed {
@@ -90,6 +95,8 @@ export interface VideoResultRowProps extends VideoSeed {
   selectionMode?: boolean;
   onToggleSelect?(): void;
   onEnterSelection?(): void;
+  /** 当前行位于现有选区内时，右键下载应交给整组选区入口。 */
+  onDownloadSelected?(): void;
   /** @deprecated 保留兼容；请用 totalColumns。 */
   colSpan?: number;
 }
@@ -100,6 +107,7 @@ export interface VideoResultRowProps extends VideoSeed {
  * 分 P、画质、Offset 等细项挪到「下载队列」里逐条配置。
  */
 export function VideoResultRow({
+  platform,
   bvid,
   title,
   author,
@@ -115,6 +123,7 @@ export function VideoResultRow({
   selectionMode = false,
   onToggleSelect,
   onEnterSelection,
+  onDownloadSelected,
 }: VideoResultRowProps) {
   const settings = useAppStore((state) => state.settings);
   const openQueuePanel = useAppStore((state) => state.openQueuePanel);
@@ -122,7 +131,8 @@ export function VideoResultRow({
   const { widePlay, narrowPlay } = useTrackClickPrefs();
   const playClick = playClickForLayout({ widePlay, narrowPlay }, layout);
 
-  const [info, setInfo] = useState<VideoInfo | null>(given ?? resolvedCache.get(bvid) ?? null);
+  const cacheKey = `${platform}:${bvid}`;
+  const [info, setInfo] = useState<VideoInfo | null>(given ?? resolvedCache.get(cacheKey) ?? null);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
@@ -144,9 +154,9 @@ export function VideoResultRow({
       if (!entries.some((entry) => entry.isIntersecting)) return;
       observer.disconnect();
       void api
-        .videoResolve(bvid)
+        .videoResolve(bvid, platform)
         .then((result) => {
-          resolvedCache.set(bvid, result);
+          resolvedCache.set(cacheKey, result);
           if (alive) setInfo(result);
         })
         .catch(() => undefined);
@@ -156,10 +166,11 @@ export function VideoResultRow({
       alive = false;
       observer.disconnect();
     };
-  }, [bvid, info]);
+  }, [bvid, cacheKey, info, platform]);
 
   const buildRequest = useCallback((): VideoDownloadRequest => {
     return {
+      platform,
       bvid,
       page_index: 0,
       max_height: effectiveHeight,
@@ -169,7 +180,7 @@ export function VideoResultRow({
       artist: author.trim() || undefined,
       cover: cover.trim() || undefined,
     };
-  }, [bvid, effectiveHeight, settings?.video_transcode, title, author, cover]);
+  }, [platform, bvid, effectiveHeight, settings?.video_transcode, title, author, cover]);
 
   const download = useCallback(async () => {
     setSending(true);
@@ -200,6 +211,7 @@ export function VideoResultRow({
     pointerDragCleanupRef.current = beginVideoPointerDrag(
       event.nativeEvent,
       {
+        platform,
         bvid,
         page_index: 0,
         max_height: effectiveHeight,
@@ -242,7 +254,9 @@ export function VideoResultRow({
           if (!bvid) return;
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
           if (selectionMode) return;
-          if (playClick === "double") requestVideoPreview({ bvid, title, author, page: 0, cover });
+          if (playClick === "double" && platform === "bilibili") {
+            requestVideoPreview({ bvid, title, author, page: 0, cover });
+          }
         }}
         onPointerDown={(event) => {
           if ((event.target as HTMLElement).closest("button, select, label, input, a")) return;
@@ -263,12 +277,16 @@ export function VideoResultRow({
           if (selectionMode) return;
           // 窄屏单击即播，双点的第二个 click 必须吞掉，避免视频重新装载两次。
           if (playClick === "single" && event.detail > 1) return;
-          if (playClick === "single") requestVideoPreview({ bvid, title, author, page: 0, cover });
+          if (playClick === "single" && platform === "bilibili") {
+            requestVideoPreview({ bvid, title, author, page: 0, cover });
+          }
         }}
         title={
-          playClick === "single"
-            ? "单击预览视频；点下载加入队列后可在队列里调分 P / 画质 / Offset"
-            : "双击预览视频；点下载加入队列后可在队列里调分 P / 画质 / Offset"
+          platform === "bilibili"
+            ? playClick === "single"
+              ? "单击预览视频；下载细项可在队列里调整"
+              : "双击预览视频；下载细项可在队列里调整"
+            : "YouTube Video；点下载后可在队列里选择音频或视频"
         }
       >
         <td
@@ -333,9 +351,9 @@ export function VideoResultRow({
             case "sources":
               return (
                 <td key={column.key} data-col="sources" {...cellDrag}>
-                  <span className="kd-source-dots" title="B站">
-                    <span className="kd-source-dot" data-platform="bilibili" data-active="true">
-                      <PlatformMark id="bilibili" size={12} />
+                  <span className="kd-source-dots" title={platform === "youtube" ? "YouTube" : "B站"}>
+                    <span className="kd-source-dot" data-platform={platform} data-active="true">
+                      <PlatformMark id={platform} size={12} />
                     </span>
                   </span>
                 </td>
@@ -343,7 +361,7 @@ export function VideoResultRow({
             case "from":
               return (
                 <td key={column.key} className="kd-mono" data-col="from" {...cellDrag}>
-                  B站
+                  {platform === "youtube" ? "YouTube" : "B站"}
                 </td>
               );
             case "quality":
@@ -372,7 +390,8 @@ export function VideoResultRow({
             type="button"
             disabled={sending || !bvid}
             onClick={() => {
-              void download();
+              if (onDownloadSelected) onDownloadSelected();
+              else void download();
               setRowMenu(null);
             }}
           >

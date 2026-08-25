@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  collectionPageWindow,
   promoteResolvedCollection,
+  RESOLVED_COLLECTION_PAGE_SIZE,
   resolvedCollectionItem,
 } from "../src/lib/searchCollections.ts";
 import type {
@@ -78,4 +80,35 @@ test("stale collection result does not replace a newer result set", () => {
   const resolved = resolvedCollectionItem(collection, response);
 
   assert.equal(promoteResolvedCollection([newer], collection, resolved)[0], newer);
+});
+
+test("loaded collections paginate fifty tracks without changing the full total", () => {
+  assert.equal(RESOLVED_COLLECTION_PAGE_SIZE, 50);
+  assert.deepEqual(collectionPageWindow(300, 1), {
+    page: 1,
+    pageCount: 6,
+    start: 0,
+    end: 50,
+  });
+  assert.deepEqual(collectionPageWindow(300, 6), {
+    page: 6,
+    pageCount: 6,
+    start: 250,
+    end: 300,
+  });
+});
+
+test("collection pagination clamps stale pages after a shorter refresh", () => {
+  assert.deepEqual(collectionPageWindow(71, 99), {
+    page: 2,
+    pageCount: 2,
+    start: 50,
+    end: 71,
+  });
+  assert.deepEqual(collectionPageWindow(0, Number.NaN), {
+    page: 1,
+    pageCount: 1,
+    start: 0,
+    end: 0,
+  });
 });

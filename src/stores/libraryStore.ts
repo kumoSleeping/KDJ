@@ -8,6 +8,10 @@ import { api } from "../lib/api";
 import { resolveLibraryPasteOp } from "../lib/libraryPaste";
 import { isOutsideFolder } from "../lib/outsideFolder";
 import { cycleTableSort } from "../lib/tableSort";
+import {
+  readWorkspaceSession,
+  updateLocalWorkspaceSession,
+} from "../lib/workspaceSession";
 import type {
   AnalyzeProgress,
   AnalyzeResponseLike,
@@ -62,17 +66,6 @@ export interface LibraryFilter {
   order2: SortOrder;
 }
 
-const FOLDER_SESSION_KEY = "kd-library-folder";
-
-function writeSessionFolder(folder: string): void {
-  try {
-    if (folder.trim()) sessionStorage.setItem(FOLDER_SESSION_KEY, folder);
-    else sessionStorage.removeItem(FOLDER_SESSION_KEY);
-  } catch {
-    /* private mode */
-  }
-}
-
 export const DEFAULT_FILTER: LibraryFilter = {
   q: "",
   key: "",
@@ -91,6 +84,30 @@ export const DEFAULT_FILTER: LibraryFilter = {
   order2: "asc",
 };
 
+const TRACK_SORTS: readonly TrackSort[] = [
+  "added_at", "title", "artist", "album", "bpm", "camelot", "energy", "duration", "rating", "custom",
+];
+
+function restoredLibraryFilter(): LibraryFilter {
+  const restored = readWorkspaceSession().local;
+  const sort = TRACK_SORTS.includes(restored.sort as TrackSort)
+    ? restored.sort as TrackSort
+    : DEFAULT_FILTER.sort;
+  const sort2 = restored.sort2 && TRACK_SORTS.includes(restored.sort2 as TrackSort)
+    ? restored.sort2 as TrackSort
+    : null;
+  return {
+    ...DEFAULT_FILTER,
+    folder: restored.folder,
+    folderDeep: restored.folderDeep,
+    sort,
+    order: restored.order,
+    sort2: sort2 === sort ? null : sort2,
+    order2: restored.order2,
+  };
+}
+
+const RESTORED_LIBRARY_SESSION = readWorkspaceSession().local;
 const PAGE_SIZE = 200;
 const FILTER_DEBOUNCE_MS = 250;
 
@@ -112,6 +129,12 @@ function cancelPending(): void {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function folderTreeContains(nodes: FolderTree["roots"], path: string): boolean {
+  return nodes.some((node) =>
+    node.path === path || folderTreeContains(node.children, path),
+  );
 }
 
 /**
@@ -291,10 +314,12 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   loading: false,
   loadingMore: false,
   error: "",
-  // 刷新后仍回到刚才打开的文件夹，待下载行才对得上 dest_dir。
-  filter: { ...DEFAULT_FILTER, folder: "" },
-  selectedId: null,
-  selectedIds: [],
+  // 文件夹、排序和最后选中的曲目跨进程恢复；无效 id 会在列表加载后安全清理。
+  filter: restoredLibraryFilter(),
+  selectedId: RESTORED_LIBRARY_SESSION.selectedId,
+  selectedIds: RESTORED_LIBRARY_SESSION.selectedId
+    ? [RESTORED_LIBRARY_SESSION.selectedId]
+    : [],
   selectionMode: false,
   selectedTrack: null,
   clipboard: null,
@@ -411,9 +436,21 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   setFilter(patch) {
     cancelPending();
     const filter = { ...get().filter, ...patch };
-    if ("folder" in patch) writeSessionFolder(filter.folder);
+    const folderChanged = "folder" in patch && filter.folder !== get().filter.folder;
+    updateLocalWorkspaceSession({
+      folder: filter.folder,
+      folderDeep: filter.folderDeep,
+      sort: filter.sort,
+      order: filter.order,
+      sort2: filter.sort2,
+      order2: filter.order2,
+      ...(folderChanged ? { selectedId: null, scrollTop: 0 } : {}),
+    });
     set({
       filter,
+      ...(folderChanged
+        ? { selectedId: null, selectedIds: [], selectedTrack: null, selectionMode: false }
+        : {}),
     });
     filterTimer = setTimeout(() => {
       filterTimer = null;
@@ -423,7 +460,15 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   resetFilter() {
     cancelPending();
-    writeSessionFolder("");
+    updateLocalWorkspaceSession({
+      folder: "",
+      folderDeep: DEFAULT_FILTER.folderDeep,
+      sort: DEFAULT_FILTER.sort,
+      order: DEFAULT_FILTER.order,
+      sort2: DEFAULT_FILTER.sort2,
+      order2: DEFAULT_FILTER.order2,
+      scrollTop: 0,
+    });
     set({
       filter: { ...DEFAULT_FILTER },
     });
@@ -435,8 +480,21 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
       const folders = await api.folders();
       const filter = get().filter;
       // 「其他」里已经没有歌了：退回全部曲目，别留在空哨兵筛选上。
-      if (isOutsideFolder(filter.folder) && folders.outside <= 0) {
-        set({ folders, filter: { ...filter, folder: "" } });
+      if (
+        (isOutsideFolder(filter.folder) && folders.outside <= 0) ||
+        (filter.folder &&
+          !isOutsideFolder(filter.folder) &&
+          !folderTreeContains(folders.roots, filter.folder))
+      ) {
+        const nextFilter = { ...filter, folder: "" };
+        updateLocalWorkspaceSession({ folder: "", selectedId: null, scrollTop: 0 });
+        set({
+          folders,
+          filter: nextFilter,
+          selectedId: null,
+          selectedIds: [],
+          selectedTrack: null,
+        });
         void get().refresh();
         return;
       }
@@ -458,6 +516,7 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     // 按 id 选中都发生在当前页里，页外暂存到这里就过期了
     set({ selectedTrack: null });
     if (id === null) {
+      updateLocalWorkspaceSession({ selectedId: null });
       set({ selectedId: null, selectedIds: [], selectionMode: false });
       return;
     }
@@ -466,7 +525,9 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
       // Cmd/Ctrl 点：加进去或拿出来。锚点跟着最后动的那一条走。
       const has = selectedIds.includes(id);
       const next = has ? selectedIds.filter((item) => item !== id) : [...selectedIds, id];
-      set({ selectedIds: next, selectedId: has ? (next[next.length - 1] ?? null) : id });
+      const nextSelectedId = has ? (next[next.length - 1] ?? null) : id;
+      updateLocalWorkspaceSession({ selectedId: nextSelectedId });
+      set({ selectedIds: next, selectedId: nextSelectedId });
       return;
     }
     if (mode === "range" && selectedId !== null) {
@@ -475,22 +536,27 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
       const to = tracks.findIndex((track) => track.id === id);
       if (from >= 0 && to >= 0) {
         const [lo, hi] = from <= to ? [from, to] : [to, from];
+        updateLocalWorkspaceSession({ selectedId: id });
         set({ selectedIds: tracks.slice(lo, hi + 1).map((track) => track.id), selectedId: id });
         return;
       }
     }
+    updateLocalWorkspaceSession({ selectedId: id });
     set({ selectedId: id, selectedIds: [id] });
   },
 
   selectTrack(track) {
+    updateLocalWorkspaceSession({ selectedId: track.id });
     set({ selectedId: track.id, selectedIds: [track.id], selectedTrack: track });
   },
 
   selectAll() {
     const { tracks } = get();
+    const selectedId = get().selectedId ?? (tracks[0]?.id ?? null);
+    updateLocalWorkspaceSession({ selectedId });
     set({
       selectedIds: tracks.map((track) => track.id),
-      selectedId: get().selectedId ?? (tracks[0]?.id ?? null),
+      selectedId,
     });
   },
 

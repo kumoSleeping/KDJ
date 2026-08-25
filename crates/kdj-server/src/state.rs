@@ -14,15 +14,18 @@ use kdj_providers::bilibili::BilibiliProvider;
 use kdj_providers::netease::NeteaseProvider;
 use kdj_providers::qqmusic::QqMusicProvider;
 use kdj_providers::soundcloud::SoundCloudProvider;
+use kdj_providers::youtube::YoutubeProvider;
+use kdj_providers::youtubemusic::auth::YoutubeAuth;
 use kdj_providers::youtubemusic::YoutubeMusicProvider;
 use kdj_providers::{MusicProvider, ProviderContext, ProviderLiveSettings};
 
 /// 账号页和搜索页的平台顺序。`local` 不是真的 provider，不在这里。
-pub const PLATFORMS: [Platform; 5] = [
+pub const PLATFORMS: [Platform; 6] = [
     Platform::Wyy,
     Platform::Qqm,
     Platform::Soundcloud,
     Platform::Ytm,
+    Platform::Youtube,
     Platform::Bilibili,
 ];
 
@@ -40,6 +43,8 @@ pub struct SongPreviewTicket {
     pub cache_key: Option<String>,
     pub cached: bool,
     pub url: String,
+    /// YTM URL 是否带 WebView 生成的内容绑定 PO Token；这类 URL 不能在后端刷新。
+    pub browser_resolved: bool,
     pub last_used_at: Instant,
 }
 
@@ -184,8 +189,12 @@ pub struct AppState {
     pub bilibili: Arc<BilibiliProvider>,
     /// SoundCloud OAuth 回调需要访问具体 provider 的短期 PKCE 会话。
     pub soundcloud: Arc<SoundCloudProvider>,
-    /// YouTube Music 设备码登录需要访问具体 provider 的在途设备码会话。
+    /// 两个平台的登录态严格隔离；退出或重新连接任一来源不会影响另一个。
+    pub ytm_auth: Arc<YoutubeAuth>,
+    pub youtube_auth: Arc<YoutubeAuth>,
     pub youtubemusic: Arc<YoutubeMusicProvider>,
+    /// 普通 YouTube 视频解析/下载接口需要具体 provider。
+    pub youtube: Arc<YoutubeProvider>,
     /// 所有 provider 共享的 live 设置句柄；`PUT /api/settings` 后刷这份即可。
     provider_ctx: ProviderContext,
     /// 在线歌曲试听的短期代理票据：浏览器只拿本地 URL，不直接碰各平台 CDN。
@@ -210,51 +219,75 @@ pub struct AppState {
     pub folder_undo: Mutex<VecDeque<FolderUndoBatch>>,
     /// 已观察到的外置曲目状态，用来区分“本轮 djay 改了”与普通三秒轮询。
     pub one_library_sync: Mutex<HashMap<String, OneLibrarySyncSnapshot>>,
+    /// CLI / 第二次启动用来唤回窗口或真退出。测试里接收端会被丢掉，send 失败即可。
+    pub control: tokio::sync::mpsc::UnboundedSender<UiControl>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum UiControl {
+    Show,
+    Quit,
 }
 
 impl AppState {
     pub fn new(config: Arc<AppConfig>) -> Result<Arc<Self>> {
+        let (state, _rx) = Self::new_with_control(config)?;
+        Ok(state)
+    }
+
+    pub fn new_with_control(
+        config: Arc<AppConfig>,
+    ) -> Result<(Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<UiControl>)> {
         let database = Database::open(&config.db_path())?;
         let library = Arc::new(LibraryService::new(database));
-
         let ctx = provider_context(&config);
         let netease = Arc::new(NeteaseProvider::new(ctx.clone())?);
         let qqmusic = Arc::new(QqMusicProvider::new(ctx.clone())?);
         let soundcloud = Arc::new(SoundCloudProvider::new(ctx.clone())?);
-        let youtubemusic = Arc::new(YoutubeMusicProvider::new(ctx.clone())?);
+        let ytm_auth = Arc::new(YoutubeAuth::new(&ctx, Platform::Ytm)?);
+        let youtube_auth = Arc::new(YoutubeAuth::new(&ctx, Platform::Youtube)?);
+        let youtubemusic = Arc::new(YoutubeMusicProvider::new(ctx.clone(), ytm_auth.clone())?);
+        let youtube = Arc::new(YoutubeProvider::new(ctx.clone(), youtube_auth.clone())?);
         let bilibili = Arc::new(BilibiliProvider::new(ctx.clone())?);
-
         let mut providers: BTreeMap<Platform, Arc<dyn MusicProvider>> = BTreeMap::new();
         providers.insert(Platform::Wyy, netease);
         providers.insert(Platform::Qqm, qqmusic);
         providers.insert(Platform::Soundcloud, soundcloud.clone());
         providers.insert(Platform::Ytm, youtubemusic.clone());
+        providers.insert(Platform::Youtube, youtube.clone());
         providers.insert(Platform::Bilibili, bilibili.clone());
-
         let waveforms = crate::waveform::WaveformCoordinator::new(library.clone());
         let stems = kdj_stems::StemCoordinator::new(&config.data_dir);
         let stream_cache = crate::stream_cache::StreamCache::default();
         stream_cache.set_enabled(config.to_settings().stream_cache_enabled);
-        Ok(Arc::new(AppState {
-            config,
-            hub: EventHub::default(),
-            library,
-            providers,
-            bilibili,
-            soundcloud,
-            youtubemusic,
-            provider_ctx: ctx,
-            song_previews: Mutex::new(SongPreviewTickets::default()),
-            stream_cache,
-            stream_waveforms: Default::default(),
-            analysis: Default::default(),
-            waveforms,
-            stems,
-            maintenance: Default::default(),
-            folder_operations: Mutex::new(()),
-            folder_undo: Mutex::new(VecDeque::new()),
-            one_library_sync: Mutex::new(HashMap::new()),
-        }))
+        let (control, rx) = tokio::sync::mpsc::unbounded_channel();
+        Ok((
+            Arc::new(AppState {
+                config,
+                hub: EventHub::default(),
+                library,
+                providers,
+                bilibili,
+                soundcloud,
+                ytm_auth,
+                youtube_auth,
+                youtubemusic,
+                youtube,
+                provider_ctx: ctx,
+                song_previews: Mutex::new(SongPreviewTickets::default()),
+                stream_cache,
+                stream_waveforms: Default::default(),
+                analysis: Default::default(),
+                waveforms,
+                stems,
+                maintenance: Default::default(),
+                folder_operations: Mutex::new(()),
+                folder_undo: Mutex::new(VecDeque::new()),
+                one_library_sync: Mutex::new(HashMap::new()),
+                control,
+            }),
+            rx,
+        ))
     }
 
     pub fn folder_undo_status(&self) -> FolderUndoStatus {
@@ -319,6 +352,10 @@ fn provider_live_settings(config: &AppConfig) -> ProviderLiveSettings {
             .enabled_platforms
             .iter()
             .any(|id| id == Platform::Ytm.as_str()),
+        youtube_enabled: settings
+            .enabled_platforms
+            .iter()
+            .any(|id| id == Platform::Youtube.as_str()),
         video_dir: Some(config.video_dir()),
         video_format: settings.video_format.ext().to_string(),
     }
@@ -354,6 +391,7 @@ mod tests {
             cache_key: None,
             cached: false,
             url: format!("https://cdn.example/{key}"),
+            browser_resolved: false,
             last_used_at: at,
         }
     }

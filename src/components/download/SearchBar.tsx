@@ -175,7 +175,7 @@ export function SearchBar({
         <div className="kd-searchbar-copy" data-empty={!query || undefined}>
           {!query && (
             <span className="kd-search-placeholder" aria-hidden="true">
-              喵喵喵?
+              开发者最近在补"全金属狂潮"!
             </span>
           )}
           <textarea
@@ -387,7 +387,9 @@ export function SearchPlatforms({
               off
                 ? `${item.label}：未在设置中启用，点一下开启`
                 : item.video
-                  ? `${item.label}（贴链接或 BV 号自动走视频解析）· 拖动排序`
+                  ? item.id === "bilibili"
+                    ? `${item.label}（贴链接或 BV 号自动走视频解析）· 拖动排序`
+                    : `${item.label}（视频 / Shorts / 播放列表）· 拖动排序`
                   : `${item.label} · 拖动排序：排前面的优先作为下载来源`
             }
             onPointerDown={(event) => onPointerDown(event, item.id)}

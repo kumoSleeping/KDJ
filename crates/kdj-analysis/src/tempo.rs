@@ -21,6 +21,9 @@ pub struct TempoResult {
     pub bpm_raw: f64,
     pub confidence: f64,
     pub beat_times: Vec<f64>,
+    /// Normalized onset strength at each tracked beat, used only for conservative 4/4 accent
+    /// classification. Equal-strength beats intentionally produce no downbeat claim.
+    pub beat_strengths: Vec<f64>,
     pub first_beat: f64,
     pub beat_interval: f64,
 }
@@ -671,6 +674,10 @@ pub fn analyze_tempo(samples: &[f32], sr: f64) -> TempoResult {
             first_beat: beat_times.first().copied().unwrap_or(0.0),
             beat_interval: interval,
             beat_times,
+            beat_strengths: frames
+                .iter()
+                .map(|frame| env.get(*frame).copied().unwrap_or(0.0))
+                .collect(),
         };
     }
 
@@ -689,6 +696,10 @@ pub fn analyze_tempo(samples: &[f32], sr: f64) -> TempoResult {
         first_beat: round_to(beat_times[0], 4),
         beat_interval: round_to(beat_interval, 6),
         beat_times: beat_times.iter().map(|t| round_to(*t, 4)).collect(),
+        beat_strengths: frames
+            .iter()
+            .map(|frame| env.get(*frame).copied().unwrap_or(0.0))
+            .collect(),
     }
 }
 

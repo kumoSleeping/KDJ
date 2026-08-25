@@ -37,6 +37,7 @@ fn default_priority(platform: Platform) -> f64 {
         Platform::Qqm => 0.95,
         Platform::Soundcloud => 0.8,
         Platform::Ytm => 0.7,
+        Platform::Youtube => 0.6,
         Platform::Bilibili => 0.5,
         Platform::Local => 0.4,
     }
@@ -578,6 +579,7 @@ fn priority_table(priority: &[Platform]) -> BTreeMap<Platform, f64> {
         Platform::Qqm,
         Platform::Soundcloud,
         Platform::Ytm,
+        Platform::Youtube,
         Platform::Bilibili,
         Platform::Local,
     ]
@@ -713,6 +715,14 @@ pub fn merge_results(
     for (index, source) in ordered.into_iter().enumerate() {
         let mut best: Option<(usize, f64)> = None;
         for (i, cluster) in clusters.iter().enumerate() {
+            // 视频与音乐即使同名也不是同一种下载结果；普通 YouTube 和 B 站视频
+            // 可以互相聚合，但绝不能被并进 YTM/网易云的音频行。
+            let source_is_video = matches!(source.platform, Platform::Youtube | Platform::Bilibili);
+            let cluster_is_video =
+                matches!(cluster[0].platform, Platform::Youtube | Platform::Bilibili);
+            if source_is_video != cluster_is_video {
+                continue;
+            }
             let value = same_song_score(&cluster[0], &source);
             if value >= SAME_SONG_THRESHOLD && best.is_none_or(|(_, current)| value >= current) {
                 best = Some((i, value));
@@ -1178,6 +1188,25 @@ mod tests {
         let groups = merge_results("Supernova", &per_platform, &[Platform::Wyy, Platform::Qqm]);
         assert_eq!(groups.len(), 1, "同一首歌应当并成一组");
         assert_eq!(groups[0].sources.len(), 2);
+    }
+
+    #[test]
+    fn youtube_video_does_not_merge_into_same_named_music() {
+        let mut per_platform = BTreeMap::new();
+        per_platform.insert(
+            Platform::Ytm,
+            vec![source(Platform::Ytm, "Supernova", &["aespa"], 178.0)],
+        );
+        per_platform.insert(
+            Platform::Youtube,
+            vec![source(Platform::Youtube, "Supernova", &["aespa"], 178.0)],
+        );
+        let groups = merge_results(
+            "Supernova",
+            &per_platform,
+            &[Platform::Ytm, Platform::Youtube],
+        );
+        assert_eq!(groups.len(), 2, "视频和音乐必须保持两个功能入口");
     }
 
     #[test]

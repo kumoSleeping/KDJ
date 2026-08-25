@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useRef } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   accentPaint,
   dimPaint,
@@ -40,6 +41,7 @@ export function LyricsHost({
   const prefs = useLyricsPrefs();
   const desktopOpacity = prefs.desktopOpacity;
   const lyricExtra = useLyricsPrefs((state) => state.lyricExtra);
+  const setDesktopCoordinates = useLyricsPrefs((state) => state.setDesktopCoordinates);
   const setDesktopVerticalOffset = useLyricsPrefs((state) => state.setDesktopVerticalOffset);
   const showLyrics = useAppStore((state) => state.showLyrics);
   const entry = useLyricsStore((state) => state.get(current?.id));
@@ -155,7 +157,28 @@ export function LyricsHost({
     ).catch((error) => console.error("悬浮歌词时间轴推送失败", error));
   }, [overlayOn, current?.id, entry, lyricExtra]);
 
-  // 原生浮层被拖动后把新位置写回偏好，下次打开落在同一处。
+  // 桌面歌词是另一张 WebView；坐标必须回传主窗落盘，不能只写歌词窗自己的 storage。
+  useEffect(() => {
+    if (!window.__TAURI_INTERNALS__) return;
+    let unlisten: UnlistenFn | null = null;
+    let timer: number | null = null;
+    let latest: { x: number; y: number } | null = null;
+    void listen<{ x: number; y: number }>("desktop-lyrics-moved", (event) => {
+      latest = event.payload;
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        if (latest) setDesktopCoordinates(latest.x, latest.y);
+      }, 220);
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      unlisten?.();
+    };
+  }, [setDesktopCoordinates]);
+
+  // Android 原生浮层被拖动后把新位置写回偏好，下次打开落在同一处。
   useEffect(() => {
     const control = window.kdj?.overlayPermission;
     if (!control) return;

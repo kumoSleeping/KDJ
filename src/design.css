@@ -145,8 +145,9 @@
   color-scheme: light;
   --kd-text: #1c1c1e;
   --kd-text-body: #3a3a3c;
-  --kd-muted: #86868b;
-  --kd-faint: #b0b0b6;
+  --kd-muted: #6e6e73;
+  /* 白天次要数字（侧栏曲目数等）不能太浅，否则白底上几乎看不见。 */
+  --kd-faint: #8e8e93;
   --kd-settings-muted: #5f5f66;
   --kd-settings-faint: #76767d;
   --kd-bg: #f2f2f2;
@@ -818,6 +819,16 @@ textarea {
 .kd-narrow-source-children button[data-stream-platform="qqm"] > svg {
   color: #31c27c;
 }
+.kd-narrow-source-roots button[data-stream-platform="soundcloud"] > svg,
+.kd-narrow-source-children button[data-stream-platform="soundcloud"] > svg {
+  color: #ff5500;
+}
+.kd-narrow-source-roots button[data-stream-platform="ytm"] > svg,
+.kd-narrow-source-children button[data-stream-platform="ytm"] > svg,
+.kd-narrow-source-roots button[data-stream-platform="youtube"] > svg,
+.kd-narrow-source-children button[data-stream-platform="youtube"] > svg {
+  color: #ff0000;
+}
 .kd-narrow-source-roots button[data-stream-platform="bilibili"] > svg,
 .kd-narrow-source-children button[data-stream-platform="bilibili"] > svg {
   color: #fb7299;
@@ -1239,7 +1250,8 @@ textarea {
   background: #ff8800;
   color: #2b1600;
 }
-.kd-segment > button[data-platform="ytm"][aria-pressed="true"] {
+.kd-segment > button[data-platform="ytm"][aria-pressed="true"],
+.kd-segment > button[data-platform="youtube"][aria-pressed="true"] {
   background: #ff2b2b;
   color: #fff;
 }
@@ -2759,11 +2771,15 @@ body[data-kd-search-pointer-dragging="true"] .kd-table tbody tr[data-video="true
   user-select: none;
   -webkit-user-select: none;
 }
-body[data-kd-search-pointer-dragging="true"] .kd-video-row {
-  cursor: grabbing;
+body[data-kd-search-pointer-dragging="true"],
+body[data-kd-search-pointer-dragging="true"] * {
+  cursor: grabbing !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
 }
 [data-kd-pointer-search-over="folder"],
-[data-kd-pointer-search-over="queue"] {
+[data-kd-pointer-search-over="queue"],
+[data-kd-pointer-search-over="deck"] {
   outline: 1px dashed color-mix(in srgb, var(--kd-accent) 70%, transparent);
   outline-offset: -2px;
   background: color-mix(in srgb, var(--kd-accent) 9%, transparent);
@@ -2967,9 +2983,57 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
 }
 .kd-result-package-actions {
   display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: flex-end;
   gap: 0.65rem;
+}
+/* 已载入的歌单/艺术家按 50 首分页；页头保留紧凑控制，页尾显示当前范围。 */
+.kd-result-pagination {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-width: 0;
+  color: var(--kd-muted);
+  font-size: var(--kd-size-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.kd-result-pagination[data-compact="true"] {
+  gap: 0.2rem;
+}
+.kd-result-page-btn {
+  appearance: none;
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 1.55rem;
+  height: 1.55rem;
+  padding: 0;
+  border: 1px solid var(--kd-line-soft);
+  background: transparent;
+  color: var(--kd-muted);
+  cursor: pointer;
+}
+.kd-result-page-btn:hover:not(:disabled) {
+  border-color: var(--kd-theme);
+  background: var(--kd-hover);
+  color: var(--kd-theme);
+}
+.kd-result-page-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.kd-result-page-status {
+  min-width: 3rem;
+  text-align: center;
+}
+.kd-table tbody tr[data-collection-pagination="true"] td {
+  padding: 0.38rem 0.5rem;
+  border-top: 1px solid var(--kd-line-soft);
+  background: var(--kd-panel-raised);
+  text-align: center;
 }
 /* 在线结果行首与本地曲库一致只显示序号。下载仍保留在右键菜单、详情和批量动作中。 */
 .kd-table tbody td.kd-result-lead {
@@ -3645,8 +3709,12 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   white-space: nowrap;
 }
 .kd-player-deck[data-active="true"] .kd-player-deck-state,
-.kd-player-deck[data-transitioning="true"] .kd-player-deck-state {
+.kd-player-deck[data-transitioning="true"] .kd-player-deck-state,
+.kd-player-deck[data-resolving="true"] .kd-player-deck-state {
   color: var(--kd-text-body);
+}
+.kd-player-deck[data-resolving="true"] .kd-player-deck-copy {
+  opacity: 1;
 }
 .kd-player-theme {
   appearance: none;
@@ -3892,60 +3960,6 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
 /* Canvas 波形有自己的 z-index；已播遮罩必须明确压在 canvas 上，否则会被彩色柱子盖掉。 */
 .kd-wave-dim {
   z-index: 2;
-}
-.kd-wave-analysis-frontier {
-  position: absolute;
-  z-index: 5;
-  top: 12%;
-  bottom: 12%;
-  width: 1px;
-  pointer-events: none;
-  background: rgba(255, 255, 255, 0.78);
-  box-shadow: 0 0 5px rgba(110, 177, 255, 0.9);
-  transition: left 220ms linear;
-}
-.kd-wave-analysis-frontier[data-direction="back"] {
-  background: rgba(132, 195, 255, 0.68);
-}
-/* 在线波形的未知区域仍应是一条可读的流媒体进度轨，而不是一根死灰线。
-   已缓冲段稍亮；真实 analyser 柱由 canvas 叠在上面。 */
-.kd-wave-stream-bed {
-  position: absolute;
-  inset: 0 0.15rem;
-  display: block;
-  pointer-events: none;
-}
-.kd-wave-stream-bed::before,
-.kd-wave-stream-bed > i {
-  position: absolute;
-  top: 50%;
-  height: 5px;
-  border-radius: 999px;
-  transform: translateY(-50%);
-}
-.kd-wave-stream-bed::before {
-  content: "";
-  left: 0;
-  right: 0;
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--kd-theme) 18%, var(--kd-panel-raised)),
-    color-mix(in srgb, #6788ff 22%, var(--kd-panel-raised)),
-    color-mix(in srgb, #a36dff 18%, var(--kd-panel-raised))
-  );
-  box-shadow: inset 0 1px color-mix(in srgb, white 42%, transparent),
-    0 0 0 1px color-mix(in srgb, var(--kd-theme) 7%, transparent);
-}
-.kd-wave-stream-bed > i {
-  z-index: 1;
-  min-width: 2px;
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--kd-theme) 46%, #79a8ff),
-    color-mix(in srgb, #7c6fff 48%, var(--kd-theme))
-  );
-  box-shadow: 0 0 7px color-mix(in srgb, var(--kd-theme) 18%, transparent);
-  opacity: 0.72;
 }
 /* 在线试听没有分析波形：一条可点击进度条顶上。 */
 .kd-player-wave-stream {
@@ -4273,6 +4287,10 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   overflow: hidden;
   pointer-events: none;
 }
+.kd-wave-bake .kd-wave-beat-grid {
+  /* Negative-time bars live on the bake strip, not to the left of a 0…duration rail. */
+  overflow: visible;
+}
 .kd-wave-beat-grid > i {
   position: absolute;
   top: 0;
@@ -4587,8 +4605,16 @@ body[data-kd-search-pointer-dragging="true"] .kd-video-row {
   width: 100%;
   height: 100% !important;
 }
-.kd-performance-overview-wave canvas {
-  height: 100% !important;
+.kd-performance-overview-wave .kd-wave-playhead {
+  z-index: 8;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #ff344f;
+  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.72), 0 0 6px rgba(255, 52, 79, 0.62);
+}
+.kd-performance-overview-wave .kd-wave-playhead-motion {
+  z-index: 8;
 }
 
 @media (max-width: 760px) {
@@ -5270,7 +5296,8 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-activity-plat[data-platform="soundcloud"] {
   color: #ff5500;
 }
-.kd-activity-plat[data-platform="ytm"] {
+.kd-activity-plat[data-platform="ytm"],
+.kd-activity-plat[data-platform="youtube"] {
   color: #ff0000;
 }
 .kd-activity-plat[data-platform="bilibili"] {
@@ -5647,7 +5674,8 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-source-dot[data-platform="soundcloud"] {
   color: #ff5500;
 }
-.kd-source-dot[data-platform="ytm"] {
+.kd-source-dot[data-platform="ytm"],
+.kd-source-dot[data-platform="youtube"] {
   color: #ff0000;
 }
 .kd-source-dot[data-platform="bilibili"] {
@@ -5875,6 +5903,15 @@ input[type="range"].kd-xfader:disabled::-moz-range-thumb {
 .kd-account-avatar,
 .kd-account-avatar > img {
   border-radius: 50% !important;
+}
+/* 浏览器登录只保留系统原生 pop-up button 的外观；不套通用表单的大输入框皮肤。 */
+.kd-account-browser-select {
+  appearance: auto;
+  width: 100%;
+  min-width: 0;
+  height: 1.55rem;
+  font: inherit;
+  font-size: var(--kd-size-xs);
 }
 /* 同一个位子放图标而不是头像（更新那一行）：不描边，免得看着像个空头像框 */
 .kd-set-avatar-icon {
@@ -6981,17 +7018,21 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
   flex: none;
 }
 .kd-work-mode-switch {
-  margin-right: 0.35rem;
   -webkit-app-region: no-drag;
 }
 .kd-work-mode-glyph {
   position: relative;
-  width: 1.1rem;
-  height: 1.1rem;
+  display: block;
+  flex: none;
+  width: 1rem;
+  height: 1rem;
 }
 .kd-work-mode-glyph > svg {
   position: absolute;
   inset: 0;
+  display: block;
+  width: 1rem;
+  height: 1rem;
   transition:
     opacity 150ms ease,
     transform 190ms cubic-bezier(0.2, 0.9, 0.3, 1);
@@ -7042,6 +7083,12 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 }
 .kd-chrome-btn[data-open="true"]:hover {
   color: var(--kd-text-body);
+}
+.kd-chrome-btn[data-action="aggregate-search"][data-active="true"] {
+  color: var(--kd-theme);
+}
+.kd-chrome-btn[data-action="aggregate-search"][data-active="true"]:hover {
+  color: var(--kd-theme-strong);
 }
 .kd-chrome-btn[data-action="middle-split"][data-active="true"] {
   color: var(--kd-theme);
@@ -7248,7 +7295,8 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 .kd-plat[aria-pressed="true"][data-platform="soundcloud"] {
   color: #ff5500;
 }
-.kd-plat[aria-pressed="true"][data-platform="ytm"] {
+.kd-plat[aria-pressed="true"][data-platform="ytm"],
+.kd-plat[aria-pressed="true"][data-platform="youtube"] {
   color: #ff0000;
 }
 .kd-plat[aria-pressed="true"][data-platform="bilibili"] {
@@ -8422,6 +8470,13 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 .kd-folder-stream-root[data-stream-platform="qqm"] > svg {
   color: #31c27c;
 }
+.kd-folder-stream-root[data-stream-platform="soundcloud"] > svg {
+  color: #ff5500;
+}
+.kd-folder-stream-root[data-stream-platform="ytm"] > svg,
+.kd-folder-stream-root[data-stream-platform="youtube"] > svg {
+  color: #ff0000;
+}
 .kd-folder-stream-root[data-stream-platform="bilibili"] > svg {
   color: #fb7299;
 }
@@ -8458,6 +8513,13 @@ textarea.kd-searchbar-input::-webkit-scrollbar {
 }
 .kd-folder-stream-playlist[data-stream-platform="qqm"] > svg {
   color: color-mix(in srgb, #31c27c 68%, var(--kd-muted));
+}
+.kd-folder-stream-playlist[data-stream-platform="soundcloud"] > svg {
+  color: color-mix(in srgb, #ff5500 68%, var(--kd-muted));
+}
+.kd-folder-stream-playlist[data-stream-platform="ytm"] > svg,
+.kd-folder-stream-playlist[data-stream-platform="youtube"] > svg {
+  color: color-mix(in srgb, #ff0000 68%, var(--kd-muted));
 }
 .kd-stream-status {
   padding-left: 1.2rem;
@@ -8560,6 +8622,14 @@ button.kd-stream-status {
   --kd-fader-thumb-border: rgba(0, 0, 0, 0.55);
   --kd-knob-boost: #e24b4b;
   --kd-knob-cut: #4d8af0;
+  --kd-knob-needle: #fff;
+  --kd-beat-tick: rgba(255, 255, 255, 0.28);
+  --kd-beat-bar: #ffe600;
+  --kd-beat-label: #fff3a0;
+  --kd-beat-label-shadow: 0 1px #000, 1px 0 #000, -1px 0 #000;
+  --kd-eq-guide: rgba(255, 255, 255, 0.06);
+  --kd-eq-guide-major: rgba(255, 255, 255, 0.14);
+  --kd-eq-zero: rgba(255, 255, 255, 0.14);
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -8676,81 +8746,34 @@ button.kd-stream-status {
 }
 .kd-performance-deck-waves {
   position: relative;
+  isolation: isolate;
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 0;
 }
+.kd-performance-wave-needle {
+  position: absolute;
+  z-index: 9;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  margin-left: -1px;
+  pointer-events: none;
+  background: #ff344f;
+  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.72), 0 0 6px rgba(255, 52, 79, 0.62);
+}
 .kd-performance-deck-waves + .kd-performance-deck-waves {
   margin-top: 1px;
 }
-.kd-performance-wave-renderer,
-.kd-performance-wave-gpu,
-.kd-performance-wave-overlay {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-.kd-performance-wave-renderer {
-  z-index: 2;
-  overflow: hidden;
-}
-.kd-performance-wave-gpu,
-.kd-performance-wave-overlay {
-  display: block;
-}
-.kd-performance-wave-overlay { z-index: 2; }
 .kd-performance-wave-row {
   position: relative;
   flex: 0 0 auto;
-  height: 3.15rem;
+  /* 折中扩高格子；中性 GAIN 的波形仍保持旧版厚度，上下余量用于实时增益。 */
+  height: 4.5rem;
   overflow: hidden;
   background: #090c11;
-}
-.kd-performance-wave-menu {
-  position: absolute;
-  z-index: 10;
-  top: 0.14rem;
-  right: 0.14rem;
-  width: max-content;
-  pointer-events: auto;
-}
-.kd-performance-wave-menu-trigger {
-  width: 1.45rem;
-  height: 1.25rem;
-  display: grid;
-  place-items: center;
-  margin-left: auto;
-  padding: 0;
-  border: 0;
-  border-radius: 0.16rem;
-  color: #aab3c0;
-  background: transparent;
-}
-.kd-performance-wave-menu-trigger:hover,
-.kd-performance-wave-menu[data-open="true"] .kd-performance-wave-menu-trigger { color: #eef3f8; }
-.kd-performance-wave-menu-popover {
-  margin-top: 0.08rem;
-  padding: 1px;
-  background: var(--kd-border-subtle);
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.42);
-}
-.kd-performance-wave-menu-popover > button {
-  min-width: 5rem;
-  height: 1.35rem;
-  padding: 0 0.42rem;
-  border: 0;
-  color: var(--kd-text-subtle);
-  background: #0b1016;
-  font: 750 var(--kd-dj-xs)/1 var(--kd-font);
-  text-align: left;
-  white-space: nowrap;
-}
-.kd-performance-wave-menu-popover > button[data-active="true"] {
-  color: #a9e9c2;
-  background: #101a16;
 }
 .kd-performance-wave-empty { display: block; height: 100%; }
 [data-wave-seek="off"],
@@ -8773,46 +8796,45 @@ button.kd-stream-status {
   height: auto;
 }
 .kd-performance-scratch:active { cursor: grabbing; }
-.kd-performance-focus-wave,
-.kd-performance-stem-wave {
+.kd-performance-focus-wave {
   width: 100%;
   height: 100% !important;
   min-width: 0;
+  /* 演奏波形始终使用专用暗色画布；按页面主题选黑白线会直接混进 RGB 柱。 */
+  background: #080a0d !important;
 }
-.kd-performance-focus-wave .kd-wave-playhead {
-  z-index: 7;
-  width: 2px !important;
-  background: #ff344f;
-  box-shadow: 0 0 0 0.5px rgba(255,255,255,0.72), 0 0 6px rgba(255,52,79,0.62);
+.kd-performance-focus-wave .kd-wave-playhead-motion {
+  display: none;
 }
-/* 滚动波形的层级：低对比拍线、单像素暖黄小节线、每小节连续编号。 */
+/* 参考演出软件：灰色拍线退后，荧光黄小节线满高压在波形上，每小节连续编号。 */
+.kd-performance-focus-wave .kd-wave-rail-zoom {
+  /* Cues sit above PCM. Beat numbers now live on the bake strip so negative
+     time is the same lattice; this rail is transparent and only holds markers. */
+  z-index: 3;
+}
 .kd-performance-focus-wave .kd-wave-beat-grid > i {
   width: 1px;
-  background: rgba(27, 31, 38, 0.22);
+  background: var(--kd-beat-tick);
   box-shadow: none;
 }
 .kd-performance-focus-wave .kd-wave-beat-grid > i[data-bar="true"] {
+  /* Half a CSS pixel flickers on 1× displays as the rail crosses the pixel grid. */
   width: 1px;
-  background: #c79d12;
+  background: var(--kd-beat-bar);
   box-shadow: none;
+}
+@media (min-resolution: 2dppx) {
+  .kd-performance-focus-wave .kd-wave-beat-grid > i[data-bar="true"] { width: 0.5px; }
 }
 .kd-performance-focus-wave .kd-wave-beat-grid > i:not(:empty) {
-  padding: 2px 0 0 3px;
-  color: #6b4b00;
+  /* 左 padding 会把 i 的背景一起撑宽，让 0.5px 小节线重新变成粗色块。 */
+  padding: 2px 0 0;
+  overflow: visible;
+  color: var(--kd-beat-label);
   font: 800 0.58rem/1 var(--kd-font-mono);
-  text-indent: 0;
-  text-shadow: 0 1px rgba(255,255,255,0.72);
-}
-:root:not([data-theme="light"]) .kd-performance-focus-wave .kd-wave-beat-grid > i {
-  background: rgba(226, 234, 244, 0.16);
-}
-:root:not([data-theme="light"]) .kd-performance-focus-wave .kd-wave-beat-grid > i[data-bar="true"] {
-  background: #e8c126;
-  box-shadow: none;
-}
-:root:not([data-theme="light"]) .kd-performance-focus-wave .kd-wave-beat-grid > i:not(:empty) {
-  color: #ffe66a;
-  text-shadow: 0 1px #000, 1px 0 #000, -1px 0 #000;
+  text-indent: 3px;
+  text-shadow: var(--kd-beat-label-shadow);
+  white-space: nowrap;
 }
 .kd-performance-wave-row[data-playing="true"] {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-deck-a) 40%, transparent);
@@ -8820,125 +8842,12 @@ button.kd-stream-status {
 .kd-performance-wave-row[data-side="b"][data-playing="true"] {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-deck-b) 40%, transparent);
 }
-/* VOCALS 是主网格底部的强度带，不占独立车道，也不改变 A/B 波形总高度。 */
-.kd-performance-stem-lanes {
-  position: absolute;
-  z-index: 2;
-  right: 0;
-  bottom: 1px;
-  left: 0;
-  height: 0.62rem;
-  min-height: 0;
-  pointer-events: none;
-}
-.kd-performance-stem-lane {
-  position: absolute;
-  inset: 0;
-  min-width: 0;
-  height: auto;
-  overflow: hidden;
-  background: transparent;
-}
-/* 图标直接画在波形上，不加底板；用投影保证压过亮色波形时仍可辨。 */
-.kd-performance-stem-lane-icon {
-  position: absolute;
-  z-index: 8;
-  left: 0.14rem;
-  top: 50%;
-  transform: translateY(-50%);
-  display: grid;
-  place-items: center;
-  width: 0.74rem;
-  height: 0.74rem;
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.85));
-}
-/* B 盘车道图标贴右缘，与 A 盘左右呼应。 */
-.kd-performance-deck-waves[data-side="b"] .kd-performance-stem-lane-icon {
-  left: auto;
-  right: 0.14rem;
-}
-.kd-performance-stem-lane[data-stem="vocals"] .kd-performance-stem-lane-icon { color: #7ce5ae; }
-.kd-performance-stem-wave {
-  min-width: 0;
-  background: transparent !important;
-}
-.kd-performance-stem-wave-empty {
-  display: block;
-  height: 100%;
-  min-width: 0;
-  background: transparent;
-}
-.kd-performance-stem-wave .kd-wave-playhead {
-  z-index: 7;
-  background: #fff;
-  box-shadow: 0 0 3px #000;
-}
-/* 每台 Deck 的一体式 Beat Grid：普通拍线和黄色小节线只画一份，满宽覆盖 ORG + STEM。 */
-.kd-performance-deck-grid {
-  position: absolute;
-  z-index: 6;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-.kd-performance-deck-grid *,
-.kd-performance-deck-grid *::before,
-.kd-performance-deck-grid *::after {
-  pointer-events: none !important;
-}
 .kd-wave-rail {
   pointer-events: none;
 }
-.kd-performance-deck-grid-rail {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  will-change: transform;
-}
-.kd-performance-deck-grid-zoom,
 .kd-wave-rail-zoom {
   position: absolute;
   inset: 0;
-}
-.kd-performance-deck-grid-rail > i {
-  position: absolute;
-  z-index: 3;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: rgba(210, 218, 228, 0.34);
-  box-shadow: none;
-}
-.kd-performance-deck-grid-rail > i[data-bar="true"] {
-  width: 1px;
-  background: #e4c400;
-  box-shadow: none;
-}
-.kd-performance-deck-grid .kd-wave-cue {
-  z-index: 5;
-  width: 2px;
-}
-.kd-performance-deck-grid .kd-wave-cue::before,
-.kd-performance-deck-grid .kd-wave-cue::after {
-  border-left-width: 6px;
-  border-right-width: 6px;
-}
-.kd-performance-deck-grid .kd-wave-cue::before {
-  border-top-width: 8px;
-}
-.kd-performance-deck-grid .kd-wave-cue::after {
-  border-bottom-width: 8px;
-}
-.kd-performance-deck-grid-rail > i > b {
-  position: absolute;
-  top: 2px;
-  left: 4px;
-  color: #e8edf4;
-  font: 800 0.55rem/1 var(--kd-font-mono);
-  text-shadow: 0 1px 2px #000, 0 0 3px #000;
 }
 .kd-performance-info-grid {
   display: grid;
@@ -8970,7 +8879,7 @@ button.kd-stream-status {
   border-radius: 50% !important;
   background: repeating-radial-gradient(circle, #191a1e 0 1px, #050506 1.5px 3px);
   box-shadow: 0 2px 5px rgba(0,0,0,0.42), inset 0 0 0 1px rgba(255,255,255,0.06);
-  animation: kd-player-vinyl-spin 2.8s linear infinite paused;
+  animation: kd-player-vinyl-spin var(--kd-vinyl-spin-duration, 2.8s) linear infinite paused;
 }
 .kd-performance-vinyl-record[data-spinning="true"] { animation-play-state: running; }
 .kd-performance-vinyl-record img {
@@ -9679,13 +9588,20 @@ button.kd-stream-status {
   --kd-fader-thumb-border: rgba(0, 0, 0, 0.28);
   --kd-knob-boost: #d1242f;
   --kd-knob-cut: #1f6feb;
+  --kd-knob-needle: #1c1c1e;
+  --kd-beat-tick: rgba(28, 28, 30, 0.48);
+  --kd-beat-bar: #c2410c;
+  --kd-beat-label: #9a3412;
+  --kd-beat-label-shadow: 0 1px rgba(255, 255, 255, 0.92);
+  --kd-eq-guide: rgba(28, 28, 30, 0.18);
+  --kd-eq-guide-major: rgba(28, 28, 30, 0.34);
+  --kd-eq-zero: rgba(28, 28, 30, 0.38);
   --kd-border: #c5cad3;
   --kd-border-subtle: #d0d5dd;
   --kd-text-subtle: #5c6370;
   background: var(--kd-bg);
 }
-/* 波形区在亮色主题下仍保持深色底（rekordbox/djay 浅色模式惯例）：车道、角标、
-   播放头、节拍线全部沿用深色配色，不做亮色覆盖。 */
+/* 波形底与节拍线默认已按浅底配置；dock 后写的深色硬编码在文末再统一盖掉。 */
 :root[data-theme="light"] .kd-performance-tempo-bpm { color: var(--kd-text); }
 :root[data-theme="light"] .kd-performance-tempo-pct > output { color: var(--kd-text-body); }
 :root[data-theme="light"] .kd-performance-tempo .kd-performance-sync {
@@ -9696,6 +9612,8 @@ button.kd-stream-status {
   text-shadow: none;
 }
 :root[data-theme="light"] .kd-dj-vfader-zero { background: #7d858f; }
+:root[data-theme="light"] .kd-dj-vfader-ticks > u { background: #5c6370; }
+:root[data-theme="light"] .kd-performance-main-deck .kd-dj-vfader-ticks > u { background: #5c6370; }
 :root[data-theme="light"] .kd-dj-vfader-lock { background: #c3c9d1; }
 :root[data-theme="light"] .kd-dj-vfader-lock[data-active="true"] { background: #1fa957; }
 :root[data-theme="light"] .kd-dj-vfader-thumb {
@@ -9897,7 +9815,7 @@ button.kd-stream-status {
   border-bottom: 0;
 }
 .kd-app .kd-player[data-performance-dock="true"] .kd-performance-wave-row {
-  height: 3.4rem;
+  height: 4.8rem;
 }
 .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-grid {
   --kd-dock-vinyl-size: 4.35rem;
@@ -10079,18 +9997,32 @@ button.kd-stream-status {
 }
 .kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata {
   grid-auto-flow: column;
-  gap: 0.5rem;
+  gap: 0.55rem;
   flex: 0 0 auto;
+  align-items: stretch;
 }
 .kd-performance-info[data-side="b"] .kd-performance-metadata {
   grid-column: 1;
   grid-row: 1;
 }
+.kd-performance-info[data-side="b"] .kd-performance-metadata [data-time="true"] { order: 2; }
+.kd-performance-info[data-side="b"] .kd-performance-metadata [data-key="true"] { order: 1; }
+.kd-performance-metadata [data-key="true"] {
+  padding-inline-start: 0.55rem;
+  border-inline-start: 1px solid color-mix(in srgb, var(--kd-text-subtle) 55%, transparent);
+}
+.kd-performance-info[data-side="b"] .kd-performance-metadata [data-key="true"] {
+  padding-inline-start: 0;
+  padding-inline-end: 0.55rem;
+  border-inline-start: 0;
+  border-inline-end: 1px solid color-mix(in srgb, var(--kd-text-subtle) 55%, transparent);
+}
 .kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata dd {
   margin-top: 0.08rem;
   font-size: var(--kd-dj-md);
 }
-.kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata [data-time="true"] dt {
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata [data-time="true"] dt,
+.kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata [data-key="true"] dt {
   display: none;
 }
 .kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata [data-time="true"] dd {
@@ -10727,7 +10659,7 @@ button.kd-stream-status {
   display: flex;
   flex-direction: column;
   gap: 0.22rem;
-  padding: 0.3rem 0.55rem 0.42rem;
+  padding: 0.22rem 0.48rem 0.28rem;
   border-top: 1px solid var(--kd-border-subtle);
   background: color-mix(in srgb, var(--kd-panel) 72%, transparent);
 }
@@ -10963,7 +10895,7 @@ button.kd-stream-status {
   stroke-width: 1;
 }
 .kd-dj-arcknob-needle {
-  stroke: #fff;
+  stroke: var(--kd-knob-needle, #fff);
   stroke-width: 2;
   stroke-linecap: round;
 }
@@ -11051,62 +10983,6 @@ button.kd-stream-status {
   min-width: 2.35rem;
 }
 
-.kd-performance-stem-wave-toggle {
-  min-height: 1.25rem;
-  padding: 0.14rem 0.46rem;
-  border: 1px solid var(--kd-border-subtle);
-  color: var(--kd-text-subtle);
-  background: transparent;
-  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
-}
-.kd-performance-stem-wave-toggle[data-active="true"] {
-  color: #9bd6ae;
-  border-color: color-mix(in srgb, #82c49e 52%, var(--kd-border-subtle));
-  background: color-mix(in srgb, #82c49e 10%, transparent);
-}
-.kd-performance-other-settings {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  align-items: center;
-  gap: 0.6rem;
-  padding: 0.2rem 0.5rem 0.3rem;
-}
-/* 分段开关组：STEM / 人声波形 / 量化，三段一体、细边框、激活着色。 */
-.kd-performance-toggle-group {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin: 0.3rem 0.5rem 0.1rem;
-  border: 1px solid var(--kd-border-subtle);
-  background: var(--kd-panel-inset);
-}
-.kd-performance-toggle-group > button {
-  min-width: 0;
-  min-height: 1.5rem;
-  padding: 0.14rem 0.2rem;
-  border: 0;
-  border-right: 1px solid var(--kd-border-subtle);
-  color: var(--kd-text-subtle);
-  background: transparent;
-  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
-  letter-spacing: 0.05em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.kd-performance-toggle-group > button:last-child { border-right: 0; }
-.kd-performance-toggle-group > button:hover:not(:disabled) { color: var(--kd-text); }
-.kd-performance-toggle-group > button[data-active="true"] {
-  color: #9bd6ae;
-  background: color-mix(in srgb, #82c49e 12%, transparent);
-  box-shadow: inset 0 -2px 0 #82c49e;
-}
-.kd-performance-toggle-group > button[data-loading="true"] { cursor: progress; }
-.kd-performance-toggle-group > button:disabled { opacity: 0.48; }
-.kd-performance-other-settings .kd-dj-slide {
-  height: 1.7rem;
-  grid-template-columns: 3.4rem minmax(0, 1fr) 3.2rem;
-}
-
 .kd-performance-monitor-block > .kd-performance-output-strips {
   display: grid;
   gap: 0.55rem;
@@ -11125,6 +11001,10 @@ button.kd-stream-status {
   --kd-fader-thumb-border: rgba(0, 0, 0, 0.28);
   --kd-knob-boost: #d1242f;
   --kd-knob-cut: #1f6feb;
+  --kd-knob-needle: #1c1c1e;
+  --kd-eq-guide: rgba(28, 28, 30, 0.18);
+  --kd-eq-guide-major: rgba(28, 28, 30, 0.34);
+  --kd-eq-zero: rgba(28, 28, 30, 0.38);
   background: var(--kd-bg);
 }
 :root[data-theme="light"] .kd-performance-control-host,
@@ -11312,7 +11192,7 @@ button.kd-stream-status {
   border-radius: 50% !important;
 }
 .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info .kd-performance-vinyl-record {
-  animation: kd-player-vinyl-spin 2.8s linear infinite paused;
+  animation: kd-player-vinyl-spin var(--kd-vinyl-spin-duration, 2.8s) linear infinite paused;
   box-shadow:
     0 3px 10px rgba(0, 0, 0, 0.5),
     inset 0 0 0 1px rgba(255, 255, 255, 0.08);
@@ -11340,9 +11220,9 @@ button.kd-stream-status {
 .kd-performance-main-deck {
   position: relative;
   min-width: 0;
-  min-height: 12.4rem;
+  min-height: 8.3rem;
   display: grid;
-  grid-template-columns: minmax(3.7rem, 4.7rem) minmax(15rem, 1.5fr) minmax(12rem, 0.92fr);
+  grid-template-columns: minmax(3.4rem, 4.2rem) minmax(12rem, 1.5fr) minmax(9.2rem, 0.86fr);
   align-items: stretch;
   background: color-mix(in srgb, var(--kd-panel) 78%, transparent);
 }
@@ -11358,7 +11238,7 @@ button.kd-stream-status {
   box-shadow: inset 0 0 18px rgba(154, 140, 255, 0.12);
 }
 .kd-performance-main-deck[data-side="b"] {
-  grid-template-columns: minmax(12rem, 0.92fr) minmax(15rem, 1.5fr) minmax(3.7rem, 4.7rem);
+  grid-template-columns: minmax(9.2rem, 0.86fr) minmax(12rem, 1.5fr) minmax(3.4rem, 4.2rem);
 }
 .kd-performance-main-deck + .kd-performance-main-deck {
   border-left: 1px solid var(--kd-border-subtle);
@@ -11373,7 +11253,7 @@ button.kd-stream-status {
 
 .kd-performance-main-deck .kd-performance-mixer-tempo {
   width: 100%;
-  padding-block: 0.42rem;
+  padding-block: 0.2rem;
   background: var(--kd-panel-inset);
 }
 .kd-performance-main-deck[data-side="b"] .kd-performance-mixer-tempo {
@@ -11392,25 +11272,26 @@ button.kd-stream-status {
 .kd-performance-main-deck .kd-performance-tempo {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: 1.85rem auto auto minmax(5.2rem, 1fr) 1.45rem;
+  grid-template-rows: 1.15rem auto auto minmax(4.4rem, 1fr) 0.85rem;
   align-items: center;
-  gap: 0.16rem;
-  padding: 0.42rem 0.48rem 0.34rem;
+  gap: 0.1rem;
+  padding: 0.22rem 0.36rem 0.16rem;
 }
 .kd-performance-main-deck .kd-performance-tempo-side { display: contents; }
 .kd-performance-main-deck .kd-performance-tempo .kd-performance-sync {
   grid-column: 1;
   grid-row: 1;
   width: 100%;
-  height: 1.85rem;
-  border-radius: 0.32rem;
+  height: 1.15rem;
+  border-radius: 0.26rem;
   background: var(--kd-panel-raised);
-  font-size: var(--kd-dj-md);
+  font-size: var(--kd-dj-xs);
+  letter-spacing: 0.04em;
 }
 .kd-performance-main-deck .kd-performance-tempo-bpm {
   grid-column: 1;
   grid-row: 2;
-  font-size: calc(var(--kd-dj-xl) * 1.3);
+  font-size: calc(var(--kd-dj-xl) * 1.05);
 }
 .kd-performance-main-deck .kd-performance-tempo-pct {
   grid-column: 1;
@@ -11420,100 +11301,110 @@ button.kd-stream-status {
   grid-column: 1;
   grid-row: 4;
   justify-self: center;
-  width: 3.35rem;
-  min-height: 5.2rem;
+  width: 3.05rem;
+  min-height: 4.4rem;
 }
 .kd-performance-main-deck .kd-performance-tempo-steps {
   grid-column: 1;
   grid-row: 5;
   width: 100%;
-  gap: 0.35rem;
+  gap: 0.22rem;
 }
 .kd-performance-main-deck .kd-performance-tempo-steps > button {
-  height: 1.45rem;
+  height: 0.85rem;
   border: 0;
 }
 .kd-performance-main-deck .kd-performance-tempo-steps > button > svg {
-  width: 1.05rem;
-  height: 1.05rem;
+  width: 0.78rem;
+  height: 0.78rem;
 }
 .kd-performance-main-deck .kd-dj-vfader-ticks > u {
-  width: 2.9rem;
-  margin-left: -1.45rem;
+  width: 2.55rem;
+  margin-left: -1.275rem;
   background: color-mix(in srgb, var(--kd-fader-track) 62%, transparent);
 }
 .kd-performance-main-deck .kd-dj-vfader-thumb {
-  width: 3rem;
-  height: 0.82rem;
-  border-radius: 0.42rem !important;
+  width: 2.7rem;
+  height: 0.72rem;
+  border-radius: 0.36rem !important;
 }
-.kd-performance-main-deck .kd-dj-vfader-zero { width: 3.25rem; margin-left: -1.625rem; }
-.kd-performance-deck-pad-bank,
-.kd-performance-deck-fx-bank {
+.kd-performance-main-deck .kd-dj-vfader-zero { width: 2.9rem; margin-left: -1.45rem; }
+.kd-performance-deck-pad-bank {
   display: grid;
-  grid-template-rows: 1.45rem minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   min-width: 0;
   border-right: 1px solid var(--kd-border-subtle);
   background: color-mix(in srgb, var(--kd-panel-raised) 72%, transparent);
+}
+.kd-performance-deck-fx-bank {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  min-width: 0;
+  background: transparent;
 }
 .kd-performance-main-deck[data-side="b"] .kd-performance-deck-pad-bank {
   border-right: 0;
   border-left: 1px solid var(--kd-border-subtle);
 }
-.kd-performance-deck-pad-bank > header,
-.kd-performance-deck-fx-bank > header {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-bottom: 1px solid var(--kd-border-subtle);
-  color: #70cfff;
-  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
-}
-.kd-performance-pad-page-tabs {
-  display: flex !important;
-  align-items: stretch;
-  justify-content: flex-start !important;
-  padding: 0 !important;
-}
-.kd-performance-pad-page-tabs > button {
-  width: 3rem;
-  min-width: 3rem;
-  height: 100%;
-  padding: 0;
-  border: 0;
-  border-right: 1px solid var(--kd-border-subtle);
-  color: var(--kd-text-subtle);
-  background: transparent;
-  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
-}
-.kd-performance-pad-page-tabs > button > svg { display: block; margin: auto; }
-.kd-performance-pad-page-tabs > button > b { font: 900 var(--kd-dj-sm)/1 var(--kd-font-mono); }
-.kd-performance-pad-page-tabs > button:last-child { border-right: 0; }
-.kd-performance-pad-page-tabs > button[data-active="true"] {
-  color: #70cfff;
-  background: color-mix(in srgb, #70cfff 8%, transparent);
-  box-shadow: inset 0 -2px 0 #70cfff;
-}
-.kd-performance-pad-page-content {
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-}
-.kd-performance-pad-page-content > .kd-performance-cues {
+.kd-performance-deck-pad-bank > .kd-performance-cues {
   grid-column: auto;
   grid-row: auto;
   width: 100%;
   height: 100%;
   min-height: 0;
-  padding: 0.28rem;
+  padding: 0.22rem;
 }
-.kd-performance-pad-page-content .kd-performance-cues-bank > span {
+.kd-performance-deck-pad-bank .kd-performance-cues-bank > span {
   height: 100%;
   min-height: 0;
 }
-.kd-performance-main-deck[data-side="b"] .kd-performance-pad-page-content > .kd-performance-cues { direction: rtl; }
-.kd-performance-main-deck[data-side="b"] .kd-performance-pad-page-content > .kd-performance-cues > * { direction: ltr; }
-.kd-performance-loop-pads,
+.kd-performance-main-deck[data-side="b"] .kd-performance-deck-pad-bank > .kd-performance-cues { direction: rtl; }
+.kd-performance-main-deck[data-side="b"] .kd-performance-deck-pad-bank > .kd-performance-cues > * { direction: ltr; }
+.kd-performance-fx-layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+  background: color-mix(in srgb, var(--kd-panel) 82%, transparent);
+}
+.kd-performance-fx-layout > .kd-performance-deck-fx-page + .kd-performance-deck-fx-page {
+  border-left: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-deck-fx-page {
+  min-width: 0;
+  min-height: 2.85rem;
+  display: grid;
+  grid-template-columns: 1.85rem minmax(0, 1fr);
+  align-items: stretch;
+}
+.kd-performance-deck-fx-page > .kd-performance-fx-toolbar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  border-right: 1px solid var(--kd-border-subtle);
+}
+.kd-performance-deck-fx-page .kd-performance-fx-modes {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.kd-performance-deck-fx-page .kd-performance-fx-modes > button {
+  flex: 1 1 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid var(--kd-border-subtle);
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+}
+.kd-performance-deck-fx-page .kd-performance-fx-modes > button:last-child { border-bottom: 0; }
+.kd-performance-deck-fx-page > .kd-performance-deck-fx-bank {
+  min-width: 0;
+  height: 100%;
+  border: 0;
+}
 .kd-performance-deck-fx-page .kd-performance-pad-fx,
 .kd-performance-deck-fx-page .kd-performance-sampler-pads {
   display: grid;
@@ -11522,73 +11413,129 @@ button.kd-stream-status {
   gap: 1px;
   width: 100%;
   height: 100%;
-  padding: 0.28rem;
+  min-height: 2.85rem;
   background: var(--kd-border-subtle);
 }
-.kd-performance-loop-pads > button {
-  min-width: 0;
-  display: grid;
-  place-content: center;
-  gap: 0.2rem;
-  border: 0;
-  color: var(--kd-text-subtle);
-  background: var(--kd-panel-inset);
-  font-family: var(--kd-font-mono);
-}
-.kd-performance-loop-pads > button > b { color: var(--kd-text); font-size: var(--kd-dj-lg); }
-.kd-performance-loop-pads > button > span { font-size: var(--kd-dj-xs); }
-.kd-performance-loop-pads > button[data-active="true"] {
-  color: #fff;
-  background: color-mix(in srgb, #7567cf 72%, var(--kd-panel-inset));
-}
-.kd-performance-loop-pads > button:disabled { opacity: 0.42; }
-.kd-performance-deck-fx-page {
-  height: 100%;
-  min-height: 0;
-  display: grid;
-  grid-template-rows: 1.4rem minmax(0, 1fr);
-}
-.kd-performance-deck-fx-page > .kd-performance-fx-toolbar {
-  margin: 0;
-  border-bottom: 1px solid var(--kd-border-subtle);
-}
-.kd-performance-deck-fx-page .kd-performance-fx-modes {
-  width: 100%;
-  height: 100%;
-}
-.kd-performance-deck-fx-page .kd-performance-fx-modes > button {
-  flex: 1 1 0;
-  min-height: 0;
-  border-block: 0;
-}
-.kd-performance-deck-fx-page > .kd-performance-deck-fx-bank {
-  grid-template-rows: minmax(0, 1fr);
-  height: 100%;
-  border: 0;
-}
-.kd-performance-deck-fx-page > .kd-performance-deck-fx-bank > header { display: none; }
 .kd-performance-deck-fx-page .kd-performance-pad-fx > button,
 .kd-performance-deck-fx-page .kd-performance-sampler-pads > button { min-height: 0; }
 .kd-performance-deck-fx-bank:not([data-targeted="true"]) { opacity: 0.48; }
-.kd-performance-deck-fx-bank .kd-performance-fx-knobs {
+.kd-performance-fx-layout .kd-performance-fx-knobs {
   display: grid;
-  grid-template-rows: repeat(3, minmax(0, 1fr));
-  gap: 1px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0;
+  height: 100%;
   margin: 0;
-  background: var(--kd-border-subtle);
+  background: transparent;
 }
-.kd-performance-deck-fx-bank .kd-performance-fx-slot {
-  grid-template-columns: 2rem minmax(3.8rem, 0.55fr) minmax(3.8rem, 1fr) minmax(3.8rem, 1fr);
-  gap: 0.3rem;
-  padding: 0.16rem 0.42rem;
+.kd-performance-fx-layout .kd-performance-fx-slot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 1.15rem minmax(1.45rem, 1fr);
+  align-items: stretch;
+  gap: 0;
+  min-width: 0;
+  padding: 0.08rem 0.28rem 0.1rem;
+  background: transparent;
 }
-.kd-performance-deck-fx-bank .kd-performance-fx-slot[data-kind="vocal"] {
-  grid-template-columns: 2rem minmax(3.8rem, 0.65fr) minmax(5rem, 1.6fr);
+.kd-performance-fx-layout .kd-performance-fx-slot + .kd-performance-fx-slot {
+  border-left: 1px solid var(--kd-border-subtle);
 }
-.kd-performance-deck-fx-bank .kd-performance-fx-slot .kd-dj-slide {
-  grid-template-columns: 1.35rem minmax(0, 1fr) 1.5rem;
-  gap: 0.14rem;
+.kd-performance-fx-head {
+  display: grid;
+  grid-template-columns: 0.85rem minmax(0, 1fr) 0.85rem;
+  align-items: center;
+  gap: 0.08rem;
+  min-width: 0;
 }
+.kd-performance-fx-head > button {
+  height: 1.05rem;
+  padding: 0;
+  border: 0;
+  color: var(--kd-text-subtle);
+  background: transparent;
+  font: 800 var(--kd-dj-md)/1 var(--kd-font-mono);
+}
+.kd-performance-fx-head > button:hover { color: var(--kd-text); }
+.kd-performance-fx-layout .kd-performance-fx-select {
+  justify-content: center;
+  gap: 0.18rem;
+  min-width: 0;
+  font: 750 var(--kd-dj-sm)/1 var(--kd-font);
+}
+.kd-performance-fx-layout .kd-performance-fx-select > span {
+  flex: 1 1 0;
+  text-align: center;
+}
+.kd-performance-fx-layout .kd-performance-fx-select > svg:first-child {
+  flex: none;
+  color: var(--kd-text);
+}
+.kd-performance-fx-body {
+  display: grid;
+  grid-template-columns: 2.05rem minmax(0, 1fr) 2.35rem;
+  align-items: center;
+  gap: 0.28rem;
+  min-width: 0;
+}
+.kd-performance-fx-layout .kd-performance-fx-on {
+  height: 1.28rem;
+  border-radius: 0.28rem;
+  font: 800 var(--kd-dj-xs)/1 var(--kd-font-mono);
+}
+.kd-performance-fx-layout .kd-performance-fx-slot .kd-dj-slide {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+.kd-performance-fx-layout .kd-performance-fx-slot .kd-dj-slide > b,
+.kd-performance-fx-layout .kd-performance-fx-slot .kd-dj-slide > output { display: none; }
+.kd-performance-fx-layout .kd-performance-fx-slot .kd-dj-slide-track {
+  min-height: 1.28rem;
+}
+.kd-performance-fx-layout .kd-performance-fx-slot .kd-dj-slide-track::before {
+  height: 0.22rem;
+  border: 0;
+  border-radius: 999px !important;
+  background: color-mix(in srgb, var(--kd-fader-track) 82%, transparent);
+}
+.kd-performance-fx-layout .kd-performance-fx-slot .kd-dj-slide-fill { display: none; }
+.kd-performance-fx-layout .kd-performance-fx-slot .kd-dj-slide-thumb {
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 999px !important;
+  background: #8d949c;
+  box-shadow: 0 0 0 1px color-mix(in srgb, #000 45%, transparent);
+}
+.kd-performance-fx-layout .kd-performance-fx-slot .kd-dj-slide-track::after {
+  content: "";
+  position: absolute;
+  left: 12%;
+  right: 12%;
+  bottom: 0.08rem;
+  height: 0.22rem;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(
+      to right,
+      color-mix(in srgb, var(--kd-text-subtle) 55%, transparent) 0 1px,
+      transparent 1px 25%
+    );
+}
+.kd-performance-fx-mix {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  justify-items: center;
+  gap: 0.08rem;
+  min-width: 0;
+  color: var(--kd-text-subtle);
+  font: 800 0.55rem/1 var(--kd-font-mono);
+}
+.kd-performance-fx-mix > .kd-dj-arcknob {
+  width: 1.28rem;
+  gap: 0;
+}
+.kd-performance-fx-mix > .kd-dj-arcknob > b { display: none; }
 
 .kd-performance-platter {
   position: relative;
@@ -11654,42 +11601,61 @@ button.kd-stream-status {
 }
 
 .kd-performance-deck-mix-module {
-  display: grid;
-  grid-template-columns: minmax(4.4rem, 1fr) 3.15rem;
-  grid-template-rows: minmax(0, 1fr);
-  gap: 0.25rem;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0.18rem;
   min-width: 0;
-  padding: 0.3rem 0.34rem;
+  min-height: 0;
+  height: 100%;
+  padding: 0.18rem 0.22rem;
   background: color-mix(in srgb, var(--kd-panel) 88%, transparent);
 }
 .kd-performance-main-deck[data-side="b"] .kd-performance-deck-mix-module {
-  grid-template-columns: 3.15rem minmax(4.4rem, 1fr);
+  flex-direction: row-reverse;
 }
 .kd-performance-deck-mix-module > .kd-performance-strip {
-  grid-column: 1;
-  grid-row: 1;
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
 }
 .kd-performance-deck-mix-module > .kd-performance-gain-fader {
-  grid-column: 2;
-  grid-row: 1;
+  flex: 0 0 2.7rem;
+  min-height: 0;
 }
-.kd-performance-main-deck[data-side="b"] .kd-performance-deck-mix-module > .kd-performance-strip { grid-column: 2; }
-.kd-performance-main-deck[data-side="b"] .kd-performance-deck-mix-module > .kd-performance-gain-fader { grid-column: 1; }
 .kd-performance-deck-mix-module .kd-performance-strip-knobs {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(5.1rem, 1fr) auto;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: row;
   align-items: stretch;
-  justify-items: stretch;
-  gap: 0.16rem;
-  height: 100%;
+  gap: 0.1rem;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+}
+.kd-performance-strip[data-side="b"] .kd-performance-strip-knobs {
+  flex-direction: row-reverse;
+}
+.kd-performance-deck-mix-module .kd-dj-eq-chart {
+  flex: 1 1 auto;
+  align-self: stretch;
+  width: auto;
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+}
+.kd-performance-deck-mix-module .kd-dj-eq-knobs {
+  flex: 0 0 2.05rem;
+  align-self: stretch;
+  height: auto;
 }
 .kd-dj-eq-chart {
   position: relative;
   width: 100%;
   min-width: 0;
-  min-height: 5.1rem;
+  min-height: 0;
   overflow: hidden;
   border: 0;
   border-radius: 0;
@@ -11700,6 +11666,7 @@ button.kd-stream-status {
   -webkit-user-select: none;
   -webkit-touch-callout: none;
   outline: none;
+  aspect-ratio: auto;
 }
 .kd-dj-eq-chart[data-dragging="true"] {
   cursor: ns-resize;
@@ -11715,7 +11682,7 @@ button.kd-stream-status {
 }
 .kd-dj-eq-spectrum > path {
   fill: none;
-  stroke-width: 2.1;
+  stroke-width: 1.7;
   vector-effect: non-scaling-stroke;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -11729,7 +11696,7 @@ button.kd-stream-status {
   right: 0;
   left: 0;
   height: 1px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--kd-eq-zero);
   pointer-events: none;
 }
 .kd-dj-eq-guides { position: absolute; z-index: 2; inset: 0; pointer-events: none; }
@@ -11738,10 +11705,10 @@ button.kd-stream-status {
   top: 0;
   bottom: 0;
   width: 1px;
-  background: rgba(255, 255, 255, 0.045);
+  background: var(--kd-eq-guide);
 }
 .kd-dj-eq-guides > i[data-kind="major"] {
-  background: rgba(255, 255, 255, 0.11);
+  background: var(--kd-eq-guide-major);
 }
 .kd-dj-eq-curve {
   position: absolute;
@@ -11755,22 +11722,41 @@ button.kd-stream-status {
 .kd-dj-eq-curve > path {
   fill: none;
   stroke: #cbd2d9;
-  stroke-width: 1.65;
+  stroke-width: 1.45;
+  vector-effect: non-scaling-stroke;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.kd-dj-eq-filter {
+  position: absolute;
+  z-index: 4;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+.kd-dj-eq-filter > path {
+  fill: none;
+  stroke: var(--kd-theme);
+  stroke-width: 1.75;
   vector-effect: non-scaling-stroke;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 .kd-dj-eq-knobs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+  align-items: center;
   justify-items: center;
-  gap: 0.06rem;
+  gap: 0.02rem;
   min-width: 0;
+  height: 100%;
 }
 .kd-performance-deck-mix-module .kd-dj-eq-knobs > .kd-dj-arcknob {
-  width: min(2.2rem, 100%);
-  gap: 0.06rem;
+  width: min(1.85rem, 100%);
+  gap: 0.02rem;
 }
 .kd-performance-deck-mix-module .kd-dj-eq-knobs > .kd-dj-arcknob > b { letter-spacing: 0; }
 .kd-performance-gain-fader {
@@ -11779,9 +11765,9 @@ button.kd-stream-status {
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) auto;
   justify-items: center;
-  gap: 0.25rem;
+  gap: 0.14rem;
   box-sizing: border-box;
-  padding-inline: 0.24rem;
+  padding-inline: 0.12rem;
   background: color-mix(in srgb, var(--kd-panel-inset) 58%, transparent);
 }
 .kd-performance-main-deck[data-side="a"] .kd-performance-gain-fader {
@@ -11796,25 +11782,25 @@ button.kd-stream-status {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   justify-items: center;
-  gap: 0.25rem;
+  gap: 0.12rem;
 }
 .kd-performance-gain-stack > .kd-dj-arcknob[data-size="xs"] {
-  width: 2.6rem !important;
-  grid-template-rows: 2.2rem;
+  width: 2.2rem !important;
+  grid-template-rows: 1.7rem;
   align-items: center;
   gap: 0;
 }
 .kd-performance-gain-stack > .kd-dj-arcknob[data-size="xs"] > svg { align-self: center; }
 .kd-performance-gain-stack > .kd-dj-arcknob[data-size="xs"] > svg {
-  width: 1.45rem !important;
-  height: 1.45rem !important;
+  width: 1.2rem !important;
+  height: 1.2rem !important;
 }
 .kd-performance-gain-stack > .kd-dj-arcknob[data-size="xs"] > b {
   display: none;
 }
-.kd-performance-gain-fader > .kd-dj-arcknob[data-size="xl"] { width: 3rem !important; }
+.kd-performance-gain-fader > .kd-dj-arcknob[data-size="lg"] { width: 2.35rem !important; }
 .kd-performance-gain-fader > .kd-dj-arcknob > b {
-  width: 2.6rem;
+  width: 2.4rem;
   max-width: none;
   overflow: visible;
   text-align: center;
@@ -11829,8 +11815,8 @@ button.kd-stream-status {
 .kd-performance-gain-stack > .kd-performance-channel-fader > b { display: none; }
 .kd-performance-gain-fader .kd-performance-channel-fader .kd-dj-vfader {
   justify-self: center;
-  width: 1rem;
-  min-height: 3.7rem;
+  width: 0.92rem;
+  min-height: 2.6rem;
 }
 .kd-performance-gain-fader .kd-performance-channel-fader .kd-dj-vfader-ticks > u {
   width: 1.45rem;
@@ -12026,11 +12012,11 @@ button.kd-stream-status {
 
 @media (max-width: 1200px) {
   .kd-performance-main-deck {
-    grid-template-columns: minmax(3.5rem, 4.2rem) minmax(11rem, 1fr) minmax(10rem, 0.85fr);
-    grid-template-rows: minmax(12.4rem, auto);
+    grid-template-columns: minmax(3.2rem, 3.8rem) minmax(10rem, 1fr) minmax(8.2rem, 0.8fr);
+    grid-template-rows: minmax(8.3rem, auto);
   }
   .kd-performance-main-deck[data-side="b"] {
-    grid-template-columns: minmax(10rem, 0.85fr) minmax(11rem, 1fr) minmax(3.5rem, 4.2rem);
+    grid-template-columns: minmax(8.2rem, 0.8fr) minmax(10rem, 1fr) minmax(3.2rem, 3.8rem);
   }
   .kd-performance-transport-layout {
     /* Medium layout uses MIX 0.85 of the 1.85fr left after the 4.2rem TEMPO track. */
@@ -12066,13 +12052,109 @@ button.kd-stream-status {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: repeat(3, auto);
   }
-  .kd-performance-deck-fx-bank .kd-performance-fx-slot {
-    grid-template-columns: 1.8rem minmax(3.4rem, 0.55fr) minmax(3.4rem, 1fr) minmax(3.4rem, 1fr);
-    grid-template-rows: auto;
+  .kd-performance-fx-layout {
+    grid-template-columns: minmax(0, 1fr);
   }
-  .kd-performance-deck-fx-bank .kd-performance-fx-slot .kd-dj-slide { grid-column: auto; }
+  .kd-performance-fx-layout > .kd-performance-deck-fx-page + .kd-performance-deck-fx-page {
+    border-left: 0;
+    border-top: 1px solid var(--kd-border-subtle);
+  }
   .kd-performance-lower-layout { grid-template-columns: minmax(0, 1fr); }
   .kd-performance-global-controls { grid-column: auto; grid-row: auto; grid-template-columns: minmax(0, 1fr); }
+}
+
+/* —— 日间 × dock：后写的 #090c10 / #080b0f 硬编码比早期 light 规则更具体，
+   会把波形条、信息栏、曲目信息、EQ 图和电平表重新涂成深色。这里用同级或更高
+   选择器收回浅色；波形画布必须显式覆盖 focus-wave 的 !important 黑底。 —— */
+:root[data-theme="light"] .kd-app .kd-player[data-performance-dock="true"],
+:root[data-theme="light"] .kd-app .kd-player[data-performance-dock="true"] > .kd-performance-workspace,
+:root[data-theme="light"] .kd-performance-wave-stack,
+:root[data-theme="light"] .kd-performance-wave-row,
+:root[data-theme="light"] .kd-app .kd-player[data-performance-dock="true"] .kd-performance-overview-wave {
+  background: var(--kd-panel);
+}
+:root[data-theme="light"] .kd-performance-focus-wave {
+  background: var(--kd-panel) !important;
+}
+:root[data-theme="light"] .kd-performance-wave-needle {
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.28), 0 0 6px rgba(255, 52, 79, 0.5);
+}
+:root[data-theme="light"] .kd-performance-overview-wave .kd-wave-playhead {
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.3), 0 0 5px rgba(255, 52, 79, 0.42);
+}
+:root[data-theme="light"] .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-grid,
+:root[data-theme="light"] .kd-performance-workspace > .kd-performance-controls-surface {
+  border-top-color: var(--kd-line);
+  background: var(--kd-panel);
+}
+:root[data-theme="light"] .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info {
+  background: var(--kd-panel);
+}
+:root[data-theme="light"] .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-copy > strong,
+:root[data-theme="light"] .kd-app .kd-player[data-performance-dock="true"] .kd-performance-metadata [data-time="true"] dd {
+  color: var(--kd-text);
+}
+:root[data-theme="light"] .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info-copy > span {
+  color: var(--kd-text-body);
+}
+:root[data-theme="light"] .kd-app .kd-player[data-performance-dock="true"] .kd-performance-info .kd-performance-vinyl-record {
+  box-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.16),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.06);
+}
+:root[data-theme="light"] .kd-dj-eq-chart {
+  background: #e8ebef;
+}
+:root[data-theme="light"] .kd-dj-eq-curve > path {
+  stroke: #4b5563;
+}
+:root[data-theme="light"] .kd-dj-metfader {
+  border-color: #b9bfc9;
+  background: #e8ebef;
+}
+:root[data-theme="light"] .kd-performance-platter {
+  background: #e8ebef;
+}
+:root[data-theme="light"] .kd-performance-platter-brand {
+  color: #6b7280;
+  text-shadow: none;
+}
+:root[data-theme="light"] .kd-performance-platter[data-empty="true"] .kd-performance-vinyl-record {
+  border-color: #c5cad3;
+  background:
+    radial-gradient(circle at center,
+      #f3f4f6 0 43%,
+      #e5e7eb 44% 51%,
+      #d1d5db 52% 76%,
+      #e5e7eb 77% 79%,
+      #f9fafb 80% 100%);
+  box-shadow:
+    0 0 0 2px #d1d5db,
+    0 2px 6px rgba(0, 0, 0, 0.12),
+    inset 0 0 0 2px rgba(255, 255, 255, 0.65);
+}
+:root[data-theme="light"] .kd-performance-platter > strong {
+  color: var(--kd-text);
+  text-shadow: none;
+}
+:root[data-theme="light"] .kd-performance-deck-transport-row .kd-performance-loop-stepper > span,
+:root[data-theme="light"] .kd-performance-deck-transport-row .kd-performance-loop-jump > span:first-child {
+  border-color: var(--kd-line);
+  background: var(--kd-panel);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--kd-line) 70%, transparent);
+}
+:root[data-theme="light"] .kd-performance-deck-transport-row .kd-performance-loop-stepper button,
+:root[data-theme="light"] .kd-performance-deck-transport-row .kd-performance-loop-jump button {
+  color: var(--kd-text-body);
+}
+:root[data-theme="light"] .kd-performance-deck-transport-row .kd-performance-loop-stepper button:hover:not(:disabled),
+:root[data-theme="light"] .kd-performance-deck-transport-row .kd-performance-loop-jump button:hover:not(:disabled) {
+  color: var(--kd-text);
+  background: var(--kd-hover);
+}
+:root[data-theme="light"] .kd-performance-deck-transport-row .kd-performance-loop-stepper > em,
+:root[data-theme="light"] .kd-performance-deck-transport-row .kd-performance-loop-jump-size {
+  color: var(--kd-muted);
 }
 
 /* DJ 曲库保留用户配置的完整列宽；超出当前板块时由既有 .kd-scroll 横向浏览。 */

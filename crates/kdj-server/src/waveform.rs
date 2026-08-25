@@ -20,14 +20,51 @@ use tokio::sync::{broadcast, Semaphore};
 
 use crate::jobs;
 
-/// 播放条 / 详情栏默认要的列数。分析预热也写这一档。
+/// 当前详细波形的快速首帧档位；整曲 release overview 单独使用更细的原生资产。
 pub const DEFAULT_WAVEFORM_BUCKETS: usize = 640;
+pub const RELEASE_OVERVIEW_BUCKETS: usize = 4_096;
+pub const CURRENT_WAVEFORM_PROFILE: &str = "kdwave-current-detail";
+pub const CURRENT_WAVEFORM_REVISION: i64 = 6;
 pub const CANONICAL_WAVEFORM_PROFILE: &str = "kdwave-v0241-overview-640";
 pub const CANONICAL_WAVEFORM_REVISION: i64 = 5;
+pub const WAVEFORM_BINARY_MIME: &str = "application/vnd.kdj.waveform";
 const CACHE_MAGIC: &[u8; 8] = b"KDJWAVE\0";
 const CACHE_VERSION: u16 = 1;
 const CACHE_HEADER_LEN: usize = 8 + 2 + 8 + 8 + 4;
+const WIRE_MAGIC: &[u8; 8] = b"KDJWVFM\0";
+const WIRE_VERSION: u16 = 1;
+const WIRE_HEADER_LEN: usize = 8 + 2 + 1 + 1 + 4 + 8 + 8 + 4;
 const MAX_CACHE_COLUMNS: usize = 100_000;
+
+/// HTTP 二进制波形自描述其算法 profile 与 revision；前端不再只能从 URL 猜数据语义。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaveformWireProfile {
+    CurrentDetail,
+    ReleaseOverview,
+}
+
+impl WaveformWireProfile {
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::CurrentDetail => 1,
+            Self::ReleaseOverview => 2,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::CurrentDetail => CURRENT_WAVEFORM_PROFILE,
+            Self::ReleaseOverview => CANONICAL_WAVEFORM_PROFILE,
+        }
+    }
+
+    pub const fn revision(self) -> u32 {
+        match self {
+            Self::CurrentDetail => CURRENT_WAVEFORM_REVISION as u32,
+            Self::ReleaseOverview => CANONICAL_WAVEFORM_REVISION as u32,
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct WaveKey {
@@ -115,7 +152,7 @@ impl WaveformCoordinator {
         coordinator
     }
 
-    /// 把固定 640 列的演奏波形放进单 worker 队列。`priority` 给已装入 Deck 的歌曲用；
+    /// 把固定高密度的旧版整曲预览放进单 worker 队列。`priority` 给已装入 Deck 的歌曲用；
     /// 普通批量分析走队尾。缓存已存在、已排队或正在算都不会重复提交。
     pub fn enqueue_default(
         &self,
@@ -127,7 +164,7 @@ impl WaveformCoordinator {
         let mtime = file_mtime(&path);
         let key = WaveKey {
             track_id,
-            buckets: DEFAULT_WAVEFORM_BUCKETS,
+            buckets: RELEASE_OVERVIEW_BUCKETS,
             mtime,
         };
         if let Some((_, canonical)) = read_release_overview_cached(&cache_dir, key) {
@@ -254,7 +291,7 @@ impl WaveformCoordinator {
         self.get_or_compute_mode(
             track_id,
             path,
-            DEFAULT_WAVEFORM_BUCKETS,
+            RELEASE_OVERVIEW_BUCKETS,
             cache_dir,
             true,
             true,
@@ -297,7 +334,7 @@ impl WaveformCoordinator {
             cache_id,
             legacy_cache_id,
             path,
-            DEFAULT_WAVEFORM_BUCKETS,
+            RELEASE_OVERVIEW_BUCKETS,
             cache_dir,
             portable_cache_dir,
             WaveformProfile::ReleaseOverview,
@@ -316,7 +353,7 @@ impl WaveformCoordinator {
         profile: WaveformProfile,
     ) -> Result<Waveform> {
         let buckets = if profile == WaveformProfile::ReleaseOverview {
-            DEFAULT_WAVEFORM_BUCKETS
+            RELEASE_OVERVIEW_BUCKETS
         } else {
             buckets.clamp(64, MAX_WAVEFORM_BUCKETS)
         };
@@ -377,7 +414,7 @@ impl WaveformCoordinator {
         self.get_or_compute_mode(
             track_id,
             path,
-            DEFAULT_WAVEFORM_BUCKETS,
+            RELEASE_OVERVIEW_BUCKETS,
             cache_dir,
             false,
             true,
@@ -397,7 +434,7 @@ impl WaveformCoordinator {
         profile: WaveformProfile,
     ) -> Result<Waveform> {
         let buckets = if profile == WaveformProfile::ReleaseOverview {
-            DEFAULT_WAVEFORM_BUCKETS
+            RELEASE_OVERVIEW_BUCKETS
         } else {
             buckets.clamp(64, MAX_WAVEFORM_BUCKETS)
         };
@@ -465,7 +502,7 @@ impl WaveformCoordinator {
                     coord.record_outcome(
                         WaveKey {
                             track_id,
-                            buckets: DEFAULT_WAVEFORM_BUCKETS,
+                            buckets,
                             mtime,
                         },
                         &outcome,
@@ -474,27 +511,16 @@ impl WaveformCoordinator {
                 publish(&coord, decode_key, outcome.clone());
                 return outcome;
             }
-            let outcome = match profile {
-                WaveformProfile::ReleaseOverview => match compute_release_overview(&path, track_id)
-                {
-                    Ok(overview) => match write_release_overview(&cache_dir, key, &overview) {
-                        Ok(()) => WaveOutcome::Ok(overview),
-                        Err(err) => WaveOutcome::Err(format!("{err:#}")),
-                    },
-                    Err(err) => WaveOutcome::Err(format!("{err:#}")),
-                },
-                WaveformProfile::CurrentDetail => match compute_shared_waveforms(&path, track_id) {
-                    Ok((overview, detail)) => match store_shared_waveforms(
-                        &cache_dir, track_id, mtime, &overview, &detail,
-                    ) {
-                        Ok(()) => {
-                            remove_obsolete_track_caches(&cache_dir, track_id);
-                            WaveOutcome::Ok(detail)
-                        }
-                        Err(err) => WaveOutcome::Err(format!("{err:#}")),
-                    },
-                    Err(err) => WaveOutcome::Err(format!("{err:#}")),
-                },
+            let outcome = match compute_profile_waveforms(
+                &path,
+                track_id,
+                mtime,
+                &cache_dir,
+                profile,
+                interactive,
+            ) {
+                Ok(waveform) => WaveOutcome::Ok(waveform),
+                Err(err) => WaveOutcome::Err(format!("{err:#}")),
             };
             if let WaveOutcome::Err(message) = &outcome {
                 tracing::warn!("波形生成失败 {track_id}：{message}");
@@ -503,7 +529,7 @@ impl WaveformCoordinator {
                 coord.record_outcome(
                     WaveKey {
                         track_id,
-                        buckets: DEFAULT_WAVEFORM_BUCKETS,
+                        buckets,
                         mtime,
                     },
                     &outcome,
@@ -529,7 +555,7 @@ impl WaveformCoordinator {
     }
 
     fn record_status(&self, key: WaveKey, error: Option<&str>) {
-        if key.buckets != DEFAULT_WAVEFORM_BUCKETS {
+        if key.buckets != RELEASE_OVERVIEW_BUCKETS {
             return;
         }
         if let Err(err) = self.library.record_waveform_asset(
@@ -578,9 +604,7 @@ fn publish(coord: &WaveformCoordinator, key: DecodeKey, outcome: WaveOutcome) {
     }
 }
 
-/// `.kdwave` 是固定小端二进制：魔数、格式版本、track、时长、列数，随后依次是
-/// f32 amp 与三个 u8 色彩通道。长度可以在分配前精确校验，半截文件不会被接受。
-fn encode_cache(wave: &Waveform) -> Result<Vec<u8>> {
+fn validated_waveform_columns(wave: &Waveform) -> Result<usize> {
     let count = wave.amp.len();
     anyhow::ensure!(
         count > 0 && count <= MAX_CACHE_COLUMNS,
@@ -598,7 +622,35 @@ fn encode_cache(wave: &Waveform) -> Result<Vec<u8>> {
         wave.amp.iter().all(|value| value.is_finite()),
         "波形振幅含非法值"
     );
+    Ok(count)
+}
 
+/// HTTP wire v1：36-byte 小端自描述头，随后是 f32 amp 与三个 u8 色彩通道。
+/// 24k 列固定约 168 KiB，不再先膨胀成 JSON 文本和数万个临时 number token。
+pub fn encode_waveform_binary(wave: &Waveform, profile: WaveformWireProfile) -> Result<Vec<u8>> {
+    let count = validated_waveform_columns(wave)?;
+    let mut body = Vec::with_capacity(WIRE_HEADER_LEN + count * 7);
+    body.extend_from_slice(WIRE_MAGIC);
+    body.extend_from_slice(&WIRE_VERSION.to_le_bytes());
+    body.push(profile.code());
+    body.push(0); // flags/reserved
+    body.extend_from_slice(&profile.revision().to_le_bytes());
+    body.extend_from_slice(&wave.track_id.to_le_bytes());
+    body.extend_from_slice(&wave.duration.to_le_bytes());
+    body.extend_from_slice(&(count as u32).to_le_bytes());
+    for value in &wave.amp {
+        body.extend_from_slice(&value.to_le_bytes());
+    }
+    body.extend_from_slice(&wave.r);
+    body.extend_from_slice(&wave.g);
+    body.extend_from_slice(&wave.b);
+    Ok(body)
+}
+
+/// `.kdwave` 是固定小端二进制：魔数、格式版本、track、时长、列数，随后依次是
+/// f32 amp 与三个 u8 色彩通道。长度可以在分配前精确校验，半截文件不会被接受。
+fn encode_cache(wave: &Waveform) -> Result<Vec<u8>> {
+    let count = validated_waveform_columns(wave)?;
     let mut body = Vec::with_capacity(CACHE_HEADER_LEN + count * 7);
     body.extend_from_slice(CACHE_MAGIC);
     body.extend_from_slice(&CACHE_VERSION.to_le_bytes());
@@ -648,47 +700,133 @@ fn write_cache(path: &Path, wave: &Waveform) -> Result<()> {
     Ok(())
 }
 
-fn compute_release_overview(path: &Path, track_id: i64) -> Result<Waveform> {
-    let decoded =
-        kdj_analysis::decode::decode_audio(path, kdj_analysis::waveform::RELEASE_OVERVIEW_SR, None)
-            .with_context(|| format!("解码 v0.2.41 整曲预览失败：{}", path.display()))?;
+fn decode_waveform_audio(path: &Path) -> Result<kdj_analysis::decode::DecodedAudio> {
+    kdj_analysis::decode::decode_audio_native(path, None)
+        .with_context(|| format!("解码整轨波形失败：{}", path.display()))
+}
+
+fn release_overview_from_decoded(
+    decoded: &kdj_analysis::decode::DecodedAudio,
+    track_id: i64,
+) -> Result<Waveform> {
+    let resampled =
+        (decoded.sample_rate != kdj_analysis::waveform::RELEASE_OVERVIEW_SR).then(|| {
+            kdj_analysis::decode::resample_mono(
+                &decoded.samples,
+                decoded.sample_rate,
+                kdj_analysis::waveform::RELEASE_OVERVIEW_SR,
+            )
+        });
+    let samples = resampled.as_deref().unwrap_or(&decoded.samples);
     let mut overview = kdj_analysis::waveform::release_overview_waveform(
-        &decoded.samples,
-        decoded.sample_rate as f64,
-        DEFAULT_WAVEFORM_BUCKETS,
+        samples,
+        f64::from(kdj_analysis::waveform::RELEASE_OVERVIEW_SR),
+        RELEASE_OVERVIEW_BUCKETS,
     );
     if overview.amp.is_empty() {
-        anyhow::bail!("文件没有可解码的音频");
+        anyhow::bail!("文件没有可解码的整曲预览");
     }
     overview.track_id = track_id;
     Ok(fit_release_overview_columns(
         overview,
-        DEFAULT_WAVEFORM_BUCKETS,
+        RELEASE_OVERVIEW_BUCKETS,
     ))
 }
 
-fn write_release_overview(cache_dir: &Path, key: WaveKey, overview: &Waveform) -> Result<()> {
-    write_cache(&release_overview_cache_path(cache_dir, key), overview)
-}
-
-fn compute_shared_waveforms(path: &Path, track_id: i64) -> Result<(Waveform, Waveform)> {
-    let decoded = kdj_analysis::decode::decode_audio_native(path, None)
-        .with_context(|| format!("解码失败：{}", path.display()))?;
+fn current_waveforms_from_decoded(
+    decoded: &kdj_analysis::decode::DecodedAudio,
+    track_id: i64,
+) -> Result<(Waveform, Waveform)> {
     let duration = decoded
         .duration
         .unwrap_or(decoded.samples.len() as f64 / f64::from(decoded.sample_rate).max(1.0));
     let mut detail = kdj_analysis::waveform::band_waveform(
         &decoded.samples,
-        decoded.sample_rate as f64,
+        f64::from(decoded.sample_rate),
         detail_waveform_buckets(duration),
     );
     if detail.amp.is_empty() {
-        anyhow::bail!("文件没有可解码的音频");
+        anyhow::bail!("文件没有可解码的详细波形");
     }
     detail.track_id = track_id;
     let mut overview = fit_waveform_columns(detail.clone(), DEFAULT_WAVEFORM_BUCKETS);
     overview.track_id = track_id;
     Ok((overview, detail))
+}
+
+/// A cold interactive request materialises both visual profiles from one native PCM decode.
+/// The requested cache is mandatory; priming the sibling profile is best-effort so an optional
+/// visualization can never turn an otherwise valid response into an error.
+fn compute_profile_waveforms(
+    path: &Path,
+    track_id: i64,
+    mtime: u64,
+    cache_dir: &Path,
+    profile: WaveformProfile,
+    prime_other_profile: bool,
+) -> Result<Waveform> {
+    let decoded = decode_waveform_audio(path)?;
+    match profile {
+        WaveformProfile::ReleaseOverview => {
+            let release = release_overview_from_decoded(&decoded, track_id)?;
+            let release_key = WaveKey {
+                track_id,
+                buckets: RELEASE_OVERVIEW_BUCKETS,
+                mtime,
+            };
+            write_release_overview(cache_dir, release_key, &release)?;
+
+            if prime_other_profile && detail_from_cache(cache_dir, track_id, mtime).is_none() {
+                match current_waveforms_from_decoded(&decoded, track_id).and_then(
+                    |(overview, detail)| {
+                        store_shared_waveforms(cache_dir, track_id, mtime, &overview, &detail)?;
+                        remove_obsolete_track_caches(cache_dir, track_id);
+                        Ok(())
+                    },
+                ) {
+                    Ok(()) => {}
+                    Err(error) => tracing::warn!(
+                        "顺带生成详细波形失败 {track_id}（整曲预览仍可用）：{error:#}"
+                    ),
+                }
+            }
+            Ok(release)
+        }
+        WaveformProfile::CurrentDetail => {
+            let (overview, detail) = current_waveforms_from_decoded(&decoded, track_id)?;
+            store_shared_waveforms(cache_dir, track_id, mtime, &overview, &detail)?;
+            remove_obsolete_track_caches(cache_dir, track_id);
+
+            if prime_other_profile {
+                let release_key = WaveKey {
+                    track_id,
+                    buckets: RELEASE_OVERVIEW_BUCKETS,
+                    mtime,
+                };
+                if read_release_overview_cached(cache_dir, release_key).is_none() {
+                    match release_overview_from_decoded(&decoded, track_id).and_then(|release| {
+                        write_release_overview(cache_dir, release_key, &release)
+                    }) {
+                        Ok(()) => {}
+                        Err(error) => tracing::warn!(
+                            "顺带生成整曲预览失败 {track_id}（详细波形仍可用）：{error:#}"
+                        ),
+                    }
+                }
+            }
+            Ok(detail)
+        }
+    }
+}
+
+fn compute_release_overview(path: &Path, track_id: i64) -> Result<Waveform> {
+    let decoded = decode_waveform_audio(path)
+        .with_context(|| format!("解码 v0.2.41 整曲预览失败：{}", path.display()))?;
+    release_overview_from_decoded(&decoded, track_id)
+}
+
+fn write_release_overview(cache_dir: &Path, key: WaveKey, overview: &Waveform) -> Result<()> {
+    write_cache(&release_overview_cache_path(cache_dir, key), overview)
 }
 
 fn store_shared_waveforms(
@@ -850,7 +988,7 @@ pub fn fit_waveform_columns(wave: Waveform, columns: usize) -> Waveform {
 
 /// v0.2.41 的屏幕列汇聚：高度保留窗口 peak，而不是当前详细波形的 RMS/peak 混合。
 fn fit_release_overview_columns(wave: Waveform, columns: usize) -> Waveform {
-    let columns = columns.clamp(64, 2_000);
+    let columns = columns.clamp(64, RELEASE_OVERVIEW_BUCKETS);
     let source_len = wave.amp.len();
     if source_len == columns
         || source_len == 0
@@ -925,7 +1063,9 @@ pub fn file_mtime(path: &Path) -> u64 {
 }
 
 fn cache_path(cache_dir: &Path, track_id: i64, buckets: usize, mtime: u64) -> PathBuf {
-    cache_dir.join(format!("{track_id}-v6-{buckets}-{mtime}.kdwave"))
+    cache_dir.join(format!(
+        "{track_id}-v{CURRENT_WAVEFORM_REVISION}-{buckets}-{mtime}.kdwave"
+    ))
 }
 
 fn release_overview_cache_path(cache_dir: &Path, key: WaveKey) -> PathBuf {
@@ -1031,7 +1171,7 @@ fn read_cached(cache_dir: &Path, key: WaveKey) -> Option<(Waveform, bool)> {
 fn read_release_overview_cached(cache_dir: &Path, key: WaveKey) -> Option<(Waveform, bool)> {
     let current = release_overview_cache_path(cache_dir, key);
     read_cache(&current)
-        .filter(|wave| wave.track_id == key.track_id)
+        .filter(|wave| wave.track_id == key.track_id && wave.amp.len() == key.buckets)
         .map(|wave| (wave, true))
 }
 
@@ -1057,7 +1197,7 @@ pub(crate) fn load_cached_default(
 ) -> Option<Waveform> {
     let key = WaveKey {
         track_id,
-        buckets: DEFAULT_WAVEFORM_BUCKETS,
+        buckets: RELEASE_OVERVIEW_BUCKETS,
         mtime: file_mtime(path),
     };
     if let Some((waveform, _)) = read_release_overview_cached(cache_dir, key) {
@@ -1067,7 +1207,7 @@ pub(crate) fn load_cached_default(
     // 旧分析任务曾先生成波形、再把 BPM/Key 写入音频标签。音频内容没变，但
     // 标签写入会改变 mtime，留下一个仍然有效、文件名时间戳却落后一拍的缓存。
     // 这里仅回读已有文件，不把它冒充当前资产状态，也不会触发重新解码。
-    let prefix = format!("{track_id}-v0241-overview-{}-", DEFAULT_WAVEFORM_BUCKETS);
+    let prefix = format!("{track_id}-v0241-overview-{}-", RELEASE_OVERVIEW_BUCKETS);
     let mut candidates: Vec<(u64, PathBuf)> = std::fs::read_dir(cache_dir)
         .ok()?
         .flatten()
@@ -1084,7 +1224,9 @@ pub(crate) fn load_cached_default(
         .collect();
     candidates.sort_unstable_by_key(|(stamp, _)| std::cmp::Reverse(*stamp));
     candidates.into_iter().find_map(|(_, candidate)| {
-        read_cache(&candidate).filter(|waveform| waveform.track_id == track_id)
+        read_cache(&candidate).filter(|waveform| {
+            waveform.track_id == track_id && waveform.amp.len() == RELEASE_OVERVIEW_BUCKETS
+        })
     })
 }
 
@@ -1097,7 +1239,7 @@ pub(crate) fn write_cached_default_for_test(
 ) -> Result<()> {
     let key = WaveKey {
         track_id,
-        buckets: DEFAULT_WAVEFORM_BUCKETS,
+        buckets: RELEASE_OVERVIEW_BUCKETS,
         mtime: file_mtime(path),
     };
     write_cache(&release_overview_cache_path(cache_dir, key), waveform)
@@ -1264,6 +1406,44 @@ mod tests {
     }
 
     #[test]
+    fn http_binary_waveform_is_compact_and_self_describes_its_profile() {
+        let wave = Waveform {
+            track_id: -42,
+            duration: 3.5,
+            amp: vec![0.25, 0.75],
+            r: vec![255, 32],
+            g: vec![64, 128],
+            b: vec![32, 255],
+        };
+        for profile in [
+            WaveformWireProfile::CurrentDetail,
+            WaveformWireProfile::ReleaseOverview,
+        ] {
+            let body = encode_waveform_binary(&wave, profile).unwrap();
+            assert_eq!(&body[..8], WIRE_MAGIC);
+            assert_eq!(u16::from_le_bytes(body[8..10].try_into().unwrap()), 1);
+            assert_eq!(body[10], profile.code());
+            assert_eq!(body[11], 0);
+            assert_eq!(
+                u32::from_le_bytes(body[12..16].try_into().unwrap()),
+                profile.revision()
+            );
+            assert_eq!(
+                i64::from_le_bytes(body[16..24].try_into().unwrap()),
+                wave.track_id
+            );
+            assert_eq!(
+                f64::from_le_bytes(body[24..32].try_into().unwrap()),
+                wave.duration
+            );
+            assert_eq!(u32::from_le_bytes(body[32..36].try_into().unwrap()), 2);
+            assert_eq!(body.len(), WIRE_HEADER_LEN + wave.amp.len() * 7);
+            assert_eq!(f32::from_le_bytes(body[36..40].try_into().unwrap()), 0.25);
+            assert_eq!(&body[44..], &[255, 32, 64, 128, 32, 255]);
+        }
+    }
+
+    #[test]
     fn cache_writes_atomically_and_roundtrips() {
         let dir = scratch("roundtrip");
         let path = dir.join("1-v6-640-1.kdwave");
@@ -1325,6 +1505,31 @@ mod tests {
     }
 
     #[test]
+    fn overview_pooling_matches_the_frontend_rms_peak_contract() {
+        let mut source = Vec::with_capacity(128);
+        for target in 0..64 {
+            if target % 2 == 0 {
+                source.extend([1.0, 0.0]);
+            } else {
+                source.extend([0.8, 0.2]);
+            }
+        }
+        let pooled = fit_waveform_columns(
+            Waveform {
+                track_id: 3,
+                duration: 4.0,
+                amp: source,
+                r: vec![255; 128],
+                g: vec![64; 128],
+                b: vec![32; 128],
+            },
+            64,
+        );
+        assert!((pooled.amp[0] - 0.76568544).abs() < 1e-6);
+        assert!((pooled.amp[1] - 0.62647617).abs() < 1e-6);
+    }
+
+    #[test]
     fn completed_v6_waveform_removes_only_that_tracks_obsolete_caches() {
         let dir = scratch("obsolete-cleanup");
         let old_json = dir.join("7-v2-640-1.json");
@@ -1379,6 +1584,18 @@ mod tests {
             cache_path(&cache_dir, 1, detail_n, mtime).is_file(),
             "detail master must be written from the same decode"
         );
+        assert!(
+            release_overview_cache_path(
+                &cache_dir,
+                WaveKey {
+                    track_id: 1,
+                    buckets: RELEASE_OVERVIEW_BUCKETS,
+                    mtime,
+                },
+            )
+            .is_file(),
+            "current detail cold miss must prime release overview from the same decode"
+        );
         let detailed = coordinator
             .get_or_compute(1, audio, detail_n, cache_dir)
             .await
@@ -1398,28 +1615,36 @@ mod tests {
         ));
         let coordinator = WaveformCoordinator::new(library);
 
-        let current = coordinator
-            .get_or_compute(41, audio.clone(), 640, cache_dir.clone())
-            .await
-            .unwrap();
         let release = coordinator
             .get_release_overview(41, audio.clone(), cache_dir.clone())
             .await
             .unwrap();
         let key = WaveKey {
             track_id: 41,
-            buckets: DEFAULT_WAVEFORM_BUCKETS,
+            buckets: RELEASE_OVERVIEW_BUCKETS,
             mtime: file_mtime(&audio),
         };
-        assert!(cache_path(&cache_dir, 41, 640, key.mtime).is_file());
+        let detail_n = detail_waveform_buckets(release.duration);
+        assert!(
+            cache_path(&cache_dir, 41, 640, key.mtime).is_file(),
+            "release cold miss must prime the current overview"
+        );
+        assert!(
+            cache_path(&cache_dir, 41, detail_n, key.mtime).is_file(),
+            "release cold miss must prime current detail from the same decode"
+        );
         assert!(release_overview_cache_path(&cache_dir, key).is_file());
-        assert_eq!(release.amp.len(), 640);
+        assert_eq!(release.amp.len(), RELEASE_OVERVIEW_BUCKETS);
+
+        let current = coordinator
+            .get_or_compute(41, audio.clone(), 640, cache_dir.clone())
+            .await
+            .unwrap();
         assert_ne!(
             current.r[0], release.r[0],
             "v0.2.41 preview must not be served from the current detail cache"
         );
 
-        let detail_n = detail_waveform_buckets(current.duration);
         let detail = coordinator
             .get_or_compute(41, audio, detail_n, cache_dir.clone())
             .await
@@ -1439,14 +1664,14 @@ mod tests {
         let wave = Waveform {
             track_id: 17,
             duration: 3.5,
-            amp: vec![0.25, 0.75],
-            r: vec![255, 32],
-            g: vec![64, 128],
-            b: vec![32, 255],
+            amp: vec![0.25; RELEASE_OVERVIEW_BUCKETS],
+            r: vec![255; RELEASE_OVERVIEW_BUCKETS],
+            g: vec![64; RELEASE_OVERVIEW_BUCKETS],
+            b: vec![32; RELEASE_OVERVIEW_BUCKETS],
         };
         let stale_key = WaveKey {
             track_id: 17,
-            buckets: DEFAULT_WAVEFORM_BUCKETS,
+            buckets: RELEASE_OVERVIEW_BUCKETS,
             mtime: 1,
         };
         write_cache(&release_overview_cache_path(&cache, stale_key), &wave).unwrap();
@@ -1458,7 +1683,7 @@ mod tests {
                 &cache,
                 WaveKey {
                     track_id: 17,
-                    buckets: DEFAULT_WAVEFORM_BUCKETS,
+                    buckets: RELEASE_OVERVIEW_BUCKETS,
                     mtime: file_mtime(&audio),
                 },
             )
@@ -1484,6 +1709,25 @@ mod tests {
             b: vec![2],
         };
         assert!(encode_cache(&bad).is_err(), "通道错位不能写进缓存");
+
+        let key = WaveKey {
+            track_id: 1,
+            buckets: RELEASE_OVERVIEW_BUCKETS,
+            mtime: 7,
+        };
+        let wrong_density = Waveform {
+            track_id: 1,
+            duration: 3.0,
+            amp: vec![0.25; 2_000],
+            r: vec![255; 2_000],
+            g: vec![64; 2_000],
+            b: vec![32; 2_000],
+        };
+        write_cache(&release_overview_cache_path(&dir, key), &wrong_density).unwrap();
+        assert!(
+            read_release_overview_cached(&dir, key).is_none(),
+            "文件名升级后不能继续读取内部仍为旧密度的缓存"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

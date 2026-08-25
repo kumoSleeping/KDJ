@@ -44,6 +44,7 @@ import {
   type AppFontScale,
 } from "../../lib/fontScale";
 import { api } from "../../lib/api";
+import { getBridge } from "../../lib/bridge";
 import { formatBytes } from "../../lib/format";
 import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
@@ -569,6 +570,80 @@ function LyricsColorRow({
   );
 }
 
+function CliSkillExport() {
+  const bridge = getBridge();
+  const exportSkill = bridge.exportCliSkill;
+  const [busy, setBusy] = useState("");
+  const [notice, setNotice] = useState("");
+  const [ok, setOk] = useState(false);
+  if (!exportSkill) return null;
+
+  const run = (preset?: "cursor" | "claude" | "codex" | "pi", folder?: string, key = preset ?? "folder") => {
+    setBusy(key);
+    setNotice("");
+    setOk(false);
+    void (async () => {
+      try {
+        const result = await exportSkill({ preset, folder });
+        setOk(true);
+        setNotice(`v${result.version} → ${result.path}`);
+        await bridge.revealPath(result.path);
+      } catch (error) {
+        setOk(false);
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setBusy("");
+      }
+    })();
+  };
+
+  return (
+    <Panel heading="CLI" dense>
+      <div className="kd-djp-choice" role="group" aria-label="导出 CLI 手册">
+        {(
+          [
+            ["claude", "Claude Code"],
+            ["codex", "Codex"],
+            ["pi", "PI"],
+            ["cursor", "Cursor"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            className="kd-djp-choice-btn"
+            disabled={busy !== ""}
+            aria-busy={busy === id || undefined}
+            onClick={() => run(id)}
+          >
+            {label}
+          </button>
+        ))}
+        <button
+          type="button"
+          className="kd-djp-choice-btn"
+          disabled={busy !== ""}
+          onClick={() => {
+            void bridge.pickFolder().then((folder) => {
+              if (folder) run(undefined, folder, "folder");
+            });
+          }}
+        >
+          文件夹
+        </button>
+      </div>
+      <InlineNotice
+        text={notice}
+        tone={ok ? "ok" : "warn"}
+        onDismiss={() => {
+          setNotice("");
+          setOk(false);
+        }}
+      />
+    </Panel>
+  );
+}
+
 export function SettingsPanel() {
   const theme = useAppStore((state) => state.settings?.theme ?? "system");
   const settings = useAppStore((state) => state.settings);
@@ -716,6 +791,7 @@ export function SettingsPanel() {
   const bpmLabel = bpm ? `${Math.round(bpm)} BPM` : "120 BPM（未分析，按默认估）";
   const lengthHint = `约 ${formatSeconds(mixSeconds(bpm, bars))} · ${bpmLabel}`;
 
+  // YouTube Music 与 YouTube 视频各自一行、各自登录和退出。
   const accountRows = accounts.filter((account) => account.supports_login);
   const autoCheck = useUpdateStore((s) => s.autoCheck);
   const setAutoCheck = useUpdateStore((s) => s.setAutoCheck);
@@ -828,6 +904,22 @@ export function SettingsPanel() {
               ]}
               title="Performance 双极 FILTER 的共振强度。高档为默认；低档与此前的固定滤波响应一致。"
               onChange={(next) => void saveSettings({ filter_resonance: next })}
+            />
+          </div>
+        </Panel>
+
+        <Panel heading="实验性内容" dense>
+          <div className="kd-djp-switch-list" aria-label="实验性内容">
+            <Switch
+              checked={settings?.experimental_dj_mode ?? false}
+              disabled={!settings}
+              label="DJ 模式"
+              title="开启后在顶栏显示 DJ 模式切换按钮；关闭后返回管理器模式并隐藏入口。"
+              onChange={() =>
+                void saveSettings({
+                  experimental_dj_mode: !(settings?.experimental_dj_mode ?? false),
+                })
+              }
             />
           </div>
         </Panel>
@@ -1039,7 +1131,7 @@ export function SettingsPanel() {
               <Switch
                 checked={autoBeatSync}
                 label="自动对拍"
-                title="开启后：点波形落到被点小节内与当前播放相同的相位；SYNC 锁小节（黄线对齐）；接歌等到下一小节边界。关掉则点击精确落点，SYNC 只锁拍子（灰线对齐）。"
+                title="开启后：点波形落到被点 1/4 小节内与当前播放相同的相位；SYNC 锁小节（黄线对齐）；接歌等到下一小节边界。关掉则点击精确落点，SYNC 只锁拍子（灰线对齐）。"
                 onChange={() => setAutoBeatSync(!autoBeatSync)}
               />
               <Switch
@@ -1103,6 +1195,8 @@ export function SettingsPanel() {
             accountRows.map((account) => <AccountRow key={account.platform} account={account} />)
           )}
         </Panel>
+
+        <CliSkillExport />
 
         <div ref={updateSectionRef} id="kd-settings-update">
           <Panel heading="软件更新" dense>

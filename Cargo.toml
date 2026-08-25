@@ -20,14 +20,15 @@ rust-version = "1.88"
 license = "GPL-3.0-or-later"
 
 [profile.release]
-opt-level = "z"
+# Audio decode, waveform extraction and realtime DSP are throughput paths. `z` more than doubled
+# cold waveform latency on M2; LTO + stripping still keep release artifacts compact at level 2.
+opt-level = 2
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
 
-# Redress runs one 100-iteration NQP per STFT bin. Size optimisation leaves a single Deck too
-# close to its realtime deadline on M2; optimise only this small Rust crate for throughput.
+# Keep the latency-sensitive STEM crate explicitly pinned if the global profile is retuned later.
 [profile.release.package.kdj-stems]
 opt-level = 2
 

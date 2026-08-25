@@ -55,17 +55,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/tracks/{id}/stems",
-            axum::routing::get(stems::track_status)
-                .post(stems::separate_track)
-                .delete(stems::release_track),
-        )
-        .route(
-            "/api/tracks/{id}/stems/waveform/{stem}",
-            axum::routing::get(stems::stem_waveform),
-        )
-        .route(
-            "/api/tracks/{id}/stems/waveform",
-            axum::routing::get(stems::live_stem_waveform),
+            axum::routing::get(stems::track_status),
         )
         .route("/ws", axum::routing::get(ws::handler))
         // 服务只监听 127.0.0.1；开放 CORS 让 Tauri WebView 和本机浏览器调试都能直连。
@@ -78,6 +68,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                     axum::http::header::CONTENT_RANGE,
                     axum::http::header::ACCEPT_RANGES,
                     axum::http::header::CONTENT_LENGTH,
+                    axum::http::HeaderName::from_static("x-kdj-waveform-profile"),
+                    axum::http::HeaderName::from_static("x-kdj-waveform-revision"),
                 ]),
         )
         .with_state(state);
@@ -85,8 +77,14 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 }
 
 /// 起服务，返回实际监听的端口（传 0 时由系统分配）。
-pub async fn serve(config: Arc<AppConfig>) -> Result<(u16, tokio::task::JoinHandle<()>)> {
-    let state = AppState::new(config.clone())?;
+pub async fn serve(
+    config: Arc<AppConfig>,
+) -> Result<(
+    u16,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::mpsc::UnboundedReceiver<state::UiControl>,
+)> {
+    let (state, control_rx) = AppState::new_with_control(config.clone())?;
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port))
@@ -99,5 +97,5 @@ pub async fn serve(config: Arc<AppConfig>) -> Result<(u16, tokio::task::JoinHand
             tracing::error!("HTTP 服务退出：{err}");
         }
     });
-    Ok((port, handle))
+    Ok((port, handle, control_rx))
 }

@@ -1,27 +1,8 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
-import {
-  cachedWaveform,
-  cachedReleaseOverviewWaveform,
-  loadReleaseOverviewById,
-  loadReleaseOverviewForTrack,
-  loadWaveformForTrack,
-  loadWaveformById,
-  streamWaveformSnapshot,
-  subscribeStreamWaveform,
-  updateStreamWaveform,
-  type StreamWaveformSnapshot,
-} from "../../lib/waveformCache";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CuePoint, Track, Waveform as WaveformData } from "../../types";
 import {
-  cueColor,
-  cueNearTime,
-  cueTitle,
-  hotCueLabel,
-  waveformLoopRegions,
-} from "../../lib/cuePoints";
-import { isOneLibraryPlaybackTrack } from "../../lib/playbackTrackSource";
-import { waveformEdgeScales, waveformPlaceholderSampleIndex } from "../../lib/waveformRenderPolicy";
-import {
+  PERFORMANCE_WAVEFORM_BAKE_SCREENS,
+  PERFORMANCE_WAVEFORM_SECONDS_PER_SCREEN,
   PERFORMANCE_WAVEFORM_SMOOTHING_MS,
   PERFORMANCE_WAVEFORM_SCRATCH_MAX_STEP_SECONDS,
   PERFORMANCE_WAVEFORM_SCRATCH_SMOOTHING_MS,
@@ -33,21 +14,32 @@ import {
   waveformBakeRangeChanged,
   waveformPointerSeconds,
   waveformViewportLayout,
+  beatMarkerRangePercent,
   type WaveformBakeWindow,
 } from "../../lib/waveformViewport";
-import { beatGridMarkers } from "../../lib/performanceCues";
+import { beatGridMarkers, type BeatGridMarker } from "../../lib/performanceCues";
 import { barPhaseAlignedSeek } from "../../lib/beatGridSync";
 import {
-  releaseOverviewWaveformDisplayRgb,
-  vocalGuideWaveformDisplayRgb,
-  waveformDisplayRgb,
-} from "../../lib/waveformPalette";
+  liveWaveformAnimationTimeMs,
+  liveWaveformPlaybackRate,
+  projectedLiveWaveformPosition,
+  shouldPauseLiveWaveformClock,
+  updateWaveformMotionClock,
+  waveformMotionClockPosition,
+  type WaveformMotionClock,
+} from "../../lib/waveformMotion";
 import { ContextMenu } from "../common";
+import { drawWaveformCanvas } from "./WaveformCanvas";
+import { useWaveformData } from "./useWaveformData";
+import { markerRatio, WaveformCueMarkers, WaveformLoopFills } from "./WaveformMarkers";
+import {
+  getLiveDeckClock,
+  subscribeLivePlaybackClock,
+} from "../../lib/unifiedPlayer";
+export { pointPatch, WaveformCueMarkers, WaveformLoopFills } from "./WaveformMarkers";
 
 /** 点波形跳转：PlayerBar 监听它，和 kd:play / kd:position 一套约定。 */
 export const SEEK_EVENT = "kd:seek";
-/** Let a newly loaded Deck paint/respond before upgrading its cached 640-column preview. */
-const DETAIL_WAVEFORM_IDLE_DELAY_MS = 750;
 export interface SeekDetail {
   trackId: number;
   position: number;
@@ -60,6 +52,38 @@ export interface SeekDetail {
   scrubbing?: boolean;
   /** 同一次手势的最终落点不能被媒体同步回声去重吞掉。 */
   forceCommit?: boolean;
+}
+
+function WaveformBeatGrid({
+  markers,
+  rangeStartSec,
+  rangeEndSec,
+  tempoScaleX,
+}: {
+  markers: readonly BeatGridMarker[];
+  rangeStartSec: number;
+  rangeEndSec: number;
+  tempoScaleX: number;
+}) {
+  if (markers.length === 0) return null;
+  const unstretch = tempoScaleX !== 1 ? `scaleX(${1 / tempoScaleX})` : undefined;
+  return (
+    <span className="kd-wave-beat-grid" aria-hidden="true">
+      {markers.map((marker) => (
+        <i
+          key={`${marker.positionSec}:${marker.beat}`}
+          data-bar={marker.beat === 1 ? "true" : undefined}
+          style={{
+            left: `${beatMarkerRangePercent(marker.positionSec, rangeStartSec, rangeEndSec)}%`,
+            transform: unstretch,
+            transformOrigin: "0 50%",
+          }}
+        >
+          {marker.beat === 1 ? marker.bar : null}
+        </i>
+      ))}
+    </span>
+  );
 }
 
 /**
@@ -102,7 +126,7 @@ export interface WaveformProps {
   /** 自定义 scrub 接收器；用于非当前 Deck，避免错误派发全局播放跳转。 */
   onSeek?: (detail: Omit<SeekDetail, "trackId">) => void;
   /**
-   * 自动对拍：按下时记下当前小节相位，点击/拖动松手落到被点小节内的同一相位。
+   * 自动对拍：按下时记下当前 1/4 小节相位，点击/拖动松手落到被点拍内的同一相位。
    * 关掉或没有网格时仍是精确落点。
    */
   preserveBarPhase?: boolean;
@@ -117,337 +141,22 @@ export interface WaveformProps {
   /** 曲目时间相对墙钟的推进倍率。仅在局部波形走带时使用。 */
   playbackRate?: number;
   className?: string;
-  /** Precomputed alternate lane (for example one classical Redress stem); bypasses the library waveform API. */
+  /** Precomputed waveform; bypasses the library waveform API. */
   waveform?: WaveformData;
-  /** Empty vertical space reserved above and below the rendered columns (0..0.45 each side). */
-  verticalInsetRatio?: number;
-  /** 低于该幅度（0..1）的列直接留空，不画 1px 中线；分轨车道用来隐藏纯底噪段。 */
-  silenceThreshold?: number;
-  /** 未分析到的列改用这份波形（主轨）的淡化版顶替，表示“正在分析中”。 */
-  placeholder?: WaveformData | null;
-  /** 整轨透明度：分轨车道跟随分轨音量，静音时最淡但不消失。 */
-  opacity?: number;
-  /** Display-only colour mapping; vocal guide rails stay in a vivid yellow-to-green range. */
-  palette?: "rgb" | "vocal-guide";
+  /** Display-only vertical envelope scale; Performance uses it to visualize live mixer trim. */
+  amplitudeScale?: number;
   /** A held hardware platter may move backward at frame rate; interpolate both directions. */
   interactiveScrub?: boolean;
   /** Skip CSS rail interpolation for this paint — SYNC/seek landings must not slide then bounce. */
   snapRail?: boolean;
+  /** Changed after native SYNC acknowledges a phase seek; the compositor lands it in one frame. */
+  motionRevision?: number;
+  /** Physical native Deck whose callback/DAC clock drives this Performance rail. */
+  nativeDeck?: 0 | 1;
   /** 整曲预览专用：恢复 v0.2.41 的 STFT 数据、原始高饱和 RGB 与像素汇聚。 */
   renderProfile?: "current" | "release-overview";
-}
-
-function draw(
-  canvas: HTMLCanvasElement,
-  wave: WaveformData,
-  cssWidth: number,
-  cssHeight: number,
-  known?: readonly boolean[],
-  verticalInsetRatio = 0,
-  silenceThreshold = 0,
-  placeholder?: WaveformData | null,
-  timeStart: number | null = null,
-  timeEnd: number | null = null,
-  palette: "rgb" | "vocal-guide" = "rgb",
-  releaseOverview = false,
-) {
-  const dpr = window.devicePixelRatio || 1;
-  // 局部 DJ 轨道会比视口宽数倍；限制 backing store，避免长曲在 Retina 屏上
-  // 超过 WebKit 的 canvas 尺寸上限。CSS 仍保持完整时间尺度。
-  const maxBackingWidth = 16_384;
-  const backingWidth = Math.max(1, Math.min(maxBackingWidth, Math.round(cssWidth * dpr)));
-  const backingHeight = Math.max(1, Math.round(cssHeight * dpr));
-  // Assigning either canvas dimension reallocates and clears the backing store. The old code did
-  // that on every live STEM delta even when the rail size had not changed, synchronously flushing
-  // several large canvases and occasionally starving the compositor transition.
-  if (canvas.width !== backingWidth) canvas.width = backingWidth;
-  if (canvas.height !== backingHeight) canvas.height = backingHeight;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  ctx.setTransform(canvas.width / cssWidth, 0, 0, canvas.height / cssHeight, 0, 0);
-  ctx.clearRect(0, 0, cssWidth, cssHeight);
-
-  const n = wave.amp.length;
-  if (n === 0) return;
-  const mid = cssHeight / 2;
-  const inset = Math.min(0.45, Math.max(0, verticalInsetRatio)) * cssHeight;
-  const availableHalfHeight = releaseOverview
-    ? Math.max(0.5, mid - 1)
-    : Math.max(0.5, mid - inset - 1);
-  const width = Math.max(1, Math.floor(Math.min(cssWidth, canvas.width)));
-  const columnCssWidth = cssWidth / width;
-  const waveDuration = wave.duration > 0 ? wave.duration : 0;
-  const windowed = timeStart !== null
-    && timeEnd !== null
-    && timeEnd > timeStart
-    && waveDuration > 0;
-
-  interface PixelColumn {
-    amp: number;
-    r: number;
-    g: number;
-    b: number;
-    known: boolean;
-  }
-  const columns: PixelColumn[] = [];
-  for (let x = 0; x < width; x += 1) {
-    let from: number;
-    let to: number;
-    if (windowed) {
-      const t0 = timeStart + (x / width) * (timeEnd - timeStart);
-      const t1 = timeStart + ((x + 1) / width) * (timeEnd - timeStart);
-      if (t1 <= 0 || t0 >= waveDuration) {
-        columns.push({ amp: 0, r: 0, g: 0, b: 0, known: false });
-        continue;
-      }
-      from = Math.max(0, Math.floor((Math.max(0, t0) / waveDuration) * n));
-      to = Math.min(n, Math.max(from + 1, Math.ceil((Math.min(waveDuration, t1) / waveDuration) * n)));
-    } else if (width > n && !releaseOverview) {
-      const source = width > 1 ? (x * (n - 1)) / (width - 1) : 0;
-      const left = Math.max(0, Math.min(n - 1, Math.floor(source)));
-      const right = Math.max(0, Math.min(n - 1, left + 1));
-      const mix = source - left;
-      const leftKnown = known === undefined || Boolean(known[left]);
-      const rightKnown = known === undefined || Boolean(known[right]);
-      if (!leftKnown && !rightKnown) {
-        columns.push({ amp: 0, r: 0, g: 0, b: 0, known: false });
-        continue;
-      }
-      const from = leftKnown ? left : right;
-      const to = rightKnown ? right : left;
-      const ratio = leftKnown && rightKnown ? mix : 0;
-      columns.push({
-        amp: wave.amp[from] + (wave.amp[to] - wave.amp[from]) * ratio,
-        r: Math.round(wave.r[from] + (wave.r[to] - wave.r[from]) * ratio),
-        g: Math.round(wave.g[from] + (wave.g[to] - wave.g[from]) * ratio),
-        b: Math.round(wave.b[from] + (wave.b[to] - wave.b[from]) * ratio),
-        known: true,
-      });
-      continue;
-    } else {
-      from = Math.floor((x * n) / width);
-      to = Math.max(from + 1, Math.floor(((x + 1) * n) / width));
-    }
-
-    let amp = 0;
-    let r = 0;
-    let g = 0;
-    let b = 0;
-    let weight = 0;
-    let hasKnownSample = known === undefined;
-    for (let i = from; i < to && i < n; i += 1) {
-      if (known && !known[i]) continue;
-      hasKnownSample = true;
-      const value = wave.amp[i];
-      if (value > amp) amp = value;
-      // 颜色按幅度加权平均：安静帧的颜色本来就不可靠，不该和强拍平起平坐。
-      const sampleWeight = value + 0.001;
-      r += wave.r[i] * sampleWeight;
-      g += wave.g[i] * sampleWeight;
-      b += wave.b[i] * sampleWeight;
-      weight += sampleWeight;
-    }
-    columns.push({
-      amp,
-      r: weight > 0 ? Math.round(r / weight) : 0,
-      g: weight > 0 ? Math.round(g / weight) : 0,
-      b: weight > 0 ? Math.round(b / weight) : 0,
-      known: hasKnownSample && weight > 0,
-    });
-  }
-
-  // 在线渐进波形的首/尾真实桶可能从静音基线一步跳到满高，视觉上会变成截图里
-  // 那种整高竖墙。只给最外侧几列做屏幕空间包络；内部瞬态和 unknown 掩码不动。
-  const edgeScales = known
-    ? waveformEdgeScales(
-        columns.map((column) => column.amp),
-        columns.map((column) => column.known),
-      )
-    : null;
-  const displayRgb = releaseOverview
-    ? releaseOverviewWaveformDisplayRgb
-    : palette === "vocal-guide"
-      ? vocalGuideWaveformDisplayRgb
-      : waveformDisplayRgb;
-  for (let x = 0; x < columns.length; x += 1) {
-    const column = columns[x];
-    if (!column.known) {
-      // 未分析到的列：有占位主波形就画它的淡化版，表示“正在分析中”；
-      // 否则交给 DOM 下层的流媒体渐变轨道，不拿灰柱或随机柱冒充波形。
-      if (placeholder && placeholder.amp.length > 0) {
-        const pn = placeholder.amp.length;
-        const placeholderDuration = placeholder.duration > 0 ? placeholder.duration : waveDuration;
-        const source = waveformPlaceholderSampleIndex(
-          x,
-          width,
-          pn,
-          placeholderDuration,
-          windowed ? timeStart : null,
-          windowed ? timeEnd : null,
-        );
-        // DJ 窗口在曲首/曲尾本来就会露出超出曲目的空白。这里绝不能拿整首
-        // overview 去填它，否则左/右半边会凭空出现一段彩色“波形”。
-        if (source === null) continue;
-        const pl = Math.max(0, Math.min(pn - 1, Math.floor(source)));
-        const pr = Math.max(0, Math.min(pn - 1, pl + 1));
-        const pm = source - pl;
-        const pAmp = placeholder.amp[pl] + (placeholder.amp[pr] - placeholder.amp[pl]) * pm;
-        if (pAmp > 0.01) {
-          const half = Math.max(0.5, pAmp * availableHalfHeight);
-          const prr = Math.round(placeholder.r[pl] + (placeholder.r[pr] - placeholder.r[pl]) * pm);
-          const pgg = Math.round(placeholder.g[pl] + (placeholder.g[pr] - placeholder.g[pl]) * pm);
-          const pbb = Math.round(placeholder.b[pl] + (placeholder.b[pr] - placeholder.b[pl]) * pm);
-          ctx.globalAlpha = 0.3;
-          const [displayR, displayG, displayB] = displayRgb(prr, pgg, pbb, pAmp);
-          ctx.fillStyle = `rgb(${displayR},${displayG},${displayB})`;
-          ctx.fillRect(x * columnCssWidth, mid - half, columnCssWidth, half * 2);
-          ctx.globalAlpha = 1;
-        }
-      }
-      continue;
-    }
-    if (silenceThreshold > 0 && column.amp <= silenceThreshold) {
-      // 分轨车道里“这段没有这个乐器”只剩底噪；留空，不画成一条平线假装有内容。
-      continue;
-    }
-    const [displayR, displayG, displayB] = displayRgb(
-      column.r,
-      column.g,
-      column.b,
-      column.amp,
-    );
-    ctx.fillStyle = `rgb(${displayR},${displayG},${displayB})`;
-    // 最小 1px：静音段也留一条中线，否则波形会断成几截看着像坏了
-    const half = Math.max(
-      0.5,
-      column.amp * (edgeScales?.[x] ?? 1) * availableHalfHeight,
-    );
-    ctx.fillRect(
-      releaseOverview ? x : x * columnCssWidth,
-      mid - half,
-      releaseOverview ? 1 : columnCssWidth,
-      half * 2,
-    );
-  }
-}
-
-function markerRatio(ms: number | null | undefined, totalSec: number): number | null {
-  if (ms == null || totalSec <= 0) return null;
-  return Math.min(1, Math.max(0, ms / 1000 / totalSec));
-}
-
-function timeRatio(timeSec: number, totalSec: number): number | null {
-  if (!Number.isFinite(timeSec) || totalSec <= 0) return null;
-  return Math.min(1, Math.max(0, timeSec / totalSec));
-}
-
-function loopRegionStyle(start: number, end: number, color: string): CSSProperties {
-  return {
-    left: `${start * 100}%`,
-    width: `${Math.max(0, end - start) * 100}%`,
-    "--kd-cue-color": color,
-  } as CSSProperties;
-}
-
-function cueMarkerStyle(at: number, color: string): CSSProperties {
-  return {
-    left: `${at * 100}%`,
-    "--kd-cue-color": color,
-  } as CSSProperties;
-}
-
-/** 半透明 Loop 区间。Beat grid 应画在这层上面，Cue 三角竖线再盖上来。 */
-export function WaveformLoopFills({
-  total,
-  cuePoints = [],
-  loopStart = null,
-  loopLength = null,
-}: {
-  total: number;
-  cuePoints?: readonly CuePoint[];
-  loopStart?: number | null;
-  loopLength?: number | null;
-}) {
-  if (total <= 0) return null;
-  return (
-    <>
-      {waveformLoopRegions(cuePoints, loopStart, loopLength).map((region) => {
-        const start = timeRatio(region.startSec, total);
-        const end = timeRatio(region.endSec, total);
-        if (start === null || end === null || end <= start) return null;
-        return (
-          <span
-            key={region.key}
-            className="kd-wave-cue-loop"
-            data-active={region.active || undefined}
-            style={loopRegionStyle(start, end, region.color)}
-            aria-hidden="true"
-          />
-        );
-      })}
-    </>
-  );
-}
-
-/** Cue 点：上下三角 + 竖线。普通 Loop 只有色带，不画 Cue 锚点。 */
-export function WaveformCueMarkers({
-  total,
-  cuePoints = [],
-}: {
-  total: number;
-  cuePoints?: readonly CuePoint[];
-}) {
-  if (total <= 0) return null;
-  return (
-    <>
-      {cuePoints.map((cue) => {
-        const at = markerRatio(cue.start_ms, total);
-        if (at === null) return null;
-        const hot = hotCueLabel(cue.hot_cue);
-        return (
-          <span
-            key={`cue:${cue.id}`}
-            className="kd-wave-cue"
-            data-kind={hot ? "hot" : "memory"}
-            data-loop={cue.end_ms !== null ? "true" : undefined}
-            style={cueMarkerStyle(at, cueColor(cue))}
-            title={cueTitle(cue)}
-            aria-hidden="true"
-          />
-        );
-      })}
-      {cuePoints.map((cue) => {
-        if (cue.end_ms === null || cue.end_ms <= cue.start_ms) return null;
-        const end = markerRatio(cue.end_ms, total);
-        if (end === null || cueNearTime(cuePoints, cue.end_ms / 1_000) !== undefined) return null;
-        return (
-          <span
-            key={`cue:${cue.id}:end`}
-            className="kd-wave-cue"
-            data-kind="loop-end"
-            style={cueMarkerStyle(end, cueColor(cue))}
-            aria-hidden="true"
-          />
-        );
-      })}
-    </>
-  );
-}
-
-/** 校验起止点并生成 patch；不合法返回中文原因。 */
-export function pointPatch(
-  kind: "start" | "end",
-  positionSec: number,
-  cueMs: number | null | undefined,
-  endMs: number | null | undefined,
-): { cue_ms: number } | { end_ms: number } | string {
-  const ms = Math.max(0, Math.round(positionSec * 1000));
-  if (kind === "start") {
-    if (endMs != null && ms >= endMs) return "开始点必须早于结束点";
-    return { cue_ms: ms };
-  }
-  if (cueMs != null && ms <= cueMs) return "结束点必须晚于开始点";
-  return { end_ms: ms };
+  /** Performance may upgrade a cached preview sooner without owning a second acquisition hook. */
+  detailUpgradeDelayMs?: number;
 }
 
 export function Waveform({
@@ -473,28 +182,27 @@ export function Waveform({
   playbackRate = 1,
   className,
   waveform: providedWaveform,
-  verticalInsetRatio = 0,
-  silenceThreshold = 0,
-  placeholder = null,
-  opacity,
-  palette = "rgb",
+  amplitudeScale = 1,
   interactiveScrub = false,
   snapRail = false,
+  motionRevision = 0,
+  nativeDeck,
   renderProfile = "current",
+  detailUpgradeDelayMs,
 }: WaveformProps) {
-  const oneLibraryTrack =
-    track?.id === trackId && isOneLibraryPlaybackTrack(track) ? track : null;
-  const progressiveStream = trackId < 0 && oneLibraryTrack === null;
-  const releaseOverview = renderProfile === "release-overview";
-  const [wave, setWave] = useState<WaveformData | null>(() =>
-    providedWaveform ?? (releaseOverview
-      ? cachedReleaseOverviewWaveform(trackId)
-      : cachedWaveform(trackId, buckets)),
-  );
-  const [streamSnapshot, setStreamSnapshot] = useState<StreamWaveformSnapshot | null>(() =>
-    progressiveStream ? streamWaveformSnapshot(trackId) : null,
-  );
-  const [error, setError] = useState("");
+  const {
+    displayReleaseOverview,
+    displayWave,
+    error,
+  } = useWaveformData({
+    trackId,
+    track,
+    duration,
+    buckets,
+    providedWaveform,
+    renderProfile,
+    detailUpgradeDelayMs,
+  });
   // 右键设点永远取当时正在播放的位置，不能让鼠标点到波形哪里就误落到哪里。
   const [menu, setMenu] = useState<{ x: number; y: number; position: number } | null>(null);
   const [menuError, setMenuError] = useState("");
@@ -509,6 +217,20 @@ export function Waveform({
    * render may be restarted, and then a rebake can be mistaken for an ordinary 100ms movement.
    */
   const committedBakeWindowRef = useRef<WaveformBakeWindow | null>(null);
+  const motionClockRef = useRef<WaveformMotionClock | null>(null);
+  const liveDiscontinuityRef = useRef<number | null>(null);
+  const livePlatterActiveRef = useRef(false);
+  const motionAnimationsRef = useRef<{
+    bake: Animation;
+    rail: Animation;
+    trackId: number;
+    bakeStartSec: number;
+    bakeEndSec: number;
+    totalSec: number;
+    railLeadInSec: number;
+    loopStartSec: number | null;
+    loopLengthSec: number | null;
+  } | null>(null);
   const customSeekRef = useRef(onSeek);
   const draggingRef = useRef(false);
   const previewFrameRef = useRef<number | null>(null);
@@ -538,6 +260,9 @@ export function Waveform({
   useEffect(
     () => () => {
       if (previewFrameRef.current !== null) cancelAnimationFrame(previewFrameRef.current);
+      motionAnimationsRef.current?.bake?.cancel();
+      motionAnimationsRef.current?.rail?.cancel();
+      motionAnimationsRef.current = null;
     },
     [],
   );
@@ -623,124 +348,20 @@ export function Waveform({
     );
   };
 
-  useEffect(() => {
-    if (providedWaveform) {
-      setWave(providedWaveform);
-      setError("");
-      return;
-    }
-    if (progressiveStream) {
-      // 在线曲的波形只由当前媒体的 buffered + analyser 渐进生成，不能从这里另拉整首。
-      setWave(null);
-      setError("");
-      return;
-    }
-    let alive = true;
-    if (releaseOverview) {
-      const cached = cachedReleaseOverviewWaveform(trackId);
-      setWave(cached);
-      setError("");
-      if (cached) return;
-      const request = oneLibraryTrack
-        ? loadReleaseOverviewForTrack(oneLibraryTrack)
-        : loadReleaseOverviewById(trackId);
-      void request
-        .then((result) => {
-          if (alive) setWave(result);
-        })
-        .catch((reason: unknown) => {
-          if (alive) setError(reason instanceof Error ? reason.message : String(reason));
-        });
-      return () => {
-        alive = false;
-      };
-    }
-    // Performance 的局部滚动波形会按曲长要 100 列/秒，但曲库分析预先写好的是 640 桶。
-    // 先拿 canonical 预览立即画，再在它之后后台升级；旧逻辑直接等详细档，等于
-    // 每次装盘都绕开已有缓存现场整轨解码，overview 还会再用 960 解第二次。
-    const previewBuckets = Math.min(640, buckets);
-    const detailed = cachedWaveform(trackId, buckets);
-    const preview = detailed ?? cachedWaveform(trackId, previewBuckets);
-    setWave(preview);
-    setError("");
-    if (detailed) return;
-    const loadAt = (count: number) => oneLibraryTrack
-      ? loadWaveformForTrack(oneLibraryTrack, count)
-      : loadWaveformById(trackId, count);
-    // Keep a cached canonical rail responsive through a new Deck load. The detailed request is
-    // intentionally deferred and globally serialized by the backend; current/predicted Decks
-    // must not launch several full-track decodes while a platter or waveform needs input now.
-    let detailTimer: number | null = null;
-    const request = preview && buckets > previewBuckets
-      ? new Promise<WaveformData>((resolve, reject) => {
-          detailTimer = window.setTimeout(() => {
-            detailTimer = null;
-            void loadAt(buckets).then(resolve, reject);
-          }, DETAIL_WAVEFORM_IDLE_DELAY_MS);
-        })
-      : loadAt(buckets);
-    request
-      .then((result) => {
-        if (alive) setWave(result);
-      })
-      .catch((reason: unknown) => {
-        if (alive) setError(reason instanceof Error ? reason.message : String(reason));
-      });
-    // 切曲目时作废上一条请求，慢响应不会画到新曲子上
-    return () => {
-      alive = false;
-      if (detailTimer !== null) window.clearTimeout(detailTimer);
-    };
-  }, [
-    trackId,
-    oneLibraryTrack?.source_key,
-    progressiveStream,
-    buckets,
-    providedWaveform,
-    releaseOverview,
-  ]);
-
-  useEffect(() => {
-    if (!progressiveStream) {
-      setStreamSnapshot(null);
-      return;
-    }
-    const sync = () => setStreamSnapshot(streamWaveformSnapshot(trackId));
-    const unsubscribe = subscribeStreamWaveform(trackId, sync);
-    // 首帧也建固定桶：即使媒体还没触发 progress，底栏仍有“未缓存”基线。
-    if (!streamWaveformSnapshot(trackId)) {
-      updateStreamWaveform(trackId, 0, duration, null, []);
-    }
-    sync();
-    return unsubscribe;
-  }, [trackId, progressiveStream]);
-
-  useEffect(() => {
-    if (progressiveStream && duration > 0) {
-      // loadedmetadata 可能晚于首帧；只补时长，不清掉 PlayerBar 已喂入的缓存区间。
-      updateStreamWaveform(trackId, 0, duration, null);
-    }
-  }, [trackId, duration, progressiveStream]);
-
-  const activeStreamSnapshot =
-    streamSnapshot?.waveform.track_id === trackId ? streamSnapshot : null;
-  const displayWave = progressiveStream ? activeStreamSnapshot?.waveform ?? null : wave;
-
   // 波形计算可能要几秒；期间直接使用曲库/媒体元数据里的时长，让用户可以立刻拖动跳转。
   const waveDuration = displayWave?.duration ?? 0;
   const total = waveDuration > 0 ? waveDuration : duration;
   const ratio = total > 0 && position !== null ? Math.min(1, Math.max(0, position / total)) : null;
-  const analysisFrontierRatio = total > 0 && displayWave?.analysis_frontier != null
-    ? Math.min(1, Math.max(0, displayWave.analysis_frontier / total))
-    : null;
-  const analysisBackFrontierRatio = total > 0 && displayWave?.analysis_back_frontier != null
-    ? Math.min(1, Math.max(0, displayWave.analysis_back_frontier / total))
-    : null;
+  const hasActiveLoop = loopStart !== null
+    && loopLength !== null
+    && Number.isFinite(loopStart)
+    && Number.isFinite(loopLength)
+    && loopLength > 0;
   const previousPosition = previousPositionRef.current;
   const railPosition = stabilizedWaveformPosition(
     previousPosition,
     position,
-    playing && !interactiveScrub && !snapRail,
+    playing && !interactiveScrub && !snapRail && !hasActiveLoop,
   );
   const viewport = waveformViewportLayout(total, railPosition, viewportSeconds);
   const animateRail = !snapRail && railAnimationReady && shouldAnimateWaveformRail(
@@ -765,7 +386,44 @@ export function Waveform({
       previousPosition,
       railPosition,
     );
-  const motionPosition = animateRail && playing && !interactiveScrub && railPosition !== null
+  const compositorLoopStart = hasActiveLoop
+    ? Math.min(total, Math.max(0, loopStart as number))
+    : null;
+  const compositorLoopEnd = compositorLoopStart !== null
+    ? Math.min(total, compositorLoopStart + (loopLength as number))
+    : null;
+  const compositorLoopLength = compositorLoopStart !== null
+    && compositorLoopEnd !== null
+    && compositorLoopEnd > compositorLoopStart
+      ? compositorLoopEnd - compositorLoopStart
+      : null;
+  // A single compositor animation walks between sparse native clock samples. Retargeting a short
+  // CSS transition every 100 ms created a sample-and-hold cadence even when no frame was dropped.
+  // Once the callback cursor reaches an active loop, the same native timeline repeats an exact
+  // loop-in → loop-out keyframe instead of falling back to ten-hertz wrap snapshots.
+  const loopReadyForCompositor = compositorLoopStart !== null
+    && compositorLoopEnd !== null
+    && compositorLoopLength !== null
+    // One stable bitmap must contain the whole loop plus the viewport at both endpoints. Oversized
+    // imported loop windows retain the exact snapshot fallback rather than exposing blank canvas.
+    && 2 * compositorLoopLength + (viewportSeconds ?? 0)
+      <= PERFORMANCE_WAVEFORM_SECONDS_PER_SCREEN * PERFORMANCE_WAVEFORM_BAKE_SCREENS
+    && railPosition !== null
+    && railPosition >= compositorLoopStart
+    && railPosition < compositorLoopEnd;
+  const platterLive = interactiveScrub || Math.abs(Number(playbackRate) || 0) > 0.02;
+  const continuousRailMotion = viewport.active
+    && typeof Element !== "undefined"
+    && typeof Element.prototype.animate === "function"
+    && railAnimationReady
+    && (Boolean(playing) || platterLive)
+    && !snapRail
+    && railPosition !== null;
+  const motionPosition = !continuousRailMotion
+    && animateRail
+    && playing
+    && !interactiveScrub
+    && railPosition !== null
     ? projectedWaveformPosition(railPosition, total, playbackRate)
     : railPosition;
   const overviewMotionPosition = animateOverview && railPosition !== null
@@ -812,7 +470,8 @@ export function Waveform({
 
   useLayoutEffect(() => {
     if (
-      !bakeRangeChanged
+      continuousRailMotion
+      || !bakeRangeChanged
       || !animateRail
       || !bake
       || motionPosition === null
@@ -837,9 +496,235 @@ export function Waveform({
     bake?.endSec,
     bake?.startSec,
     bakeRangeChanged,
+    continuousRailMotion,
     motionPosition,
     railPosition,
   ]);
+
+  useLayoutEffect(() => {
+    const bakeElement = bakeRef.current;
+    const railElement = railRef.current;
+    const now = performance.now();
+    const clock = updateWaveformMotionClock(
+      motionClockRef.current,
+      {
+        trackId,
+        position: railPosition ?? 0,
+        duration: total,
+        rate: playbackRate,
+        playing: continuousRailMotion,
+        discrete: !continuousRailMotion,
+        motionRevision,
+        loopStart: continuousRailMotion && loopReadyForCompositor ? compositorLoopStart : null,
+        loopLength: continuousRailMotion && loopReadyForCompositor ? compositorLoopLength : null,
+      },
+      now,
+    );
+    motionClockRef.current = clock;
+
+    const cancelAnimations = () => {
+      motionAnimationsRef.current?.bake?.cancel();
+      motionAnimationsRef.current?.rail?.cancel();
+      motionAnimationsRef.current = null;
+    };
+    if (!continuousRailMotion || !bake || !bakeElement || !railElement || total <= 0) {
+      // Cancelling reveals the transform React committed for the fallback path (projected CSS
+      // transition, exact scratch/seek, or paused position). Do not imperatively replace it here.
+      cancelAnimations();
+      return;
+    }
+
+    const visualPosition = waveformMotionClockPosition(clock, now);
+    const visualRate = Math.abs(clock.rate) < 0.001
+      ? (clock.rate < 0 ? -0.001 : 0.001)
+      : clock.rate;
+    const bakeSpan = bake.endSec - bake.startSec;
+    const railLeadInSec = Math.max(
+      PERFORMANCE_WAVEFORM_SECONDS_PER_SCREEN * PERFORMANCE_WAVEFORM_BAKE_SCREENS,
+      Math.max(0, -bake.startSec),
+    );
+    const bakeAnimationPosition = visualPosition - bake.startSec;
+    const railAnimationPosition = visualPosition + railLeadInSec;
+    const owner = motionAnimationsRef.current;
+    const sameAnimation = owner
+      && owner.trackId === trackId
+      && Math.abs(owner.bakeStartSec - bake.startSec) < 1e-6
+      && Math.abs(owner.bakeEndSec - bake.endSec) < 1e-6
+      // Metadata and decoded waveforms can publish slightly different durations. The full rail's
+      // animation duration is source time, so retaining an old effect here changes px/second.
+      && Math.abs(owner.totalSec - total) < 1e-6
+      && Math.abs(owner.railLeadInSec - railLeadInSec) < 1e-6
+      && owner.loopStartSec === clock.loopStart
+      && owner.loopLengthSec === clock.loopLength;
+
+    /**
+     * Each Web Animation uses source milliseconds as its local timeline. TEMPO is therefore a
+     * native playbackRate update, while SYNC writes currentTime once. The outer scaleX layer is
+     * independent, so zoom and transport translation continue in the same compositor frame.
+     */
+    const syncNativeAnimation = (
+      animation: Animation,
+      sourceTimeMs: number,
+      snap: boolean,
+      timelineTime: number | null,
+    ) => {
+      if (snap) {
+        animation.pause();
+        animation.playbackRate = visualRate;
+        animation.currentTime = Math.max(0, sourceTimeMs);
+        animation.play();
+        if (timelineTime !== null) {
+          animation.startTime = timelineTime - Math.max(0, sourceTimeMs) / visualRate;
+        }
+      } else if (Math.abs(animation.playbackRate - visualRate) > 1e-6) {
+        // updatePlaybackRate preserves the current compositor phase instead of restarting the
+        // animation. This is the key difference from rebuilding a duration on every BPM tick.
+        animation.updatePlaybackRate(visualRate);
+      }
+    };
+
+    const rawTimelineTime = document.timeline?.currentTime;
+    const timelineTime = typeof rawTimelineTime === "number" ? rawTimelineTime : null;
+    if (sameAnimation) {
+      syncNativeAnimation(owner.bake, bakeAnimationPosition * 1_000, clock.snapped, timelineTime);
+      syncNativeAnimation(owner.rail, railAnimationPosition * 1_000, clock.snapped, timelineTime);
+      return;
+    }
+
+    cancelAnimations();
+    if (!(bakeSpan > 0)) return;
+    const bakeAnimationStart = bake.startSec;
+    const bakeAnimationEnd = bake.endSec;
+    const railAnimationStart = -railLeadInSec;
+    const railAnimationEnd = total;
+    const bakeFrom = waveformBakeTranslatePercent(bake, bakeAnimationStart);
+    const bakeTo = waveformBakeTranslatePercent(bake, bakeAnimationEnd);
+    const railFrom = (railAnimationStart / total) * 100;
+    const railTo = (railAnimationEnd / total) * 100;
+    const baseTiming = {
+      easing: "linear" as const,
+      fill: "both" as const,
+      iterations: 1,
+    };
+    const bakeAnimation = bakeElement.animate(
+      [
+        { transform: `translate3d(${-bakeFrom}%, 0, 0)` },
+        { transform: `translate3d(${-bakeTo}%, 0, 0)` },
+      ],
+      { ...baseTiming, duration: bakeSpan * 1_000 },
+    );
+    const railAnimation = railElement.animate(
+      [
+        { transform: `translate3d(${-railFrom}%, 0, 0)` },
+        { transform: `translate3d(${-railTo}%, 0, 0)` },
+      ],
+      {
+        ...baseTiming,
+        duration: (total + railLeadInSec) * 1_000,
+      },
+    );
+    syncNativeAnimation(bakeAnimation, bakeAnimationPosition * 1_000, true, timelineTime);
+    syncNativeAnimation(railAnimation, railAnimationPosition * 1_000, true, timelineTime);
+    motionAnimationsRef.current = {
+      bake: bakeAnimation,
+      rail: railAnimation,
+      trackId,
+      bakeStartSec: bake.startSec,
+      bakeEndSec: bake.endSec,
+      totalSec: total,
+      railLeadInSec,
+      loopStartSec: clock.loopStart,
+      loopLengthSec: clock.loopLength,
+    };
+  }, [
+    bake?.endSec,
+    bake?.startSec,
+    compositorLoopLength,
+    compositorLoopStart,
+    continuousRailMotion,
+    motionRevision,
+    playbackRate,
+    railPosition,
+    total,
+    trackId,
+    viewport.active,
+  ]);
+
+  useEffect(() => {
+    if (nativeDeck === undefined || !viewport.active) return;
+    return subscribeLivePlaybackClock(() => {
+      const live = getLiveDeckClock(nativeDeck);
+      const owner = motionAnimationsRef.current;
+      if (!live || !owner || live.trackId !== trackId || owner.trackId !== trackId) return;
+      const animations = [owner.bake, owner.rail] as const;
+      const discontinuity = liveDiscontinuityRef.current !== live.discontinuityRevision;
+      const rate = liveWaveformPlaybackRate(live.targetRate, live.audibleRate, live.scratchHeld);
+      const visualRate = Math.abs(rate) < 0.001 ? (rate < 0 ? -0.001 : 0.001) : rate;
+      const platterAuthority = live.scratchHeld || livePlatterActiveRef.current;
+      livePlatterActiveRef.current = live.scratchHeld;
+      if (platterAuthority) {
+        // During a grab/coast the callback position is authoritative. Rate-only animation drifts
+        // when MIDI packets are coalesced and is the reason the rail used to freeze, then jump on
+        // the next touch. Land PCM bake and beat-grid rail in the same JS task, then let both run
+        // at the same measured velocity until the next lightweight clock sample.
+        const sourcePosition = projectedLiveWaveformPosition(
+          live.currentTime,
+          live.clientPresentationTimeMs,
+          performance.now(),
+          rate,
+          owner.totalSec,
+        );
+        const bakeTime = liveWaveformAnimationTimeMs(
+          sourcePosition - owner.bakeStartSec,
+          owner.bakeEndSec - owner.bakeStartSec,
+        );
+        const railTime = liveWaveformAnimationTimeMs(
+          sourcePosition + owner.railLeadInSec,
+          owner.totalSec + owner.railLeadInSec,
+        );
+        if (bakeTime !== null && railTime !== null) {
+          owner.bake.playbackRate = visualRate;
+          owner.rail.playbackRate = visualRate;
+          owner.bake.currentTime = bakeTime;
+          owner.rail.currentTime = railTime;
+        }
+        liveDiscontinuityRef.current = live.discontinuityRevision;
+        animations.forEach((animation) => {
+          if (Math.abs(rate) <= 0.02) animation.pause();
+          else if (animation.playState !== "running") animation.play();
+        });
+        return;
+      }
+      if (shouldPauseLiveWaveformClock(live.playing, live.scratchHeld, true, discontinuity, rate)) {
+        liveDiscontinuityRef.current = live.discontinuityRevision;
+        animations.forEach((animation) => animation.pause());
+        return;
+      }
+      liveDiscontinuityRef.current = live.discontinuityRevision;
+      // Never seek currentTime here. Bake (PCM) and rail (beat grid) are two effects; a second
+      // pause/play landing after layout is what made them rock against each other on Play/Seek.
+      // But a parked platter / pause edge does call pause() above — when audible rate returns,
+      // updatePlaybackRate alone leaves playState=paused, so audio scratches while the rail freezes.
+      animations.forEach((animation) => {
+        if (animation.playState === "paused") {
+          animation.playbackRate = visualRate;
+          animation.play();
+          return;
+        }
+        if (Math.abs(animation.playbackRate - visualRate) > 1e-6) {
+          animation.updatePlaybackRate(visualRate);
+        }
+      });
+    });
+  }, [nativeDeck, trackId, viewport.active]);
+
+  // Overview and DJ detail share frequency hues but deliberately keep different aggregation and
+  // contrast policies: macro preview rejects sub-pixel outliers; the beat rail preserves peaks.
+  const canvasProfile = displayReleaseOverview
+    ? "release-overview"
+    : viewport.active
+      ? "performance-detail"
+      : "current";
 
   // Viewport Decks paint a 3-screen sliding window; overview still uses the host width.
   useLayoutEffect(() => {
@@ -853,34 +738,43 @@ export function Waveform({
         ? host.clientWidth * bake.widthScale
         : rail.clientWidth;
       if (width <= 0 || renderedHeight <= 0) return;
-      draw(
+      drawWaveformCanvas(
         canvas,
         displayWave,
         width,
         renderedHeight,
-        activeStreamSnapshot?.known ?? displayWave.known,
-        verticalInsetRatio,
-        silenceThreshold,
-        placeholder,
+        displayWave.known,
         bake?.startSec ?? null,
         bake?.endSec ?? null,
-        palette,
-        releaseOverview,
+        canvasProfile,
       );
     };
     render();
     const observer = new ResizeObserver(render);
     observer.observe(host);
-    return () => observer.disconnect();
+    window.addEventListener("resize", render);
+    // Moving a Tauri window between Retina and non-Retina displays can change DPR without changing
+    // the host's CSS box, so ResizeObserver alone leaves a stale backing-store resolution.
+    let dprQuery: MediaQueryList | null = null;
+    const watchDpr = () => {
+      dprQuery?.removeEventListener("change", handleDprChange);
+      dprQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      dprQuery.addEventListener("change", handleDprChange);
+    };
+    const handleDprChange = () => {
+      render();
+      watchDpr();
+    };
+    watchDpr();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", render);
+      dprQuery?.removeEventListener("change", handleDprChange);
+    };
   }, [
     displayWave,
-    activeStreamSnapshot,
     height,
-    verticalInsetRatio,
-    silenceThreshold,
-    placeholder,
-    palette,
-    releaseOverview,
+    canvasProfile,
     viewport.active,
     bake?.startSec,
     bake?.endSec,
@@ -889,14 +783,41 @@ export function Waveform({
 
   const cueRatio = markerRatio(cueMs, total);
   const endRatio = markerRatio(endMs, total);
-  const ready = displayWave !== null && displayWave.amp.length > 0;
+  const ready = displayWave !== null
+    && displayWave.amp.length > 0
+    && (displayWave.known === undefined || displayWave.known.some(Boolean));
+  const renderedAmplitudeScale = Number.isFinite(amplitudeScale)
+    ? Math.min(1, Math.max(0, amplitudeScale))
+    : 1;
+  const canvasAmplitudeStyle = renderedAmplitudeScale === 1
+    ? undefined
+    : {
+        transform: `scaleY(${renderedAmplitudeScale})`,
+        transformOrigin: "50% 50%",
+        willChange: "transform",
+      };
+  const beatRangeMargin = viewport.active ? (viewportSeconds ?? 0) / 2 + 1 : 0;
+  const beatRangeStart = viewport.active && bake
+    ? bake.startSec
+    : viewport.active && loopReadyForCompositor && compositorLoopStart !== null
+      ? compositorLoopStart - beatRangeMargin
+      : viewport.active
+        ? viewport.viewStartSec - 1
+        : 0;
+  const beatRangeEnd = viewport.active && bake
+    ? bake.endSec
+    : viewport.active && loopReadyForCompositor && compositorLoopEnd !== null
+      ? compositorLoopEnd + beatRangeMargin
+      : viewport.active
+        ? viewport.viewEndSec + 1
+        : total;
   const beatMarkers = showBeatGrid && track
     ? beatGridMarkers(
         total,
         track.bpm,
         track.first_beat,
-        viewport.active ? viewport.viewStartSec - 1 : 0,
-        viewport.active ? viewport.viewEndSec + 1 : total,
+        beatRangeStart,
+        beatRangeEnd,
         track.bpm_confidence,
       )
     : [];
@@ -925,10 +846,9 @@ export function Waveform({
       style={{
         position: "relative",
         height,
-        background: progressiveStream ? "transparent" : "var(--kd-panel-inset)",
+        background: "var(--kd-panel-inset)",
         cursor: seekable && total > 0 ? "pointer" : "default",
         overflow: "hidden",
-        opacity,
         pointerEvents: seekable ? undefined : "none",
       }}
       // 只在冒泡阶段拦住可跳转波形，让滑轨先处理点击；捕获阶段拦截会让
@@ -965,7 +885,7 @@ export function Waveform({
             transform: `scaleX(${viewport.tempoScaleX})`,
             transformOrigin: "50% 50%",
             pointerEvents: "none",
-            zIndex: 1,
+            zIndex: 2,
           }}
         >
           <div
@@ -978,7 +898,7 @@ export function Waveform({
               left: "50%",
               width: `${bake.widthScale * 100}%`,
               transform: `translate3d(-${bake.translatePercent}%, 0, 0)`,
-              transition: animateRail && !bakeRangeChanged
+              transition: !continuousRailMotion && animateRail && !bakeRangeChanged
                 ? `transform ${interactiveScrub ? PERFORMANCE_WAVEFORM_SCRATCH_SMOOTHING_MS : PERFORMANCE_WAVEFORM_SMOOTHING_MS}ms linear`
                 : "none",
               willChange: "transform",
@@ -991,10 +911,19 @@ export function Waveform({
                 display: ready ? "block" : "none",
                 width: "100%",
                 height: "100%",
+                ...canvasAmplitudeStyle,
               }}
               role="img"
               aria-label="频谱波形"
             />
+            {showBeatGrid ? (
+              <WaveformBeatGrid
+                markers={beatMarkers}
+                rangeStartSec={bake.startSec}
+                rangeEndSec={bake.endSec}
+                tempoScaleX={viewport.tempoScaleX}
+              />
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -1022,29 +951,14 @@ export function Waveform({
           transform: viewport.active
             ? `translate3d(-${motionViewport.railTranslatePercent}%, 0, 0)`
             : "none",
-          // Deck snapshots arrive about every 100 ms. A small overlap absorbs scheduler jitter;
-          // retargeting the compositor transition stays smooth without queuing delayed frames.
-          transition: animateRail
+          // Loop/scratch and old WebView fallback: overlap sparse snapshots without queueing them.
+          // Ordinary playback is owned by the continuous compositor animation above.
+          transition: !continuousRailMotion && animateRail
             ? `transform ${interactiveScrub ? PERFORMANCE_WAVEFORM_SCRATCH_SMOOTHING_MS : PERFORMANCE_WAVEFORM_SMOOTHING_MS}ms linear`
             : "none",
           willChange: viewport.active ? "transform" : undefined,
         }}
       >
-      {progressiveStream && (
-        <span className="kd-wave-stream-bed" aria-hidden="true">
-          {(activeStreamSnapshot?.bufferedRanges ?? []).map((range, index) => {
-            if (total <= 0) return null;
-            const left = clampRatio(range.start / total) * 100;
-            const right = clampRatio(range.end / total) * 100;
-            return (
-              <i
-                key={`${index}:${range.start}:${range.end}`}
-                style={{ left: `${left}%`, width: `${Math.max(0, right - left)}%` }}
-              />
-            );
-          })}
-        </span>
-      )}
       {!viewport.active ? (
       <canvas
         ref={canvasRef}
@@ -1054,30 +968,15 @@ export function Waveform({
           zIndex: 1,
           width: "100%",
           height: "100%",
+          ...canvasAmplitudeStyle,
         }}
         role="img"
         aria-label="频谱波形"
       />
       ) : null}
-      {analysisFrontierRatio !== null ? (
-        <span
-          className="kd-wave-analysis-frontier"
-          aria-hidden="true"
-          style={{ left: `${analysisFrontierRatio * 100}%` }}
-        />
-      ) : null}
-      {analysisBackFrontierRatio !== null
-      && (analysisFrontierRatio === null || analysisBackFrontierRatio < analysisFrontierRatio) ? (
-        <span
-          className="kd-wave-analysis-frontier"
-          data-direction="back"
-          aria-hidden="true"
-          style={{ left: `${analysisBackFrontierRatio * 100}%` }}
-        />
-      ) : null}
-      {/* 在线流即使还没有第一帧 analyser 数据，也始终显示上面的渐变缓存轨；
-          不能让通用的灰色 fallback 在首帧或媒体等待期间盖住它。 */}
-      {!ready && !progressiveStream && (
+      {/* Acquisition kind does not change the DJ surface. A detail viewport stays empty until it
+          has real columns, while every compact overview uses the same seekable fallback. */}
+      {!ready && !viewport.active && (
         <div
           className="kd-wave-fallback"
           aria-hidden="true"
@@ -1105,22 +1004,13 @@ export function Waveform({
         loopLength={loopLength}
       />
 
-      {beatMarkers.length > 0 ? (
-        <span className="kd-wave-beat-grid" aria-hidden="true">
-          {beatMarkers.map((marker) => (
-            <i
-              key={`${marker.positionSec}:${marker.beat}`}
-              data-bar={marker.beat === 1 ? "true" : undefined}
-              style={{
-                left: `${(marker.positionSec / total) * 100}%`,
-                transform: viewport.tempoScaleX !== 1 ? `scaleX(${1 / viewport.tempoScaleX})` : undefined,
-                transformOrigin: "0 50%",
-              }}
-            >
-              {marker.beat === 1 ? marker.bar : null}
-            </i>
-          ))}
-        </span>
+      {beatMarkers.length > 0 && !viewport.active ? (
+        <WaveformBeatGrid
+          markers={beatMarkers}
+          rangeStartSec={0}
+          rangeEndSec={total}
+          tempoScaleX={1}
+        />
       ) : null}
 
       {/* 已播部分压暗：不换色，只盖一层半透明遮罩，颜色信息还在。
@@ -1311,8 +1201,4 @@ export function Waveform({
       )}
     </div>
   );
-}
-
-function clampRatio(value: number): number {
-  return Math.min(1, Math.max(0, Number.isFinite(value) ? value : 0));
 }

@@ -4,8 +4,7 @@
  */
 
 export type MidiKind = "note" | "cc";
-export type MidiValueMap = "unipolar" | "bipolar" | "relative";
-export type EqStemLayer = "eq" | "stems";
+export type MidiValueMap = "unipolar" | "bipolar" | "relative" | "relativeCentered";
 export type MidiDeck = 0 | 1;
 
 export type MidiActionType =
@@ -24,8 +23,12 @@ export type MidiActionType =
   | "tempo"
   | "loopToggle"
   | "loopSize"
-  | "toggleEqStem"
-  | "stemGain"
+  | "pflToggle"
+  | "fxMix"
+  | "fxParameter"
+  | "fxPrevious"
+  | "fxNext"
+  | "fxEnabled"
   | "shiftHold"
   /** 原始缓动盘转动；运行时根据电容触摸状态决定刮擦或 pitch bend。 */
   | "jog"
@@ -40,10 +43,9 @@ export type MidiActionType =
   | "browsePress"
   | "loadSelected";
 
-export type MidiFeedbackKey = "playing" | "pausedLoaded" | "syncing" | "looping" | "eqStem" | "crossfaderEnabled";
+export type MidiFeedbackKey = "playing" | "pausedLoaded" | "syncing" | "looping" | "pfl" | "crossfaderEnabled";
 
 export interface MidiWhen {
-  eqStem?: EqStemLayer;
   /** 软件 Shift 层。Buddy 的 Shift 对 jog 会换 CC，对 EQ 旋钮有时仍发原 CC。 */
   shift?: boolean;
 }
@@ -51,7 +53,6 @@ export interface MidiWhen {
 export interface MidiActionSpec {
   type: MidiActionType;
   deck?: MidiDeck;
-  stems?: Array<"drums" | "bass" | "other" | "vocals">;
   value?: MidiValueMap;
   when?: MidiWhen;
 }
@@ -69,7 +70,8 @@ export interface MidiBinding {
   max?: number;
   /**
    * 反转（djay 高级控制选项同名）。相对同类电位器反相。
-   * TEMPO 上端是 −、下端是 +；Browser 滚动默认开启，顺时针往下。
+   * 默认极性已经是 Pioneer 正向：TEMPO 上端 − / 下端 +，Browser 顺时针往下。
+   * 只有显式 invert: true 才反相。
    */
   invert?: boolean;
   /** 按钮默认只在按下（velocity/value > 0）触发；旋钮为 all。 */
@@ -98,6 +100,8 @@ export interface MidiMapping {
 export interface MidiMessage {
   port: string;
   bytes: number[];
+  /** Native MIDI callback timestamp; differences remain valid across the Tauri event bridge. */
+  timestampMicros?: number;
 }
 
 export interface ParsedMidi {
@@ -109,13 +113,15 @@ export interface ParsedMidi {
 }
 
 export interface MidiLayerState {
-  eqStem: [EqStemLayer, EqStemLayer];
   shift?: boolean;
 }
 
 export type MidiResolvedAction =
-  | { type: "playToggle" | "cue" | "sync" | "loopToggle" | "toggleEqStem"; deck: MidiDeck }
+  | { type: "playToggle" | "cue" | "sync" | "loopToggle" | "pflToggle"; deck: MidiDeck }
   | { type: "toggleCrossfader" }
+  | { type: "fxMix" | "fxParameter"; value: number }
+  | { type: "fxPrevious" | "fxNext"; deck?: MidiDeck }
+  | { type: "fxEnabled"; deck: MidiDeck; held: boolean }
   | { type: "shiftHold"; held: boolean }
   | { type: "jogTouch" | "scratchTouch"; deck: MidiDeck; held: boolean }
   | { type: "browsePress" }
@@ -126,15 +132,14 @@ export type MidiResolvedAction =
     type: "eqHigh" | "eqMid" | "eqLow" | "filter" | "gain" | "volume" | "crossfader" | "master" | "tempo";
     deck?: MidiDeck;
     value: number;
-  }
-  | { type: "stemGain"; deck: MidiDeck; stems: Array<"drums" | "bass" | "other" | "vocals">; value: number };
+  };
 
 export interface MidiFeedback {
   playing: [boolean, boolean];
   pausedLoaded: [boolean, boolean];
   syncing: [boolean, boolean];
   looping: [boolean, boolean];
-  eqStem: [boolean, boolean];
+  pfl: [boolean, boolean];
   crossfaderEnabled: boolean;
 }
 
@@ -161,8 +166,12 @@ const ACTION_TYPES = new Set<string>([
   "tempo",
   "loopToggle",
   "loopSize",
-  "toggleEqStem",
-  "stemGain",
+  "pflToggle",
+  "fxMix",
+  "fxParameter",
+  "fxPrevious",
+  "fxNext",
+  "fxEnabled",
   "shiftHold",
   "jog",
   "jogTouch",
@@ -194,7 +203,7 @@ export function parseMidiBytes(bytes: readonly number[]): ParsedMidi | null {
   return null;
 }
 
-/** Reloop 一类控制器的按键灯和按键共用 Note。软件回灯若被当成按键，STEM 层会立刻弹回 EQ。 */
+/** Reloop 一类控制器的按键灯和按键共用 Note。软件回灯不能被误当成新的 PFL 按键。 */
 export const MIDI_ECHO_WINDOW_MS = 80;
 
 export class MidiEchoGuard {
@@ -239,12 +248,13 @@ export function mappingMatchesPort(mapping: MidiMapping, port: string): boolean 
 export function decodeMidiValue(value: number, map: MidiValueMap | undefined): number {
   const midi = Math.min(127, Math.max(0, Math.round(value)));
   if (map === "relative") {
-    // Two's complement (01h / 7Fh) and 64-centered (41h / 3Fh) both appear on Reloop platters.
-    // Treat 64 as stopped; values near 64 as 64-centered; the 01h/7Fh extremes as two's complement.
-    if (midi === 0 || midi === 64) return 0;
-    if (Math.abs(midi - 64) <= 32) return midi - 64;
+    // MIDI relative two's complement used by the Buddy: 01h..3Fh are +1..+63 and
+    // 7Fh..40h are -1..-64. The official Mixxx mapping decodes this exact two's-
+    // complement form. Guessing that 41h/3Fh were centered values reversed fast
+    // counter-clockwise packets and caused the platter to jump forward.
     return midi < 64 ? midi : midi - 128;
   }
+  if (map === "relativeCentered") return midi - 64;
   if (map === "bipolar") {
     if (midi <= 64) return (midi - 64) / 64;
     return (midi - 64) / 63;
@@ -252,18 +262,21 @@ export function decodeMidiValue(value: number, map: MidiValueMap | undefined): n
   return midi / 127;
 }
 
-/** 把 0..1 的 MIDI 行程映射到 TEMPO 量程；中位附近吸到原速。 */
+/**
+ * 把 0..1 的 MIDI/屏幕行程映射到 TEMPO 量程。
+ * Pioneer 极性：1 = 槽顶 / −（减速），0 = 槽底 / +（加速）；中位附近吸到原速。
+ */
 export function scaleUnitToRange(unit: number, min: number, max: number): number {
   const t = Math.min(1, Math.max(0, Number.isFinite(unit) ? unit : 0.5));
   if (min < 1 && max > 1 && Math.abs(t - 0.5) <= 0.02) return 1;
-  return min + t * (max - min);
+  return max - t * (max - min);
 }
 
-/** 软件速率在当前量程里的推子位置；超出量程钉在 0 或 1。 */
+/** 软件速率在当前量程里的推子位置（1 = 槽顶 / −）。超出量程钉在 0 或 1。 */
 export function scaleRangeToUnit(rate: number, min: number, max: number): number {
   const span = max - min;
   if (!(span > 0) || !Number.isFinite(rate)) return 0.5;
-  return Math.min(1, Math.max(0, (rate - min) / span));
+  return Math.min(1, Math.max(0, (max - rate) / span));
 }
 
 /**
@@ -290,13 +303,12 @@ export class MidiFourteenBit {
 }
 
 function invertUnit(unit: number, map: MidiValueMap | undefined): number {
-  if (map === "bipolar" || map === "relative") return -unit;
+  if (map === "bipolar" || map === "relative" || map === "relativeCentered") return -unit;
   return 1 - unit;
 }
 
-/** Browser 滚动默认反转；其它动作只有显式 invert: true 才反相。 */
-export function midiBindingInverts(binding: MidiBinding, actionType: MidiActionType): boolean {
-  if (actionType === "browseStep") return binding.invert !== false;
+/** 只有显式 invert: true 才反相。Browser / TEMPO 的 Pioneer 正向不靠这个开关。 */
+export function midiBindingInverts(binding: MidiBinding, _actionType?: MidiActionType): boolean {
   return Boolean(binding.invert);
 }
 
@@ -304,11 +316,7 @@ function applyBindingInvert(
   unit: number,
   map: MidiValueMap | undefined,
   invert: boolean,
-  actionType: MidiActionType,
 ): number {
-  // djay 的 library rotary 未反转时 01h 往上；KDJ 列表 01h 默认往下。
-  // 所以 Browser 的「反转」开启时保持 01h=+1，关掉才取反。
-  if (actionType === "browseStep") return invert ? unit : invertUnit(unit, map);
   return invert ? invertUnit(unit, map) : unit;
 }
 
@@ -344,7 +352,7 @@ function decodeBindingValue(
   } else {
     unit = decodeMidiValue(parsed.value, map);
   }
-  return applyBindingInvert(unit, map, midiBindingInverts(binding, spec.type), spec.type);
+  return applyBindingInvert(unit, map, midiBindingInverts(binding, spec.type));
 }
 
 function actionValueMap(action: MidiActionSpec, binding: MidiBinding): MidiValueMap | undefined {
@@ -366,11 +374,16 @@ function actionValueMap(action: MidiActionSpec, binding: MidiBinding): MidiValue
     || action.type === "filter"
     || action.type === "gain"
     || action.type === "crossfader"
-    || action.type === "stemGain"
   ) {
     return "bipolar";
   }
-  if (action.type === "volume" || action.type === "master" || action.type === "tempo") {
+  if (
+    action.type === "volume"
+    || action.type === "master"
+    || action.type === "tempo"
+    || action.type === "fxMix"
+    || action.type === "fxParameter"
+  ) {
     return "unipolar";
   }
   return undefined;
@@ -381,11 +394,7 @@ function edgeFor(binding: MidiBinding): "press" | "release" | "all" {
   return binding.kind === "note" ? "press" : "all";
 }
 
-function layerAllows(action: MidiActionSpec, layers: MidiLayerState, deck: MidiDeck | undefined): boolean {
-  if (action.when?.eqStem) {
-    const side = deck ?? 0;
-    if (layers.eqStem[side] !== action.when.eqStem) return false;
-  }
+function layerAllows(action: MidiActionSpec, layers: MidiLayerState): boolean {
   if (action.when?.shift != null && Boolean(layers.shift) !== action.when.shift) return false;
   return true;
 }
@@ -400,10 +409,18 @@ function resolveAction(
     case "cue":
     case "sync":
     case "loopToggle":
-    case "toggleEqStem":
+    case "pflToggle":
       return deck === 0 || deck === 1 ? { type: spec.type, deck } : null;
     case "toggleCrossfader":
       return { type: "toggleCrossfader" };
+    case "fxMix":
+    case "fxParameter":
+      return { type: spec.type, value: mapped };
+    case "fxPrevious":
+    case "fxNext":
+      return { type: spec.type, ...(deck === 0 || deck === 1 ? { deck } : {}) };
+    case "fxEnabled":
+      return deck === 0 || deck === 1 ? { type: spec.type, deck, held: mapped > 0 } : null;
     case "shiftHold":
       return { type: "shiftHold", held: mapped > 0 };
     case "jogTouch":
@@ -420,10 +437,6 @@ function resolveAction(
       return deck === 0 || deck === 1 ? { type: spec.type, deck, delta: mapped } : null;
     case "browseStep":
       return { type: "browseStep", delta: mapped };
-    case "stemGain":
-      return (deck === 0 || deck === 1) && spec.stems?.length
-        ? { type: "stemGain", deck, stems: spec.stems, value: mapped }
-        : null;
     case "crossfader":
     case "master":
       return { type: spec.type, value: mapped };
@@ -454,17 +467,13 @@ export function resolveMidiActions(
     if (edge === "release" && parsed.pressed) continue;
     for (const spec of binding.actions) {
       if (!ACTION_TYPES.has(spec.type)) continue;
-      if (!layerAllows(spec, layers, spec.deck)) continue;
+      if (!layerAllows(spec, layers)) continue;
       const mapped = decodeBindingValue(binding, parsed, spec, fourteenBit);
       const action = resolveAction(spec, mapped);
       if (action) resolved.push(action);
     }
   }
   return resolved;
-}
-
-export function toggleEqStemLayer(current: EqStemLayer): EqStemLayer {
-  return current === "eq" ? "stems" : "eq";
 }
 
 export function midiFeedbackValue(feedback: MidiFeedback, from: MidiFeedbackKey, deck: MidiDeck | undefined): boolean {

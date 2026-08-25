@@ -15,9 +15,9 @@ use futures_util::StreamExt;
 use kdj_core::models::*;
 use kdj_core::Settings;
 use kdj_library::service::{DeletedTrack, FileDisposal, TrackQuery};
-use kdj_providers::MusicProvider;
+use kdj_providers::{MusicProvider, ProtectedPreviewIdentity};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::downloads::{
     enqueue_audio, enqueue_video, enqueue_vj_export, retry_audio, retry_failed_audio,
@@ -35,6 +35,8 @@ pub struct Ctx {
 pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/control/show", post(control_show))
+        .route("/api/control/quit", post(control_quit))
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/accounts", get(list_accounts))
         .route("/api/accounts/{platform}/login/qr", post(login_qr))
@@ -56,18 +58,46 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
             post(soundcloud_oauth_callback),
         )
         .route(
-            "/api/accounts/ytm/login/device",
-            get(ytm_device_start),
+            "/api/accounts/soundcloud/login/browsers",
+            get(browser_catalog),
         )
         .route(
-            "/api/accounts/ytm/login/device/{device_code}",
-            get(ytm_device_status),
+            "/api/accounts/soundcloud/login/browser",
+            post(soundcloud_browser_login),
+        )
+        .route("/api/accounts/ytm/login/browsers", get(browser_catalog))
+        .route("/api/accounts/ytm/login/browser", post(ytm_browser_login))
+        .route("/api/accounts/ytm/login/headers", post(ytm_headers_login))
+        .route("/api/accounts/youtube/login/browsers", get(browser_catalog))
+        .route(
+            "/api/accounts/youtube/login/browser",
+            post(youtube_browser_login),
+        )
+        .route(
+            "/api/accounts/youtube/login/headers",
+            post(youtube_headers_login),
         )
         .route("/api/search", post(search))
         .route("/api/search/cover", post(search_cover))
         .route("/api/search/capabilities", get(search_capabilities))
         .route("/api/search/collection", post(resolve_collection))
         .route("/api/lyrics", post(lyrics))
+        .route(
+            "/api/song/preview/ytm/identity",
+            get(ytm_protected_preview_identity),
+        )
+        .route(
+            "/api/song/preview/ytm/botguard",
+            post(ytm_protected_preview_botguard),
+        )
+        .route(
+            "/api/song/preview/ytm/player",
+            post(ytm_protected_preview_player),
+        )
+        .route(
+            "/api/song/preview/ytm/player-script",
+            post(ytm_protected_preview_player_script),
+        )
         .route("/api/song/preview", post(song_preview))
         .route(
             "/api/song/preview/{token}/waveform",
@@ -205,6 +235,22 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Health> {
         // 前端据此隐藏安卓上做不了的桌面专属入口
         platform: std::env::consts::OS.to_string(),
     })
+}
+
+async fn control_show(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
+    state
+        .control
+        .send(crate::state::UiControl::Show)
+        .map_err(|_| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "窗口控制通道已关闭"))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn control_quit(State(state): State<Arc<AppState>>) -> ApiResult<Json<Value>> {
+    state
+        .control
+        .send(crate::state::UiControl::Quit)
+        .map_err(|_| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "窗口控制通道已关闭"))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// Settings 加一个**只读**的派生字段：前端「保存到」菜单里的「系统下载」
@@ -376,17 +422,110 @@ async fn soundcloud_oauth_callback(
     Ok(Json(account))
 }
 
-/// 发起一次 YouTube Music 设备码登录：返回 user_code / 激活地址 / 有效期。
-async fn ytm_device_start(State(state): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(state.youtubemusic.begin_device_login().await?))
+#[derive(Debug, Deserialize)]
+struct BrowserLoginBody {
+    browser: String,
+    #[serde(default)]
+    profile: Option<String>,
 }
 
-/// 查一次设备码登录状态；成功时登录态已落盘，响应里带上新账号。
-async fn ytm_device_status(
+#[derive(Debug, Deserialize)]
+struct YoutubeHeadersLoginBody {
+    headers: String,
+}
+
+/// 只探测本机浏览器与 Profile；不会读取 Cookie 内容或触发系统钥匙串。
+async fn browser_catalog() -> ApiResult<Json<kdj_providers::browser::BrowserCatalog>> {
+    let catalog = tokio::task::spawn_blocking(kdj_providers::browser::catalog)
+        .await
+        .map_err(|error| ApiError::bad_request(format!("检测浏览器失败：{error}")))?;
+    Ok(Json(catalog))
+}
+
+/// 从桌面浏览器的指定 Profile 导入 SoundCloud 网页会话。
+async fn soundcloud_browser_login(
     State(state): State<Arc<AppState>>,
-    AxumPath(device_code): AxumPath<String>,
-) -> Json<serde_json::Value> {
-    Json(state.youtubemusic.poll_device_login(&device_code).await)
+    Json(payload): Json<BrowserLoginBody>,
+) -> ApiResult<Json<Account>> {
+    let browser = payload.browser.trim().to_string();
+    let profile = payload.profile.map(|profile| profile.trim().to_string());
+    if browser.is_empty() {
+        return Err(ApiError::bad_request("请选择浏览器"));
+    }
+    state.soundcloud.import_browser(browser, profile).await?;
+    let account = state.soundcloud.account().await;
+    state.hub.publish("account.changed", &account);
+    Ok(Json(account))
+}
+
+async fn import_youtube_browser(
+    auth: Arc<kdj_providers::youtubemusic::auth::YoutubeAuth>,
+    payload: BrowserLoginBody,
+) -> ApiResult<kdj_providers::youtubemusic::auth::BrowserSession> {
+    let browser = payload.browser.trim().to_string();
+    let profile = payload.profile.map(|profile| profile.trim().to_string());
+    if browser.is_empty() {
+        return Err(ApiError::bad_request("请选择浏览器"));
+    }
+    tokio::task::spawn_blocking(move || auth.import_browser(&browser, profile.as_deref()))
+        .await
+        .map_err(|error| ApiError::bad_request(format!("读取浏览器会话失败：{error}")))?
+        .map_err(Into::into)
+}
+
+/// YouTube Music 只更新自己的会话与账号事件。
+async fn ytm_browser_login(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<BrowserLoginBody>,
+) -> ApiResult<Json<Account>> {
+    let session = import_youtube_browser(state.ytm_auth.clone(), payload).await?;
+    state.ytm_auth.save(session)?;
+    let account = state.youtubemusic.account().await;
+    state.hub.publish("account.changed", &account);
+    Ok(Json(account))
+}
+
+/// 普通 YouTube 视频只更新自己的会话与账号事件。
+async fn youtube_browser_login(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<BrowserLoginBody>,
+) -> ApiResult<Json<Account>> {
+    let session = import_youtube_browser(state.youtube_auth.clone(), payload).await?;
+    state.youtube_auth.save(session)?;
+    let account = state.youtube.account().await;
+    state.hub.publish("account.changed", &account);
+    Ok(Json(account))
+}
+
+fn save_headers_session(
+    auth: &kdj_providers::youtubemusic::auth::YoutubeAuth,
+    headers: &str,
+) -> ApiResult<()> {
+    let session = kdj_providers::youtubemusic::auth::BrowserSession::from_headers(headers)?;
+    auth.save(session)?;
+    Ok(())
+}
+
+/// ytmusicapi 标准回退：只写 YouTube Music 请求头会话。
+async fn ytm_headers_login(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<YoutubeHeadersLoginBody>,
+) -> ApiResult<Json<Account>> {
+    save_headers_session(&state.ytm_auth, &payload.headers)?;
+    let account = state.youtubemusic.account().await;
+    state.hub.publish("account.changed", &account);
+    Ok(Json(account))
+}
+
+/// 普通 YouTube 请求头回退；不会覆盖 YouTube Music 会话。
+async fn youtube_headers_login(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<YoutubeHeadersLoginBody>,
+) -> ApiResult<Json<Account>> {
+    save_headers_session(&state.youtube_auth, &payload.headers)?;
+    let account = state.youtube.account().await;
+    state.hub.publish("account.changed", &account);
+    Ok(Json(account))
 }
 
 // ---------------------------------------------------------------- 搜索
@@ -576,6 +715,143 @@ struct SongPreviewBody {
     /// 播放器解码失败后的重试会主动绕过并清掉旧缓存，再从平台刷新。
     #[serde(default)]
     bypass_cache: bool,
+    /// Tauri WebView 在真实浏览器环境中生成的内容绑定 WebPO token。
+    #[serde(default)]
+    po_token: Option<String>,
+    /// 与 token 同一 WebView 会话执行官方播放器签名器后得到的 GVS URL。
+    #[serde(default)]
+    resolved_url: Option<String>,
+}
+
+#[derive(Serialize)]
+struct YtmProtectedIdentityResponse {
+    visitor_data: String,
+    data_sync_id: String,
+}
+
+async fn ytm_protected_preview_identity(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<YtmProtectedIdentityResponse>> {
+    let provider = state
+        .provider(Platform::Ytm)
+        .ok_or_else(|| ApiError::not_found("YouTube Music 平台不可用"))?;
+    let identity = provider
+        .protected_preview_identity()
+        .await?
+        .ok_or_else(|| ApiError::bad_request("YouTube Music 登录会话标识不可用"))?;
+    Ok(Json(YtmProtectedIdentityResponse {
+        visitor_data: identity.visitor_data,
+        data_sync_id: identity.data_sync_id,
+    }))
+}
+
+#[derive(Deserialize)]
+struct YtmProtectedBotguardBody {
+    operation: String,
+    payload: Value,
+}
+
+async fn ytm_protected_preview_botguard(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<YtmProtectedBotguardBody>,
+) -> ApiResult<Json<Value>> {
+    let size = serde_json::to_vec(&body.payload)
+        .map(|value| value.len())
+        .unwrap_or(usize::MAX);
+    if !matches!(body.operation.as_str(), "Create" | "GenerateIT") || size > 512 * 1024 {
+        return Err(ApiError::bad_request("YouTube BotGuard 参数无效"));
+    }
+    let provider = state
+        .provider(Platform::Ytm)
+        .ok_or_else(|| ApiError::not_found("YouTube Music 平台不可用"))?;
+    let value = provider
+        .protected_preview_botguard(&body.operation, &body.payload)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("YouTube BotGuard 不可用"))?;
+    Ok(Json(value))
+}
+
+#[derive(Deserialize)]
+struct YtmProtectedPlayerBody {
+    source: SongSource,
+    po_token: String,
+    visitor_data: String,
+    data_sync_id: String,
+    #[serde(default)]
+    quality: Option<Quality>,
+}
+
+#[derive(Serialize)]
+struct YtmProtectedPlayerResponse {
+    signature_cipher: String,
+    player_url: String,
+}
+
+async fn ytm_protected_preview_player(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<YtmProtectedPlayerBody>,
+) -> ApiResult<Json<YtmProtectedPlayerResponse>> {
+    if body.source.platform != Platform::Ytm
+        || !valid_web_po_token(&body.po_token)
+        || body.visitor_data.is_empty()
+        || body.visitor_data.len() > 4096
+        || body.visitor_data.contains(['\r', '\n'])
+        || body.data_sync_id.len() > 512
+        || body.data_sync_id.contains(['\r', '\n'])
+    {
+        return Err(ApiError::bad_request("YouTube Music WebPO 参数无效"));
+    }
+    let provider = state
+        .provider(Platform::Ytm)
+        .ok_or_else(|| ApiError::not_found("YouTube Music 平台不可用"))?;
+    let quality = body
+        .quality
+        .unwrap_or_else(|| state.config.to_settings().stream_quality);
+    let protected = provider
+        .protected_preview_cipher(
+            &body.source,
+            quality,
+            &body.po_token,
+            &ProtectedPreviewIdentity {
+                visitor_data: body.visitor_data,
+                data_sync_id: body.data_sync_id,
+            },
+        )
+        .await?
+        .ok_or_else(|| ApiError::bad_request("YouTube Music 没有返回受保护试听流"))?;
+    Ok(Json(YtmProtectedPlayerResponse {
+        signature_cipher: protected.signature_cipher,
+        player_url: protected.player_url,
+    }))
+}
+
+#[derive(Deserialize)]
+struct YtmProtectedPlayerScriptBody {
+    player_url: String,
+}
+
+async fn ytm_protected_preview_player_script(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<YtmProtectedPlayerScriptBody>,
+) -> ApiResult<Response> {
+    let provider = state
+        .provider(Platform::Ytm)
+        .ok_or_else(|| ApiError::not_found("YouTube Music 平台不可用"))?;
+    let javascript = provider
+        .protected_preview_player_script(&body.player_url)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("YouTube Music 播放器脚本不可用"))?;
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (header::CACHE_CONTROL, "private, max-age=3600"),
+        ],
+        javascript,
+    )
+        .into_response())
 }
 
 async fn song_cache_stats(
@@ -708,6 +984,14 @@ async fn song_preview(
     let quality = body
         .quality
         .unwrap_or_else(|| state.config.to_settings().stream_quality);
+    if body.source.platform == Platform::Ytm
+        && body
+            .po_token
+            .as_deref()
+            .is_some_and(|token| !valid_web_po_token(token))
+    {
+        return Err(ApiError::bad_request("YouTube Music WebPO token 无效"));
+    }
     let cache_key = crate::stream_cache::StreamCache::key(&body.source, quality);
     let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
     if body.bypass_cache {
@@ -736,15 +1020,28 @@ async fn song_preview(
                     cache_key: Some(cache_key),
                     cached: true,
                     url: String::new(),
+                    browser_resolved: body.po_token.is_some(),
                     last_used_at: std::time::Instant::now(),
                 },
             ));
         }
     }
-    match provider
-        .preview_url_at_quality(&body.source, quality)
-        .await?
-    {
+    let preview = if body.source.platform == Platform::Ytm {
+        match (body.po_token.as_deref(), body.resolved_url.as_deref()) {
+            (Some(token), Some(url)) => Some(validated_ytm_browser_stream_url(url, token)?),
+            (None, None) => {
+                provider
+                    .preview_url_at_quality(&body.source, quality)
+                    .await?
+            }
+            _ => return Err(ApiError::bad_request("YouTube Music WebPO 会话不完整")),
+        }
+    } else {
+        provider
+            .preview_url_at_quality(&body.source, quality)
+            .await?
+    };
+    match preview {
         Some(url) => Ok(insert_song_preview_ticket(
             &state,
             SongPreviewTicket {
@@ -753,6 +1050,7 @@ async fn song_preview(
                 cache_key: Some(cache_key),
                 cached: false,
                 url,
+                browser_resolved: body.po_token.is_some(),
                 last_used_at: std::time::Instant::now(),
             },
         )),
@@ -762,6 +1060,38 @@ async fn song_preview(
             "这个平台不支持歌曲试听",
         )),
     }
+}
+
+fn valid_web_po_token(value: &str) -> bool {
+    (80..=2048).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'='))
+}
+
+fn validated_ytm_browser_stream_url(value: &str, po_token: &str) -> ApiResult<String> {
+    if value.len() > 16 * 1024 || value.contains(['\r', '\n']) {
+        return Err(ApiError::bad_request("YouTube Music 音频 URL 无效"));
+    }
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| ApiError::bad_request("YouTube Music 音频 URL 无效"))?;
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let trusted_host = host == "googlevideo.com" || host.ends_with(".googlevideo.com");
+    let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+    let audio = params
+        .get("mime")
+        .is_some_and(|mime| mime.starts_with("audio/"));
+    if url.scheme() != "https"
+        || !trusted_host
+        || url.path() != "/videoplayback"
+        || params.get("pot").map(String::as_str) != Some(po_token)
+        || !audio
+    {
+        return Err(ApiError::bad_request(
+            "YouTube Music 音频 URL 不属于受信任的 GVS 来源",
+        ));
+    }
+    Ok(url.into())
 }
 
 /// 试听直链代理。平台 CDN 常返回 WebView 不认识的 Content-Type，或要求浏览器
@@ -1221,24 +1551,30 @@ async fn refresh_song_preview_ticket(
     let provider = state
         .provider(ticket.source.platform)
         .ok_or_else(|| ApiError::bad_request("不认识的平台"))?;
-    let refreshed_url = provider
-        .preview_url_at_quality(&ticket.source, ticket.quality)
-        .await?
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "这个平台暂时无法刷新试听地址",
-            )
-        })?;
-    ticket.url = refreshed_url;
+    let refreshed = if ticket.source.platform == Platform::Ytm && ticket.browser_resolved {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "YouTube Music WebPO 地址已失效，请重新播放",
+        ));
+    } else {
+        provider
+            .preview_url_at_quality(&ticket.source, ticket.quality)
+            .await?
+    };
+    ticket.url = refreshed.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "这个平台暂时无法刷新试听地址",
+        )
+    })?;
     ticket.cached = false;
     ticket.last_used_at = std::time::Instant::now();
-    let mut previews = state.song_previews.lock().unwrap();
-    if !previews.update_url(token, ticket.url.clone()) {
-        // 极端并发下票据可能在 provider 请求期间被容量淘汰；当前正在用的票据
-        // 应恢复为最新租约，避免随后 seek 立刻 404。
-        previews.insert(token.to_string(), ticket.clone());
-    }
+    // token 也是刷新状态的一部分，整张覆盖比只更新 URL 更安全。
+    state
+        .song_previews
+        .lock()
+        .unwrap()
+        .insert(token.to_string(), ticket.clone());
     Ok(())
 }
 
@@ -1395,9 +1731,16 @@ async fn refresh_background_preview_url(
     let provider = state
         .provider(ticket.source.platform)
         .ok_or_else(|| "缓存来源平台不可用".to_string())?;
-    let url = provider
-        .preview_url_at_quality(&ticket.source, ticket.quality)
-        .await
+    let refreshed = if ticket.source.platform == Platform::Ytm && ticket.browser_resolved {
+        return (!ticket.url.is_empty())
+            .then(|| ticket.url.clone())
+            .ok_or_else(|| "缓存来源地址无法刷新".to_string());
+    } else {
+        provider
+            .preview_url_at_quality(&ticket.source, ticket.quality)
+            .await
+    };
+    let url = refreshed
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "缓存来源地址无法刷新".to_string())?;
     let mut previews = state.song_previews.lock().unwrap();
@@ -1437,29 +1780,28 @@ async fn cache_song_preview_background(
         {
             return Ok(());
         }
-        let request = client
-            .get(&url)
-            .header(reqwest::header::RANGE, format!("bytes={offset}-"));
+        let requested_range = format!("bytes={offset}-");
+        let request = client.get(&url).header(
+            reqwest::header::RANGE,
+            bounded_preview_upstream_range(&url, &requested_range),
+        );
         let mut response = tokio::time::timeout(std::time::Duration::from_secs(30), request.send())
             .await
             .map_err(|_| "缓存源连接超时".to_string())?
             .map_err(|error| format!("缓存源连接失败：{error}"))?;
         let status = preview_upstream_status(&response);
         if song_preview_url_needs_refresh(status) {
-            if offset > 0 {
-                return Err("缓存续传地址失效，已丢弃本次临时文件".into());
-            }
             if refreshes_left == 0 {
                 return Err(format!("缓存源刷新后仍返回 HTTP {status}"));
             }
+            // 网易云/QQ 的播放 URL 可能在分段下载中途过期。刷新后的地址仍指向
+            // 同一 source key，可以从当前 Range 继续；直接丢弃会让 DJ Deck 永远
+            // 得不到完整波形与 BPM，即使声音本身仍由前台代理正常播放。
             refreshes_left -= 1;
             url = refresh_background_preview_url(&state, &token, &ticket).await?;
             continue;
         }
         let Some(mime) = preview_audio_mime(response.headers(), &content_type_hint) else {
-            if offset > 0 {
-                return Err("缓存续传源变成了非音频内容，已丢弃临时文件".into());
-            }
             if refreshes_left == 0 {
                 return Err("缓存源刷新后仍返回非音频内容".into());
             }
@@ -1613,6 +1955,29 @@ fn song_preview_url_needs_refresh(status: StatusCode) -> bool {
     )
 }
 
+fn bounded_preview_upstream_range(url: &str, range: &str) -> String {
+    const GVS_CHUNK_BYTES: u64 = 512 * 1024;
+    let googlevideo = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "googlevideo.com" || host.ends_with(".googlevideo.com"));
+    if !googlevideo {
+        return range.to_string();
+    }
+    let Some(start) = range
+        .trim()
+        .strip_prefix("bytes=")
+        .and_then(|value| value.strip_suffix('-'))
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return range.to_string();
+    };
+    format!(
+        "bytes={start}-{}",
+        start.saturating_add(GVS_CHUNK_BYTES - 1)
+    )
+}
+
 async fn request_song_preview_upstream(
     client: &reqwest::Client,
     url: &str,
@@ -1620,7 +1985,10 @@ async fn request_song_preview_upstream(
 ) -> ApiResult<reqwest::Response> {
     let mut request = client.get(url);
     if let Some(range) = range {
-        request = request.header(reqwest::header::RANGE, range);
+        request = request.header(
+            reqwest::header::RANGE,
+            bounded_preview_upstream_range(url, range),
+        );
     }
     request
         .send()
@@ -1681,7 +2049,8 @@ async fn resolve(
 /// 投喂里的链接一律按"这可能是个歌单"来取，条数和 `/api/resolve` 的默认值一致。
 /// 跟着 `limit`（那是**搜索**每平台的条数，默认 20）走的话，
 /// 粘一个 300 首的歌单进来只会解析出前 20 首。
-const INTAKE_RESOLVE_LIMIT: usize = 500;
+// 链接集合默认完整展开；各 provider 把 0 解释为 full_listing。
+const INTAKE_RESOLVE_LIMIT: usize = 0;
 
 /// 外层并发度。和 Python 的 `INTAKE_WORKERS` 一致。
 const INTAKE_WORKERS: usize = 4;
@@ -1845,14 +2214,42 @@ async fn enqueue(
         .sources
         .into_iter()
         .map(|source| {
-            enqueue_audio(
-                state.clone(),
-                ctx.downloads.clone(),
-                source,
-                quality,
-                analyze,
-                dest_dir.clone(),
-            )
+            if source.platform == Platform::Youtube {
+                let request = VideoDownloadRequest {
+                    platform: Platform::Youtube,
+                    bvid: source.key.clone(),
+                    max_height: source
+                        .payload
+                        .get("max_height")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(settings.video_max_height),
+                    audio_only: source
+                        .payload
+                        .get("audio_only")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    transcode: source
+                        .payload
+                        .get("transcode")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(settings.video_transcode),
+                    dest_dir: dest_dir.clone(),
+                    title: source.title.clone(),
+                    artist: source.artist_text(),
+                    cover: source.cover.clone(),
+                    ..Default::default()
+                };
+                enqueue_video(state.clone(), ctx.downloads.clone(), request)
+            } else {
+                enqueue_audio(
+                    state.clone(),
+                    ctx.downloads.clone(),
+                    source,
+                    quality,
+                    analyze,
+                    dest_dir.clone(),
+                )
+            }
         })
         .collect();
     // 整批入队后广播一次完整队列：超过上限被裁掉的旧条目只能靠这条事件让前端知道
@@ -1912,6 +2309,8 @@ async fn remove_download(
 struct VideoResolveBody {
     #[serde(default)]
     url: String,
+    #[serde(default)]
+    platform: Option<Platform>,
 }
 
 async fn video_resolve(
@@ -1922,7 +2321,23 @@ async fn video_resolve(
     if url.is_empty() {
         return Err(ApiError::bad_request("链接不能为空"));
     }
-    Ok(Json(state.bilibili.resolve_video(url).await?))
+    let platform = body.platform.unwrap_or_else(|| {
+        reqwest::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
+            .filter(|host| host != "music.youtube.com")
+            .filter(|host| {
+                host == "youtu.be" || host == "youtube.com" || host.ends_with(".youtube.com")
+            })
+            .map(|_| Platform::Youtube)
+            .unwrap_or(Platform::Bilibili)
+    });
+    let info = match platform {
+        Platform::Youtube => state.youtube.resolve_video(url).await?,
+        Platform::Bilibili => state.bilibili.resolve_video(url).await?,
+        _ => return Err(ApiError::bad_request("这个来源不是视频平台")),
+    };
+    Ok(Json(info))
 }
 
 /// 前端没显式给画质/转码时跟随全局设置。
@@ -1947,13 +2362,15 @@ async fn video_download(
     Json(mut payload): Json<VideoDownloadRequest>,
 ) -> ApiResult<Json<DownloadTask>> {
     if payload.url.trim().is_empty() && payload.bvid.trim().is_empty() {
-        return Err(ApiError::bad_request("缺少视频链接或 BV 号"));
+        return Err(ApiError::bad_request("缺少视频链接或视频 ID"));
+    }
+    if !matches!(payload.platform, Platform::Bilibili | Platform::Youtube) {
+        return Err(ApiError::bad_request("这个来源不是视频平台"));
     }
     apply_video_defaults(&mut payload, &state.config.to_settings());
     payload.dest_dir = normalize_dest_dir(&state, &payload.dest_dir)?;
-    // 立刻入队、立刻返回。真正的标题要向 B 站请求一次才知道，那一跳放在
-    // 下载任务自己的线程里做（见 `enqueue_video`）——在这里同步等的话，
-    // 点一次「下载」按钮要卡上几秒才有反应，限流时更久。
+    // 立刻入队、立刻返回。真正的标题由视频 provider 在任务线程里补齐，
+    // 避免网络解析阻塞按钮反馈。
     let task = enqueue_video(state.clone(), ctx.downloads.clone(), payload);
     ctx.downloads.broadcast_list();
     Ok(Json(task))
@@ -2225,6 +2642,20 @@ struct TrackQueryParams {
     offset: Option<i64>,
 }
 
+fn exclude_music_playlists_from_youtube(
+    mut video_playlists: Vec<StreamPlaylist>,
+    music_playlists: &[StreamPlaylist],
+) -> Vec<StreamPlaylist> {
+    // Google 的同一个播放列表对象会同时出现在 YouTube 与 YouTube Music。
+    // 侧栏按产品严格分区：只要 Music 目录认领了这个 ID，视频目录就不再重复展示。
+    let music_keys = music_playlists
+        .iter()
+        .map(|playlist| playlist.key.as_str())
+        .collect::<HashSet<_>>();
+    video_playlists.retain(|playlist| !music_keys.contains(playlist.key.as_str()));
+    video_playlists
+}
+
 async fn stream_playlists(
     State(state): State<Arc<AppState>>,
     AxumPath(platform): AxumPath<String>,
@@ -2233,7 +2664,25 @@ async fn stream_playlists(
     let provider = state
         .provider(platform)
         .ok_or_else(|| ApiError::not_found("平台不可用"))?;
-    Ok(Json(provider.stream_playlists().await?))
+    let mut playlists = provider.stream_playlists().await?;
+    if platform == Platform::Youtube {
+        if let Some(music_provider) = state.provider(Platform::Ytm) {
+            // 分区必须失败闭合：无法确认 Music 目录时，宁可让视频目录报错，
+            // 也不能把可能属于 Music 的共享播放列表再次展示出来。
+            let music_playlists = music_provider.stream_playlists().await?;
+            playlists = exclude_music_playlists_from_youtube(playlists, &music_playlists);
+        }
+    }
+    if playlists
+        .iter()
+        .any(|playlist| playlist.platform != platform)
+    {
+        return Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "平台目录返回了混合来源，已拒绝展示",
+        ));
+    }
+    Ok(Json(playlists))
 }
 
 async fn stream_playlist(
@@ -2250,6 +2699,17 @@ async fn stream_playlist(
         .stream_playlist_tracks(&payload.key, payload.limit)
         .await?
         .ok_or_else(|| ApiError::bad_request("该平台暂不支持歌单展开"))?;
+    if response.platform != payload.platform
+        || response
+            .sources
+            .iter()
+            .any(|source| source.platform != payload.platform)
+    {
+        return Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "平台歌单返回了混合来源，已拒绝展示",
+        ));
+    }
     let in_library_source_keys = in_library_source_keys(&state, &response.sources);
     Ok(Json(StreamPlaylistApiResponse {
         response,
@@ -2398,6 +2858,8 @@ struct OneLibraryWaveformParams {
     buckets: usize,
     #[serde(default)]
     profile: WaveformRequestProfile,
+    #[serde(default)]
+    format: WaveformResponseFormat,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -2406,6 +2868,52 @@ enum WaveformRequestProfile {
     #[default]
     Current,
     ReleaseOverview,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum WaveformResponseFormat {
+    #[default]
+    Json,
+    Binary,
+}
+
+fn waveform_response(
+    waveform: Waveform,
+    profile: WaveformRequestProfile,
+    format: WaveformResponseFormat,
+) -> ApiResult<Response> {
+    if format == WaveformResponseFormat::Json {
+        return Ok(Json(waveform).into_response());
+    }
+    let wire_profile = match profile {
+        WaveformRequestProfile::Current => crate::waveform::WaveformWireProfile::CurrentDetail,
+        WaveformRequestProfile::ReleaseOverview => {
+            crate::waveform::WaveformWireProfile::ReleaseOverview
+        }
+    };
+    let body =
+        crate::waveform::encode_waveform_binary(&waveform, wire_profile).map_err(|error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("编码波形响应失败：{error:#}"),
+            )
+        })?;
+    let mut response = body.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static(crate::waveform::WAVEFORM_BINARY_MIME),
+    );
+    response.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-kdj-waveform-profile"),
+        axum::http::HeaderValue::from_static(wire_profile.name()),
+    );
+    response.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-kdj-waveform-revision"),
+        axum::http::HeaderValue::from_str(&wire_profile.revision().to_string())
+            .expect("waveform revision is an ASCII integer"),
+    );
+    Ok(response)
 }
 
 /// rbox 为每次 `OneLibrary::new` 建独立 r2d2 池；同一加密库被列表轮询、封面缩略图
@@ -2810,7 +3318,7 @@ async fn one_library_set_cover(
 async fn one_library_waveform(
     State(state): State<Arc<AppState>>,
     Query(params): Query<OneLibraryWaveformParams>,
-) -> ApiResult<Json<Waveform>> {
+) -> ApiResult<Response> {
     if params.playback_id >= 0 {
         return Err(ApiError::bad_request("OneLibrary 播放 id 必须是负数"));
     }
@@ -2853,7 +3361,7 @@ async fn one_library_waveform(
         crate::waveform::fit_waveform_columns(waveform, buckets)
     };
     waveform.track_id = params.playback_id;
-    Ok(Json(waveform))
+    waveform_response(waveform, params.profile, params.format)
 }
 
 async fn library_devices() -> ApiResult<Json<Vec<RemovableDevice>>> {
@@ -4356,6 +4864,8 @@ struct WaveformParams {
     buckets: usize,
     #[serde(default)]
     profile: WaveformRequestProfile,
+    #[serde(default)]
+    format: WaveformResponseFormat,
 }
 fn default_buckets() -> usize {
     640
@@ -4369,7 +4879,7 @@ async fn library_waveform(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<i64>,
     Query(params): Query<WaveformParams>,
-) -> ApiResult<Json<Waveform>> {
+) -> ApiResult<Response> {
     let buckets = params
         .buckets
         .clamp(64, crate::waveform::MAX_WAVEFORM_BUCKETS);
@@ -4395,12 +4905,74 @@ async fn library_waveform(
             .await
     }
     .map_err(|err| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("{err:#}")))?;
-    Ok(Json(wave))
+    waveform_response(wave, params.profile, params.format)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stream_playlist(platform: Platform, key: &str, title: &str) -> StreamPlaylist {
+        StreamPlaylist {
+            platform,
+            key: key.into(),
+            title: title.into(),
+            cover: String::new(),
+            count: 0,
+            is_favorite: false,
+            origin: String::new(),
+        }
+    }
+
+    #[test]
+    fn youtube_sidebar_excludes_playlists_claimed_by_youtube_music() {
+        let video = vec![
+            stream_playlist(Platform::Youtube, "shared", "音乐歌单"),
+            stream_playlist(Platform::Youtube, "WL", "稍后观看"),
+        ];
+        let music = vec![stream_playlist(Platform::Ytm, "shared", "音乐歌单")];
+
+        let filtered = exclude_music_playlists_from_youtube(video, &music);
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|playlist| playlist.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["WL"]
+        );
+    }
+
+    #[tokio::test]
+    async fn waveform_binary_response_advertises_the_compact_profiled_contract() {
+        let waveform = Waveform {
+            track_id: 7,
+            duration: 2.0,
+            amp: vec![0.25, 0.75],
+            r: vec![255, 0],
+            g: vec![0, 255],
+            b: vec![1, 2],
+        };
+        let response = waveform_response(
+            waveform,
+            WaveformRequestProfile::Current,
+            WaveformResponseFormat::Binary,
+        )
+        .unwrap();
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            crate::waveform::WAVEFORM_BINARY_MIME
+        );
+        assert_eq!(
+            response.headers()["x-kdj-waveform-profile"],
+            crate::waveform::CURRENT_WAVEFORM_PROFILE
+        );
+        assert_eq!(response.headers()["x-kdj-waveform-revision"], "6");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..8], b"KDJWVFM\0");
+        assert_eq!(body.len(), 36 + 2 * 7);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn one_library_http_database_tasks_are_serialized() {
@@ -4426,6 +4998,46 @@ mod tests {
             task.await.unwrap();
         }
         assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn googlevideo_open_ranges_are_bounded_for_native_streaming() {
+        assert_eq!(
+            bounded_preview_upstream_range(
+                "https://rr1---sn.example.googlevideo.com/videoplayback?id=x",
+                "bytes=524288-"
+            ),
+            "bytes=524288-1048575"
+        );
+        assert_eq!(
+            bounded_preview_upstream_range("https://cdn.example.test/audio", "bytes=10-"),
+            "bytes=10-"
+        );
+        assert_eq!(
+            bounded_preview_upstream_range(
+                "https://rr1---sn.example.googlevideo.com/videoplayback?id=x",
+                "bytes=10-20"
+            ),
+            "bytes=10-20"
+        );
+    }
+
+    #[test]
+    fn web_po_tokens_accept_only_bounded_base64url_text() {
+        let token = "A".repeat(120);
+        assert!(valid_web_po_token(&token));
+        assert!(valid_web_po_token(&format!("{}-_", "A".repeat(100))));
+        assert!(!valid_web_po_token("short"));
+        assert!(!valid_web_po_token(&format!("{}+", "A".repeat(100))));
+        let url = format!(
+            "https://rr1---sn.example.googlevideo.com/videoplayback?mime=audio%2Fmp4&pot={token}"
+        );
+        assert!(validated_ytm_browser_stream_url(&url, &token).is_ok());
+        assert!(validated_ytm_browser_stream_url(
+            &format!("https://example.test/videoplayback?mime=audio%2Fmp4&pot={token}"),
+            &token
+        )
+        .is_err());
     }
 
     #[test]

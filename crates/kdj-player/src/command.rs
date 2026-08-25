@@ -15,6 +15,69 @@ pub enum DeckId {
     B = 1,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PlatterPhase {
+    #[default]
+    Start,
+    Move,
+    End,
+    /// Explicit Play/Pause/load cancellation: no coast and no inherited velocity.
+    Cancel,
+}
+
+/// Manual Performance effects. The discriminants are stable callback data, not a serialized API.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum DeckFxKind {
+    #[default]
+    Echo,
+    Reverb,
+    Flanger,
+    Phaser,
+    BitCrusher,
+    Gate,
+    Alarm,
+    Hydrant,
+    Rocket,
+}
+
+impl DeckFxKind {
+    pub const ALL: [Self; 9] = [
+        Self::Echo,
+        Self::Reverb,
+        Self::Flanger,
+        Self::Phaser,
+        Self::BitCrusher,
+        Self::Gate,
+        Self::Alarm,
+        Self::Hydrant,
+        Self::Rocket,
+    ];
+}
+
+/// One of the three serial manual-FX slots. MIX is a dry/wet crossfade; PARAMETER controls the
+/// effect-specific characteristic (for example LFO rate or decay). Both are normalized to 0..1
+/// by the coordinator before reaching the callback.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeckFxSlot {
+    pub kind: DeckFxKind,
+    pub enabled: bool,
+    pub mix: f32,
+    pub parameter: f32,
+}
+
+impl Default for DeckFxSlot {
+    fn default() -> Self {
+        Self {
+            kind: DeckFxKind::Echo,
+            enabled: false,
+            mix: 0.5,
+            parameter: 0.5,
+        }
+    }
+}
+
 impl DeckId {
     pub const fn other(self) -> Self {
         match self {
@@ -66,18 +129,18 @@ pub enum RtCommand {
         deck: DeckId,
         playing: bool,
     },
-    /// Capacitive platter contact temporarily owns this Deck's media cursor. This is deliberately
-    /// separate from `SetDeckPlaying`: the logical transport stays playing while the callback
-    /// stops consuming its source, so a release cannot be mistaken for a Play/Pause transition.
-    SetDeckScratchHeld {
+    /// Route this Deck to output channels 3/4 when the selected device exposes a cue pair.
+    SetDeckPfl {
         deck: DeckId,
-        held: bool,
+        enabled: bool,
     },
-    /// Relative platter motion while a capacitive hold owns this Deck. The callback plays the
-    /// moved audio immediately instead of waiting for a decoder rebuild on note-off.
-    ScratchDeck {
+    /// One callback-domain platter state machine. Velocity is normalized media speed: 1.0 is
+    /// nominal forward playback and -1.0 is nominal reverse. End includes the final input speed
+    /// in the same command, so queue/IPC timing cannot erase a throw.
+    ControlDeckPlatter {
         deck: DeckId,
-        delta_frames: f64,
+        phase: PlatterPhase,
+        velocity: f64,
     },
     SetRate {
         deck: DeckId,
@@ -87,6 +150,12 @@ pub enum RtCommand {
     /// expose an intermediate frame where only one side has adopted the new clock rate.
     SetDeckRates {
         rates: [f32; 2],
+    },
+    /// Small callback-domain phase correction layered after the pitch-preserving worker. Unlike a
+    /// persistent TEMPO change this never asks Rubber Band R3 to rebuild its live ratio plan.
+    SetDeckPhaseCorrection {
+        deck: DeckId,
+        multiplier: f32,
     },
     /// Per-lane STEM gains in `StemKind::index` order (drums, bass, other, vocals). Applied by
     /// the renderer with a short ramp, so mute/volume moves land at the next callback frame
@@ -107,6 +176,12 @@ pub enum RtCommand {
         /// Loop duration in those frames. Ignored when `looping` is false.
         frames: u64,
     },
+    /// Put the installed source on a silent timeline before its first media frame. The decoder
+    /// remains parked at frame 0 until this signed callback clock reaches zero.
+    SetDeckPreroll {
+        deck: DeckId,
+        frames: u64,
+    },
     SetEq {
         deck: DeckId,
         trim_db: f32,
@@ -115,15 +190,10 @@ pub enum RtCommand {
         high_db: f32,
         filter: f32,
     },
-    /// Shared manual Performance FX unit. `pad` is 0 when no momentary Pad FX is held.
+    /// Three serial manual Performance FX slots. `pad` is 0 when no momentary Pad FX is held.
     SetDeckFx {
         deck: DeckId,
-        echo: f32,
-        echo_parameter: f32,
-        reverb: f32,
-        reverb_parameter: f32,
-        gater: f32,
-        gater_parameter: f32,
+        slots: [DeckFxSlot; 3],
         pad: u8,
         beat_seconds: f32,
     },

@@ -26,6 +26,9 @@ const BRAND_PATH: Partial<Record<Platform, string>> = {
   // YouTube Music：圆盘 + 镂空播放三角（simple-icons 的 youtubemusic 轮廓）。
   // 三角与圆盘绕向无关地镂空，靠下方 fillRule="evenodd"。
   ytm: "M12 0C5.376 0 0 5.376 0 12s5.376 12 12 12 12-5.376 12-12S18.624 0 12 0ZM9.6 7.5v9l7.8-4.5-7.8-4.5Z",
+  // 普通 YouTube：圆角播放框；与 YTM 的圆盘明确区分。
+  youtube:
+    "M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.017 3.017 0 0 0 2.121 2.136c1.872.505 9.377.505 9.377.505s7.505 0 9.376-.505a3.016 3.016 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814ZM9.545 15.568V8.432L15.818 12l-6.273 3.568Z",
 };
 
 /**
@@ -37,6 +40,7 @@ export const PLATFORM_BRAND: Partial<Record<Platform, string>> = {
   qqm: "#31c27c",
   soundcloud: "#ff5500",
   ytm: "#ff0000",
+  youtube: "#ff0000",
   bilibili: "#fb7299",
 };
 

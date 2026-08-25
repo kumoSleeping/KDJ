@@ -3,6 +3,12 @@
  */
 
 import { getBridge } from "./bridge";
+import {
+  decodeWaveformBinary,
+  isWaveformBinaryContentType,
+  WAVEFORM_BINARY_MIME,
+  type WaveformProfile,
+} from "./waveformBinary";
 import type {
   Account,
   AnalyzeResponseLike,
@@ -34,8 +40,6 @@ import type {
   SoundCloudOAuthStart,
   SoundCloudOAuthStatus,
   SoundCloudOAuthCallback,
-  YtmDeviceLogin,
-  YtmDeviceStatus,
   ResolveResponse,
   CollectionResult,
   ScanResponseLike,
@@ -44,8 +48,6 @@ import type {
   StreamCacheStats,
   StreamWaveformProgress,
   StemRuntimeStatus,
-  StemName,
-  LiveStemWaveformDelta,
   TrackStemStatus,
   LyricsRequest,
   LyricsResponse,
@@ -62,6 +64,7 @@ import type {
   VideoDownloadRequest,
   VideoInfo,
   VjExportRequest,
+  BrowserCatalog,
   Waveform,
   WsEvent,
 } from "../types";
@@ -106,6 +109,39 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 /** 和 request 共用同一套错误语义，但保留图片响应为 Blob。 */
+async function requestWaveform(path: string, profile: WaveformProfile): Promise<Waveform> {
+  const { baseUrl } = bridge();
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/api${path}`, {
+      cache: "no-store",
+      headers: { Accept: `${WAVEFORM_BINARY_MIME}, application/json;q=0.5` },
+    });
+  } catch (error) {
+    throw new ApiError(`无法连接本地服务：${(error as Error).message}`, 0);
+  }
+  if (!response.ok) {
+    const text = await response.text();
+    const data = text ? safeParse(text) : null;
+    const detail =
+      (data && typeof data === "object" && "detail" in data
+        ? String((data as { detail: unknown }).detail)
+        : "") || response.statusText;
+    throw new ApiError(detail || `HTTP ${response.status}`, response.status, data);
+  }
+  if (isWaveformBinaryContentType(response.headers.get("Content-Type"))) {
+    return decodeWaveformBinary(await response.arrayBuffer(), profile);
+  }
+  // Compatibility with a Rust server that predates binary negotiation: it ignores `format` and
+  // returns the old JSON shape, so frontend HMR does not require an immediate backend restart.
+  const text = await response.text();
+  const data = text ? safeParse(text) : null;
+  if (!data || typeof data !== "object") {
+    throw new ApiError("波形响应格式无效", response.status, data);
+  }
+  return data as Waveform;
+}
+
 async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> {
   const { baseUrl } = bridge();
   const headers = new Headers(init.headers);
@@ -162,9 +198,22 @@ export const api = {
     request<SoundCloudOAuthStatus>(`/accounts/soundcloud/login/oauth/${encodeURIComponent(state)}`),
   soundcloudOAuthCallback: (body: SoundCloudOAuthCallback) =>
     post<Account>("/accounts/soundcloud/login/oauth/callback", body),
-  ytmDeviceLoginStart: () => request<YtmDeviceLogin>("/accounts/ytm/login/device"),
-  ytmDeviceLoginStatus: (deviceCode: string) =>
-    request<YtmDeviceStatus>(`/accounts/ytm/login/device/${encodeURIComponent(deviceCode)}`),
+  soundcloudBrowserCatalog: () =>
+    request<BrowserCatalog>("/accounts/soundcloud/login/browsers"),
+  soundcloudBrowserLogin: (browser: string, profile?: string) =>
+    post<Account>("/accounts/soundcloud/login/browser", { browser, profile }),
+  ytmBrowserCatalog: () =>
+    request<BrowserCatalog>("/accounts/ytm/login/browsers"),
+  ytmBrowserLogin: (browser: string, profile?: string) =>
+    post<Account>("/accounts/ytm/login/browser", { browser, profile }),
+  ytmHeadersLogin: (headers: string) =>
+    post<Account>("/accounts/ytm/login/headers", { headers }),
+  youtubeBrowserCatalog: () =>
+    request<BrowserCatalog>("/accounts/youtube/login/browsers"),
+  youtubeBrowserLogin: (browser: string, profile?: string) =>
+    post<Account>("/accounts/youtube/login/browser", { browser, profile }),
+  youtubeHeadersLogin: (headers: string) =>
+    post<Account>("/accounts/youtube/login/headers", { headers }),
 
   search: (body: SearchRequest) => post<SearchResponse>("/search", body),
   searchCapabilities: () => request<SearchCapabilities>("/search/capabilities"),
@@ -184,9 +233,47 @@ export const api = {
    * QQ 的 media_mid、SoundCloud 的 transcoding_url 都在 payload 里。
    */
   songPreview: async (source: SongSource, bypassCache = false) => {
+    const videoId = source.payload?.video_id;
+    let poToken: string | undefined;
+    let resolvedUrl: string | undefined;
+    if (source.platform === "ytm" && typeof videoId === "string") {
+      const { decipherYoutubeWebStream, youtubeWebPoSession } = await import("./youtubePoToken");
+      const identity = await request<{
+        visitor_data: string;
+        data_sync_id: string;
+      }>("/song/preview/ytm/identity", { cache: "no-store" });
+      const proof = await youtubeWebPoSession(
+        videoId,
+        identity.visitor_data,
+        (operation, payload) => post<unknown>("/song/preview/ytm/botguard", {
+          operation,
+          payload,
+        }),
+      );
+      poToken = proof.gvsPoToken;
+      const protectedPlayer = await post<{
+        signature_cipher: string;
+        player_url: string;
+      }>("/song/preview/ytm/player", {
+        source,
+        po_token: proof.playerPoToken,
+        visitor_data: identity.visitor_data,
+        data_sync_id: identity.data_sync_id,
+      });
+      resolvedUrl = await decipherYoutubeWebStream(
+        protectedPlayer.signature_cipher,
+        protectedPlayer.player_url,
+        poToken,
+        (playerUrl) => post<string>("/song/preview/ytm/player-script", {
+          player_url: playerUrl,
+        }),
+      );
+    }
     const result = await post<{ url: string; cached?: boolean; waveform_token?: string }>("/song/preview", {
       source,
       bypass_cache: bypassCache,
+      po_token: poToken,
+      resolved_url: resolvedUrl,
     });
     if (!result.url.startsWith("/")) return result;
     return { ...result, url: `${bridge().baseUrl}${result.url}` };
@@ -211,7 +298,8 @@ export const api = {
   removeDownload: (id: string) => request<{ removed: boolean }>(`/downloads/${id}`, { method: "DELETE" }),
   clearDownloads: () => post<{ removed: number }>("/downloads/clear"),
 
-  videoResolve: (url: string) => post<VideoInfo>("/video/resolve", { url }),
+  videoResolve: (url: string, platform?: "bilibili" | "youtube") =>
+    post<VideoInfo>("/video/resolve", { url, platform }),
   videoDownload: (body: VideoDownloadRequest) => post<DownloadTask>("/video/download", body),
   /** 按顺序导出 VJ：由下载队列统一调度、显示进度并支持取消。 */
   vjExport: (body: VjExportRequest) => post<DownloadTask>("/vj/export", body),
@@ -425,61 +513,21 @@ export const api = {
   waveform: (
     id: number,
     buckets = 640,
-    profile: "current" | "release-overview" = "current",
+    profile: WaveformProfile = "current",
   ) =>
-    request<Waveform>(
-      `/library/waveform/${id}?buckets=${buckets}&profile=${profile}`,
+    requestWaveform(
+      `/library/waveform/${id}?buckets=${buckets}&profile=${profile}&format=binary`,
+      profile,
     ),
   stemRuntimeStatus: () => request<StemRuntimeStatus>("/stems/runtime"),
   resetStemRuntime: () => post<StemRuntimeStatus>("/stems/runtime/reset", {}),
-  trackStemStatus: (
-    id: number,
-    position?: number,
-    playing = false,
-  ) =>
-    request<TrackStemStatus>(
-      `/tracks/${id}/stems?${
-        position === undefined || !Number.isFinite(position)
-          ? ""
-          : `position=${Math.max(0, position)}&playing=${playing ? "true" : "false"}`
-      }`,
-    ),
-  separateTrackStems: (
-    id: number,
-    position = 0,
-    options: {
-      duration?: number;
-      deck?: 0 | 1;
-      playing?: boolean;
-    },
-  ) =>
-    post<TrackStemStatus>(`/tracks/${id}/stems`, {
-      position: Number.isFinite(position) ? Math.max(0, position) : 0,
-      duration: Number.isFinite(options?.duration) ? Math.max(0, options?.duration ?? 0) : 0,
-      deck: options?.deck === 1 ? 1 : 0,
-      playing: options?.playing === true,
-    }),
-  releaseTrackStems: (id: number) =>
-    request<{ released: boolean }>(`/tracks/${id}/stems`, { method: "DELETE" }),
-  stemWaveform: (id: number, stem: StemName, buckets = 640) =>
-    request<Waveform>(`/tracks/${id}/stems/waveform/${stem}?buckets=${buckets}`),
-  /**
-   * Live performance lanes poll this small append-only payload. Do not use `stemWaveform` here:
-   * a 24k-column response × four lanes every 200ms starves WebKit's compositor.
-   */
-  stemWaveformDelta: (id: number, buckets: number, after = 0, epoch: number | null = null) =>
-    request<LiveStemWaveformDelta>(
-      `/tracks/${id}/stems/waveform?buckets=${buckets}&after=${Math.max(0, after)}${
-        epoch === null ? "" : `&epoch=${Math.max(0, epoch)}`
-      }`,
-      { cache: "no-store" },
-    ),
+  trackStemStatus: (id: number) => request<TrackStemStatus>(`/tracks/${id}/stems`),
   oneLibraryWaveform: (
     devicePath: string,
     contentId: number,
     playbackId: number,
     buckets = 640,
-    profile: "current" | "release-overview" = "current",
+    profile: WaveformProfile = "current",
   ) => {
     const query = new URLSearchParams({
       device_path: devicePath,
@@ -487,8 +535,9 @@ export const api = {
       playback_id: String(playbackId),
       buckets: String(buckets),
       profile,
+      format: "binary",
     });
-    return request<Waveform>(`/library/onelibrary/waveform?${query}`);
+    return requestWaveform(`/library/onelibrary/waveform?${query}`, profile);
   },
   harmonic: (id: number, tolerance = 12, limit = 60, folder = "") =>
     request<HarmonicMatch[]>(

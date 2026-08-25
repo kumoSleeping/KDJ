@@ -1,11 +1,12 @@
 import type { Platform } from "../types";
 
-/** 平台一览（仅在线源）。本地曲库在左侧树里浏览，不再占搜索来源位。 */
+/** 平台一览（仅在线源）。YTM 音乐与普通 YouTube 视频是两个独立来源。 */
 export const SEARCH_PLATFORMS: ReadonlyArray<{ id: Platform; label: string; video?: boolean }> = [
   { id: "wyy", label: "网易云" },
   { id: "qqm", label: "QQ 音乐" },
   { id: "soundcloud", label: "SOUNDCLOUD" },
   { id: "ytm", label: "YouTube Music" },
+  { id: "youtube", label: "YouTube Video", video: true },
   { id: "bilibili", label: "哔哩哔哩", video: true },
 ];
 
@@ -14,6 +15,7 @@ export const DEFAULT_PRIORITY: readonly string[] = [
   "qqm",
   "soundcloud",
   "ytm",
+  "youtube",
   "bilibili",
 ];
 /** 默认开启 / 勾选：仅网易云与 QQ。 */

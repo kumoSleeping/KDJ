@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { FolderOpen, LoaderCircle } from "lucide-react";
+import { FolderOpen, LoaderCircle, RefreshCw } from "lucide-react";
 import { api } from "../../lib/api";
 import { getBridge } from "../../lib/bridge";
 import { useAppStore } from "../../stores/appStore";
-import type { Account, AccountState, Platform, QrStateValue, YtmDeviceLogin } from "../../types";
+import type {
+  Account,
+  AccountState,
+  BrowserCatalog,
+  Platform,
+  QrStateValue,
+} from "../../types";
 import { Button, InlineNotice } from "../common";
 import { PLATFORM_BRAND, PlatformMark } from "../download/PlatformMark";
 
@@ -67,6 +73,7 @@ export const settingRow = {
     position: "relative",
     display: "flex",
     alignItems: "center",
+    flexWrap: "wrap",
     // 老的 1.5rem 间距在 350px 里是纯浪费，够把文字和按钮分开就行
     gap: "0.75rem",
     padding: "0.55rem 0",
@@ -162,9 +169,13 @@ export function AccountRow({ account }: { account: Account }) {
   const [busy, setBusy] = useState(false);
   const [qrBusy, setQrBusy] = useState(false);
   const [oauthBusy, setOauthBusy] = useState(false);
-  const [deviceBusy, setDeviceBusy] = useState(false);
-  /** YouTube Music 设备码登录的在途会话；null = 没有进行中的登录。 */
-  const [deviceSession, setDeviceSession] = useState<YtmDeviceLogin | null>(null);
+  const [youtubeBusy, setYoutubeBusy] = useState(false);
+  const [youtubeLoginOpen, setYoutubeLoginOpen] = useState(false);
+  const [youtubeAdvancedOpen, setYoutubeAdvancedOpen] = useState(false);
+  const [youtubeCatalog, setYoutubeCatalog] = useState<BrowserCatalog | null>(null);
+  const [youtubeBrowser, setYoutubeBrowser] = useState("");
+  const [youtubeProfile, setYoutubeProfile] = useState("");
+  const [youtubeHeaders, setYoutubeHeaders] = useState("");
   /** 打开用（安卓可能是 content URI）。 */
   const [savedPath, setSavedPath] = useState("");
   /** 给用户看的路径；没有就退化成 savedPath。 */
@@ -177,6 +188,26 @@ export function AccountRow({ account }: { account: Account }) {
   const [notice, setNotice] = useState("");
 
   const loggedIn = account.state === "valid";
+  const browserAccount = account.login_method === "browser";
+  const youtubeAccount =
+    (account.platform === "youtube" || account.platform === "ytm") && browserAccount;
+  const soundcloudAccount = account.platform === "soundcloud";
+  const browserMobile = ["android", "ios"].includes(String(getBridge().platform));
+  const stateLabel = browserAccount
+    ? account.state === "valid"
+      ? account.credential_kind === "ytm_oauth"
+        ? "仅 YouTube Music 授权"
+        : account.credential_kind === "oauth"
+          ? "OAuth 授权"
+          : "浏览器会话"
+      : account.state === "missing"
+        ? "匿名访问"
+        : STATE_LABEL[account.state]
+    : STATE_LABEL[account.state];
+  const stateColor =
+    browserAccount && account.state === "missing"
+      ? "var(--kd-faint)"
+      : STATE_COLOR[account.state];
   const avatarFallback = qqAvatarFallback(account);
   const avatarSrc = account.avatar || avatarFallback;
 
@@ -409,65 +440,99 @@ export function AccountRow({ account }: { account: Account }) {
     }
   };
 
-  const oauthAccount = account.login_method === "oauth" || account.platform === "soundcloud";
-  const deviceAccount = account.login_method === "device";
+  // 桌面 SoundCloud 直接读取所选浏览器 Profile；移动端无法跨应用读取，保留原有
+  // OAuth / deep-link 登录作为回退。
+  const oauthAccount =
+    account.login_method === "oauth" || (soundcloudAccount && browserMobile);
+  const selectedYoutubeBrowser = youtubeCatalog?.browsers.find(
+    (browser) => browser.id === youtubeBrowser,
+  );
+  const selectedYoutubeProfile = selectedYoutubeBrowser?.profiles.find(
+    (profile) => profile.id === youtubeProfile,
+  );
 
-  /**
-   * YouTube Music 的 Google 设备码登录：后端申请 user_code，
-   * 用户在任何浏览器打开 youtube.com/activate 输入，本行轮询直到成功。
-   */
-  const deviceLogin = async () => {
-    const generation = ++qrGenerationRef.current;
-    setDeviceBusy(true);
-    setDeviceSession(null);
+  const detectYoutubeBrowsers = async () => {
+    setYoutubeBusy(true);
     setNotice("");
     try {
-      const session = await api.ytmDeviceLoginStart();
-      if (generation !== qrGenerationRef.current) return;
-      setDeviceSession(session);
-      const bridge = getBridge();
-      if (bridge.openExternal) {
-        await bridge.openExternal(session.verification_url);
-      } else {
-        setNotice(`请在浏览器打开 ${session.verification_url} 输入 ${session.user_code}`);
+      const catalog = soundcloudAccount
+        ? await api.soundcloudBrowserCatalog()
+        : account.platform === "ytm"
+          ? await api.ytmBrowserCatalog()
+          : await api.youtubeBrowserCatalog();
+      setYoutubeCatalog(catalog);
+      if (!catalog.supported) {
+        setYoutubeBrowser("");
+        setYoutubeProfile("");
+        setNotice(`移动端无法读取其它应用的浏览器会话，${account.label} 将继续匿名访问。`);
+        return;
       }
-      const poll = async () => {
-        if (generation !== qrGenerationRef.current) return;
-        try {
-          const status = await api.ytmDeviceLoginStatus(session.device_code);
-          if (generation !== qrGenerationRef.current) return;
-          if (status.status === "done") {
-            setDeviceBusy(false);
-            setDeviceSession(null);
-            await refreshAccounts();
-            return;
-          }
-          if (status.status === "error") {
-            setDeviceBusy(false);
-            setDeviceSession(null);
-            setNotice(status.message || "YouTube Music 登录失败");
-            return;
-          }
-          window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
-        } catch (error) {
-          if (generation === qrGenerationRef.current) {
-            setDeviceBusy(false);
-            setDeviceSession(null);
-            setNotice(
-              `YouTube Music 登录状态检查失败：${error instanceof Error ? error.message : String(error)}`,
-            );
-          }
-        }
-      };
-      window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
+      const selected =
+        catalog.browsers.find((browser) => browser.id === youtubeBrowser) ?? catalog.browsers[0];
+      setYoutubeBrowser(selected?.id ?? "");
+      setYoutubeProfile(
+        selected?.profiles.some((profile) => profile.id === youtubeProfile)
+          ? youtubeProfile
+          : selected?.profiles[0]?.id ?? "",
+      );
+      if (catalog.browsers.length === 0) {
+        setNotice("没有检测到可读取的浏览器 Profile。");
+      }
     } catch (error) {
-      if (generation === qrGenerationRef.current) {
-        setDeviceBusy(false);
-        setDeviceSession(null);
-        setNotice(
-          `发起 YouTube Music 登录失败：${error instanceof Error ? error.message : String(error)}`,
-        );
+      setNotice(`检测浏览器失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setYoutubeBusy(false);
+    }
+  };
+
+  const toggleYoutubeLogin = () => {
+    if (youtubeLoginOpen) {
+      setYoutubeLoginOpen(false);
+      return;
+    }
+    setYoutubeLoginOpen(true);
+    if (!youtubeCatalog) void detectYoutubeBrowsers();
+  };
+
+  const importYoutubeBrowser = async () => {
+    if (!youtubeBrowser || !youtubeProfile) return;
+    setYoutubeBusy(true);
+    setNotice("");
+    try {
+      if (soundcloudAccount) {
+        await api.soundcloudBrowserLogin(youtubeBrowser, youtubeProfile);
+      } else if (account.platform === "ytm") {
+        await api.ytmBrowserLogin(youtubeBrowser, youtubeProfile);
+      } else {
+        await api.youtubeBrowserLogin(youtubeBrowser, youtubeProfile);
       }
+      setYoutubeLoginOpen(false);
+      setYoutubeAdvancedOpen(false);
+      await refreshAccounts();
+    } catch (error) {
+      setNotice(`连接 ${account.label} 浏览器会话失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setYoutubeBusy(false);
+    }
+  };
+
+  const importYoutubeHeaders = async () => {
+    if (!youtubeHeaders.trim()) return;
+    setYoutubeBusy(true);
+    setNotice("");
+    try {
+      if (account.platform === "ytm") {
+        await api.ytmHeadersLogin(youtubeHeaders);
+      } else {
+        await api.youtubeHeadersLogin(youtubeHeaders);
+      }
+      setYoutubeHeaders("");
+      setYoutubeLoginOpen(false);
+      await refreshAccounts();
+    } catch (error) {
+      setNotice(`导入 ${account.label} 请求头失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setYoutubeBusy(false);
     }
   };
 
@@ -500,7 +565,7 @@ export function AccountRow({ account }: { account: Account }) {
               }}
             />
           )}
-          {!avatarSrc && !loggedIn && <PlatformMark id={account.platform} size={17} />}
+          {!avatarSrc && <PlatformMark id={account.platform} size={17} />}
         </span>
         <div style={settingRow.body}>
           {/* title 兜住省略号：名字被截了还能悬停看全 */}
@@ -509,11 +574,11 @@ export function AccountRow({ account }: { account: Account }) {
           </div>
           <div style={settingRow.hint}>
             {/* 状态本身就是这行的说明，不再另起一个彩色标签 */}
-            <span style={{ color: STATE_COLOR[account.state] }}>{STATE_LABEL[account.state]}</span>
+            <span style={{ color: stateColor }}>{stateLabel}</span>
             {account.nickname && ` · ${account.nickname}`}
             {/* detail 常常就是状态本身（"未登录"），或 UID/musicid 这类机器码——都不展示 */}
             {account.detail &&
-              account.detail !== STATE_LABEL[account.state] &&
+              account.detail !== stateLabel &&
               !isMachineIdDetail(account.detail) &&
               ` · ${account.detail}`}
           </div>
@@ -524,13 +589,6 @@ export function AccountRow({ account }: { account: Account }) {
               {qrState === "waiting"
                 ? (SCAN_WITH[account.platform] ?? "等待扫码")
                 : (qrState && QR_STATE_TEXT[qrState]) || "等待扫码"}
-            </div>
-          )}
-          {deviceSession && !loggedIn && (
-            <div style={settingRow.hint}>
-              在浏览器打开 {deviceSession.verification_url} 输入{" "}
-              <b style={{ letterSpacing: "0.08em" }}>{deviceSession.user_code}</b>
-              {" · "}等待授权
             </div>
           )}
           {/* 贴在状态行下面，而不是塞进右边那一列：那一列只有按钮那么宽，
@@ -552,10 +610,19 @@ export function AccountRow({ account }: { account: Account }) {
             {oauthBusy && <LoaderCircle size={13} className="kd-spin" />}
             {oauthBusy ? "等待授权" : "使用 SoundCloud 登录"}
           </Button>
-        ) : deviceAccount ? (
-          <Button size="sm" variant="ghost" disabled={deviceBusy} onClick={() => void deviceLogin()}>
-            {deviceBusy && <LoaderCircle size={13} className="kd-spin" />}
-            {deviceBusy ? "等待授权" : "使用 Google 登录"}
+        ) : browserAccount && browserMobile ? (
+          <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>
+            匿名可用
+          </span>
+        ) : browserAccount ? (
+          <Button
+            size="sm"
+            variant={youtubeLoginOpen ? "ghost" : "primary"}
+            disabled={youtubeBusy}
+            onClick={toggleYoutubeLogin}
+          >
+            {youtubeBusy && <LoaderCircle size={13} className="kd-spin" />}
+            {youtubeLoginOpen ? "取消" : "连接"}
           </Button>
         ) : savedPath ? (
           <Button
@@ -579,6 +646,142 @@ export function AccountRow({ account }: { account: Account }) {
           </Button>
         )}
       </div>
+      {browserAccount && youtubeLoginOpen && !loggedIn && !browserMobile && (
+        <div
+          style={{
+            flex: "1 0 100%",
+            minWidth: 0,
+            display: "grid",
+            gap: "0.3rem",
+            padding: "0 0 0.45rem 2.4rem",
+          }}
+        >
+          {youtubeBusy && !youtubeCatalog && (
+            <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>
+              正在查找浏览器…
+            </span>
+          )}
+          {youtubeCatalog && youtubeCatalog.browsers.length > 0 && (
+            <>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(0, 5.4rem) minmax(0, 7.1rem) auto auto",
+                  alignItems: "center",
+                  gap: "0.25rem",
+                  maxWidth: "18rem",
+                }}
+              >
+                <select
+                  className="kd-account-browser-select"
+                  aria-label="浏览器"
+                  title="浏览器"
+                  value={youtubeBrowser}
+                  disabled={youtubeBusy}
+                  onChange={(event) => {
+                    const browser = youtubeCatalog.browsers.find(
+                      (candidate) => candidate.id === event.currentTarget.value,
+                    );
+                    setYoutubeBrowser(event.currentTarget.value);
+                    setYoutubeProfile(browser?.profiles[0]?.id ?? "");
+                  }}
+                >
+                  {youtubeCatalog.browsers.map((browser) => (
+                    <option key={browser.id} value={browser.id}>
+                      {browser.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="kd-account-browser-select"
+                  aria-label="浏览器 Profile"
+                  title="Profile"
+                  value={youtubeProfile}
+                  disabled={youtubeBusy}
+                  onChange={(event) => setYoutubeProfile(event.currentTarget.value)}
+                >
+                  {selectedYoutubeBrowser?.profiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.label}
+                    </option>
+                  ))}
+                </select>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  iconOnly
+                  aria-label="重新检测浏览器"
+                  title="重新检测浏览器"
+                  disabled={youtubeBusy}
+                  onClick={() => void detectYoutubeBrowsers()}
+                >
+                  <RefreshCw size={13} />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={youtubeBusy || !youtubeBrowser || !youtubeProfile}
+                  onClick={() => void importYoutubeBrowser()}
+                >
+                  {youtubeBusy && <LoaderCircle size={13} className="kd-spin" />}
+                  连接
+                </Button>
+              </div>
+              <small className="kd-faint" style={{ lineHeight: 1.35 }}>
+                {soundcloudAccount
+                  ? "读取所选 Profile 的 SoundCloud 登录状态，不读取密码。"
+                  : `只连接 ${account.label}；不会改变另一个 YouTube 来源的登录状态。`}
+              </small>
+              {selectedYoutubeProfile?.requires_elevation && (
+                <small style={{ color: "var(--kd-warn)", lineHeight: 1.35 }}>
+                  此 Windows Profile 使用应用绑定加密；请以管理员运行，或改用 Firefox。
+                </small>
+              )}
+            </>
+          )}
+          {youtubeAccount && (
+            <div>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={youtubeBusy}
+                onClick={() => setYoutubeAdvancedOpen((open) => !open)}
+              >
+                {youtubeAdvancedOpen ? "收起请求头导入" : "手动导入请求头…"}
+              </Button>
+            </div>
+          )}
+          {youtubeAccount && youtubeAdvancedOpen && (
+            <div style={{ display: "grid", gap: "0.25rem" }}>
+              <textarea
+                className="kd-textarea"
+                value={youtubeHeaders}
+                disabled={youtubeBusy}
+                rows={4}
+                aria-label={`${account.label} 请求头`}
+                placeholder={
+                  account.platform === "ytm"
+                    ? "粘贴 music.youtube.com 的 browse 请求头"
+                    : "粘贴 www.youtube.com 的 browse 请求头"
+                }
+                onChange={(event) => setYoutubeHeaders(event.target.value)}
+                style={{ width: "100%", fontSize: "var(--kd-size-xs)" }}
+              />
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={youtubeBusy || !youtubeHeaders.trim()}
+                  onClick={() => void importYoutubeHeaders()}
+                >
+                  {youtubeBusy && <LoaderCircle size={13} className="kd-spin" />}
+                  导入
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

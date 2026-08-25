@@ -276,16 +276,6 @@ impl StereoRegionDecoder {
     }
 }
 
-/// Decode `[start, start + frames)` at 44.1 kHz stereo, padding with silence if the file ends.
-pub(crate) fn decode_stereo_region(
-    path: &Path,
-    start: f64,
-    frames: usize,
-) -> Result<(Vec<f32>, Vec<f32>)> {
-    let mut decoder = StereoRegionDecoder::open(path)?;
-    decoder.decode_region(start, frames)
-}
-
 /// Decode a complete file to 44.1 kHz stereo for the classical A/B research tool. Product
 /// playback continues to use bounded region decoding.
 pub fn decode_stereo_file(path: &Path) -> Result<Vec<[f32; 2]>> {
@@ -297,32 +287,6 @@ pub fn decode_stereo_file(path: &Path) -> Result<Vec<[f32; 2]>> {
         .zip(decoded.right)
         .map(|(left, right)| [left, right])
         .collect())
-}
-
-/// Reuse `cached` when it already holds this path; reopen once if a seek/decode fails.
-pub(crate) fn decode_stereo_region_cached(
-    cached: &mut Option<StereoRegionDecoder>,
-    path: &Path,
-    start: f64,
-    frames: usize,
-) -> Result<(Vec<f32>, Vec<f32>)> {
-    if cached.as_ref().is_none_or(|decoder| !decoder.matches(path)) {
-        *cached = Some(StereoRegionDecoder::open(path)?);
-    }
-    match cached
-        .as_mut()
-        .expect("STEM region decoder")
-        .decode_region(start, frames)
-    {
-        Ok(samples) => Ok(samples),
-        Err(_) => {
-            *cached = Some(StereoRegionDecoder::open(path)?);
-            cached
-                .as_mut()
-                .expect("STEM region decoder")
-                .decode_region(start, frames)
-        }
-    }
 }
 
 /// Sequential fixed-shape classical Redress windows. A seek reopens the decoder; a context-safe core advance
@@ -562,31 +526,6 @@ mod tests {
         let input = vec![0.0; 48_000];
         let output = resample(&input, 48_000, 44_100);
         assert!((output.len() as isize - 44_100).abs() <= 1);
-    }
-
-    #[test]
-    fn reused_decoder_matches_a_fresh_open() {
-        let dir = std::env::temp_dir().join(format!("kdj-stem-decoder-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tone.wav");
-        write_sine_wav(&path, SAMPLE_RATE, SAMPLE_RATE as usize / 4).unwrap();
-
-        let mut cached = None;
-        let first = decode_stereo_region_cached(&mut cached, &path, 0.0, 2048).unwrap();
-        let second = decode_stereo_region_cached(&mut cached, &path, 0.05, 2048).unwrap();
-        let fresh_first = decode_stereo_region(&path, 0.0, 2048).unwrap();
-        let fresh_second = decode_stereo_region(&path, 0.05, 2048).unwrap();
-        assert_eq!(first.0.len(), fresh_first.0.len());
-        assert_eq!(second.0.len(), fresh_second.0.len());
-        let err = first
-            .0
-            .iter()
-            .zip(fresh_first.0.iter())
-            .map(|(left, right)| (left - right).abs())
-            .fold(0.0f32, f32::max);
-        assert!(err < 1e-4, "reused decoder drifted by {err}");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

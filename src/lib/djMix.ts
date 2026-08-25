@@ -42,6 +42,7 @@ import {
 } from "./browserDeckPreload";
 import { mediaUrlForTrack } from "./streamTrack";
 import { BEATS_PER_BAR as GRID_BEATS_PER_BAR, msUntilNextBoundary } from "./beatGridSync";
+import { CHANNEL_FILTER_RESONANCE_SCALE } from "./eqGraph";
 import type { FilterResonance, Track } from "../types";
 
 /* ---------------------------------------------------------------- 配置 */
@@ -91,7 +92,7 @@ interface DjConfig {
    */
   applyInOutPoints: boolean;
   /**
-   * 自动对拍：波形跳转保持小节相位；SYNC 锁小节（黄线对齐）；接歌等到下一小节边界。
+   * 自动对拍：波形跳转保持 1/4 小节相位；SYNC 锁小节（黄线对齐）；接歌等到下一小节边界。
    * 关掉后点击跳转仍是精确落点，SYNC 只锁拍子（灰线对齐）。
    */
   autoBeatSync: boolean;
@@ -258,18 +259,19 @@ const CURVE_N = 64;
 /** 反馈总是严格低于 0.4；效果链再异常也不允许接近自激。 */
 const ECHO_FEEDBACK_MAX = 0.34;
 const HYDRANT_FEEDBACK_MAX = 0.3;
-/** 共振 Q 的安全上限。高于 3 在满电平母带上很容易形成刺耳窄峰。 */
+/** Hydrant / 合成层共振上限，与通道 FILTER 的高档分开，避免效果链跟着拧滤波器一起变尖。 */
 const RESONANCE_Q_MAX = 2.4;
-/** Web Audio 的低档严格保留此前固定的 0.7；其余档位在安全上限内逐级提高。 */
+/** 与 `kdj-player` 通道 FILTER 的 low / medium / high 对齐。 */
 const FILTER_RESONANCE_Q: Record<FilterResonance, number> = {
-  low: 0.7,
-  medium: 1.4,
-  high: RESONANCE_Q_MAX,
+  low: 0.72,
+  medium: 1.85,
+  high: 3.2,
 };
-let channelFilterResonanceQ = FILTER_RESONANCE_Q.high;
+let channelFilterResonanceQ = filterResonanceQ("high");
 
 function filterResonanceQ(resonance: FilterResonance): number {
-  return FILTER_RESONANCE_Q[resonance] ?? FILTER_RESONANCE_Q.high;
+  return (FILTER_RESONANCE_Q[resonance] ?? FILTER_RESONANCE_Q.high)
+    * CHANNEL_FILTER_RESONANCE_SCALE;
 }
 
 /** 接歌用的秒数 = 小节数 × 每小节时长（按出让方的 BPM）。 */
@@ -1457,7 +1459,7 @@ export interface DjBeginOptions {
  * bucket 都达标，避免一个编码残响把尾点拖到文件末端。
  */
 export function findMixStartTime(
-  wave: { duration: number; amp: number[] },
+  wave: { duration: number; amp: ArrayLike<number> },
   mixSecs: number,
 ): number | null {
   const n = wave.amp.length;
@@ -1465,10 +1467,17 @@ export function findMixStartTime(
   const secPerBucket = wave.duration / n;
 
   const NOISE_FLOOR = 0.02;
-  const active = wave.amp.filter((value) => Number.isFinite(value) && value > NOISE_FLOOR);
-  if (active.length < 8) return null;
+  let activeCount = 0;
+  let activeSum = 0;
+  for (let index = 0; index < n; index += 1) {
+    const value = wave.amp[index];
+    if (!Number.isFinite(value) || value <= NOISE_FLOOR) continue;
+    activeCount += 1;
+    activeSum += value;
+  }
+  if (activeCount < 8) return null;
 
-  const average = active.reduce((sum, value) => sum + value, 0) / active.length;
+  const average = activeSum / activeCount;
   const threshold = Math.max(NOISE_FLOOR, average * 0.12);
   const windowBuckets = Math.max(2, Math.ceil(1.5 / secPerBucket));
   const requiredAudible = Math.ceil(windowBuckets * 0.6);
@@ -1496,7 +1505,13 @@ export function findMixStartTime(
 
 /** @deprecated 使用 findMixStartTime */
 export function findOutroStart(
-  wave: { duration: number; amp: number[]; r: number[]; g: number[]; b: number[] },
+  wave: {
+    duration: number;
+    amp: ArrayLike<number>;
+    r: ArrayLike<number>;
+    g: ArrayLike<number>;
+    b: ArrayLike<number>;
+  },
   mixSecs: number,
 ): number | null {
   return findMixStartTime(wave, mixSecs);
@@ -1618,10 +1633,10 @@ export const djEngine = {
     if (!ctx || !decks) return;
     const now = ctx.currentTime;
     for (const deck of decks) {
-      for (const param of [deck.lowpass.Q, deck.highpass.Q]) {
-        param.cancelScheduledValues(now);
-        param.setValueAtTime(channelFilterResonanceQ, now);
-      }
+      deck.lowpass.Q.cancelScheduledValues(now);
+      deck.lowpass.Q.setValueAtTime(channelFilterResonanceQ, now);
+      deck.highpass.Q.cancelScheduledValues(now);
+      deck.highpass.Q.setValueAtTime(channelFilterResonanceQ, now);
     }
   },
 

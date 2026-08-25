@@ -12,6 +12,26 @@ export interface WorkspacePaneState {
 }
 
 export type WorkspacePaneAvailability = Record<WorkspacePaneKind, boolean>;
+export type WorkspacePaneWeights = Readonly<Record<WorkspacePaneKind, number>>;
+
+/**
+ * CSS Grid 对总和小于 1 的 fr 轨道不会铺满容器，而会故意留下未分配空间。
+ * 板块宽度是长期保存的：三栏里把本地栏拖到 0.92 后切回单栏，如果原样写成
+ * 0.92fr，列表右侧就会永久空出 8%。这里只归一化当前可见板块的 CSS 份额，
+ * 保存的原始权重不变，重新打开多栏时仍保留用户拖过的比例。
+ */
+export function normalizedWorkspacePaneFractions(
+  visible: readonly WorkspacePaneKind[],
+  weights: WorkspacePaneWeights,
+): number[] {
+  if (visible.length === 0) return [];
+  const values = visible.map((kind) => {
+    const value = weights[kind];
+    return Number.isFinite(value) && value > 0 ? value : 1;
+  });
+  const total = values.reduce((sum, value) => sum + value, 0);
+  return values.map((value) => (value / total) * visible.length);
+}
 
 /**
  * Delete/Backspace 只能由当前点亮板块消费；两张表会同时保留选区，不能各自在

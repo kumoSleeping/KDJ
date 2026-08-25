@@ -295,9 +295,9 @@ impl DeckEq {
         self.filter = filter;
         self.filter_resonance = filter_resonance;
         self.trim_gain = db_gain(trim_db);
-        let low_coefficients = shelf(self.sample_rate, 220.0, low_db, false);
-        let mid_coefficients = peaking(self.sample_rate, 1_200.0, 0.8, mid_db);
-        let high_coefficients = shelf(self.sample_rate, 5_500.0, high_db, true);
+        let low_coefficients = shelf(self.sample_rate, 320.0, low_db, false);
+        let mid_coefficients = peaking(self.sample_rate, 1_000.0, mid_peak_q(mid_db), mid_db);
+        let high_coefficients = shelf(self.sample_rate, 4_000.0, high_db, true);
         if initialise_coefficients {
             self.low.set_coefficients(low_coefficients);
             self.mid.set_coefficients(mid_coefficients);
@@ -432,6 +432,22 @@ fn finite_db(db: f32) -> f32 {
     }
 }
 
+/// Mixxx Biquad Full Kill uses Q=0.3 on boost and Q=0.9 on cut so a mid kill
+/// isolates instead of scooping vocals, snare, and most of the mix. This deck EQ
+/// is Pioneer-style shelf + peak, so keep the historical 0.5 boost Q and tighten
+/// toward Mixxx's kill Q as the cut deepens, reaching 0.9 by −12 dB.
+fn mid_peak_q(gain_db: f32) -> f32 {
+    const Q_BOOST: f32 = 0.5;
+    const Q_KILL: f32 = 0.9;
+    const KILL_Q_AT_DB: f32 = 12.0;
+    if gain_db >= 0.0 {
+        Q_BOOST
+    } else {
+        let t = (-gain_db / KILL_Q_AT_DB).clamp(0.0, 1.0);
+        Q_BOOST + (Q_KILL - Q_BOOST) * t
+    }
+}
+
 fn normalized_filter_resonance(value: f32) -> f32 {
     if value.is_finite() {
         value.clamp(
@@ -453,6 +469,9 @@ const FILTER_CENTER_DEADZONE: f32 = 0.01;
 const FILTER_NEAR_CENTER_Q: f32 = 0.707_106_77;
 const FILTER_RESONANCE_RAMP_START: f32 = 0.10;
 const FILTER_RESONANCE_RAMP_END: f32 = 0.30;
+/// Applied equally to LPF and HPF after the setting's Q is chosen. 0.95 is about 0.4 dB
+/// less peak at the cutoff, enough extra headroom without changing the sweep character.
+const FILTER_RESONANCE_SCALE: f32 = 0.95;
 /// A 24 ms dual-filter crossfade is longer than an individual callback but shorter than a normal
 /// control gesture. Unlike interpolating near-unit IIR coefficients, it cannot inject a resonant
 /// state burst while frequent 40 ms UI updates sweep the low-frequency end of the filter.
@@ -477,6 +496,7 @@ fn effective_filter_resonance(filter: f32, selected_q: f32) -> f32 {
         / (FILTER_RESONANCE_RAMP_END - FILTER_RESONANCE_RAMP_START))
         .clamp(0.0, 1.0);
     let smooth = linear * linear * (3.0 - 2.0 * linear);
+    let selected_q = selected_q * FILTER_RESONANCE_SCALE;
     FILTER_NEAR_CENTER_Q + (selected_q - FILTER_NEAR_CENTER_Q) * smooth
 }
 
@@ -853,10 +873,55 @@ mod tests {
     }
 
     #[test]
+    fn mid_peak_q_tightens_on_cut() {
+        assert!((mid_peak_q(0.0) - 0.5).abs() < 1e-6);
+        assert!((mid_peak_q(9.0) - 0.5).abs() < 1e-6);
+        assert!(mid_peak_q(-6.0) > 0.65 && mid_peak_q(-6.0) < 0.75);
+        assert!((mid_peak_q(-12.0) - 0.9).abs() < 1e-6);
+        assert!((mid_peak_q(-48.0) - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn modest_mid_cut_does_not_gut_bass() {
+        let mut dry = DeckEq::default();
+        dry.configure(
+            48_000,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            crate::DEFAULT_FILTER_RESONANCE_Q,
+        );
+        let mut cut = DeckEq::default();
+        cut.configure(
+            48_000,
+            0.0,
+            0.0,
+            -6.0,
+            0.0,
+            0.0,
+            crate::DEFAULT_FILTER_RESONANCE_Q,
+        );
+        let dry_bass = tone_rms(&mut dry, 80.0);
+        let cut_bass = tone_rms(&mut cut, 80.0);
+        assert!(
+            cut_bass > dry_bass * 0.85,
+            "−6 dB mid leaked into bass: dry={dry_bass}, cut={cut_bass}",
+        );
+        let dry_mid = tone_rms(&mut dry, 1_000.0);
+        let cut_mid = tone_rms(&mut cut, 1_000.0);
+        assert!(
+            cut_mid < dry_mid * 0.6,
+            "−6 dB mid did not cut 1 kHz: dry={dry_mid}, cut={cut_mid}",
+        );
+    }
+
+    #[test]
     fn three_band_deck_eq_audibly_cuts_each_target_band() {
         for (frequency, gains) in [
             (100.0, (-48.0, 0.0, 0.0)),
-            (1_200.0, (0.0, -48.0, 0.0)),
+            (1_000.0, (0.0, -48.0, 0.0)),
             (8_000.0, (0.0, 0.0, -48.0)),
         ] {
             let mut neutral = DeckEq::default();
@@ -886,6 +951,44 @@ mod tests {
                 "{frequency} Hz band cut stayed too loud: neutral={neutral_rms}, cut={cut_rms}",
             );
         }
+    }
+
+    #[test]
+    fn killing_all_three_eq_bands_nearly_silences_broadband_audio() {
+        let mut dry = DeckEq::default();
+        dry.configure(
+            48_000,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            crate::DEFAULT_FILTER_RESONANCE_Q,
+        );
+        let mut killed = DeckEq::default();
+        killed.configure(
+            48_000,
+            0.0,
+            -48.0,
+            -48.0,
+            -48.0,
+            0.0,
+            crate::DEFAULT_FILTER_RESONANCE_Q,
+        );
+        let mut dry_energy = 0.0;
+        let mut killed_energy = 0.0;
+        for frame in 0..24_000 {
+            let phase = frame as f32 / 48_000.0;
+            let sample = (2.0 * PI * 80.0 * phase).sin() * 0.35
+                + (2.0 * PI * 1_000.0 * phase).sin() * 0.35
+                + (2.0 * PI * 8_000.0 * phase).sin() * 0.3;
+            dry_energy += dry.process_stereo([sample; 2])[0].abs();
+            killed_energy += killed.process_stereo([sample; 2])[0].abs();
+        }
+        assert!(
+            killed_energy < dry_energy * 0.04,
+            "full EQ kill stayed too loud: dry={dry_energy}, killed={killed_energy}",
+        );
     }
 
     #[test]
@@ -1075,7 +1178,11 @@ mod tests {
         let at_end = effective_filter_resonance(FILTER_RESONANCE_RAMP_END, selected);
         assert!((at_start - FILTER_NEAR_CENTER_Q).abs() < f32::EPSILON);
         assert!(midway > at_start && midway < at_end);
-        assert!((at_end - selected).abs() < f32::EPSILON);
+        assert!((at_end - selected * FILTER_RESONANCE_SCALE).abs() < f32::EPSILON);
+        assert!(
+            (effective_filter_resonance(-FILTER_RESONANCE_RAMP_END, selected) - at_end).abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]

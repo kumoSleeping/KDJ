@@ -103,7 +103,7 @@ sidecar/kdj/
 | POST | `/library/tracks/{id}/write-tags` | — | `Track` |
 | GET | `/library/harmonic/{id}` | query `bpm_tolerance=12.0, limit=60, wide=true` | `HarmonicMatch[]` |
 | GET | `/library/stats` | — | `LibraryStats` |
-| GET | `/library/waveform/{id}` | query `buckets=640` | `{duration, amp[], r[], g[], b[]}`，磁盘缓存 |
+| GET | `/library/waveform/{id}` | query `buckets=640, profile=current\|release-overview, format=json\|binary` | 默认兼容 JSON；前端请求 `binary` 时返回带 profile/revision 的 `application/vnd.kdj.waveform` 紧凑二进制，磁盘缓存 |
 | GET | `/library/folders` | — | `FolderTree` |
 | POST | `/library/folders/create` | `{parent, name}` | `FolderTree` |
 | POST | `/library/folders/rename` | `{path, name}` | `FolderTree`（同时 rebase 该枝下所有曲目的 path） |

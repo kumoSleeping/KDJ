@@ -10,6 +10,7 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
 import { isSparseDownloadTitle, withDownloadDisplay } from "../lib/downloadDisplay";
+import { rememberVideoEnqueue } from "../lib/queueTaskDraft";
 import {
   hintForDownload,
   pruneDownloadDisplayCache,
@@ -152,6 +153,22 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       dest_dir: destDir || undefined,
     };
     const tasks = await api.enqueue(body);
+    tasks.forEach((task, index) => {
+      const source = sources[index];
+      if (task.kind !== "video" || source?.platform !== "youtube") return;
+      rememberVideoEnqueue(task.id, {
+        platform: "youtube",
+        bvid: source.key,
+        page_index: 0,
+        max_height: Number(source.payload.max_height) || 1080,
+        audio_only: Boolean(source.payload.audio_only),
+        transcode: Boolean(source.payload.transcode),
+        title: source.title,
+        artist: source.artists.join(", "),
+        cover: source.cover,
+        dest_dir: destDir || undefined,
+      });
+    });
     const explicitTarget = options && "one_library_target" in options
       ? options.one_library_target
       : undefined;

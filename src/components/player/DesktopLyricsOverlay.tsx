@@ -85,6 +85,16 @@ function publishedStreamState(value: PublishedStreamPlayback): UnifiedPlayerStat
     transitioning: false,
     rate: value.rate,
     error: "",
+    sync: {
+      enabled: false,
+      leader: 0,
+      follower: 1,
+      phase: "disabled",
+      phaseErrorSeconds: 0,
+      correctionRate: 1,
+      targetBpm: 0,
+      multiple: 1,
+    },
     decks: [0, 1].map((index) => ({
       trackId: index === 0 ? value.trackId : null,
       currentTime: index === 0 ? value.position : 0,
@@ -225,7 +235,6 @@ export function DesktopLyricsOverlay() {
   const locked = prefs.desktopLocked;
   const fontScale = prefs.desktopFontScale;
   const opacity = prefs.desktopOpacity;
-  const setDesktopCoordinates = useLyricsPrefs((state) => state.setDesktopCoordinates);
   const smoothTime = useSmoothPlaybackTime(activePlayback);
   const entry = useSyncExternalStore(
     useLyricsStore.subscribe,
@@ -309,25 +318,6 @@ export function DesktopLyricsOverlay() {
       unlistenStreamPlayback?.();
     };
   }, []);
-
-  useEffect(() => {
-    let unlisten: UnlistenFn | null = null;
-    let timer: number | null = null;
-    let latest: { x: number; y: number } | null = null;
-    void listen<{ x: number; y: number }>("desktop-lyrics-moved", (event) => {
-      latest = event.payload;
-      if (timer != null) window.clearTimeout(timer);
-      timer = window.setTimeout(() => {
-        if (latest) setDesktopCoordinates(latest.x, latest.y);
-      }, 220);
-    }).then((dispose) => {
-      unlisten = dispose;
-    });
-    return () => {
-      if (timer != null) window.clearTimeout(timer);
-      unlisten?.();
-    };
-  }, [setDesktopCoordinates]);
 
   useEffect(() => {
     let alive = true;

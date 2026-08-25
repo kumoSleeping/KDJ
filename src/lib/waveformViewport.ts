@@ -14,9 +14,13 @@ export const PERFORMANCE_WAVEFORM_BAKE_SCREENS = 3;
  */
 export const PERFORMANCE_WAVEFORM_SMOOTHING_MS = 240;
 /** A held platter publishes visual targets at animation-frame cadence, not the 100ms audio clock. */
-export const PERFORMANCE_WAVEFORM_SCRATCH_SMOOTHING_MS = 32;
+export const PERFORMANCE_WAVEFORM_SCRATCH_SMOOTHING_MS = 16;
 /** A fast physical spin can accumulate a whole bar between two animation frames. */
 export const PERFORMANCE_WAVEFORM_SCRATCH_MAX_STEP_SECONDS = 8;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
+}
 
 /**
  * Performance 波形固定屏幕移动速度。引擎位置按 playback rate 推进，因此可视的
@@ -46,11 +50,12 @@ export function projectedWaveformPosition(
   runwayMs = PERFORMANCE_WAVEFORM_SMOOTHING_MS,
 ): number {
   const duration = Number.isFinite(durationSec) ? Math.max(0, durationSec) : 0;
-  const position = Number.isFinite(positionSec) ? Math.max(0, positionSec) : 0;
+  const position = Number.isFinite(positionSec) ? positionSec : 0;
   const rate = Number.isFinite(playbackRate) && playbackRate > 0 ? playbackRate : 1;
   const runway = Number.isFinite(runwayMs) ? Math.max(0, runwayMs) : 0;
   const projected = position + rate * runway / 1_000;
-  return duration > 0 ? Math.min(duration, projected) : projected;
+  if (duration > 0 && projected > duration) return duration;
+  return projected;
 }
 
 /**
@@ -92,8 +97,8 @@ export function detailWaveformBuckets(durationSec: number): number {
 }
 
 /**
- * 从 Deck 高密度 master 派生整曲概览。高度按时间面积平均，不能用屏幕像素峰值，
- * 否则每个 300–500ms 概览桶总能碰到一个鼓点，整首就会变成顶满的实心带。
+ * 从 Deck 高密度 master 派生整曲概览。高度和服务端统一为 80% RMS + 20% peak：
+ * RMS 避免每个 300–500ms 桶碰到鼓点就顶满，少量 peak 则保留可辨认的瞬态。
  * 颜色仍按响度加权，保留低/中/高的细节变化。
  */
 export function overviewWaveformFromDetail(wave: Waveform, requestedColumns: number): Waveform {
@@ -116,8 +121,9 @@ export function overviewWaveformFromDetail(wave: Waveform, requestedColumns: num
     const end = (target + 1) * sourceLength / columns;
     const first = Math.floor(start);
     const last = Math.min(sourceLength, Math.ceil(end));
-    let amplitudeSum = 0;
-    let area = 0;
+    let peak = 0;
+    let squareSum = 0;
+    let amplitudeWeight = 0;
     let red = 0;
     let green = 0;
     let blue = 0;
@@ -126,8 +132,9 @@ export function overviewWaveformFromDetail(wave: Waveform, requestedColumns: num
       const overlap = Math.max(0, Math.min(end, source + 1) - Math.max(start, source));
       if (overlap <= 0) continue;
       const value = Math.min(1, Math.max(0, wave.amp[source] ?? 0));
-      amplitudeSum += value * overlap;
-      area += overlap;
+      peak = Math.max(peak, value);
+      squareSum += value * value * overlap;
+      amplitudeWeight += overlap;
       const weight = overlap * (value + 0.001);
       red += (wave.r[source] ?? 0) * weight;
       green += (wave.g[source] ?? 0) * weight;
@@ -135,7 +142,8 @@ export function overviewWaveformFromDetail(wave: Waveform, requestedColumns: num
       colorWeight += weight;
     }
     const fallback = Math.min(sourceLength - 1, first);
-    amp.push(area > 0 ? amplitudeSum / area : wave.amp[fallback] ?? 0);
+    const rms = amplitudeWeight > 0 ? Math.sqrt(squareSum / amplitudeWeight) : peak;
+    amp.push(Math.min(1, Math.max(0, rms * 0.8 + peak * 0.2)));
     r.push(colorWeight > 0 ? Math.round(red / colorWeight) : wave.r[fallback] ?? 0);
     g.push(colorWeight > 0 ? Math.round(green / colorWeight) : wave.g[fallback] ?? 0);
     b.push(colorWeight > 0 ? Math.round(blue / colorWeight) : wave.b[fallback] ?? 0);
@@ -192,11 +200,24 @@ export function waveformPointerSeconds(
   const layout = waveformViewportLayout(duration, positionSec, viewportSeconds);
   if (!layout.active) return ratio * duration;
   const span = layout.viewEndSec - layout.viewStartSec;
-  return Math.min(duration, Math.max(0, layout.viewStartSec + ratio * span));
+  return layout.viewStartSec + ratio * span;
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
+/**
+ * Place a beat on a painted range (bake window or visible viewport).
+ *
+ * Mixxx / Rekordbox keep one absolute lattice: at −5 s the needle is 50% and bar 1
+ * (t = 0) sits to its right. Mapping beats onto 0…duration and clipping `left < 0`
+ * is what redrew 1/2/3 on top of the song.
+ */
+export function beatMarkerRangePercent(
+  positionSec: number,
+  rangeStartSec: number,
+  rangeEndSec: number,
+): number {
+  const span = rangeEndSec - rangeStartSec;
+  if (!(span > 0) || !Number.isFinite(positionSec)) return 50;
+  return ((positionSec - rangeStartSec) / span) * 100;
 }
 
 /**
@@ -228,7 +249,10 @@ export function waveformViewportLayout(
     };
   }
 
-  const position = clamp(positionSec, 0, duration);
+  // Performance pre-roll leaves the track before 0 under the fixed center needle. Mixxx / Serato
+  // paint that lead-in as part of the same absolute timeline, so bar numbers continue backward
+  // instead of lifting the song and redrawing 1/2/3.
+  const position = Math.min(duration, positionSec);
   // 不得限制为固定最大 zoom。旧的 12x 上限会让 3 分钟和 8 分钟曲目分别显示
   // 不同秒数，从而即使 rate 相同，波形也以不同像素速度移动。Canvas 自己限制
   // backing store；这里必须忠实保留调用方请求的时间窗口。
@@ -295,7 +319,7 @@ export function waveformBakeRangeChanged(
 /**
  * Sliding window for the DJ canvas. Pixels are baked in a TEMPO-independent
  * 1× track-time window; SYNC / fader zoom is CSS `scaleX` around the playhead.
- * Rebuilding on every rate tick used to freeze both STEM rails at once.
+ * Rebuilding on every rate tick used to freeze both Deck rails at once.
  */
 export function waveformBakeWindow(
   durationSec: number,
@@ -320,6 +344,22 @@ export function waveformBakeWindow(
       position - visibleHalf >= previous.startSec + slack
       && position + visibleHalf <= previous.endSec - slack
     ) {
+      return {
+        ...previous,
+        viewportSeconds: displayView,
+        translatePercent: waveformBakeTranslatePercent(previous, position),
+      };
+    }
+    // Empty time before frame 0 has no PCM. Mixxx keeps t=0 painted at a stable canvas
+    // coordinate and just translates further left; recentering here lifted the song and
+    // redrew the 1/2/3 grid on top of it.
+    const viewEnd = position + visibleHalf;
+    const audibleStart = Math.max(0, position - visibleHalf);
+    const audibleEnd = duration > 0 ? Math.min(duration, viewEnd) : viewEnd;
+    const needsAudiblePixels = audibleEnd > audibleStart;
+    const audibleStillBaked = !needsAudiblePixels
+      || (audibleStart >= previous.startSec && audibleEnd <= previous.endSec);
+    if (viewEnd <= previous.endSec - slack && audibleStillBaked) {
       return {
         ...previous,
         viewportSeconds: displayView,

@@ -17,6 +17,12 @@ import { rememberVideoEnqueue } from "./queueTaskDraft";
 import { useAppStore } from "../stores/appStore";
 import { useDownloadStore } from "../stores/downloadStore";
 import { useLibraryStore } from "../stores/libraryStore";
+import {
+  dispatchStreamDeckDrop,
+  trackDeckDropSideAt,
+  TRACK_DECK_DROP_TARGET_ATTR,
+  TRACK_DECK_SPLIT_DROP_TARGET,
+} from "./trackDrag";
 import type { OneLibraryTarget, SongSource, VideoDownloadRequest } from "../types";
 
 export { isSparseDownloadTitle, withDownloadDisplay } from "./downloadDisplay";
@@ -65,6 +71,11 @@ export function activeSearchDrag(): ActiveSearchDrag | null {
   return active;
 }
 
+/** Deck 只接歌曲流；视频拖动仍保留给下载队列和文件夹。 */
+export function searchAudioSource(payload: ActiveSearchDrag | null): SongSource | null {
+  return payload?.kind === "audio" ? payload.sources[0] ?? null : null;
+}
+
 export function endSearchDrag(): void {
   // Chromium 是 drop → dragend，但 WKWebView 偶尔会先把 React 的 dragend
   // 回调送到 JS。立刻清空会让随后到达的文件夹 drop 既读不到自定义 MIME，
@@ -92,6 +103,13 @@ export function claimActiveSearchDrag(): ActiveSearchDrag | null {
   const payload = active;
   finishSearchDrop();
   return payload;
+}
+
+/** dragover：是不是一首可装入 DJ Deck 的在线歌曲。 */
+export function isSearchAudioDrag(event: { dataTransfer: DataTransfer | null }): boolean {
+  if (active) return active.kind === "audio" && active.sources.length > 0;
+  const types = event.dataTransfer ? Array.from(event.dataTransfer.types) : [];
+  return types.some((type) => type.toLowerCase() === SEARCH_DOWNLOAD_DND_TYPE);
 }
 
 /** dragover：是不是搜到的歌/视频在拖（兼容 WebKit 藏自定义 MIME）。 */
@@ -140,6 +158,135 @@ export function writeVideoDownloadDrag(
   } catch {
     // text/plain + active 足以走完整条拖放链路。
   }
+}
+
+/**
+ * 音频搜索行必须和本地曲目一样走 pointer 主链路。WKWebView 经常在跨 WebContent
+ * 合成层时不产生 HTML5 drop；直接按松手坐标认 Deck，才能真正完成“拖入装盘”。
+ */
+export function beginAudioPointerDrag(
+  down: PointerEvent,
+  sources: SongSource[],
+  displayTitle: string,
+  onError: (error: unknown) => void,
+  onActivated?: () => void,
+): () => void {
+  if (down.pointerType !== "mouse" || down.button !== 0 || sources.length === 0) {
+    return () => undefined;
+  }
+  const target = down.target as HTMLElement | null;
+  if (target?.closest("button, input, select, textarea, a, label")) return () => undefined;
+
+  const { pointerId, clientX: startX, clientY: startY } = down;
+  const payload: Extract<ActiveSearchDrag, { kind: "audio" }> = { kind: "audio", sources };
+  const ghostTitle = displayTitle.trim() || sources[0]?.title || "在线歌曲";
+  let dragging = false;
+  let ghost: HTMLDivElement | null = null;
+  const clearTargets = () => {
+    document
+      .querySelectorAll<HTMLElement>("[data-kd-pointer-search-over]")
+      .forEach((node) => {
+        node.removeAttribute("data-kd-pointer-search-over");
+        node.removeAttribute("data-kd-native-track-over");
+      });
+  };
+  const deckElementAt = (x: number, y: number): HTMLElement | null => {
+    const selector = `[${TRACK_DECK_DROP_TARGET_ATTR}]`;
+    const stack = typeof document.elementsFromPoint === "function"
+      ? document.elementsFromPoint(x, y)
+      : [document.elementFromPoint(x, y)].filter((node): node is Element => node !== null);
+    return stack
+      .map((node) => node.closest<HTMLElement>(selector))
+      .find((node): node is HTMLElement => node !== null) ?? null;
+  };
+  const paintTarget = (x: number, y: number) => {
+    clearTargets();
+    const deck = deckElementAt(x, y);
+    const deckSide = trackDeckDropSideAt(x, y);
+    if (deck && deckSide !== null) {
+      deck.setAttribute("data-kd-pointer-search-over", "deck");
+      deck.setAttribute(
+        "data-kd-native-track-over",
+        deck.getAttribute(TRACK_DECK_DROP_TARGET_ATTR) === TRACK_DECK_SPLIT_DROP_TARGET
+          ? String(deckSide)
+          : "true",
+      );
+      if (ghost) ghost.textContent = `${ghostTitle} → Deck ${deckSide === 0 ? "A" : "B"}`;
+      return;
+    }
+    const queue = searchQueueDropElementAt(x, y);
+    if (queue) {
+      queue.setAttribute("data-kd-pointer-search-over", "queue");
+      if (ghost) ghost.textContent = `${ghostTitle} → 下载队列`;
+      return;
+    }
+    const folder = searchDropElementAt(x, y);
+    folder?.setAttribute("data-kd-pointer-search-over", "folder");
+    if (ghost) ghost.textContent = folder ? `${ghostTitle} → 下载到文件夹` : ghostTitle;
+  };
+  const cleanup = () => {
+    window.removeEventListener("pointermove", onMove, true);
+    window.removeEventListener("pointerup", onUp, true);
+    window.removeEventListener("pointercancel", onCancel, true);
+    clearTargets();
+    ghost?.remove();
+    ghost = null;
+    delete document.body.dataset.kdSearchPointerDragging;
+  };
+  const activate = (x: number, y: number) => {
+    dragging = true;
+    onActivated?.();
+    window.getSelection()?.removeAllRanges();
+    dragEpoch += 1;
+    announceSearchDrag(payload);
+    document.body.dataset.kdSearchPointerDragging = "true";
+    ghost = document.createElement("div");
+    ghost.className = "kd-track-pointer-ghost";
+    ghost.textContent = ghostTitle;
+    document.body.appendChild(ghost);
+    ghost.style.transform = `translate3d(${x + 12}px, ${y + 12}px, 0)`;
+    paintTarget(x, y);
+  };
+  const onMove = (move: PointerEvent) => {
+    if (move.pointerId !== pointerId) return;
+    if (!dragging && Math.hypot(move.clientX - startX, move.clientY - startY) < 5) return;
+    move.preventDefault();
+    if (!dragging) activate(move.clientX, move.clientY);
+    ghost?.style.setProperty(
+      "transform",
+      `translate3d(${move.clientX + 12}px, ${move.clientY + 12}px, 0)`,
+    );
+    paintTarget(move.clientX, move.clientY);
+  };
+  const onUp = (up: PointerEvent) => {
+    if (up.pointerId !== pointerId) return;
+    const deckSide = trackDeckDropSideAt(up.clientX, up.clientY);
+    const queue = searchQueueDropElementAt(up.clientX, up.clientY);
+    const dest = searchDropPathAt(up.clientX, up.clientY);
+    cleanup();
+    if (!dragging) return;
+    up.preventDefault();
+    finishSearchDrop();
+    if (deckSide !== null) {
+      dispatchStreamDeckDrop(sources[0]!, deckSide);
+      return;
+    }
+    const action = queue
+      ? enqueueSearchQueuePayload(payload)
+      : dest
+        ? enqueueSearchPayload(payload, dest)
+        : Promise.resolve();
+    void action.catch(onError);
+  };
+  const onCancel = (cancel: PointerEvent) => {
+    if (cancel.pointerId !== pointerId) return;
+    cleanup();
+    if (dragging) finishSearchDrop();
+  };
+  window.addEventListener("pointermove", onMove, { capture: true, passive: false });
+  window.addEventListener("pointerup", onUp, true);
+  window.addEventListener("pointercancel", onCancel, true);
+  return cleanup;
 }
 
 /**

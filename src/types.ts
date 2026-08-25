@@ -3,7 +3,7 @@
  * 改这里必须同步改 models.rs 和 docs/00-architecture.md。
  */
 
-export type Platform = "wyy" | "qqm" | "soundcloud" | "ytm" | "bilibili" | "local";
+export type Platform = "wyy" | "qqm" | "soundcloud" | "ytm" | "youtube" | "bilibili" | "local";
 export type Quality = "flac" | "320" | "128";
 export type SearchKind = "song" | "playlist" | "artist" | "album" | "radio";
 export type TaskState = "queued" | "running" | "processing" | "done" | "failed" | "canceled";
@@ -52,6 +52,8 @@ export interface Settings {
   write_tags_after_analyze: boolean;
   analysis_duration: number;
   theme: "light" | "dark" | "system";
+  /** 是否显示顶栏里的实验性 DJ 模式入口；全新安装默认关闭。 */
+  experimental_dj_mode: boolean;
   soundcloud_enabled: boolean;
   netease_use_download_api: boolean;
   video_max_height: number;
@@ -107,8 +109,28 @@ export interface Account {
   detail: string;
   /** false = 该平台当前没有可用登录方式，前端不要显示登录入口。 */
   supports_login: boolean;
-  /** qr = 扫码，oauth = 系统浏览器 OAuth，device = 设备码登录（YouTube Music）。旧后端缺字段时按 qr 处理。 */
-  login_method?: "qr" | "oauth" | "device";
+  /** qr = 扫码，oauth = OAuth，browser = 导入桌面浏览器会话。 */
+  login_method?: "qr" | "oauth" | "browser";
+  /** anonymous / browser_session / oauth / ytm_oauth：UI 据此展示真实的凭证能力。 */
+  credential_kind?: "anonymous" | "browser_session" | "oauth" | "ytm_oauth" | string;
+}
+
+export interface BrowserProfile {
+  id: string;
+  label: string;
+  requires_elevation: boolean;
+}
+
+export interface BrowserOption {
+  id: string;
+  label: string;
+  profiles: BrowserProfile[];
+}
+
+export interface BrowserCatalog {
+  supported: boolean;
+  platform: string;
+  browsers: BrowserOption[];
 }
 
 /** 同一登录会话下的一张可选二维码（QQ 音乐会同时给 QQ 音乐 / QQ 两张）。 */
@@ -150,19 +172,6 @@ export interface SoundCloudOAuthStatus {
 export interface SoundCloudOAuthCallback {
   state: string;
   code: string;
-}
-
-export interface YtmDeviceLogin {
-  device_code: string;
-  user_code: string;
-  verification_url: string;
-  expires_in: number;
-}
-
-export interface YtmDeviceStatus {
-  status: "pending" | "done" | "error" | string;
-  message: string;
-  account?: Account | null;
 }
 
 export interface SongSource {
@@ -351,6 +360,7 @@ export interface VideoStreamOption {
 }
 
 export interface VideoInfo {
+  platform: "bilibili" | "youtube";
   bvid: string;
   title: string;
   author: string;
@@ -362,6 +372,7 @@ export interface VideoInfo {
 }
 
 export interface VideoDownloadRequest {
+  platform?: "bilibili" | "youtube";
   url?: string;
   bvid?: string;
   page_index?: number;
@@ -433,6 +444,14 @@ export interface Track {
   bpm_v2?: boolean;
   bpm_confidence: number | null;
   first_beat: number | null;
+  beat_origin?: number | null;
+  /** Raw detected beat markers when the current analyzer exposes them. */
+  beat_times?: number[];
+  /** Musically classified downbeats; absent/empty means bar semantics are not trustworthy. */
+  downbeats?: number[];
+  downbeat_confidence?: number | null;
+  downbeat_origin?: number | null;
+  beat_grid_revision?: string;
   music_key: string;
   camelot: string;
   open_key: string;
@@ -668,48 +687,17 @@ export interface AnalyzeResponseLike {
 export interface Waveform {
   track_id: number;
   duration: number;
-  /** 每一列的 0..1 幅度（柱子高度），等分整轨。 */
-  amp: number[];
+  /** 每一列的 0..1 幅度（柱子高度），等分整轨；二进制响应保留零拷贝 f32 view。 */
+  amp: number[] | Float32Array;
   /** 每一列的颜色，0..255，长度和 amp 相同。红=低频/鼓、绿=中频/人声、蓝=高频/镲。 */
-  r: number[];
-  g: number[];
-  b: number[];
+  r: number[] | Uint8Array;
+  g: number[] | Uint8Array;
+  b: number[] | Uint8Array;
   /** 渐进生成波形中已经真实分析的列；省略表示所有列均已完成。 */
-  known?: boolean[];
-  /** 实时 STEM 扫描起点和当前工作前沿（曲目秒）；普通曲库波形不提供。 */
-  analysis_start?: number;
-  analysis_frontier?: number;
-  analysis_back_frontier?: number;
+  known?: boolean[] | Uint8Array;
 }
 
 export type StemName = "vocals" | "drums" | "bass" | "other";
-
-/** A compact, append-only update for the optional live vocal performance waveform. */
-export interface LiveStemWaveformPoint {
-  index: number;
-  amp: number;
-  r: number;
-  g: number;
-  b: number;
-}
-
-export interface LiveStemWaveformStem {
-  stem: StemName;
-  points: LiveStemWaveformPoint[];
-}
-
-export interface LiveStemWaveformDelta {
-  track_id: number;
-  /** Public waveform epoch: changes for a new song/model session, but remains stable across seeks. */
-  epoch: number;
-  duration: number;
-  columns: number;
-  revision: number;
-  stems: LiveStemWaveformStem[];
-  analysis_start: number;
-  analysis_frontier: number;
-  analysis_back_frontier: number;
-}
 
 export interface StemRuntimeStatus {
   id: string;
@@ -756,12 +744,6 @@ export interface TrackStemStatus {
   cachePath: string;
   duration: number;
   error: string;
-  phase?: "" | "window" | "fill" | "waiting" | "done" | "error";
-  coveredSeconds?: number;
-  windowStart?: number;
-  windowEnd?: number;
-  windowCoveredSeconds?: number;
-  waitingForDeck?: number | null;
 }
 
 /** 在线缓存已实际解码出的前缀波形。`covered_seconds` 只覆盖从 0 开始的真实 PCM；
@@ -770,6 +752,8 @@ export interface StreamWaveformProgress {
   /** 后端支持当前 token 的会话波形；不表示用户开启了持久磁盘缓存。 */
   enabled: boolean;
   waveform: Waveform | null;
+  /** 完整媒体生成的高密度 Performance 波形；与整曲 overview 分开。 */
+  detail_waveform?: Waveform | null;
   covered_seconds: number;
   revision: number;
   complete: boolean;
@@ -788,6 +772,10 @@ export interface StreamAnalysisResult {
   bpm_confidence: number | null;
   first_beat: number | null;
   beat_times: number[];
+  beat_origin?: number | null;
+  downbeat_origin?: number | null;
+  downbeats?: number[];
+  downbeat_confidence?: number | null;
   key: string;
   key_short: string;
   camelot: string;
@@ -933,6 +921,11 @@ export interface KdjBridge {
   }) => Promise<SavedLoginQr>;
   pickFolder: () => Promise<string | null>;
   pickFolders: () => Promise<string[]>;
+  /** 覆盖导出 CLI skill 到 Claude Code / Codex / PI / Cursor 或自选文件夹。 */
+  exportCliSkill?: (options: {
+    preset?: "cursor" | "claude" | "codex" | "pi";
+    folder?: string;
+  }) => Promise<{ version: string; path: string; overwritten: boolean }>;
   /** 安卓：媒体读取权限（READ_MEDIA_AUDIO）是否已授予；桌面恒为 true。 */
   mediaPermissionGranted: () => Promise<boolean>;
   /** 用系统浏览器开外链（Release 页等）。 */

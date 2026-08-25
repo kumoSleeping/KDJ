@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { selectableGroups, selectionKey } from "../src/lib/resultSelection";
+import {
+  resultRowActionUsesSelection,
+  selectableGroups,
+  selectionKey,
+} from "../src/lib/resultSelection";
 import type { IntakeItem, MergedGroup, SongSource } from "../src/types";
 
 function biliSource(key: string): SongSource {
@@ -54,4 +58,15 @@ test("B 站收藏夹视频进入全选集合，已入库和纯本地条目除外
     "bili-2",
   ]);
   assert.notEqual(selectionKey(0, first.group_id), selectionKey(1, first.group_id));
+});
+
+test("选中视频的右键下载作用于整个选区，选区外行仍只作用于自身", () => {
+  const selected = new Set([
+    selectionKey(0, "bili-1"),
+    selectionKey(0, "bili-2"),
+    selectionKey(0, "bili-3"),
+  ]);
+
+  assert.equal(resultRowActionUsesSelection(selected, selectionKey(0, "bili-2")), true);
+  assert.equal(resultRowActionUsesSelection(selected, selectionKey(0, "bili-4")), false);
 });

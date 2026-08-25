@@ -2,9 +2,9 @@
  * Perceptual display palette for three-band DJ waveform data.
  *
  * Cached R/G/B values are semantic low/mid/high strengths, not literal screen colours. Height
- * already carries loudness, so the display palette keeps even quiet passages bright. Chroma is
- * restrained by lifting secondary channels toward a cool near-white anchor instead of lowering
- * the dominant channel; frequency identity and section changes therefore remain visible.
+ * already carries loudness. Overview and Performance detail therefore share frequency hues while
+ * owning separate contrast: overview shows macro sections; detail lifts secondary channels so
+ * beat-scale frequency evidence stays readable instead of becoming high-density RGB confetti.
  */
 
 export type WaveformDisplayRgb = readonly [number, number, number];
@@ -19,15 +19,90 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
 }
 
-/** v0.2.41 overview treated cached RGB as literal screen colour; do not soften it. */
+const SHARED_LOW_DOMINANCE = 0.9;
+const RELEASE_SATURATION_RETENTION = 0.84;
+const DETAIL_SATURATION_RETENTION = 0.7;
+const DETAIL_NEUTRAL_VALUE = 178;
+const DETAIL_COLOR_VALUE_LIFT = 50;
+const DETAIL_AMPLITUDE_VALUE_LIFT = 6;
+
+/** Low/mid/high keep one hue language across overview and DJ detail without sharing contrast. */
+function balancedFrequencyRgb(
+  lowValue: number,
+  midValue: number,
+  highValue: number,
+): [number, number, number] {
+  let low = clamp(lowValue, 0, 255);
+  const middle = clamp(midValue, 0, 255);
+  const high = clamp(highValue, 0, 255);
+  const strongestSecondary = Math.max(middle, high);
+  if (low > strongestSecondary) {
+    low = strongestSecondary + (low - strongestSecondary) * SHARED_LOW_DOMINANCE;
+  }
+  return [low, middle, high];
+}
+
+function retainedSaturation(
+  source: readonly [number, number, number],
+  retention: number,
+): [number, number, number] {
+  const neutral = (source[0] + source[1] + source[2]) / 3;
+  return [
+    neutral + (source[0] - neutral) * retention,
+    neutral + (source[1] - neutral) * retention,
+    neutral + (source[2] - neutral) * retention,
+  ];
+}
+
+/**
+ * Keep the v0.2.41 colour identity, but take only the harshest edge off it: compress red dominance
+ * first, then move every channel 16% toward that column's own neutral value. Full render opacity
+ * is retained, so the result stays clear without becoming neon or washed out.
+ */
 export function releaseOverviewWaveformDisplayRgb(
   lowValue: number,
   midValue: number,
   highValue: number,
 ): WaveformDisplayRgb {
-  return [lowValue, midValue, highValue].map((value) =>
-    Math.round(clamp(value, 0, 255))
-  ) as unknown as WaveformDisplayRgb;
+  const softened = retainedSaturation(
+    balancedFrequencyRgb(lowValue, midValue, highValue),
+    RELEASE_SATURATION_RETENTION,
+  );
+  return [
+    Math.round(softened[0]),
+    Math.round(softened[1]),
+    Math.round(softened[2]),
+  ];
+}
+
+/**
+ * DJ detail uses the overview's low=red / mid=green / high=blue identity, but not its macro
+ * contrast. A 30-second rail must keep adjacent kicks, vocals and cymbals separable, so secondary
+ * channels are lifted further and overall value is stabilised independently from amplitude.
+ * Height remains the authoritative transient/loudness channel.
+ */
+export function performanceDetailWaveformDisplayRgb(
+  lowValue: number,
+  midValue: number,
+  highValue: number,
+  amplitude = 1,
+): WaveformDisplayRgb {
+  const source = balancedFrequencyRgb(lowValue, midValue, highValue);
+  const peak = Math.max(source[0], source[1], source[2]);
+  if (peak <= 0) return [0, 0, 0];
+  const floor = Math.min(source[0], source[1], source[2]);
+  const chroma = (peak - floor) / peak;
+  const softened = retainedSaturation(source, DETAIL_SATURATION_RETENTION);
+  const softenedPeak = Math.max(softened[0], softened[1], softened[2]);
+  const value = DETAIL_NEUTRAL_VALUE
+    + DETAIL_COLOR_VALUE_LIFT * Math.sqrt(chroma)
+    + DETAIL_AMPLITUDE_VALUE_LIFT * Math.sqrt(clamp(amplitude, 0, 1));
+  const scale = softenedPeak > 0 ? value / softenedPeak : 0;
+  return [
+    Math.round(clamp(softened[0] * scale, 0, 255)),
+    Math.round(clamp(softened[1] * scale, 0, 255)),
+    Math.round(clamp(softened[2] * scale, 0, 255)),
+  ];
 }
 
 export function waveformDisplayRgb(
@@ -54,37 +129,3 @@ export function waveformDisplayRgb(
     return Math.round(clamp(value * softened, 0, 255));
   }) as unknown as WaveformDisplayRgb;
 }
-
-/**
- * Vocal-guide palette. The cached channels still describe low/mid/high spectral weight, but a
- * separate vocal rail is a navigation aid rather than a second full-spectrum overview. Map that
- * evidence through three vivid anchors so warmth reads yellow, presence reads yellow-green and
- * air reads green; blue is deliberately bounded to keep the guide visually distinct from the
- * original RGB waveform. Amplitude changes height, so it only adds a small value lift here.
- */
-export function vocalGuideWaveformDisplayRgb(
-  lowValue: number,
-  midValue: number,
-  highValue: number,
-  amplitude = 1,
-): WaveformDisplayRgb {
-  const source = [lowValue, midValue, highValue].map((value) => clamp(value, 0, 255));
-  const total = source[0] + source[1] + source[2];
-  if (total <= 0) return [0, 0, 0];
-
-  const anchors: readonly WaveformDisplayRgb[] = [
-    [255, 216, 18],
-    [176, 246, 28],
-    [48, 235, 86],
-  ];
-  const value = 0.9 + 0.1 * Math.sqrt(clamp(amplitude, 0, 1));
-  return [0, 1, 2].map((channel) => Math.round(clamp(
-    anchors.reduce(
-      (sum, anchor, band) => sum + anchor[channel] * (source[band] / total),
-      0,
-    ) * value,
-    0,
-    255,
-  ))) as unknown as WaveformDisplayRgb;
-}
-

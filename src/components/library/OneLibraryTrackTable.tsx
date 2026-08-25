@@ -42,6 +42,10 @@ import {
 } from "../../lib/trackClickPrefs";
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import { shouldHandleWorkspaceDelete } from "../../lib/workspacePanes";
+import {
+  readWorkspaceSession,
+  updateOneLibraryWorkspaceSession,
+} from "../../lib/workspaceSession";
 import { isEditable } from "../../lib/useLibraryClipboard";
 import { usePlaylistStore, type OneLibrarySelectMode } from "../../stores/playlistStore";
 import { useAppStore } from "../../stores/appStore";
@@ -214,6 +218,8 @@ export function OneLibraryTrackTable({
   const pointerCleanupRef = useRef<(() => void) | null>(null);
   const suppressClickRef = useRef<number | null>(null);
   const viewKey = target ? playlistViewKey(target.device_path, target.playlist_id) : "";
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const restoredScrollRef = useRef("");
   const [view, setView] = useState<OneLibraryViewState>(() => readStoredView(viewKey));
   const [columnPrefs, setColumnPrefs] = useState<TableColumnPrefs>(() =>
     loadTableColumnPrefs(ONE_LIBRARY_COLUMNS_KEY, COLUMN_SCHEMA),
@@ -234,6 +240,7 @@ export function OneLibraryTrackTable({
   useEffect(() => {
     setView(readStoredView(viewKey));
     setFiltersOpen(false);
+    restoredScrollRef.current = "";
   }, [viewKey]);
 
   useEffect(() => {
@@ -318,6 +325,28 @@ export function OneLibraryTrackTable({
   useEffect(() => {
     setVisibleContentIds(visibleTracks.map((track) => track.content_id));
   }, [setVisibleContentIds, visibleTracks]);
+
+  useEffect(() => {
+    if (loading || !target || restoredScrollRef.current === viewKey) return;
+    const restored = readWorkspaceSession().oneLibrary;
+    if (
+      restored.target?.device_path !== target.device_path ||
+      restored.target.playlist_id !== target.playlist_id
+    ) {
+      restoredScrollRef.current = viewKey;
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      const scroller = scrollerRef.current;
+      if (!scroller) return;
+      scroller.scrollTop = Math.min(
+        restored.scrollTop,
+        Math.max(0, scroller.scrollHeight - scroller.clientHeight),
+      );
+      restoredScrollRef.current = viewKey;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [loading, target, viewKey, visibleTracks.length]);
 
   useEffect(
     () => () => setVisibleContentIds(null),
@@ -693,7 +722,13 @@ export function OneLibraryTrackTable({
           <LoaderCircle className="kd-spin" size={18} />
         </div>
       ) : (
-        <div className="kd-scroll kd-grow">
+        <div
+          className="kd-scroll kd-grow"
+          ref={scrollerRef}
+          onScroll={(event) => {
+            updateOneLibraryWorkspaceSession({ scrollTop: event.currentTarget.scrollTop });
+          }}
+        >
           <table
             className="kd-table kd-onelibrary-track-table"
             data-kind="onelibrary"
@@ -814,6 +849,9 @@ export function OneLibraryTrackTable({
                       const cursor = visibleTracks.findIndex((item) => item.content_id === track.content_id);
                       if (anchor >= 0 && cursor >= 0) {
                         const [start, end] = anchor < cursor ? [anchor, cursor] : [cursor, anchor];
+                        updateOneLibraryWorkspaceSession({
+                          focusedContentId: track.content_id,
+                        });
                         usePlaylistStore.setState({
                           selectedContentIds: visibleTracks
                             .slice(start, end + 1)

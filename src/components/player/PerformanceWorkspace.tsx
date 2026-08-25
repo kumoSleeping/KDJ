@@ -1,31 +1,40 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { ChevronDown, CircleDot, Lock, LockOpen, Mic, Minus, Pause, Play, Plus, Repeat2 } from "lucide-react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { AudioLines, ChevronDown, Lock, LockOpen, Minus, Pause, Play, Plus } from "lucide-react";
 import {
   channelFaderGain,
   crossfaderChannelGains,
   HOT_CUE_COLORS,
   HOT_CUE_PAD_COUNT,
   removeHotCue,
-  scratchPosition,
+  shouldDropSeekPreview,
   snapCueSeconds,
   updateHotCueComment,
   upsertHotCue,
 } from "../../lib/performanceCues";
 import { api } from "../../lib/api";
 import { camelotColor, parseCamelot } from "../../lib/camelot";
-import { formatDuration } from "../../lib/format";
+import { formatDuration, formatSignedDuration } from "../../lib/format";
+import { PERFORMANCE_PREROLL_SECONDS } from "../../lib/deckPosition";
 import {
   finishTrackDrop,
   isTrackDrag,
   readTrackDragIds,
+  STREAM_DECK_DROP_EVENT,
   TRACK_DECK_DROP_EVENT,
   TRACK_DECK_DROP_TARGET_ATTR,
   TRACK_DECK_SPLIT_DROP_TARGET,
   TRACK_SAMPLER_DROP_EVENT,
   TRACK_SAMPLER_DROP_TARGET_ATTR,
+  type StreamDeckDropDetail,
   type TrackDeckDropDetail,
   type TrackSamplerDropDetail,
 } from "../../lib/trackDrag";
+import {
+  finishSearchDrop,
+  isSearchAudioDrag,
+  readSearchDrop,
+  searchAudioSource,
+} from "../../lib/searchDrag";
 import type {
   CuePoint,
   StemRuntimeStatus,
@@ -33,54 +42,47 @@ import type {
   StemName,
   Track,
   TrackStemStatus,
-  Waveform as WaveformData,
 } from "../../types";
-import { stemModeUsesTwoLanes } from "../../lib/stemMode";
 import {
   detailWaveformBuckets,
   performanceWaveformViewportSeconds,
-  waveformPointerSeconds,
 } from "../../lib/waveformViewport";
-import {
-  ORIGINAL_WAVE_BIT,
-  STEM_WAVE_BITS,
-  VOCAL_WAVE_BIT,
-  PERFORMANCE_WAVE_DISPLAY_STORAGE_KEY,
-  performanceStemLanesVisible,
-  readPerformanceWaveMask,
-} from "../../lib/performanceWaveDisplay";
+import { performanceWaveformAmplitudeScale } from "../../lib/waveformRenderPolicy";
 import { useDjConfig } from "../../lib/djMix";
-import { getLiveDeckSpectrum, type UnifiedDeckSyncRequest } from "../../lib/unifiedPlayer";
+import {
+  getLiveDeckSpectrum,
+  type UnifiedDeckSyncRequest,
+  type UnifiedPlatterEvent,
+  type UnifiedSyncState,
+} from "../../lib/unifiedPlayer";
 import {
   EQ_GRAPH_BAND_COUNT,
   EQ_GRAPH_FREQUENCIES,
+  channelFilterCutoffHz,
+  channelFilterDbAtRatio,
+  channelFilterResonanceQ,
   eqCurveDbAtRatio,
   eqDbToGraphRatio,
   eqGestureWeights,
   eqSpectrumLevelToRatio,
   type EqGraphValues,
 } from "../../lib/eqGraph";
+import { useAppStore } from "../../stores/appStore";
 import {
   ENGINE_TEMPO_MAX,
   ENGINE_TEMPO_MIN,
   crossfaderTempoPlan,
   deckSyncRate,
   linkedDeckRates,
+  adoptNativeSyncRelation,
   shouldQuantizeSyncOnPlay,
-  scratchSnappedPosition,
 } from "../../lib/beatGridSync";
 import { LatestTempoCommandLane, TEMPO_COMMAND_INTERVAL_MS } from "../../lib/tempoCommandLane";
-import {
-  cachedWaveform,
-  loadWaveformForTrack,
-  streamWaveformSnapshot,
-  subscribeStreamWaveform,
-} from "../../lib/waveformCache";
-import { isStreamTrack, mediaUrlForTrack } from "../../lib/streamTrack";
+import { mediaUrlForTrack } from "../../lib/streamTrack";
 import { Waveform, type SeekDetail } from "../library/Waveform";
-import type { EqStemLayer, MidiFeedback, MidiLayerState, MidiMapping, MidiResolvedAction } from "../../lib/midi/mapping";
+import type { MidiFeedback, MidiLayerState, MidiMapping, MidiResolvedAction } from "../../lib/midi/mapping";
 import { MIDI_PRESETS } from "../../lib/midi/presets";
-import { mappingForPort, dispatchMidiMessage, MidiEchoGuard, MidiFourteenBit, parseMidiBytes, scaleRangeToUnit, scaleUnitToRange, toggleEqStemLayer } from "../../lib/midi/mapping";
+import { mappingForPort, dispatchMidiMessage, MidiEchoGuard, MidiFourteenBit, parseMidiBytes, scaleRangeToUnit, scaleUnitToRange } from "../../lib/midi/mapping";
 import { SOFT_TAKEOVER_THRESHOLD, SoftTakeover } from "../../lib/midi/softTakeover";
 import { selectMappedPort, sendMidiOutputs, subscribeMidi } from "../../lib/midi/runtime";
 import { MIDI_BROWSE_EVENT } from "../../lib/midiLibraryNav";
@@ -91,10 +93,17 @@ import {
   midiJogSeekSeconds,
   midiJogVinylSeconds,
 } from "../../lib/midiJog";
-import { localLibraryDataTrackId, usesLocalLibraryRecord } from "../../lib/playbackTrackSource";
-import { stemEqToGain } from "../../lib/stemEq";
+import { PlatterVelocityTracker, pointerPlatterDistance } from "../../lib/platter";
+import { usesLocalLibraryRecord } from "../../lib/playbackTrackSource";
 import { knobBias, snapKnobToCenter } from "../../lib/stemDeckLog";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
+import {
+  hydratePlaybackTrack,
+  songSourceRequest,
+  subscribePlaybackTrackMetadata,
+  trackIdRequest,
+  type PlaybackTrackRequest,
+} from "../../lib/playbackTrack";
 
 type TempoRangeId = "6" | "10" | "16" | "wide";
 
@@ -138,10 +147,16 @@ export interface PerformanceDeckModel {
   position: number;
   duration: number;
   active: boolean;
+  /** User transport intent; controls stay lit while a requested source is buffering. */
   playing: boolean;
+  /** Physical callback clock. Waveforms must not walk before buffered audio starts moving. */
+  transportRunning: boolean;
   /** Post-EQ peak in linear full scale; values >= 1 indicate clipping. */
   peakLevel: number;
   rate: number;
+  audibleRate: number;
+  scratchHeld: boolean;
+  discontinuityRevision: number;
   cover: string;
   /** 引擎级无缝循环窗口（曲目秒）；null 表示线性播放。 */
   loopStart: number | null;
@@ -158,12 +173,7 @@ export interface PerformanceMixerValues {
 }
 
 export interface PerformanceDeckFx {
-  echo: number;
-  echoParameter: number;
-  reverb: number;
-  reverbParameter: number;
-  gater: number;
-  gaterParameter: number;
+  slots: DeckFxSlots;
   pad: number;
   beatSeconds: number;
 }
@@ -180,60 +190,75 @@ export interface PerformanceStemDeckModel {
 
 export interface PerformanceWorkspaceProps {
   decks: [PerformanceDeckModel, PerformanceDeckModel];
+  /** Incremented when manager playback explicitly returns Deck controls to neutral. */
+  deckResetRevisions: readonly [number, number];
   stems: [PerformanceStemDeckModel, PerformanceStemDeckModel];
   stemRuntime: StemRuntimeStatus | null;
   stemMode: StemMode;
   masterVolume: number;
-  onSeek: (side: 0 | 1, detail: Omit<SeekDetail, "trackId">) => void;
+  /** Resolves after the native Deck accepted the landing, so the visual clock can snap with it. */
+  onSeek: (side: 0 | 1, detail: Omit<SeekDetail, "trackId">) => Promise<boolean>;
   /** Hardware jog seeks must stay on an already installed physical Deck. */
   onJogSeek: (side: 0 | 1, position: number) => void;
   /** Edge rotation: transient pitch bend, never a source reload or persistent TEMPO change. */
   onJogNudge: (side: 0 | 1, amount: number) => void;
-  /** Held platter motion in track seconds; must be applied immediately, not coalesced until note-off. */
-  onJogScratchTick: (side: 0 | 1, delta: number) => void;
-  /** Capacitive Jog touch pauses a playing physical Deck without loading/focusing it. */
-  onJogScratchStart: (side: 0 | 1) => void;
-  /** Release applies the final platter position, then resumes only a Deck that touch had paused. */
-  onJogScratchRelease: (side: 0 | 1, position: number | null) => void;
-  /** Pointer/keyboard scratch release mirrors a physical platter: seek once, then restore only
-   * the transport state that this gesture held. */
-  onScratchRelease: (side: 0 | 1, position: number, resume: boolean) => void;
-  /** Starts a momentary callback hold; it must not mutate Play/Pause transport state. */
-  onScratchHold: (side: 0 | 1) => void;
-  onTrackDrop: (side: 0 | 1, ids: number[]) => void;
+  /** Pointer, touch and MIDI all enter the same signed-velocity platter state machine. */
+  onPlatter: (side: 0 | 1, event: UnifiedPlatterEvent) => void;
+  /** All source kinds cross one normalized load edge; provider details stop here. */
+  onTrackLoad: (side: 0 | 1, request: PlaybackTrackRequest) => void;
   onTogglePlay: (side: 0 | 1) => void;
   onMainCue: (side: 0 | 1, position: number) => void;
   onRateChange: (side: 0 | 1, rate: number) => boolean | Promise<boolean>;
   onRatePairChange: (rates: [number, number]) => boolean | Promise<boolean>;
   onSync: (request: UnifiedDeckSyncRequest) => boolean | Promise<boolean>;
+  onClearSync: () => void;
+  nativeSync: UnifiedSyncState;
   onMixerChange: (
     side: 0 | 1,
+    expectedTrackId: number | null,
     values: PerformanceMixerValues,
     channelGain: number,
   ) => void;
   onDeckFx: (side: 0 | 1, fx: PerformanceDeckFx) => void;
   onMasterVolumeChange: (volume: number) => void;
-  onEnsureStemWaveScan?: (side: 0 | 1) => void;
-  onReleaseStemWaveScan?: (trackId: number) => void;
-  onStemWaveMaskChange?: (mask: number) => void;
   onToggleStemAll: (side: 0 | 1) => void;
-  onStemGain: (side: 0 | 1, stem: StemName, value: number) => void;
-  onSetLoop: (side: 0 | 1, start: number, length: number) => void;
-  onClearLoop: (side: 0 | 1) => void;
+  onDeckPfl: (side: 0 | 1, enabled: boolean) => void;
+  onToggleLoop: (side: 0 | 1, length: number) => void;
+  onResizeLoop: (side: 0 | 1, length: number) => void;
   onSaveCuePoints: (track: Track, cues: CuePoint[]) => Promise<void>;
   onSaveMainCue: (track: Track, cueMs: number) => Promise<void>;
 }
 
-const MIXER_STORAGE_KEY = "kd-performance-mixer-v2";
+// 现场旋钮只在当前应用进程内保留；真正重启必须回到中性值。
+export const PERFORMANCE_MIXER_SESSION_KEY = "kd-performance-mixer-session-v1";
 const LOOP_BEATS_STORAGE_KEY = "kd-performance-loop-beats-v1";
 const JUMP_BEATS_STORAGE_KEY = "kd-performance-jump-beats-v1";
 const CROSSFADER_ENABLED_STORAGE_KEY = "kd-performance-crossfader-enabled-v1";
 const SAMPLER_STORAGE_KEY = "kd-performance-sampler-slots-v1";
 type FxPanelMode = "knobs" | "pads" | "sampler";
-type DeckPadPage = "cue" | "loop" | "fx";
-type FxKind = "echo" | "reverb" | "gater" | "vocal";
-type FxSlot = { kind: FxKind; parameter: number; wet: number; enabled: boolean };
+type FxKind =
+  | "echo"
+  | "reverb"
+  | "flanger"
+  | "phaser"
+  | "bitCrusher"
+  | "gate"
+  | "alarm"
+  | "hydrant"
+  | "rocket";
+type FxSlot = { kind: FxKind; parameter: number; mix: number; enabled: boolean };
 type DeckFxSlots = [FxSlot, FxSlot, FxSlot];
+const FX_OPTIONS: ReadonlyArray<{ kind: FxKind; label: string }> = [
+  { kind: "echo", label: "Echo" },
+  { kind: "reverb", label: "Reverb" },
+  { kind: "flanger", label: "Flanger" },
+  { kind: "phaser", label: "Phaser" },
+  { kind: "bitCrusher", label: "Bit Crusher" },
+  { kind: "gate", label: "Gate" },
+  { kind: "alarm", label: "Alarm" },
+  { kind: "hydrant", label: "Hydrant" },
+  { kind: "rocket", label: "Rocket" },
+];
 const PAD_FX_LABELS = [
   "ECHO 1/8", "ECHO 1/4", "REV SHORT", "REV LONG",
   "GATE 1/8", "GATE 1/16", "LP SWEEP", "HP SWEEP",
@@ -241,9 +266,9 @@ const PAD_FX_LABELS = [
 
 function defaultDeckFxSlots(): DeckFxSlots {
   return [
-    { kind: "echo", parameter: 0.5, wet: 0.35, enabled: false },
-    { kind: "reverb", parameter: 0.5, wet: 0.3, enabled: false },
-    { kind: "vocal", parameter: 0.5, wet: 1, enabled: false },
+    { kind: "echo", parameter: 0.5, mix: 0.35, enabled: false },
+    { kind: "reverb", parameter: 0.5, mix: 0.3, enabled: false },
+    { kind: "flanger", parameter: 0.5, mix: 0.5, enabled: false },
   ];
 }
 
@@ -260,36 +285,6 @@ function readSamplerSlotIds(): Array<number | null> {
   }
 }
 
-interface StemWaveCursor {
-  trackId: number | null;
-  epoch: number | null;
-  revision: number;
-}
-
-function emptyLiveStemWaveform(
-  trackId: number,
-  duration: number,
-  columns: number,
-  analysisStart: number,
-  analysisFrontier: number,
-  analysisBackFrontier: number,
-): WaveformData {
-  return {
-    track_id: trackId,
-    duration,
-    amp: new Array<number>(columns).fill(0),
-    // Unknown columns remain empty. Their eventual RGB values come from the actual separated
-    // audio block, rather than borrowing either the original mix or a fixed STEM label colour.
-    r: new Array<number>(columns).fill(31),
-    g: new Array<number>(columns).fill(31),
-    b: new Array<number>(columns).fill(31),
-    known: new Array<boolean>(columns).fill(false),
-    analysis_start: analysisStart,
-    analysis_frontier: analysisFrontier,
-    analysis_back_frontier: analysisBackFrontier,
-  };
-}
-
 const DEFAULT_MIXER: PerformanceMixerValues = {
   gain: 0,
   high: 0,
@@ -301,7 +296,7 @@ const DEFAULT_MIXER: PerformanceMixerValues = {
 
 function readMixer(): [PerformanceMixerValues, PerformanceMixerValues] {
   try {
-    const value = JSON.parse(localStorage.getItem(MIXER_STORAGE_KEY) ?? "null") as unknown;
+    const value = JSON.parse(sessionStorage.getItem(PERFORMANCE_MIXER_SESSION_KEY) ?? "null") as unknown;
     if (Array.isArray(value) && value.length === 2) {
       return value.map((item) => ({ ...DEFAULT_MIXER, ...(item as object) })) as [
         PerformanceMixerValues,
@@ -312,6 +307,17 @@ function readMixer(): [PerformanceMixerValues, PerformanceMixerValues] {
     // 坏存档回到中性参数。
   }
   return [{ ...DEFAULT_MIXER }, { ...DEFAULT_MIXER }];
+}
+
+/** Manager song loads start a neutral single-track context; DJ loads never call this. */
+export function clearPerformanceMixerSession(
+  storage: Pick<Storage, "removeItem"> = window.sessionStorage,
+): void {
+  try {
+    storage.removeItem(PERFORMANCE_MIXER_SESSION_KEY);
+  } catch {
+    // Storage may be unavailable in a restricted WebView; the mounted reset revision still wins.
+  }
 }
 
 function readCrossfaderEnabled(): boolean {
@@ -383,167 +389,64 @@ function beatSeconds(track: Track | null): number | null {
   return track?.bpm ? 60 / track.bpm : null;
 }
 
-type StemOption = {
-  stem: StemName;
-  label: string;
-  short: string;
-  shortcut: string;
-  bit: number;
-  gainIndex: 0 | 1 | 2 | 3;
-  icon: typeof Mic;
-};
-
-const TWO_STEM_OPTIONS: StemOption[] = [
-  { stem: "vocals", label: "VOCALS", short: "V", shortcut: "V", bit: STEM_WAVE_BITS.vocals, gainIndex: 3, icon: Mic },
-];
-
-function stemOptions(mode: StemMode): StemOption[] {
-  return stemModeUsesTwoLanes(mode) ? TWO_STEM_OPTIONS : [];
+function isPerformanceDeckDrag(event: { dataTransfer: DataTransfer | null }): boolean {
+  return isTrackDrag(event) || isSearchAudioDrag(event);
 }
 
-/** 低于这个幅度就当作底噪留空（后端 amp 已归一化到 0..1）。 */
-const STEM_SILENCE_THRESHOLD = 0.06;
-/** 人声静音时仍作为结构引导线可见；音频增益与波形透明度不是同一语义。 */
-const VOCAL_WAVEFORM_MIN_OPACITY = 0.4;
-
-/** 主轨道（ORG）波形；显示开关与四条 STEM 车道完全独立。 */
-function useMainWaveform(track: Track | null, buckets: number): WaveformData | null {
-  const trackId = track?.id ?? null;
-  const [wave, setWave] = useState<WaveformData | null>(() => (
-    trackId !== null
-      ? cachedWaveform(trackId, buckets) ?? cachedWaveform(trackId, Math.min(640, buckets))
-      : null
-  ));
-  useEffect(() => {
-    if (trackId === null || !track) {
-      setWave(null);
-      return;
-    }
-    if (isStreamTrack(track)) {
-      const sync = () => setWave(streamWaveformSnapshot(trackId)?.waveform ?? null);
-      sync();
-      return subscribeStreamWaveform(trackId, sync);
-    }
-    let alive = true;
-    let detailTimer: number | null = null;
-    const previewBuckets = Math.min(640, buckets);
-    const detailed = cachedWaveform(trackId, buckets);
-    const preview = detailed ?? cachedWaveform(trackId, previewBuckets);
-    setWave(preview);
-    const loadDetail = () => {
-      detailTimer = null;
-      void loadWaveformForTrack(track, buckets)
-        .then((loaded) => { if (alive) setWave(loaded); })
-        .catch(() => { /* 主波形不可得时留空，下一次换歌会重试。 */ });
-    };
-    if (detailed) return () => { alive = false; };
-    if (!preview) {
-      void loadWaveformForTrack(track, previewBuckets)
-        .then((loaded) => {
-          if (!alive) return;
-          setWave(loaded);
-          if (buckets > previewBuckets) detailTimer = window.setTimeout(loadDetail, 750);
-        })
-        .catch(() => { /* 下一次换歌重试。 */ });
-    } else if (buckets > previewBuckets) {
-      detailTimer = window.setTimeout(loadDetail, 750);
-    }
-    return () => {
-      alive = false;
-      if (detailTimer !== null) window.clearTimeout(detailTimer);
-    };
-  }, [buckets, track?.source_key, trackId]);
-  return wave;
+/** Convert drag wire formats into the single Deck load contract at the UI boundary. */
+function dropIntoPerformanceDeck(
+  event: React.DragEvent<HTMLElement>,
+  side: 0 | 1,
+  onTrackLoad: PerformanceWorkspaceProps["onTrackLoad"],
+): void {
+  if (isSearchAudioDrag(event)) {
+    event.preventDefault();
+    event.stopPropagation();
+    const source = searchAudioSource(readSearchDrop(event.dataTransfer));
+    finishSearchDrop();
+    if (source) onTrackLoad(side, songSourceRequest(source));
+    return;
+  }
+  if (!isTrackDrag(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const ids = readTrackDragIds(event.dataTransfer);
+  finishTrackDrop();
+  if (ids.length) onTrackLoad(side, trackIdRequest(ids[0]));
 }
 
 function DeckScratchSurface({
   deck,
-  other,
   side,
-  autoBeatSync,
-  syncMultiple,
-  onSeek,
-  onScratchHold,
-  onScratchRelease,
-  onScratchPreview,
-  onScratchTick,
-  onTrackDrop,
+  onPlatter,
+  onTrackLoad,
 }: {
   deck: PerformanceDeckModel;
-  other: PerformanceDeckModel;
   side: 0 | 1;
-  autoBeatSync: boolean;
-  syncMultiple: number;
-  onSeek: PerformanceWorkspaceProps["onSeek"];
-  onScratchHold: PerformanceWorkspaceProps["onScratchHold"];
-  onScratchRelease: PerformanceWorkspaceProps["onScratchRelease"];
-  onScratchPreview: (side: 0 | 1, position: number | null) => void;
-  onScratchTick?: (side: 0 | 1, delta: number) => void;
-  onTrackDrop: PerformanceWorkspaceProps["onTrackDrop"];
+  onPlatter: PerformanceWorkspaceProps["onPlatter"];
+  onTrackLoad: PerformanceWorkspaceProps["onTrackLoad"];
 }) {
   const track = deck.track;
-  const viewportSeconds = performanceWaveformViewportSeconds(deck.rate);
-  const scratchAtRef = useRef<number | null>(null);
   const scratchRef = useRef<{
     pointerId: number;
-    startX: number;
+    lastX: number;
     width: number;
-    startPosition: number;
-    playhead: number;
-    didScratch: boolean;
-    resumeOnRelease: boolean;
+    tracker: PlatterVelocityTracker;
   } | null>(null);
+  const onPlatterLiveRef = useRef(onPlatter);
+  onPlatterLiveRef.current = onPlatter;
 
-  useEffect(() => {
+  useEffect(() => () => {
+    // Track replacement/unmount is a real gesture boundary. A generation-safe end cannot
+    // release a newer source, but it prevents the old callback voice from remaining grabbed.
+    if (scratchRef.current) onPlatterLiveRef.current(side, { phase: "end", velocity: 0 });
     scratchRef.current = null;
-    scratchAtRef.current = null;
-    onScratchPreview(side, null);
-  }, [onScratchPreview, side, track?.id]);
-  useEffect(() => {
-    const preview = scratchAtRef.current;
-    if (scratchRef.current || preview === null) return;
-    if (Math.abs(deck.position - preview) < 0.08) {
-      scratchAtRef.current = null;
-      onScratchPreview(side, null);
-    }
-  }, [deck.position, onScratchPreview, side]);
-  useEffect(
-    () => () => onScratchPreview(side, null),
-    [onScratchPreview, side],
-  );
-
-  const snapScratch = (raw: number, hard: boolean) => {
-    const self = deck.track;
-    const counterpart = other.track;
-    if (
-      !autoBeatSync
-      || !self?.bpm
-      || !counterpart?.bpm
-      || self.first_beat == null
-      || counterpart.first_beat == null
-    ) {
-      return raw;
-    }
-    return scratchSnappedPosition({
-      followerPositionSec: raw,
-      followerBpm: self.bpm,
-      followerFirstBeatSec: self.first_beat,
-      followerRate: deck.rate,
-      masterPositionSec: other.position,
-      masterBpm: counterpart.bpm,
-      masterFirstBeatSec: counterpart.first_beat,
-      masterRate: other.rate,
-      multiple: syncMultiple,
-      hard,
-    });
-  };
+  }, [side, track?.id]);
 
   const finishScratch = (event: React.PointerEvent<HTMLDivElement>) => {
     const gesture = scratchRef.current;
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     event.preventDefault();
-    const at = snapScratch(scratchAtRef.current ?? gesture.startPosition, true);
-    scratchAtRef.current = at;
     scratchRef.current = null;
     try {
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -552,11 +455,7 @@ function DeckScratchSurface({
     } catch {
       // WebKit may release capture before pointercancel reaches React.
     }
-    if (gesture.didScratch) {
-      onScratchRelease(side, at, gesture.resumeOnRelease);
-    } else {
-      onSeek(side, { position: at, forceCommit: true });
-    }
+    onPlatter(side, { phase: "end", velocity: gesture.tracker.end(event.timeStamp) });
   };
 
   if (!track) return null;
@@ -566,13 +465,13 @@ function DeckScratchSurface({
       data-side={side === 0 ? "a" : "b"}
       role="slider"
       tabIndex={0}
-      aria-label={`${side === 0 ? "A" : "B"} Deck 波形，点击跳转，拖动刮擦`}
-      aria-valuemin={0}
+      aria-label={`${side === 0 ? "A" : "B"} Deck 波形，拖动刮擦`}
+      aria-valuemin={-PERFORMANCE_PREROLL_SECONDS}
       aria-valuemax={deck.duration}
-      aria-valuenow={scratchAtRef.current ?? deck.position}
+      aria-valuenow={deck.position}
       {...{ [TRACK_DECK_DROP_TARGET_ATTR]: String(side) }}
       onDragOver={(event) => {
-        if (!isTrackDrag(event)) return;
+        if (!isPerformanceDeckDrag(event)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = "copy";
         event.currentTarget.dataset.kdNativeTrackOver = "true";
@@ -583,135 +482,58 @@ function DeckScratchSurface({
         }
       }}
       onDrop={(event) => {
-        if (!isTrackDrag(event)) return;
-        event.preventDefault();
-        const ids = readTrackDragIds(event.dataTransfer);
         delete event.currentTarget.dataset.kdNativeTrackOver;
-        finishTrackDrop();
-        if (ids.length) onTrackDrop(side, ids);
+        dropIntoPerformanceDeck(event, side, onTrackLoad);
       }}
       onPointerDownCapture={(event) => {
-        if (event.button !== 0) return;
+        if (event.button !== 0 || scratchRef.current) return;
         event.preventDefault();
         const rect = event.currentTarget.getBoundingClientRect();
-        const at = snapScratch(
-          waveformPointerSeconds(
-            event.clientX,
-            rect.left,
-            rect.width,
-            deck.duration,
-            deck.position,
-            viewportSeconds,
-          ),
-          false,
-        );
+        const tracker = new PlatterVelocityTracker();
+        tracker.start(event.timeStamp);
         scratchRef.current = {
           pointerId: event.pointerId,
-          startX: event.clientX,
+          lastX: event.clientX,
           width: rect.width,
-          startPosition: at,
-          playhead: deck.position,
-          didScratch: false,
-          resumeOnRelease: deck.playing,
+          tracker,
         };
-        scratchAtRef.current = at;
-        onScratchPreview(side, at);
         event.currentTarget.setPointerCapture(event.pointerId);
+        // A real capacitive platter grabs on contact, not after an arbitrary drag threshold.
+        onPlatter(side, { phase: "start" });
       }}
       onPointerMove={(event) => {
         const gesture = scratchRef.current;
         if (!gesture || gesture.pointerId !== event.pointerId) return;
         event.preventDefault();
-        if (!gesture.didScratch && Math.abs(event.clientX - gesture.startX) >= 6) {
-          gesture.didScratch = true;
-          onScratchHold(side);
+        const native = event.nativeEvent;
+        const coalesced = typeof native.getCoalescedEvents === "function"
+          ? native.getCoalescedEvents()
+          : [];
+        const points = coalesced.length > 0 ? coalesced : [native];
+        let velocity: number | null = null;
+        for (const point of points) {
+          const deltaX = point.clientX - gesture.lastX;
+          if (deltaX === 0) continue;
+          velocity = gesture.tracker.move(
+            pointerPlatterDistance(deltaX, gesture.width),
+            point.timeStamp,
+          );
+          gesture.lastX = point.clientX;
         }
-        const rect = event.currentTarget.getBoundingClientRect();
-        const raw = gesture.didScratch
-          ? scratchPosition(
-              gesture.startPosition,
-              event.clientX - gesture.startX,
-              gesture.width,
-              viewportSeconds,
-              deck.duration,
-            )
-          : waveformPointerSeconds(
-              event.clientX,
-              rect.left,
-              rect.width,
-              deck.duration,
-              gesture.playhead,
-              viewportSeconds,
-            );
-        const previous = scratchAtRef.current;
-        const at = snapScratch(raw, false);
-        scratchAtRef.current = at;
-        onScratchPreview(side, at);
-        if (gesture.didScratch && onScratchTick) {
-          const delta = at - (previous ?? at);
-          if (delta !== 0) onScratchTick(side, delta);
-        }
+        if (velocity !== null) onPlatter(side, { phase: "move", velocity });
       }}
       onPointerUp={finishScratch}
       onPointerCancel={finishScratch}
+      onLostPointerCapture={finishScratch}
       onKeyDown={(event) => {
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
         event.preventDefault();
-        const delta = event.key === "ArrowLeft" ? -0.1 : 0.1;
-        const at = clamp(deck.position + delta, 0, deck.duration);
-        const resumeOnRelease = deck.playing;
-        onScratchHold(side);
-        onScratchRelease(side, at, resumeOnRelease);
+        const velocity = event.key === "ArrowLeft" ? -0.75 : 0.75;
+        onPlatter(side, { phase: "start" });
+        onPlatter(side, { phase: "move", velocity });
+        onPlatter(side, { phase: "end", velocity });
       }}
     />
-  );
-}
-
-function WaveDisplayMenu({ vocalVisible, onToggleVocal }: {
-  vocalVisible: boolean;
-  onToggleVocal: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node | null)) setOpen(false);
-    };
-    window.addEventListener("pointerdown", close, true);
-    return () => window.removeEventListener("pointerdown", close, true);
-  }, [open]);
-  return (
-    <div
-      ref={rootRef}
-      className="kd-performance-wave-menu"
-      data-open={open || undefined}
-      onPointerDown={(event) => event.stopPropagation()}
-    >
-      <button
-        type="button"
-        className="kd-performance-wave-menu-trigger"
-        aria-label="波形显示"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <ChevronDown size={12} strokeWidth={2.2} aria-hidden="true" />
-      </button>
-      {open ? (
-        <div className="kd-performance-wave-menu-popover" role="menu">
-          <button
-            type="button"
-            role="menuitemcheckbox"
-            aria-checked={vocalVisible}
-            data-active={vocalVisible || undefined}
-            onClick={() => { onToggleVocal(); setOpen(false); }}
-          >
-            人声波形
-          </button>
-        </div>
-      ) : null}
-    </div>
   );
 }
 
@@ -719,20 +541,22 @@ function DeckWave({
   deck,
   side,
   position,
-  waveform,
+  motionRate,
+  amplitudeScale,
   interactiveScrub,
   snapRail,
-  onTrackDrop,
-  cornerControl,
+  motionRevision,
+  onTrackLoad,
 }: {
   deck: PerformanceDeckModel;
   side: 0 | 1;
   position: number;
-  waveform: WaveformData | null;
+  motionRate: number;
+  amplitudeScale: number;
   interactiveScrub: boolean;
   snapRail: boolean;
-  onTrackDrop: PerformanceWorkspaceProps["onTrackDrop"];
-  cornerControl?: ReactNode;
+  motionRevision: number;
+  onTrackLoad: PerformanceWorkspaceProps["onTrackLoad"];
 }) {
   const track = deck.track;
   const dropTarget = { [TRACK_DECK_DROP_TARGET_ATTR]: String(side) };
@@ -744,7 +568,7 @@ function DeckWave({
       data-kd-performance-wave-lane="org"
       {...dropTarget}
       onDragOver={(event) => {
-        if (!isTrackDrag(event)) return;
+        if (!isPerformanceDeckDrag(event)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = "copy";
         event.currentTarget.dataset.kdNativeTrackOver = "true";
@@ -755,16 +579,12 @@ function DeckWave({
         }
       }}
       onDrop={(event) => {
-        if (!isTrackDrag(event)) return;
-        event.preventDefault();
-        const ids = readTrackDragIds(event.dataTransfer);
         delete event.currentTarget.dataset.kdNativeTrackOver;
-        finishTrackDrop();
-        if (ids.length) onTrackDrop(side, ids);
+        dropIntoPerformanceDeck(event, side, onTrackLoad);
       }}
     >
       {!track ? <span className="kd-performance-wave-empty" /> : null}
-      {track && waveform ? (
+      {track ? (
         <Waveform
           className="kd-performance-focus-wave"
           trackId={track.id}
@@ -780,196 +600,64 @@ function DeckWave({
           seekable={false}
           showBeatGrid
           viewportSeconds={performanceWaveformViewportSeconds(deck.rate)}
-          playing={deck.playing}
-          playbackRate={deck.rate}
-          waveform={waveform}
-          verticalInsetRatio={0}
+          playing={deck.transportRunning || deck.scratchHeld || interactiveScrub}
+          playbackRate={motionRate}
+          buckets={detailWaveformBuckets(deck.duration || track.duration || 0)}
+          detailUpgradeDelayMs={120}
+          amplitudeScale={amplitudeScale}
           interactiveScrub={interactiveScrub}
           snapRail={snapRail}
+          motionRevision={motionRevision}
+          nativeDeck={side}
         />
       ) : null}
-      {cornerControl}
-    </div>
-  );
-}
-
-function StemWaveLanes({
-  displayMask,
-  stemMode,
-  track,
-  position,
-  duration,
-  rate,
-  playing,
-  interactiveScrub,
-  snapRail,
-  sources,
-}: {
-  displayMask: number;
-  stemMode: StemMode;
-  track: Track | null;
-  position: number;
-  duration: number;
-  rate: number;
-  playing: boolean;
-  interactiveScrub: boolean;
-  snapRail: boolean;
-  sources: ReadonlyMap<StemName, { waveform: WaveformData | null; placeholder: WaveformData | null; opacity: number }>;
-}) {
-  // 车道数量只由用户按键决定。波形响应到达前保留同高空槽，加载/换歌不会把
-  // STEM 区先清零再逐条撑开。
-  const visibleLanes = stemOptions(stemMode).filter(({ bit }) => (displayMask & bit) !== 0);
-  if (visibleLanes.length === 0) return null;
-  return (
-    <div className="kd-performance-stem-lanes">
-      {visibleLanes.map(({ stem, label }) => (
-          <div
-            className="kd-performance-stem-lane"
-            key={stem}
-            data-stem={stem}
-            data-kd-performance-wave-lane={stem}
-            role="img"
-            aria-label={`${label} 强度`}
-          >
-            {track && sources.get(stem)?.waveform ? (
-              <Waveform
-                className="kd-performance-stem-wave"
-                trackId={track.id}
-                track={track}
-                position={position}
-                duration={duration}
-                height={10}
-                seekable={false}
-                viewportSeconds={performanceWaveformViewportSeconds(rate)}
-                playing={playing}
-                playbackRate={rate}
-                waveform={sources.get(stem)!.waveform!}
-                placeholder={sources.get(stem)!.placeholder}
-                opacity={sources.get(stem)!.opacity}
-                palette={stem === "vocals" ? "vocal-guide" : "rgb"}
-                silenceThreshold={STEM_SILENCE_THRESHOLD}
-                verticalInsetRatio={0}
-                interactiveScrub={interactiveScrub}
-                snapRail={snapRail}
-              />
-            ) : <span className="kd-performance-stem-wave-empty" aria-hidden="true" />}
-          </div>
-      ))}
     </div>
   );
 }
 
 function PerformanceDeckWaves({
   deck,
-  other,
-  stemState,
-  stemMode,
   side,
   position,
+  motionRate,
+  trimGain,
   interactiveScrub,
   snapRail,
-  displayMask,
-  waveforms,
-  autoBeatSync,
-  syncMultiple,
-  onSeek,
-  onScratchHold,
-  onScratchRelease,
-  onScratchPreview,
-  onScratchTick,
-  onTrackDrop,
-  cornerControl,
+  motionRevision,
+  onPlatter,
+  onTrackLoad,
 }: {
   deck: PerformanceDeckModel;
-  other: PerformanceDeckModel;
-  stemState: PerformanceStemDeckModel;
-  stemMode: StemMode;
   side: 0 | 1;
   position: number;
+  motionRate: number;
+  trimGain: number;
   interactiveScrub: boolean;
   snapRail: boolean;
-  displayMask: number;
-  waveforms: Partial<Record<StemName, WaveformData>>;
-  autoBeatSync: boolean;
-  syncMultiple: number;
-  onSeek: PerformanceWorkspaceProps["onSeek"];
-  onScratchHold: PerformanceWorkspaceProps["onScratchHold"];
-  onScratchRelease: PerformanceWorkspaceProps["onScratchRelease"];
-  onScratchPreview: (side: 0 | 1, position: number | null) => void;
-  onScratchTick: PerformanceWorkspaceProps["onJogScratchTick"];
-  onTrackDrop: PerformanceWorkspaceProps["onTrackDrop"];
-  cornerControl?: ReactNode;
+  motionRevision: number;
+  onPlatter: PerformanceWorkspaceProps["onPlatter"];
+  onTrackLoad: PerformanceWorkspaceProps["onTrackLoad"];
 }) {
-  const track = deck.track;
-  const duration = deck.duration || track?.duration || 0;
-  const buckets = detailWaveformBuckets(duration);
-  const mainWaveform = useMainWaveform(track, buckets);
-  const pendingWave = useMemo(
-    () => (track
-      ? emptyLiveStemWaveform(track.id, duration, Math.min(640, buckets), 0, 0, 0)
-      : null),
-    [buckets, duration, track?.id],
-  );
-  const stemLaneSources = useMemo(() => {
-    const result = new Map<StemName, { waveform: WaveformData | null; placeholder: WaveformData | null; opacity: number }>();
-    for (const { stem, bit, gainIndex } of stemOptions(stemMode)) {
-      if ((displayMask & bit) === 0) continue;
-      const waveform = track && waveforms[stem]?.track_id === track.id ? waveforms[stem] ?? null : null;
-      const gain = !stemState.enabled
-        ? 1
-        : (stemState.mask & bit) !== 0
-          ? clamp(stemState.gains[gainIndex] ?? 1, 0, 1)
-          : 0;
-      result.set(stem, {
-        waveform: waveform ?? (stemState.enabled ? pendingWave : null),
-        // Unknown vocal columns stay empty. Reusing the full mix here would draw a convincing
-        // but false vocal band while the separator is still catching up.
-        placeholder: null,
-        opacity: gain >= 0.999
-          ? 1
-          : VOCAL_WAVEFORM_MIN_OPACITY + (1 - VOCAL_WAVEFORM_MIN_OPACITY) * gain,
-      });
-    }
-    return result;
-  }, [displayMask, mainWaveform, pendingWave, stemMode, stemState, track?.id, waveforms]);
-
   return (
     <div className="kd-performance-deck-waves" data-side={side === 0 ? "a" : "b"}>
       <StableDeckWave
         deck={deck}
         side={side}
         position={position}
-        waveform={mainWaveform}
+        motionRate={motionRate}
+        amplitudeScale={performanceWaveformAmplitudeScale(trimGain)}
         interactiveScrub={interactiveScrub}
         snapRail={snapRail}
-        onTrackDrop={onTrackDrop}
-        cornerControl={cornerControl}
-      />
-      <StemWaveLanes
-        displayMask={displayMask}
-        stemMode={stemMode}
-        track={track}
-        position={position}
-        duration={duration}
-        rate={deck.rate}
-        playing={deck.playing}
-        interactiveScrub={interactiveScrub}
-        snapRail={snapRail}
-        sources={stemLaneSources}
+        motionRevision={motionRevision}
+        onTrackLoad={onTrackLoad}
       />
       <DeckScratchSurface
         deck={deck}
-        other={other}
         side={side}
-        autoBeatSync={autoBeatSync}
-        syncMultiple={syncMultiple}
-        onSeek={onSeek}
-        onScratchHold={onScratchHold}
-        onScratchRelease={onScratchRelease}
-        onScratchPreview={onScratchPreview}
-        onScratchTick={onScratchTick}
-        onTrackDrop={onTrackDrop}
+        onPlatter={onPlatter}
+        onTrackLoad={onTrackLoad}
       />
+      {deck.track ? <i className="kd-performance-wave-needle" aria-hidden="true" /> : null}
     </div>
   );
 }
@@ -1041,7 +729,12 @@ function DeckInfo({ deck, side, preserveBarPhase, quantize, onSeek, onTogglePlay
       data-side={side === 0 ? "a" : "b"}
     >
       <span className="kd-performance-vinyl" aria-hidden="true">
-        <span className="kd-performance-vinyl-record" data-spinning={deck.playing || undefined} data-empty={!track || undefined}>
+        <span
+          className="kd-performance-vinyl-record"
+          data-spinning={deck.transportRunning || undefined}
+          data-empty={!track || undefined}
+          style={{ "--kd-vinyl-spin-duration": `${2.8 / clamp(deck.rate, 0.5, 2)}s` } as CSSProperties}
+        >
           {deck.cover ? <img src={deck.cover} alt="" /> : <b className="kd-performance-platter-brand">KDJ</b>}
         </span>
       </span>
@@ -1059,8 +752,8 @@ function DeckInfo({ deck, side, preserveBarPhase, quantize, onSeek, onTogglePlay
             height={18}
             buckets={640}
             preserveBarPhase={preserveBarPhase}
-            playing={deck.playing}
-            playbackRate={deck.rate}
+            playing={deck.transportRunning}
+            playbackRate={deck.transportRunning ? deck.rate : 0}
             onSeek={(detail) => onSeek(side, detail)}
             className="kd-performance-overview-wave"
           />
@@ -1097,8 +790,8 @@ function DeckInfo({ deck, side, preserveBarPhase, quantize, onSeek, onTogglePlay
         </div>
         {track ? (
           <dl className="kd-performance-metadata">
-            <div data-time="true"><dt>TIME</dt><dd>{formatDuration(deck.position)}</dd></div>
-            <div><dt aria-label="调性" /><dd style={keyColor ? { color: keyColor } : undefined}>{deckKey(track)}</dd></div>
+            <div data-time="true"><dt>TIME</dt><dd>{formatSignedDuration(deck.position)}</dd></div>
+            <div data-key="true"><dt aria-label="调性" /><dd style={keyColor ? { color: keyColor } : undefined}>{deckKey(track)}</dd></div>
           </dl>
         ) : null}
       </div>
@@ -1250,16 +943,15 @@ function HotCuePads({ deck, side, quantize, onSeek, onSaveCuePoints }: {
 }
 
 /** LOOP 控制：开/关 + 拍数步进 + 节拍跳转。循环窗口由引擎无缝回绕。 */
-function LoopControls({ deck, side, beats, jumpBeats, quantize, onBeats, onJumpBeats, onSetLoop, onClearLoop, onSeek }: {
+function LoopControls({ deck, side, beats, jumpBeats, onBeats, onJumpBeats, onToggleLoop, onResizeLoop, onSeek }: {
   deck: PerformanceDeckModel;
   side: 0 | 1;
   beats: number;
   jumpBeats: number;
-  quantize: boolean;
   onBeats: (beats: number) => void;
   onJumpBeats: (beats: number) => void;
-  onSetLoop: PerformanceWorkspaceProps["onSetLoop"];
-  onClearLoop: PerformanceWorkspaceProps["onClearLoop"];
+  onToggleLoop: (side: 0 | 1) => void;
+  onResizeLoop: (side: 0 | 1, beats: number) => void;
   onSeek: PerformanceWorkspaceProps["onSeek"];
 }) {
   const track = deck.track;
@@ -1269,19 +961,10 @@ function LoopControls({ deck, side, beats, jumpBeats, quantize, onBeats, onJumpB
     const index = LOOP_BEAT_CHOICES.indexOf(beats);
     const next = LOOP_BEAT_CHOICES[clamp(index + direction, 0, LOOP_BEAT_CHOICES.length - 1)];
     onBeats(next);
-    if (looping && deck.loopStart !== null && beat) {
-      onSetLoop(side, deck.loopStart, next * beat);
-    }
+    if (looping && beat) onResizeLoop(side, next);
   };
   const toggleLoop = () => {
-    if (!track || !beat) return;
-    if (looping) {
-      onClearLoop(side);
-      return;
-    }
-    const start = snapCueSeconds(deck.position, track.bpm, track.first_beat, quantize);
-    if (start + beats * beat > deck.duration + 0.05) return;
-    onSetLoop(side, start, beats * beat);
+    onToggleLoop(side);
   };
   const jump = (direction: -1 | 1) => {
     if (!track || !beat) return;
@@ -1777,24 +1460,63 @@ function FxSlotControl({ slot, onChange }: {
   slot: FxSlot;
   onChange: (patch: Partial<FxSlot>) => void;
 }) {
-  const wet = clamp(slot.wet, 0, 1);
+  const mix = clamp(slot.mix, 0, 1);
   const parameter = clamp(slot.parameter, 0, 1);
-  const label = slot.kind === "echo" ? "Echo" : slot.kind === "reverb" ? "Reverb" : slot.kind === "gater" ? "Gater" : "Vocal";
+  const index = FX_OPTIONS.findIndex((effect) => effect.kind === slot.kind);
+  const label = FX_OPTIONS[index]?.label ?? "Echo";
+  const cycle = (direction: -1 | 1) => {
+    const next = (index + direction + FX_OPTIONS.length) % FX_OPTIONS.length;
+    onChange({ kind: FX_OPTIONS[next].kind });
+  };
   return (
     <div className="kd-performance-fx-slot" data-active={slot.enabled || undefined} data-kind={slot.kind}>
-      <button type="button" className="kd-performance-fx-on" aria-pressed={slot.enabled} onClick={() => onChange({ enabled: !slot.enabled })}>ON</button>
-      <label className="kd-performance-fx-select">
-        <span>{label}</span>
-        <select value={slot.kind} aria-label="选择效果" onChange={(event) => onChange({ kind: event.currentTarget.value as FxKind })}>
-          <option value="echo">Echo</option>
-          <option value="reverb">Reverb</option>
-          <option value="gater">Gater</option>
-          <option value="vocal">Vocal</option>
-        </select>
-        <ChevronDown size={10} aria-hidden="true" />
-      </label>
-      {slot.kind === "vocal" ? null : <SlideStrip label="PRM" value={parameter} min={0} max={1} onChange={(parameter) => onChange({ parameter })} onReset={() => onChange({ parameter: 0.5 })} />}
-      <SlideStrip label="MIX" value={wet} min={0} max={1} onChange={(wet) => onChange({ wet })} onReset={() => onChange({ wet: slot.kind === "vocal" ? 1 : 0.5 })} />
+      <div className="kd-performance-fx-head">
+        <button type="button" aria-label="上一个效果" onClick={() => cycle(-1)}>‹</button>
+        <label className="kd-performance-fx-select">
+          <AudioLines size={12} aria-hidden="true" />
+          <span>{label}</span>
+          <select
+            value={slot.kind}
+            aria-label="选择效果"
+            onChange={(event) => onChange({ kind: event.currentTarget.value as FxKind })}
+          >
+            {FX_OPTIONS.map((effect) => <option key={effect.kind} value={effect.kind}>{effect.label}</option>)}
+          </select>
+          <ChevronDown size={10} aria-hidden="true" />
+        </label>
+        <button type="button" aria-label="下一个效果" onClick={() => cycle(1)}>›</button>
+      </div>
+      <div className="kd-performance-fx-body">
+        <button
+          type="button"
+          className="kd-performance-fx-on"
+          aria-pressed={slot.enabled}
+          onClick={() => onChange({ enabled: !slot.enabled })}
+        >
+          ON
+        </button>
+        <SlideStrip
+          label="PARAMETER"
+          value={parameter}
+          min={0}
+          max={1}
+          onChange={(value) => onChange({ parameter: value })}
+          onReset={() => onChange({ parameter: 0.5 })}
+        />
+        <span className="kd-performance-fx-mix">
+          <i>D</i>
+          <ArcKnob
+            size="xs"
+            label="DRY/WET"
+            value={mix}
+            min={0}
+            max={1}
+            onChange={(value) => onChange({ mix: value })}
+            onReset={() => onChange({ mix: 0.5 })}
+          />
+          <i>W</i>
+        </span>
+      </div>
     </div>
   );
 }
@@ -1802,6 +1524,7 @@ function FxSlotControl({ slot, onChange }: {
 /**
  * 竖排 TEMPO 面板（rekordbox 式）：竖推子占满控制区全高，SYNC、有效 BPM 读数、
  * 百分比 + 量程下拉、−/+ 步进键收进推子旁的一列（B 台镜像），不再占推子上下方。
+ * 推子极性跟 CDJ：往上减速，往下加速。
  */
 function TempoPanel({
   deck,
@@ -1887,10 +1610,10 @@ function TempoPanel({
     }
   };
 
-  // 竖推手势挂在 VFader 上：按下定位、拖动跟随、松手 flush；键盘中步进留在推子内部，
-  // 这里只把 0..1 行程换算回当前量程的 rate。±2% 中位吸附也由 VFader 的 snapRatio 完成。
+  // 竖推手势挂在 VFader 上：按下定位、拖动跟随、松手 flush；键盘中步进留在推子内部。
+  // Pioneer / CDJ：槽顶是 −、槽底是 +。中位吸附走 VFader 的 snapRatio（WIDE 的 0% 不在 50%）。
   const commitRatio = (ratio: number) => {
-    commit(range.min + clamp(ratio, 0, 1) * (range.max - range.min));
+    commit(range.max - clamp(ratio, 0, 1) * (range.max - range.min));
   };
   const onFaderGestureEnd = () => {
     tempoGestureRef.current = false;
@@ -1933,8 +1656,8 @@ function TempoPanel({
   const percent = Math.round((draft - 1) * 1000) / 10;
   const pctText = percent === 0 ? "0.0%" : `${percent > 0 ? "+" : ""}${percent.toFixed(1)}%`;
   // 0% 档在量程里的位置（WIDE 不是对称量程，中位线不能写死在 50%）。
-  const zeroRatio = clamp((1 - range.min) / (range.max - range.min), 0, 1);
-  const softwareRatio = clamp((shown - range.min) / (range.max - range.min), 0, 1);
+  const zeroRatio = scaleRangeToUnit(1, range.min, range.max);
+  const softwareRatio = scaleRangeToUnit(shown, range.min, range.max);
   const hardwareRate = hardwareUnit != null ? scaleUnitToRange(hardwareUnit, range.min, range.max) : null;
   const hardwareRatio = hardwareRate != null ? scaleRangeToUnit(hardwareRate, range.min, range.max) : null;
   const takeoverActive = hardwareRatio != null
@@ -2168,13 +1891,13 @@ function smoothEqChartPath(points: EqChartPoint[]): string {
 
 /**
  * Fifteen genuine post-EQ levels form one moving spectrum line under the three-control preset.
- * The pointer gesture
- * is intentionally relative: contact never jumps to an absolute y value. Coalesced pointer
- * segments are integrated across every crossed cell, then distributed to LOW/MID/HIGH.
+ * The pointer gesture is relative: contact never jumps to an absolute y value.
  */
-function EqSpectrumChart({ side, values, playing, onAdjust, onReset }: {
+function EqSpectrumChart({ side, values, filter, resonanceQ, playing, onAdjust, onReset }: {
   side: 0 | 1;
   values: EqGraphValues;
+  filter: number;
+  resonanceQ: number;
   playing: boolean;
   onAdjust: (delta: EqGraphValues) => void;
   onReset: () => void;
@@ -2245,6 +1968,20 @@ function EqSpectrumChart({ side, values, playing, onAdjust, onReset }: {
     { x: 1_000, y: curvePoints[curvePoints.length - 1].y },
   ];
   const smoothCurvePath = smoothEqChartPath(pathPoints);
+  const filterActive = channelFilterCutoffHz(filter) != null;
+  const filterPointRatios = Array.from({ length: 41 }, (_, index) => index / 40);
+  const filterCurvePoints = filterPointRatios.map((ratio) => ({
+    x: ratio * 1_000,
+    y: eqDbToGraphRatio(channelFilterDbAtRatio(filter, resonanceQ, ratio)) * 1_000,
+  }));
+  const filterPathPoints = filterCurvePoints.length === 0
+    ? []
+    : [
+      { x: 0, y: filterCurvePoints[0].y },
+      ...filterCurvePoints,
+      { x: 1_000, y: filterCurvePoints[filterCurvePoints.length - 1].y },
+    ];
+  const smoothFilterPath = filterActive ? smoothEqChartPath(filterPathPoints) : "";
 
   const applyPointerSamples = (event: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
@@ -2270,7 +2007,6 @@ function EqSpectrumChart({ side, values, playing, onAdjust, onReset }: {
         (drag.x - rect.left) / rect.width,
         (nextX - rect.left) / rect.width,
       );
-      // Roughly 65% of chart height moves one side of the bipolar control's full throw.
       const delta = -dy / (rect.height * 0.65);
       low += delta * weights.low;
       mid += delta * weights.mid;
@@ -2359,14 +2095,20 @@ function EqSpectrumChart({ side, values, playing, onAdjust, onReset }: {
       <svg className="kd-dj-eq-curve" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">
         <path d={smoothCurvePath} />
       </svg>
+      {filterActive ? (
+        <svg className="kd-dj-eq-filter" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">
+          <path d={smoothFilterPath} />
+        </svg>
+      ) : null}
     </div>
   );
 }
 
 /** Single Deck mixer: the graph and the physical-style LOW/MID/HIGH knobs share one state. */
-function MixerStrip({ side, mixer, playing, setMixer, adjustEq }: {
+function MixerStrip({ side, mixer, resonanceQ, playing, setMixer, adjustEq }: {
   side: 0 | 1;
   mixer: PerformanceMixerValues;
+  resonanceQ: number;
   playing: boolean;
   setMixer: (patch: Partial<PerformanceMixerValues>) => void;
   adjustEq: (delta: EqGraphValues) => void;
@@ -2377,21 +2119,23 @@ function MixerStrip({ side, mixer, playing, setMixer, adjustEq }: {
         <EqSpectrumChart
           side={side}
           values={mixer}
+          filter={mixer.filter}
+          resonanceQ={resonanceQ}
           playing={playing}
           onAdjust={adjustEq}
           onReset={() => setMixer({ low: 0, mid: 0, high: 0 })}
         />
         <div className="kd-dj-eq-knobs">
-          <ArcKnob size="sm" label="LOW" value={mixer.low} onChange={(low) => setMixer({ low })} onReset={() => setMixer({ low: 0 })} />
-          <ArcKnob size="sm" label="MID" value={mixer.mid} onChange={(mid) => setMixer({ mid })} onReset={() => setMixer({ mid: 0 })} />
           <ArcKnob size="sm" label="HIGH" value={mixer.high} onChange={(high) => setMixer({ high })} onReset={() => setMixer({ high: 0 })} />
+          <ArcKnob size="sm" label="MID" value={mixer.mid} onChange={(mid) => setMixer({ mid })} onReset={() => setMixer({ mid: 0 })} />
+          <ArcKnob size="sm" label="LOW" value={mixer.low} onChange={(low) => setMixer({ low })} onReset={() => setMixer({ low: 0 })} />
         </div>
       </div>
     </div>
   );
 }
 
-/** Pure channel-volume fader. Live loudness now exists only in the EQ spectrum line. */
+/** Pure channel-volume fader. */
 function ChannelFader({ side, mixer, setMixer }: {
   side: 0 | 1;
   mixer: PerformanceMixerValues;
@@ -2417,57 +2161,56 @@ const StableDeckInfo = memo(DeckInfo);
 
 export function PerformanceWorkspace({
   decks: sourceDecks,
-  stems,
-  stemRuntime,
+  deckResetRevisions,
   stemMode,
   masterVolume,
   onSeek,
   onJogSeek,
   onJogNudge,
-  onJogScratchTick,
-  onJogScratchStart,
-  onJogScratchRelease,
-  onScratchRelease,
-  onScratchHold,
-  onTrackDrop,
+  onPlatter,
+  onTrackLoad,
   onTogglePlay,
   onMainCue,
   onRateChange,
   onRatePairChange,
   onSync,
+  onClearSync,
+  nativeSync,
   onMixerChange,
   onDeckFx,
   onMasterVolumeChange,
-  onEnsureStemWaveScan,
-  onReleaseStemWaveScan,
-  onStemWaveMaskChange,
   onToggleStemAll,
-  onStemGain,
-  onSetLoop,
-  onClearLoop,
+  onDeckPfl,
+  onToggleLoop,
+  onResizeLoop,
   onSaveCuePoints,
   onSaveMainCue,
 }: PerformanceWorkspaceProps) {
+  const filterResonanceQ = channelFilterResonanceQ(
+    useAppStore((state) => state.settings?.filter_resonance ?? "high"),
+  );
   const [analyzedDeckTracks, setAnalyzedDeckTracks] = useState<[Track | null, Track | null]>([null, null]);
   useEffect(() => {
     let alive = true;
     const resolve = (track: Track | null) => {
-      const localId = localLibraryDataTrackId(track);
-      if (!track || localId === null) return Promise.resolve(track);
-      return api.track(localId)
-        .then((analyzed) => ({
-          ...track,
-          bpm: analyzed.bpm ?? track.bpm,
-          bpm_v2: analyzed.bpm_v2,
-          bpm_confidence: analyzed.bpm_confidence ?? track.bpm_confidence,
-          first_beat: analyzed.first_beat ?? track.first_beat,
-        }))
+      if (!track) return Promise.resolve(null);
+      return hydratePlaybackTrack(track)
         .catch(() => track);
     };
-    void Promise.all([resolve(sourceDecks[0].track), resolve(sourceDecks[1].track)]).then((tracks) => {
-      if (alive) setAnalyzedDeckTracks(tracks as [Track | null, Track | null]);
-    });
-    return () => { alive = false; };
+    const refresh = () => {
+      void Promise.all([resolve(sourceDecks[0].track), resolve(sourceDecks[1].track)])
+        .then((tracks) => {
+          if (alive) setAnalyzedDeckTracks(tracks as [Track | null, Track | null]);
+        });
+    };
+    const unsubscribers = sourceDecks.flatMap((deck) =>
+      deck.track ? [subscribePlaybackTrackMetadata(deck.track, refresh)] : [],
+    );
+    refresh();
+    return () => {
+      alive = false;
+      unsubscribers.forEach((unsubscribe) => unsubscribe());
+    };
   }, [
     sourceDecks[0].track?.id,
     sourceDecks[0].track?.modified_at,
@@ -2483,10 +2226,7 @@ export function PerformanceWorkspace({
         ...deck,
         track: {
           ...current,
-          bpm: analyzed.bpm ?? current.bpm,
-          bpm_v2: analyzed.bpm_v2,
-          bpm_confidence: analyzed.bpm_confidence ?? current.bpm_confidence,
-          first_beat: analyzed.first_beat ?? current.first_beat,
+          ...analyzed,
         },
       };
     }) as [PerformanceDeckModel, PerformanceDeckModel],
@@ -2521,45 +2261,28 @@ export function PerformanceWorkspace({
   const [crossfader, setCrossfader] = useState(0);
   const [crossfaderEnabled, setCrossfaderEnabled] = useState(readCrossfaderEnabled);
   const [crossfaderTempoSync, setCrossfaderTempoSync] = useState(false);
-  const [eqStemMode, setEqStemMode] = useState<[EqStemLayer, EqStemLayer]>(["eq", "eq"]);
+  const [deckPfl, setDeckPfl] = useState<[boolean, boolean]>([false, false]);
+  const deckPflRef = useRef(deckPfl);
+  deckPflRef.current = deckPfl;
   const [midiPort, setMidiPort] = useState<string | null>(null);
   const [loopBeats, setLoopBeats] = useState<[number, number]>(readLoopBeats);
   const [jumpBeats, setJumpBeats] = useState<[number, number]>(readJumpBeats);
-  const [deckPadPage, setDeckPadPage] = useState<[DeckPadPage, DeckPadPage]>(["cue", "cue"]);
   const [fxMode, setFxMode] = useState<[FxPanelMode, FxPanelMode]>(["knobs", "knobs"]);
   const [fxSlots, setFxSlots] = useState<[DeckFxSlots, DeckFxSlots]>([
     defaultDeckFxSlots(),
     defaultDeckFxSlots(),
   ]);
   const [heldPadFx, setHeldPadFx] = useState<[number, number]>([0, 0]);
-  const vocalFxRestoreRef = useRef<[
-    { gain: number; wasEnabled: boolean } | null,
-    { gain: number; wasEnabled: boolean } | null,
-  ]>([null, null]);
-  const vocalFxEnableAttemptRef = useRef<[string | null, string | null]>([null, null]);
-  const vocalFxDisableAttemptRef = useRef<[boolean, boolean]>([false, false]);
   const [samplerSlotIds, setSamplerSlotIds] = useState<Array<number | null>>(readSamplerSlotIds);
   const [samplerTracks, setSamplerTracks] = useState<Array<Track | null>>(() => Array(8).fill(null));
   const samplerAudioRef = useRef<Array<HTMLAudioElement | null>>(Array(8).fill(null));
-  const [activeStemDisplayMask, setActiveStemDisplayMask] = useState(readPerformanceWaveMask);
-  /** SYNC 锁定：base 是按下 SYNC 的那台；关系 otherEff = multiple × baseEff，双向跟随。 */
+  /** Native Sync Group mirror plus an optimistic button state while its command is in flight. */
   const [syncLock, setSyncLock] = useState<{ base: 0 | 1; multiple: number } | null>(null);
-  const [stemWaveforms, setStemWaveforms] = useState<[
-    Partial<Record<StemName, WaveformData>>,
-    Partial<Record<StemName, WaveformData>>,
-  ]>([{}, {}]);
-  // `revision` is a server-side append cursor, not React state: ordinary 200ms polls must not
-  // schedule a component update. This is the important boundary that keeps the compositor free.
-  const stemWaveCursorRef = useRef<[StemWaveCursor, StemWaveCursor]>([
-    { trackId: null, epoch: null, revision: 0 },
-    { trackId: null, epoch: null, revision: 0 },
-  ]);
-  const stemScanTrackIdsRef = useRef<[number | null, number | null]>([null, null]);
   const [scratchPreviews, setScratchPreviews] = useState<[number | null, number | null]>([
     null,
     null,
   ]);
-  /** Held hardware platter positions preview the needle while ticks already drive the engine. */
+  /** Immediate hardware-contact state while the callback start acknowledgement is in flight. */
   const [midiScratchActive, setMidiScratchActive] = useState<[boolean, boolean]>([false, false]);
   const onSeekRef = useRef(onSeek);
   onSeekRef.current = onSeek;
@@ -2567,12 +2290,8 @@ export function PerformanceWorkspace({
   onJogSeekRef.current = onJogSeek;
   const onJogNudgeRef = useRef(onJogNudge);
   onJogNudgeRef.current = onJogNudge;
-  const onJogScratchTickRef = useRef(onJogScratchTick);
-  onJogScratchTickRef.current = onJogScratchTick;
-  const onJogScratchStartRef = useRef(onJogScratchStart);
-  onJogScratchStartRef.current = onJogScratchStart;
-  const onJogScratchReleaseRef = useRef(onJogScratchRelease);
-  onJogScratchReleaseRef.current = onJogScratchRelease;
+  const onPlatterRef = useRef(onPlatter);
+  onPlatterRef.current = onPlatter;
   const onDeckFxRef = useRef(onDeckFx);
   onDeckFxRef.current = onDeckFx;
   const deckTrackIdsRef = useRef<[number | null, number | null]>([
@@ -2581,10 +2300,23 @@ export function PerformanceWorkspace({
   ]);
   deckTrackIdsRef.current = [decks[0].track?.id ?? null, decks[1].track?.id ?? null];
   const jogTouchRef = useRef<[boolean, boolean]>([false, false]);
+  const midiPlatterTrackersRef = useRef<[PlatterVelocityTracker, PlatterVelocityTracker]>([
+    new PlatterVelocityTracker(),
+    new PlatterVelocityTracker(),
+  ]);
+  const isJogVinylMotion = (side: 0 | 1) => jogTouchRef.current[side];
   const decksRef = useRef(decks);
   decksRef.current = decks;
+  const previewJogNudge = useCallback((side: 0 | 1, amount: number) => {
+    onJogNudgeRef.current(side, amount);
+  }, []);
   const syncLockRef = useRef(syncLock);
   syncLockRef.current = syncLock;
+  useEffect(() => {
+    const relation = adoptNativeSyncRelation(nativeSync);
+    syncLockRef.current = relation;
+    setSyncLock(relation);
+  }, [nativeSync.enabled, nativeSync.follower, nativeSync.leader, nativeSync.multiple]);
   const syncInteractionRevisionRef = useRef(0);
   const crossfaderTempoSyncRef = useRef(crossfaderTempoSync);
   crossfaderTempoSyncRef.current = crossfaderTempoSync;
@@ -2615,6 +2347,66 @@ export function PerformanceWorkspace({
     trackIds: [decks[0].track?.id ?? null, decks[1].track?.id ?? null] as [number | null, number | null],
   });
   const mixerSignatureRef = useRef<[string, string]>(["", ""]);
+  const appliedDeckResetRevisionsRef = useRef<[number, number]>([
+    deckResetRevisions[0],
+    deckResetRevisions[1],
+  ]);
+  useLayoutEffect(() => {
+    const resetA = appliedDeckResetRevisionsRef.current[0] !== deckResetRevisions[0];
+    const resetB = appliedDeckResetRevisionsRef.current[1] !== deckResetRevisions[1];
+    appliedDeckResetRevisionsRef.current = [deckResetRevisions[0], deckResetRevisions[1]];
+    if (!resetA && !resetB) return;
+
+    // Manager ownership cancels trailing DJ gestures before publishing one neutral mixer/FX
+    // snapshot. DJ source replacements never advance this revision.
+    if (mixerTimerRef.current !== null) {
+      window.clearTimeout(mixerTimerRef.current);
+      mixerTimerRef.current = null;
+    }
+    if (crossfaderTempoTimerRef.current !== null) {
+      window.clearTimeout(crossfaderTempoTimerRef.current);
+      crossfaderTempoTimerRef.current = null;
+    }
+    crossfaderTempoPendingRef.current = null;
+    crossfaderTempoSyncRef.current = false;
+    syncLockRef.current = null;
+    setCrossfaderTempoSync(false);
+    setSyncLock(null);
+
+    ([0, 1] as const).forEach((side) => {
+      if (!(side === 0 ? resetA : resetB)) return;
+      const jogTimer = jogSeekTimerRef.current[side];
+      if (jogTimer !== null) window.clearTimeout(jogTimer);
+      jogSeekTimerRef.current[side] = null;
+      jogSeekPendingRef.current[side] = null;
+      jogAtRef.current[side] = null;
+      jogTouchRef.current[side] = false;
+      midiPlatterTrackersRef.current[side].reset();
+      scratchPreviewPendingRef.current[side] = null;
+      mixerSignatureRef.current[side] = "";
+      tempoTakeoverRef.current.lanes[side] = new SoftTakeover();
+      tempoTakeoverRef.current.hardwareUnit[side] = null;
+      onDeckPfl(side, false);
+    });
+
+    setMixers((current) => [
+      resetA ? { ...DEFAULT_MIXER } : current[0],
+      resetB ? { ...DEFAULT_MIXER } : current[1],
+    ]);
+    setVisualRates((current) => [resetA ? null : current[0], resetB ? null : current[1]]);
+    setTempoHardwareUnit((current) => [resetA ? null : current[0], resetB ? null : current[1]]);
+    const resetPfl: [boolean, boolean] = [resetA ? false : deckPflRef.current[0], resetB ? false : deckPflRef.current[1]];
+    deckPflRef.current = resetPfl;
+    setDeckPfl(resetPfl);
+    setFxMode((current) => [resetA ? "knobs" : current[0], resetB ? "knobs" : current[1]]);
+    setFxSlots((current) => [
+      resetA ? defaultDeckFxSlots() : current[0],
+      resetB ? defaultDeckFxSlots() : current[1],
+    ]);
+    setHeldPadFx((current) => [resetA ? 0 : current[0], resetB ? 0 : current[1]]);
+    setScratchPreviews((current) => [resetA ? null : current[0], resetB ? null : current[1]]);
+    setMidiScratchActive((current) => [resetA ? false : current[0], resetB ? false : current[1]]);
+  }, [deckResetRevisions[0], deckResetRevisions[1]]);
   useEffect(() => {
     localStorage.setItem(LOOP_BEATS_STORAGE_KEY, JSON.stringify(loopBeats));
   }, [loopBeats]);
@@ -2643,29 +2435,19 @@ export function PerformanceWorkspace({
       audio?.pause();
       if (audio) audio.src = "";
     });
-    ([0, 1] as const).forEach((side) => {
-      onDeckFxRef.current(side, { echo: 0, echoParameter: 0.5, reverb: 0, reverbParameter: 0.5, gater: 0, gaterParameter: 0.5, pad: 0, beatSeconds: 0.5 });
-    });
+    // Closing the DJ surface is presentation-only. Manager `Load` owns the explicit neutral reset;
+    // clearing FX here would mutate a still-mounted physical Deck merely because the view changed.
   }, []);
   useEffect(() => {
-    const effect = (slots: DeckFxSlots, kind: FxKind): { wet: number; parameter: number } => {
-      const candidates = slots.filter((slot) => slot.enabled && slot.kind === kind);
-      if (candidates.length === 0) return { wet: 0, parameter: 0.5 };
-      return candidates.reduce((best, slot) => slot.wet >= best.wet ? slot : best);
-    };
     ([0, 1] as const).forEach((side) => {
-      const echo = effect(fxSlots[side], "echo");
-      const reverb = effect(fxSlots[side], "reverb");
-      const gater = effect(fxSlots[side], "gater");
       const knobMode = fxMode[side] === "knobs";
       const padMode = fxMode[side] === "pads";
+      const slots = fxSlots[side].map((slot) => ({
+        ...slot,
+        enabled: knobMode && slot.enabled,
+      })) as DeckFxSlots;
       onDeckFxRef.current(side, {
-        echo: knobMode ? echo.wet : 0,
-        echoParameter: echo.parameter,
-        reverb: knobMode ? reverb.wet : 0,
-        reverbParameter: reverb.parameter,
-        gater: knobMode ? gater.wet : 0,
-        gaterParameter: gater.parameter,
+        slots,
         pad: padMode ? heldPadFx[side] : 0,
         beatSeconds: beatSeconds(decks[side].track) ?? 0.5,
       });
@@ -2678,117 +2460,11 @@ export function PerformanceWorkspace({
     heldPadFx,
   ]);
   useEffect(() => {
-    ([0, 1] as const).forEach((side) => {
-      const vocal = fxMode[side] === "knobs"
-        ? fxSlots[side]
-          .filter((slot) => slot.enabled && slot.kind === "vocal")
-          .reduce<FxSlot | null>((best, slot) => !best || slot.wet >= best.wet ? slot : best, null)
-        : null;
-      const restore = vocalFxRestoreRef.current[side];
-      if (vocal) {
-        if (!restore) {
-          vocalFxRestoreRef.current[side] = {
-            gain: stems[side].gains[3],
-            wasEnabled: stems[side].enabled,
-          };
-        }
-        vocalFxDisableAttemptRef.current[side] = false;
-        if (!stems[side].enabled) {
-          const token = [
-            decks[side].track?.id ?? "none",
-            stemRuntime?.state ?? "none",
-            stems[side].status?.state ?? "none",
-          ].join(":");
-          if (vocalFxEnableAttemptRef.current[side] !== token) {
-            vocalFxEnableAttemptRef.current[side] = token;
-            onToggleStemAll(side);
-          }
-          return;
-        }
-        vocalFxEnableAttemptRef.current[side] = null;
-        if (Math.abs(stems[side].gains[3] - vocal.wet) > 0.002) {
-          onStemGain(side, "vocals", vocal.wet);
-        }
-        return;
-      }
-
-      if (!restore) return;
-      if (stems[side].enabled) {
-        if (Math.abs(stems[side].gains[3] - restore.gain) > 0.002) {
-          onStemGain(side, "vocals", restore.gain);
-        }
-        if (!restore.wasEnabled && !vocalFxDisableAttemptRef.current[side]) {
-          vocalFxDisableAttemptRef.current[side] = true;
-          onToggleStemAll(side);
-        } else if (restore.wasEnabled) {
-          vocalFxRestoreRef.current[side] = null;
-        }
-      } else if (!restore.wasEnabled && vocalFxEnableAttemptRef.current[side] === null) {
-        vocalFxRestoreRef.current[side] = null;
-        vocalFxDisableAttemptRef.current[side] = false;
-      } else if (!stems[side].enabled && vocalFxDisableAttemptRef.current[side]) {
-        vocalFxRestoreRef.current[side] = null;
-        vocalFxEnableAttemptRef.current[side] = null;
-        vocalFxDisableAttemptRef.current[side] = false;
-      }
-    });
-  }, [
-    decks[0].track?.id,
-    decks[1].track?.id,
-    fxMode,
-    fxSlots,
-    stemRuntime?.state,
-    stems[0].enabled,
-    stems[1].enabled,
-    stems[0].gains,
-    stems[1].gains,
-    stems[0].status?.state,
-    stems[1].status?.state,
-  ]);
-  useEffect(() => {
-    localStorage.setItem(PERFORMANCE_WAVE_DISPLAY_STORAGE_KEY, JSON.stringify(activeStemDisplayMask));
-    onStemWaveMaskChange?.(activeStemDisplayMask);
-  }, [activeStemDisplayMask, onStemWaveMaskChange]);
-  useEffect(() => {
-    const previous = stemScanTrackIdsRef.current;
-    const next: [number | null, number | null] = [
-      decks[0].track?.id ?? null,
-      decks[1].track?.id ?? null,
-    ];
-    const wantsVocalWave = performanceStemLanesVisible(activeStemDisplayMask);
-    const active: [number | null, number | null] = [
-      wantsVocalWave ? next[0] : null,
-      wantsVocalWave ? next[1] : null,
-    ];
-    [...new Set(previous.filter((trackId): trackId is number => trackId !== null))]
-      .filter((trackId) => !active.includes(trackId))
-      .forEach((trackId) => onReleaseStemWaveScan?.(trackId));
-    stemScanTrackIdsRef.current = active;
-    if (stemRuntime?.state !== "ready") return;
-    // Give the original 640-column rail its first paint, then automatically prepare STEM around
-    // each loaded Deck. Staggering the mounts avoids two cold decode requests landing together;
-    // the native scheduler still owns inference priority and expands beyond the viewport later.
-    const timers = ([0, 1] as const).flatMap((side) => {
-      if (active[side] === null) return [];
-      return [window.setTimeout(
-        () => onEnsureStemWaveScan?.(side),
-        700 + side * 300,
-      )];
-    });
-    return () => timers.forEach((timer) => window.clearTimeout(timer));
-  }, [
-    decks[0].track?.id,
-    decks[1].track?.id,
-    activeStemDisplayMask,
-    onEnsureStemWaveScan,
-    onReleaseStemWaveScan,
-    stemRuntime?.state,
-  ]);
-  useEffect(() => {
     localStorage.setItem(CROSSFADER_ENABLED_STORAGE_KEY, JSON.stringify(crossfaderEnabled));
   }, [crossfaderEnabled]);
   useEffect(() => {
-    localStorage.setItem(MIXER_STORAGE_KEY, JSON.stringify(mixers));
+    // 切出再切回 DJ 模式仍保留本次演出手感；进程重启后 sessionStorage 清空。
+    sessionStorage.setItem(PERFORMANCE_MIXER_SESSION_KEY, JSON.stringify(mixers));
     mixerDispatchRef.current = {
       mixers,
       crossfader,
@@ -2818,7 +2494,12 @@ export function PerformanceWorkspace({
           ].join(":");
           if (signature === mixerSignatureRef.current[side]) return;
           mixerSignatureRef.current[side] = signature;
-          latest.onMixerChange(side as 0 | 1, values, channelGain);
+          latest.onMixerChange(
+            side as 0 | 1,
+            latest.trackIds[side],
+            values,
+            channelGain,
+          );
         });
       }, 40);
     }
@@ -2832,16 +2513,25 @@ export function PerformanceWorkspace({
       mixerTimerRef.current = null;
     }
   }, []);
-  const onTrackDropRef = useRef(onTrackDrop);
-  onTrackDropRef.current = onTrackDrop;
+  const onTrackLoadRef = useRef(onTrackLoad);
+  onTrackLoadRef.current = onTrackLoad;
   useEffect(() => {
-    const drop = (event: Event) => {
+    const dropTrack = (event: Event) => {
       const detail = (event as CustomEvent<TrackDeckDropDetail>).detail;
       if (!detail || (detail.side !== 0 && detail.side !== 1) || detail.ids.length === 0) return;
-      onTrackDropRef.current(detail.side, detail.ids);
+      onTrackLoadRef.current(detail.side, trackIdRequest(detail.ids[0]));
     };
-    window.addEventListener(TRACK_DECK_DROP_EVENT, drop);
-    return () => window.removeEventListener(TRACK_DECK_DROP_EVENT, drop);
+    const dropStream = (event: Event) => {
+      const detail = (event as CustomEvent<StreamDeckDropDetail>).detail;
+      if (!detail || (detail.side !== 0 && detail.side !== 1) || !detail.source) return;
+      onTrackLoadRef.current(detail.side, songSourceRequest(detail.source));
+    };
+    window.addEventListener(TRACK_DECK_DROP_EVENT, dropTrack);
+    window.addEventListener(STREAM_DECK_DROP_EVENT, dropStream);
+    return () => {
+      window.removeEventListener(TRACK_DECK_DROP_EVENT, dropTrack);
+      window.removeEventListener(STREAM_DECK_DROP_EVENT, dropStream);
+    };
   }, []);
   const assignSamplerSlot = useCallback(async (slot: number, id: number) => {
     if (slot < 0 || slot > 7 || !Number.isFinite(id)) return;
@@ -2865,11 +2555,6 @@ export function PerformanceWorkspace({
   }, [assignSamplerSlot]);
 
   useEffect(() => {
-    setStemWaveforms([{}, {}]);
-    stemWaveCursorRef.current = [
-      { trackId: decks[0].track?.id ?? null, epoch: null, revision: 0 },
-      { trackId: decks[1].track?.id ?? null, epoch: null, revision: 0 },
-    ];
     // 任一台换歌后旧的对齐关系不再成立，解除 SYNC 锁定（重新点 SYNC 即可）。
     crossfaderTempoSyncRef.current = false;
     setCrossfaderTempoSync(false);
@@ -2880,137 +2565,19 @@ export function PerformanceWorkspace({
     }
     syncLockRef.current = null;
     setSyncLock(null);
-  }, [decks[0].track?.id, decks[1].track?.id, stemMode]);
+  }, [
+    decks[0].track?.id,
+    decks[1].track?.id,
+    deckResetRevisions[0],
+    deckResetRevisions[1],
+    stemMode,
+  ]);
 
   useEffect(() => () => {
     if (crossfaderTempoTimerRef.current !== null) {
       window.clearTimeout(crossfaderTempoTimerRef.current);
     }
   }, []);
-
-  useEffect(() => {
-    let alive = true;
-    const running = [false, false];
-    const sync = async (side: 0 | 1) => {
-      const track = decks[side].track;
-      const lanesVisible = performanceStemLanesVisible(activeStemDisplayMask);
-      const scanMounted = Boolean(stems[side].status?.phase);
-      if (!track || !lanesVisible || (!stems[side].enabled && !scanMounted) || running[side]) {
-        return;
-      }
-      running[side] = true;
-      const cursor = stemWaveCursorRef.current[side];
-      if (cursor.trackId !== track.id) {
-        cursor.trackId = track.id;
-        cursor.epoch = null;
-        cursor.revision = 0;
-      }
-      let delta: Awaited<ReturnType<typeof api.stemWaveformDelta>> | null = null;
-      try {
-        delta = await api.stemWaveformDelta(
-          track.id,
-          detailWaveformBuckets(decks[side].duration),
-          cursor.revision,
-          cursor.epoch,
-        );
-      } catch {
-        // Playback creates the in-memory session asynchronously; the next 200ms tick retries.
-      }
-      running[side] = false;
-      if (!alive || !delta || delta.track_id !== track.id) return;
-      const isNewEpoch = cursor.epoch !== delta.epoch;
-      cursor.epoch = delta.epoch;
-      cursor.revision = delta.revision;
-      const hasPoints = delta.stems.some(({ points }) => points.length > 0);
-      // Empty delta responses are the normal steady state. Do not touch React state or GPU
-      // textures in that case; the independent visual clock keeps drawing at display Hz.
-      if (!hasPoints && !isNewEpoch) return;
-      setStemWaveforms((current) => {
-        const next = [{ ...current[0] }, { ...current[1] }] as [
-          Partial<Record<StemName, WaveformData>>,
-          Partial<Record<StemName, WaveformData>>,
-        ];
-        // A live separator has to decode a new local window after a genuine seek, but it is
-        // still the same song. Keep already published columns instead of blanking every STEM rail
-        // and making a jog/SYNC look like a whole-track re-analysis.
-        delta.stems.forEach(({ stem, points }) => {
-          // Runtime/model changes create a new public epoch. Never merge that first payload into
-          // old-model arrays: their lane meaning and coverage are no longer compatible.
-          const prior = isNewEpoch ? undefined : next[side][stem];
-          const waveform = prior
-            && prior.track_id === track.id
-            && prior.amp.length === delta.columns
-            ? prior
-            : emptyLiveStemWaveform(
-                track.id,
-                delta.duration,
-                delta.columns,
-                delta.analysis_start,
-                delta.analysis_frontier,
-                delta.analysis_back_frontier,
-              );
-          points.forEach(({ index, amp, r, g, b }) => {
-            if (index < 0 || index >= waveform.amp.length || !Number.isFinite(amp)) return;
-            waveform.amp[index] = Math.max(waveform.amp[index], amp);
-            waveform.r[index] = Math.round(Math.min(255, Math.max(0, r)));
-            waveform.g[index] = Math.round(Math.min(255, Math.max(0, g)));
-            waveform.b[index] = Math.round(Math.min(255, Math.max(0, b)));
-            if (waveform.known) waveform.known[index] = true;
-          });
-          // A fresh wrapper makes Waveform repaint only when a real classical separation block changed. Its
-          // large typed timeline arrays stay shared; copying them on every visual update would
-          // merely move the old polling bottleneck from JSON parsing into the JS heap.
-          next[side][stem] = {
-            ...waveform,
-            analysis_start: delta.analysis_start,
-            analysis_frontier: delta.analysis_frontier,
-            analysis_back_frontier: delta.analysis_back_frontier,
-          };
-        });
-        return next;
-      });
-    };
-    ([0, 1] as const).forEach((side) => {
-      const shouldPoll = performanceStemLanesVisible(activeStemDisplayMask)
-        && (stems[side].enabled || Boolean(stems[side].status?.phase));
-      if (!shouldPoll || decks[side].track?.id !== stemWaveCursorRef.current[side].trackId) {
-        stemWaveCursorRef.current[side] = {
-          trackId: decks[side].track?.id ?? null,
-          epoch: null,
-          revision: 0,
-        };
-        if (!performanceStemLanesVisible(activeStemDisplayMask)) {
-          setStemWaveforms((current) => {
-            const next = [{ ...current[0] }, { ...current[1] }] as [
-              Partial<Record<StemName, WaveformData>>,
-              Partial<Record<StemName, WaveformData>>,
-            ];
-            next[side] = {};
-            return next;
-          });
-        }
-      }
-      void sync(side);
-    });
-    const timer = window.setInterval(() => {
-      void sync(0);
-      void sync(1);
-    }, 200);
-    return () => {
-      alive = false;
-      window.clearInterval(timer);
-    };
-  }, [
-    decks[0].track?.id,
-    decks[1].track?.id,
-    decks[0].duration,
-    decks[1].duration,
-    activeStemDisplayMask,
-    stems[0].enabled,
-    stems[1].enabled,
-    stems[0].status?.phase,
-    stems[1].status?.phase,
-  ]);
 
   const updateScratchPreview = useCallback((side: 0 | 1, position: number | null) => {
     scratchPreviewPendingRef.current[side] = position;
@@ -3064,13 +2631,12 @@ export function PerformanceWorkspace({
     jogSeekPendingRef.current[side] = null;
   };
 
-  const startMidiJogScratch = (side: 0 | 1) => {
+  const startMidiJogScratch = (side: 0 | 1, inputAt = performance.now()) => {
     cancelPendingSyncCorrection();
     if (jogTouchRef.current[side]) return;
     jogTouchRef.current[side] = true;
-    // A capacitive platter owns the Deck cursor without toggling Play/Pause. Ticks go to the
-    // engine immediately as vinyl velocity; note-off still seeks once so a reverse grab can
-    // resync the streaming worker.
+    midiPlatterTrackersRef.current[side].start(inputAt);
+    // A capacitive platter owns the Deck cursor without toggling Play/Pause.
     discardJogSeek(side);
     const deck = decksRef.current[side];
     const trackId = deck.track?.id;
@@ -3078,7 +2644,7 @@ export function PerformanceWorkspace({
     jogAtRef.current[side] = trackId != null
       ? { trackId, position: at, at: performance.now() }
       : null;
-    updateScratchPreview(side, at);
+    // MIDI does not own a preview needle — the scrolling waveform follows the engine only.
     setMidiScratchActive((current) => {
       if (current[side]) return current;
       const next: [boolean, boolean] = [current[0], current[1]];
@@ -3087,18 +2653,15 @@ export function PerformanceWorkspace({
     });
     // Touch is a momentary platter hold for a Deck that is actually playing now, rather than a
     // stale visual row turning into an implicit load/focus request or a hidden PauseDeck.
-    onJogScratchStartRef.current(side);
+    onPlatterRef.current(side, { phase: "start" });
   };
 
-  const finishMidiJogScratch = (side: 0 | 1) => {
+  const finishMidiJogScratch = (side: 0 | 1, inputAt = performance.now()) => {
     cancelPendingSyncCorrection();
     if (!jogTouchRef.current[side]) return;
     jogTouchRef.current[side] = false;
-    const position = jogAtRef.current[side]?.position
-      ?? jogSeekPendingRef.current[side]?.position
-      ?? null;
-    // Ticks already moved the callback needle. Keep one final seek so a reverse grab can rebuild
-    // the streaming worker onto that same platter position.
+    const velocity = midiPlatterTrackersRef.current[side].end(inputAt);
+    // Note-off and its final measured speed are one native command. No final seek/rebuild.
     discardJogSeek(side);
     setMidiScratchActive((current) => {
       if (!current[side]) return current;
@@ -3106,7 +2669,7 @@ export function PerformanceWorkspace({
       next[side] = false;
       return next;
     });
-    onJogScratchReleaseRef.current(side, position);
+    onPlatterRef.current(side, { phase: "end", velocity });
     jogAtRef.current[side] = null;
   };
 
@@ -3115,18 +2678,27 @@ export function PerformanceWorkspace({
       window.cancelAnimationFrame(scratchPreviewFrameRef.current);
     }
     ([0, 1] as const).forEach((side) => {
+      if (jogTouchRef.current[side]) {
+        onPlatterRef.current(side, { phase: "end", velocity: 0 });
+        jogTouchRef.current[side] = false;
+      }
       const timer = jogSeekTimerRef.current[side];
       if (timer !== null) window.clearTimeout(timer);
     });
   }, []);
 
   useEffect(() => {
-    // A jog message from the prior source must not land after a Deck replacement. The actual
-    // player clock clears a live preview once the coalesced seek reaches the audio engine.
-    // Do not synthesize a release here: a visual row can change before its physical Deck does,
-    // and a synthetic release could briefly revive the departing source. A later real note-off
-    // is guarded by its original physical track ID in PlayerBar.
+    // A source change is a real gesture boundary. End the old generation before clearing local
+    // refs; the runtime/actor gesture ID makes this harmless if a newer physical source already
+    // won the race. Leaving the ref false without End orphaned the callback hold indefinitely.
+    ([0, 1] as const).forEach((side) => {
+      if (!jogTouchRef.current[side]) return;
+      const velocity = midiPlatterTrackersRef.current[side].end(performance.now());
+      onPlatterRef.current(side, { phase: "end", velocity });
+    });
     jogTouchRef.current = [false, false];
+    midiPlatterTrackersRef.current[0].reset();
+    midiPlatterTrackersRef.current[1].reset();
     setMidiScratchActive([false, false]);
     jogAtRef.current = [null, null];
     ([0, 1] as const).forEach((side) => {
@@ -3148,10 +2720,7 @@ export function PerformanceWorkspace({
         // first visual platter frame while the callback-only hold takes effect.
         if (jogTouchRef.current[side] || midiScratchActive[side]) return;
         const preview = current[side];
-        if (
-          preview !== null
-          && (!decks[side].track || Math.abs(preview - decks[side].position) < 0.08)
-        ) {
+        if (shouldDropSeekPreview(preview, decks[side].position, false)) {
           next[side] = null;
         }
       });
@@ -3190,12 +2759,6 @@ export function PerformanceWorkspace({
   );
 
   useEffect(() => {
-    setVisualRates([null, null]);
-    armTempoTakeover(0);
-    armTempoTakeover(1);
-  }, [decks[0].track?.id, decks[1].track?.id]);
-
-  useEffect(() => {
     setVisualRates((current) => {
       const next: [number | null, number | null] = [
         current[0] != null && Math.abs(current[0] - decks[0].rate) < 0.0005 ? null : current[0],
@@ -3230,11 +2793,17 @@ export function PerformanceWorkspace({
   const requestNativeSync = (side: 0 | 1, masterSide: 0 | 1, rate: number) => {
     const follower = decksRef.current[side].track;
     const master = decksRef.current[masterSide].track;
+    const followerOrigin = (follower?.downbeat_confidence ?? 0) >= 0.5
+      ? follower?.downbeat_origin ?? follower?.downbeats?.[0] ?? follower?.first_beat
+      : follower?.first_beat;
+    const masterOrigin = (master?.downbeat_confidence ?? 0) >= 0.5
+      ? master?.downbeat_origin ?? master?.downbeats?.[0] ?? master?.first_beat
+      : master?.first_beat;
     if (
       !follower?.bpm
       || !master?.bpm
-      || follower.first_beat == null
-      || master.first_beat == null
+      || followerOrigin == null
+      || masterOrigin == null
     ) {
       return Promise.resolve(false);
     }
@@ -3243,11 +2812,25 @@ export function PerformanceWorkspace({
       master: masterSide,
       rate,
       followerBpm: follower.bpm,
-      followerFirstBeat: follower.first_beat,
+      followerFirstBeat: followerOrigin,
       masterBpm: master.bpm,
-      masterFirstBeat: master.first_beat,
+      masterFirstBeat: masterOrigin,
       beatsPerBar: 4,
     }));
+  };
+
+  const rollbackVisualRates = (rejected: readonly [number | null, number | null]) => {
+    setVisualRates((current) => {
+      const next: [number | null, number | null] = [current[0], current[1]];
+      ([0, 1] as const).forEach((side) => {
+        const rate = rejected[side];
+        // A late failed command must not erase a newer pointer/MIDI preview.
+        if (rate !== null && current[side] !== null && Math.abs(current[side] - rate) < 0.0005) {
+          next[side] = null;
+        }
+      });
+      return next[0] === current[0] && next[1] === current[1] ? current : next;
+    });
   };
 
   const flushCrossfaderTempoRates = () => {
@@ -3257,7 +2840,11 @@ export function PerformanceWorkspace({
     }
     const rates = crossfaderTempoPendingRef.current;
     crossfaderTempoPendingRef.current = null;
-    if (rates) void Promise.resolve(onRatePairChangeRef.current(rates));
+    if (rates) {
+      void Promise.resolve(onRatePairChangeRef.current(rates)).then((applied) => {
+        if (!applied) rollbackVisualRates(rates);
+      });
+    }
   };
 
   const queueCrossfaderTempoRates = (rates: [number, number], immediate = false) => {
@@ -3300,27 +2887,28 @@ export function PerformanceWorkspace({
 
   const handleManualSeek: PerformanceWorkspaceProps["onSeek"] = (side, detail) => {
     cancelPendingSyncCorrection();
-    onSeek(side, detail);
+    return onSeek(side, detail);
   };
-  const handleManualSetLoop: PerformanceWorkspaceProps["onSetLoop"] = (side, start, length) => {
+  const handleResizeLoop = (side: 0 | 1, beats: number) => {
+    const beat = beatSeconds(decks[side].track);
+    if (decks[side].loopStart === null || !beat) return;
     cancelPendingSyncCorrection();
-    onSetLoop(side, start, length);
+    const length = beats * beat;
+    onResizeLoop(side, length);
   };
-  const handleManualClearLoop: PerformanceWorkspaceProps["onClearLoop"] = (side) => {
+  const handleLoopToggle = (side: 0 | 1) => {
+    const deck = decks[side];
+    const beat = beatSeconds(deck.track);
+    if (!deck.track || !beat) return;
     cancelPendingSyncCorrection();
-    onClearLoop(side);
+    // Rust samples loop-in from the callback in the same command that toggles the loop. The UI
+    // intentionally sends no position, so a delayed React snapshot can never jump the song.
+    const length = loopBeats[side] * beat;
+    onToggleLoop(side, length);
   };
-  const handleManualScratchHold: PerformanceWorkspaceProps["onScratchHold"] = (side) => {
+  const handleManualPlatter: PerformanceWorkspaceProps["onPlatter"] = (side, event) => {
     cancelPendingSyncCorrection();
-    onScratchHold(side);
-  };
-  const handleManualScratchRelease: PerformanceWorkspaceProps["onScratchRelease"] = (
-    side,
-    position,
-    resume,
-  ) => {
-    cancelPendingSyncCorrection();
-    onScratchRelease(side, position, resume);
+    onPlatter(side, event);
   };
   const handleManualTogglePlay: PerformanceWorkspaceProps["onTogglePlay"] = (side) => {
     cancelPendingSyncCorrection();
@@ -3330,9 +2918,9 @@ export function PerformanceWorkspace({
     cancelPendingSyncCorrection();
     onMainCue(side, position);
   };
-  const handleManualTrackDrop: PerformanceWorkspaceProps["onTrackDrop"] = (side, ids) => {
+  const handleManualTrackLoad: PerformanceWorkspaceProps["onTrackLoad"] = (side, request) => {
     cancelPendingSyncCorrection();
-    onTrackDrop(side, ids);
+    onTrackLoad(side, request);
   };
 
   const toggleSyncLock = (side: 0 | 1) => {
@@ -3346,6 +2934,7 @@ export function PerformanceWorkspace({
       cancelPendingSyncCorrection();
       syncLockRef.current = null;
       setSyncLock(null);
+      onClearSync();
       return;
     }
     const other = (1 - side) as 0 | 1;
@@ -3407,9 +2996,15 @@ export function PerformanceWorkspace({
     if (paired) {
       const hardware = tempoTakeoverRef.current.hardwareUnit[other];
       if (hardware != null) showTempoHardware(other, hardware);
-      return Promise.resolve(onRatePairChange(paired));
+      return Promise.resolve(onRatePairChange(paired)).then((applied) => {
+        if (!applied) rollbackVisualRates(paired);
+        return applied;
+      });
     }
-    return Promise.resolve(onRateChange(side, rate));
+    return Promise.resolve(onRateChange(side, rate)).then((applied) => {
+      if (!applied) rollbackVisualRates(side === 0 ? [rate, null] : [null, rate]);
+      return applied;
+    });
   };
 
   useEffect(() => {
@@ -3445,11 +3040,6 @@ export function PerformanceWorkspace({
     decks[0].track?.id,
     decks[1].track?.id,
   ]);
-
-  const scratchMultiple = (side: 0 | 1) =>
-    syncLock
-      ? (syncLock.base === side ? syncLock.multiple : 1 / syncLock.multiple)
-      : 1;
 
   const patchMixer = (side: 0 | 1, patch: Partial<PerformanceMixerValues>) => {
     setMixers((current) => {
@@ -3487,13 +3077,6 @@ export function PerformanceWorkspace({
       return side === 0 ? [updated, current[1]] : [current[0], updated];
     });
   };
-  const toggleStemLayer = (side: 0 | 1) => {
-    setEqStemMode((current) => {
-      const next: [EqStemLayer, EqStemLayer] = [current[0], current[1]];
-      next[side] = toggleEqStemLayer(current[side]);
-      return next;
-    });
-  };
   const toggleCrossfaderEnabled = () => {
     setCrossfaderEnabled((on) => {
       if (on) handleCrossfaderChange(0, true);
@@ -3508,6 +3091,7 @@ export function PerformanceWorkspace({
     flushCrossfaderTempoRates();
     syncLockRef.current = null;
     setSyncLock(null);
+    onClearSync();
   };
 
   const toggleCrossfaderTempoSync = () => {
@@ -3563,13 +3147,23 @@ export function PerformanceWorkspace({
     delta: number,
     wholeTrack: boolean,
     commitToTransport = true,
+    inputAt = performance.now(),
   ) => {
     cancelPendingSyncCorrection();
     const deck = decksRef.current[side];
     const trackId = deck.track?.id;
     if (trackId == null || delta === 0) return;
-    const now = performance.now();
+    const now = inputAt;
     const held = jogTouchRef.current[side];
+    if (!wholeTrack && !commitToTransport) {
+      if (!held) return;
+      const velocity = midiPlatterTrackersRef.current[side].move(
+        midiJogVinylSeconds(delta),
+        now,
+      );
+      onPlatterRef.current(side, { phase: "move", velocity });
+      return;
+    }
     const from = midiJogCursorPosition(
       jogAtRef.current[side],
       trackId,
@@ -3582,15 +3176,55 @@ export function PerformanceWorkspace({
       : midiJogVinylSeconds(delta);
     const at = clampJogPosition(from + deltaSec, deck.duration);
     jogAtRef.current[side] = { trackId, position: at, at: now };
-    updateScratchPreview(side, at);
     if (commitToTransport) {
       // Shift+jog still coalesces absolute seeks so a fast spin cannot rebuild decoders.
+      // Preview the seek cursor only for whole-track search — vinyl ticks follow the engine.
+      updateScratchPreview(side, at);
       queueJogSeek(side, trackId, at);
-    } else if (held) {
-      onJogScratchTickRef.current(side, deltaSec);
     }
   };
-  const applyMidiAction = (action: MidiResolvedAction) => {
+  const hardwareFxTargets = (deck?: 0 | 1): readonly (0 | 1)[] =>
+    deck === 0 || deck === 1 ? [deck] : [0, 1];
+  const patchHardwareFx1 = (
+    deck: 0 | 1 | undefined,
+    patch: Partial<FxSlot>,
+  ) => {
+    const targets = hardwareFxTargets(deck);
+    setFxMode((current) => [
+      targets.includes(0) ? "knobs" : current[0],
+      targets.includes(1) ? "knobs" : current[1],
+    ]);
+    setFxSlots((current) => {
+      const next: [DeckFxSlots, DeckFxSlots] = [
+        [...current[0]] as DeckFxSlots,
+        [...current[1]] as DeckFxSlots,
+      ];
+      for (const side of targets) next[side][0] = { ...next[side][0], ...patch };
+      return next;
+    });
+  };
+  const stepHardwareFx1 = (deck: 0 | 1 | undefined, direction: -1 | 1) => {
+    const targets = hardwareFxTargets(deck);
+    setFxMode((current) => [
+      targets.includes(0) ? "knobs" : current[0],
+      targets.includes(1) ? "knobs" : current[1],
+    ]);
+    setFxSlots((current) => {
+      const next: [DeckFxSlots, DeckFxSlots] = [
+        [...current[0]] as DeckFxSlots,
+        [...current[1]] as DeckFxSlots,
+      ];
+      for (const side of targets) {
+        const present = next[side][0];
+        const index = FX_OPTIONS.findIndex((effect) => effect.kind === present.kind);
+        const stepped = (index + direction + FX_OPTIONS.length) % FX_OPTIONS.length;
+        next[side][0] = { ...present, kind: FX_OPTIONS[stepped].kind };
+      }
+      return next;
+    });
+  };
+
+  const applyMidiAction = (action: MidiResolvedAction, inputAt = performance.now()) => {
     switch (action.type) {
       case "playToggle":
         handleManualTogglePlay(action.deck);
@@ -3651,28 +3285,31 @@ export function PerformanceWorkspace({
           handleDeckRateChange(action.deck, previewedRate);
         }
         return;
-      case "toggleEqStem":
-        toggleStemLayer(action.deck);
+      case "pflToggle": {
+        const next: [boolean, boolean] = [deckPflRef.current[0], deckPflRef.current[1]];
+        next[action.deck] = !next[action.deck];
+        deckPflRef.current = next;
+        setDeckPfl(next);
+        onDeckPfl(action.deck, next[action.deck]);
         return;
-      case "stemGain":
-        for (const stem of action.stems) {
-          if (stemOptions(stemMode).some((option) => option.stem === stem)) {
-            onStemGain(action.deck, stem, stemEqToGain(action.value));
-          }
-        }
+      }
+      case "fxMix":
+        patchHardwareFx1(undefined, { mix: action.value });
+        return;
+      case "fxParameter":
+        patchHardwareFx1(undefined, { parameter: action.value });
+        return;
+      case "fxPrevious":
+        stepHardwareFx1(action.deck, -1);
+        return;
+      case "fxNext":
+        stepHardwareFx1(action.deck, 1);
+        return;
+      case "fxEnabled":
+        patchHardwareFx1(action.deck, { enabled: action.held });
         return;
       case "loopToggle": {
-        const deck = decks[action.deck];
-        const beat = beatSeconds(deck.track);
-        if (!deck.track || !beat) return;
-        if (deck.loopStart !== null && deck.loopLength !== null) {
-          handleManualClearLoop(action.deck);
-          return;
-        }
-        const start = snapCueSeconds(deck.position, deck.track.bpm, deck.track.first_beat, quantize);
-        const length = loopBeats[action.deck] * beat;
-        if (start + length > deck.duration + 0.05) return;
-        handleManualSetLoop(action.deck, start, length);
+        handleLoopToggle(action.deck);
         return;
       }
       case "loopSize": {
@@ -3682,55 +3319,51 @@ export function PerformanceWorkspace({
           next[action.deck] = beats;
           return next;
         });
-        const deck = decks[action.deck];
-        const beat = beatSeconds(deck.track);
-        if (deck.loopStart !== null && beat) {
-          handleManualSetLoop(action.deck, deck.loopStart, beats * beat);
-        }
+        handleResizeLoop(action.deck, beats);
         return;
       }
       case "jogTouch":
-        if (action.held) startMidiJogScratch(action.deck);
-        else finishMidiJogScratch(action.deck);
+        if (action.held) startMidiJogScratch(action.deck, inputAt);
+        else finishMidiJogScratch(action.deck, inputAt);
         return;
       case "jog":
         // A JSON mapping normally resolves this to jogSeek before it reaches the workspace.
         // Keep the runtime guard for custom mappings that only expose a Shift hold signal.
         if (shiftHeldRef.current) {
-          moveJogPosition(action.deck, action.delta, true, !jogTouchRef.current[action.deck]);
-        } else if (jogTouchRef.current[action.deck]) {
-          moveJogPosition(action.deck, action.delta, false, false);
+          moveJogPosition(action.deck, action.delta, true, !jogTouchRef.current[action.deck], inputAt);
+        } else if (isJogVinylMotion(action.deck)) {
+          moveJogPosition(action.deck, action.delta, false, false, inputAt);
         } else {
           cancelPendingSyncCorrection();
-          onJogNudgeRef.current(action.deck, midiJogNudgeAmount(action.delta));
+          previewJogNudge(action.deck, midiJogNudgeAmount(action.delta));
         }
         return;
       // Keep hand-written mappings using the old names operational. The Buddy preset uses the
       // explicit jog/jogTouch pair above, so only legacy maps retain the old stop-and-scratch
       // interpretation.
       case "scratchTouch":
-        if (action.held) startMidiJogScratch(action.deck);
-        else finishMidiJogScratch(action.deck);
+        if (action.held) startMidiJogScratch(action.deck, inputAt);
+        else finishMidiJogScratch(action.deck, inputAt);
         return;
       case "scratch":
         if (shiftHeldRef.current) {
-          moveJogPosition(action.deck, action.delta, true, !jogTouchRef.current[action.deck]);
+          moveJogPosition(action.deck, action.delta, true, !jogTouchRef.current[action.deck], inputAt);
           return;
         }
-        if (jogTouchRef.current[action.deck]) {
-          moveJogPosition(action.deck, action.delta, false, false);
+        if (isJogVinylMotion(action.deck)) {
+          moveJogPosition(action.deck, action.delta, false, false, inputAt);
         } else {
           // Older mappings expose only a rotary "scratch" message and have no reliable release
           // edge. Treat that as an edge pitch-bend; pausing it here would have no matching resume
           // command and left the Deck permanently stopped.
           cancelPendingSyncCorrection();
-          onJogNudgeRef.current(action.deck, midiJogNudgeAmount(action.delta));
+          previewJogNudge(action.deck, midiJogNudgeAmount(action.delta));
         }
         return;
       case "jogSeek":
         // Shift overrides both edge nudge and the capacitive surface: its scope is intentionally
         // the full track, but the latest-value lane keeps it from resetting playback/loading.
-        moveJogPosition(action.deck, action.delta, true, !jogTouchRef.current[action.deck]);
+        moveJogPosition(action.deck, action.delta, true, !jogTouchRef.current[action.deck], inputAt);
         return;
       case "browseStep":
         if (action.delta === 0) return;
@@ -3752,8 +3385,6 @@ export function PerformanceWorkspace({
     fourteenBit: new MidiFourteenBit(),
   });
   midiLiveRef.current.apply = applyMidiAction;
-  const eqStemModeRef = useRef(eqStemMode);
-  eqStemModeRef.current = eqStemMode;
   const midiLedRef = useRef(new Map<string, number>());
   const midiEchoRef = useRef(new MidiEchoGuard());
 
@@ -3769,9 +3400,12 @@ export function PerformanceWorkspace({
       midiLiveRef.current.mapping = mapping;
       const parsed = parseMidiBytes(message.bytes);
       if (parsed && midiEchoRef.current.isEcho(parsed)) return;
-      const layers: MidiLayerState = { eqStem: eqStemModeRef.current, shift: shiftHeldRef.current };
+      const layers: MidiLayerState = { shift: shiftHeldRef.current };
+      const inputAt = Number.isFinite(message.timestampMicros)
+        ? Number(message.timestampMicros) / 1_000
+        : performance.now();
       for (const action of dispatchMidiMessage(mapping, message, layers, midiLiveRef.current.fourteenBit)) {
-        midiLiveRef.current.apply(action);
+        midiLiveRef.current.apply(action, inputAt);
       }
     });
   }, []);
@@ -3790,7 +3424,7 @@ export function PerformanceWorkspace({
         decks[0].loopStart !== null && decks[0].loopLength !== null,
         decks[1].loopStart !== null && decks[1].loopLength !== null,
       ],
-      eqStem: [eqStemMode[0] === "stems", eqStemMode[1] === "stems"],
+      pfl: deckPfl,
       crossfaderEnabled,
     };
     void sendMidiOutputs(mapping, feedback, midiLedRef.current, midiEchoRef.current);
@@ -3800,10 +3434,10 @@ export function PerformanceWorkspace({
     decks[0].track?.id,
     decks[1].track?.id,
     decks[0].loopStart,
-    decks[1].loopStart,
     decks[0].loopLength,
+    decks[1].loopStart,
     decks[1].loopLength,
-    eqStemMode,
+    deckPfl,
     crossfaderEnabled,
     midiPort,
     syncLock,
@@ -3875,7 +3509,6 @@ export function PerformanceWorkspace({
       data-targeted="true"
       aria-label={side === 0 ? "Deck A 3 FX" : "Deck B 3 FX"}
     >
-      <header><b>3 FX</b></header>
       <div className="kd-performance-fx-knobs">
         {fxSlots[side].map((slot, index) => (
           <FxSlotControl key={index} slot={slot} onChange={(patch) => patchFxSlot(side, index, patch)} />
@@ -3884,13 +3517,13 @@ export function PerformanceWorkspace({
     </section>
   );
   const renderDeckFxPage = (side: 0 | 1) => (
-    <div className="kd-performance-deck-fx-page">
+    <div className="kd-performance-deck-fx-page" data-side={side === 0 ? "a" : "b"}>
       <div className="kd-performance-fx-toolbar">
         <span className="kd-performance-fx-modes">
           {([
-            ["knobs", "3 FX"],
-            ["pads", "PAD FX"],
-            ["sampler", "采样器"],
+            ["knobs", "FX"],
+            ["pads", "PAD"],
+            ["sampler", "SMP"],
           ] as const).map(([mode, label]) => (
             <button key={mode} type="button" data-active={fxMode[side] === mode || undefined} onClick={() => selectFxMode(side, mode)}>{label}</button>
           ))}
@@ -3946,75 +3579,22 @@ export function PerformanceWorkspace({
     </div>
   );
 
-  const selectDeckPadPage = (side: 0 | 1, page: DeckPadPage) => {
-    setDeckPadPage((current) => side === 0 ? [page, current[1]] : [current[0], page]);
-  };
-  const triggerLoopPad = (side: 0 | 1, beats: number) => {
-    const deck = viewDecks[side];
-    const track = deck.track;
-    const beat = beatSeconds(track);
-    setLoopBeats((current) => side === 0 ? [beats, current[1]] : [current[0], beats]);
-    if (!track || !beat) return;
-    const looping = deck.loopStart !== null && deck.loopLength !== null;
-    if (looping && loopBeats[side] === beats) {
-      handleManualClearLoop(side);
-      return;
-    }
-    const start = deck.loopStart ?? snapCueSeconds(deck.position, track.bpm, track.first_beat, quantize);
-    if (start + beats * beat > deck.duration + 0.05) return;
-    handleManualSetLoop(side, start, beats * beat);
-  };
   const renderDeckPadPanel = (side: 0 | 1) => (
     <section
       className="kd-performance-deck-pad-bank"
-      data-page={deckPadPage[side]}
-      aria-label={side === 0 ? "Deck A 演奏垫" : "Deck B 演奏垫"}
+      aria-label={side === 0 ? "Deck A Hot Cue" : "Deck B Hot Cue"}
     >
-      <header className="kd-performance-pad-page-tabs" role="tablist" aria-label="演奏垫模式">
-        {(["cue", "loop", "fx"] as const).map((page) => (
-          <button
-            key={page}
-            type="button"
-            role="tab"
-            aria-selected={deckPadPage[side] === page}
-            aria-label={page === "cue" ? "Hot Cue" : page === "loop" ? "Loop" : "效果器"}
-            title={page === "cue" ? "Hot Cue" : page === "loop" ? "Loop" : "效果器"}
-            data-active={deckPadPage[side] === page || undefined}
-            onClick={() => selectDeckPadPage(side, page)}
-          >
-            {page === "cue" ? <CircleDot size={13} /> : page === "loop" ? <Repeat2 size={14} /> : <b>FX</b>}
-          </button>
-        ))}
-      </header>
-      <div className="kd-performance-pad-page-content">
-        {deckPadPage[side] === "cue" ? (
-          <HotCuePads deck={viewDecks[side]} side={side} quantize={quantize} onSeek={handleManualSeek} onSaveCuePoints={onSaveCuePoints} />
-        ) : deckPadPage[side] === "loop" ? (
-          <div className="kd-performance-loop-pads">
-            {LOOP_BEAT_CHOICES.map((beats) => (
-              <button
-                key={beats}
-                type="button"
-                data-active={viewDecks[side].loopStart !== null && loopBeats[side] === beats || undefined}
-                disabled={!viewDecks[side].track || !beatSeconds(viewDecks[side].track)}
-                onClick={() => triggerLoopPad(side, beats)}
-              >
-                <b>{beats < 1 ? "1/" + Math.round(1 / beats) : beats}</b>
-                <span>BEATS</span>
-              </button>
-            ))}
-          </div>
-        ) : renderDeckFxPage(side)}
-      </div>
+      <HotCuePads deck={viewDecks[side]} side={side} quantize={quantize} onSeek={handleManualSeek} onSaveCuePoints={onSaveCuePoints} />
     </section>
   );
+
   const renderDeckMain = (side: 0 | 1) => (
     <section
       className="kd-performance-main-deck"
       data-side={side === 0 ? "a" : "b"}
       {...{ [TRACK_DECK_DROP_TARGET_ATTR]: String(side) }}
       onDragOver={(event) => {
-        if (!isTrackDrag(event)) return;
+        if (!isPerformanceDeckDrag(event)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = "copy";
         event.currentTarget.dataset.kdNativeTrackOver = "true";
@@ -4025,13 +3605,8 @@ export function PerformanceWorkspace({
         }
       }}
       onDrop={(event) => {
-        if (!isTrackDrag(event)) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const ids = readTrackDragIds(event.dataTransfer);
         delete event.currentTarget.dataset.kdNativeTrackOver;
-        finishTrackDrop();
-        if (ids.length) handleManualTrackDrop(side, ids);
+        dropIntoPerformanceDeck(event, side, handleManualTrackLoad);
       }}
     >
       {renderTempo(side)}
@@ -4040,6 +3615,7 @@ export function PerformanceWorkspace({
         <MixerStrip
           side={side}
           mixer={mixers[side]}
+          resonanceQ={filterResonanceQ}
           playing={viewDecks[side].playing}
           setMixer={(patch) => patchMixer(side, patch)}
           adjustEq={(delta) => adjustMixerEq(side, delta)}
@@ -4053,7 +3629,7 @@ export function PerformanceWorkspace({
               setMixer={(patch) => patchMixer(side, patch)}
             />
           </div>
-          <ArcKnob size="xl" label="FILTER" value={mixers[side].filter} onChange={(filter) => patchMixer(side, { filter })} onReset={() => patchMixer(side, { filter: 0 })} />
+          <ArcKnob size="lg" label="FILTER" value={mixers[side].filter} onChange={(filter) => patchMixer(side, { filter })} onReset={() => patchMixer(side, { filter: 0 })} />
         </div>
       </div>
     </section>
@@ -4073,11 +3649,10 @@ export function PerformanceWorkspace({
         side={side}
         beats={loopBeats[side]}
         jumpBeats={jumpBeats[side]}
-        quantize={quantize}
         onBeats={(beats) => setLoopBeats((current) => side === 0 ? [beats, current[1]] : [current[0], beats])}
         onJumpBeats={(beats) => setJumpBeats((current) => side === 0 ? [beats, current[1]] : [current[0], beats])}
-        onSetLoop={handleManualSetLoop}
-        onClearLoop={handleManualClearLoop}
+        onToggleLoop={handleLoopToggle}
+        onResizeLoop={handleResizeLoop}
         onSeek={handleManualSeek}
       />
     </div>
@@ -4131,39 +3706,31 @@ export function PerformanceWorkspace({
       <div className="kd-performance-workspace" data-testid="performance-workspace">
         <div className="kd-performance-wave-stack" aria-label="Deck A/B 实时滚动波形">
           {([0, 1] as const).map((side) => {
-            const position = scratchPreviews[side] ?? decks[side].position;
-            const interactiveScrub = midiScratchActive[side] || scratchPreviews[side] != null;
-            const other = (1 - side) as 0 | 1;
+            // Only Shift+Jog whole-track search owns an absolute preview. Pointer/touch/MIDI
+            // platter motion is velocity input and always follows the audio callback needle.
+            const seekPreview = scratchPreviews[side];
+            const position = seekPreview ?? decks[side].position;
+            const platterMotion = midiScratchActive[side] || viewDecks[side].scratchHeld;
+            const interactiveScrub = platterMotion || seekPreview != null;
+            // While scratching, motionRate is the smoothed engine audible rate. Otherwise the
+            // hardware transport rate drives ordinary play — never TEMPO while parked.
+            const motionRate = platterMotion
+              ? viewDecks[side].audibleRate
+              : (viewDecks[side].transportRunning ? viewDecks[side].rate : 0);
             return (
               <PerformanceDeckWaves
                 key={side}
                 deck={viewDecks[side]}
-                other={viewDecks[other]}
-                stemState={stems[side]}
-                stemMode={stemMode}
                 side={side}
                 position={position}
+                motionRate={motionRate}
+                trimGain={mixers[side].gain}
                 interactiveScrub={interactiveScrub}
-                snapRail={false}
-                displayMask={activeStemDisplayMask}
-                waveforms={stemWaveforms[side]}
-                autoBeatSync={autoBeatSync}
-                syncMultiple={scratchMultiple(side)}
-                onSeek={handleManualSeek}
-                onScratchHold={handleManualScratchHold}
-                onScratchRelease={handleManualScratchRelease}
-                onScratchPreview={updateScratchPreview}
-                onScratchTick={onJogScratchTick}
-                onTrackDrop={handleManualTrackDrop}
-                cornerControl={side === 0 ? (
-                  <WaveDisplayMenu
-                    vocalVisible={(activeStemDisplayMask & VOCAL_WAVE_BIT) !== 0}
-                    onToggleVocal={() => setActiveStemDisplayMask((mask) =>
-                      (mask & VOCAL_WAVE_BIT) !== 0
-                        ? ORIGINAL_WAVE_BIT
-                        : ORIGINAL_WAVE_BIT | VOCAL_WAVE_BIT)}
-                  />
-                ) : undefined}
+                snapRail={seekPreview != null && !midiScratchActive[side]}
+                motionRevision={deckResetRevisions[side]
+                  + viewDecks[side].discontinuityRevision}
+                onPlatter={handleManualPlatter}
+                onTrackLoad={handleManualTrackLoad}
               />
             );
           })}
@@ -4173,7 +3740,7 @@ export function PerformanceWorkspace({
           aria-label="Deck A/B 整曲预览波形"
           {...{ [TRACK_DECK_DROP_TARGET_ATTR]: TRACK_DECK_SPLIT_DROP_TARGET }}
           onDragOver={(event) => {
-            if (!isTrackDrag(event)) return;
+            if (!isPerformanceDeckDrag(event)) return;
             event.preventDefault();
             event.dataTransfer.dropEffect = "copy";
             const rect = event.currentTarget.getBoundingClientRect();
@@ -4185,14 +3752,10 @@ export function PerformanceWorkspace({
             }
           }}
           onDrop={(event) => {
-            if (!isTrackDrag(event)) return;
-            event.preventDefault();
-            const ids = readTrackDragIds(event.dataTransfer);
             const rect = event.currentTarget.getBoundingClientRect();
             const side = event.clientX < rect.left + rect.width / 2 ? 0 : 1;
             delete event.currentTarget.dataset.kdNativeTrackOver;
-            finishTrackDrop();
-            if (ids.length) handleManualTrackDrop(side, ids);
+            dropIntoPerformanceDeck(event, side, handleManualTrackLoad);
           }}
         >
           <StableDeckInfo deck={decks[0]} side={0} preserveBarPhase={autoBeatSync} quantize={quantize} onSeek={handleManualSeek} onTogglePlay={handleManualTogglePlay} onMainCue={handleManualMainCue} onSaveMainCue={onSaveMainCue} />
@@ -4207,6 +3770,10 @@ export function PerformanceWorkspace({
             {renderDeckTransport(0)}
             {crossfaderControl}
             {renderDeckTransport(1)}
+          </div>
+          <div className="kd-performance-fx-layout" aria-label="双 Deck 效果器">
+            {renderDeckFxPage(0)}
+            {renderDeckFxPage(1)}
           </div>
         </div>
       </div>

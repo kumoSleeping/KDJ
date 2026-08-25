@@ -19,7 +19,7 @@ pub fn prefer_live_audio() {
     }
 }
 
-/// Full-file waveform, BPM analysis, and STEM display scan. Must not steal the live Deck.
+/// Full-file waveform and BPM/key analysis. Must not steal the live Deck.
 pub fn prefer_background() {
     #[cfg(target_os = "macos")]
     unsafe {

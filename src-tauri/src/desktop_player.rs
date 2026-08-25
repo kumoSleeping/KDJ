@@ -18,6 +18,7 @@ use crate::desktop_media::DesktopMediaSession;
 
 pub const STATE_EVENT: &str = "playback-state";
 pub const LEVEL_EVENT: &str = "playback-levels";
+pub const CLOCK_EVENT: &str = "playback-clock";
 
 pub struct DesktopPlayerHandle {
     coordinator: Arc<PlaybackCoordinator>,
@@ -61,6 +62,14 @@ impl DesktopPlayerHandle {
                     }
                 });
             }
+            {
+                let clock_app = app.clone();
+                coordinator.subscribe_clock(move |clock| {
+                    if let Err(error) = clock_app.emit(CLOCK_EVENT, clock) {
+                        tracing::warn!("发送播放时钟失败：{error}");
+                    }
+                });
+            }
             return Ok(Self {
                 coordinator,
                 _media_session: media_session,
@@ -96,6 +105,14 @@ impl DesktopPlayerHandle {
                 coordinator.subscribe_levels(move |levels| {
                     if let Err(error) = level_app.emit(LEVEL_EVENT, levels) {
                         tracing::warn!("发送电平失败：{error}");
+                    }
+                });
+            }
+            {
+                let clock_app = app.clone();
+                coordinator.subscribe_clock(move |clock| {
+                    if let Err(error) = clock_app.emit(CLOCK_EVENT, clock) {
+                        tracing::warn!("发送播放时钟失败：{error}");
                     }
                 });
             }

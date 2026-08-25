@@ -47,10 +47,10 @@ export interface SearchWorkRailProps {
   queueError: string;
   onDismissQueueError(): void;
   chosenReady: boolean;
-  /** 勾选里有 B 站来源时才出现：批量下载只要音轨（m4a）。 */
-  showBilibiliAudioOnly?: boolean;
-  bilibiliAudioOnly?: boolean;
-  onToggleBilibiliAudioOnly?(value: boolean): void;
+  /** 勾选里有视频来源时出现：批量下载只要音轨。 */
+  showVideoAudioOnly?: boolean;
+  videoAudioOnly?: boolean;
+  onToggleVideoAudioOnly?(value: boolean): void;
   /** 本地面板不可见时，仍把右侧详情栏开关留在当前工作条。 */
   asideToggle?: ReactNode;
   onClose(): void;
@@ -71,9 +71,9 @@ export function SearchWorkRail({
   queueError,
   onDismissQueueError,
   chosenReady,
-  showBilibiliAudioOnly = false,
-  bilibiliAudioOnly = false,
-  onToggleBilibiliAudioOnly,
+  showVideoAudioOnly = false,
+  videoAudioOnly = false,
+  onToggleVideoAudioOnly,
   asideToggle,
   onClose,
 }: SearchWorkRailProps) {
@@ -100,15 +100,15 @@ export function SearchWorkRail({
         actions={
           <>
             <InlineNotice text={queueError} onDismiss={onDismissQueueError} />
-            {showBilibiliAudioOnly ? (
+            {showVideoAudioOnly ? (
               <label className="kd-muted" style={{ cursor: "pointer", fontSize: 11 }}>
                 <input
                   type="checkbox"
-                  checked={bilibiliAudioOnly}
-                  onChange={(event) => onToggleBilibiliAudioOnly?.(event.target.checked)}
+                  checked={videoAudioOnly}
+                  onChange={(event) => onToggleVideoAudioOnly?.(event.target.checked)}
                   style={{ marginRight: 4 }}
                 />
-                B站只下音频
+                视频只下音频
               </label>
             ) : null}
             <Button variant="primary" size="sm" disabled={!chosenReady} onClick={onAddToQueue}>
@@ -147,7 +147,9 @@ export function SearchWorkRail({
         </span>,
       );
       if (openedCollection) {
-        const unit = openedCollection.platform === "bilibili" ? "个视频" : "首";
+        const unit = openedCollection.platform === "bilibili" || openedCollection.platform === "youtube"
+          ? "个视频"
+          : "首";
         texts.push(
           <span
             key="opened-collection"

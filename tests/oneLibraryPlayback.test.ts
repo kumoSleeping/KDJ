@@ -43,15 +43,17 @@ test("OneLibrary negative ids request the dedicated complete waveform instead of
   Object.assign(globalThis, {
     fetch: async (input: string | URL | Request) => {
       requested.push(String(input));
-      const amp = Array(640).fill(0.5);
+      const releaseOverview = new URL(String(input)).searchParams.get("profile") === "release-overview";
+      const columns = releaseOverview ? 4_096 : 640;
+      const amp = Array(columns).fill(0.5);
       return new Response(
         JSON.stringify({
           track_id: -1_234_567_890,
           duration: 180,
           amp,
-          r: Array(640).fill(255),
-          g: Array(640).fill(128),
-          b: Array(640).fill(64),
+          r: Array(columns).fill(255),
+          g: Array(columns).fill(128),
+          b: Array(columns).fill(64),
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
@@ -60,7 +62,13 @@ test("OneLibrary negative ids request the dedicated complete waveform instead of
 
   const [
     { oneLibraryPlayableTrack },
-    { loadReleaseOverviewForTrack, loadWaveformForTrack, streamWaveformSnapshot },
+    {
+      loadReleaseOverviewForTrack,
+      loadWaveformForTrack,
+      mergeCachedStreamWaveform,
+      streamWaveformSnapshot,
+      updateStreamWaveform,
+    },
     { mediaUrlForTrack },
     { api },
   ] = await Promise.all([
@@ -118,15 +126,50 @@ test("OneLibrary negative ids request the dedicated complete waveform instead of
   assert.equal(url.searchParams.get("device_path"), "/Volumes/KDJ");
   assert.equal(url.searchParams.get("content_id"), "5");
   assert.equal(url.searchParams.get("playback_id"), String(track.id));
+  assert.equal(url.searchParams.get("format"), "binary");
   assert.equal(
     requested.some((value) => value.includes(`/api/library/waveform/${track.id}`)),
     false,
   );
 
   const releaseOverview = await loadReleaseOverviewForTrack(track);
-  assert.equal(releaseOverview.amp.length, 640);
+  assert.equal(releaseOverview.amp.length, 4_096);
   assert.equal(requested.length, 2, "release overview must not reuse the current detail cache");
   const releaseUrl = new URL(requested[1]);
   assert.equal(releaseUrl.pathname, "/api/library/onelibrary/waveform");
   assert.equal(releaseUrl.searchParams.get("profile"), "release-overview");
+  assert.equal(releaseUrl.searchParams.get("buckets"), "4096");
+  assert.equal(releaseUrl.searchParams.get("format"), "binary");
+
+  const streamId = -9_999;
+  updateStreamWaveform(streamId, 0, 180, null, []);
+  const emptyStreamSnapshot = streamWaveformSnapshot(streamId);
+  assert.equal(emptyStreamSnapshot?.waveform.known, emptyStreamSnapshot?.known);
+  assert.equal(emptyStreamSnapshot?.waveform.known?.some(Boolean), false);
+  const overview = {
+    track_id: 0,
+    duration: 180,
+    amp: Array(4_096).fill(0.5),
+    r: Array(4_096).fill(255),
+    g: Array(4_096).fill(128),
+    b: Array(4_096).fill(64),
+  };
+  const detail = {
+    track_id: 0,
+    duration: 180,
+    amp: Array(18_000).fill(0.5),
+    r: Array(18_000).fill(64),
+    g: Array(18_000).fill(128),
+    b: Array(18_000).fill(255),
+  };
+  mergeCachedStreamWaveform(streamId, 180, 180, overview, 1, [{ start: 0, end: 180 }], detail);
+  const streamSnapshot = streamWaveformSnapshot(streamId);
+  assert.equal(streamSnapshot?.waveform.amp.length, 4_096, "overview remains independent");
+  assert.equal(
+    streamSnapshot?.waveform.known,
+    streamSnapshot?.known,
+    "progressive coverage travels with the canonical waveform contract",
+  );
+  assert.equal(streamSnapshot?.detailWaveform?.amp.length, 18_000, "Performance receives detail");
+  assert.equal(streamSnapshot?.detailWaveform?.track_id, streamId);
 });

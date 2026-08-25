@@ -9,11 +9,13 @@ use kdj_core::FilterResonance;
 #[cfg(test)]
 use kdj_player::DecodedTrack;
 use kdj_player::{
-    decode_file_streaming_looped, decode_live_stem_streaming, decode_source_streaming_looped,
-    run_pitch_preserving_pipeline, DeckId, LoopWindow, PlayerMode, RtCommand, StemFrame,
-    StreamMetadata, StreamSeekControl, StreamSource, StreamWriter, TempoControl, TransitionPlan,
-    DEFAULT_FILTER_RESONANCE_Q, DEFAULT_STREAM_BUFFER_SECONDS, FILTER_RESONANCE_HIGH_Q,
-    FILTER_RESONANCE_LOW_Q, FILTER_RESONANCE_MEDIUM_Q, STEM_GAIN_MAX,
+    decode_file_streaming_seekable, decode_live_stem_streaming, decode_source_streaming_seekable,
+    format_loop_clock, run_pitch_preserving_pipeline, DeckFxKind, DeckFxSlot, DeckId, LoopWindow,
+    PlatterPhase, PlayerMode, RtCommand, StemFrame, StreamMetadata, StreamSeekControl,
+    StreamSource, StreamWriter, TempoControl, TransitionPlan, DEFAULT_FILTER_RESONANCE_Q,
+    DEFAULT_STREAM_BUFFER_SECONDS, FILTER_RESONANCE_HIGH_Q, FILTER_RESONANCE_LOW_Q,
+    FILTER_RESONANCE_MEDIUM_Q, MAX_TRANSPORT_LOOP_PCM_BYTES, MAX_TRANSPORT_LOOP_SECONDS,
+    STEM_GAIN_MAX,
 };
 #[cfg(test)]
 use kdj_stems::record_stem_output_underrun;
@@ -23,8 +25,9 @@ use kdj_stems::{
 };
 
 use crate::contract::{
-    CommandAck, PlaybackCommand, PlaybackLevels, PlaybackPhase, PlaybackSnapshot, PlaybackSource,
-    PlaybackSourceKind, PlaybackTransitionPlan,
+    CommandAck, PlaybackClock, PlaybackCommand, PlaybackDeckClock, PlaybackFxKind, PlaybackFxSlot,
+    PlaybackLevels, PlaybackPhase, PlaybackPlatterPhase, PlaybackSnapshot, PlaybackSource,
+    PlaybackSourceKind, PlaybackSyncPhase, PlaybackSyncSnapshot, PlaybackTransitionPlan,
 };
 use crate::platform::{CpalOutputFactory, PlaybackOutput, PlaybackOutputFactory};
 use crate::remote_source::{is_loopback_http_url, HttpRangeSource};
@@ -41,6 +44,8 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const TEMPO_OUTPUT_BUFFER_MS: u64 = 160;
 const STARTUP_BUFFER_MS: u64 = 120;
 const SEEK_BUFFER_MS: u64 = 120;
+/// Vinyl coast must be audible before the coordinator may rebuild a decoder at the needle.
+const SCRATCH_COAST_HANDOFF_DELAY: Duration = Duration::from_millis(400);
 // classical Redress separation and tile assembly stay outside the callback. Once a fixed tile is ready, this
 // short post-tempo ring absorbs scheduler jitter without retaining seconds of stale controls.
 const STEM_TEMPO_OUTPUT_BUFFER_MS: u64 = 640;
@@ -84,6 +89,7 @@ type CommandReply = SyncSender<Result<CommandAck, String>>;
 type StateReply = SyncSender<PlaybackSnapshot>;
 type StateEmitter = Arc<dyn Fn(PlaybackSnapshot) + Send + Sync>;
 type LevelEmitter = Arc<dyn Fn(PlaybackLevels) + Send + Sync>;
+type ClockEmitter = Arc<dyn Fn(PlaybackClock) + Send + Sync>;
 
 pub struct PlaybackCoordinator {
     sender: Sender<Request>,
@@ -154,6 +160,11 @@ impl PlaybackCoordinator {
         let _ = self.sender.send(Request::SubscribeLevels(Arc::new(emit)));
     }
 
+    /// Subscribe to the callback/DAC correlated visual clock (~30 Hz).
+    pub fn subscribe_clock(&self, emit: impl Fn(PlaybackClock) + Send + Sync + 'static) {
+        let _ = self.sender.send(Request::SubscribeClock(Arc::new(emit)));
+    }
+
     pub fn snapshot(&self) -> Result<PlaybackSnapshot, String> {
         let (reply, response) = mpsc::sync_channel(1);
         self.sender
@@ -191,7 +202,25 @@ enum Request {
     },
     DeviceError(String),
     SubscribeLevels(LevelEmitter),
+    SubscribeClock(ClockEmitter),
     Shutdown,
+}
+
+fn publishes_control_snapshot(command: &PlaybackCommand) -> bool {
+    // Continuous platter/mixer packets must not force a full UI snapshot. Doing that for every
+    // mouse/MIDI tick re-rendered both waveform rails at pointer rate and felt like hitching.
+    !matches!(
+        command,
+        PlaybackCommand::SetDeckRate { .. }
+            | PlaybackCommand::SetDeckRates { .. }
+            | PlaybackCommand::NudgeDeck { .. }
+            | PlaybackCommand::ControlDeckPlatter {
+                phase: PlaybackPlatterPhase::Move,
+                ..
+            }
+            | PlaybackCommand::SetDeckStems { .. }
+            | PlaybackCommand::SetDeckFx { .. }
+    )
 }
 
 #[derive(Clone)]
@@ -262,7 +291,7 @@ impl DeckRuntime {
         (seconds.max(0.0) * f64::from(self.output_sample_rate)).round() as u64
     }
 
-    fn seconds_for_frame(&self, frame: u64) -> f64 {
+    fn seconds_for_frame(&self, frame: i64) -> f64 {
         frame as f64 / f64::from(self.output_sample_rate)
     }
 
@@ -308,6 +337,27 @@ struct ClockedDeckSeek {
     skipped_output_frames: u64,
     skipped_media_frames: f64,
     catchup_progress_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NativeSyncGroup {
+    leader: DeckId,
+    follower: DeckId,
+    base_rates: [f32; 2],
+    follower_bpm: f64,
+    follower_origin: f64,
+    leader_bpm: f64,
+    leader_origin: f64,
+    beats_per_bar: u8,
+    /// Shared effective BPM both Decks play toward (leader_bpm × leader_rate).
+    target_bpm: f64,
+    /// Leader effective BPM = multiple × follower effective BPM (0.5 / 1 / 2).
+    multiple: f64,
+    correction_rate: f32,
+    phase_error_seconds: f64,
+    phase: PlaybackSyncPhase,
+    /// True while a one-shot follower phase seek is in flight; prevents re-entry.
+    aligning_follower: bool,
 }
 
 struct PendingStream {
@@ -388,13 +438,27 @@ struct Actor {
     level_emit: Option<LevelEmitter>,
     last_level_tick: Instant,
     latest_levels: PlaybackLevels,
+    clock_emit: Option<ClockEmitter>,
+    last_clock_tick: Instant,
+    latest_audio: kdj_player::TransportSnapshot,
+    sync_group: Option<NativeSyncGroup>,
     volume: f32,
     eq: (f32, f32),
     filter_resonance: f32,
     manual_mode: bool,
     manual_desired_playing: [bool; 2],
     scratch_held: [bool; 2],
+    scratch_coasting: [bool; 2],
+    scratch_coast_started: [Option<Instant>; 2],
+    /// True once the callback has acknowledged this grab. A stale snapshot still showing
+    /// `held=false` must not be treated as an instant tap.
+    scratch_saw_engine_hold: [bool; 2],
+    scratch_gesture_ids: [u64; 2],
+    scratch_gesture_sequences: [u64; 2],
+    /// Negative requested Deck positions waiting for a frame-0 source to install.
+    pending_preroll: [Option<f64>; 2],
     jog_nudge_until: [Option<Instant>; 2],
+    jog_nudge_multipliers: [f32; 2],
     deck_mixers: [DeckMixer; 2],
     stem_pool: Option<(PathBuf, Arc<StemInferencePool>, StemPoolGuard)>,
     observed_stem_underruns: [u64; 2],
@@ -431,13 +495,24 @@ impl Actor {
             level_emit: None,
             last_level_tick: Instant::now(),
             latest_levels: PlaybackLevels::default(),
+            clock_emit: None,
+            last_clock_tick: Instant::now(),
+            latest_audio: kdj_player::TransportSnapshot::default(),
+            sync_group: None,
             volume: 1.0,
             eq: (0.0, 0.0),
             filter_resonance: DEFAULT_FILTER_RESONANCE_Q,
             manual_mode: false,
             manual_desired_playing: [false; 2],
             scratch_held: [false; 2],
+            scratch_coasting: [false; 2],
+            scratch_coast_started: [None, None],
+            scratch_saw_engine_hold: [false; 2],
+            scratch_gesture_ids: [0; 2],
+            scratch_gesture_sequences: [0; 2],
+            pending_preroll: [None, None],
             jog_nudge_until: [None, None],
+            jog_nudge_multipliers: [1.0; 2],
             deck_mixers: [DeckMixer::default(); 2],
             stem_pool: None,
             observed_stem_underruns: stem_output_underruns_by_deck(),
@@ -468,7 +543,10 @@ impl Actor {
             self.promote_ready_streams();
             self.release_stem_pool_if_idle();
             self.refresh_from_audio();
+            self.handoff_settled_scratch_coasts();
+            self.update_sync_snapshot();
             self.publish_levels();
+            self.publish_clock();
             self.publish_audio_pressure();
             self.protect_audio_from_stem_underrun();
             self.retry_interrupted_stems();
@@ -508,15 +586,7 @@ impl Actor {
                 // TEMPO is a continuous control, not a transport transition. Its acknowledgement
                 // must still be ordered, but force-emitting a full snapshot for every pointer
                 // sample makes the WebView re-render every waveform rail at mouse-event rate.
-                let immediate_snapshot = !matches!(
-                    &command,
-                    PlaybackCommand::SetDeckRate { .. }
-                        | PlaybackCommand::SetDeckRates { .. }
-                        | PlaybackCommand::NudgeDeck { .. }
-                        | PlaybackCommand::ScratchDeck { .. }
-                        | PlaybackCommand::SetDeckStems { .. }
-                        | PlaybackCommand::SetDeckFx { .. }
-                );
+                let immediate_snapshot = publishes_control_snapshot(&command);
                 let result = self.apply_command(command_id, command).map(|()| {
                     self.bump_sequence();
                     self.publish(immediate_snapshot);
@@ -530,15 +600,7 @@ impl Actor {
             }
             Request::PlatformCommand { command, reply } => {
                 let command_id = self.state.last_command_id;
-                let immediate_snapshot = !matches!(
-                    &command,
-                    PlaybackCommand::SetDeckRate { .. }
-                        | PlaybackCommand::SetDeckRates { .. }
-                        | PlaybackCommand::NudgeDeck { .. }
-                        | PlaybackCommand::ScratchDeck { .. }
-                        | PlaybackCommand::SetDeckStems { .. }
-                        | PlaybackCommand::SetDeckFx { .. }
-                );
+                let immediate_snapshot = publishes_control_snapshot(&command);
                 let result = self.apply_command(command_id, command).map(|()| {
                     self.bump_sequence();
                     self.publish(immediate_snapshot);
@@ -569,6 +631,7 @@ impl Actor {
                 }
                 if let Err(error) = result {
                     let failed = self.pending[deck as usize].take();
+                    self.pending_preroll[deck as usize] = None;
                     let activation = failed.as_ref().and_then(|pending| pending.activation);
                     let failed_stem = failed
                         .as_ref()
@@ -626,6 +689,10 @@ impl Actor {
                 self.level_emit = Some(emit);
                 self.last_level_tick = Instant::now() - LEVEL_INTERVAL;
             }
+            Request::SubscribeClock(emit) => {
+                self.clock_emit = Some(emit);
+                self.last_clock_tick = Instant::now() - LEVEL_INTERVAL;
+            }
             Request::DeviceError(error) => {
                 self.recover_from_device_error(error);
                 self.bump_sequence();
@@ -650,17 +717,34 @@ impl Actor {
             PlaybackCommand::Pause => self.set_playing(false),
             PlaybackCommand::PlayDeck { deck } => self.set_deck_playing(deck, true),
             PlaybackCommand::PauseDeck { deck } => self.set_deck_playing(deck, false),
-            PlaybackCommand::SetDeckScratchHeld { deck, held } => {
-                self.set_deck_scratch_held(deck, held)
-            }
-            PlaybackCommand::ScratchDeck { deck, delta } => self.scratch_deck(deck, delta),
+            PlaybackCommand::SetDeckPfl { deck, enabled } => self.send(RtCommand::SetDeckPfl {
+                deck: deck_id(deck)?,
+                enabled,
+            }),
+            PlaybackCommand::ControlDeckPlatter {
+                deck,
+                phase,
+                gesture_id,
+                sequence,
+                velocity,
+                expected_track_id,
+            } => self.control_deck_platter(
+                deck,
+                phase,
+                gesture_id,
+                sequence,
+                velocity,
+                expected_track_id,
+            ),
             PlaybackCommand::SeekDeck {
                 deck,
                 position,
                 play_when_ready,
             } => self.seek_deck_when_ready(deck, position, play_when_ready),
             PlaybackCommand::NudgeDeck { deck, amount } => self.nudge_deck(deck, amount),
-            PlaybackCommand::SetDeckRate { deck, rate } => self.set_deck_rate(deck, rate),
+            PlaybackCommand::SetDeckRate { deck, rate } => {
+                self.set_sync_aware_deck_rate(deck, rate)
+            }
             PlaybackCommand::SetDeckRates { rates } => self.set_deck_rates(rates),
             PlaybackCommand::SyncDeck {
                 follower,
@@ -681,6 +765,10 @@ impl Actor {
                 master_first_beat,
                 beats_per_bar,
             ),
+            PlaybackCommand::ClearSync => {
+                self.clear_native_sync(true);
+                Ok(())
+            }
             PlaybackCommand::SetDeckMixer {
                 deck,
                 channel_gain,
@@ -702,25 +790,10 @@ impl Actor {
             ),
             PlaybackCommand::SetDeckFx {
                 deck,
-                echo,
-                echo_parameter,
-                reverb,
-                reverb_parameter,
-                gater,
-                gater_parameter,
+                slots,
                 pad,
                 beat_seconds,
-            } => self.set_deck_fx(
-                deck,
-                echo,
-                echo_parameter,
-                reverb,
-                reverb_parameter,
-                gater,
-                gater_parameter,
-                pad,
-                beat_seconds,
-            ),
+            } => self.set_deck_fx(deck, slots, pad, beat_seconds),
             PlaybackCommand::SetFilterResonance { resonance } => {
                 self.set_filter_resonance(resonance)
             }
@@ -731,12 +804,8 @@ impl Actor {
                 mask,
                 gains,
             } => self.set_deck_stems(track_id, enabled, cache_path, mask, gains),
-            PlaybackCommand::SetDeckLoop {
-                track_id,
-                start,
-                length,
-            } => self.set_deck_loop(track_id, start, length),
-            PlaybackCommand::ClearDeckLoop { track_id } => self.clear_deck_loop(track_id),
+            PlaybackCommand::ToggleDeckLoop { deck, length } => self.toggle_deck_loop(deck, length),
+            PlaybackCommand::ResizeDeckLoop { deck, length } => self.resize_deck_loop(deck, length),
             PlaybackCommand::Seek { position } => self.seek(position),
             PlaybackCommand::Handoff {
                 track_id,
@@ -790,6 +859,11 @@ impl Actor {
         self.manual_mode = false;
         self.manual_desired_playing = [false; 2];
         self.settle_transition()?;
+        // `Load` is the manager/single-track boundary. A song selected there must never inherit
+        // a hidden Performance channel's EQ, fader, FX or source-scoped loop state. Reset both
+        // sides because the continuous player may choose either one as its next decode target.
+        // `LoadDeck`, by contrast, is the DJ boundary and preserves the addressed Deck controls.
+        self.reset_performance_controls_for_manager_load()?;
         source.position = source.position.max(0.0);
         // 状态先落账、激活后执行：一旦激活失败必须整体回滚，
         // 否则状态层声称新曲目、硬件却还在旧 Deck 上发声。
@@ -882,11 +956,27 @@ impl Actor {
         self.open_output()?;
         validate_source(&source)?;
         let deck = deck_id(deck)?;
+        if self
+            .sync_group
+            .is_some_and(|sync| sync.leader == deck || sync.follower == deck)
+        {
+            self.clear_native_sync(true);
+        }
+        // TEMPO belongs to the physical DJ Deck, not to the song. Read it inside the actor so a
+        // hardware packet immediately before this load wins even if the WebView trails a frame.
+        if let Some(installed) = self.source_for_deck(deck) {
+            source.rate = installed.rate;
+        }
+        self.pending_preroll[deck as usize] = None;
         self.stem_recoveries[deck as usize] = None;
         self.clear_jog_nudge(deck);
         self.release_scratch_hold(deck);
         self.settle_transition()?;
         self.enter_manual_mode();
+        // Loop and active STEM ownership point into the departing song. They cannot cross into a
+        // new timeline, while TEMPO, mixer and FX remain untouched and follow the physical Deck.
+        self.invalidate_loop(deck)?;
+        self.state.decks[deck as usize].stem_enabled = false;
         source.position = clamp_position(source.position, source.duration);
         self.manual_desired_playing[deck as usize] = source.autoplay;
         let view = &mut self.state.decks[deck as usize];
@@ -913,11 +1003,19 @@ impl Actor {
             .ok_or_else(|| "目标 Deck 尚未装入曲目".to_string())?;
         self.enter_manual_mode();
         let index = deck as usize;
-        if self.scratch_held[index] {
+        if self.scratch_held[index] || self.scratch_coasting[index] {
             // An explicit transport button supersedes a momentary platter gesture. Clear the
             // callback hold first; `SetDeckPlaying` then remains the only Play/Pause mutation.
-            self.send(RtCommand::SetDeckScratchHeld { deck, held: false })?;
+            self.send(RtCommand::ControlDeckPlatter {
+                deck,
+                phase: PlatterPhase::Cancel,
+                velocity: 0.0,
+            })?;
             self.scratch_held[index] = false;
+            self.scratch_coasting[index] = false;
+            self.scratch_coast_started[index] = None;
+            self.scratch_gesture_ids[index] = 0;
+            self.scratch_gesture_sequences[index] = 0;
         }
         self.manual_desired_playing[index] = playing;
         self.state.decks[index].desired_playing = playing;
@@ -950,13 +1048,9 @@ impl Actor {
         Ok(())
     }
 
-    fn set_deck_scratch_held(&mut self, deck: u8, held: bool) -> Result<(), String> {
+    fn start_deck_platter(&mut self, deck: u8) -> Result<(), String> {
         let deck = deck_id(deck)?;
         let index = deck as usize;
-        if !held {
-            self.release_scratch_hold(deck);
-            return Ok(());
-        }
         if self.decks[index].is_none() {
             return Err("目标 Deck 尚未装入曲目".to_string());
         }
@@ -969,25 +1063,200 @@ impl Actor {
         let playing = self.manual_desired_playing[index]
             || self.state.decks[index].is_playing
             || self.state.decks[index].desired_playing;
-        if !playing {
-            return Ok(());
+        if playing {
+            // Preserve a running Deck's transport intent across the temporary callback owner.
+            // A paused Deck intentionally stays false: like Mixxx scratch2, platter motion may
+            // speak and move the needle without becoming a hidden Play command.
+            self.manual_desired_playing[index] = true;
+            self.state.decks[index].desired_playing = true;
         }
-        self.manual_desired_playing[index] = true;
-        self.state.decks[index].desired_playing = true;
         self.clear_jog_nudge(deck);
         self.send(RtCommand::SetMode(PlayerMode::RealtimeDj))?;
-        self.send(RtCommand::SetDeckScratchHeld { deck, held: true })?;
+        self.send(RtCommand::ControlDeckPlatter {
+            deck,
+            phase: PlatterPhase::Start,
+            velocity: 0.0,
+        })?;
         self.scratch_held[index] = true;
+        self.scratch_coasting[index] = false;
+        self.scratch_coast_started[index] = None;
+        self.scratch_saw_engine_hold[index] = false;
+        Ok(())
+    }
+
+    fn control_deck_platter(
+        &mut self,
+        deck: u8,
+        phase: PlaybackPlatterPhase,
+        gesture_id: u64,
+        sequence: u64,
+        velocity: f64,
+        expected_track_id: Option<i64>,
+    ) -> Result<(), String> {
+        match phase {
+            PlaybackPlatterPhase::Start => {
+                self.begin_deck_scratch(deck, gesture_id, expected_track_id)
+            }
+            PlaybackPlatterPhase::Move => {
+                self.update_deck_scratch(deck, gesture_id, sequence, velocity)
+            }
+            PlaybackPlatterPhase::End => {
+                self.end_deck_scratch(deck, gesture_id, sequence, velocity)
+            }
+        }
+    }
+
+    fn begin_deck_scratch(
+        &mut self,
+        deck: u8,
+        gesture_id: u64,
+        expected_track_id: Option<i64>,
+    ) -> Result<(), String> {
+        if gesture_id == 0 {
+            return Err("刮擦手势 id 无效".into());
+        }
+        let deck_id = deck_id(deck)?;
+        let index = deck_id as usize;
+        if let Some(expected) = expected_track_id {
+            if self.state.decks[index].track_id != Some(expected) {
+                return Err("刮擦手势已属于旧曲目".into());
+            }
+        }
+        self.start_deck_platter(deck)?;
+        self.scratch_gesture_ids[index] = gesture_id;
+        self.scratch_gesture_sequences[index] = 0;
+        Ok(())
+    }
+
+    fn update_deck_scratch(
+        &mut self,
+        deck: u8,
+        gesture_id: u64,
+        sequence: u64,
+        velocity: f64,
+    ) -> Result<(), String> {
+        let deck_id = deck_id(deck)?;
+        let index = deck_id as usize;
+        if gesture_id == 0
+            || self.scratch_gesture_ids[index] != gesture_id
+            || !self.scratch_held[index]
+        {
+            // High-rate stale packets are intentionally harmless; rejecting with an error would
+            // turn a normal touch-up race into a notice flood.
+            return Ok(());
+        }
+        if sequence <= self.scratch_gesture_sequences[index] {
+            return Ok(());
+        }
+        self.scratch_gesture_sequences[index] = sequence;
+        self.set_deck_platter_velocity(deck, velocity)
+    }
+
+    fn end_deck_scratch(
+        &mut self,
+        deck: u8,
+        gesture_id: u64,
+        sequence: u64,
+        velocity: f64,
+    ) -> Result<(), String> {
+        let deck_id = deck_id(deck)?;
+        let index = deck_id as usize;
+        if gesture_id != 0 && self.scratch_gesture_ids[index] != gesture_id {
+            return Ok(());
+        }
+        if sequence < self.scratch_gesture_sequences[index] {
+            return Ok(());
+        }
+        self.begin_scratch_coast(deck_id, velocity)
+    }
+
+    fn begin_scratch_coast(&mut self, deck: DeckId, velocity: f64) -> Result<(), String> {
+        let index = deck as usize;
+        if !self.scratch_held[index] && !self.scratch_coasting[index] {
+            return Ok(());
+        }
+        let velocity = if velocity.is_finite() {
+            velocity.clamp(-8.0, 8.0)
+        } else {
+            0.0
+        };
+        self.send(RtCommand::ControlDeckPlatter {
+            deck,
+            phase: PlatterPhase::End,
+            velocity,
+        })?;
+        self.scratch_held[index] = false;
+        self.scratch_coasting[index] = true;
+        self.scratch_coast_started[index] = Some(Instant::now());
+        self.scratch_gesture_ids[index] = 0;
+        self.scratch_gesture_sequences[index] = 0;
         Ok(())
     }
 
     fn release_scratch_hold(&mut self, deck: DeckId) {
         let index = deck as usize;
-        if !self.scratch_held[index] {
+        if !self.scratch_held[index] && !self.scratch_coasting[index] {
             return;
         }
-        let _ = self.send(RtCommand::SetDeckScratchHeld { deck, held: false });
+        let _ = self.send(RtCommand::ControlDeckPlatter {
+            deck,
+            phase: PlatterPhase::Cancel,
+            velocity: 0.0,
+        });
         self.scratch_held[index] = false;
+        self.scratch_coasting[index] = false;
+        self.scratch_coast_started[index] = None;
+        self.scratch_gesture_ids[index] = 0;
+        self.scratch_gesture_sequences[index] = 0;
+    }
+
+    fn handoff_settled_scratch_coasts(&mut self) {
+        for index in 0..2 {
+            if !self.scratch_coasting[index] || self.scratch_held[index] {
+                continue;
+            }
+            if self.latest_audio.deck_scratch_held[index] {
+                self.scratch_saw_engine_hold[index] = true;
+            }
+            if !self.latest_audio.deck_scratch_held[index] {
+                if !self.scratch_saw_engine_hold[index]
+                    && self.scratch_coast_started[index]
+                        .is_none_or(|started| started.elapsed() < Duration::from_millis(80))
+                {
+                    // Grab/release are still in the realtime queue; do not mistake a stale
+                    // snapshot for an already-finished tap.
+                    continue;
+                }
+                // Capacitive lift never rebuilds a decoder. Streaming Decks keep ScratchTape
+                // playthrough in-engine; seeking here was the playback-key "woom".
+                self.scratch_coasting[index] = false;
+                self.scratch_coast_started[index] = None;
+                continue;
+            }
+            if self.pending[index].is_some() || self.decks[index].is_none() {
+                continue;
+            }
+            if self.scratch_coast_started[index]
+                .is_none_or(|started| started.elapsed() < SCRATCH_COAST_HANDOFF_DELAY)
+            {
+                continue;
+            }
+            let audible = f64::from(self.latest_audio.deck_audible_rates[index]);
+            let playing = self.manual_desired_playing[index];
+            let settled = if playing {
+                let desired = f64::from(self.state.decks[index].rate).clamp(0.5, 2.0);
+                audible > 0.0 && (audible - desired).abs() <= 0.08
+            } else {
+                audible.abs() <= 0.03
+            };
+            if !settled {
+                continue;
+            }
+            // Engine is already at transport speed on the scratch voice. Clear the coast
+            // window only — leftover jog ticks stop, and no seek/worker spawn.
+            self.scratch_coasting[index] = false;
+            self.scratch_coast_started[index] = None;
+        }
     }
 
     fn seek_deck(&mut self, deck: u8, position: f64) -> Result<(), String> {
@@ -1000,17 +1269,31 @@ impl Actor {
         position: f64,
         play_when_ready: bool,
     ) -> Result<(), String> {
-        if !position.is_finite() || position < 0.0 {
+        if !position.is_finite() {
             return Err("播放位置无效".into());
         }
         let deck = deck_id(deck)?;
+        // Explicit transport jumps leave the loop. Keeping a window whose cached PCM belongs to
+        // the old needle would make the next out-point pull the whole song backwards.
+        self.invalidate_loop(deck)?;
+        let requested_position = clamp_performance_position(position, None);
+        self.pending_preroll[deck as usize] = None;
         self.clear_jog_nudge(deck);
         // 自动接歌模式下 manual_desired_playing 还没有接管两台 Deck。先从真实
         // snapshot 继承走带状态，再重建流；否则第一次点 Hot Cue / scratch 会把
         // 正在播放的 Deck 当成 false，seek 完就意外停住。
         self.enter_manual_mode();
         let index = deck as usize;
-        let release_scratch_hold = self.scratch_held[index];
+        let coasting = self.scratch_coasting[index];
+        let release_scratch_hold = self.scratch_held[index] || coasting;
+        if self.scratch_held[index] {
+            // An explicit seek supersedes the platter. Cancel once; never start a second coast.
+            let _ = self.send(RtCommand::ControlDeckPlatter {
+                deck,
+                phase: PlatterPhase::Cancel,
+                velocity: 0.0,
+            });
+        }
         if play_when_ready {
             // Do not send SetDeckPlaying here. A paused ordinary Deck may request a resume at
             // promotion time, while a held playing Deck already retains its true transport intent.
@@ -1023,13 +1306,34 @@ impl Actor {
             }
             return Err("目标 Deck 没有可重建的音频源".to_string());
         };
-        source.position = clamp_position(position, source.duration);
+        let requested_position = clamp_performance_position(requested_position, source.duration);
+        source.position = clamp_position(requested_position, source.duration);
         source.autoplay = self.manual_desired_playing[index];
         let view = &mut self.state.decks[index];
-        view.current_time = source.position;
+        view.current_time = requested_position;
         // Keep the live decoder audible while the new position buffers. Marking buffering here
         // used to freeze the transport UI for the whole time-stretcher startup window.
         view.buffering = self.decks[deck as usize].is_none();
+
+        if requested_position < 0.0 {
+            // Compressed media has no negative frames. Prepare frame 0, then install a signed,
+            // silent callback clock that advances to 0 before consuming the first decoded frame.
+            source.position = 0.0;
+            self.pending_preroll[index] = Some(requested_position);
+            let result = self.start_original_with_optional_stem_followup(deck, source, None, true);
+            if result.is_ok() && release_scratch_hold {
+                if let Some(pending) = self.pending[index].as_mut() {
+                    pending.release_scratch_hold = true;
+                }
+            } else if result.is_err() {
+                self.pending_preroll[index] = None;
+                if release_scratch_hold {
+                    self.release_scratch_hold(deck);
+                }
+            }
+            return result;
+        }
+
         // Keep an already-separated Deck separated across Hot Cue/SYNC. Its current STEM source
         // remains audible while a shadow classical Redress stream prepares near the future handoff point.
         // Routing this case through ORG made STEM EQ appear reset and doubled SYNC model work.
@@ -1050,6 +1354,9 @@ impl Actor {
             if release_scratch_hold {
                 self.release_scratch_hold(deck);
             }
+            if result.is_ok() {
+                self.on_seek_settled(deck);
+            }
             return result;
         }
         if replacing_live_stems {
@@ -1057,7 +1364,7 @@ impl Actor {
                 source.position,
                 source.rate,
                 source.duration,
-                self.manual_desired_playing[index],
+                self.manual_desired_playing[index] && !coasting,
                 true,
             );
             source.position = clocked_seek.position;
@@ -1083,7 +1390,7 @@ impl Actor {
                 source.position,
                 source.rate,
                 source.duration,
-                self.manual_desired_playing[index],
+                self.manual_desired_playing[index] && !coasting,
                 false,
             );
             source.position = clocked_seek.position;
@@ -1112,7 +1419,7 @@ impl Actor {
             source.position,
             source.rate,
             source.duration,
-            self.manual_desired_playing[index],
+            self.manual_desired_playing[index] && !coasting,
             false,
         );
         source.position = clocked_seek.position;
@@ -1138,39 +1445,24 @@ impl Actor {
         }
     }
 
-    fn scratch_deck(&mut self, deck: u8, delta: f64) -> Result<(), String> {
+    fn set_deck_platter_velocity(&mut self, deck: u8, velocity: f64) -> Result<(), String> {
         let deck = deck_id(deck)?;
-        if !delta.is_finite() || delta == 0.0 {
-            return Ok(());
+        if !velocity.is_finite() {
+            return Err("缓动盘速度无效".into());
         }
         let index = deck as usize;
-        // A jog packet is never an implicit load. Ignore ticks that arrive before the source
-        // exists instead of rebuilding a decoder for every relative CC.
+        // A platter observation is never an implicit load. Ignore it before the source exists.
         if self.decks[index].is_none() {
             return Ok(());
         }
         if !self.scratch_held[index] {
             return Ok(());
         }
-        let sample_rate = self.decks[index]
-            .as_ref()
-            .expect("checked installed Deck before converting platter delta")
-            .output_sample_rate
-            .max(1);
-        self.send(RtCommand::ScratchDeck {
+        self.send(RtCommand::ControlDeckPlatter {
             deck,
-            delta_frames: delta * f64::from(sample_rate),
+            phase: PlatterPhase::Move,
+            velocity: velocity.clamp(-8.0, 8.0),
         })?;
-        let duration = self.state.decks[index].duration;
-        let next = (self.state.decks[index].current_time + delta).max(0.0);
-        self.state.decks[index].current_time = if duration > 0.0 {
-            next.min(duration)
-        } else {
-            next
-        };
-        if deck == self.front {
-            self.state.current_time = self.state.decks[index].current_time;
-        }
         Ok(())
     }
 
@@ -1186,14 +1478,9 @@ impl Actor {
             return Ok(());
         }
         self.enter_manual_mode();
-        let runtime = self.decks[index]
-            .as_mut()
-            .expect("checked installed Deck before entering manual mode");
         let amount = amount.clamp(-1.0, 1.0);
-        let rate =
-            (runtime.request.rate * (1.0 + amount * JOG_NUDGE_MAX_RATE_OFFSET)).clamp(0.5, 2.0);
-        runtime.tempo.set(rate);
-        self.send(RtCommand::SetRate { deck, rate })?;
+        self.jog_nudge_multipliers[index] = 1.0 + amount * JOG_NUDGE_MAX_RATE_OFFSET;
+        self.set_sync_phase_correction(deck, 1.0);
         self.jog_nudge_until[index] = Some(Instant::now() + JOG_NUDGE_HOLD);
         Ok(())
     }
@@ -1265,28 +1552,20 @@ impl Actor {
             return Err("播放速度必须在 0.5 到 2.0 之间".into());
         }
         let deck = deck_id(deck)?;
+        if self.sync_group.is_some() {
+            // A one-sided persistent TEMPO request cannot preserve the group's effective BPM.
+            // Linked gestures use SetDeckRates and keep the group alive.
+            self.clear_native_sync(true);
+        }
         self.clear_jog_nudge(deck);
-        self.cancel_clocked_deck_seek(deck);
         if self.decks[deck as usize].is_none() && self.pending[deck as usize].is_none() {
             return Err("目标曲目尚未装入 Deck".to_string());
         }
         // 同 seek：第一次从自动模式进入手动 Performance 时必须继承实际播放状态，
         // SYNC 只改 rate，不能顺带暂停正在走带的 Deck。
         self.enter_manual_mode();
-        let index = deck as usize;
-        let live = self.decks[index].as_ref().is_some();
-        if let Some(runtime) = self.decks[index].as_mut() {
-            runtime.request.rate = rate;
-            runtime.tempo.set(rate);
-        }
-        if let Some(pending) = self.pending[index].as_mut() {
-            pending.request.rate = rate;
-            pending.tempo.set(rate);
-        }
-        self.state.decks[deck as usize].rate = rate;
-        if self.front == deck {
-            self.state.rate = rate;
-        }
+        let live = self.decks[deck as usize].as_ref().is_some();
+        self.retarget_deck_tempo(deck, rate);
         // The Rubber Band worker sees the latest atomic target at its next input block; the
         // callback only moves the authoritative media clock. Neither side replaces a decoder or
         // source for a TEMPO/SYNC adjustment.
@@ -1294,6 +1573,68 @@ impl Actor {
             self.send(RtCommand::SetRate { deck, rate })?;
         }
         Ok(())
+    }
+
+    /// Record a new persistent TEMPO for a replacement without retargeting the source that is
+    /// currently feeding the callback. SYNC acquisition used to replan the live R3 worker and then
+    /// immediately launch a second shadow R3/STEM worker; that transient double workload was the
+    /// main source of the severe post-SYNC stalls reported on Apple Silicon.
+    fn stage_deck_rate_for_replacement(&mut self, deck: DeckId, rate: f32) -> Result<(), String> {
+        if !rate.is_finite() || !(0.5..=2.0).contains(&rate) {
+            return Err("播放速度必须在 0.5 到 2.0 之间".into());
+        }
+        let index = deck as usize;
+        if self.decks[index].is_none() && self.pending[index].is_none() {
+            return Err("目标曲目尚未装入 Deck".to_string());
+        }
+        if self.sync_group.is_some() {
+            self.clear_native_sync(true);
+        }
+        self.clear_jog_nudge(deck);
+        if let Some(runtime) = self.decks[index].as_mut() {
+            runtime.request.rate = rate;
+        }
+        if let Some(pending) = self.pending[index].as_mut() {
+            pending.request.rate = rate;
+            pending.tempo.set(rate);
+        }
+        self.state.decks[index].rate = rate;
+        if self.front == deck {
+            self.state.rate = rate;
+        }
+        Ok(())
+    }
+
+    fn set_sync_aware_deck_rate(&mut self, deck: u8, rate: f32) -> Result<(), String> {
+        let deck_id = deck_id(deck)?;
+        let Some(sync) = self.sync_group else {
+            return self.set_deck_rate(deck, rate);
+        };
+        if !rate.is_finite() || !(0.5..=2.0).contains(&rate) {
+            return Err("播放速度必须在 0.5 到 2.0 之间".into());
+        }
+        let mut rates = sync.base_rates;
+        let multiple = if sync.multiple.is_finite() && sync.multiple > 0.0 {
+            sync.multiple
+        } else {
+            1.0
+        };
+        let factor = if deck_id == sync.follower {
+            (sync.follower_bpm * multiple) / sync.leader_bpm
+        } else {
+            sync.leader_bpm / (sync.follower_bpm * multiple)
+        };
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err("SYNC 联动速度超出引擎范围".into());
+        }
+        rates[deck_id as usize] = rate;
+        let other = deck_id.other();
+        let other_rate = f64::from(rate) * factor;
+        if !other_rate.is_finite() || !(0.5..=2.0).contains(&other_rate) {
+            return Err("SYNC 联动速度超出引擎范围".into());
+        }
+        rates[other as usize] = other_rate as f32;
+        self.set_deck_rates(rates)
     }
 
     fn set_deck_rates(&mut self, rates: [f32; 2]) -> Result<(), String> {
@@ -1309,30 +1650,45 @@ impl Actor {
                 return Err("SYNC 关联的两首曲目必须都已装入 Deck".to_string());
             }
         }
+        if let Some(sync) = self.sync_group.as_mut() {
+            sync.base_rates = rates;
+            sync.correction_rate = rates[sync.follower as usize];
+            sync.target_bpm = f64::from(rates[sync.leader as usize]) * sync.leader_bpm;
+        }
         for deck in [DeckId::A, DeckId::B] {
             self.clear_jog_nudge(deck);
-            self.cancel_clocked_deck_seek(deck);
         }
         self.enter_manual_mode();
         for deck in [DeckId::A, DeckId::B] {
-            let index = deck as usize;
-            let rate = rates[index];
-            if let Some(runtime) = self.decks[index].as_mut() {
-                runtime.request.rate = rate;
-                runtime.tempo.set(rate);
-            }
-            if let Some(pending) = self.pending[index].as_mut() {
-                pending.request.rate = rate;
-                pending.tempo.set(rate);
-            }
-            self.state.decks[index].rate = rate;
-            if self.front == deck {
-                self.state.rate = rate;
-            }
+            self.retarget_deck_tempo(deck, rates[deck as usize]);
         }
         // One callback command is the important boundary: linked faders never create a transient
         // half-updated pair, and one actor snapshot replaces two independent 10 Hz UI echoes.
+        self.update_sync_snapshot();
         self.send(RtCommand::SetDeckRates { rates })
+    }
+
+    /// Persistent TEMPO is an atomic retarget. It must not cancel a clocked seek/STEM shadow or
+    /// bump Rubber Band's revision when the fader has not actually moved.
+    fn retarget_deck_tempo(&mut self, deck: DeckId, rate: f32) {
+        const EPSILON: f32 = 1e-4;
+        let index = deck as usize;
+        if let Some(runtime) = self.decks[index].as_mut() {
+            runtime.request.rate = rate;
+            if (runtime.tempo.rate() - rate).abs() > EPSILON {
+                runtime.tempo.set(rate);
+            }
+        }
+        if let Some(pending) = self.pending[index].as_mut() {
+            pending.request.rate = rate;
+            if (pending.tempo.rate() - rate).abs() > EPSILON {
+                pending.tempo.set(rate);
+            }
+        }
+        self.state.decks[index].rate = rate;
+        if self.front == deck {
+            self.state.rate = rate;
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1400,10 +1756,48 @@ impl Actor {
         })
         .ok_or_else(|| "SYNC 无法建立有效网格".to_string())?;
 
-        self.set_deck_rate(follower as u8, rate)?;
         let wall_error = (target - follower_position).abs() / f64::from(rate);
-        if self.manual_desired_playing[follower_index] && wall_error > SYNC_PHASE_TOLERANCE_SEC {
-            self.seek_deck_when_ready(follower as u8, target, false)?;
+        let needs_shadow_acquire =
+            self.manual_desired_playing[follower_index] && wall_error > SYNC_PHASE_TOLERANCE_SEC;
+        if needs_shadow_acquire {
+            self.stage_deck_rate_for_replacement(follower, rate)?;
+        } else {
+            self.set_deck_rate(follower as u8, rate)?;
+        }
+        let base_rates = std::array::from_fn(|index| {
+            self.source_for_deck(if index == 0 { DeckId::A } else { DeckId::B })
+                .map(|source| source.rate)
+                .unwrap_or(self.state.decks[index].rate)
+        });
+        let target_bpm = master_bpm * master_rate;
+        let multiple = sync_fold_multiple(target_bpm, follower_bpm);
+        self.sync_group = Some(NativeSyncGroup {
+            leader: master,
+            follower,
+            base_rates,
+            follower_bpm,
+            follower_origin: follower_first_beat,
+            leader_bpm: master_bpm,
+            leader_origin: master_first_beat,
+            beats_per_bar,
+            target_bpm,
+            multiple,
+            correction_rate: rate,
+            phase_error_seconds: 0.0,
+            phase: if needs_shadow_acquire {
+                PlaybackSyncPhase::Acquiring
+            } else {
+                PlaybackSyncPhase::Locked
+            },
+            aligning_follower: needs_shadow_acquire,
+        });
+        self.set_sync_phase_correction(follower, 1.0);
+        self.update_sync_snapshot();
+        if needs_shadow_acquire {
+            if let Err(error) = self.seek_deck_when_ready(follower as u8, target, false) {
+                self.clear_native_sync(true);
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -1426,24 +1820,30 @@ impl Actor {
     fn set_deck_fx(
         &mut self,
         deck: u8,
-        echo: f32,
-        echo_parameter: f32,
-        reverb: f32,
-        reverb_parameter: f32,
-        gater: f32,
-        gater_parameter: f32,
+        slots: [PlaybackFxSlot; 3],
         pad: u8,
         beat_seconds: f32,
     ) -> Result<(), String> {
         let deck = deck_id(deck)?;
+        let slots = slots.map(|slot| DeckFxSlot {
+            kind: match slot.kind {
+                PlaybackFxKind::Echo => DeckFxKind::Echo,
+                PlaybackFxKind::Reverb => DeckFxKind::Reverb,
+                PlaybackFxKind::Flanger => DeckFxKind::Flanger,
+                PlaybackFxKind::Phaser => DeckFxKind::Phaser,
+                PlaybackFxKind::BitCrusher => DeckFxKind::BitCrusher,
+                PlaybackFxKind::Gate => DeckFxKind::Gate,
+                PlaybackFxKind::Alarm => DeckFxKind::Alarm,
+                PlaybackFxKind::Hydrant => DeckFxKind::Hydrant,
+                PlaybackFxKind::Rocket => DeckFxKind::Rocket,
+            },
+            enabled: slot.enabled,
+            mix: finite_clamp(slot.mix, 0.0, 1.0, 0.5),
+            parameter: finite_clamp(slot.parameter, 0.0, 1.0, 0.5),
+        });
         self.send(RtCommand::SetDeckFx {
             deck,
-            echo: finite_clamp(echo, 0.0, 1.0, 0.0),
-            echo_parameter: finite_clamp(echo_parameter, 0.0, 1.0, 0.5),
-            reverb: finite_clamp(reverb, 0.0, 1.0, 0.0),
-            reverb_parameter: finite_clamp(reverb_parameter, 0.0, 1.0, 0.5),
-            gater: finite_clamp(gater, 0.0, 1.0, 0.0),
-            gater_parameter: finite_clamp(gater_parameter, 0.0, 1.0, 0.5),
+            slots,
             pad: pad.min(8),
             beat_seconds: finite_clamp(beat_seconds, 0.1, 4.0, 0.5),
         })
@@ -1497,6 +1897,9 @@ impl Actor {
             }
             return Ok(());
         }
+        // A raw/STEM source replacement changes the PCM type feeding the reservoir. Exit the old
+        // loop first; gain-only changes above stay on the same source and keep looping.
+        self.invalidate_loop(deck)?;
         // 慢速路径：原曲↔实时 STEM。原曲继续发声，分轨 worker 从当前位置开始分离。
         let mut source = self
             .source_for_deck(deck)
@@ -1541,74 +1944,162 @@ impl Actor {
         Ok(())
     }
 
-    fn set_deck_loop(&mut self, track_id: i64, start: f64, length: f64) -> Result<(), String> {
-        if !start.is_finite() || !length.is_finite() || start < 0.0 || length < 0.05 {
-            return Err("循环区间无效".into());
+    fn validate_loop_length(length: f64) -> Result<(), String> {
+        if !length.is_finite() || length < 0.05 {
+            return Err("循环长度无效".into());
         }
-        if length > 180.0 {
-            return Err("循环长度超出上限".into());
+        if length > MAX_TRANSPORT_LOOP_SECONDS {
+            return Err(format!(
+                "循环长度不能超过 {} 秒",
+                MAX_TRANSPORT_LOOP_SECONDS as u32
+            ));
         }
-        let deck = self
-            .deck_for_track(track_id)
-            .ok_or_else(|| "目标曲目尚未装入 Deck".to_string())?;
-        self.cancel_clocked_deck_seek(deck);
-        self.enter_manual_mode();
-        let duration = self.state.decks[deck as usize].duration;
-        if duration > 0.0 && start + length > duration + 0.05 {
-            return Err("循环区间超出曲目长度".into());
-        }
-        let playhead = self.live_deck_seconds(deck);
-        // The performance UI can report 0 while the engine is already mid-track (deck state
-        // not yet bound). A loop starting at 0 then wrapping the live playhead would decode
-        // the intro after draining the current buffer — exactly "unrelated clip, then intro".
-        let start = if start < 0.05 && playhead.is_finite() && playhead > length + 0.05 {
-            playhead
-        } else {
-            start
-        };
-        if duration > 0.0 && start + length > duration + 0.05 {
-            return Err("循环区间超出曲目长度".into());
-        }
-        let stored_playhead = if playhead.is_finite() && playhead > 0.05 {
-            playhead
-        } else {
-            start
-        };
-        if let Some(runtime) = self.decks[deck as usize].as_mut() {
-            runtime.loop_playback = Some(LoopPlayback { start, length });
-        }
-        self.state.decks[deck as usize].loop_start = Some(start);
-        self.state.decks[deck as usize].loop_length = Some(length);
-        // Arm the callback loop flag before the decoder notices the window, so an engage
-        // underrun freezes the playhead instead of spinning around the window.
-        self.apply_engine_loop(deck)?;
-        self.loop_windows[deck as usize].set(start, length, stored_playhead);
         Ok(())
     }
 
-    fn clear_deck_loop(&mut self, track_id: i64) -> Result<(), String> {
-        let deck = self
-            .deck_for_track(track_id)
-            .ok_or_else(|| "目标曲目尚未装入 Deck".to_string())?;
-        self.cancel_clocked_deck_seek(deck);
-        self.enter_manual_mode();
-        self.invalidate_loop(deck)
+    /// One button, one authority: off -> capture the callback needle; on -> exit at loop-out.
+    fn toggle_deck_loop(&mut self, deck: u8, length: f64) -> Result<(), String> {
+        Self::validate_loop_length(length)?;
+        let deck = deck_id(deck)?;
+        if self.loop_windows[deck as usize].snapshot().is_some() {
+            self.cancel_clocked_deck_seek(deck);
+            self.enter_manual_mode();
+            return self.invalidate_loop(deck);
+        }
+        self.capture_deck_loop(deck, length)
     }
 
-    /// Drop the transport loop without rebuilding the audible source, EQ or STEM session.
-    fn invalidate_loop(&mut self, deck: DeckId) -> Result<(), String> {
-        self.loop_windows[deck as usize].clear();
-        if let Some(runtime) = self.decks[deck as usize].as_mut() {
-            runtime.loop_playback = None;
+    fn resize_deck_loop(&mut self, deck: u8, length: f64) -> Result<(), String> {
+        Self::validate_loop_length(length)?;
+        let deck = deck_id(deck)?;
+        let start = self.decks[deck as usize]
+            .as_ref()
+            .and_then(|runtime| runtime.loop_playback)
+            .map(|looping| looping.start)
+            .ok_or_else(|| "当前 Deck 没有活动循环".to_string())?;
+        self.install_loop_window(deck, start, length)
+    }
+
+    fn capture_deck_loop(&mut self, deck: DeckId, length: f64) -> Result<(), String> {
+        Self::validate_loop_length(length)?;
+        self.cancel_clocked_deck_seek(deck);
+        self.enter_manual_mode();
+        if self.pending[deck as usize].is_some() {
+            return Err("Deck 正在切换音频源，暂不能建立循环".into());
         }
-        self.state.decks[deck as usize].loop_start = None;
-        self.state.decks[deck as usize].loop_length = None;
+        if self.scratch_held[deck as usize]
+            || self.scratch_coasting[deck as usize]
+            || self.latest_audio.deck_scratch_held[deck as usize]
+        {
+            return Err("缓动盘释放后才能建立循环".into());
+        }
+        let runtime = self.decks[deck as usize]
+            .as_ref()
+            .ok_or_else(|| "目标曲目尚未装入 Deck".to_string())?;
+        if self.manual_desired_playing[deck as usize]
+            && runtime.source.buffered_frames() == 0
+            && !runtime.source.ended()
+        {
+            return Err("Deck 缓冲就绪后才能建立循环".into());
+        }
+        let source_id = runtime.source_id;
+        let output_sample_rate = runtime.output_sample_rate;
+        let audio = self
+            .player
+            .as_mut()
+            .ok_or_else(|| "原生音频输出未初始化".to_string())?
+            .snapshot();
+        if audio.deck_source_ids[deck as usize] != source_id {
+            return Err("Deck 音频时钟尚未就绪".into());
+        }
+        let start_frame = audio.deck_frames[deck as usize];
+        if start_frame < 0 {
+            return Err("静音预卷期间不能建立循环".into());
+        }
+        let start = start_frame as f64 / f64::from(output_sample_rate.max(1));
+        self.install_loop_window(deck, start, length)
+    }
+
+    fn install_loop_window(&mut self, deck: DeckId, start: f64, length: f64) -> Result<(), String> {
+        Self::validate_loop_length(length)?;
+        let index = deck as usize;
+        let runtime = self.decks[index]
+            .as_ref()
+            .ok_or_else(|| "目标曲目尚未装入 Deck".to_string())?;
+        let start_frames = runtime.frame_for_seconds(start);
+        let frames = runtime.frame_for_seconds(length).max(1);
+        let bytes_per_frame = match &runtime.source {
+            PlaybackStream::Stereo(_) => std::mem::size_of::<[f32; 2]>(),
+            PlaybackStream::Stems(_) => std::mem::size_of::<StemFrame>(),
+        };
+        if usize::try_from(frames)
+            .ok()
+            .and_then(|frames| frames.checked_mul(bytes_per_frame))
+            .is_none_or(|bytes| bytes > MAX_TRANSPORT_LOOP_PCM_BYTES)
+        {
+            return Err("当前采样率下的循环过长".into());
+        }
+        let start = start_frames as f64 / f64::from(runtime.output_sample_rate.max(1));
+        let length = frames as f64 / f64::from(runtime.output_sample_rate.max(1));
+        let duration = self.state.decks[index].duration;
+        let frame_tolerance = 0.5 / f64::from(runtime.output_sample_rate.max(1));
+        if duration > 0.0 && start + length > duration + frame_tolerance {
+            return Err("循环区间超出曲目长度".into());
+        }
+
+        // Arm the callback boundary before publishing the worker reservoir window. If the fixed
+        // realtime queue rejects the edge, no logical loop state has changed.
+        self.send(RtCommand::SetDeckLoop {
+            deck,
+            looping: true,
+            start_frames,
+            frames,
+        })?;
+        self.loop_windows[index].set(start, length);
+        if let Some(runtime) = self.decks[index].as_mut() {
+            runtime.loop_playback = Some(LoopPlayback { start, length });
+        }
+        self.state.decks[index].loop_start = Some(start);
+        self.state.decks[index].loop_length = Some(length);
+        tracing::info!(
+            "loop deck={} capture in={} out={} frames={}",
+            if deck == DeckId::A { 'A' } else { 'B' },
+            format_loop_clock(start),
+            format_loop_clock(start + length),
+            frames,
+        );
+        Ok(())
+    }
+
+    /// Disable the callback boundary first, then let the PCM worker finish its current cycle and
+    /// resume the untouched linear read-ahead parked at loop-out. No decoder seek or source swap.
+    fn invalidate_loop(&mut self, deck: DeckId) -> Result<(), String> {
+        let index = deck as usize;
+        let active = self.loop_windows[index].snapshot().is_some()
+            || self.decks[index]
+                .as_ref()
+                .is_some_and(|runtime| runtime.loop_playback.is_some())
+            || self.state.decks[index].loop_start.is_some();
+        if !active {
+            return Ok(());
+        }
         self.send(RtCommand::SetDeckLoop {
             deck,
             looping: false,
             start_frames: 0,
             frames: 0,
-        })
+        })?;
+        self.loop_windows[index].clear();
+        if let Some(runtime) = self.decks[index].as_mut() {
+            runtime.loop_playback = None;
+        }
+        self.state.decks[index].loop_start = None;
+        self.state.decks[index].loop_length = None;
+        tracing::info!(
+            "loop deck={} exit",
+            if deck == DeckId::A { 'A' } else { 'B' },
+        );
+        Ok(())
     }
 
     fn apply_engine_loop(&mut self, deck: DeckId) -> Result<(), String> {
@@ -1616,12 +2107,7 @@ impl Actor {
             return Ok(());
         };
         let Some(looping) = runtime.loop_playback else {
-            return self.send(RtCommand::SetDeckLoop {
-                deck,
-                looping: false,
-                start_frames: 0,
-                frames: 0,
-            });
+            return Ok(());
         };
         let start_frames = runtime.frame_for_seconds(looping.start);
         let frames = runtime.frame_for_seconds(looping.length).max(1);
@@ -1688,23 +2174,98 @@ impl Actor {
         if self.jog_nudge_until[index].take().is_none() {
             return;
         }
-        let rate = self.decks[index]
-            .as_ref()
-            .map(|runtime| runtime.request.rate);
+        self.jog_nudge_multipliers[index] = 1.0;
+        self.set_sync_phase_correction(deck, 1.0);
+    }
+
+    fn set_transient_deck_rate(&mut self, deck: DeckId, rate: f32) {
+        let index = deck as usize;
         if let Some(runtime) = self.decks[index].as_mut() {
-            runtime.tempo.set(runtime.request.rate);
+            runtime.tempo.set(rate);
         }
-        if let Some(rate) = rate {
-            // The Rubber Band worker and audio callback own separate clocks. Restore both
-            // together so a temporary edge bend cannot leave the reported position drifting.
+        if let Some(pending) = self.pending[index].as_mut() {
+            pending.tempo.set(rate);
+        }
+        if self.decks[index].is_some() {
             let _ = self.send(RtCommand::SetRate { deck, rate });
         }
+    }
+
+    fn set_sync_phase_correction(&mut self, deck: DeckId, multiplier: f32) {
+        let multiplier = if multiplier.is_finite() {
+            multiplier.clamp(0.97, 1.03)
+        } else {
+            1.0
+        };
+        let combined = (multiplier * self.jog_nudge_multipliers[deck as usize]).clamp(0.75, 1.25);
+        let _ = self.send(RtCommand::SetDeckPhaseCorrection {
+            deck,
+            multiplier: combined,
+        });
+    }
+
+    fn clear_native_sync(&mut self, restore_rate: bool) {
+        let Some(sync) = self.sync_group.take() else {
+            self.state.sync = PlaybackSyncSnapshot::default();
+            return;
+        };
+        self.set_sync_phase_correction(sync.follower, 1.0);
+        if restore_rate
+            && self.decks[sync.follower as usize]
+                .as_ref()
+                .is_some_and(|runtime| {
+                    (runtime.tempo.rate() - sync.base_rates[sync.follower as usize]).abs()
+                        > f32::EPSILON
+                })
+        {
+            self.set_transient_deck_rate(sync.follower, sync.base_rates[sync.follower as usize]);
+        }
+        self.state.sync = PlaybackSyncSnapshot::default();
+    }
+
+    fn update_sync_snapshot(&mut self) {
+        self.state.sync = self
+            .sync_group
+            .map(|sync| PlaybackSyncSnapshot {
+                enabled: true,
+                leader: sync.leader as u8,
+                follower: sync.follower as u8,
+                phase: sync.phase,
+                phase_error_seconds: sync.phase_error_seconds,
+                correction_rate: sync.correction_rate,
+                target_bpm: sync.target_bpm,
+                multiple: sync.multiple,
+            })
+            .unwrap_or_default();
+    }
+
+    fn on_seek_settled(&mut self, deck: DeckId) {
+        let Some(sync) = self.sync_group else {
+            return;
+        };
+        // Only finish the one-shot SYNC acquire. A user click/Hot Cue/scratch must not start
+        // another decoder replacement: that second seek is what made waveform jumps jitter.
+        if deck != sync.follower || !sync.aligning_follower {
+            return;
+        }
+        if let Some(group) = self.sync_group.as_mut() {
+            group.aligning_follower = false;
+            group.phase = PlaybackSyncPhase::Locked;
+        }
+        self.update_sync_snapshot();
     }
 
     fn release_expired_jog_nudges(&mut self) {
         let now = Instant::now();
         for deck in [DeckId::A, DeckId::B] {
-            if self.jog_nudge_until[deck as usize].is_some_and(|until| until <= now) {
+            let index = deck as usize;
+            let Some(until) = self.jog_nudge_until[index] else {
+                continue;
+            };
+            if until > now {
+                continue;
+            }
+            if self.jog_nudge_until[index].is_some() {
                 self.clear_jog_nudge(deck);
             }
         }
@@ -1758,6 +2319,30 @@ impl Actor {
         })
     }
 
+    fn reset_deck_controls_for_manager_load(&mut self, deck: DeckId) -> Result<(), String> {
+        let index = deck as usize;
+        self.set_deck_mixer(deck as u8, DeckMixer::default())?;
+        self.set_deck_fx(deck as u8, [PlaybackFxSlot::default(); 3], 0, 0.5)?;
+        self.send(RtCommand::SetDeckPfl {
+            deck,
+            enabled: false,
+        })?;
+        self.invalidate_loop(deck)?;
+        self.send(RtCommand::SetDeckStemGains {
+            deck,
+            gains: [1.0; 4],
+        })?;
+        self.state.decks[index].stem_enabled = false;
+        Ok(())
+    }
+
+    fn reset_performance_controls_for_manager_load(&mut self) -> Result<(), String> {
+        for deck in [DeckId::A, DeckId::B] {
+            self.reset_deck_controls_for_manager_load(deck)?;
+        }
+        Ok(())
+    }
+
     fn prewarm_queue(&mut self) -> Result<(), String> {
         let Some(source) = self
             .queue
@@ -1770,9 +2355,47 @@ impl Actor {
         self.prepare(source)
     }
 
+    fn pause_manual_decks(&mut self) -> Result<(), String> {
+        for deck in [DeckId::A, DeckId::B] {
+            self.clear_jog_nudge(deck);
+            self.cancel_clocked_deck_seek(deck);
+            self.release_scratch_hold(deck);
+        }
+        if self.decks.iter().any(Option::is_some) {
+            self.send(RtCommand::SetMode(PlayerMode::RealtimeDj))?;
+        }
+        for deck in [DeckId::A, DeckId::B] {
+            let index = deck as usize;
+            self.manual_desired_playing[index] = false;
+            self.state.decks[index].desired_playing = false;
+            if self.decks[index].is_some() {
+                self.send(RtCommand::SetDeckPlaying {
+                    deck,
+                    playing: false,
+                })?;
+            }
+            self.state.decks[index].is_playing = false;
+        }
+        // Keep `front` and its metadata intact: the next global Play resumes the song that was
+        // visible in the manager. Pause is nevertheless a global silence boundary so a hidden
+        // second DJ Deck cannot keep audio focus and immediately stop an online preview.
+        self.state.desired_playing = false;
+        self.state.is_playing = false;
+        self.state.phase = if self.state.track_id.is_some() {
+            PlaybackPhase::Paused
+        } else {
+            PlaybackPhase::Idle
+        };
+        Ok(())
+    }
+
     fn set_playing(&mut self, playing: bool) -> Result<(), String> {
         if self.manual_mode {
-            return self.set_deck_playing(self.front as u8, playing);
+            return if playing {
+                self.set_deck_playing(self.front as u8, true)
+            } else {
+                self.pause_manual_decks()
+            };
         }
         if !playing {
             self.release_scratch_hold(DeckId::A);
@@ -1983,7 +2606,7 @@ impl Actor {
             .ok_or_else(|| "原生音频输出未初始化".to_string())?
             .snapshot();
         let frame = if audio.deck_source_ids[self.front as usize] == runtime.source_id {
-            audio.deck_frames[self.front as usize]
+            audio.deck_frames[self.front as usize].max(0) as u64
         } else {
             runtime.frame_for_seconds(runtime.request.position)
         };
@@ -2179,7 +2802,6 @@ impl Actor {
                             let duration = worker_request.duration.unwrap_or(0.0);
                             let pool = stem_pool.expect("live STEM pool");
                             let epoch = Arc::clone(&fence);
-                            let worker_loop = Arc::clone(&loop_window);
                             let worker_seek = seek.clone();
                             run_pitch_preserving_pipeline(
                                 tempo.clone(),
@@ -2200,7 +2822,6 @@ impl Actor {
                                         revision,
                                         raw_writer,
                                         &is_cancelled,
-                                        Some(worker_loop),
                                         Some(worker_seek),
                                     )
                                 },
@@ -2214,7 +2835,7 @@ impl Actor {
                         PlaybackSourceKind::Local => {
                             let path = PathBuf::from(&worker_request.path);
                             let position = worker_request.position;
-                            let worker_loop = Arc::clone(&loop_window);
+                            let worker_seek = seek.clone();
                             run_pitch_preserving_pipeline(
                                 tempo.clone(),
                                 output_rate,
@@ -2222,25 +2843,25 @@ impl Actor {
                                 writer,
                                 move |raw_writer, cancelled| {
                                     let is_cancelled = || cancelled();
-                                    decode_file_streaming_looped(
+                                    decode_file_streaming_seekable(
                                         &path,
                                         position,
                                         output_rate,
                                         raw_writer,
                                         &is_cancelled,
-                                        Some(worker_loop),
+                                        Some(worker_seek),
                                     )
                                 },
                                 Arc::clone(&cancellation),
                                 Some(Arc::clone(&loop_window)),
-                                None,
+                                Some(seek),
                             )
                         }
                         PlaybackSourceKind::Remote => {
                             let path = worker_request.path.clone();
                             let position = worker_request.position;
                             let remote_fence = Arc::clone(&fence);
-                            let worker_loop = Arc::clone(&loop_window);
+                            let worker_seek = seek.clone();
                             run_pitch_preserving_pipeline(
                                 tempo.clone(),
                                 output_rate,
@@ -2254,7 +2875,7 @@ impl Actor {
                                     );
                                     opened.map_err(anyhow::Error::new).and_then(|opened| {
                                         let is_cancelled = || cancelled();
-                                        decode_source_streaming_looped(
+                                        decode_source_streaming_seekable(
                                             Box::new(opened.source),
                                             opened.hint_extension.as_deref(),
                                             &path,
@@ -2262,13 +2883,13 @@ impl Actor {
                                             output_rate,
                                             raw_writer,
                                             &is_cancelled,
-                                            Some(worker_loop),
+                                            Some(worker_seek),
                                         )
                                     })
                                 },
                                 Arc::clone(&cancellation),
                                 Some(Arc::clone(&loop_window)),
-                                None,
+                                Some(seek),
                             )
                         }
                     },
@@ -2675,10 +3296,17 @@ impl Actor {
                 seek: pending.seek,
             });
             self.state.decks[deck as usize].stem_enabled = pending.request.stem_enabled;
+            let preroll = self.pending_preroll[deck as usize].take();
             let _ = self.send(RtCommand::SetRate {
                 deck,
                 rate: pending.request.rate,
             });
+            if let Some(seconds) = preroll {
+                let frames = (-seconds * f64::from(pending.output_sample_rate))
+                    .round()
+                    .max(0.0) as u64;
+                let _ = self.send(RtCommand::SetDeckPreroll { deck, frames });
+            }
             if pending.request.stem_enabled {
                 let _ = self.send(RtCommand::SetDeckStemGains {
                     deck,
@@ -2710,7 +3338,9 @@ impl Actor {
                     });
                 }
                 let duration = pending.request.duration.unwrap_or(0.0).max(0.0);
-                if let Some(position) = clocked_position {
+                if let Some(position) = preroll {
+                    self.state.decks[deck as usize].current_time = position;
+                } else if let Some(position) = clocked_position {
                     self.state.decks[deck as usize].current_time = position;
                 } else if !playing_same_track {
                     self.state.decks[deck as usize].current_time = pending.request.position;
@@ -2737,13 +3367,23 @@ impl Actor {
                 // logical transport has remained playing for the entire gesture.
                 self.release_scratch_hold(deck);
             }
+            if !pending.followup_stems {
+                self.on_seek_settled(deck);
+            }
             if pending.followup_stems {
                 let mut stem_request = pending.request.clone();
                 stem_request.stem_enabled = true;
                 if self.manual_desired_playing[deck as usize] {
                     let now = self.state.decks[deck as usize].current_time;
-                    stem_request.position =
-                        clamp_position(now + stem_followup_lead_seconds(), stem_request.duration);
+                    if now < 0.0 {
+                        stem_request.position = 0.0;
+                        self.pending_preroll[deck as usize] = Some(now);
+                    } else {
+                        stem_request.position = clamp_position(
+                            now + stem_followup_lead_seconds(),
+                            stem_request.duration,
+                        );
+                    }
                 }
                 if let Err(error) = self.start_stream(deck, stem_request, None) {
                     self.fail(error);
@@ -2846,10 +3486,16 @@ impl Actor {
             Some(player) => player.snapshot(),
             None => return,
         };
+        self.latest_audio = audio;
         self.latest_levels = PlaybackLevels {
             peaks: audio.deck_peak_levels,
             bands: audio.deck_spectrum_levels,
         };
+        for index in 0..2 {
+            if audio.deck_scratch_held[index] {
+                self.scratch_saw_engine_hold[index] = true;
+            }
+        }
         let mut rewind_ended = [false, false];
         for deck in [DeckId::A, DeckId::B] {
             let index = deck as usize;
@@ -2864,19 +3510,7 @@ impl Actor {
                 view.rate = runtime.request.rate;
             }
             if audio.deck_source_ids[index] == runtime.source_id {
-                if self.pending[index].as_ref().is_some_and(|pending| {
-                    if runtime.source.drained() {
-                        // EOF rewind (and any other replacement) already published the target
-                        // clock. The drained live decoder is still parked on the last frame.
-                        return true;
-                    }
-                    let same_origin = (pending.request.position - runtime.request.position).abs()
-                        <= LIVE_CLOCK_SAME_ORIGIN_SEC;
-                    let stem_catchup = pending.request.stem_enabled
-                        && !runtime.request.stem_enabled
-                        && pending.request.track_id == runtime.request.track_id;
-                    !same_origin && !stem_catchup
-                }) {
+                if live_decoder_clock_is_outgoing(self.pending[index].as_ref(), runtime) {
                     // Live is still the pre-seek decoder. Publishing that clock snaps the
                     // playhead back, so a click looks like it did nothing.
                     continue;
@@ -2895,6 +3529,13 @@ impl Actor {
                 );
                 view.output_underruns = audio.deck_output_underruns[index];
                 view.peak_level = audio.deck_peak_levels[index];
+                view.applied_rate = runtime.tempo.applied_rate();
+                view.audible_rate = audio.deck_audible_rates[index];
+                view.target_rate_revision = runtime.tempo.revision();
+                view.applied_rate_revision = runtime.tempo.applied_revision();
+                view.audible_rate_revision = audio.deck_audible_rate_revisions[index];
+                view.discontinuity_revision = audio.deck_discontinuity_revisions[index];
+                view.scratch_held = audio.deck_scratch_held[index];
                 if let Some(seek) = stem_clock.as_ref() {
                     if self.pending[index].is_none() {
                         seek.publish_clock(played);
@@ -2909,8 +3550,22 @@ impl Actor {
                         view.is_playing = false;
                         rewind_ended[index] = self.manual_mode
                             && self.pending[index].is_none()
-                            && !self.scratch_held[index];
+                            && !self.scratch_held[index]
+                            && !self.scratch_coasting[index];
                     }
+                } else if self.manual_desired_playing[index]
+                    && !audio.deck_playing[index]
+                    && !audio.deck_scratch_held[index]
+                    && !self.scratch_held[index]
+                    && !self.scratch_coasting[index]
+                    && runtime.source.ended()
+                {
+                    // Decoded / non-draining ends clear engine playing without a drained() edge.
+                    // Mirror that into desired so the Pause glyph and waveform stop together.
+                    self.manual_desired_playing[index] = false;
+                    view.desired_playing = false;
+                    view.is_playing = false;
+                    rewind_ended[index] = self.manual_mode && self.pending[index].is_none();
                 }
             }
         }
@@ -3039,6 +3694,66 @@ impl Actor {
         emit(self.latest_levels);
     }
 
+    fn publish_clock(&mut self) {
+        let Some(emit) = &self.clock_emit else {
+            return;
+        };
+        if self.last_clock_tick.elapsed() < LEVEL_INTERVAL {
+            return;
+        }
+        self.last_clock_tick = Instant::now();
+        let audio = self.latest_audio;
+        let decks = std::array::from_fn(|index| {
+            let runtime = self.decks[index].as_ref();
+            let source_matches =
+                runtime.is_some_and(|runtime| audio.deck_source_ids[index] == runtime.source_id);
+            let use_live_decoder = source_matches
+                && runtime.is_some_and(|runtime| {
+                    !live_decoder_clock_is_outgoing(self.pending[index].as_ref(), runtime)
+                });
+            let current_time = if use_live_decoder {
+                runtime
+                    .map(|runtime| runtime.seconds_for_frame(audio.deck_frames[index]))
+                    .unwrap_or(self.state.decks[index].current_time)
+            } else {
+                self.state.decks[index].current_time
+            };
+            PlaybackDeckClock {
+                track_id: self.state.decks[index].track_id,
+                source_id: audio.deck_source_ids[index],
+                current_time,
+                target_rate: runtime
+                    .map(|runtime| runtime.tempo.rate())
+                    .unwrap_or(self.state.decks[index].rate),
+                applied_rate: runtime
+                    .map(|runtime| runtime.tempo.applied_rate())
+                    .unwrap_or(self.state.decks[index].applied_rate),
+                audible_rate: audio.deck_audible_rates[index],
+                target_revision: runtime.map(|runtime| runtime.tempo.revision()).unwrap_or(0),
+                applied_revision: runtime
+                    .map(|runtime| runtime.tempo.applied_revision())
+                    .unwrap_or(0),
+                audible_revision: audio.deck_audible_rate_revisions[index],
+                discontinuity_revision: audio.deck_discontinuity_revisions[index],
+                playing: if use_live_decoder {
+                    audio.deck_playing[index]
+                } else {
+                    // A cleared replacement reports not-playing. Publishing that pauses the
+                    // waveform compositor, then the promoted landing jumps it forward.
+                    self.state.decks[index].is_playing
+                },
+                scratch_held: audio.deck_scratch_held[index],
+            }
+        });
+        emit(PlaybackClock {
+            output_frame: audio.output_frames,
+            output_sample_rate: audio.output_sample_rate,
+            callback_time_ns: audio.callback_time_ns,
+            presentation_time_ns: audio.presentation_time_ns,
+            decks,
+        });
+    }
+
     fn publish_audio_pressure(&self) {
         let mut pressure = AudioPressure::Normal;
         let prior = work_scheduler().audio_pressure();
@@ -3134,6 +3849,8 @@ impl Actor {
         self.decks[deck as usize] = None;
         self.manual_desired_playing[deck as usize] = false;
         self.scratch_held[deck as usize] = false;
+        self.scratch_coasting[deck as usize] = false;
+        self.scratch_coast_started[deck as usize] = None;
         self.state.decks[deck as usize] = crate::contract::PlaybackDeckSnapshot {
             rate: 1.0,
             ..crate::contract::PlaybackDeckSnapshot::default()
@@ -3175,6 +3892,7 @@ impl Actor {
     }
 
     fn dispose(&mut self) {
+        self.sync_group = None;
         self.invalidate(DeckId::A);
         self.invalidate(DeckId::B);
         self.pending = [None, None];
@@ -3184,6 +3902,8 @@ impl Actor {
         self.manual_mode = false;
         self.manual_desired_playing = [false; 2];
         self.scratch_held = [false; 2];
+        self.scratch_coasting = [false; 2];
+        self.scratch_coast_started = [None, None];
         self.deck_mixers = [DeckMixer {
             low_db: self.eq.0,
             high_db: self.eq.1,
@@ -3369,6 +4089,42 @@ fn wrap_sync_error(value: f64, period: f64) -> f64 {
     wrapped
 }
 
+fn sync_phase_error(input: SyncPhaseInput) -> Option<(f64, f64)> {
+    if !input.follower_position.is_finite()
+        || !input.master_position.is_finite()
+        || !input.follower_bpm.is_finite()
+        || input.follower_bpm <= 0.0
+        || !input.master_bpm.is_finite()
+        || input.master_bpm <= 0.0
+        || !input.follower_first_beat.is_finite()
+        || !input.master_first_beat.is_finite()
+        || !input.follower_rate.is_finite()
+        || input.follower_rate <= 0.0
+        || !input.master_rate.is_finite()
+        || input.master_rate <= 0.0
+        || !input.beats_per_bar.is_finite()
+        || input.beats_per_bar <= 0.0
+    {
+        return None;
+    }
+    let follower_cell = 60.0 / input.follower_bpm * input.beats_per_bar;
+    let master_cell = 60.0 / input.master_bpm * input.beats_per_bar;
+    let common_period = (follower_cell / input.follower_rate).max(master_cell / input.master_rate);
+    if !common_period.is_finite() || common_period <= 0.0 {
+        return None;
+    }
+    let follower_wall = (input.follower_position
+        - sync_grid_origin(input.follower_first_beat, follower_cell))
+        / input.follower_rate;
+    let master_wall = (input.master_position
+        - sync_grid_origin(input.master_first_beat, master_cell))
+        / input.master_rate;
+    Some((
+        wrap_sync_error(follower_wall - master_wall, common_period),
+        common_period,
+    ))
+}
+
 /// Resolve the nearest phase-equivalent follower position that is actually seekable.
 ///
 /// A nearest signed correction can point before 0 when a freshly loaded Deck is synchronized.
@@ -3392,21 +4148,7 @@ fn sync_phase_target(input: SyncPhaseInput) -> Option<f64> {
     {
         return None;
     }
-    let follower_cell = 60.0 / input.follower_bpm * input.beats_per_bar;
-    let master_cell = 60.0 / input.master_bpm * input.beats_per_bar;
-    let follower_period = follower_cell / input.follower_rate;
-    let master_period = master_cell / input.master_rate;
-    let common_period = follower_period.max(master_period);
-    if !common_period.is_finite() || common_period <= 0.0 {
-        return None;
-    }
-    let follower_wall = (input.follower_position
-        - sync_grid_origin(input.follower_first_beat, follower_cell))
-        / input.follower_rate;
-    let master_wall = (input.master_position
-        - sync_grid_origin(input.master_first_beat, master_cell))
-        / input.master_rate;
-    let error = wrap_sync_error(follower_wall - master_wall, common_period);
+    let (error, common_period) = sync_phase_error(input)?;
     let source_period = common_period * input.follower_rate;
     let mut target = input.follower_position - error * input.follower_rate;
     let max_position = input
@@ -3414,18 +4156,43 @@ fn sync_phase_target(input: SyncPhaseInput) -> Option<f64> {
         .filter(|duration| duration.is_finite() && *duration > 0.0)
         .map(|duration| (duration - SEEK_END_MARGIN_SECONDS).max(0.0))
         .unwrap_or(f64::INFINITY);
-    if target < 0.0 {
-        target += (-target / source_period).ceil() * source_period;
+    let min_position = -PERFORMANCE_PREROLL_SECONDS;
+    if target < min_position {
+        target += ((min_position - target) / source_period).ceil() * source_period;
     }
     if target > max_position && max_position.is_finite() {
         target -= ((target - max_position) / source_period).ceil() * source_period;
     }
-    if target < 0.0 || target > max_position {
+    if target < min_position || target > max_position {
         // Extremely short tracks may contain no full equivalent cell. A bounded target is safer
         // than an invalid seek, though such a track cannot promise a persistent bar lock.
-        target = target.clamp(0.0, max_position);
+        target = target.clamp(min_position, max_position);
     }
     Some(target)
+}
+
+fn sync_fold_multiple(leader_effective_bpm: f64, follower_bpm: f64) -> f64 {
+    if !leader_effective_bpm.is_finite()
+        || leader_effective_bpm <= 0.0
+        || !follower_bpm.is_finite()
+        || follower_bpm <= 0.0
+    {
+        return 1.0;
+    }
+    let mut best_multiple = 1.0;
+    let mut best_distance = f64::INFINITY;
+    for multiple in [0.5, 1.0, 2.0] {
+        let rate = leader_effective_bpm / (follower_bpm * multiple);
+        if !rate.is_finite() || rate <= 0.0 {
+            continue;
+        }
+        let distance = rate.log2().abs();
+        if distance < best_distance {
+            best_distance = distance;
+            best_multiple = multiple;
+        }
+    }
+    best_multiple
 }
 
 fn validate_source(source: &PlaybackSource) -> Result<(), String> {
@@ -3443,6 +4210,29 @@ fn validate_source(source: &PlaybackSource) -> Result<(), String> {
     }
     if !source.rate.is_finite() || !(0.5..=2.0).contains(&source.rate) {
         return Err("播放速度必须在 0.5 到 2.0 之间".into());
+    }
+    if let Some(grid) = &source.beat_grid {
+        let valid_markers = |markers: &[f64]| {
+            markers
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0)
+                && markers.windows(2).all(|pair| pair[1] > pair[0])
+        };
+        if !grid.bpm.is_finite()
+            || grid.bpm <= 0.0
+            || !grid.beat_origin.is_finite()
+            || grid.beat_origin < 0.0
+            || grid
+                .downbeat_origin
+                .is_some_and(|origin| !origin.is_finite() || origin < 0.0)
+            || !(1..=16).contains(&grid.beats_per_bar)
+            || !grid.confidence.is_finite()
+            || !(0.0..=1.0).contains(&grid.confidence)
+            || !valid_markers(&grid.beats)
+            || !valid_markers(&grid.downbeats)
+        {
+            return Err("Deck 节拍网格无效".into());
+        }
     }
     if source.path.trim().is_empty() {
         return Err("音频路径为空".into());
@@ -3580,6 +4370,39 @@ fn filter_resonance_q(resonance: FilterResonance) -> f32 {
 /// 进度条最右端换算出的目标常常正好等于时长；精确 seek 到流的末尾会读出
 /// 流外（end of stream），给末尾留一点余量，让“跳到结尾”播完最后一点自然结束。
 const SEEK_END_MARGIN_SECONDS: f64 = 0.25;
+/// Must mirror `src/lib/deckPosition.ts`.
+const PERFORMANCE_PREROLL_SECONDS: f64 = 30.0;
+
+/// Pending replacements must not leak the outgoing decoder as the visual clock.
+/// `refresh_from_audio` keeps `state.current_time` at the seek landing; `publish_clock` must
+/// publish that same landing instead of the still-audible pre-seek frames.
+fn live_decoder_clock_is_outgoing(pending: Option<&PendingStream>, runtime: &DeckRuntime) -> bool {
+    pending.is_some_and(|pending| {
+        if runtime.source.drained() {
+            // EOF rewind (and any other replacement) already published the target clock. The
+            // drained live decoder is still parked on the last frame.
+            return true;
+        }
+        let same_origin = (pending.request.position - runtime.request.position).abs()
+            <= LIVE_CLOCK_SAME_ORIGIN_SEC;
+        let stem_catchup = pending.request.stem_enabled
+            && !runtime.request.stem_enabled
+            && pending.request.track_id == runtime.request.track_id;
+        !same_origin && !stem_catchup
+    })
+}
+
+fn clamp_performance_position(position: f64, duration: Option<f64>) -> f64 {
+    let position = if position.is_finite() {
+        position.max(-PERFORMANCE_PREROLL_SECONDS)
+    } else {
+        0.0
+    };
+    duration
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+        .map(|duration| position.min((duration - SEEK_END_MARGIN_SECONDS).max(0.0)))
+        .unwrap_or(position)
+}
 
 fn clamp_position(position: f64, duration: Option<f64>) -> f64 {
     let position = if position.is_finite() {
@@ -3677,7 +4500,7 @@ mod tests {
             let source_id = self.next_source_id;
             let mut snapshot = self.knobs.snapshot.lock().unwrap();
             snapshot.deck_source_ids[deck as usize] = source_id;
-            snapshot.deck_frames[deck as usize] = start_frame;
+            snapshot.deck_frames[deck as usize] = start_frame as i64;
             Ok(source_id)
         }
 
@@ -3691,7 +4514,7 @@ mod tests {
             let source_id = self.next_source_id;
             let mut snapshot = self.knobs.snapshot.lock().unwrap();
             snapshot.deck_source_ids[deck as usize] = source_id;
-            snapshot.deck_frames[deck as usize] = start_frame;
+            snapshot.deck_frames[deck as usize] = start_frame as i64;
             Ok(source_id)
         }
 
@@ -3705,7 +4528,7 @@ mod tests {
             let source_id = self.next_source_id;
             let mut snapshot = self.knobs.snapshot.lock().unwrap();
             snapshot.deck_source_ids[deck as usize] = source_id;
-            snapshot.deck_frames[deck as usize] = start_frame;
+            snapshot.deck_frames[deck as usize] = start_frame as i64;
             Ok(source_id)
         }
 
@@ -3726,7 +4549,7 @@ mod tests {
                     self.knobs.snapshot.lock().unwrap().playing = playing;
                 }
                 RtCommand::SeekPrepared { deck, frame } => {
-                    self.knobs.snapshot.lock().unwrap().deck_frames[deck as usize] = frame;
+                    self.knobs.snapshot.lock().unwrap().deck_frames[deck as usize] = frame as i64;
                 }
                 _ => {}
             }
@@ -3784,6 +4607,7 @@ mod tests {
             position,
             duration: Some(180.0),
             rate: 1.0,
+            beat_grid: None,
             autoplay: false,
             stem_cache_path: String::new(),
             stem_enabled: false,
@@ -3803,7 +4627,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_phase_target_uses_the_next_equivalent_bar_near_track_start() {
+    fn sync_phase_target_uses_signed_preroll_near_track_start() {
         let target = sync_phase_target(SyncPhaseInput {
             follower_position: 0.1,
             follower_bpm: 120.0,
@@ -3817,7 +4641,239 @@ mod tests {
             follower_duration: Some(180.0),
         })
         .expect("valid grids");
-        assert!((target - 1.8).abs() < 1e-9, "target={target}");
+        assert!((target + 0.2).abs() < 1e-9, "target={target}");
+    }
+
+    #[test]
+    fn sync_fold_multiple_picks_half_and_double_time() {
+        assert!((sync_fold_multiple(140.0, 70.0) - 2.0).abs() < 1e-9);
+        assert!((sync_fold_multiple(70.0, 140.0) - 0.5).abs() < 1e-9);
+        assert!((sync_fold_multiple(128.0, 128.0) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn native_sync_tempo_gesture_updates_both_persistent_deck_rates() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.decks[1] = Some(live_runtime(2, 0.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[1].track_id = Some(2);
+        actor.sync_group = Some(NativeSyncGroup {
+            leader: DeckId::B,
+            follower: DeckId::A,
+            base_rates: [1.25, 1.0],
+            follower_bpm: 100.0,
+            follower_origin: 0.0,
+            leader_bpm: 125.0,
+            leader_origin: 0.0,
+            beats_per_bar: 4,
+            target_bpm: 125.0,
+            multiple: 1.0,
+            correction_rate: 1.25,
+            phase_error_seconds: 0.0,
+            phase: PlaybackSyncPhase::Locked,
+            aligning_follower: false,
+        });
+        knobs.sent.lock().unwrap().clear();
+
+        actor
+            .set_sync_aware_deck_rate(DeckId::B as u8, 1.1)
+            .expect("原生 Sync Group 应联动两台 TEMPO");
+
+        assert!((actor.state.decks[0].rate - 1.375).abs() < 0.000_1);
+        assert!((actor.state.decks[1].rate - 1.1).abs() < 0.000_1);
+        assert!(matches!(
+            knobs.sent.lock().unwrap().last(),
+            Some(RtCommand::SetDeckRates { rates })
+                if (rates[0] - 1.375).abs() < 0.000_1
+                    && (rates[1] - 1.1).abs() < 0.000_1
+        ));
+        assert_eq!(actor.state.sync.phase, PlaybackSyncPhase::Locked);
+        assert!((actor.state.sync.target_bpm - 137.5).abs() < 0.000_1);
+        assert!(!knobs
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| matches!(command, RtCommand::SetDeckPhaseCorrection { .. })));
+    }
+
+    #[test]
+    fn open_loop_sync_does_not_servo_an_ahead_follower() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.decks[1] = Some(live_runtime(2, 0.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[1].track_id = Some(2);
+        actor.manual_desired_playing = [true, true];
+        actor.latest_audio.deck_source_ids = [101, 102];
+        actor.latest_audio.deck_playing = [true, true];
+        actor.latest_audio.deck_frames = [55_200, 52_800];
+        actor.sync_group = Some(NativeSyncGroup {
+            leader: DeckId::B,
+            follower: DeckId::A,
+            base_rates: [1.0, 1.0],
+            follower_bpm: 120.0,
+            follower_origin: 0.0,
+            leader_bpm: 120.0,
+            leader_origin: 0.0,
+            beats_per_bar: 4,
+            target_bpm: 120.0,
+            multiple: 1.0,
+            correction_rate: 1.0,
+            phase_error_seconds: 0.0,
+            phase: PlaybackSyncPhase::Locked,
+            aligning_follower: false,
+        });
+        knobs.sent.lock().unwrap().clear();
+
+        actor.update_sync_snapshot();
+
+        let rate = actor.decks[0].as_ref().unwrap().tempo.rate();
+        assert!((rate - 1.0).abs() < f32::EPSILON, "persistent rate={rate}");
+        assert!(
+            !knobs.sent.lock().unwrap().iter().any(|command| matches!(
+                command,
+                RtCommand::SetDeckPhaseCorrection { .. } | RtCommand::SetRate { .. }
+            )),
+            "open-loop SYNC must not chase the leader playhead"
+        );
+        assert_eq!(actor.state.sync.phase, PlaybackSyncPhase::Locked);
+        assert!(!actor.sync_group.unwrap().aligning_follower);
+    }
+
+    #[test]
+    fn sync_deck_snapshot_stores_shared_target_bpm_and_fold_multiple() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.decks[1] = Some(live_runtime(2, 0.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[1].track_id = Some(2);
+        actor
+            .sync_deck(0, 1, 1.0, 70.0, 0.0, 140.0, 0.0, 4)
+            .expect("paused SYNC should lock without a shadow seek");
+        assert!(actor.state.sync.enabled);
+        assert_eq!(actor.state.sync.follower, 0);
+        assert_eq!(actor.state.sync.leader, 1);
+        assert_eq!(actor.state.sync.phase, PlaybackSyncPhase::Locked);
+        assert!((actor.state.sync.multiple - 2.0).abs() < 1e-9);
+        assert!((actor.state.sync.target_bpm - 140.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn native_sync_tempo_keeps_half_time_fold() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.decks[1] = Some(live_runtime(2, 0.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[1].track_id = Some(2);
+        actor.sync_group = Some(NativeSyncGroup {
+            leader: DeckId::B,
+            follower: DeckId::A,
+            base_rates: [1.0, 1.0],
+            follower_bpm: 70.0,
+            follower_origin: 0.0,
+            leader_bpm: 140.0,
+            leader_origin: 0.0,
+            beats_per_bar: 4,
+            target_bpm: 140.0,
+            multiple: 2.0,
+            correction_rate: 1.0,
+            phase_error_seconds: 0.0,
+            phase: PlaybackSyncPhase::Locked,
+            aligning_follower: false,
+        });
+
+        actor
+            .set_sync_aware_deck_rate(DeckId::B as u8, 1.1)
+            .expect("half-time fold should keep both Decks at the same beat-equivalent rate");
+
+        assert!((actor.state.decks[0].rate - 1.1).abs() < 0.000_1);
+        assert!((actor.state.decks[1].rate - 1.1).abs() < 0.000_1);
+        assert!((actor.state.sync.target_bpm - 154.0).abs() < 0.000_1);
+    }
+
+    #[test]
+    fn a_user_seek_while_synced_does_not_phase_align_the_other_deck() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 1.15));
+        actor.decks[1] = Some(live_runtime(2, 1.10));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[1].track_id = Some(2);
+        actor.manual_desired_playing = [true, true];
+        actor.sync_group = Some(NativeSyncGroup {
+            leader: DeckId::B,
+            follower: DeckId::A,
+            base_rates: [1.0, 1.0],
+            follower_bpm: 120.0,
+            follower_origin: 0.0,
+            leader_bpm: 120.0,
+            leader_origin: 0.0,
+            beats_per_bar: 4,
+            target_bpm: 120.0,
+            multiple: 1.0,
+            correction_rate: 1.0,
+            phase_error_seconds: 0.0,
+            phase: PlaybackSyncPhase::Locked,
+            aligning_follower: false,
+        });
+        actor.update_sync_snapshot();
+        knobs.sent.lock().unwrap().clear();
+
+        actor.on_seek_settled(DeckId::B);
+        actor.on_seek_settled(DeckId::A);
+
+        assert!(actor.pending[0].is_none());
+        assert!(actor.pending[1].is_none());
+        assert!(!actor.sync_group.unwrap().aligning_follower);
+        assert_eq!(actor.state.sync.phase, PlaybackSyncPhase::Locked);
+        assert!(
+            knobs.sent.lock().unwrap().is_empty(),
+            "click/Hot Cue must not start a second SYNC seek"
+        );
+    }
+
+    #[test]
+    fn stale_scratch_generation_cannot_move_a_new_platter_hold() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.begin_deck_scratch(0, 7, Some(1)).expect("第一轮手势");
+        actor
+            .update_deck_scratch(0, 7, 1, 0.1)
+            .expect("第一轮 tick");
+        actor.begin_deck_scratch(0, 8, Some(1)).expect("第二轮手势");
+        actor
+            .update_deck_scratch(0, 7, 2, 9.0)
+            .expect("旧 tick 应被静默丢弃");
+        actor.update_deck_scratch(0, 8, 1, 0.2).expect("新 tick");
+        let velocities: Vec<f64> = knobs
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|command| match command {
+                RtCommand::ControlDeckPlatter {
+                    phase: PlatterPhase::Move,
+                    velocity,
+                    ..
+                } => Some(*velocity),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(velocities, vec![0.1, 0.2]);
     }
 
     #[test]
@@ -3842,6 +4898,170 @@ mod tests {
                 if (rates[0] - 1.1).abs() < f32::EPSILON
                     && (rates[1] - 0.9).abs() < f32::EPSILON
         ));
+    }
+
+    #[test]
+    fn tempo_does_not_cancel_an_in_flight_clocked_seek() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 12.0));
+        actor.state.decks[0].track_id = Some(1);
+        let (stream, writer) = StreamSource::bounded(64);
+        std::mem::forget(writer);
+        actor.revisions[0] = 4;
+        actor.pending[0] = Some(PendingStream {
+            revision: 4,
+            source: PlaybackStream::Stereo(stream),
+            request: source(1, 18.0),
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 1,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(4)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            clocked_seek: Some(ClockedDeckSeek {
+                requested_at: Instant::now(),
+                requested_position: 18.0,
+                promote_at: Instant::now(),
+                position: 18.0,
+                rate: 1.0,
+                advancing: true,
+                skipped_output_frames: 0,
+                skipped_media_frames: 0.0,
+                catchup_progress_at: None,
+            }),
+            seek: StreamSeekControl::new(),
+        });
+
+        actor.set_deck_rate(0, 1.08).expect("单路 TEMPO");
+
+        assert!(actor.pending[0]
+            .as_ref()
+            .is_some_and(|pending| pending.clocked_seek.is_some()));
+        assert!((actor.state.decks[0].rate - 1.08).abs() < 0.000_1);
+    }
+
+    #[test]
+    fn pending_seek_clock_holds_the_requested_landing() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 12.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[0].current_time = 90.0;
+        actor.state.decks[0].is_playing = true;
+        actor.latest_audio.deck_source_ids = [101, 0];
+        actor.latest_audio.deck_frames = [12 * 48_000, 0];
+        actor.latest_audio.deck_playing = [false, false];
+        let (stream, writer) = StreamSource::bounded(64);
+        std::mem::forget(writer);
+        actor.pending[0] = Some(PendingStream {
+            revision: 1,
+            source: PlaybackStream::Stereo(stream),
+            request: source(1, 90.0),
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 1,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(1)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            clocked_seek: None,
+            seek: StreamSeekControl::new(),
+        });
+        let captured = Arc::new(Mutex::new(None));
+        let emit_captured = Arc::clone(&captured);
+        actor.clock_emit = Some(Arc::new(move |clock| {
+            *emit_captured.lock().unwrap() = Some(clock);
+        }));
+        actor.last_clock_tick = Instant::now() - LEVEL_INTERVAL;
+
+        actor.publish_clock();
+
+        let clock = captured.lock().unwrap().expect("clock event");
+        assert!(
+            (clock.decks[0].current_time - 90.0).abs() < 1e-9,
+            "pending seek must publish the landing, not the outgoing decoder ({})",
+            clock.decks[0].current_time
+        );
+        assert!(
+            clock.decks[0].playing,
+            "a cleared replacement must not pause the waveform compositor"
+        );
+    }
+
+    #[test]
+    fn linked_tempo_does_not_abort_sync_acquire() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.decks[1] = Some(live_runtime(2, 0.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[1].track_id = Some(2);
+        let (stream, writer) = StreamSource::bounded(64);
+        std::mem::forget(writer);
+        actor.revisions[0] = 5;
+        actor.pending[0] = Some(PendingStream {
+            revision: 5,
+            source: PlaybackStream::Stereo(stream),
+            request: source(1, 4.0),
+            tempo: TempoControl::new(1.0),
+            output_sample_rate: 48_000,
+            startup_buffer_frames: 1,
+            activation: None,
+            cancel: Arc::new(AtomicU64::new(5)),
+            followup_stems: false,
+            release_scratch_hold: false,
+            clocked_seek: Some(ClockedDeckSeek {
+                requested_at: Instant::now(),
+                requested_position: 4.0,
+                promote_at: Instant::now(),
+                position: 4.0,
+                rate: 1.0,
+                advancing: true,
+                skipped_output_frames: 0,
+                skipped_media_frames: 0.0,
+                catchup_progress_at: None,
+            }),
+            seek: StreamSeekControl::new(),
+        });
+        actor.sync_group = Some(NativeSyncGroup {
+            leader: DeckId::B,
+            follower: DeckId::A,
+            base_rates: [1.0, 1.0],
+            follower_bpm: 120.0,
+            follower_origin: 0.0,
+            leader_bpm: 120.0,
+            leader_origin: 0.0,
+            beats_per_bar: 4,
+            target_bpm: 120.0,
+            multiple: 1.0,
+            correction_rate: 1.0,
+            phase_error_seconds: 0.0,
+            phase: PlaybackSyncPhase::Acquiring,
+            aligning_follower: true,
+        });
+        knobs.sent.lock().unwrap().clear();
+
+        actor.set_deck_rates([1.05, 1.05]).expect("联动 TEMPO");
+
+        assert!(actor.sync_group.unwrap().aligning_follower);
+        assert_eq!(
+            actor.sync_group.unwrap().phase,
+            PlaybackSyncPhase::Acquiring
+        );
+        assert!(actor.pending[0]
+            .as_ref()
+            .is_some_and(|pending| pending.clocked_seek.is_some()));
+        assert!(!knobs
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| matches!(command, RtCommand::SetDeckPhaseCorrection { .. })));
     }
 
     #[test]
@@ -4369,142 +5589,199 @@ mod tests {
         assert_eq!(gains, [1.5, 1.0, 1.0, 2.0]);
     }
 
+    fn set_fake_deck_clock(knobs: &FakeKnobs, deck: DeckId, source_id: u64, seconds: f64) {
+        let mut snapshot = knobs.snapshot.lock().unwrap();
+        snapshot.deck_source_ids[deck as usize] = source_id;
+        snapshot.deck_frames[deck as usize] = (seconds * 48_000.0).round() as i64;
+    }
+
     #[test]
-    fn loop_shares_a_live_stem_deck_without_replacing_the_source() {
+    fn loop_capture_samples_the_native_callback_clock_without_a_decoder_seek() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
-        let mut runtime = live_runtime(1, 12.0);
-        runtime.request.stem_enabled = true;
-        runtime.request.stem_cache_path = "classical-redress-v1".into();
-        actor.decks[DeckId::A as usize] = Some(runtime);
-        actor.front = DeckId::A;
-        actor.state.track_id = Some(1);
-        actor.state.decks[DeckId::A as usize].duration = 180.0;
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
         actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].duration = 180.0;
+        set_fake_deck_clock(&knobs, DeckId::A, 101, 45.25);
 
         actor
-            .set_deck_loop(1, 10.0, 1.0)
-            .expect("STEM 台上的 LOOP 应只改走带约束");
+            .toggle_deck_loop(DeckId::A as u8, 2.0)
+            .expect("Auto Loop should capture the callback needle");
 
-        assert!(actor.pending[DeckId::A as usize].is_none());
-        let runtime = actor.decks[DeckId::A as usize]
-            .as_ref()
-            .expect("循环不得换掉当前 STEM 源");
-        assert!(runtime.request.stem_enabled);
-        assert!(runtime.loop_playback.is_some());
-        assert!(matches!(
-            runtime.source,
-            PlaybackStream::Stems(_) | PlaybackStream::Stereo(_)
-        ));
-        assert_eq!(actor.state.decks[DeckId::A as usize].loop_start, Some(10.0));
-        let sent = knobs.sent.lock().unwrap();
-        assert!(sent.iter().any(|command| matches!(
+        assert_eq!(actor.state.decks[0].loop_start, Some(45.25));
+        assert_eq!(actor.state.decks[0].loop_length, Some(2.0));
+        assert_eq!(
+            actor.decks[0].as_ref().unwrap().seek.generation(),
+            0,
+            "LOOP must never seek the media decoder"
+        );
+        assert!(
+            actor.pending[0].is_none(),
+            "LOOP must not replace the Deck source"
+        );
+        assert!(knobs.sent.lock().unwrap().iter().any(|command| matches!(
             command,
             RtCommand::SetDeckLoop {
                 deck: DeckId::A,
                 looping: true,
-                start_frames: 480_000,
-                frames: 48_000,
+                start_frames: 2_172_000,
+                frames: 96_000,
             }
         )));
+    }
+
+    #[test]
+    fn loop_toggle_off_clears_one_window_without_seek_or_source_replacement() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[0].duration = 180.0;
+        set_fake_deck_clock(&knobs, DeckId::A, 101, 30.0);
+        actor.toggle_deck_loop(0, 2.0).unwrap();
+        knobs.sent.lock().unwrap().clear();
+
+        actor.toggle_deck_loop(0, 2.0).unwrap();
+
+        assert!(actor.state.decks[0].loop_start.is_none());
+        assert!(actor.loop_windows[0].snapshot().is_none());
+        assert_eq!(actor.decks[0].as_ref().unwrap().seek.generation(), 0);
+        assert!(actor.pending[0].is_none());
+        assert!(matches!(
+            knobs.sent.lock().unwrap().as_slice(),
+            [RtCommand::SetDeckLoop {
+                deck: DeckId::A,
+                looping: false,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn enabling_after_exit_captures_a_fresh_point_instead_of_relooping_saved_audio() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[0].duration = 180.0;
+        set_fake_deck_clock(&knobs, DeckId::A, 101, 30.0);
+        actor.toggle_deck_loop(0, 2.0).unwrap();
+        actor.toggle_deck_loop(0, 2.0).unwrap();
+        set_fake_deck_clock(&knobs, DeckId::A, 101, 60.0);
+
+        actor.toggle_deck_loop(0, 2.0).unwrap();
+
+        assert_eq!(actor.state.decks[0].loop_start, Some(60.0));
+        assert_eq!(actor.decks[0].as_ref().unwrap().seek.generation(), 0);
+    }
+
+    #[test]
+    fn resizing_active_loop_preserves_native_in_and_changes_only_out() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[0].duration = 180.0;
+        set_fake_deck_clock(&knobs, DeckId::A, 101, 30.0);
+        actor.toggle_deck_loop(0, 2.0).unwrap();
+        set_fake_deck_clock(&knobs, DeckId::A, 101, 99.0);
+
+        actor.resize_deck_loop(0, 4.0).unwrap();
+
+        assert_eq!(actor.state.decks[0].loop_start, Some(30.0));
+        assert_eq!(actor.state.decks[0].loop_length, Some(4.0));
+        assert_eq!(actor.decks[0].as_ref().unwrap().seek.generation(), 0);
+    }
+
+    #[test]
+    fn loop_targets_the_requested_physical_deck_when_track_ids_match() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.decks[1] = Some(live_runtime(1, 0.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[1].track_id = Some(1);
+        actor.state.decks[0].duration = 180.0;
+        actor.state.decks[1].duration = 180.0;
+        set_fake_deck_clock(&knobs, DeckId::A, 101, 12.0);
+        set_fake_deck_clock(&knobs, DeckId::B, 101, 30.0);
+
+        actor.toggle_deck_loop(1, 2.0).unwrap();
+
+        assert!(actor.decks[0].as_ref().unwrap().loop_playback.is_none());
+        assert_eq!(actor.state.decks[1].loop_start, Some(30.0));
+        assert!(knobs.sent.lock().unwrap().iter().any(|command| matches!(
+            command,
+            RtCommand::SetDeckLoop {
+                deck: DeckId::B,
+                looping: true,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn loop_uses_the_installed_stem_source_without_replacing_it() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        let mut runtime = live_runtime(1, 0.0);
+        runtime.request.stem_enabled = true;
+        runtime.request.stem_cache_path = "classical-redress-v1".into();
+        actor.decks[0] = Some(runtime);
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[0].duration = 180.0;
+        set_fake_deck_clock(&knobs, DeckId::A, 101, 10.0);
+
+        actor.toggle_deck_loop(0, 4.0).unwrap();
+
+        assert!(actor.decks[0].as_ref().unwrap().request.stem_enabled);
+        assert!(actor.pending[0].is_none());
+        assert_eq!(actor.decks[0].as_ref().unwrap().seek.generation(), 0);
+    }
+
+    #[test]
+    fn stem_loop_reservoir_rejects_unbounded_high_rate_allocations() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        let (stems, writer) = StreamSource::<StemFrame>::bounded(64);
+        std::mem::forget(writer);
+        let mut runtime = live_runtime(1, 0.0);
+        runtime.source = PlaybackStream::Stems(stems);
+        runtime.output_sample_rate = 192_000;
+        actor.decks[0] = Some(runtime);
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[0].duration = 180.0;
+        {
+            let mut snapshot = knobs.snapshot.lock().unwrap();
+            snapshot.deck_source_ids[0] = 101;
+            snapshot.deck_frames[0] = 0;
+        }
+
+        actor
+            .toggle_deck_loop(0, 16.0)
+            .expect_err("high-rate STEM loop cache must stay bounded");
+
+        assert!(actor.loop_windows[0].snapshot().is_none());
+        assert!(actor.state.decks[0].loop_start.is_none());
     }
 
     #[test]
     fn loop_outside_track_is_rejected_without_touching_playback() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
-        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
-        actor.front = DeckId::A;
-        actor.state.track_id = Some(1);
-        actor.state.decks[DeckId::A as usize].duration = 180.0;
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[0].duration = 180.0;
+        set_fake_deck_clock(&knobs, DeckId::A, 101, 170.0);
 
         actor
-            .set_deck_loop(1, 170.0, 20.0)
-            .expect_err("循环区间越界必须拒绝");
+            .toggle_deck_loop(0, 20.0)
+            .expect_err("out-of-track loop must be rejected");
 
-        assert!(actor.pending[DeckId::A as usize].is_none());
-        assert!(actor.state.decks[DeckId::A as usize].loop_start.is_none());
-        assert!(actor
-            .clear_deck_loop(1)
-            .is_ok_and(|()| actor.pending[DeckId::A as usize].is_none()));
-    }
-
-    #[test]
-    fn set_deck_loop_keeps_the_current_source_and_mixer() {
-        let knobs = Arc::new(FakeKnobs::default());
-        let mut actor = test_actor(&knobs);
-        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
-        actor.front = DeckId::A;
-        actor.state.track_id = Some(1);
-        actor.manual_mode = true;
-        actor.state.decks[DeckId::A as usize].current_time = 12.0;
-        actor.state.decks[DeckId::A as usize].duration = 180.0;
-
-        actor
-            .set_deck_loop(1, 10.0, 0.1)
-            .expect("LOOP 应落在当前源上");
-        actor.set_deck_loop(1, 10.0, 0.2).expect("改拍数只更新窗口");
-
-        assert!(actor.pending[DeckId::A as usize].is_none());
-        let runtime = actor.decks[DeckId::A as usize]
-            .as_ref()
-            .expect("改循环不得换源");
-        assert!(matches!(runtime.source, PlaybackStream::Stereo(_)));
-        assert_eq!(
-            runtime.loop_playback.map(|looping| looping.length),
-            Some(0.2)
-        );
-        let sent = knobs.sent.lock().unwrap();
-        let loops = sent
-            .iter()
-            .filter(|command| matches!(command, RtCommand::SetDeckLoop { looping: true, .. }))
-            .count();
-        assert!(loops >= 2, "改拍数应再次发送走带 LOOP 命令");
-    }
-
-    #[test]
-    fn stale_zero_loop_start_follows_the_live_playhead() {
-        let knobs = Arc::new(FakeKnobs::default());
-        let mut actor = test_actor(&knobs);
-        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 45.0));
-        actor.front = DeckId::A;
-        actor.state.track_id = Some(1);
-        actor.state.decks[DeckId::A as usize].current_time = 45.0;
-        actor.state.decks[DeckId::A as usize].duration = 180.0;
-
-        actor
-            .set_deck_loop(1, 0.0, 2.0)
-            .expect("过期的 0 起点应改用当前播放头");
-
-        assert_eq!(actor.state.decks[DeckId::A as usize].loop_start, Some(45.0));
-        assert_eq!(actor.state.decks[DeckId::A as usize].loop_length, Some(2.0));
-        let snap = actor.loop_windows[DeckId::A as usize]
-            .snapshot()
-            .expect("循环窗口应开启");
-        assert!((snap.start - 45.0).abs() < 1e-6);
-        assert!((snap.playhead - 45.0).abs() < 1e-6);
-        assert!((snap.engage_target() - 45.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn loop_in_survives_a_zero_playhead_snapshot() {
-        let knobs = Arc::new(FakeKnobs::default());
-        let mut actor = test_actor(&knobs);
-        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 45.0));
-        actor.front = DeckId::A;
-        actor.state.track_id = Some(1);
-        actor.state.decks[DeckId::A as usize].current_time = 0.0;
-        actor.state.decks[DeckId::A as usize].duration = 180.0;
-
-        actor
-            .set_deck_loop(1, 45.0, 2.0)
-            .expect("UI 起点正确时不得被 0 播放头覆盖");
-
-        let snap = actor.loop_windows[DeckId::A as usize]
-            .snapshot()
-            .expect("循环窗口应开启");
-        assert!((snap.start - 45.0).abs() < 1e-6);
-        assert_eq!(snap.engage_target(), 45.0);
+        assert!(actor.state.decks[0].loop_start.is_none());
+        assert!(actor.loop_windows[0].snapshot().is_none());
+        assert_eq!(actor.decks[0].as_ref().unwrap().seek.generation(), 0);
     }
 
     #[test]
@@ -4734,6 +6011,8 @@ mod tests {
         assert!((clamp_position(184.464, None) - 184.464).abs() < 0.001);
         assert_eq!(clamp_position(5.0, Some(0.1)), 0.0);
         assert_eq!(clamp_position(f64::NAN, Some(10.0)), 0.0);
+        assert_eq!(clamp_performance_position(-3.5, Some(180.0)), -3.5);
+        assert_eq!(clamp_performance_position(-90.0, Some(180.0)), -30.0);
     }
 
     /// 没有激活承诺时跳转照常登记（保护不影响正常 seek）。
@@ -4798,6 +6077,7 @@ mod tests {
         actor.open_output().expect("打开测试输出");
         let mut runtime = live_runtime(1, 12.0);
         runtime.request.rate = 1.1;
+        runtime.tempo.set(1.1);
         actor.decks[DeckId::A as usize] = Some(runtime);
         actor.state.track_id = Some(1);
         actor.state.decks[DeckId::A as usize].track_id = Some(1);
@@ -4822,7 +6102,14 @@ mod tests {
             (runtime.request.rate - 1.1).abs() < 0.001,
             "TEMPO 不得被缓动写回"
         );
-        assert!((runtime.tempo.rate() - 1.1 * (1.0 + JOG_NUDGE_MAX_RATE_OFFSET)).abs() < 0.001);
+        assert!((runtime.tempo.rate() - 1.1).abs() < 0.001);
+        assert!(knobs.sent.lock().unwrap().iter().any(|command| {
+            matches!(
+                command,
+                RtCommand::SetDeckPhaseCorrection { deck: DeckId::A, multiplier }
+                    if (*multiplier - (1.0 + JOG_NUDGE_MAX_RATE_OFFSET)).abs() < 0.001
+            )
+        }));
         assert!(
             actor.pending[DeckId::A as usize].is_none(),
             "缓动不得启动新的解码 worker"
@@ -4839,9 +6126,11 @@ mod tests {
             (runtime.tempo.rate() - 1.1).abs() < 0.001,
             "超时后必须回到原 TEMPO"
         );
-        assert!(knobs.sent.lock().unwrap().iter().any(|command| {
-            matches!(command, RtCommand::SetRate { deck: DeckId::A, rate } if (*rate - 1.1).abs() < 0.001)
-        }));
+        assert!(matches!(
+            knobs.sent.lock().unwrap().last(),
+            Some(RtCommand::SetDeckPhaseCorrection { deck: DeckId::A, multiplier })
+                if (*multiplier - 1.0).abs() < 0.001
+        ));
     }
 
     #[test]
@@ -4968,6 +6257,72 @@ mod tests {
     }
 
     #[test]
+    fn global_pause_silences_every_manual_deck_and_global_play_resumes_only_front() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.decks[DeckId::B as usize] = Some(live_runtime(2, 18.0));
+        actor.front = DeckId::B;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, true];
+        actor.state.track_id = Some(2);
+        actor.state.desired_playing = true;
+        actor.state.is_playing = true;
+        for (index, track_id) in [1, 2].into_iter().enumerate() {
+            actor.state.decks[index].track_id = Some(track_id);
+            actor.state.decks[index].desired_playing = true;
+            actor.state.decks[index].is_playing = true;
+        }
+        knobs.sent.lock().unwrap().clear();
+
+        actor.set_playing(false).expect("管理器全局暂停");
+
+        assert_eq!(actor.front, DeckId::B, "暂停不能改变管理器当前歌曲");
+        assert_eq!(actor.manual_desired_playing, [false, false]);
+        assert!(!actor.state.desired_playing);
+        assert!(!actor.state.is_playing);
+        assert_eq!(actor.state.phase, PlaybackPhase::Paused);
+        assert!(actor
+            .state
+            .decks
+            .iter()
+            .all(|deck| !deck.desired_playing && !deck.is_playing));
+        let sent = knobs.sent.lock().unwrap();
+        for deck in [DeckId::A, DeckId::B] {
+            assert!(sent.iter().any(|command| matches!(
+                command,
+                RtCommand::SetDeckPlaying {
+                    deck: target,
+                    playing: false,
+                } if *target == deck
+            )));
+        }
+        drop(sent);
+        knobs.sent.lock().unwrap().clear();
+
+        actor.set_playing(true).expect("管理器恢复当前歌曲");
+
+        assert_eq!(actor.front, DeckId::B);
+        assert_eq!(actor.manual_desired_playing, [false, true]);
+        let sent = knobs.sent.lock().unwrap();
+        assert!(sent.iter().any(|command| matches!(
+            command,
+            RtCommand::SetDeckPlaying {
+                deck: DeckId::B,
+                playing: true,
+            }
+        )));
+        assert!(!sent.iter().any(|command| matches!(
+            command,
+            RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            }
+        )));
+    }
+
+    #[test]
     fn explicit_paused_deck_load_keeps_the_other_deck_playing() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
@@ -4992,6 +6347,184 @@ mod tests {
             .as_ref()
             .expect("B 的暂停流已登记");
         assert!(!pending.request.autoplay);
+    }
+
+    #[test]
+    fn dj_deck_load_preserves_physical_controls_and_hardware_tempo() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        let mut deck_b = live_runtime(2, 18.0);
+        deck_b.request.rate = 1.25;
+        deck_b.tempo.set(1.25);
+        actor.decks[DeckId::B as usize] = Some(deck_b);
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::B as usize].track_id = Some(2);
+        actor.state.decks[DeckId::B as usize].stem_enabled = true;
+        actor.state.decks[DeckId::B as usize].loop_start = Some(8.0);
+        actor.state.decks[DeckId::B as usize].loop_length = Some(4.0);
+        actor.decks[DeckId::B as usize]
+            .as_mut()
+            .expect("Deck B")
+            .loop_playback = Some(LoopPlayback {
+            start: 8.0,
+            length: 4.0,
+        });
+        actor.loop_windows[DeckId::B as usize].set(8.0, 4.0);
+        actor.deck_mixers[DeckId::A as usize].channel_gain = 0.4;
+        actor.deck_mixers[DeckId::B as usize] = DeckMixer {
+            channel_gain: 0.2,
+            trim_db: -6.0,
+            low_db: -12.0,
+            mid_db: 4.0,
+            high_db: -3.0,
+            filter: 0.75,
+        };
+        actor
+            .set_deck_fx(
+                DeckId::B as u8,
+                [PlaybackFxSlot {
+                    enabled: true,
+                    ..PlaybackFxSlot::default()
+                }; 3],
+                0,
+                0.5,
+            )
+            .expect("打开 B 效果器");
+        actor
+            .send(RtCommand::SetDeckPfl {
+                deck: DeckId::B,
+                enabled: true,
+            })
+            .expect("打开 B 监听");
+        knobs.sent.lock().unwrap().clear();
+
+        // A DJ source replacement keeps continuous physical controls. Only song-scoped loop/STEM
+        // ownership is cleared. The incoming source's default rate must not beat the Deck rate.
+        actor
+            .load_deck(DeckId::B as u8, source(3, 0.0))
+            .expect("换入 B");
+
+        let mixer = actor.deck_mixers[DeckId::B as usize];
+        assert!((mixer.channel_gain - 0.2).abs() < f32::EPSILON);
+        assert!((mixer.trim_db + 6.0).abs() < f32::EPSILON);
+        assert!((mixer.low_db + 12.0).abs() < f32::EPSILON);
+        assert!((mixer.mid_db - 4.0).abs() < f32::EPSILON);
+        assert!((mixer.high_db + 3.0).abs() < f32::EPSILON);
+        assert!((mixer.filter - 0.75).abs() < f32::EPSILON);
+        assert!((actor.deck_mixers[DeckId::A as usize].channel_gain - 0.4).abs() < f32::EPSILON);
+        assert!(
+            (actor.pending[DeckId::B as usize]
+                .as_ref()
+                .unwrap()
+                .request
+                .rate
+                - 1.25)
+                .abs()
+                < f32::EPSILON
+        );
+        assert_eq!(actor.state.decks[DeckId::B as usize].loop_start, None);
+        assert_eq!(actor.state.decks[DeckId::B as usize].loop_length, None);
+        assert!(!actor.state.decks[DeckId::B as usize].stem_enabled);
+        assert!(actor.loop_windows[DeckId::B as usize].snapshot().is_none());
+
+        let sent = knobs.sent.lock().unwrap();
+        assert!(!sent.iter().any(|command| matches!(
+            command,
+            RtCommand::SetDeckGain {
+                deck: DeckId::B,
+                ..
+            } | RtCommand::SetEq {
+                deck: DeckId::B,
+                ..
+            } | RtCommand::SetDeckFx {
+                deck: DeckId::B,
+                ..
+            } | RtCommand::SetDeckPfl {
+                deck: DeckId::B,
+                ..
+            }
+        )));
+        assert!(sent.iter().any(|command| matches!(
+            command,
+            RtCommand::SetDeckLoop {
+                deck: DeckId::B,
+                looping: false,
+                ..
+            }
+        )));
+        assert!(!sent.iter().any(|command| matches!(
+            command,
+            RtCommand::SetDeckGain {
+                deck: DeckId::A,
+                ..
+            } | RtCommand::SetEq {
+                deck: DeckId::A,
+                ..
+            } | RtCommand::SetDeckFx {
+                deck: DeckId::A,
+                ..
+            } | RtCommand::SetDeckLoop {
+                deck: DeckId::A,
+                ..
+            } | RtCommand::SetDeckStemGains {
+                deck: DeckId::A,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn manager_load_resets_both_possible_decode_targets_to_defaults() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.decks[DeckId::B as usize] = Some(live_runtime(2, 18.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::B as usize].track_id = Some(2);
+        actor.deck_mixers = [DeckMixer {
+            channel_gain: 0.2,
+            trim_db: -6.0,
+            low_db: -12.0,
+            mid_db: 4.0,
+            high_db: -3.0,
+            filter: 0.75,
+        }; 2];
+        actor.loop_windows[DeckId::A as usize].set(4.0, 2.0);
+        actor.loop_windows[DeckId::B as usize].set(8.0, 4.0);
+        knobs.sent.lock().unwrap().clear();
+
+        actor.load(source(3, 0.0)).expect("管理器装入新歌");
+
+        for deck in [DeckId::A, DeckId::B] {
+            let mixer = actor.deck_mixers[deck as usize];
+            assert!((mixer.channel_gain - 1.0).abs() < f32::EPSILON);
+            assert!(mixer.trim_db.abs() < f32::EPSILON);
+            assert!(mixer.low_db.abs() < f32::EPSILON);
+            assert!(mixer.mid_db.abs() < f32::EPSILON);
+            assert!(mixer.high_db.abs() < f32::EPSILON);
+            assert!(mixer.filter.abs() < f32::EPSILON);
+            assert!(actor.loop_windows[deck as usize].snapshot().is_none());
+        }
+        let sent = knobs.sent.lock().unwrap();
+        for deck in [DeckId::A, DeckId::B] {
+            assert!(sent.iter().any(|command| matches!(
+                command,
+                RtCommand::SetDeckGain { deck: target, gain }
+                    if *target == deck && (*gain - 1.0).abs() < f32::EPSILON
+            )));
+            assert!(sent.iter().any(|command| matches!(
+                command,
+                RtCommand::SetDeckFx { deck: target, slots, pad: 0, .. }
+                    if *target == deck && slots.iter().all(|slot| !slot.enabled)
+            )));
+            assert!(sent.iter().any(|command| matches!(
+                command,
+                RtCommand::SetDeckPfl { deck: target, enabled: false } if *target == deck
+            )));
+        }
     }
 
     #[test]
@@ -5211,6 +6744,27 @@ mod tests {
     }
 
     #[test]
+    fn platter_seek_before_zero_prepares_frame_zero_and_keeps_a_signed_preroll() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 2.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 2.0;
+
+        actor
+            .seek_deck(DeckId::A as u8, -3.5)
+            .expect("盘面允许拉到曲首之前");
+
+        assert_eq!(actor.pending_preroll[DeckId::A as usize], Some(-3.5));
+        assert_eq!(actor.state.decks[DeckId::A as usize].current_time, -3.5);
+        let pending = actor.pending[DeckId::A as usize]
+            .as_ref()
+            .expect("负时间仍需准备 frame 0 解码流");
+        assert_eq!(pending.request.position, 0.0);
+    }
+
+    #[test]
     fn capacitive_scratch_hold_preserves_play_intent_until_the_final_seek_promotes() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
@@ -5223,7 +6777,7 @@ mod tests {
         actor.state.desired_playing = true;
 
         actor
-            .set_deck_scratch_held(DeckId::A as u8, true)
+            .start_deck_platter(DeckId::A as u8)
             .expect("按住盘面只接管游标");
         assert!(actor.scratch_held[DeckId::A as usize]);
         assert!(actor.manual_desired_playing[DeckId::A as usize]);
@@ -5270,6 +6824,54 @@ mod tests {
     }
 
     #[test]
+    fn paused_deck_accepts_realtime_platter_motion_without_starting_transport() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].duration = 180.0;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [false, false];
+
+        actor
+            .start_deck_platter(DeckId::A as u8)
+            .expect("paused platter should own the callback cursor");
+        actor
+            .set_deck_platter_velocity(DeckId::A as u8, -1.0)
+            .expect("paused platter motion should reach the callback");
+
+        assert!(actor.scratch_held[DeckId::A as usize]);
+        assert!(!actor.manual_desired_playing[DeckId::A as usize]);
+        assert!(!actor.state.decks[DeckId::A as usize].desired_playing);
+        assert!(
+            (actor.state.decks[DeckId::A as usize].current_time - 12.0).abs() < 0.001,
+            "ticks must not invent a UI clock; the callback snapshot owns the needle"
+        );
+        let sent = knobs.sent.lock().unwrap();
+        assert!(sent.iter().any(|command| matches!(
+            command,
+            RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            }
+        )));
+        assert!(sent.iter().any(|command| matches!(
+            command,
+            RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity,
+            } if (*velocity + 1.0).abs() < 0.001
+        )));
+        assert!(!sent
+            .iter()
+            .any(|command| matches!(command, RtCommand::SetDeckPlaying { .. })));
+    }
+
+    #[test]
     fn capacitive_scratch_ticks_move_the_held_cursor_without_rebuilding() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
@@ -5283,29 +6885,64 @@ mod tests {
         actor.state.desired_playing = true;
 
         actor
-            .set_deck_scratch_held(DeckId::A as u8, true)
+            .start_deck_platter(DeckId::A as u8)
             .expect("按住盘面只接管游标");
         knobs.sent.lock().unwrap().clear();
         actor
-            .scratch_deck(DeckId::A as u8, -0.01)
+            .set_deck_platter_velocity(DeckId::A as u8, -1.0)
             .expect("按住转动应立刻送给引擎");
 
         assert!(
             actor.pending[DeckId::A as usize].is_none(),
             "刮擦 tick 不得重建 decoder"
         );
-        assert!((actor.state.decks[DeckId::A as usize].current_time - 11.99).abs() < 0.001);
+        assert!(
+            (actor.state.decks[DeckId::A as usize].current_time - 12.0).abs() < 0.001,
+            "the coordinator must not sum platter deltas onto the published clock"
+        );
         let sent = knobs.sent.lock().unwrap();
         assert!(
             sent.iter().any(|command| matches!(
                 command,
-                RtCommand::ScratchDeck {
+                RtCommand::ControlDeckPlatter {
                     deck: DeckId::A,
-                    delta_frames,
-                } if (*delta_frames + 480.0).abs() < 0.001
+                    phase: PlatterPhase::Move,
+                    velocity,
+                } if (*velocity + 1.0).abs() < 0.001
             )),
             "held platter motion must become a realtime scratch tick, got {sent:?}",
         );
+    }
+
+    #[test]
+    fn capacitive_scratch_can_pull_the_needle_into_signed_preroll() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 0.2));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 0.2;
+        actor.state.decks[DeckId::A as usize].duration = 180.0;
+        actor.manual_mode = true;
+        actor.scratch_held[DeckId::A as usize] = true;
+
+        actor
+            .set_deck_platter_velocity(DeckId::A as u8, -8.0)
+            .expect("reverse vinyl may enter silent lead-in");
+
+        assert!(
+            (actor.state.decks[DeckId::A as usize].current_time - 0.2).abs() < 0.001,
+            "lead-in is an engine cursor, not a coordinator sum"
+        );
+        let sent = knobs.sent.lock().unwrap();
+        assert!(sent.iter().any(|command| matches!(
+            command,
+            RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Move,
+                velocity,
+            } if *velocity < 0.0
+        )));
     }
 
     #[test]
@@ -5323,19 +6960,181 @@ mod tests {
         actor.manual_desired_playing = [false, false];
 
         actor
-            .set_deck_scratch_held(DeckId::A as u8, true)
+            .start_deck_platter(DeckId::A as u8)
             .expect("正在播放的 Deck 即使 manual intent 过期也必须冻结游标");
         assert!(actor.scratch_held[DeckId::A as usize]);
         assert!(actor.manual_desired_playing[DeckId::A as usize]);
         assert!(
             knobs.sent.lock().unwrap().iter().any(|command| matches!(
                 command,
-                RtCommand::SetDeckScratchHeld {
+                RtCommand::ControlDeckPlatter {
                     deck: DeckId::A,
-                    held: true,
+                    phase: PlatterPhase::Start,
+                    velocity: 0.0,
                 }
             )),
             "stale manual intent must not swallow the callback hold",
+        );
+    }
+
+    #[test]
+    fn capacitive_scratch_release_coasts_instead_of_rebuilding() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].duration = 180.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.decks[DeckId::A as usize].desired_playing = true;
+        actor.manual_desired_playing = [true, false];
+
+        actor.start_deck_platter(DeckId::A as u8).expect("hold");
+        actor
+            .set_deck_platter_velocity(DeckId::A as u8, -2.0)
+            .expect("velocity");
+        knobs.sent.lock().unwrap().clear();
+        actor.begin_scratch_coast(DeckId::A, -2.0).expect("release");
+
+        assert!(!actor.scratch_held[DeckId::A as usize]);
+        assert!(actor.scratch_coasting[DeckId::A as usize]);
+        assert!(
+            actor.pending[DeckId::A as usize].is_none(),
+            "note-off must coast on the scratch voice instead of rebuilding a decoder"
+        );
+        let sent = knobs.sent.lock().unwrap();
+        assert!(sent.iter().any(|command| matches!(
+            command,
+            RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::End,
+                velocity,
+            } if (*velocity + 2.0).abs() < f64::EPSILON
+        )));
+        assert!(
+            !sent.iter().any(|command| matches!(
+                command,
+                RtCommand::ControlDeckPlatter {
+                    deck: DeckId::A,
+                    phase: PlatterPhase::Cancel,
+                    ..
+                }
+            )),
+            "inertial release must not hard-clear the scratch voice"
+        );
+    }
+
+    #[test]
+    fn light_touch_release_does_not_rebuild_the_decoder() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].duration = 180.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.decks[DeckId::A as usize].desired_playing = true;
+        actor.manual_desired_playing = [true, false];
+
+        actor.start_deck_platter(DeckId::A as u8).expect("hold");
+        knobs.sent.lock().unwrap().clear();
+        actor.begin_scratch_coast(DeckId::A, 0.0).expect("release");
+        assert!(actor.scratch_coasting[DeckId::A as usize]);
+
+        actor.latest_audio.deck_scratch_held[DeckId::A as usize] = false;
+        actor.latest_audio.deck_audible_rates[DeckId::A as usize] = 1.0;
+        actor.scratch_saw_engine_hold[DeckId::A as usize] = true;
+        // Needle moved during the grab — previously this path seek-rebuilt the decoder.
+        actor.state.decks[DeckId::A as usize].current_time = 12.4;
+        actor.scratch_coast_started[DeckId::A as usize] =
+            Some(Instant::now() - Duration::from_millis(500));
+        actor.handoff_settled_scratch_coasts();
+
+        assert!(
+            !actor.scratch_coasting[DeckId::A as usize],
+            "a tap that already returned to transport must not stay in coast"
+        );
+        assert!(
+            actor.pending[DeckId::A as usize].is_none(),
+            "capacitive scratch must never rebuild a decoder, even when the needle moved"
+        );
+    }
+
+    #[test]
+    fn settled_throw_coast_does_not_seek_rebuild() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].duration = 180.0;
+        actor.state.decks[DeckId::A as usize].rate = 1.0;
+        actor.state.decks[DeckId::A as usize].is_playing = true;
+        actor.state.decks[DeckId::A as usize].desired_playing = true;
+        actor.manual_desired_playing = [true, false];
+
+        actor.start_deck_platter(DeckId::A as u8).expect("hold");
+        actor
+            .set_deck_platter_velocity(DeckId::A as u8, -4.0)
+            .expect("throw");
+        actor.begin_scratch_coast(DeckId::A, -4.0).expect("release");
+        assert!(actor.scratch_coasting[DeckId::A as usize]);
+
+        actor.latest_audio.deck_scratch_held[DeckId::A as usize] = true;
+        actor.latest_audio.deck_audible_rates[DeckId::A as usize] = 1.0;
+        actor.scratch_saw_engine_hold[DeckId::A as usize] = true;
+        actor.scratch_coast_started[DeckId::A as usize] =
+            Some(Instant::now() - Duration::from_millis(500));
+        knobs.sent.lock().unwrap().clear();
+        actor.handoff_settled_scratch_coasts();
+
+        assert!(!actor.scratch_coasting[DeckId::A as usize]);
+        assert!(
+            actor.pending[DeckId::A as usize].is_none(),
+            "settled throw must clear coast without spawning a worker"
+        );
+        let sent = knobs.sent.lock().unwrap();
+        assert!(
+            !sent
+                .iter()
+                .any(|command| matches!(command, RtCommand::SeekPrepared { .. })),
+            "settled throw must not seek a replacement source"
+        );
+    }
+
+    #[test]
+    fn stale_motion_after_note_off_cannot_reaccelerate_the_coast() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[DeckId::A as usize] = Some(live_runtime(1, 12.0));
+        actor.state.decks[DeckId::A as usize].track_id = Some(1);
+        actor.state.decks[DeckId::A as usize].current_time = 12.0;
+        actor.state.decks[DeckId::A as usize].duration = 180.0;
+
+        actor.start_deck_platter(DeckId::A as u8).expect("hold");
+        actor
+            .set_deck_platter_velocity(DeckId::A as u8, -2.0)
+            .expect("move");
+        actor.begin_scratch_coast(DeckId::A, -2.0).expect("release");
+        knobs.sent.lock().unwrap().clear();
+        actor
+            .set_deck_platter_velocity(DeckId::A as u8, -8.0)
+            .expect("late move");
+
+        let sent = knobs.sent.lock().unwrap();
+        assert!(
+            !sent.iter().any(|command| matches!(
+                command,
+                RtCommand::ControlDeckPlatter {
+                    phase: PlatterPhase::Move,
+                    ..
+                }
+            )),
+            "a late move from the old gesture must not overwrite the atomic end velocity"
         );
     }
 
@@ -5384,9 +7183,10 @@ mod tests {
         );
         assert!(commands.iter().any(|command| matches!(
             command,
-            RtCommand::SetDeckScratchHeld {
+            RtCommand::ControlDeckPlatter {
                 deck: DeckId::A,
-                held: false
+                phase: PlatterPhase::Cancel,
+                ..
             }
         )));
         assert!(
@@ -5956,7 +7756,7 @@ mod tests {
         );
         assert_eq!(
             knobs.snapshot.lock().unwrap().deck_frames[0],
-            (6.12_f64 * 48_000.0).round() as u64,
+            (6.12_f64 * 48_000.0).round() as i64,
             "装上分轨时必须对齐当前播放头，而不是分轨 worker 的起点"
         );
     }
@@ -6110,7 +7910,7 @@ mod tests {
             snapshot.playing = true;
             snapshot.active_deck = DeckId::A;
             snapshot.deck_source_ids[DeckId::A as usize] = source_id;
-            snapshot.deck_frames[DeckId::A as usize] = (42.5_f64 * 48_000.0).round() as u64;
+            snapshot.deck_frames[DeckId::A as usize] = (42.5_f64 * 48_000.0).round() as i64;
         }
 
         actor.recover_from_device_error("设备已拔出".into());

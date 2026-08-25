@@ -19,7 +19,7 @@ pub const WAVEFORM_SR: u32 = 22_050;
 /// v0.2.41 整曲预览的固定采样率。普通/DJ overview 继续用这条历史路径，
 /// 高密度滚动波形则保持 native-rate Mixxx 路径。
 pub const RELEASE_OVERVIEW_SR: u32 = 16_000;
-/// 普通歌曲按 100 列/秒保存详细波形；十分钟以上曲目再受总列数上限保护。
+/// 普通歌曲按 100 列/秒保存详细波形；四分钟以上曲目再受总列数上限保护。
 pub const DETAIL_WAVEFORM_COLUMNS_PER_SECOND: f64 = 100.0;
 pub const MAX_WAVEFORM_BUCKETS: usize = 24_000;
 const MIN_DETAIL_WAVEFORM_BUCKETS: usize = 2_000;
@@ -256,7 +256,7 @@ const RELEASE_COLOR_FLOOR: f64 = 0.12;
 /// v0.2.41 的整曲预览算法：16 kHz STFT、P5–P99 幅度拉伸，以及相对本曲
 /// 常态占比的高饱和 RGB。只给 overview 使用；DJ 滚动主波形仍走 band_waveform。
 pub fn release_overview_waveform(samples: &[f32], sr: f64, buckets: usize) -> Waveform {
-    let buckets = buckets.clamp(64, 2000);
+    let buckets = buckets.clamp(64, 4096);
     let energies = release_band_energy_frames(samples, sr, RELEASE_N_FFT, RELEASE_HOP);
     let n_frames = energies[0].len();
     if n_frames == 0 {
@@ -365,42 +365,43 @@ pub fn release_overview_waveform(samples: &[f32], sr: f64, buckets: usize) -> Wa
 }
 
 fn release_band_energy_frames(samples: &[f32], sr: f64, n_fft: usize, hop: usize) -> [Vec<f64>; 3] {
-    use rustfft::num_complex::Complex32;
-    use rustfft::FftPlanner;
+    use realfft::RealFftPlanner;
 
     if samples.len() < n_fft {
         return Default::default();
     }
     let bins = n_fft / 2 + 1;
     let frames = 1 + (samples.len() - n_fft) / hop;
-    let window = dsp::hann_window(n_fft);
+    let window: Vec<f32> = dsp::hann_window(n_fft)
+        .into_iter()
+        .map(|value| value as f32)
+        .collect();
+    let low_end = ((RELEASE_XOVER_LOW * n_fft as f64 / sr).ceil() as usize).min(bins);
+    let high_end = ((RELEASE_XOVER_HIGH * n_fft as f64 / sr).ceil() as usize).clamp(low_end, bins);
+    let band_ranges = [0..low_end, low_end..high_end, high_end..bins];
     let mut energies = [
         vec![0.0f64; frames],
         vec![0.0f64; frames],
         vec![0.0f64; frames],
     ];
-    let mut planner = FftPlanner::<f32>::new();
+    let mut planner = RealFftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(n_fft);
-    let mut scratch = vec![Complex32::new(0.0, 0.0); fft.get_inplace_scratch_len()];
-    let mut buffer = vec![Complex32::new(0.0, 0.0); n_fft];
+    let mut scratch = fft.make_scratch_vec();
+    let mut buffer = fft.make_input_vec();
+    let mut spectrum = fft.make_output_vec();
 
     for frame in 0..frames {
         let start = frame * hop;
         for (index, slot) in buffer.iter_mut().enumerate() {
-            *slot = Complex32::new(samples[start + index] * window[index] as f32, 0.0);
+            *slot = samples[start + index] * window[index];
         }
-        fft.process_with_scratch(&mut buffer, &mut scratch);
-        for (bin, value) in buffer.iter().take(bins).enumerate() {
-            let hz = bin as f64 * sr / n_fft as f64;
-            let band = if hz < RELEASE_XOVER_LOW {
-                0
-            } else if hz < RELEASE_XOVER_HIGH {
-                1
-            } else {
-                2
-            };
-            let magnitude = value.norm() as f64;
-            energies[band][frame] += magnitude * magnitude;
+        fft.process_with_scratch(&mut buffer, &mut spectrum, &mut scratch)
+            .expect("real FFT buffers have planner-defined sizes");
+        for (band, range) in band_ranges.iter().enumerate() {
+            energies[band][frame] = spectrum[range.clone()]
+                .iter()
+                .map(|value| value.norm_sqr() as f64)
+                .sum();
         }
     }
     energies

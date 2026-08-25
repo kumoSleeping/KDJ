@@ -79,6 +79,12 @@ export function QueueRowConfig({
   const [dropHot, setDropHot] = useState(false);
 
   const bvid = draft?.kind === "video" ? draft.request.bvid?.trim() || "" : "";
+  const videoPlatform =
+    draft?.kind === "video" && draft.request.platform === "youtube"
+      ? "youtube"
+      : task.platform === "youtube"
+        ? "youtube"
+        : "bilibili";
 
   // 视频任务第一次点开：若还没有草稿，用当前全局默认补一份（只能改展示，真正生效需重新入队）
   useEffect(() => {
@@ -86,6 +92,7 @@ export function QueueRowConfig({
     const height = Number.parseInt(task.quality, 10);
     const bvidMatch = task.title.match(/\bBV[0-9A-Za-z]{10}\b/);
     rememberVideoEnqueue(task.id, {
+      platform: task.platform === "youtube" ? "youtube" : "bilibili",
       bvid: bvidMatch?.[0],
       page_index: 0,
       max_height: Number.isFinite(height) && height > 0 ? height : (settings?.video_max_height ?? 1080),
@@ -100,23 +107,24 @@ export function QueueRowConfig({
 
   useEffect(() => {
     if (!open || task.kind !== "video" || !bvid) return;
-    const cached = infoCache.get(bvid);
+    const cacheKey = `${videoPlatform}:${bvid}`;
+    const cached = infoCache.get(cacheKey);
     if (cached) {
       setInfo(cached);
       return;
     }
     let alive = true;
     void api
-      .videoResolve(bvid)
+      .videoResolve(bvid, videoPlatform)
       .then((result) => {
-        infoCache.set(bvid, result);
+        infoCache.set(cacheKey, result);
         if (alive) setInfo(result);
       })
       .catch(() => undefined);
     return () => {
       alive = false;
     };
-  }, [open, task.kind, bvid]);
+  }, [open, task.kind, bvid, videoPlatform]);
 
   useEffect(() => {
     if (!open || task.kind !== "video") return;
@@ -239,7 +247,7 @@ export function QueueRowConfig({
     return (
       <div className="kd-queue-config">
         <p className="kd-muted" style={{ fontSize: "var(--kd-size-xs)", margin: 0 }}>
-          缺少 BV 号，无法在队列里改分 P / Offset。请从搜索结果重新加入。
+          缺少视频 ID，无法修改下载参数。请从搜索结果重新加入。
         </p>
       </div>
     );
@@ -306,6 +314,7 @@ export function QueueRowConfig({
         </label>
       </div>
 
+      {videoPlatform === "bilibili" ? (
       <div className="kd-queue-config-block">
         <div className="kd-queue-config-label">Offset 自动识别下载</div>
         <label className="kd-queue-radio">
@@ -473,6 +482,7 @@ export function QueueRowConfig({
           </div>
         ) : null}
       </div>
+      ) : null}
 
       {busy ? (
         <p className="kd-faint" style={{ margin: 0, fontSize: "var(--kd-size-xs)" }}>

@@ -1,19 +1,27 @@
+import { clampPerformanceDeckPosition } from "./deckPosition";
+import { PLATTER_RPM, PLATTER_SECONDS_PER_REVOLUTION } from "./platter";
+
 /**
  * Reloop Buddy 的缓动盘协议把转速编码进单条相对 CC。真实的触摸状态由
  * Note 6 单独给出：边缘转动是短暂 pitch bend，按住电容盘面才是局部刮擦。
- * Buddy/Mixxx 参考映射把盘面解析成每圈 360 个 tick。用户所指的是带编号的黄色
- * 小节线（而非其中的细拍线），所以局部模式的一整圈跨一个 bar-grid 单元；此前把
- * 可视波形窗口除以 72，实际一圈能跳过数十秒。
+ * Buddy/Mixxx 参考映射把盘面解析成每圈 360 个 tick。盘面运动统一换算成
+ * 33⅓ RPM 媒体距离，再由源时间戳换成速度；它不再拥有另一套绝对位置逻辑。
  */
 
 export const MIDI_JOG_TICKS_PER_REVOLUTION = 360;
 /** 官方手册把 Shift+Jog 定义为 quick search；八圈横跨整轨，快但仍可控。 */
 export const MIDI_JOG_QUICK_SEARCH_TURNS_PER_TRACK = 8;
 /** Capacitive vinyl: one platter revolution is 33⅓ RPM, like a real record. */
-export const MIDI_JOG_VINYL_RPM = 100 / 3;
-const MAX_JOG_TICKS_PER_MESSAGE = 8;
+export const MIDI_JOG_VINYL_RPM = PLATTER_RPM;
+/** 7-bit relative full range (01h/7Fh or 64-centered). Clipping to 8 dropped fast spins. */
+const MAX_RELATIVE_TICKS_PER_MESSAGE = 64;
+/** Edge pitch-bend stays a small nudge even when a relative packet is large. */
+const MAX_NUDGE_TICKS_PER_MESSAGE = 8;
 /** Edge-jog bursts share a cursor so 01h ticks accumulate. A held platter must ignore this. */
 export const MIDI_JOG_CURSOR_STALE_MS = 240;
+/** Must mirror the native callback window/rate in kdj-playback's JOG_NUDGE_* constants. */
+export const MIDI_JOG_NUDGE_HOLD_MS = 90;
+export const MIDI_JOG_NUDGE_MAX_RATE_OFFSET = 0.18;
 
 export interface MidiJogCursor {
   trackId: number;
@@ -21,41 +29,46 @@ export interface MidiJogCursor {
   at: number;
 }
 
-function boundedJogTicks(delta: number): number {
+function relativeJogTicks(delta: number): number {
   if (!Number.isFinite(delta) || delta === 0) return 0;
-  return Math.sign(delta) * Math.min(MAX_JOG_TICKS_PER_MESSAGE, Math.abs(delta));
+  return Math.sign(delta) * Math.min(MAX_RELATIVE_TICKS_PER_MESSAGE, Math.abs(delta));
 }
 
-export function midiJogScratchSeconds(delta: number, gridSeconds: number): number {
-  const grid = Number.isFinite(gridSeconds) && gridSeconds > 0 ? gridSeconds : 2;
-  return boundedJogTicks(delta) * (grid / MIDI_JOG_TICKS_PER_REVOLUTION);
+function boundedNudgeTicks(delta: number): number {
+  if (!Number.isFinite(delta) || delta === 0) return 0;
+  return Math.sign(delta) * Math.min(MAX_NUDGE_TICKS_PER_MESSAGE, Math.abs(delta));
 }
 
 /** Held platter motion in track seconds, mapped like a 33⅓ RPM record. */
 export function midiJogVinylSeconds(delta: number): number {
-  const secondsPerRevolution = 60 / MIDI_JOG_VINYL_RPM;
-  return boundedJogTicks(delta) * (secondsPerRevolution / MIDI_JOG_TICKS_PER_REVOLUTION);
+  return relativeJogTicks(delta) * (
+    PLATTER_SECONDS_PER_REVOLUTION / MIDI_JOG_TICKS_PER_REVOLUTION
+  );
 }
 
 export function midiJogSeekSeconds(delta: number, duration: number): number {
   const span = Number.isFinite(duration) && duration > 0 ? duration : 180;
-  return boundedJogTicks(delta) * (
+  return relativeJogTicks(delta) * (
     span / (MIDI_JOG_TICKS_PER_REVOLUTION * MIDI_JOG_QUICK_SEARCH_TURNS_PER_TRACK)
   );
 }
 
 /** 边缘转动给原生引擎的归一化、瞬态 pitch-bend 幅度。 */
 export function midiJogNudgeAmount(delta: number): number {
-  return boundedJogTicks(delta) / MAX_JOG_TICKS_PER_MESSAGE;
+  return boundedNudgeTicks(delta) / MAX_NUDGE_TICKS_PER_MESSAGE;
+}
+
+/** Compositor preview of the native 90ms edge pitch bend; persistent TEMPO remains unchanged. */
+export function midiJogNudgeRate(baseRate: number, amount: number): number {
+  const base = Number.isFinite(baseRate) && baseRate > 0 ? baseRate : 1;
+  const bend = Number.isFinite(amount) ? Math.max(-1, Math.min(1, amount)) : 0;
+  return Math.max(0.5, Math.min(2, base * (1 + bend * MIDI_JOG_NUDGE_MAX_RATE_OFFSET)));
 }
 
 export function clampJogPosition(position: number, duration: number): number {
-  const at = Number.isFinite(position) ? position : 0;
-  // A streaming Deck can accept a seek before metadata has reported its final duration. Do not
-  // turn that temporary `0` into an artificial end-of-track boundary: only a known duration may
-  // cap forward/local platter travel. Audio time itself still never goes below the real 0:00.
-  if (!Number.isFinite(duration) || duration <= 0) return Math.max(0, at);
-  return Math.min(duration, Math.max(0, at));
+  // Media decoding still begins at 0; the Performance renderer turns negative positions into a
+  // bounded silent pre-roll so a real platter can pull the first downbeat behind the zero line.
+  return clampPerformanceDeckPosition(position, duration);
 }
 
 /**

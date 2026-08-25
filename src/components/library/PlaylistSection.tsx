@@ -22,6 +22,10 @@ import { finishTrackDrop, isTrackDrag, readTrackDragIds } from "../../lib/trackD
 import { enqueueSearchOneLibraryDrop, isSearchDownloadDrag } from "../../lib/searchDrag";
 import { clearTextSelection } from "../../lib/textSelection";
 import { oneLibraryTreeDropPosition } from "../../lib/oneLibraryTree";
+import {
+  readSidebarTreeState,
+  writeOneLibraryTreeState,
+} from "../../lib/sidebarState";
 import { isMidiBrowseActivate, midiBrowseItemProps } from "../../lib/midiLibraryNav";
 import { usePlaylistStore } from "../../stores/playlistStore";
 import { useAppStore } from "../../stores/appStore";
@@ -68,6 +72,13 @@ interface DropState {
   edge: "before" | "after" | "inside";
 }
 
+interface OneLibraryTreeUiState {
+  open: boolean;
+  openDevices: Set<string>;
+  openFolders: Set<string>;
+  knownDevices: Set<string>;
+}
+
 function nodeKey(devicePath: string, id: number) {
   return `${devicePath}\u0000${id}`;
 }
@@ -104,9 +115,34 @@ export function PlaylistSection({
   const openPlaylist = usePlaylistStore((state) => state.openPlaylist);
   const selectedTarget = usePlaylistStore((state) => state.selectedTarget);
   const openVirtualDiskPanel = useAppStore((state) => state.openVirtualDiskPanel);
-  const [open, setOpen] = useState(true);
-  const [openDevices, setOpenDevices] = useState<Set<string>>(new Set());
-  const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
+  const [treeUi, setTreeUi] = useState<OneLibraryTreeUiState>(() => {
+    const restored = readSidebarTreeState().oneLibrary;
+    return {
+      open: restored.open,
+      openDevices: new Set(restored.openDevices),
+      openFolders: new Set(restored.openFolders),
+      knownDevices: new Set(restored.knownDevices),
+    };
+  });
+  const { open, openDevices, openFolders } = treeUi;
+  const updateTreeUi = (update: (current: OneLibraryTreeUiState) => OneLibraryTreeUiState) => {
+    setTreeUi((current) => {
+      const next = update(current);
+      writeOneLibraryTreeState({
+        open: next.open,
+        openDevices: [...next.openDevices],
+        openFolders: [...next.openFolders],
+        knownDevices: [...next.knownDevices],
+      });
+      return next;
+    });
+  };
+  const setOpen = (update: (current: boolean) => boolean) =>
+    updateTreeUi((current) => ({ ...current, open: update(current.open) }));
+  const setOpenDevices = (update: (current: Set<string>) => Set<string>) =>
+    updateTreeUi((current) => ({ ...current, openDevices: update(current.openDevices) }));
+  const setOpenFolders = (update: (current: Set<string>) => Set<string>) =>
+    updateTreeUi((current) => ({ ...current, openFolders: update(current.openFolders) }));
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [deleteArmed, setDeleteArmed] = useState(false);
   const [creating, setCreating] = useState("");
@@ -117,13 +153,23 @@ export function PlaylistSection({
 
   useEffect(() => setDeleteArmed(false), [menu]);
   useEffect(() => {
-    setOpenDevices((current) => {
-      const next = new Set(current);
+    updateTreeUi((current) => {
+      const openDevices = new Set(current.openDevices);
+      const knownDevices = new Set(current.knownDevices);
       for (const device of devices) {
-        if (device.is_virtual || device.has_one_library) next.add(device.path);
+        // 只自动展开第一次见到的可用设备；用户明确收起过的设备重启后保持收起。
+        if (
+          !knownDevices.has(device.path) &&
+          (device.is_virtual || device.has_one_library)
+        ) {
+          openDevices.add(device.path);
+        }
+        knownDevices.add(device.path);
       }
-      return next;
+      return { ...current, openDevices, knownDevices };
     });
+    // updateTreeUi 只包装稳定的 React setter；设备列表才是这段校准的输入。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [devices]);
 
   const physicalDevices = useMemo(

@@ -281,7 +281,14 @@ export function mediaUrlForTrack(track: Track): string {
   // OneLibrary 的 path 已是挂载卷里的真实文件。把它的负数临时 id 交给
   // /api/library/audio/:id 只会查一条不存在的 KDJ 曲库记录并返回 404。
   if (isOneLibraryPlaybackTrack(track)) return track.path;
-  return streamMediaUrl(track) ?? api.audioUrl(track.id);
+  // 未解析完的在线占位曲目同样没有曲库音频；不能退回 /library/audio/:负id。
+  if (isStreamTrack(track)) return streamMediaUrl(track) ?? "";
+  return api.audioUrl(track.id);
+}
+
+/** 唱盘已有展示元数据，但 provider 直链还没回来，不能拿空 src 去 load。 */
+export function isUnresolvedStreamTrack(track: Track | null | undefined): boolean {
+  return Boolean(track && isStreamTrack(track) && !streamMediaUrl(track));
 }
 
 export function makeSongStreamTrack(
@@ -387,7 +394,7 @@ export function preloadStreamTrack(track: Track): Promise<void> {
   const source = meta.source;
   let request: Promise<void>;
   request = api
-    .songPreview(source)
+    .songPreview(source, meta.cacheRetryUsed)
     .then(({ url, waveform_token: waveformToken }) => {
       // 解析期间条目受 prune 保护；这里仍核对身份，避免将迟到结果写进复用上下文。
       if (metaById.get(track.id) !== meta) {

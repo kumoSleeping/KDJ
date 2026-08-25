@@ -27,6 +27,13 @@ export function formatDuration(seconds: number | null | undefined): string {
   return h > 0 ? `${h}:${pad2(m)}:${pad2(s)}` : `${m}:${pad2(s)}`;
 }
 
+/** Deck 时间允许负预卷；例如 -2.4 秒显示为 `-0:02`。 */
+export function formatSignedDuration(seconds: number | null | undefined): string {
+  if (!isNum(seconds)) return "--:--";
+  const sign = seconds < 0 ? "-" : "";
+  return `${sign}${formatDuration(Math.abs(seconds))}`;
+}
+
 /** 字节 → `1.4 MB`。1024 进制，KB 以上保留 1 位小数。 */
 export function formatBytes(bytes: number | null | undefined): string {
   if (!isNum(bytes) || bytes < 0) return DASH;

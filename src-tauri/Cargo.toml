@@ -44,8 +44,12 @@ kdj-playback = { version = "0.2.41", path = "../crates/kdj-playback" }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
-reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 midir = "0.11"
+clap = { version = "4.5", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # hdiutil / diskutil 的 -plist 输出不受系统显示语言影响；不要解析本地化文本。

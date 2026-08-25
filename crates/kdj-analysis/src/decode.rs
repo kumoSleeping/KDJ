@@ -5,8 +5,10 @@
 //! - 顺带修好一个真实缺陷——现在没装 ffmpeg 的用户**连 BPM 都分析不了**，
 //!   换成内建解码之后开箱即用。
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{bail, Context, Result};
 use symphonia::core::audio::SampleBuffer;
@@ -20,6 +22,44 @@ pub const DEFAULT_SR: u32 = 22050;
 
 fn known_sample_rate(rate: Option<u32>) -> Option<u32> {
     rate.filter(|rate| *rate > 0)
+}
+
+fn track_duration(params: &symphonia::core::codecs::CodecParameters) -> Option<f64> {
+    params
+        .n_frames
+        .zip(known_sample_rate(params.sample_rate))
+        .map(|(frames, rate)| frames as f64 / rate as f64)
+}
+
+/// 只读容器头拿总时长，不解 PCM、不重采样。
+///
+/// 分析窗要从 15% 处起跳，必须先知道全曲多长。旧实现为此先解 50ms 再 sinc，
+/// 等于每首歌多打开一次解码器。时长在 Xing/容器头里，probe 就够了。
+pub fn probe_duration(path: &Path) -> Result<Option<f64>> {
+    let file = File::open(path).with_context(|| format!("打开音频失败：{}", path.display()))?;
+    let stream = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            stream,
+            &FormatOptions {
+                enable_gapless: true,
+                ..Default::default()
+            },
+            &MetadataOptions::default(),
+        )
+        .with_context(|| format!("无法识别音频格式：{}", path.display()))?;
+    let track = probed
+        .format
+        .tracks()
+        .iter()
+        .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        .context("文件里没有可解码的音轨")?;
+    Ok(track_duration(&track.codec_params))
 }
 
 #[derive(Debug)]
@@ -94,10 +134,7 @@ fn decode_audio_inner(
     // target / 0 会变成 inf，随后 Vec 按 usize::MAX 预分配并以 capacity overflow panic。
     let mut source_sr = known_sample_rate(params.sample_rate).unwrap_or(DEFAULT_SR);
     let channels = params.channels.map(|c| c.count()).unwrap_or(1).max(1);
-    let duration = params
-        .n_frames
-        .zip(known_sample_rate(params.sample_rate))
-        .map(|(frames, rate)| frames as f64 / rate as f64);
+    let duration = track_duration(&params);
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&params, &DecoderOptions::default())
@@ -198,7 +235,7 @@ fn decode_audio_inner(
     let samples = if source_sr == output_sr {
         mono
     } else {
-        resample(&mono, source_sr, output_sr)
+        resample_mono(&mono, source_sr, output_sr)
     };
     let samples = match max_seconds {
         Some(secs) => {
@@ -221,79 +258,221 @@ fn decode_audio_inner(
 ///
 /// 一开始用的是线性插值，那等价于一个很钝的低通：44.1k→22.05k 时会把高频
 /// 大幅衰减，起音包络的形状跟着变，BPM 的倍频判定就容易和 Python 版分道扬镳。
-/// sinc 重采样把通带做平，代价是慢一点（整轨分析里占比很小）。
 ///
-/// 降采样时截止频率要按比例收紧到新的奈奎斯特频率，否则会混叠。
-fn resample(input: &[f32], from_sr: u32, to_sr: u32) -> Vec<f32> {
+/// 采样率是整数比，分数相位会周期性重复。例如 44.1k→16k 只有 160 种相位。
+/// 旧实现却为整首歌的每一个输出样本重复计算 32 次 sin/cos；四分钟就是上亿次。
+/// 这里把完全相同的 Blackman-sinc 权重按采样率对预计算并复用，逐样本只剩 32 项
+/// 点积。滤波器、tap 数与截止频率不变，不用降低频谱质量换速度。
+const RESAMPLE_TAPS: i64 = 16;
+const RESAMPLE_KERNEL_WIDTH: usize = (RESAMPLE_TAPS as usize) * 2;
+
+struct SincKernel {
+    phase_count: usize,
+    /// Integer source frames advanced after every output sample.
+    base_step: usize,
+    /// Fractional rational phase advanced after every output sample.
+    phase_step: usize,
+    weights: Vec<f64>,
+}
+
+static SINC_KERNELS: OnceLock<Mutex<HashMap<(u32, u32), Arc<SincKernel>>>> = OnceLock::new();
+
+fn greatest_common_divisor(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left.max(1)
+}
+
+fn build_sinc_kernel(from_sr: u32, to_sr: u32) -> SincKernel {
+    let gcd = greatest_common_divisor(from_sr, to_sr);
+    let phase_count = (to_sr / gcd) as usize;
+    let cutoff = (to_sr as f64 / from_sr as f64).min(1.0);
+    let mut weights = Vec::with_capacity(phase_count * RESAMPLE_KERNEL_WIDTH);
+
+    for phase in 0..phase_count {
+        let fraction = phase as f64 / phase_count as f64;
+        let start = weights.len();
+        let mut sum = 0.0;
+        for offset in -RESAMPLE_TAPS + 1..=RESAMPLE_TAPS {
+            let distance = offset as f64 - fraction;
+            let x = std::f64::consts::PI * distance * cutoff;
+            let sinc = if x.abs() < 1e-9 {
+                cutoff
+            } else {
+                cutoff * x.sin() / x
+            };
+            let t = (distance / RESAMPLE_TAPS as f64 + 1.0) / 2.0;
+            let window = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * t).cos()
+                + 0.08 * (4.0 * std::f64::consts::PI * t).cos();
+            let weight = sinc * window;
+            weights.push(weight);
+            sum += weight;
+        }
+        if sum.abs() > 1e-12 {
+            for weight in &mut weights[start..] {
+                *weight /= sum;
+            }
+        }
+    }
+
+    let reduced_from = (from_sr / gcd) as usize;
+    SincKernel {
+        phase_count,
+        base_step: reduced_from / phase_count,
+        phase_step: reduced_from % phase_count,
+        weights,
+    }
+}
+
+fn sinc_kernel(from_sr: u32, to_sr: u32) -> Arc<SincKernel> {
+    let kernels = SINC_KERNELS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(kernel) = kernels
+        .lock()
+        .expect("sinc kernel cache")
+        .get(&(from_sr, to_sr))
+        .cloned()
+    {
+        return kernel;
+    }
+    let built = Arc::new(build_sinc_kernel(from_sr, to_sr));
+    let mut cache = kernels.lock().expect("sinc kernel cache");
+    Arc::clone(cache.entry((from_sr, to_sr)).or_insert(built))
+}
+
+/// 用同一条缓存 polyphase sinc 把 mono PCM 转到目标采样率。
+///
+/// 截止频率按比例收紧到新的奈奎斯特频率，避免降采样混叠。源/目标采样率约分后，
+/// `base_step + phase_step` 递推的正是 `floor(i × from / to)` 及其余数；热循环不再为
+/// 每个输出样本执行一次 `u128` 乘除和取模，结果仍与逐样本坐标公式一致。
+/// 采样率必须非零。
+pub fn resample_mono(input: &[f32], from_sr: u32, to_sr: u32) -> Vec<f32> {
+    assert!(from_sr > 0 && to_sr > 0, "重采样率必须非零");
     if input.is_empty() || from_sr == to_sr {
         return input.to_vec();
     }
-    const TAPS: i64 = 16;
-    let ratio = to_sr as f64 / from_sr as f64;
-    let cutoff = ratio.min(1.0);
-    let out_len = ((input.len() as f64) * ratio).floor() as usize;
+    let kernel = sinc_kernel(from_sr, to_sr);
+    let out_len = ((input.len() as u128 * to_sr as u128) / from_sr as u128) as usize;
     let last = input.len() as i64 - 1;
+    let mut output = Vec::with_capacity(out_len);
+    let mut base = 0usize;
+    let mut phase = 0usize;
 
-    (0..out_len)
-        .map(|i| {
-            let center = i as f64 / ratio;
-            let base = center.floor() as i64;
-            let mut acc = 0.0f64;
-            let mut weight_sum = 0.0f64;
-            for offset in -TAPS + 1..=TAPS {
-                let index = (base + offset).clamp(0, last);
-                let distance = (base + offset) as f64 - center;
-                if distance.abs() > TAPS as f64 {
-                    continue;
-                }
-                let sinc = {
-                    let x = std::f64::consts::PI * distance * cutoff;
-                    if x.abs() < 1e-9 {
-                        cutoff
-                    } else {
-                        cutoff * x.sin() / x
-                    }
-                };
-                // Blackman 窗，抑制旁瓣
-                let t = (distance / TAPS as f64 + 1.0) / 2.0;
-                let window = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * t).cos()
-                    + 0.08 * (4.0 * std::f64::consts::PI * t).cos();
-                let weight = sinc * window;
-                acc += input[index as usize] as f64 * weight;
-                weight_sum += weight;
+    for _ in 0..out_len {
+        let weights =
+            &kernel.weights[phase * RESAMPLE_KERNEL_WIDTH..(phase + 1) * RESAMPLE_KERNEL_WIDTH];
+        let first = base as i64 - RESAMPLE_TAPS + 1;
+        let mut value = 0.0;
+        if first >= 0 && first + RESAMPLE_KERNEL_WIDTH as i64 <= input.len() as i64 {
+            for (&sample, &weight) in input[first as usize..first as usize + RESAMPLE_KERNEL_WIDTH]
+                .iter()
+                .zip(weights)
+            {
+                value += sample as f64 * weight;
             }
-            if weight_sum.abs() > 1e-12 {
-                (acc / weight_sum) as f32
-            } else {
-                input[base.clamp(0, last) as usize]
+        } else {
+            for (offset, &weight) in weights.iter().enumerate() {
+                let source = (first + offset as i64).clamp(0, last) as usize;
+                value += input[source] as f64 * weight;
             }
-        })
-        .collect()
+        }
+        output.push(value as f32);
+
+        base += kernel.base_step;
+        phase += kernel.phase_step;
+        if phase >= kernel.phase_count {
+            phase -= kernel.phase_count;
+            base += 1;
+        }
+    }
+    output
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn reference_resample(input: &[f32], from_sr: u32, to_sr: u32) -> Vec<f32> {
+        if input.is_empty() || from_sr == to_sr {
+            return input.to_vec();
+        }
+        let ratio = to_sr as f64 / from_sr as f64;
+        let cutoff = ratio.min(1.0);
+        let out_len = ((input.len() as f64) * ratio).floor() as usize;
+        let last = input.len() as i64 - 1;
+        (0..out_len)
+            .map(|index| {
+                let center = index as f64 / ratio;
+                let base = center.floor() as i64;
+                let mut value = 0.0;
+                let mut weight_sum = 0.0;
+                for offset in -RESAMPLE_TAPS + 1..=RESAMPLE_TAPS {
+                    let source = (base + offset).clamp(0, last) as usize;
+                    let distance = (base + offset) as f64 - center;
+                    let x = std::f64::consts::PI * distance * cutoff;
+                    let sinc = if x.abs() < 1e-9 {
+                        cutoff
+                    } else {
+                        cutoff * x.sin() / x
+                    };
+                    let t = (distance / RESAMPLE_TAPS as f64 + 1.0) / 2.0;
+                    let window = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * t).cos()
+                        + 0.08 * (4.0 * std::f64::consts::PI * t).cos();
+                    let weight = sinc * window;
+                    value += input[source] as f64 * weight;
+                    weight_sum += weight;
+                }
+                (value / weight_sum) as f32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn phase_accumulated_sinc_matches_the_original_per_sample_kernel() {
+        let input: Vec<f32> = (0..10_003)
+            .map(|index| {
+                let time = index as f64 / 44_100.0;
+                ((time * 440.0 * std::f64::consts::TAU).sin()
+                    + 0.31 * (time * 3_700.0 * std::f64::consts::TAU).sin()) as f32
+            })
+            .collect();
+        for (from_sr, to_sr) in [
+            (44_100, 16_000),
+            (48_000, 16_000),
+            (44_100, 22_050),
+            (16_000, 44_100),
+        ] {
+            let expected = reference_resample(&input, from_sr, to_sr);
+            let actual = resample_mono(&input, from_sr, to_sr);
+            assert_eq!(actual.len(), expected.len());
+            let max_error = actual
+                .iter()
+                .zip(expected)
+                .map(|(left, right)| (left - right).abs())
+                .fold(0.0f32, f32::max);
+            assert!(max_error < 1e-5, "{from_sr}→{to_sr} 最大误差 {max_error}");
+        }
+    }
+
     #[test]
     fn zero_container_sample_rates_fall_back_instead_of_overflowing() {
         assert_eq!(known_sample_rate(Some(0)), None);
         let rate = known_sample_rate(Some(0)).unwrap_or(DEFAULT_SR);
-        let out = resample(&[0.0, 1.0, 0.0], rate, DEFAULT_SR);
+        let out = resample_mono(&[0.0, 1.0, 0.0], rate, DEFAULT_SR);
         assert_eq!(out, vec![0.0, 1.0, 0.0]);
     }
 
     #[test]
     fn resampling_halves_the_length_when_halving_the_rate() {
         let input: Vec<f32> = (0..1000).map(|i| i as f32).collect();
-        let out = resample(&input, 44100, 22050);
+        let out = resample_mono(&input, 44100, 22050);
         assert!((out.len() as i64 - 500).abs() <= 1, "长度 {}", out.len());
     }
 
     #[test]
     fn resampling_preserves_a_ramp_shape() {
         let input: Vec<f32> = (0..200).map(|i| i as f32).collect();
-        let out = resample(&input, 100, 50);
+        let out = resample_mono(&input, 100, 50);
         // 线性斜坡降采样后仍是线性斜坡，步长翻倍。
         // 只看中段：sinc 核在两端会被截断+夹取，边缘几个样本必然有过渡，
         // 这是加窗 sinc 的固有性质，不是 bug。
@@ -316,7 +495,7 @@ mod tests {
         let input: Vec<f32> = (0..44100)
             .map(|i| (2.0 * std::f64::consts::PI * freq * i as f64 / from).sin() as f32)
             .collect();
-        let out = resample(&input, 44100, 22050);
+        let out = resample_mono(&input, 44100, 22050);
         let mid = &out[1000..out.len() - 1000];
         let peak = mid.iter().fold(0.0f32, |acc, s| acc.max(s.abs()));
         assert!(peak > 0.97, "通带内峰值被压到 {peak}");
@@ -325,7 +504,7 @@ mod tests {
     #[test]
     fn same_rate_is_a_passthrough() {
         let input: Vec<f32> = vec![1.0, 2.0, 3.0];
-        assert_eq!(resample(&input, 22050, 22050), input);
+        assert_eq!(resample_mono(&input, 22050, 22050), input);
     }
 
     #[test]
@@ -334,5 +513,37 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("打开音频失败"), "{err}");
+    }
+
+    fn write_silence_wav(path: &Path, sample_rate: u32, frames: u32) {
+        let data_bytes = frames * 2;
+        let mut bytes = Vec::with_capacity(44 + data_bytes as usize);
+        bytes.extend(b"RIFF");
+        bytes.extend(&(36 + data_bytes).to_le_bytes());
+        bytes.extend(b"WAVEfmt ");
+        bytes.extend(&16u32.to_le_bytes());
+        bytes.extend(&1u16.to_le_bytes());
+        bytes.extend(&1u16.to_le_bytes());
+        bytes.extend(&sample_rate.to_le_bytes());
+        bytes.extend(&(sample_rate * 2).to_le_bytes());
+        bytes.extend(&2u16.to_le_bytes());
+        bytes.extend(&16u16.to_le_bytes());
+        bytes.extend(b"data");
+        bytes.extend(&data_bytes.to_le_bytes());
+        bytes.resize(bytes.len() + data_bytes as usize, 0);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn probe_duration_reads_the_header_without_decoding_pcm() {
+        let path =
+            std::env::temp_dir().join(format!("kdj-probe-duration-{}.wav", std::process::id()));
+        write_silence_wav(&path, 22_050, 22_050 * 8);
+        let duration = probe_duration(&path).unwrap().expect("wav 头应有时长");
+        assert!(
+            (duration - 8.0).abs() < 0.02,
+            "probe 时长 {duration}，期望 8s"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

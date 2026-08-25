@@ -37,6 +37,12 @@ const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const CLIENT_ID_TTL: Duration = Duration::from_secs(12 * 3600);
 const OAUTH_STATE_TTL: Duration = Duration::from_secs(10 * 60);
 const OAUTH_API: &str = "https://api.soundcloud.com";
+const CREDENTIAL_OAUTH: &str = "oauth";
+const CREDENTIAL_BROWSER: &str = "browser_session";
+
+fn default_credential_kind() -> String {
+    CREDENTIAL_OAUTH.into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SoundCloudSession {
@@ -51,6 +57,12 @@ struct SoundCloudSession {
     nickname: String,
     #[serde(default)]
     avatar: String,
+    /// `oauth` 是 KDJ 自己申请的可刷新授权；`browser_session` 是从用户明确选择的
+    /// 浏览器 Profile 读取到的 `oauth_token` Cookie。
+    #[serde(default = "default_credential_kind")]
+    credential_kind: String,
+    #[serde(default)]
+    imported_from: String,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +141,36 @@ impl SoundCloudProvider {
 
     fn session_path(&self) -> PathBuf {
         self.ctx.session_file("soundcloud.json")
+    }
+
+    /// 从桌面浏览器的指定 Profile 导入 SoundCloud 网页端 `oauth_token`。读取发生在
+    /// blocking 线程；验证通过后才落盘，不会用无效 Cookie 覆盖现有登录态。
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub async fn import_browser(&self, browser: String, profile_id: Option<String>) -> Result<()> {
+        self.ensure_enabled()?;
+        let session = tokio::task::spawn_blocking(move || {
+            read_browser_session(&browser, profile_id.as_deref())
+        })
+        .await
+        .context("读取 SoundCloud 浏览器会话任务失败")??;
+        let (status, profile) = self
+            .authenticated_get_once(&session.access_token, "/me", &[], true)
+            .await?;
+        anyhow::ensure!(
+            status.is_success(),
+            "浏览器里的 SoundCloud 登录态无效：{}",
+            oauth_error(&profile)
+        );
+        self.set_session(session_with_profile(session, &profile))
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pub async fn import_browser(
+        &self,
+        _browser: String,
+        _profile_id: Option<String>,
+    ) -> Result<()> {
+        bail!("移动端无法读取其它应用的浏览器会话；SoundCloud 继续使用匿名访问")
     }
 
     fn save_session(&self, session: &SoundCloudSession) -> Result<()> {
@@ -313,6 +355,8 @@ impl SoundCloudProvider {
             user_urn: String::new(),
             nickname: String::new(),
             avatar: String::new(),
+            credential_kind: CREDENTIAL_OAUTH.into(),
+            imported_from: String::new(),
         })
     }
 
@@ -452,40 +496,64 @@ impl SoundCloudProvider {
         token: &str,
         path: &str,
         params: &[(&str, String)],
+        browser_session: bool,
     ) -> Result<(reqwest::StatusCode, Value)> {
+        let mut query = params.to_vec();
+        let base = if browser_session {
+            // SoundCloud 网页的 oauth_token 属于网页 client。官方 v1 `/me` 会对它回
+            // 403；网页自己使用的 api-v2 + 同一份公开 client_id 才接受这枚 token。
+            query.push(("client_id", self.client_id().await?));
+            API
+        } else {
+            OAUTH_API
+        };
         let response = self
             .http
-            .get(format!("{OAUTH_API}{path}"))
+            .get(format!("{base}{path}"))
             .header(reqwest::header::AUTHORIZATION, format!("OAuth {token}"))
-            .query(params)
+            .query(&query)
             .send()
             .await
             .with_context(|| format!("SoundCloud 登录接口请求失败：{path}"))?;
         let status = response.status();
-        let body = response
-            .json()
+        let text = response
+            .text()
             .await
-            .with_context(|| format!("解析 SoundCloud 登录接口响应失败：{path}"))?;
+            .with_context(|| format!("读取 SoundCloud 登录接口响应失败：{path}"))?;
+        let body = if text.trim().is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str(&text)
+                .with_context(|| format!("解析 SoundCloud 登录接口响应失败：{path}"))?
+        };
         Ok((status, body))
     }
 
     async fn api_get_authenticated(&self, path: &str, params: &[(&str, String)]) -> Result<Value> {
-        let token = if self
-            .session_snapshot()
-            .map(|session| session.expires_at <= unix_now() + 60)
-            .unwrap_or(true)
-        {
+        let current = self.session_snapshot().context("SoundCloud 尚未登录")?;
+        anyhow::ensure!(
+            !browser_session_expired(&current),
+            "SoundCloud 浏览器会话已过期，请重新连接浏览器"
+        );
+        let token = if oauth_session_needs_refresh(&current) {
             self.refresh_access_token(None).await?
         } else {
-            self.session_snapshot()
-                .map(|session| session.access_token)
-                .context("SoundCloud 尚未登录")?
+            current.access_token.clone()
         };
-        let (status, body) = self.authenticated_get_once(&token, path, params).await?;
+        let browser_session = current.credential_kind == CREDENTIAL_BROWSER;
+        let (status, body) = self
+            .authenticated_get_once(&token, path, params, browser_session)
+            .await?;
         if status == reqwest::StatusCode::UNAUTHORIZED {
+            if current.refresh_token.is_empty() {
+                if current.credential_kind == CREDENTIAL_BROWSER {
+                    bail!("SoundCloud 浏览器会话已失效，请重新连接浏览器");
+                }
+                bail!("SoundCloud 登录已失效，请重新登录");
+            }
             let refreshed = self.refresh_access_token(Some(&token)).await?;
             let (retry_status, retry_body) = self
-                .authenticated_get_once(&refreshed, path, params)
+                .authenticated_get_once(&refreshed, path, params, false)
                 .await?;
             anyhow::ensure!(
                 retry_status.is_success(),
@@ -557,7 +625,8 @@ impl MusicProvider for SoundCloudProvider {
     async fn account(&self) -> Account {
         let mut account =
             Account::new(Platform::Soundcloud, LABEL, AccountState::Missing, "未登录");
-        account.login_method = "oauth".into();
+        account.login_method = "browser".into();
+        account.credential_kind = "anonymous".into();
         if !self.ctx.soundcloud_enabled() {
             account.detail = DISABLED_MESSAGE.into();
             return account;
@@ -570,37 +639,47 @@ impl MusicProvider for SoundCloudProvider {
         };
         match self.api_get_authenticated("/me", &[]).await {
             Ok(profile) => {
+                // `/me` 期间 OAuth 可能刚完成刷新；资料要合并到刷新后的会话，不能拿
+                // 调用前的 cached 把新 access/refresh token 覆盖回去。
+                let current = self.session_snapshot().unwrap_or(cached);
                 let nickname = str_field(&profile, "username")
                     .or_else(|| str_field(&profile, "full_name"))
-                    .unwrap_or(&cached.nickname)
+                    .unwrap_or(&current.nickname)
                     .to_string();
-                let avatar = str_field(&profile, "avatar_url")
-                    .unwrap_or(&cached.avatar)
-                    .to_string();
+                let avatar = soundcloud_avatar(&profile, &current.avatar);
                 let user_urn = str_field(&profile, "urn")
                     .map(str::to_string)
                     .or_else(|| profile.get("id").map(value_id))
                     .filter(|value| !value.is_empty())
-                    .unwrap_or(cached.user_urn.clone());
-                let mut next = cached;
+                    .unwrap_or(current.user_urn.clone());
+                let credential_kind = current.credential_kind.clone();
+                let imported_from = current.imported_from.clone();
+                let mut next = current;
                 next.nickname = nickname.clone();
                 next.avatar = avatar.clone();
-                next.user_urn = user_urn;
+                next.user_urn = user_urn.clone();
                 if let Err(error) = self.set_session(next) {
                     tracing::warn!("保存 SoundCloud 用户资料失败：{error}");
                 }
                 account.state = AccountState::Valid;
-                account.detail = "已登录".into();
+                account.account_key = user_urn;
+                account.credential_kind = credential_kind;
+                account.detail = if imported_from.is_empty() {
+                    "已登录".into()
+                } else {
+                    imported_from
+                };
                 account.nickname = nickname;
                 account.avatar = avatar;
             }
             Err(error) => {
-                account.state = if cached.expires_at <= unix_now() {
+                account.state = if session_expired(&cached) {
                     AccountState::Expired
                 } else {
                     AccountState::Unknown
                 };
                 account.detail = truncate(&format!("登录态检查失败：{error}"), 160);
+                account.credential_kind = cached.credential_kind;
                 account.nickname = cached.nickname;
                 account.avatar = cached.avatar;
             }
@@ -617,7 +696,10 @@ impl MusicProvider for SoundCloudProvider {
     }
 
     async fn logout(&self) -> Result<()> {
-        if let Some(session) = self.session_snapshot() {
+        if let Some(session) = self
+            .session_snapshot()
+            .filter(|session| session.credential_kind != CREDENTIAL_BROWSER)
+        {
             let _ = self
                 .http
                 .post("https://secure.soundcloud.com/sign-out")
@@ -665,16 +747,31 @@ impl MusicProvider for SoundCloudProvider {
             .or_else(|| (!session.user_urn.is_empty()).then(|| session.user_urn.clone()))
             .context("SoundCloud 登录资料缺少用户 ID")?;
 
+        // 网页 token 走 api-v2；它的 likes 是 track / playlist 混合流。官方 OAuth
+        // 才使用拆开的 `/likes/tracks` 与 `/likes/playlists`。
+        let browser_session = session.credential_kind == CREDENTIAL_BROWSER;
+        let likes_path = if browser_session {
+            format!("/users/{user_id}/likes")
+        } else {
+            format!("/users/{user_id}/likes/tracks")
+        };
         let likes = self
             .api_get_authenticated(
-                &format!("/users/{user_id}/likes/tracks"),
+                &likes_path,
                 &[
                     ("limit", "200".into()),
                     ("linked_partitioning", "true".into()),
                 ],
             )
             .await?;
-        let favorite_count = collection(&likes).len();
+        let favorite_count = if browser_session {
+            collection(&likes)
+                .iter()
+                .filter(|entry| soundcloud_like_track(entry).is_some())
+                .count()
+        } else {
+            collection(&likes).len()
+        };
         let mut playlists = vec![kdj_core::models::StreamPlaylist {
             platform: Platform::Soundcloud,
             key: "__soundcloud_favorites__".into(),
@@ -685,37 +782,61 @@ impl MusicProvider for SoundCloudProvider {
             origin: "favorite".into(),
         }];
 
-        if let Ok(created) = self
-            .api_get_authenticated(
-                "/me/playlists",
-                &[
-                    ("show_tracks", "false".into()),
-                    ("limit", "200".into()),
-                    ("linked_partitioning", "true".into()),
-                ],
-            )
-            .await
-        {
-            playlists.extend(
-                collection(&created)
-                    .iter()
-                    .filter_map(|entry| soundcloud_playlist(entry, "created")),
-            );
-        }
-        if let Ok(collected) = self
-            .api_get_authenticated(
-                &format!("/users/{user_id}/likes/playlists"),
-                &[
-                    ("limit", "200".into()),
-                    ("linked_partitioning", "true".into()),
-                ],
-            )
-            .await
-        {
-            playlists.extend(collection(&collected).iter().filter_map(|entry| {
-                let playlist = entry.get("playlist").unwrap_or(entry);
-                soundcloud_playlist(playlist, "collected")
+        if browser_session {
+            // api-v2 没有 `/me/playlists`（会回 404）。网页的「Playlists」页走这条
+            // 聚合目录，响应再用 `{ playlist: ... }` 包一层；它同时包含自己创建和
+            // 收藏的列表，正好避免只扫混合 likes 首页时漏掉排在后面的 playlist。
+            let directory = self
+                .api_get_authenticated(
+                    &format!("/users/{user_id}/playlists/liked_and_owned"),
+                    &[
+                        ("limit", "200".into()),
+                        ("linked_partitioning", "true".into()),
+                    ],
+                )
+                .await?;
+            playlists.extend(collection(&directory).iter().filter_map(|entry| {
+                let playlist = soundcloud_like_playlist(entry)?;
+                let origin = if soundcloud_playlist_owned_by(playlist, &user_id) {
+                    "created"
+                } else {
+                    "collected"
+                };
+                soundcloud_playlist(playlist, origin)
             }));
+        } else {
+            if let Ok(created) = self
+                .api_get_authenticated(
+                    "/me/playlists",
+                    &[
+                        ("show_tracks", "false".into()),
+                        ("limit", "200".into()),
+                        ("linked_partitioning", "true".into()),
+                    ],
+                )
+                .await
+            {
+                playlists.extend(
+                    collection(&created)
+                        .iter()
+                        .filter_map(|entry| soundcloud_playlist(entry, "created")),
+                );
+            }
+            if let Ok(collected) = self
+                .api_get_authenticated(
+                    &format!("/users/{user_id}/likes/playlists"),
+                    &[
+                        ("limit", "200".into()),
+                        ("linked_partitioning", "true".into()),
+                    ],
+                )
+                .await
+            {
+                playlists.extend(collection(&collected).iter().filter_map(|entry| {
+                    let playlist = entry.get("playlist").unwrap_or(entry);
+                    soundcloud_playlist(playlist, "collected")
+                }));
+            }
         }
         Ok(dedup_playlists(playlists))
     }
@@ -739,9 +860,14 @@ impl MusicProvider for SoundCloudProvider {
                 .filter(|value| !value.is_empty())
                 .or_else(|| (!session.user_urn.is_empty()).then(|| session.user_urn.clone()))
                 .context("SoundCloud 登录资料缺少用户 ID")?;
+            let likes_path = if session.credential_kind == CREDENTIAL_BROWSER {
+                format!("/users/{user_id}/likes")
+            } else {
+                format!("/users/{user_id}/likes/tracks")
+            };
             let body = self
                 .api_get_authenticated(
-                    &format!("/users/{user_id}/likes/tracks"),
+                    &likes_path,
                     &[
                         ("limit", limit.to_string()),
                         ("linked_partitioning", "true".into()),
@@ -768,7 +894,7 @@ impl MusicProvider for SoundCloudProvider {
         };
         let sources: Vec<SongSource> = entries
             .iter()
-            .filter_map(|entry| to_source(entry.get("track").unwrap_or(entry)))
+            .filter_map(|entry| soundcloud_like_track(entry).and_then(to_source))
             .take(limit)
             .collect();
         if sources.is_empty() {
@@ -937,6 +1063,88 @@ impl MusicProvider for SoundCloudProvider {
 
 // ---------------------------------------------------------------- 纯函数
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn read_browser_session(browser: &str, profile_id: Option<&str>) -> Result<SoundCloudSession> {
+    let imported =
+        crate::browser::profile_cookies(browser, profile_id, vec!["soundcloud.com".to_string()])?;
+    browser_session_from_profile(imported)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn browser_session_from_profile(
+    imported: crate::browser::BrowserProfileCookies,
+) -> Result<SoundCloudSession> {
+    let now = unix_now().max(0) as u64;
+    let cookie = imported
+        .cookies
+        .into_iter()
+        .filter(|cookie| cookie.name == "oauth_token" && !cookie.value.trim().is_empty())
+        .filter(|cookie| {
+            let domain = cookie.domain.trim_start_matches('.');
+            domain == "soundcloud.com" || domain.ends_with(".soundcloud.com")
+        })
+        .filter(|cookie| cookie.expires.map(|expires| expires > now).unwrap_or(true))
+        .max_by_key(|cookie| {
+            let exact_domain = cookie.domain.trim_start_matches('.') == "soundcloud.com";
+            (exact_domain, cookie.expires.unwrap_or(u64::MAX))
+        })
+        .with_context(|| {
+            format!(
+                "没有从{}读取到已登录的 SoundCloud 会话；请确认该 Profile 已登录 SoundCloud",
+                imported.imported_from
+            )
+        })?;
+    Ok(SoundCloudSession {
+        access_token: cookie.value,
+        refresh_token: String::new(),
+        expires_at: cookie
+            .expires
+            .map(|expires| expires.min(i64::MAX as u64) as i64)
+            .unwrap_or(0),
+        user_urn: String::new(),
+        nickname: String::new(),
+        avatar: String::new(),
+        credential_kind: CREDENTIAL_BROWSER.into(),
+        imported_from: imported.imported_from,
+    })
+}
+
+fn session_with_profile(mut session: SoundCloudSession, profile: &Value) -> SoundCloudSession {
+    session.nickname = str_field(profile, "username")
+        .or_else(|| str_field(profile, "full_name"))
+        .unwrap_or_default()
+        .to_string();
+    session.avatar = soundcloud_avatar(profile, "");
+    session.user_urn = str_field(profile, "urn")
+        .map(str::to_string)
+        .or_else(|| profile.get("id").map(value_id))
+        .unwrap_or_default();
+    session
+}
+
+fn soundcloud_avatar(profile: &Value, fallback: &str) -> String {
+    str_field(profile, "avatar_url")
+        .filter(|url| !url.contains("/default_avatar_"))
+        .or_else(|| (!fallback.contains("/default_avatar_")).then_some(fallback))
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn session_expired(session: &SoundCloudSession) -> bool {
+    session.expires_at > 0 && session.expires_at <= unix_now()
+}
+
+fn browser_session_expired(session: &SoundCloudSession) -> bool {
+    session.credential_kind == CREDENTIAL_BROWSER && session_expired(session)
+}
+
+fn oauth_session_needs_refresh(session: &SoundCloudSession) -> bool {
+    session.credential_kind != CREDENTIAL_BROWSER
+        && !session.refresh_token.is_empty()
+        && session.expires_at > 0
+        && session.expires_at <= unix_now() + 60
+}
+
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -955,10 +1163,20 @@ fn random_token() -> String {
 fn oauth_error(body: &Value) -> String {
     body.get("error_description")
         .or_else(|| body.get("error"))
+        .or_else(|| body.get("message"))
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .unwrap_or("未知错误")
-        .to_string()
+        .map(str::to_string)
+        .or_else(|| {
+            body.get("errors")
+                .and_then(Value::as_array)
+                .and_then(|errors| errors.first())
+                .and_then(|error| error.get("error_message").or_else(|| error.get("message")))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "登录态已被 SoundCloud 拒绝".into())
 }
 
 fn value_id(value: &Value) -> String {
@@ -979,6 +1197,42 @@ fn collection(body: &Value) -> &[Value] {
                 .map(Vec::as_slice)
         })
         .unwrap_or(&[])
+}
+
+fn soundcloud_like_track(entry: &Value) -> Option<&Value> {
+    entry
+        .get("track")
+        .or_else(|| (entry.get("kind").and_then(Value::as_str) == Some("track")).then_some(entry))
+}
+
+fn soundcloud_like_playlist(entry: &Value) -> Option<&Value> {
+    entry.get("playlist").or_else(|| {
+        matches!(
+            entry.get("kind").and_then(Value::as_str),
+            Some("playlist" | "system-playlist")
+        )
+        .then_some(entry)
+    })
+}
+
+fn soundcloud_playlist_owned_by(entry: &Value, user_id: &str) -> bool {
+    let owner_id = entry
+        .get("user_id")
+        .map(value_id)
+        .filter(|value| !value.is_empty())
+        .or_else(|| entry.pointer("/user/id").map(value_id))
+        .or_else(|| {
+            entry
+                .pointer("/user/urn")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    owner_id
+        .map(|owner| {
+            owner.trim_start_matches("soundcloud:users:")
+                == user_id.trim_start_matches("soundcloud:users:")
+        })
+        .unwrap_or(false)
 }
 
 fn soundcloud_playlist(entry: &Value, origin: &str) -> Option<kdj_core::models::StreamPlaylist> {
@@ -1196,6 +1450,126 @@ fn to_source(track: &Value) -> Option<SongSource> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn browser_cookie(
+        domain: &str,
+        name: &str,
+        value: &str,
+        expires: u64,
+    ) -> rookie::enums::Cookie {
+        rookie::enums::Cookie {
+            domain: domain.into(),
+            path: "/".into(),
+            secure: true,
+            expires: Some(expires),
+            name: name.into(),
+            value: value.into(),
+            http_only: false,
+            same_site: 0,
+        }
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn browser_profile_import_keeps_only_a_live_soundcloud_oauth_cookie() {
+        let now = unix_now() as u64;
+        let session = browser_session_from_profile(crate::browser::BrowserProfileCookies {
+            imported_from: "Arc · Default".into(),
+            cookies: vec![
+                browser_cookie(".soundcloud.com", "oauth_token", "expired", now - 1),
+                browser_cookie(".soundcloud.com", "other", "ignored", now + 600),
+                browser_cookie(".soundcloud.com", "oauth_token", "live-token", now + 600),
+            ],
+        })
+        .unwrap();
+        assert_eq!(session.access_token, "live-token");
+        assert_eq!(session.credential_kind, CREDENTIAL_BROWSER);
+        assert_eq!(session.imported_from, "Arc · Default");
+        assert!(!oauth_session_needs_refresh(&session));
+    }
+
+    #[test]
+    fn legacy_saved_sessions_remain_oauth_credentials() {
+        let session: SoundCloudSession = serde_json::from_value(json!({
+            "access_token": "token",
+            "refresh_token": "refresh",
+            "expires_at": unix_now() + 30
+        }))
+        .unwrap();
+        assert_eq!(session.credential_kind, CREDENTIAL_OAUTH);
+        assert!(oauth_session_needs_refresh(&session));
+    }
+
+    #[test]
+    fn default_soundcloud_avatar_falls_back_to_the_platform_mark() {
+        let profile =
+            json!({"avatar_url": "https://a1.sndcdn.com/images/default_avatar_large.png"});
+        assert_eq!(soundcloud_avatar(&profile, ""), "");
+        assert_eq!(
+            soundcloud_avatar(&json!({}), "https://i1.sndcdn.com/avatars-real-large.jpg"),
+            "https://i1.sndcdn.com/avatars-real-large.jpg"
+        );
+    }
+
+    #[test]
+    fn web_likes_split_tracks_from_playlists() {
+        let track = json!({"track": {"kind": "track", "id": 1}});
+        let playlist = json!({"playlist": {"kind": "playlist", "id": 2}});
+        assert_eq!(
+            soundcloud_like_track(&track)
+                .and_then(|item| item.get("id"))
+                .and_then(Value::as_i64),
+            Some(1)
+        );
+        assert!(soundcloud_like_playlist(&track).is_none());
+        assert_eq!(
+            soundcloud_like_playlist(&playlist)
+                .and_then(|item| item.get("id"))
+                .and_then(Value::as_i64),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn web_playlist_directory_unwraps_and_classifies_owned_sets() {
+        let owned = json!({
+            "type": "playlist",
+            "playlist": {
+                "kind": "playlist",
+                "id": 2,
+                "title": "自己的列表",
+                "user_id": 1669723679,
+                "track_count": 4
+            }
+        });
+        let collected = json!({
+            "type": "playlist",
+            "playlist": {
+                "kind": "playlist",
+                "id": 3,
+                "title": "收藏的列表",
+                "user": {"urn": "soundcloud:users:42"},
+                "track_count": 8
+            }
+        });
+        let owned_playlist = soundcloud_like_playlist(&owned).unwrap();
+        let collected_playlist = soundcloud_like_playlist(&collected).unwrap();
+        assert!(soundcloud_playlist_owned_by(
+            owned_playlist,
+            "soundcloud:users:1669723679"
+        ));
+        assert!(!soundcloud_playlist_owned_by(
+            collected_playlist,
+            "1669723679"
+        ));
+        assert_eq!(
+            soundcloud_playlist(owned_playlist, "created")
+                .unwrap()
+                .title,
+            "自己的列表"
+        );
+    }
 
     #[test]
     fn script_urls_are_pulled_out_of_the_homepage() {

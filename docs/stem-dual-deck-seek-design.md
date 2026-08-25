@@ -38,8 +38,8 @@ PlaybackCommand::SeekDeck
 ```
 
 当前活动 STEM Deck 的跳转仍可能建立 shadow Spleeter stream，或在原 worker 中等待约
-615–671 ms 的完整 tile。本设计保留现有 ring、Rubber Band、lane gain、waveform 与
-Spleeter tile cache，只在 `StreamSeekControl` 后增加即时层和精修换手。
+615–671 ms 的完整 tile。本设计保留现有 ring、Rubber Band、lane gain 与 Spleeter tile
+cache，只在 `StreamSeekControl` 后增加即时层和精修换手。
 
 ## 3. 不可破坏的约束
 
@@ -88,8 +88,7 @@ RefinementHandoff
 2. 一个已准入 Deck 的 HS-TasNet seek hop；
 3. 一项 Spleeter audible refinement；
 4. 普通 Spleeter audible tile；
-5. look-ahead；
-6. viewport fill。
+5. look-ahead。
 
 调度规则：
 
@@ -102,7 +101,7 @@ RefinementHandoff
   refinement 保持 FIFO；第一项换手后释放即时许可证，队列继续推进。
 - 非 macOS 加速器路径可保留两个 worker；macOS 安全 ORT CPU 路径固定一个 worker，避免
   后台模型的原生 session 与 arena 内存按 worker 数翻倍。
-- look-ahead 和 viewport fill 在任一即时阶段完全让路。
+- look-ahead 在任一即时阶段完全让路。
 
 ## 6. PCM、模型和缓存生命周期
 
