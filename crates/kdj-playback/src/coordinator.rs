@@ -3002,15 +3002,16 @@ impl Actor {
             revision,
         );
         let sender = self.sender.clone();
-        std::thread::Builder::new()
+        let worker_cancel = Arc::clone(&cancel);
+        let stream_worker = std::thread::Builder::new()
             .name(format!("kdj-stream-{}-{revision}", request.track_id))
             .spawn(move || {
                 let worker_request = request.clone();
                 let cancellation: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new({
-                    let cancel = Arc::clone(&cancel);
+                    let cancel = Arc::clone(&worker_cancel);
                     move || cancel.load(Ordering::Acquire) != revision
                 });
-                let fence = Arc::clone(&cancel);
+                let fence = Arc::clone(&worker_cancel);
                 let result = match writer {
                     PlaybackStreamWriter::Stems(writer) => {
                         if worker_request.source_kind != PlaybackSourceKind::Local {
@@ -3131,8 +3132,12 @@ impl Actor {
                     revision,
                     result,
                 });
-            })
-            .map_err(|error| format!("启动流式解码线程失败：{error}"))?;
+            });
+        if let Err(error) = stream_worker {
+            cancel_stream(&cancel);
+            self.pending[deck as usize] = None;
+            return Err(format!("启动流式解码线程失败：{error}"));
+        }
         Ok(())
     }
 

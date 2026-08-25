@@ -57,7 +57,8 @@ controlDeckPlatter(deck, { phase: start | move | end, velocity, validForMs, gest
 同一 WebKit coalesced batch 若只有一个时间戳，会先合并距离再计算一次速度，零位移则明确送出
 一次静止。
 
-流式 Deck 另有每侧两个预分配的 12 秒原始立体声窗口。后台 worker 根据绝对源帧和转动方向
+流式 Deck 另有每侧两个预分配的原始立体声窗口（48 kHz 时各 12 秒，并以 576,000 帧封顶）。
+后台 worker 根据绝对源帧和转动方向
 准确 seek 本地文件或回环 HTTP Range，写完 inactive window 后只用一个原子索引发布；callback
 用 reader pin 读取并做四点 Hermite 插值，全程不分配、不加锁、不解码。接近窗口边缘会提前
 载入带重叠的下一窗；真正 cache miss 只冻结游标并保留目标速度，窗口到达后按原手速继续，

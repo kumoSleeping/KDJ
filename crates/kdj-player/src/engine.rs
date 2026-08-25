@@ -427,6 +427,7 @@ pub struct AudioRenderer {
     deck_scratch_velocity: [f64; 2],
     /// Latest normalized input observation converted to media frames per output frame.
     deck_scratch_target_velocity: [f64; 2],
+    deck_scratch_moved: [bool; 2],
     deck_scratch_releasing: [bool; 2],
     deck_scratch_release_decay: [f64; 2],
     /// A settled streaming scratch replays cached history only until it catches the source head.
@@ -543,6 +544,7 @@ fn make_channels(
             deck_scratch_held: [false; 2],
             deck_scratch_velocity: [0.0; 2],
             deck_scratch_target_velocity: [0.0; 2],
+            deck_scratch_moved: [false; 2],
             deck_scratch_releasing: [false; 2],
             deck_scratch_release_decay: [0.0; 2],
             deck_scratch_playthrough: [false; 2],
@@ -1234,6 +1236,9 @@ impl AudioRenderer {
             return;
         }
         let normalized = velocity.clamp(-SCRATCH_VELOCITY_MAX, SCRATCH_VELOCITY_MAX);
+        if normalized.abs() > SCRATCH_STATIONARY_VELOCITY {
+            self.deck_scratch_moved[index] = true;
+        }
         self.deck_scratch_target_velocity[index] = normalized * self.source_rate_ratios[index];
         self.deck_scratch_input_at[index] = self.output_frames;
         let valid = if valid_for_seconds.is_finite() {
@@ -2340,6 +2345,7 @@ impl AudioRenderer {
         self.deck_scratch_playthrough[index] = false;
         self.deck_scratch_velocity[index] = 0.0;
         self.deck_scratch_target_velocity[index] = 0.0;
+        self.deck_scratch_moved[index] = false;
         self.deck_scratch_input_at[index] = SCRATCH_NO_TICK;
         self.deck_scratch_valid_frames[index] = 0;
         self.deck_scratch_handoff_armed[index] = false;
@@ -2412,7 +2418,10 @@ impl AudioRenderer {
             SCRATCH_STATIONARY_VELOCITY
         };
 
-        if !self.deck_playing[index] && velocity.abs() <= SCRATCH_STATIONARY_VELOCITY {
+        if !self.deck_playing[index]
+            && !self.deck_scratch_moved[index]
+            && velocity.abs() <= SCRATCH_STATIONARY_VELOCITY
+        {
             // A stationary paused touch changed no source position. There is nothing to catch up
             // or seek, so release immediately even for a streaming Deck.
             self.end_scratch_voice(index);
@@ -4267,6 +4276,58 @@ mod tests {
             longest_near_zero_run(&reversed) < 32,
             "seekable pre-cue PCM must replace the old silent decode-origin lead-in"
         );
+        drop(writer);
+    }
+
+    #[test]
+    fn paused_stream_that_moved_does_not_mistake_zero_note_off_for_a_tap() {
+        let (stream, mut writer) = StreamSource::<[f32; 2]>::bounded(2_048);
+        for _ in 0..1_024 {
+            writer.push([0.4, -0.4], || false).unwrap();
+        }
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared(
+                DeckId::A,
+                96,
+                SourceKind::Stream,
+                Arc::as_ptr(&stream) as usize,
+                0,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::Start,
+                velocity: 0.0,
+            })
+            .unwrap();
+        controller
+            .send(RtCommand::UpdateDeckPlatter {
+                deck: DeckId::A,
+                velocity: 1.0,
+                valid_for_seconds: 0.25,
+            })
+            .unwrap();
+        renderer.render_prepared(&mut vec![0.0; 480], 48_000, 1);
+        let moved = controller.snapshot().deck_frames[0];
+        assert!(moved > 100);
+
+        controller
+            .send(RtCommand::ControlDeckPlatter {
+                deck: DeckId::A,
+                phase: PlatterPhase::End,
+                velocity: 0.0,
+            })
+            .unwrap();
+        renderer.render_prepared(&mut vec![0.0; 64], 48_000, 1);
+        let released = controller.snapshot();
+        assert!(!released.deck_scratch_held[0]);
+        assert!(
+            released.deck_scratch_voice_active[0],
+            "a moved paused stream needs a silent decoder handoff even when note-off speed is zero"
+        );
+        assert!(!released.deck_playing[0]);
         drop(writer);
     }
 
