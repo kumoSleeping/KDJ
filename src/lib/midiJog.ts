@@ -20,7 +20,7 @@ const MAX_NUDGE_TICKS_PER_MESSAGE = 8;
 /** Edge-jog bursts share a cursor so 01h ticks accumulate. A held platter must ignore this. */
 export const MIDI_JOG_CURSOR_STALE_MS = 240;
 /** Must mirror the native pitch-preserving tempo window in kdj-playback's JOG_NUDGE_* constants. */
-export const MIDI_JOG_NUDGE_HOLD_MS = 180;
+export const MIDI_JOG_NUDGE_HOLD_MS = 120;
 export const MIDI_JOG_NUDGE_MAX_RATE_OFFSET = 0.18;
 
 export interface MidiJogCursor {

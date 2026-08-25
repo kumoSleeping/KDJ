@@ -85,7 +85,9 @@ export function projectLoopedPlaybackTime(
 ): number {
   const anchor = Number.isFinite(anchorMedia) ? anchorMedia : 0;
   const elapsed = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
-  const speed = Number.isFinite(rate) && rate > 0 ? rate : 1;
+  // Audible callback rate is signed: zero freezes a parked platter and negative values let
+  // karaoke follow reverse scratch instead of continuing forward on the target TEMPO.
+  const speed = Number.isFinite(rate) ? rate : 1;
   const linear = anchor + elapsed * speed;
   if (
     typeof loopStart !== "number"

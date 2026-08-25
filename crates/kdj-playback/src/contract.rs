@@ -20,6 +20,7 @@ pub struct PlaybackClock {
     pub output_sample_rate: u32,
     pub callback_time_ns: u64,
     pub presentation_time_ns: u64,
+    pub foreground_deck: u8,
     pub decks: [PlaybackDeckClock; 2],
 }
 
@@ -38,6 +39,11 @@ pub struct PlaybackDeckClock {
     pub discontinuity_revision: u64,
     pub playing: bool,
     pub scratch_held: bool,
+    pub loop_generation: u64,
+    pub loop_start: Option<f64>,
+    pub loop_length: Option<f64>,
+    pub loop_wrap_count: u64,
+    pub loop_stall_frames: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -323,6 +329,8 @@ pub enum PlaybackCommand {
     ToggleDeckLoop {
         deck: u8,
         length: f64,
+        #[serde(default)]
+        quantize: bool,
     },
     /// Resize the active loop while preserving its native loop-in frame.
     ResizeDeckLoop {
@@ -472,6 +480,13 @@ pub struct PlaybackDeckSnapshot {
     /// Active engine loop window in track seconds; `None` when the deck plays linearly.
     pub loop_start: Option<f64>,
     pub loop_length: Option<f64>,
+    /// Callback-confirmed loop state and diagnostics. Desired state may lead these fields by the
+    /// bounded worker and DAC pipeline during a toggle or resize.
+    pub effective_loop_generation: u64,
+    pub effective_loop_start: Option<f64>,
+    pub effective_loop_length: Option<f64>,
+    pub loop_wrap_count: u64,
+    pub loop_stall_frames: u64,
 }
 
 impl Default for PlaybackSnapshot {
@@ -560,6 +575,7 @@ mod tests {
             PlaybackCommand::ToggleDeckLoop {
                 deck: 1,
                 length,
+                quantize: false,
             } if (length - 2.0).abs() < f64::EPSILON
         ));
 
@@ -653,4 +669,10 @@ pub struct CommandAck {
     pub command_id: u64,
     pub accepted_sequence: u64,
     pub snapshot: PlaybackSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlAck {
+    pub accepted_sequence: u64,
 }

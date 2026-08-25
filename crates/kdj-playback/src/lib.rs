@@ -10,7 +10,7 @@ mod platform;
 mod remote_source;
 
 pub use contract::{
-    CommandAck, PlaybackBeatGrid, PlaybackClock, PlaybackCommand, PlaybackDeckClock,
+    CommandAck, ControlAck, PlaybackBeatGrid, PlaybackClock, PlaybackCommand, PlaybackDeckClock,
     PlaybackLevels, PlaybackPhase, PlaybackPlatterPhase, PlaybackSnapshot, PlaybackSource,
     PlaybackSourceKind, PlaybackSyncPhase, PlaybackSyncSnapshot, PlaybackTransitionPlan,
 };

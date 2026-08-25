@@ -33,7 +33,9 @@ pub use command::{
 pub use decode::{
     decode_file, decode_file_with_limit, decode_file_with_limit_and_cancel, DecodedTrack,
 };
-pub use engine::{command_channel, AudioRenderer, CommandError, PlayerController};
+pub use engine::{
+    command_channel, AudioRenderer, CommandError, PlayerController, PERFORMANCE_PREROLL_SECONDS,
+};
 pub use output::{
     open_dynamic_default, open_prepared_default, DeviceOutput, DynamicPlayer, OutputError,
     OutputSpec,
@@ -44,8 +46,8 @@ pub use stream::{
     decode_source_streaming, decode_source_streaming_seekable, decode_stem_cache_streaming,
     format_loop_clock, run_pitch_preserving_pipeline, FrameLerp, LoopWindow, StemFrame,
     StreamMetadata, StreamSeekControl, StreamSource, StreamWriter, StreamingMediaSource,
-    DEFAULT_STREAM_BUFFER_SECONDS, MAX_TRANSPORT_LOOP_PCM_BYTES, MAX_TRANSPORT_LOOP_SECONDS,
-    STEM_GAIN_MAX, STEM_LANES,
+    DEFAULT_STREAM_BUFFER_SECONDS, LOOP_CAPTURE_HISTORY_SECONDS, MAX_TRANSPORT_LOOP_PCM_BYTES,
+    MAX_TRANSPORT_LOOP_SECONDS, STEM_GAIN_MAX, STEM_LANES,
 };
 pub use stretch::{stretch_preserving_pitch, stretch_preserving_pitch_with_cancel};
 pub use time_stretch::{

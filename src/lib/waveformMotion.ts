@@ -20,14 +20,26 @@ export function liveWaveformPlaybackRate(
   return 1;
 }
 
-export function shouldRetargetLiveWaveformClock(
-  _errorMs: number,
-  _discontinuity: boolean,
-): boolean {
-  // PCM bake and beat-grid rail are separate Web Animations. Seeking currentTime on them
-  // independently (or a second time after layout already landed) is the visible relative shake
-  // on Play/Seek. Live clock may only change playbackRate; layout owns currentTime.
-  return false;
+export function liveWaveformPhaseError(
+  authoritySeconds: number,
+  visualSeconds: number,
+  loopLengthSeconds: number | null,
+): number {
+  let error = authoritySeconds - visualSeconds;
+  if (typeof loopLengthSeconds === "number" && Number.isFinite(loopLengthSeconds) && loopLengthSeconds > 0) {
+    error = ((error + loopLengthSeconds / 2) % loopLengthSeconds + loopLengthSeconds)
+      % loopLengthSeconds - loopLengthSeconds / 2;
+  }
+  return Number.isFinite(error) ? error : 0;
+}
+
+/** A tiny visual PLL removes steady phase debt without repeatedly assigning Animation.currentTime. */
+export function correctedLiveWaveformRate(rate: number, phaseErrorSeconds: number): number {
+  const nominal = Number.isFinite(rate) ? rate : 0;
+  if (Math.abs(nominal) < 1.0e-6) return nominal;
+  const maximum = Math.max(Math.abs(nominal) * 0.005, 0.0005);
+  const correction = Math.max(-maximum, Math.min(maximum, phaseErrorSeconds / 2));
+  return nominal + correction;
 }
 
 /** Platter phase is landed once at grab (or a real source discontinuity), never every clock tick. */
@@ -64,15 +76,6 @@ export function shouldPauseLiveWaveformClock(
  * Seeks and Play edges must land on the authority sample itself: projecting that sample by the
  * leftover output buffer is what shoves the waveform a little forward or back.
  */
-export function liveWaveformAuthoritySeconds(
-  currentTime: number,
-  projectedSeconds: number,
-  landRaw: boolean,
-): number {
-  if (landRaw) return currentTime;
-  return projectedSeconds;
-}
-
 /** Project an audio-callback cursor onto `performance.now()` using the DAC-correlated timestamp. */
 export function projectedLiveWaveformPosition(
   currentTime: number,

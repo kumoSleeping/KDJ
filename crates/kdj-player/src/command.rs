@@ -170,6 +170,9 @@ pub enum RtCommand {
     /// until the coordinator restores it.
     SetDeckLoop {
         deck: DeckId,
+        /// Even LoopWindow generation. Streaming PCM carries this generation to the callback so
+        /// desired control state cannot be confused with a different cached loop revision.
+        generation: u64,
         looping: bool,
         /// Inclusive loop-in, in the same output-rate frame units as `deck_positions`.
         start_frames: u64,

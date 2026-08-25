@@ -3856,6 +3856,9 @@ export function PlayerBar({
       cover: leftDeckView?.cover ?? "",
       loopStart: leftPerformanceState?.loopStart ?? null,
       loopLength: leftPerformanceState?.loopLength ?? null,
+      effectiveLoopStart: leftPerformanceState?.effectiveLoopStart ?? null,
+      effectiveLoopLength: leftPerformanceState?.effectiveLoopLength ?? null,
+      effectiveLoopGeneration: leftPerformanceState?.effectiveLoopGeneration ?? 0,
     },
     {
       track: rightDeckView?.track ?? null,
@@ -3884,6 +3887,9 @@ export function PlayerBar({
       cover: rightDeckView?.cover ?? "",
       loopStart: rightPerformanceState?.loopStart ?? null,
       loopLength: rightPerformanceState?.loopLength ?? null,
+      effectiveLoopStart: rightPerformanceState?.effectiveLoopStart ?? null,
+      effectiveLoopLength: rightPerformanceState?.effectiveLoopLength ?? null,
+      effectiveLoopGeneration: rightPerformanceState?.effectiveLoopGeneration ?? 0,
     },
   ];
   const performanceDecksRef = useRef(performanceDecks);
@@ -4065,7 +4071,7 @@ export function PlayerBar({
   const applyStemModeRef = useRef(applyStemMode);
   applyStemModeRef.current = applyStemMode;
 
-  const togglePerformanceLoop = (side: 0 | 1, length: number) => {
+  const togglePerformanceLoop = (side: 0 | 1, length: number, quantize: boolean) => {
     const deckTrack = performanceDecks[side].track;
     if (!deckTrack) return;
     if (playerRuntime.state().decks[side].trackId !== deckTrack.id) {
@@ -4073,7 +4079,7 @@ export function PlayerBar({
       // generation, not an operational failure; the physical binding will reconcile next.
       return;
     }
-    void playerRuntime.toggleDeckLoop(side, length).catch((error: unknown) => {
+    void playerRuntime.toggleDeckLoop(side, length, quantize).catch((error: unknown) => {
       setNotice("LOOP 失败：" + (error instanceof Error ? error.message : String(error)));
     });
   };

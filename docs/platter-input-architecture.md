@@ -51,12 +51,16 @@ controlDeckPlatter(deck, { phase: start | move | end, velocity, gestureId, seque
 
 ## 音频与波形权威
 
-输入侧用最近三个源时间戳区间估计速度，真实反向时立即清空旧方向；实时 callback 再做
-10 ms 响应、160 ms 停转判定和唱片质量 coast。流式音频只在必要时
+输入侧用最近三个真实源时间戳区间估计速度，真实反向时立即清空旧方向；速度有效期按近期
+设备包间隔自适应为 24–100 ms。同一 WebKit coalesced batch 若只有一个时间戳，会先合并距离再
+计算一次速度，不再为每个点虚构 8 ms。零位移会明确送出一次静止。实时 callback 做 10 ms
+响应，并以 100 ms 为输入失联的最终安全网；过期后用 40 ms 摩擦停车。流式音频只在必要时
 使用双向 ScratchTape；缓动回 transport 后，缓存读针追上 producer head 就原位交还正常流，
 不会重建 decoder，也不会永久留在 scratch voice。暂停 Deck 的 throw 会自然减速到零，但保持
 逻辑暂停。只有电容触摸可建立 platter gesture：未触摸的边缘转动只 nudge 正在运行的 transport，
-暂停时直接丢弃，因此挪动机器不会让停播 Deck 发声。准备流从 Cue 才开始解码时，盘针仍可穿过
+暂停时直接丢弃，因此挪动机器不会让停播 Deck 发声。throw 的 60–900 ms 参数是到 handoff
+阈值的实际 settle 时长，不再是可能拖到数秒的一阶时间常数；轻微接触抖动与真实 throw 连续
+分级。准备流从 Cue 才开始解码时，盘针仍可穿过
 该缓存原点前的静音 lead-in，并继续进入统一的负时间预卷。
 
 未触摸盘面的边缘加减速走同一个 Rubber Band R3 tempo lane，保持音高且不写回 TEMPO 推子；
@@ -64,8 +68,9 @@ controlDeckPlatter(deck, { phase: start | move | end, velocity, gestureId, seque
 位置建立新手势，因此 nudge 后立即触摸不会先跳一个小范围。
 
 波形只跟 callback/DAC 关联时钟。Platter start 只在接管边界校准一次 PCM bake 与 beat-grid rail；
-后续 30 Hz 样本只更新 compositor 速度，不反复写 `currentTime`。极短 Loop 则由同一个 compositor
-按 callback 发布的 in/length 做无限 modulo 动画，不等待下一次稀疏状态样本才回绕。
+后续 30 Hz 样本主要更新 compositor 速度，不反复写 currentTime；小于 80 ms 的普通误差由
+最大 ±0.5% 的视觉 PLL 缓慢收敛，真正的相位债务才单次落点。极短 Loop 由同一个 compositor
+按 callback 已经生效的 generation/in/length 做无限 modulo 动画，不使用 coordinator 的提前状态。
 
 ## 关键不变量
 
@@ -75,6 +80,7 @@ controlDeckPlatter(deck, { phase: start | move | end, velocity, gestureId, seque
 4. `end` 自带最终速度；松手不能因遗漏最后一个 move 而归零。
 5. 高频 move 不触发全量 React snapshot。
 6. 波形位置来自音频 callback，不从输入事件累加第二条时间线。
+7. Rubber Band 的源时间游标保留小数推进量；非整数 Tempo 不得积累时间戳或永久相位债务。
 
 ## 参考链接
 

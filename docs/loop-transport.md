@@ -5,6 +5,8 @@
 KDJ exposes one Auto Loop action per physical Deck:
 
 1. With no active loop, pressing LOOP samples loop-in from the native audio callback clock.
+   Quantize off preserves that exact frame; Quantize on floors the same sample to the preceding
+   analysed beat without involving a WebView playhead.
 2. Loop-out is loop-in plus the selected beat duration, represented as the half-open interval
    [in, out).
 3. Pressing LOOP while active exits. The current cycle reaches out and then resumes the untouched
@@ -24,14 +26,20 @@ Loop is not implemented as repeated media seek.
 - The pitch-preserving worker retains two seconds of recent timed PCM. This covers the difference
   between the callback needle and worker read-ahead when LOOP is pressed.
 - The worker captures one exact decoded PCM region from in (inclusive) to out (exclusive).
-- A loop is capped at 32 seconds and 96 MiB of decoded PCM per Deck; unusually high-rate STEM
-  combinations are rejected before any allocation.
+- A loop is capped at 32 seconds and all active Deck loop reservoirs share one 96 MiB budget;
+  unusually high-rate STEM combinations are rejected before any allocation.
 - At out it reads that region circularly through the same Rubber Band session. EQ, Deck gain,
   effects, tempo and STEM lane state are not rebuilt.
 - Linear PCM after out stays queued in the raw ring. LOOP off finishes the current cached cycle and
   resumes that queue, so no decoder seek, source replacement, or trip to track zero can occur.
-- Every post-stretch packet carries its wrapped absolute media time; the callback remains the sole
-  authority for the published playhead.
+- Every post-stretch packet carries an exact fractional source clock plus loop generation and wrap
+  edge. Desired commands cannot relabel PCM from an older cached window. The callback publishes
+  only the generation that has reached the DAC-facing ring, including wrap and stall counters.
+- The stereo post-tempo ring is 48 ms and the STEM ring is 160 ms. Rubber Band control blocks are
+  capped at 512 source frames, and an active window interrupts obsolete output only once that PCM
+  reaches loop-out; valid first-cycle audio is never dropped early.
+- A 64-frame maximum cyclic bridge smooths a discontinuous PCM seam without changing loop length
+  or mutating the retained source cache.
 
 LoopWindow is a small seqlock. Odd revisions mean a write is in progress; workers only accept a
 stable even revision and its matching in/out snapshot.

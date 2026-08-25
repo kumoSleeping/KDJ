@@ -25,7 +25,13 @@ import {
   type PublishedStreamPlayback,
   type PublishedStreamPlaybackEvent,
 } from "../../lib/streamTrack";
-import { runtimePlayer, type UnifiedPlayerState } from "../../lib/unifiedPlayer";
+import {
+  getLiveDeckClock,
+  getLiveForegroundDeck,
+  runtimePlayer,
+  subscribeLivePlaybackClock,
+  type UnifiedPlayerState,
+} from "../../lib/unifiedPlayer";
 import { ensureLyrics, useLyricsStore } from "../../stores/lyricsStore";
 import type { Track } from "../../types";
 
@@ -38,46 +44,75 @@ function alignedText(
   return lines.find((line) => Math.abs(line.time - time) < 0.05)?.text;
 }
 
-/**
- * 播放状态事件大约 100ms 一拍；悬浮歌词逐字推进用墙钟把进度补到一帧一更。
- */
 function useSmoothPlaybackTime(playback: UnifiedPlayerState): number {
-  const activeDeck = playback.decks
+  const live = useSyncExternalStore(
+    subscribeLivePlaybackClock,
+    () => {
+      const foreground = getLiveDeckClock(getLiveForegroundDeck());
+      if (foreground?.trackId === playback.trackId) return foreground;
+      return ([0, 1] as const)
+        .map((deck) => getLiveDeckClock(deck))
+        .find((clock) => clock?.trackId === playback.trackId && clock.playing)
+        ?? null;
+    },
+    () => null,
+  );
+  const fallbackDeck = playback.decks
     .filter((deck) => deck.trackId === playback.trackId)
     .sort((left, right) =>
       Math.abs(left.currentTime - playback.currentTime)
       - Math.abs(right.currentTime - playback.currentTime))[0];
-  const loopStart = activeDeck?.loopStart ?? null;
-  const loopLength = activeDeck?.loopLength ?? null;
-  const [time, setTime] = useState(playback.currentTime);
+  const media = live?.currentTime ?? playback.currentTime;
+  const rate = live?.audibleRate
+    ?? (fallbackDeck?.audibleRate ?? (playback.playing ? playback.rate : 0));
+  const loopStart = live?.loopStart
+    ?? fallbackDeck?.effectiveLoopStart
+    ?? fallbackDeck?.loopStart
+    ?? null;
+  const loopLength = live?.loopLength
+    ?? fallbackDeck?.effectiveLoopLength
+    ?? fallbackDeck?.loopLength
+    ?? null;
+  const advancing = live
+    ? live.playing || live.scratchHeld
+    : playback.playing;
+  const presentationWall = live?.clientPresentationTimeMs ?? performance.now();
+  const [time, setTime] = useState(media);
   const anchorRef = useRef({
-    media: playback.currentTime,
-    wall: performance.now(),
-    rate: playback.rate,
+    media,
+    wall: presentationWall,
+    rate,
     loopStart,
     loopLength,
   });
 
   useEffect(() => {
     anchorRef.current = {
-      media: playback.currentTime,
-      wall: performance.now(),
-      rate: playback.rate > 0 ? playback.rate : 1,
+      media,
+      wall: presentationWall,
+      rate,
       loopStart,
       loopLength,
     };
-    setTime(playback.currentTime);
+    setTime(projectLoopedPlaybackTime(
+      media,
+      Math.max(0, performance.now() - presentationWall) / 1_000,
+      rate,
+      loopStart,
+      loopLength,
+    ));
   }, [
-    playback.currentTime,
-    playback.rate,
+    live,
+    media,
+    presentationWall,
+    rate,
     playback.trackId,
-    playback.playing,
     loopStart,
     loopLength,
   ]);
 
   useEffect(() => {
-    if (!playback.playing) return;
+    if (!advancing || Math.abs(rate) < 1.0e-6) return;
     let frame = 0;
     const tick = () => {
       const anchor = anchorRef.current;
@@ -92,9 +127,9 @@ function useSmoothPlaybackTime(playback: UnifiedPlayerState): number {
     };
     frame = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(frame);
-  }, [playback.playing, playback.trackId]);
+  }, [advancing, playback.trackId, rate]);
 
-  return playback.playing ? time : playback.currentTime;
+  return time;
 }
 
 function publishedStreamState(value: PublishedStreamPlayback): UnifiedPlayerState {

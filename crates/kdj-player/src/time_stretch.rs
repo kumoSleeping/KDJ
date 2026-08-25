@@ -22,10 +22,11 @@ pub const MAX_TEMPO_RATE: f32 = 2.0;
 const MAX_PROCESS_FRAMES: usize = 4_096;
 const RETRIEVE_FRAMES: usize = 4_096;
 /// Rubber Band R3 accepts dynamic ratios, but rebuilding its analysis plan for every MIDI/slider
-/// sample can discard more output than the callback ring can hide. Latest-value controls are
-/// therefore sampled once per 2,048 source frames (~43 ms at 48 kHz): fast enough for a
-/// pitch-preserving edge jog, while leaving R3 analysis headroom for two Decks and STEM.
-const MIN_RATE_UPDATE_SOURCE_FRAMES: usize = 2_048;
+/// sample can discard more output than the callback ring can hide. Keep its C-side allocation
+/// ceiling large while feeding small control blocks: 512 frames are about 10.7 ms at 48 kHz and
+/// make a pitch-preserving jog feel immediate without putting Rubber Band in the audio callback.
+const CONTROL_PROCESS_FRAMES: usize = 512;
+const MIN_RATE_UPDATE_SOURCE_FRAMES: usize = CONTROL_PROCESS_FRAMES;
 /// Below this, Rubber Band R3 is an identity with hop-rate phase artifacts. Pass PCM through.
 const UNITY_RATE_EPSILON: f32 = 0.0005;
 
@@ -167,6 +168,144 @@ pub trait TimeStretchFrame: Copy + Send + 'static {
     fn from_planar(channels: &[Vec<f32>], frame: usize) -> Self;
 }
 
+/// Source-domain metadata transported through Rubber Band with the PCM it describes.
+///
+/// media_time alone is insufficient for a loop: a backward timestamp can be an intentional wrap
+/// rather than a seek. These are plain scalars so the callback-facing packet stays allocation-free.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SourceTiming {
+    pub media_time: f64,
+    pub loop_generation: u64,
+    pub loop_active: bool,
+    pub loop_wrapped: bool,
+}
+
+impl SourceTiming {
+    pub(crate) const fn linear(media_time: f64) -> Self {
+        Self {
+            media_time,
+            loop_generation: 0,
+            loop_active: false,
+            loop_wrapped: false,
+        }
+    }
+}
+
+impl Default for SourceTiming {
+    fn default() -> Self {
+        Self::linear(f64::NAN)
+    }
+}
+
+/// Fractional, bounded mapping from source frames to rendered output frames.
+///
+/// The former implementation rounded every output frame's media advance before popping a
+/// timestamp. At 1.25x that consumed one timestamp for 1.25 source frames, growing the queue
+/// forever and moving the published clock 20% slower than the audible PCM. This cursor retains
+/// the fractional remainder; its queue is bounded by Rubber Band's finite analysis latency.
+struct SourceTimeline {
+    sample_period: f64,
+    samples: VecDeque<SourceTiming>,
+    offset: f64,
+    last: SourceTiming,
+    pending_wrap: bool,
+    #[cfg(test)]
+    maximum_pending: usize,
+}
+
+impl SourceTimeline {
+    fn new(sample_rate: u32) -> Self {
+        Self {
+            sample_period: 1.0 / f64::from(sample_rate.max(1)),
+            samples: VecDeque::new(),
+            offset: 0.0,
+            last: SourceTiming::default(),
+            pending_wrap: false,
+            #[cfg(test)]
+            maximum_pending: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.samples.clear();
+        self.offset = 0.0;
+        self.last = SourceTiming::default();
+        self.pending_wrap = false;
+        #[cfg(test)]
+        {
+            self.maximum_pending = 0;
+        }
+    }
+
+    fn push(&mut self, timing: SourceTiming) {
+        self.samples.push_back(timing);
+        #[cfg(test)]
+        {
+            self.maximum_pending = self.maximum_pending.max(self.samples.len());
+        }
+    }
+
+    fn normalize_offset(&mut self) {
+        while self.offset >= 1.0 && self.samples.len() > 1 {
+            self.samples.pop_front();
+            self.offset -= 1.0;
+            if self
+                .samples
+                .front()
+                .is_some_and(|timing| timing.loop_wrapped)
+            {
+                // High rates can step over the exact source frame carrying the boundary.
+                self.pending_wrap = true;
+            }
+        }
+    }
+
+    fn next(&mut self, media_advance: f32) -> SourceTiming {
+        self.normalize_offset();
+        let mut timing = self.samples.front().copied().unwrap_or(self.last);
+        if self.pending_wrap {
+            timing.loop_wrapped = true;
+            self.pending_wrap = false;
+        }
+
+        if let (Some(current), Some(next)) = (self.samples.front(), self.samples.get(1)) {
+            let delta = next.media_time - current.media_time;
+            let contiguous = current.media_time.is_finite()
+                && next.media_time.is_finite()
+                && current.loop_generation == next.loop_generation
+                && current.loop_active == next.loop_active
+                && !next.loop_wrapped
+                && (delta - self.sample_period).abs() <= self.sample_period * 0.6;
+            if contiguous {
+                timing.media_time = current.media_time + delta * self.offset.clamp(0.0, 1.0);
+            }
+        }
+
+        // At slow rates one source frame can render repeatedly. A wrap is an edge, not a level.
+        if timing.loop_wrapped {
+            if let Some(front) = self.samples.front_mut() {
+                front.loop_wrapped = false;
+            }
+        }
+        self.last = timing;
+        self.last.loop_wrapped = false;
+
+        let advance = if media_advance.is_finite() && media_advance > 0.0 {
+            f64::from(media_advance)
+        } else {
+            1.0
+        };
+        self.offset += advance;
+        self.normalize_offset();
+        timing
+    }
+
+    #[cfg(test)]
+    fn maximum_pending(&self) -> usize {
+        self.maximum_pending
+    }
+}
+
 impl TimeStretchFrame for [f32; 2] {
     const CHANNELS: usize = 2;
 
@@ -200,8 +339,7 @@ pub struct PitchPreservingStretcher<F: TimeStretchFrame> {
     expected_output_frames: f64,
     emitted_output_frames: usize,
     rate_spans: VecDeque<RateSpan>,
-    source_times: VecDeque<f64>,
-    last_source_time: f64,
+    source_timeline: SourceTimeline,
     realtime_activity: Option<WorkActivityGuard>,
     finished: bool,
     marker: PhantomData<F>,
@@ -261,8 +399,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
             expected_output_frames: 0.0,
             emitted_output_frames: 0,
             rate_spans: VecDeque::new(),
-            source_times: VecDeque::new(),
-            last_source_time: f64::NAN,
+            source_timeline: SourceTimeline::new(sample_rate),
             realtime_activity: (!is_unity_rate(rate))
                 .then(|| work_scheduler().activity(WorkClass::TempoStretch)),
             finished: false,
@@ -301,8 +438,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
         self.expected_output_frames = 0.0;
         self.emitted_output_frames = 0;
         self.rate_spans.clear();
-        self.source_times.clear();
-        self.last_source_time = f64::NAN;
+        self.source_timeline.reset();
         self.source_frames_since_rate_update = 0;
         self.finished = false;
         let rate = self.control.rate();
@@ -337,12 +473,26 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
     where
         S: FnMut(F, f32, u64, f64) -> Result<()>,
     {
+        self.push_transport_timed(
+            frame,
+            SourceTiming::linear(media_time),
+            |frame, media_advance, revision, timing| {
+                sink(frame, media_advance, revision, timing.media_time)
+            },
+        )
+    }
+
+    pub(crate) fn push_transport_timed<S>(
+        &mut self,
+        frame: F,
+        source_timing: SourceTiming,
+        mut sink: S,
+    ) -> Result<()>
+    where
+        S: FnMut(F, f32, u64, SourceTiming) -> Result<()>,
+    {
         if self.finished {
             return Ok(());
-        }
-        if media_time.is_finite() {
-            self.source_times.push_back(media_time);
-            self.last_source_time = media_time;
         }
         let rate = self.control.rate();
         if !is_unity_rate(rate) {
@@ -353,8 +503,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
             self.applied_rate = 1.0;
             self.applied_revision = self.control.revision();
             self.control.mark_applied(1.0, self.applied_revision);
-            let _ = self.source_times.pop_front();
-            sink(frame, 1.0, self.applied_revision, media_time)?;
+            sink(frame, 1.0, self.applied_revision, source_timing)?;
             return Ok(());
         }
         if !self.engine_engaged {
@@ -365,6 +514,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
             unsafe { rubberband_reset(self.state.as_ptr()) };
             self.configure_and_prime()?;
         }
+        self.source_timeline.push(source_timing);
         frame.push_planar(&mut self.input);
         if self.input_len() >= self.next_required {
             self.process_input(false)?;
@@ -385,6 +535,15 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
     pub fn finish_timed<S>(&mut self, mut sink: S) -> Result<()>
     where
         S: FnMut(F, f32, u64, f64) -> Result<()>,
+    {
+        self.finish_transport_timed(|frame, media_advance, revision, timing| {
+            sink(frame, media_advance, revision, timing.media_time)
+        })
+    }
+
+    pub(crate) fn finish_transport_timed<S>(&mut self, mut sink: S) -> Result<()>
+    where
+        S: FnMut(F, f32, u64, SourceTiming) -> Result<()>,
     {
         if self.finished {
             return Ok(());
@@ -527,7 +686,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
         // process call, so one frame is the safe progress fallback if the library still says 0.
         self.next_required =
             unsafe { rubberband_get_samples_required(self.state.as_ptr()) as usize }
-                .clamp(1, MAX_PROCESS_FRAMES);
+                .clamp(1, CONTROL_PROCESS_FRAMES);
     }
 
     fn discard_prime_output(&mut self) -> Result<()> {
@@ -553,7 +712,7 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
 
     fn drain_output<S>(&mut self, final_limit: Option<usize>, sink: &mut S) -> Result<()>
     where
-        S: FnMut(F, f32, u64, f64) -> Result<()>,
+        S: FnMut(F, f32, u64, SourceTiming) -> Result<()>,
     {
         loop {
             let available = unsafe { rubberband_available(self.state.as_ptr()) };
@@ -580,30 +739,16 @@ impl<F: TimeStretchFrame> PitchPreservingStretcher<F> {
                     continue;
                 }
                 let (media_advance, revision) = self.next_media_timing();
-                let media_time = self.take_source_time(media_advance);
+                let source_timing = self.source_timeline.next(media_advance);
                 sink(
                     F::from_planar(&self.output, frame),
                     media_advance,
                     revision,
-                    media_time,
+                    source_timing,
                 )?;
                 self.emitted_output_frames += 1;
             }
         }
-    }
-
-    fn take_source_time(&mut self, media_advance: f32) -> f64 {
-        let steps = media_advance.max(1.0).round() as usize;
-        let mut time = self.last_source_time;
-        for _ in 0..steps.max(1) {
-            if let Some(next) = self.source_times.pop_front() {
-                time = next;
-            }
-        }
-        if time.is_finite() {
-            self.last_source_time = time;
-        }
-        time
     }
 
     fn next_media_timing(&mut self) -> (f32, u64) {
@@ -647,6 +792,87 @@ fn finite(sample: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::StemFrame;
+
+    #[test]
+    fn fractional_source_timeline_consumes_exact_distance_and_reports_wrap_once() {
+        let mut timeline = SourceTimeline::new(100);
+        for frame in 0..20 {
+            timeline.push(SourceTiming {
+                media_time: if frame < 10 {
+                    frame as f64 / 100.0
+                } else {
+                    1.0 + (frame - 10) as f64 / 100.0
+                },
+                loop_generation: if frame < 10 { 2 } else { 4 },
+                loop_active: frame < 10,
+                loop_wrapped: frame == 10,
+            });
+        }
+
+        let mut output = Vec::new();
+        for _ in 0..10 {
+            output.push(timeline.next(1.6));
+        }
+        assert_eq!(
+            output.iter().filter(|timing| timing.loop_wrapped).count(),
+            1,
+            "a high-rate cursor must preserve exactly one skipped wrap edge"
+        );
+        let switched = output
+            .iter()
+            .position(|timing| timing.loop_generation == 4)
+            .expect("the fractional cursor must reach the new generation");
+        assert!(output[switched].media_time >= 1.0);
+        assert!(timeline.samples.len() <= 5);
+    }
+
+    #[test]
+    fn timed_r3_clock_tracks_fractional_rates_without_unbounded_timestamp_debt() {
+        let sample_rate = 8_000u32;
+        let input_frames = sample_rate as usize * 2;
+        for rate in [0.8, 1.1, 1.25, 1.49, 1.6, 2.0] {
+            let mut processor =
+                PitchPreservingStretcher::new(TempoControl::new(rate), sample_rate).unwrap();
+            let mut rendered = Vec::new();
+            for frame in 0..input_frames {
+                processor
+                    .push_timed(
+                        [0.1, -0.1],
+                        frame as f64 / f64::from(sample_rate),
+                        |_, advance, _, time| {
+                            rendered.push((time, advance));
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+            }
+            processor
+                .finish_timed(|_, advance, _, time| {
+                    rendered.push((time, advance));
+                    Ok(())
+                })
+                .unwrap();
+
+            let mut represented = 0.0f64;
+            for (time, advance) in &rendered {
+                let expected = represented / f64::from(sample_rate);
+                assert!(
+                    (*time - expected).abs() <= 2.0 / f64::from(sample_rate),
+                    "rate={rate} expected source clock {expected:.6}, got {time:.6}"
+                );
+                represented += f64::from(*advance);
+            }
+            assert!(
+                (represented - input_frames as f64).abs() < 3.0,
+                "rate={rate} represented {represented} of {input_frames} source frames"
+            );
+            assert!(
+                processor.source_timeline.maximum_pending() <= MAX_PROCESS_FRAMES * 3,
+                "rate={rate} retained {} source timestamps",
+                processor.source_timeline.maximum_pending()
+            );
+        }
+    }
 
     fn sine(frequency: f32, seconds: f32, sample_rate: u32) -> Vec<[f32; 2]> {
         (0..(seconds * sample_rate as f32) as usize)

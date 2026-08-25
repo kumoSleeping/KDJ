@@ -14,8 +14,8 @@ use kdj_player::{
     PlatterPhase, PlayerMode, RtCommand, StemFrame, StreamMetadata, StreamSeekControl,
     StreamSource, StreamWriter, TempoControl, TransitionPlan, DEFAULT_FILTER_RESONANCE_Q,
     DEFAULT_STREAM_BUFFER_SECONDS, FILTER_RESONANCE_HIGH_Q, FILTER_RESONANCE_LOW_Q,
-    FILTER_RESONANCE_MEDIUM_Q, MAX_TRANSPORT_LOOP_PCM_BYTES, MAX_TRANSPORT_LOOP_SECONDS,
-    STEM_GAIN_MAX,
+    FILTER_RESONANCE_MEDIUM_Q, LOOP_CAPTURE_HISTORY_SECONDS, MAX_TRANSPORT_LOOP_PCM_BYTES,
+    MAX_TRANSPORT_LOOP_SECONDS, PERFORMANCE_PREROLL_SECONDS, STEM_GAIN_MAX,
 };
 #[cfg(test)]
 use kdj_stems::record_stem_output_underrun;
@@ -25,9 +25,10 @@ use kdj_stems::{
 };
 
 use crate::contract::{
-    CommandAck, PlaybackClock, PlaybackCommand, PlaybackDeckClock, PlaybackFxKind, PlaybackFxSlot,
-    PlaybackLevels, PlaybackPhase, PlaybackPlatterPhase, PlaybackSnapshot, PlaybackSource,
-    PlaybackSourceKind, PlaybackSyncPhase, PlaybackSyncSnapshot, PlaybackTransitionPlan,
+    CommandAck, ControlAck, PlaybackBeatGrid, PlaybackClock, PlaybackCommand, PlaybackDeckClock,
+    PlaybackFxKind, PlaybackFxSlot, PlaybackLevels, PlaybackPhase, PlaybackPlatterPhase,
+    PlaybackSnapshot, PlaybackSource, PlaybackSourceKind, PlaybackSyncPhase, PlaybackSyncSnapshot,
+    PlaybackTransitionPlan,
 };
 use crate::platform::{CpalOutputFactory, PlaybackOutput, PlaybackOutputFactory};
 use crate::remote_source::{is_loopback_http_url, HttpRangeSource};
@@ -41,14 +42,14 @@ const LEVEL_INTERVAL: Duration = Duration::from_millis(33);
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 // A long raw PCM ring absorbs decode/network jitter. The final post-Rubber-Band ring is
 // intentionally short, so a new fader target cannot wait behind seconds of old-tempo PCM.
-const TEMPO_OUTPUT_BUFFER_MS: u64 = 160;
+const TEMPO_OUTPUT_BUFFER_MS: u64 = 48;
 const STARTUP_BUFFER_MS: u64 = 120;
 const SEEK_BUFFER_MS: u64 = 120;
 /// Vinyl coast must be audible before the coordinator may rebuild a decoder at the needle.
 const SCRATCH_COAST_HANDOFF_DELAY: Duration = Duration::from_millis(400);
 // classical Redress separation and tile assembly stay outside the callback. Once a fixed tile is ready, this
 // short post-tempo ring absorbs scheduler jitter without retaining seconds of stale controls.
-const STEM_TEMPO_OUTPUT_BUFFER_MS: u64 = 640;
+const STEM_TEMPO_OUTPUT_BUFFER_MS: u64 = 160;
 /// ORG remains audible throughout a cache miss. Replace it only after classical Redress has produced a bounded
 /// quarter-second cushion from the context-safe centre of its fixed tile.
 const STEM_STARTUP_BUFFER_MS: u64 = 250;
@@ -67,8 +68,8 @@ const DEVICE_RECOVERY_ATTEMPTS: usize = 8;
 const DEVICE_RECOVERY_BACKOFF: Duration = Duration::from_millis(150);
 /// Pitch-preserving edge-jog tempo persists across ordinary MIDI packet gaps, then returns to the
 /// Deck's actual TEMPO without a frontend timer race.
-const JOG_NUDGE_HOLD: Duration = Duration::from_millis(180);
-const JOG_NUDGE_FAILSAFE: Duration = Duration::from_secs(2);
+const JOG_NUDGE_HOLD: Duration = Duration::from_millis(120);
+const JOG_NUDGE_FAILSAFE: Duration = Duration::from_secs(1);
 const JOG_NUDGE_MAX_RATE_OFFSET: f32 = 0.18;
 /// A prepared replacement is aligned to the still-running original Deck. Late cache output is
 /// skipped forward; the transport clock is never pulled backwards.
@@ -81,12 +82,13 @@ const STEM_SEEK_CATCHUP_STALL: Duration = Duration::from_millis(40);
 const STEM_RECOVERY_BASE_DELAY: Duration = Duration::from_millis(900);
 const STEM_RECOVERY_MAX_DELAY: Duration = Duration::from_secs(8);
 const AUDIO_CRITICAL_BUFFER_MS: u64 = 30;
-const AUDIO_LOW_BUFFER_MS: u64 = 90;
-const STEM_AUDIO_LOW_BUFFER_MS: u64 = 300;
-const AUDIO_RECOVER_BUFFER_MS: u64 = 130;
-const STEM_AUDIO_RECOVER_BUFFER_MS: u64 = 450;
+const AUDIO_LOW_BUFFER_MS: u64 = 40;
+const STEM_AUDIO_LOW_BUFFER_MS: u64 = 100;
+const AUDIO_RECOVER_BUFFER_MS: u64 = 44;
+const STEM_AUDIO_RECOVER_BUFFER_MS: u64 = 140;
 
 type CommandReply = SyncSender<Result<CommandAck, String>>;
+type ControlReply = SyncSender<Result<ControlAck, String>>;
 type StateReply = SyncSender<PlaybackSnapshot>;
 type StateEmitter = Arc<dyn Fn(PlaybackSnapshot) + Send + Sync>;
 type LevelEmitter = Arc<dyn Fn(PlaybackLevels) + Send + Sync>;
@@ -156,6 +158,18 @@ impl PlaybackCoordinator {
             .map_err(|_| "播放协调器没有及时确认系统媒体命令".to_string())?
     }
 
+    /// High-frequency UI controls acknowledge only ordering. State already travels on the bounded
+    /// snapshot and callback-clock event streams; cloning it into every IPC response is wasted.
+    pub fn submit_control(&self, command: PlaybackCommand) -> Result<ControlAck, String> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.sender
+            .send(Request::ControlCommand { command, reply })
+            .map_err(|_| "播放协调器已经退出".to_string())?;
+        response
+            .recv_timeout(ACK_TIMEOUT)
+            .map_err(|_| "播放协调器没有及时确认实时控制".to_string())?
+    }
+
     /// 订阅高频轻量电平事件（~30Hz），供表桥直接驱动电平表，绕开全量快照的 10Hz 节奏。
     pub fn subscribe_levels(&self, emit: impl Fn(PlaybackLevels) + Send + Sync + 'static) {
         let _ = self.sender.send(Request::SubscribeLevels(Arc::new(emit)));
@@ -192,6 +206,10 @@ enum Request {
     PlatformCommand {
         command: PlaybackCommand,
         reply: CommandReply,
+    },
+    ControlCommand {
+        command: PlaybackCommand,
+        reply: ControlReply,
     },
     State {
         reply: StateReply,
@@ -615,6 +633,18 @@ impl Actor {
                 });
                 let _ = reply.send(result);
             }
+            Request::ControlCommand { command, reply } => {
+                let command_id = self.state.last_command_id;
+                let immediate_snapshot = publishes_control_snapshot(&command);
+                let result = self.apply_command(command_id, command).map(|()| {
+                    self.bump_sequence();
+                    self.publish(immediate_snapshot);
+                    ControlAck {
+                        accepted_sequence: self.state.sequence,
+                    }
+                });
+                let _ = reply.send(result);
+            }
             Request::State { reply } => {
                 let before = self.state.clone();
                 self.refresh_from_audio();
@@ -807,7 +837,11 @@ impl Actor {
                 mask,
                 gains,
             } => self.set_deck_stems(track_id, enabled, cache_path, mask, gains),
-            PlaybackCommand::ToggleDeckLoop { deck, length } => self.toggle_deck_loop(deck, length),
+            PlaybackCommand::ToggleDeckLoop {
+                deck,
+                length,
+                quantize,
+            } => self.toggle_deck_loop_with_quantize(deck, length, quantize),
             PlaybackCommand::ResizeDeckLoop { deck, length } => self.resize_deck_loop(deck, length),
             PlaybackCommand::Seek { position } => self.seek(position),
             PlaybackCommand::Handoff {
@@ -1984,7 +2018,17 @@ impl Actor {
     }
 
     /// One button, one authority: off -> capture the callback needle; on -> exit at loop-out.
+    #[cfg(test)]
     fn toggle_deck_loop(&mut self, deck: u8, length: f64) -> Result<(), String> {
+        self.toggle_deck_loop_with_quantize(deck, length, false)
+    }
+
+    fn toggle_deck_loop_with_quantize(
+        &mut self,
+        deck: u8,
+        length: f64,
+        quantize: bool,
+    ) -> Result<(), String> {
         Self::validate_loop_length(length)?;
         let deck = deck_id(deck)?;
         if self.loop_windows[deck as usize].snapshot().is_some() {
@@ -1996,7 +2040,7 @@ impl Actor {
             self.refresh_deck_clock_for_control(deck);
             return self.invalidate_loop(deck);
         }
-        self.capture_deck_loop(deck, length)
+        self.capture_deck_loop(deck, length, quantize)
     }
 
     fn resize_deck_loop(&mut self, deck: u8, length: f64) -> Result<(), String> {
@@ -2011,7 +2055,12 @@ impl Actor {
         self.install_loop_window(deck, start, length)
     }
 
-    fn capture_deck_loop(&mut self, deck: DeckId, length: f64) -> Result<(), String> {
+    fn capture_deck_loop(
+        &mut self,
+        deck: DeckId,
+        length: f64,
+        quantize: bool,
+    ) -> Result<(), String> {
         Self::validate_loop_length(length)?;
         self.cancel_clocked_deck_seek(deck);
         self.enter_manual_mode();
@@ -2035,6 +2084,7 @@ impl Actor {
         }
         let source_id = runtime.source_id;
         let output_sample_rate = runtime.output_sample_rate;
+        let beat_grid = runtime.request.beat_grid.clone();
         let audio = self
             .player
             .as_mut()
@@ -2047,7 +2097,17 @@ impl Actor {
         if start_frame < 0 {
             return Err("静音预卷期间不能建立循环".into());
         }
-        let start = start_frame as f64 / f64::from(output_sample_rate.max(1));
+        let audible_start = start_frame as f64 / f64::from(output_sample_rate.max(1));
+        let start = if quantize {
+            beat_grid
+                .as_ref()
+                .and_then(|grid| {
+                    quantized_loop_start(grid, audible_start, LOOP_CAPTURE_HISTORY_SECONDS)
+                })
+                .unwrap_or(audible_start)
+        } else {
+            audible_start
+        };
         self.adopt_deck_clock_sample(deck, audio);
         self.install_loop_window(deck, start, length)
     }
@@ -2064,10 +2124,29 @@ impl Actor {
             PlaybackStream::Stereo(_) => std::mem::size_of::<[f32; 2]>(),
             PlaybackStream::Stems(_) => std::mem::size_of::<StemFrame>(),
         };
-        if usize::try_from(frames)
+        let requested_bytes = usize::try_from(frames)
             .ok()
             .and_then(|frames| frames.checked_mul(bytes_per_frame))
-            .is_none_or(|bytes| bytes > MAX_TRANSPORT_LOOP_PCM_BYTES)
+            .ok_or_else(|| "当前采样率下的循环过长".to_string())?;
+        let other_loop_bytes = self
+            .decks
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .filter_map(|(_, runtime)| runtime.as_ref())
+            .filter_map(|runtime| {
+                let looping = runtime.loop_playback?;
+                let frames = runtime.frame_for_seconds(looping.length);
+                let bytes_per_frame = match &runtime.source {
+                    PlaybackStream::Stereo(_) => std::mem::size_of::<[f32; 2]>(),
+                    PlaybackStream::Stems(_) => std::mem::size_of::<StemFrame>(),
+                };
+                usize::try_from(frames).ok()?.checked_mul(bytes_per_frame)
+            })
+            .try_fold(0usize, usize::checked_add)
+            .unwrap_or(usize::MAX);
+        if requested_bytes > MAX_TRANSPORT_LOOP_PCM_BYTES
+            || requested_bytes.saturating_add(other_loop_bytes) > MAX_TRANSPORT_LOOP_PCM_BYTES
         {
             return Err("当前采样率下的循环过长".into());
         }
@@ -2081,13 +2160,15 @@ impl Actor {
 
         // Arm the callback boundary before publishing the worker reservoir window. If the fixed
         // realtime queue rejects the edge, no logical loop state has changed.
+        let generation = self.loop_windows[index].next_generation();
         self.send(RtCommand::SetDeckLoop {
             deck,
+            generation,
             looping: true,
             start_frames,
             frames,
         })?;
-        self.loop_windows[index].set(start, length);
+        debug_assert_eq!(self.loop_windows[index].set(start, length), generation);
         if let Some(runtime) = self.decks[index].as_mut() {
             runtime.loop_playback = Some(LoopPlayback { start, length });
         }
@@ -2115,13 +2196,15 @@ impl Actor {
         if !active {
             return Ok(());
         }
+        let generation = self.loop_windows[index].next_generation();
         self.send(RtCommand::SetDeckLoop {
             deck,
+            generation,
             looping: false,
             start_frames: 0,
             frames: 0,
         })?;
-        self.loop_windows[index].clear();
+        debug_assert_eq!(self.loop_windows[index].clear(), generation);
         if let Some(runtime) = self.decks[index].as_mut() {
             runtime.loop_playback = None;
         }
@@ -2145,6 +2228,7 @@ impl Actor {
         let frames = runtime.frame_for_seconds(looping.length).max(1);
         self.send(RtCommand::SetDeckLoop {
             deck,
+            generation: self.loop_windows[deck as usize].generation(),
             looping: true,
             start_frames,
             frames,
@@ -3599,6 +3683,17 @@ impl Actor {
                 view.audible_rate_revision = audio.deck_audible_rate_revisions[index];
                 view.discontinuity_revision = audio.deck_discontinuity_revisions[index];
                 view.scratch_held = audio.deck_scratch_held[index];
+                view.effective_loop_generation = audio.deck_loop_generations[index];
+                view.effective_loop_start = audio.deck_loop_active[index].then(|| {
+                    audio.deck_loop_start_frames[index] as f64
+                        / f64::from(runtime.output_sample_rate.max(1))
+                });
+                view.effective_loop_length = audio.deck_loop_active[index].then(|| {
+                    audio.deck_loop_length_frames[index] as f64
+                        / f64::from(runtime.output_sample_rate.max(1))
+                });
+                view.loop_wrap_count = audio.deck_loop_wrap_counts[index];
+                view.loop_stall_frames = audio.deck_loop_stall_frames[index];
                 if let Some(seek) = stem_clock.as_ref() {
                     if self.pending[index].is_none() {
                         seek.publish_clock(played);
@@ -3806,6 +3901,17 @@ impl Actor {
                     self.state.decks[index].is_playing
                 },
                 scratch_held: audio.deck_scratch_held[index],
+                loop_generation: audio.deck_loop_generations[index],
+                loop_start: audio.deck_loop_active[index].then(|| {
+                    audio.deck_loop_start_frames[index] as f64
+                        / f64::from(audio.output_sample_rate.max(1))
+                }),
+                loop_length: audio.deck_loop_active[index].then(|| {
+                    audio.deck_loop_length_frames[index] as f64
+                        / f64::from(audio.output_sample_rate.max(1))
+                }),
+                loop_wrap_count: audio.deck_loop_wrap_counts[index],
+                loop_stall_frames: audio.deck_loop_stall_frames[index],
             }
         });
         emit(PlaybackClock {
@@ -3813,6 +3919,7 @@ impl Actor {
             output_sample_rate: audio.output_sample_rate,
             callback_time_ns: audio.callback_time_ns,
             presentation_time_ns: audio.presentation_time_ns,
+            foreground_deck: self.front as u8,
             decks,
         });
     }
@@ -4406,6 +4513,38 @@ fn deck_id(deck: u8) -> Result<DeckId, String> {
     }
 }
 
+/// Quantize Auto Loop to the preceding analysed beat so engaging it never skips the transient the
+/// DJ just heard. Explicit beat markers win over a constant-BPM fallback.
+fn quantized_loop_start(
+    grid: &PlaybackBeatGrid,
+    position: f64,
+    maximum_lookback: f64,
+) -> Option<f64> {
+    if !(position.is_finite() && position >= 0.0) {
+        return None;
+    }
+    if let Some(beat) = grid
+        .beats
+        .iter()
+        .copied()
+        .filter(|beat| {
+            beat.is_finite()
+                && *beat >= (position - maximum_lookback.max(0.0)).max(0.0)
+                && *beat <= position + 1.0e-6
+        })
+        .max_by(f64::total_cmp)
+    {
+        return Some(beat);
+    }
+    if !(grid.bpm.is_finite() && grid.bpm > 0.0 && grid.beat_origin.is_finite()) {
+        return None;
+    }
+    let period = 60.0 / grid.bpm;
+    let beat = grid.beat_origin + ((position - grid.beat_origin) / period).floor() * period;
+    let beat = beat.clamp(0.0, position);
+    (position - beat <= maximum_lookback.max(0.0)).then_some(beat)
+}
+
 fn finite_clamp(value: f32, min: f32, max: f32, fallback: f32) -> f32 {
     if value.is_finite() {
         value.clamp(min, max)
@@ -4433,9 +4572,6 @@ fn filter_resonance_q(resonance: FilterResonance) -> f32 {
 /// 进度条最右端换算出的目标常常正好等于时长；精确 seek 到流的末尾会读出
 /// 流外（end of stream），给末尾留一点余量，让“跳到结尾”播完最后一点自然结束。
 const SEEK_END_MARGIN_SECONDS: f64 = 0.25;
-/// Must mirror `src/lib/deckPosition.ts`.
-const PERFORMANCE_PREROLL_SECONDS: f64 = 30.0;
-
 /// Pending replacements must not leak the outgoing decoder as the visual clock.
 /// `refresh_from_audio` keeps `state.current_time` at the seek landing; `publish_clock` must
 /// publish that same landing instead of the still-audible pre-seek frames.
@@ -5687,11 +5823,51 @@ mod tests {
             command,
             RtCommand::SetDeckLoop {
                 deck: DeckId::A,
+                generation: 2,
                 looping: true,
                 start_frames: 2_172_000,
                 frames: 96_000,
             }
         )));
+    }
+
+    #[test]
+    fn quantized_auto_loop_floors_the_same_callback_sample_to_the_previous_beat() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        let mut runtime = live_runtime(1, 0.0);
+        runtime.request.beat_grid = Some(PlaybackBeatGrid {
+            bpm: 120.0,
+            beat_origin: 0.0,
+            ..PlaybackBeatGrid::default()
+        });
+        actor.decks[0] = Some(runtime);
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[0].duration = 180.0;
+        set_fake_deck_clock(&knobs, DeckId::A, 101, 45.37);
+
+        actor.toggle_deck_loop_with_quantize(0, 2.0, true).unwrap();
+
+        assert_eq!(actor.state.decks[0].loop_start, Some(45.0));
+        assert_eq!(actor.loop_windows[0].snapshot().unwrap().start, 45.0);
+    }
+
+    #[test]
+    fn quantized_loop_never_selects_an_in_point_older_than_worker_history() {
+        let sparse = PlaybackBeatGrid {
+            bpm: 120.0,
+            beat_origin: 0.0,
+            beats: vec![10.0],
+            ..PlaybackBeatGrid::default()
+        };
+        assert_eq!(quantized_loop_start(&sparse, 45.37, 2.0), Some(45.0));
+
+        let extremely_slow = PlaybackBeatGrid {
+            bpm: 20.0,
+            beat_origin: 0.0,
+            ..PlaybackBeatGrid::default()
+        };
+        assert_eq!(quantized_loop_start(&extremely_slow, 2.5, 2.0), None);
     }
 
     #[test]

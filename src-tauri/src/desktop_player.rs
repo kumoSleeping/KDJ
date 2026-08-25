@@ -8,7 +8,9 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use kdj_playback::{CommandAck, PlaybackCommand, PlaybackCoordinator, PlaybackSnapshot};
+use kdj_playback::{
+    CommandAck, ControlAck, PlaybackCommand, PlaybackCoordinator, PlaybackSnapshot,
+};
 use tauri::{AppHandle, Emitter};
 
 #[cfg(target_os = "android")]
@@ -133,8 +135,8 @@ impl DesktopPlayerHandle {
         self.coordinator.submit_with_id(command_id, command)
     }
 
-    fn submit_control(&self, command: PlaybackCommand) -> Result<CommandAck, String> {
-        self.coordinator.submit_platform(command)
+    fn submit_control(&self, command: PlaybackCommand) -> Result<ControlAck, String> {
+        self.coordinator.submit_control(command)
     }
 
     fn snapshot(&self) -> Result<PlaybackSnapshot, String> {
@@ -168,7 +170,7 @@ pub fn playback_command(
 pub fn playback_control(
     player: tauri::State<'_, DesktopPlayerHandle>,
     command: PlaybackCommand,
-) -> Result<CommandAck, String> {
+) -> Result<ControlAck, String> {
     player.submit_control(command)
 }
 

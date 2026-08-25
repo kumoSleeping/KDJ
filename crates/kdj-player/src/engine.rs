@@ -8,7 +8,7 @@ use crate::command::{EngineCommand, SourceKind};
 use crate::dsp::{DeckEq, DeckSpectrum, TransitionFx};
 use crate::manual_fx::DeckManualFx;
 use crate::state::{OutputCallbackTiming, SharedState, SharedTransportState};
-use crate::stream::{format_loop_clock, FrameLerp, StemFrame, STEM_GAIN_MAX, STEM_LANES};
+use crate::stream::{FrameLerp, StemFrame, STEM_GAIN_MAX, STEM_LANES};
 use crate::{
     DeckId, DecodedTrack, PlatterPhase, PlayerMode, RtCommand, StreamSource, TransitionPlan,
     TransportSnapshot,
@@ -112,6 +112,9 @@ struct StreamPlaybackState {
     tempo_revision: u64,
     /// Absolute media time of the packet currently leaving the callback, in seconds.
     media_time: f64,
+    loop_generation: u64,
+    loop_active: bool,
+    loop_wrapped: bool,
 }
 
 impl Default for StreamPlaybackState {
@@ -122,6 +125,9 @@ impl Default for StreamPlaybackState {
             media_advance: 0.0,
             tempo_revision: 0,
             media_time: f64::NAN,
+            loop_generation: 0,
+            loop_active: false,
+            loop_wrapped: false,
         }
     }
 }
@@ -153,26 +159,25 @@ const SCRATCH_VELOCITY_MAX: f64 = 8.0;
 const SCRATCH_TAPE_FILL_FRAMES: usize = 16;
 /// A short acceleration constant keeps the platter physical without lagging behind the hand.
 const SCRATCH_RESPONSE_SECONDS: f64 = 0.010;
-/// Lift below this fraction of play speed snaps to transport. Above it is a real throw that
-/// coasts from the *current* velocity — never through a 0→1x motor startup.
-const SCRATCH_LIGHT_THROW_RATIO: f64 = 0.5;
-/// Mixxx scratchDisable ramp is a vinyl mass. Intensity is referenced to a brisk throw, not
-/// the absolute clamp, so a 30-second waveform flick does not coast for multiple seconds.
-const SCRATCH_COAST_MIN_SECONDS: f64 = 0.28;
+/// Release duration is a true settle time, not a one-pole time constant. The old 0.9 second
+/// constant could take more than three seconds to reach the handoff threshold while paused.
+const SCRATCH_COAST_MIN_SECONDS: f64 = 0.06;
 const SCRATCH_COAST_MAX_SECONDS: f64 = 0.9;
-const SCRATCH_COAST_REFERENCE_VELOCITY: f64 = 4.0;
+const SCRATCH_COAST_REFERENCE_DIFFERENCE: f64 = 4.0;
+/// One or two quantized controller ticks at note-off are contact jitter, not platter inertia.
+const SCRATCH_CONTACT_JITTER_VELOCITY: f64 = 0.15;
 const SCRATCH_HANDOFF_RATE_EPSILON: f64 = 0.08;
 /// Published platter rate one-pole (~4 ms at 48 kHz) so the waveform compositor does not
 /// reverse on encoder Δt jitter between packets.
 const SCRATCH_AUDIBLE_RATE_SMOOTH_SECONDS: f64 = 0.004;
 const SCRATCH_STATIONARY_VELOCITY: f64 = 1.0e-4;
-/// Finger parked on the record: no ticks for this long, then friction toward 0.
-/// MIDI jog packets can gap 40–120 ms; 50 ms was braking a spinning platter before note-off.
-const SCRATCH_STILL_SECONDS: f64 = 0.16;
-const SCRATCH_STILL_FRICTION_SECONDS: f64 = 0.12;
+/// Native callback safety net after the input-side adaptive validity deadline. Sparse low-speed
+/// MIDI remains valid for at most 100 ms; once stale, the record settles promptly under a finger.
+const SCRATCH_STILL_SECONDS: f64 = 0.10;
+const SCRATCH_STILL_FRICTION_SECONDS: f64 = 0.04;
 const SCRATCH_NO_TICK: u64 = u64::MAX;
 /// Silent lead-in before source frame 0. Must match the coordinator's Performance pre-roll.
-const PERFORMANCE_PREROLL_SECONDS: f64 = 30.0;
+pub const PERFORMANCE_PREROLL_SECONDS: f64 = 30.0;
 const SCRATCH_GAP_FRAMES: i64 = 64;
 
 /// Bidirectional PCM cache around the needle, Mixxx CachingReader-style.
@@ -288,20 +293,30 @@ impl ScratchTape {
         self.last_frame = frame + 1;
     }
 
-    fn push_at(&mut self, position: f64, sample: [f32; 2], media_advance: f64) {
+    fn push_at(&mut self, position: f64, sample: [f32; 2], _media_advance: f64) {
         if !position.is_finite() || position < 0.0 {
             return;
         }
         let frame = position.floor() as i64;
-        self.write_frame(frame, sample);
-        let extra = if media_advance.is_finite() && media_advance > 1.0 {
-            media_advance.floor() as i64
-        } else {
-            0
-        };
-        for offset in 1..=extra.min(SCRATCH_GAP_FRAMES) {
-            self.write_frame(frame + offset, sample);
+        if !self.is_empty() && frame >= self.last_frame {
+            let anchor_frame = self.last_frame - 1;
+            let gap = frame - anchor_frame;
+            if gap > 1 && gap <= SCRATCH_GAP_FRAMES {
+                let anchor = self.samples[Self::slot(anchor_frame)];
+                for offset in 1..=gap {
+                    let fraction = offset as f32 / gap as f32;
+                    self.write_frame(
+                        anchor_frame + offset,
+                        [
+                            anchor[0] + (sample[0] - anchor[0]) * fraction,
+                            anchor[1] + (sample[1] - anchor[1]) * fraction,
+                        ],
+                    );
+                }
+                return;
+            }
         }
+        self.write_frame(frame, sample);
     }
 
     fn get(&self, position: f64) -> [f32; 2] {
@@ -398,6 +413,7 @@ pub struct AudioRenderer {
     /// Latest normalized input observation converted to media frames per output frame.
     deck_scratch_target_velocity: [f64; 2],
     deck_scratch_releasing: [bool; 2],
+    deck_scratch_release_decay: [f64; 2],
     /// A settled streaming scratch replays cached history only until it catches the source head.
     deck_scratch_playthrough: [bool; 2],
     deck_scratch_input_at: [u64; 2],
@@ -437,10 +453,18 @@ pub struct AudioRenderer {
     stem_stream_playback: [StreamPlaybackState; 2],
     replacement_stem_playback: [StreamPlaybackState; 2],
     stem_gains: [StemGains; 2],
-    /// Transport loop on the installed source. Cursor wraps into `[start, start + length)`.
+    /// Desired transport loop on the installed source.
     deck_looping: [bool; 2],
+    deck_loop_generations: [u64; 2],
     deck_loop_start_frames: [u64; 2],
     deck_loop_frames: [u64; 2],
+    /// Streaming loops become effective only when matching PCM reaches the callback.
+    deck_effective_looping: [bool; 2],
+    deck_effective_loop_generations: [u64; 2],
+    deck_effective_loop_start_frames: [u64; 2],
+    deck_effective_loop_frames: [u64; 2],
+    deck_loop_wrap_counts: [u64; 2],
+    deck_loop_stall_frames: [u64; 2],
     output_sample_rate: u32,
     filter_resonance: f32,
     deck_eq: [DeckEq; 2],
@@ -498,6 +522,7 @@ fn make_channels(
             deck_scratch_velocity: [0.0; 2],
             deck_scratch_target_velocity: [0.0; 2],
             deck_scratch_releasing: [false; 2],
+            deck_scratch_release_decay: [0.0; 2],
             deck_scratch_playthrough: [false; 2],
             deck_scratch_input_at: [SCRATCH_NO_TICK; 2],
             deck_audible_rate_smooth: [0.0; 2],
@@ -532,8 +557,15 @@ fn make_channels(
             replacement_stem_playback: [StreamPlaybackState::default(); 2],
             stem_gains: [StemGains::default(); 2],
             deck_looping: [false; 2],
+            deck_loop_generations: [0; 2],
             deck_loop_start_frames: [0; 2],
             deck_loop_frames: [0; 2],
+            deck_effective_looping: [false; 2],
+            deck_effective_loop_generations: [0; 2],
+            deck_effective_loop_start_frames: [0; 2],
+            deck_effective_loop_frames: [0; 2],
+            deck_loop_wrap_counts: [0; 2],
+            deck_loop_stall_frames: [0; 2],
             output_sample_rate: 48_000,
             filter_resonance: crate::DEFAULT_FILTER_RESONANCE_Q,
             deck_eq: [DeckEq::default(); 2],
@@ -901,7 +933,7 @@ impl AudioRenderer {
                         advance_a,
                         stream_rebuffering(&self.stream_playback[0], &self.stem_stream_playback[0]),
                         stream_source_ended(sources[0]),
-                        self.deck_looping[0],
+                        self.loop_transport_active(0),
                     ),
                     stream_clock_should_advance(
                         self.playing && required[1],
@@ -909,7 +941,7 @@ impl AudioRenderer {
                         advance_b,
                         stream_rebuffering(&self.stream_playback[1], &self.stem_stream_playback[1]),
                         stream_source_ended(sources[1]),
-                        self.deck_looping[1],
+                        self.loop_transport_active(1),
                     ),
                 ],
                 transition_can_advance,
@@ -927,7 +959,7 @@ impl AudioRenderer {
                         && callback_source_ended(
                             sources[index],
                             self.deck_positions[index],
-                            self.deck_looping[index],
+                            self.loop_transport_active(index),
                         )
                     {
                         self.deck_playing[index] = false;
@@ -940,7 +972,7 @@ impl AudioRenderer {
             } else if callback_source_ended(
                 sources[self.active_deck as usize],
                 self.deck_positions[self.active_deck as usize],
-                self.deck_looping[self.active_deck as usize],
+                self.loop_transport_active(self.active_deck as usize),
             ) {
                 self.stop_transport();
             }
@@ -1013,14 +1045,58 @@ impl AudioRenderer {
     }
 
     fn deck_loop_out_seconds(&self, index: usize) -> Option<f64> {
-        if !self.deck_looping[index] || self.deck_loop_frames[index] == 0 {
+        let (looping, start, frames) = if self.deck_looping[index] {
+            (
+                true,
+                self.deck_loop_start_frames[index],
+                self.deck_loop_frames[index],
+            )
+        } else {
+            (
+                self.deck_effective_looping[index],
+                self.deck_effective_loop_start_frames[index],
+                self.deck_effective_loop_frames[index],
+            )
+        };
+        if !looping || frames == 0 {
             return None;
         }
         let sample_rate = f64::from(self.output_sample_rate.max(1));
-        Some(
-            (self.deck_loop_start_frames[index] + self.deck_loop_frames[index]) as f64
-                / sample_rate,
-        )
+        Some((start + frames) as f64 / sample_rate)
+    }
+
+    fn loop_transport_active(&self, index: usize) -> bool {
+        self.deck_looping[index] || self.deck_effective_looping[index]
+    }
+
+    fn adopt_stream_loop_timing(&mut self, index: usize, timing: StreamPlaybackState) {
+        if timing.loop_generation == self.deck_loop_generations[index] {
+            self.deck_effective_loop_generations[index] = timing.loop_generation;
+            self.deck_effective_looping[index] = timing.loop_active;
+            if timing.loop_active {
+                self.deck_effective_loop_start_frames[index] = self.deck_loop_start_frames[index];
+                self.deck_effective_loop_frames[index] = self.deck_loop_frames[index];
+            } else {
+                self.deck_effective_loop_start_frames[index] = 0;
+                self.deck_effective_loop_frames[index] = 0;
+            }
+        }
+        if timing.loop_active && timing.loop_wrapped {
+            self.deck_loop_wrap_counts[index] = self.deck_loop_wrap_counts[index].saturating_add(1);
+        }
+    }
+
+    fn reset_deck_loop_state(&mut self, index: usize) {
+        self.deck_looping[index] = false;
+        self.deck_loop_generations[index] = 0;
+        self.deck_loop_start_frames[index] = 0;
+        self.deck_loop_frames[index] = 0;
+        self.deck_effective_looping[index] = false;
+        self.deck_effective_loop_generations[index] = 0;
+        self.deck_effective_loop_start_frames[index] = 0;
+        self.deck_effective_loop_frames[index] = 0;
+        self.deck_loop_wrap_counts[index] = 0;
+        self.deck_loop_stall_frames[index] = 0;
     }
 
     fn mix_replacement(
@@ -1047,23 +1123,27 @@ impl AudioRenderer {
             }
             Some(CallbackSource::Stream(stream)) => {
                 let loop_out = self.deck_loop_out_seconds(index);
+                let looping = self.loop_transport_active(index);
                 stream_output_frame(
                     &mut self.replacement_stream_playback[index],
                     stream,
                     self.output_sample_rate,
-                    self.deck_looping[index],
+                    looping,
                     loop_out,
+                    self.deck_loop_generations[index],
                     StreamRecoverPolicy::PacketCushion,
                 )
             }
             Some(CallbackSource::StemStream(stream)) => {
                 let loop_out = self.deck_loop_out_seconds(index);
+                let looping = self.loop_transport_active(index);
                 let (raw, advanced) = stream_output_frame(
                     &mut self.replacement_stem_playback[index],
                     stream,
                     self.output_sample_rate,
-                    self.deck_looping[index],
+                    looping,
                     loop_out,
+                    self.deck_loop_generations[index],
                     StreamRecoverPolicy::Immediate,
                 );
                 if advanced {
@@ -1320,14 +1400,22 @@ impl AudioRenderer {
             Some(CallbackSource::Stream(stream)) => {
                 let was_rebuffering = self.stream_playback[index].rebuffering;
                 let loop_out = self.deck_loop_out_seconds(index);
+                let looping = self.loop_transport_active(index);
                 let result = stream_output_frame(
                     &mut self.stream_playback[index],
                     stream,
                     self.output_sample_rate,
-                    self.deck_looping[index],
+                    looping,
                     loop_out,
+                    self.deck_loop_generations[index],
                     StreamRecoverPolicy::PacketCushion,
                 );
+                if result.1 {
+                    self.adopt_stream_loop_timing(index, self.stream_playback[index]);
+                } else if self.loop_transport_active(index) {
+                    self.deck_loop_stall_frames[index] =
+                        self.deck_loop_stall_frames[index].saturating_add(1);
+                }
                 if !result.1 && !was_rebuffering && !stream.ended() {
                     self.deck_output_underruns[index] =
                         self.deck_output_underruns[index].saturating_add(1);
@@ -1337,15 +1425,21 @@ impl AudioRenderer {
             Some(CallbackSource::StemStream(stream)) => {
                 let was_rebuffering = self.stem_stream_playback[index].rebuffering;
                 let loop_out = self.deck_loop_out_seconds(index);
+                let looping = self.loop_transport_active(index);
                 let (raw, advanced) = stream_output_frame(
                     &mut self.stem_stream_playback[index],
                     stream,
                     self.output_sample_rate,
-                    self.deck_looping[index],
+                    looping,
                     loop_out,
+                    self.deck_loop_generations[index],
                     StreamRecoverPolicy::PacketCushion,
                 );
                 if !advanced {
+                    if self.loop_transport_active(index) {
+                        self.deck_loop_stall_frames[index] =
+                            self.deck_loop_stall_frames[index].saturating_add(1);
+                    }
                     if !was_rebuffering && !stream.ended() {
                         self.deck_output_underruns[index] =
                             self.deck_output_underruns[index].saturating_add(1);
@@ -1353,6 +1447,7 @@ impl AudioRenderer {
                     }
                     return ([0.0; 2], false);
                 }
+                self.adopt_stream_loop_timing(index, self.stem_stream_playback[index]);
                 (self.mix_stem_gains(index, raw), true)
             }
             _ => ([0.0; 2], false),
@@ -1463,21 +1558,6 @@ impl AudioRenderer {
         }
         let sample_rate = f64::from(self.output_sample_rate.max(1));
         let next = media_time * sample_rate;
-        if self.deck_looping[index] {
-            let previous = self.deck_positions[index];
-            if previous.is_finite() && next + sample_rate * 0.02 < previous {
-                let start = self.deck_loop_start_frames[index] as f64 / sample_rate;
-                let length = self.deck_loop_frames[index] as f64 / sample_rate;
-                tracing::info!(
-                    "loop deck={} wrap in={} out={} playhead={} fifo={} producer=--:--.-- wrap=--",
-                    if index == 0 { 'A' } else { 'B' },
-                    format_loop_clock(start),
-                    format_loop_clock(start + length),
-                    format_loop_clock(media_time),
-                    format_loop_clock(media_time),
-                );
-            }
-        }
         self.deck_positions[index] = next;
     }
 
@@ -1567,9 +1647,7 @@ impl AudioRenderer {
         self.reset_scratch_motion(index);
         self.scratch_tapes[index].reset();
         self.deck_audible_rate_smooth[index] = 0.0;
-        self.deck_looping[index] = false;
-        self.deck_loop_start_frames[index] = 0;
-        self.deck_loop_frames[index] = 0;
+        self.reset_deck_loop_state(index);
         // STEM EQ can be set while the live inference worker is filling its first buffer. That
         // target is already resident in the callback; do not reset it when this first STEM
         // source is installed, or a one-shot vocal mute is lost until the user moves the knob
@@ -1617,9 +1695,7 @@ impl AudioRenderer {
         self.deck_scratch_held[index] = false;
         self.reset_scratch_motion(index);
         self.scratch_tapes[index].reset();
-        self.deck_looping[index] = false;
-        self.deck_loop_start_frames[index] = 0;
-        self.deck_loop_frames[index] = 0;
+        self.reset_deck_loop_state(index);
         self.stream_edge_gains[index] = 0.0;
         self.stream_last_frames[index] = [0.0; 2];
         self.stream_playback[index] = StreamPlaybackState::default();
@@ -1787,6 +1863,7 @@ impl AudioRenderer {
             }
             RtCommand::SetDeckLoop {
                 deck,
+                generation,
                 looping,
                 start_frames,
                 frames,
@@ -1796,16 +1873,22 @@ impl AudioRenderer {
                 let next_start = if next_looping { start_frames } else { 0 };
                 let next_frames = if next_looping { frames } else { 0 };
                 if self.deck_looping[index] != next_looping
+                    || self.deck_loop_generations[index] != generation
                     || self.deck_loop_start_frames[index] != next_start
                     || self.deck_loop_frames[index] != next_frames
                 {
                     self.deck_looping[index] = next_looping;
+                    self.deck_loop_generations[index] = generation;
                     self.deck_loop_start_frames[index] = next_start;
                     self.deck_loop_frames[index] = next_frames;
-                    if matches!(self.deck_sources[index].kind, SourceKind::Decoded)
-                        && self.wrap_deck_loop(index)
-                    {
-                        self.deck_phase_resamplers[index] = DeckPhaseResampler::default();
+                    if matches!(self.deck_sources[index].kind, SourceKind::Decoded) {
+                        self.deck_effective_looping[index] = next_looping;
+                        self.deck_effective_loop_generations[index] = generation;
+                        self.deck_effective_loop_start_frames[index] = next_start;
+                        self.deck_effective_loop_frames[index] = next_frames;
+                        if self.wrap_deck_loop(index) {
+                            self.deck_phase_resamplers[index] = DeckPhaseResampler::default();
+                        }
                     }
                 }
             }
@@ -2033,6 +2116,7 @@ impl AudioRenderer {
 
     fn reset_scratch_motion(&mut self, index: usize) {
         self.deck_scratch_releasing[index] = false;
+        self.deck_scratch_release_decay[index] = 0.0;
         self.deck_scratch_playthrough[index] = false;
         self.deck_scratch_velocity[index] = 0.0;
         self.deck_scratch_target_velocity[index] = 0.0;
@@ -2090,12 +2174,17 @@ impl AudioRenderer {
         } else {
             0.0
         };
-        let throw = self.deck_scratch_velocity[index].abs();
-        let light = self.deck_playing[index]
-            && throw <= desired.abs() * SCRATCH_LIGHT_THROW_RATIO + f64::EPSILON;
+        let velocity = self.deck_scratch_velocity[index];
+        let difference = (velocity - desired).abs();
+        let handoff_epsilon = if desired.abs() > SCRATCH_STATIONARY_VELOCITY {
+            SCRATCH_HANDOFF_RATE_EPSILON
+        } else {
+            SCRATCH_STATIONARY_VELOCITY
+        };
 
-        if light {
-            // 1x → 0 → 1x in one callback. Never ramp from a zeroed grab through vinyl mass.
+        if difference <= handoff_epsilon
+            || self.deck_playing[index] && velocity.abs() <= SCRATCH_CONTACT_JITTER_VELOCITY
+        {
             if self.deck_uses_scratch_tape(index) {
                 self.enter_scratch_playthrough(index, desired);
             } else {
@@ -2103,7 +2192,7 @@ impl AudioRenderer {
             }
             return;
         }
-        if !self.deck_playing[index] && throw <= SCRATCH_STATIONARY_VELOCITY {
+        if !self.deck_playing[index] && velocity.abs() <= SCRATCH_STATIONARY_VELOCITY {
             if self.deck_uses_scratch_tape(index) {
                 self.enter_scratch_playthrough(index, 0.0);
             } else {
@@ -2114,6 +2203,15 @@ impl AudioRenderer {
 
         self.deck_scratch_releasing[index] = true;
         self.deck_scratch_playthrough[index] = false;
+        let linear = (difference / SCRATCH_COAST_REFERENCE_DIFFERENCE).clamp(0.0, 1.0);
+        let intensity = linear * linear * (3.0 - 2.0 * linear);
+        let settle_seconds = SCRATCH_COAST_MIN_SECONDS
+            + (SCRATCH_COAST_MAX_SECONDS - SCRATCH_COAST_MIN_SECONDS) * intensity;
+        let settle_frames = (f64::from(self.output_sample_rate.max(1)) * settle_seconds).max(1.0);
+        self.deck_scratch_release_decay[index] = (handoff_epsilon
+            / difference.max(handoff_epsilon))
+        .clamp(1.0e-9, 0.999_999)
+        .powf(1.0 / settle_frames);
     }
 
     fn advance_deck_phase_correction(&mut self, index: usize) {
@@ -2138,12 +2236,8 @@ impl AudioRenderer {
                 0.0
             };
             let velocity = self.deck_scratch_velocity[index];
-            let intensity =
-                ((velocity - desired).abs() / SCRATCH_COAST_REFERENCE_VELOCITY).clamp(0.0, 1.0);
-            let mass_seconds = SCRATCH_COAST_MIN_SECONDS
-                + (SCRATCH_COAST_MAX_SECONDS - SCRATCH_COAST_MIN_SECONDS) * intensity;
-            let attack_frames = (sample_rate * mass_seconds).max(1.0);
-            let mut next_velocity = velocity + (desired - velocity) / attack_frames;
+            let decay = self.deck_scratch_release_decay[index].clamp(0.0, 0.999_999_999);
+            let mut next_velocity = desired + (velocity - desired) * decay;
             let max_velocity = SCRATCH_VELOCITY_MAX * self.source_rate_ratios[index].max(1.0);
             if next_velocity.abs() > max_velocity {
                 next_velocity = next_velocity.signum() * max_velocity;
@@ -2229,6 +2323,7 @@ impl AudioRenderer {
         let position = self.deck_positions[index];
         if position >= start + length {
             self.deck_positions[index] = start + (position - start) % length;
+            self.deck_loop_wrap_counts[index] = self.deck_loop_wrap_counts[index].saturating_add(1);
             true
         } else {
             false
@@ -2396,6 +2491,12 @@ impl AudioRenderer {
             deck_audible_rate_revisions,
             self.deck_discontinuity_revisions,
             [self.platter_active(0), self.platter_active(1)],
+            self.deck_effective_loop_generations,
+            self.deck_effective_looping,
+            self.deck_effective_loop_start_frames,
+            self.deck_effective_loop_frames,
+            self.deck_loop_wrap_counts,
+            self.deck_loop_stall_frames,
             self.deck_output_underruns,
             self.deck_min_buffered_frames
                 .map(|frames| if frames == u64::MAX { 0 } else { frames }),
@@ -2562,19 +2663,31 @@ fn stream_packet_past_loop_out(media_time: f64, loop_out: Option<f64>) -> bool {
     loop_out.is_some_and(|out| media_time.is_finite() && media_time >= out)
 }
 
+fn stream_packet_loop_generation_is_current(
+    state: &StreamPlaybackState,
+    source_timing: crate::time_stretch::SourceTiming,
+    desired_loop_generation: u64,
+    looping: bool,
+) -> bool {
+    (!looping && !source_timing.loop_active)
+        || source_timing.loop_generation == state.loop_generation
+        || source_timing.loop_generation == desired_loop_generation
+}
+
 fn stream_output_frame<F: FrameLerp>(
     state: &mut StreamPlaybackState,
     stream: &StreamSource<F>,
     output_sample_rate: u32,
     looping: bool,
     loop_out: Option<f64>,
+    desired_loop_generation: u64,
     policy: StreamRecoverPolicy,
 ) -> (F, bool) {
     state.media_advance = 0.0;
     let loop_out = looping.then_some(loop_out).flatten();
     if policy == StreamRecoverPolicy::Immediate {
         loop {
-            let Some((frame, media_advance, tempo_revision, media_time)) =
+            let Some((frame, media_advance, tempo_revision, source_timing)) =
                 stream.pop_callback_timed()
             else {
                 state.rebuffering = !stream.ended();
@@ -2583,15 +2696,26 @@ fn stream_output_frame<F: FrameLerp>(
                 }
                 return (F::silence(), false);
             };
+            if !stream_packet_loop_generation_is_current(
+                state,
+                source_timing,
+                desired_loop_generation,
+                looping,
+            ) {
+                continue;
+            }
             // LOOP on must never play the linear look-ahead past out (blue zone behind the needle).
-            if stream_packet_past_loop_out(media_time, loop_out) {
+            if stream_packet_past_loop_out(source_timing.media_time, loop_out) {
                 continue;
             }
             state.rebuffering = false;
             state.missed_frames = 0;
             state.media_advance = f64::from(media_advance);
             state.tempo_revision = tempo_revision;
-            state.media_time = media_time;
+            state.media_time = source_timing.media_time;
+            state.loop_generation = source_timing.loop_generation;
+            state.loop_active = source_timing.loop_active;
+            state.loop_wrapped = source_timing.loop_wrapped;
             return (frame, true);
         }
     }
@@ -2626,7 +2750,8 @@ fn stream_output_frame<F: FrameLerp>(
     }
 
     loop {
-        let Some((frame, media_advance, tempo_revision, media_time)) = stream.pop_callback_timed()
+        let Some((frame, media_advance, tempo_revision, source_timing)) =
+            stream.pop_callback_timed()
         else {
             state.rebuffering = !stream.ended();
             if state.rebuffering {
@@ -2634,7 +2759,15 @@ fn stream_output_frame<F: FrameLerp>(
             }
             return (F::silence(), false);
         };
-        if stream_packet_past_loop_out(media_time, loop_out) {
+        if !stream_packet_loop_generation_is_current(
+            state,
+            source_timing,
+            desired_loop_generation,
+            looping,
+        ) {
+            continue;
+        }
+        if stream_packet_past_loop_out(source_timing.media_time, loop_out) {
             if stream.buffered_frames() == 0 && !stream.ended() {
                 state.rebuffering = true;
                 state.missed_frames = state.missed_frames.saturating_add(1);
@@ -2644,7 +2777,10 @@ fn stream_output_frame<F: FrameLerp>(
         }
         state.media_advance = f64::from(media_advance);
         state.tempo_revision = tempo_revision;
-        state.media_time = media_time;
+        state.media_time = source_timing.media_time;
+        state.loop_generation = source_timing.loop_generation;
+        state.loop_active = source_timing.loop_active;
+        state.loop_wrapped = source_timing.loop_wrapped;
         return (frame, true);
     }
 }
@@ -3320,6 +3456,12 @@ mod tests {
         assert!(
             (tape.get(0.5)[0] - 0.5).abs() < 0.000_1,
             "appending and filling a one-frame hole must keep earlier history"
+        );
+
+        tape.push_at(8.0, [8.0, -8.0], 4.0);
+        assert!(
+            (tape.get(6.0)[0] - 6.0).abs() < 0.000_1,
+            "tempo gaps must interpolate neighbouring PCM instead of repeating one held sample"
         );
 
         tape.push_at(10_000.0, [0.4, 0.4], 1.0);
@@ -4833,6 +4975,7 @@ mod tests {
         controller
             .send(RtCommand::SetDeckLoop {
                 deck: DeckId::A,
+                generation: 2,
                 looping: true,
                 start_frames: 0,
                 frames: 96,
@@ -4879,6 +5022,7 @@ mod tests {
         controller
             .send(RtCommand::SetDeckLoop {
                 deck: DeckId::A,
+                generation: 2,
                 looping: false,
                 start_frames: 0,
                 frames: 0,
@@ -4913,6 +5057,7 @@ mod tests {
         controller
             .send(RtCommand::SetDeckLoop {
                 deck: DeckId::A,
+                generation: 2,
                 looping: true,
                 start_frames: 0,
                 frames: 96,
@@ -4948,6 +5093,7 @@ mod tests {
         controller
             .send(RtCommand::SetDeckLoop {
                 deck: DeckId::A,
+                generation: 2,
                 looping: true,
                 start_frames: 96,
                 frames: 48,
@@ -4981,7 +5127,18 @@ mod tests {
             let cycles = ((linear - loop_start) / loop_length).floor();
             let media_time = loop_start + (linear - loop_start - cycles * loop_length);
             writer
-                .push_with_media_timing([0.5, 0.5], 1.0, 0, media_time, || false)
+                .push_with_transport_timing(
+                    [0.5, 0.5],
+                    1.0,
+                    0,
+                    crate::time_stretch::SourceTiming {
+                        media_time,
+                        loop_generation: 2,
+                        loop_active: true,
+                        loop_wrapped: frame > 0 && frame % 4_800 == 0,
+                    },
+                    || false,
+                )
                 .unwrap();
         }
         let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
@@ -4997,6 +5154,7 @@ mod tests {
         controller
             .send(RtCommand::SetDeckLoop {
                 deck: DeckId::A,
+                generation: 2,
                 looping: true,
                 start_frames: (loop_start * f64::from(sample_rate)).round() as u64,
                 frames: (loop_length * f64::from(sample_rate)).round() as u64,
@@ -5021,6 +5179,50 @@ mod tests {
             1,
             "FIFO loop wrap must not bump discontinuity"
         );
+        assert!(controller.snapshot().deck_loop_active[0]);
+        assert_eq!(controller.snapshot().deck_loop_generations[0], 2);
+        assert!(controller.snapshot().deck_loop_wrap_counts[0] >= 1);
+        drop(writer);
+    }
+
+    #[test]
+    fn disabled_loop_generation_from_a_reused_window_does_not_starve_new_source() {
+        let (stream, mut writer) = StreamSource::<[f32; 2]>::bounded(1_024);
+        for frame in 0..512 {
+            writer
+                .push_with_transport_timing(
+                    [0.4, -0.4],
+                    1.0,
+                    0,
+                    crate::time_stretch::SourceTiming {
+                        media_time: frame as f64 / 48_000.0,
+                        loop_generation: 6,
+                        loop_active: false,
+                        loop_wrapped: false,
+                    },
+                    || false,
+                )
+                .unwrap();
+        }
+        let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
+        controller
+            .install_prepared(
+                DeckId::A,
+                82,
+                SourceKind::Stream,
+                Arc::as_ptr(&stream) as usize,
+                0,
+            )
+            .unwrap();
+        controller
+            .send(RtCommand::SetDeckPlaying {
+                deck: DeckId::A,
+                playing: true,
+            })
+            .unwrap();
+        let mut output = [0.0; 256];
+        renderer.render_prepared(&mut output, 48_000, 1);
+        assert!(output.iter().any(|sample| sample.abs() > 0.1));
         drop(writer);
     }
 
@@ -5042,7 +5244,18 @@ mod tests {
         for frame in 0..4_000 {
             let media_time = loop_start + f64::from(frame) / f64::from(sample_rate);
             writer
-                .push_with_media_timing([0.75, 0.75], 1.0, 0, media_time, || false)
+                .push_with_transport_timing(
+                    [0.75, 0.75],
+                    1.0,
+                    0,
+                    crate::time_stretch::SourceTiming {
+                        media_time,
+                        loop_generation: 2,
+                        loop_active: true,
+                        loop_wrapped: frame == 0,
+                    },
+                    || false,
+                )
                 .unwrap();
         }
         let (mut controller, mut renderer, _retired) = dynamic_command_channel(8, 8);
@@ -5058,6 +5271,7 @@ mod tests {
         controller
             .send(RtCommand::SetDeckLoop {
                 deck: DeckId::A,
+                generation: 2,
                 looping: true,
                 start_frames: (loop_start * f64::from(sample_rate)).round() as u64,
                 frames: (loop_length * f64::from(sample_rate)).round() as u64,
@@ -5077,6 +5291,8 @@ mod tests {
             playhead >= loop_start && playhead < loop_end,
             "callback must skip FIFO past loop-out so the needle stays in the blue zone, got {playhead}"
         );
+        assert_eq!(controller.snapshot().deck_loop_generations[0], 2);
+        assert!(controller.snapshot().deck_loop_active[0]);
         drop(writer);
     }
 }

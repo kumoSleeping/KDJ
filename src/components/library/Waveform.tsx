@@ -20,8 +20,10 @@ import {
 import { beatGridMarkers, type BeatGridMarker } from "../../lib/performanceCues";
 import { barPhaseAlignedSeek } from "../../lib/beatGridSync";
 import {
+  correctedLiveWaveformRate,
   liveWaveformAnimationTimeMs,
   liveWaveformLoopAnimationTimeMs,
+  liveWaveformPhaseError,
   liveWaveformPlaybackRate,
   projectedLiveWaveformPosition,
   shouldLandPlatterWaveform,
@@ -115,6 +117,8 @@ export interface WaveformProps {
   /** 现场 Loop 窗口（秒）。有值时在波形上铺一层预览，对上 Cue Loop 则改用该 Cue 色。 */
   loopStart?: number | null;
   loopLength?: number | null;
+  /** Callback-effective loop generation; changes rebuild the compositor even for the same window. */
+  loopGeneration?: number;
   /**
    * 右键设起止点。返回错误文案则菜单旁提示；返回 void/空串表示成功。
    * 不传则不挂右键菜单。
@@ -171,6 +175,7 @@ export function Waveform({
   cuePoints = [],
   loopStart = null,
   loopLength = null,
+  loopGeneration = 0,
   onSetPoint,
   height = 56,
   dimPlayed = false,
@@ -234,6 +239,7 @@ export function Waveform({
     railLeadInSec: number;
     loopStartSec: number | null;
     loopLengthSec: number | null;
+    loopGeneration: number;
   } | null>(null);
   const customSeekRef = useRef(onSeek);
   const draggingRef = useRef(false);
@@ -245,6 +251,21 @@ export function Waveform({
   const [railAnimationReady, setRailAnimationReady] = useState(
     () => document.visibilityState === "visible",
   );
+  const [liveLoopOverride, setLiveLoopOverride] = useState<{
+    trackId: number;
+    generation: number;
+    start: number | null;
+    length: number | null;
+  } | null>(null);
+
+  useEffect(() => {
+    if (
+      liveLoopOverride
+      && (liveLoopOverride.trackId !== trackId || liveLoopOverride.generation === loopGeneration)
+    ) {
+      setLiveLoopOverride(null);
+    }
+  }, [liveLoopOverride, loopGeneration, trackId]);
 
   useEffect(() => {
     const syncVisibility = () => {
@@ -355,12 +376,21 @@ export function Waveform({
   // 波形计算可能要几秒；期间直接使用曲库/媒体元数据里的时长，让用户可以立刻拖动跳转。
   const waveDuration = displayWave?.duration ?? 0;
   const total = waveDuration > 0 ? waveDuration : duration;
+  const effectiveLoopOverride = liveLoopOverride?.trackId === trackId
+    && liveLoopOverride.generation !== loopGeneration
+      ? liveLoopOverride
+      : null;
+  const effectiveLoopStart = effectiveLoopOverride ? effectiveLoopOverride.start : loopStart;
+  const effectiveLoopLength = effectiveLoopOverride ? effectiveLoopOverride.length : loopLength;
+  const effectiveLoopGeneration = effectiveLoopOverride
+    ? effectiveLoopOverride.generation
+    : loopGeneration;
   const ratio = total > 0 && position !== null ? Math.min(1, Math.max(0, position / total)) : null;
-  const hasActiveLoop = loopStart !== null
-    && loopLength !== null
-    && Number.isFinite(loopStart)
-    && Number.isFinite(loopLength)
-    && loopLength > 0;
+  const hasActiveLoop = effectiveLoopStart !== null
+    && effectiveLoopLength !== null
+    && Number.isFinite(effectiveLoopStart)
+    && Number.isFinite(effectiveLoopLength)
+    && effectiveLoopLength > 0;
   const previousPosition = previousPositionRef.current;
   const railPosition = stabilizedWaveformPosition(
     previousPosition,
@@ -391,10 +421,10 @@ export function Waveform({
       railPosition,
     );
   const compositorLoopStart = hasActiveLoop
-    ? Math.min(total, Math.max(0, loopStart as number))
+    ? Math.min(total, Math.max(0, effectiveLoopStart as number))
     : null;
   const compositorLoopEnd = compositorLoopStart !== null
-    ? Math.min(total, compositorLoopStart + (loopLength as number))
+    ? Math.min(total, compositorLoopStart + (effectiveLoopLength as number))
     : null;
   const compositorLoopLength = compositorLoopStart !== null
     && compositorLoopEnd !== null
@@ -568,7 +598,8 @@ export function Waveform({
       && Math.abs(owner.totalSec - total) < 1e-6
       && Math.abs(owner.railLeadInSec - railLeadInSec) < 1e-6
       && owner.loopStartSec === clock.loopStart
-      && owner.loopLengthSec === clock.loopLength;
+      && owner.loopLengthSec === clock.loopLength
+      && owner.loopGeneration === effectiveLoopGeneration;
 
     /**
      * Each Web Animation uses source milliseconds as its local timeline. TEMPO is therefore a
@@ -675,6 +706,7 @@ export function Waveform({
       railLeadInSec,
       loopStartSec: clock.loopStart,
       loopLengthSec: clock.loopLength,
+      loopGeneration: effectiveLoopGeneration,
     };
   }, [
     bake?.endSec,
@@ -684,6 +716,7 @@ export function Waveform({
     continuousRailMotion,
     interactiveScrub,
     loopReadyForCompositor,
+    effectiveLoopGeneration,
     motionRevision,
     playbackRate,
     railPosition,
@@ -699,9 +732,30 @@ export function Waveform({
       const owner = motionAnimationsRef.current;
       if (!live || !owner || live.trackId !== trackId || owner.trackId !== trackId) return;
       const animations = [owner.bake, owner.rail] as const;
+      if ((live.loopGeneration ?? 0) !== owner.loopGeneration) {
+        // Desired and effective loop revisions can cross in flight. Never let PCM from one
+        // generation run on another generation's infinite animation.
+        animations.forEach((animation) => animation.pause());
+        setLiveLoopOverride((current) => {
+          const generation = live.loopGeneration ?? 0;
+          if (
+            current?.trackId === trackId
+            && current.generation === generation
+            && current.start === live.loopStart
+            && current.length === live.loopLength
+          ) return current;
+          return {
+            trackId,
+            generation,
+            start: live.loopStart,
+            length: live.loopLength,
+          };
+        });
+        return;
+      }
       const discontinuity = liveDiscontinuityRef.current !== live.discontinuityRevision;
       const rate = liveWaveformPlaybackRate(live.targetRate, live.audibleRate, live.scratchHeld);
-      const visualRate = Math.abs(rate) < 0.001 ? (rate < 0 ? -0.001 : 0.001) : rate;
+      let visualRate = Math.abs(rate) < 0.001 ? (rate < 0 ? -0.001 : 0.001) : rate;
       const wasPlatterActive = livePlatterActiveRef.current;
       livePlatterActiveRef.current = live.scratchHeld;
       const landAtLiveClock = () => {
@@ -769,6 +823,31 @@ export function Waveform({
         liveDiscontinuityRef.current = live.discontinuityRevision;
         animations.forEach((animation) => animation.pause());
         return;
+      }
+      const authority = projectedLiveWaveformPosition(
+        live.currentTime,
+        live.clientPresentationTimeMs,
+        performance.now(),
+        rate,
+        owner.totalSec,
+      );
+      const bakeTime = typeof owner.bake.currentTime === "number" ? owner.bake.currentTime : null;
+      if (bakeTime !== null) {
+        const visual = owner.loopStartSec !== null && owner.loopLengthSec !== null
+          ? owner.loopStartSec + ((bakeTime / 1_000) % owner.loopLengthSec)
+          : owner.bakeStartSec + bakeTime / 1_000;
+        const phaseError = liveWaveformPhaseError(
+          authority,
+          visual,
+          owner.loopLengthSec,
+        );
+        if (Math.abs(phaseError) > 0.08) {
+          // A real 80ms debt is no longer interpolation noise. Land once, then let the bounded PLL
+          // own ordinary drift; this avoids both permanent offset and 30Hz sawtooth correction.
+          landAtLiveClock();
+        } else {
+          visualRate = correctedLiveWaveformRate(visualRate, phaseError);
+        }
       }
       liveDiscontinuityRef.current = live.discontinuityRevision;
       // Never seek currentTime here. Bake (PCM) and rail (beat grid) are two effects; a second

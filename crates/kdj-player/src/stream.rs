@@ -29,7 +29,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::{Time, TimeBase};
 
-use crate::time_stretch::{PitchPreservingStretcher, TempoControl, TimeStretchFrame};
+use crate::time_stretch::{PitchPreservingStretcher, SourceTiming, TempoControl, TimeStretchFrame};
 
 /// Default read-ahead owned by one streaming Deck. The queue stores stereo output frames, so its
 /// memory is fixed regardless of track length (four seconds at 48 kHz is about 1.5 MiB).
@@ -76,7 +76,7 @@ struct StreamPacket<F: Copy> {
     generation: u64,
     media_advance: f32,
     tempo_revision: u64,
-    media_time: f64,
+    source_timing: SourceTiming,
 }
 
 /// Number of stems one STEM ring frame carries, in `StemKind::index` order.
@@ -151,6 +151,13 @@ impl LoopWindow {
         self.versioned_snapshot().0
     }
 
+    /// Generation the single control-thread writer will publish on its next set/clear operation.
+    /// This lets the callback command be queued first without changing worker-visible state when
+    /// the bounded realtime queue rejects the edge.
+    pub fn next_generation(&self) -> u64 {
+        self.generation().wrapping_add(2)
+    }
+
     pub fn start(&self) -> f64 {
         us_to_seconds(self.start_us.load(Ordering::Acquire))
     }
@@ -159,7 +166,7 @@ impl LoopWindow {
         us_to_seconds(self.length_us.load(Ordering::Acquire))
     }
 
-    pub fn set(&self, start: f64, length: f64) {
+    pub fn set(&self, start: f64, length: f64) -> u64 {
         let start = start.max(0.0);
         let length = length.max(0.05);
         // Odd revisions are writes in progress; readers retry until they observe one even,
@@ -169,13 +176,17 @@ impl LoopWindow {
         self.length_us
             .store(seconds_to_us(length), Ordering::Release);
         self.enabled.store(1, Ordering::Release);
-        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
     }
 
-    pub fn clear(&self) {
+    pub fn clear(&self) -> u64 {
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.enabled.store(0, Ordering::Release);
-        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
     }
 
     pub fn snapshot(&self) -> Option<LoopWindowSnapshot> {
@@ -412,13 +423,13 @@ impl<F: Copy> StreamSource<F> {
         }
     }
 
-    fn pop_consumer_timed(&self) -> Option<(F, f32, u64, f64)> {
+    fn pop_consumer_timed(&self) -> Option<(F, f32, u64, SourceTiming)> {
         self.pop_consumer_packet().map(|packet| {
             (
                 packet.frame,
                 packet.media_advance,
                 packet.tempo_revision,
-                packet.media_time,
+                packet.source_timing,
             )
         })
     }
@@ -433,7 +444,7 @@ impl<F: Copy> StreamSource<F> {
         self.pop_consumer()
     }
 
-    pub(crate) fn pop_callback_timed(&self) -> Option<(F, f32, u64, f64)> {
+    pub(crate) fn pop_callback_timed(&self) -> Option<(F, f32, u64, SourceTiming)> {
         self.pop_consumer_timed()
     }
 }
@@ -474,7 +485,7 @@ impl<F: Copy> StreamWriter<F> {
             frame,
             1.0,
             0,
-            media_time,
+            SourceTiming::linear(media_time),
             cancelled,
             || false,
         )?;
@@ -502,7 +513,7 @@ impl<F: Copy> StreamWriter<F> {
             frame,
             media_advance,
             0,
-            f64::NAN,
+            SourceTiming::default(),
             cancelled,
             || false,
         )?;
@@ -524,11 +535,56 @@ impl<F: Copy> StreamWriter<F> {
             frame,
             media_advance,
             tempo_revision,
-            media_time,
+            SourceTiming::linear(media_time),
             cancelled,
             || false,
         )?;
         Ok(())
+    }
+
+    pub(crate) fn push_with_transport_timing<G>(
+        &mut self,
+        frame: F,
+        media_advance: f32,
+        tempo_revision: u64,
+        source_timing: SourceTiming,
+        cancelled: G,
+    ) -> Result<()>
+    where
+        G: Fn() -> bool,
+    {
+        let _ = self.push_with_media_timing_interruptible(
+            frame,
+            media_advance,
+            tempo_revision,
+            source_timing,
+            cancelled,
+            || false,
+        )?;
+        Ok(())
+    }
+
+    fn push_with_transport_timing_interruptible<G, I>(
+        &mut self,
+        frame: F,
+        media_advance: f32,
+        tempo_revision: u64,
+        source_timing: SourceTiming,
+        cancelled: G,
+        interrupted: I,
+    ) -> Result<bool>
+    where
+        G: Fn() -> bool,
+        I: Fn() -> bool,
+    {
+        self.push_with_media_timing_interruptible(
+            frame,
+            media_advance,
+            tempo_revision,
+            source_timing,
+            cancelled,
+            interrupted,
+        )
     }
 
     fn push_with_media_advance_interruptible<G, I>(
@@ -546,7 +602,7 @@ impl<F: Copy> StreamWriter<F> {
             frame,
             media_advance,
             0,
-            f64::NAN,
+            SourceTiming::default(),
             cancelled,
             interrupted,
         )
@@ -557,7 +613,7 @@ impl<F: Copy> StreamWriter<F> {
         mut frame: F,
         media_advance: f32,
         tempo_revision: u64,
-        media_time: f64,
+        source_timing: SourceTiming,
         cancelled: G,
         interrupted: I,
     ) -> Result<bool>
@@ -582,7 +638,7 @@ impl<F: Copy> StreamWriter<F> {
                 generation: self.generation,
                 media_advance,
                 tempo_revision,
-                media_time,
+                source_timing,
             }) {
                 Ok(()) => {
                     self.counters.produced.fetch_add(1, Ordering::Release);
@@ -767,12 +823,18 @@ pub struct StreamMetadata {
 /// decoded loop reservoir predictable even for eight-channel STEM frames.
 pub const MAX_TRANSPORT_LOOP_SECONDS: f64 = 32.0;
 pub const MAX_TRANSPORT_LOOP_PCM_BYTES: usize = 96 * 1024 * 1024;
-const LOOP_CAPTURE_HISTORY_SECONDS: f64 = 2.0;
+pub const LOOP_CAPTURE_HISTORY_SECONDS: f64 = 2.0;
 
 #[derive(Clone, Copy)]
 struct TimedPcm<T: Copy> {
     frame: T,
-    media_time: f64,
+    source_timing: SourceTiming,
+}
+
+impl<T: Copy> TimedPcm<T> {
+    fn media_time(self) -> f64 {
+        self.source_timing.media_time
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -782,12 +844,14 @@ enum PcmLoopMode {
 }
 
 struct PcmLoop<T: Copy> {
+    generation: u64,
     window: LoopWindowSnapshot,
     target_frames: usize,
     frames: Vec<T>,
     mode: PcmLoopMode,
     cursor: usize,
     exit_after_cycle: bool,
+    wrap_pending: bool,
 }
 
 /// Mixxx-style read-ahead loop for KDJ's bounded streaming pipeline.
@@ -805,7 +869,7 @@ struct PcmLoopReader<T: Copy> {
     active: Option<PcmLoop<T>>,
 }
 
-impl<T: Copy> PcmLoopReader<T> {
+impl<T: Copy + FrameLerp> PcmLoopReader<T> {
     fn new(output_sample_rate: u32) -> Self {
         let sample_rate = f64::from(output_sample_rate.max(1));
         Self {
@@ -844,11 +908,13 @@ impl<T: Copy> PcmLoopReader<T> {
             return;
         };
 
+        let generation = generation.unwrap_or(0);
         let target_frames = (window.length * self.sample_rate).round().max(1.0) as usize;
         let prior = self.active.take();
         if let Some(mut active) = prior
             .filter(|active| (active.window.start - window.start).abs() <= 0.5 / self.sample_rate)
         {
+            active.generation = generation;
             active.window = window;
             active.target_frames = target_frames;
             active.exit_after_cycle = false;
@@ -861,6 +927,9 @@ impl<T: Copy> PcmLoopReader<T> {
                 active.frames.truncate(target_frames);
             }
             if active.frames.len() >= target_frames {
+                if active.mode != PcmLoopMode::Replay {
+                    active.wrap_pending = true;
+                }
                 active.mode = PcmLoopMode::Replay;
                 active.cursor %= active.frames.len().max(1);
             }
@@ -869,12 +938,14 @@ impl<T: Copy> PcmLoopReader<T> {
         }
 
         let mut active = PcmLoop {
+            generation,
             window,
             target_frames,
             frames: Vec::with_capacity(target_frames),
             mode: PcmLoopMode::Capture,
             cursor: 0,
             exit_after_cycle: false,
+            wrap_pending: false,
         };
         for packet in &self.history {
             Self::capture_packet(self.sample_rate, &mut active, *packet);
@@ -884,26 +955,27 @@ impl<T: Copy> PcmLoopReader<T> {
         }
         if active.frames.len() >= active.target_frames {
             active.mode = PcmLoopMode::Replay;
+            active.wrap_pending = true;
         }
         self.active = Some(active);
     }
 
     fn capture_packet(sample_rate: f64, active: &mut PcmLoop<T>, packet: TimedPcm<T>) {
-        if !packet.media_time.is_finite() || active.frames.len() >= active.target_frames {
+        if !packet.media_time().is_finite() || active.frames.len() >= active.target_frames {
             return;
         }
         let tolerance = 0.51 / sample_rate;
         let expected = active.window.start + active.frames.len() as f64 / sample_rate;
-        if packet.media_time + tolerance < expected {
+        if packet.media_time() + tolerance < expected {
             return;
         }
-        if packet.media_time > expected + tolerance {
+        if packet.media_time() > expected + tolerance {
             // Decoder timestamps should be contiguous here. For a sub-frame timestamp hole, hold
             // the previous sample rather than shortening the loop and accumulating phase error.
             let fill = active.frames.last().copied().unwrap_or(packet.frame);
             while active.frames.len() < active.target_frames {
                 let next = active.window.start + active.frames.len() as f64 / sample_rate;
-                if next + tolerance >= packet.media_time {
+                if next + tolerance >= packet.media_time() {
                     break;
                 }
                 active.frames.push(fill);
@@ -915,13 +987,13 @@ impl<T: Copy> PcmLoopReader<T> {
     }
 
     fn remember_linear(&mut self, packet: TimedPcm<T>) {
-        if !packet.media_time.is_finite() {
+        if !packet.media_time().is_finite() {
             return;
         }
         if self
             .history
             .back()
-            .is_some_and(|last| packet.media_time + 1.0 / self.sample_rate < last.media_time)
+            .is_some_and(|last| packet.media_time() + 1.0 / self.sample_rate < last.media_time())
         {
             self.history.clear();
         }
@@ -935,9 +1007,36 @@ impl<T: Copy> PcmLoopReader<T> {
         self.linear_pending.pop_front().or_else(|| {
             raw.pop_consumer_packet().map(|packet| TimedPcm {
                 frame: packet.frame,
-                media_time: packet.media_time,
+                source_timing: packet.source_timing,
             })
         })
+    }
+
+    /// Replace only the tiny region around the circular seam with a deterministic bridge. The
+    /// cache itself stays untouched, so enlarging a loop later still captures original PCM.
+    fn replay_frame(active: &PcmLoop<T>, cursor: usize) -> T {
+        const MAX_SEAM_FRAMES: usize = 64;
+        let len = active.frames.len();
+        if len < 16 {
+            return active.frames[cursor];
+        }
+        let span = MAX_SEAM_FRAMES.min((len / 4) * 2).max(2);
+        let half = span / 2;
+        let bridge_index = if cursor >= len - half {
+            Some(cursor - (len - half))
+        } else if cursor < half {
+            Some(half + cursor)
+        } else {
+            None
+        };
+        let Some(bridge_index) = bridge_index else {
+            return active.frames[cursor];
+        };
+        let left = active.frames[len - half - 1];
+        let right = active.frames[half];
+        let linear = (bridge_index + 1) as f32 / (span + 1) as f32;
+        let smooth = linear * linear * (3.0 - 2.0 * linear);
+        left.lerp(right, smooth)
     }
 
     fn next(&mut self, raw: &StreamSource<T>) -> Option<TimedPcm<T>> {
@@ -948,6 +1047,7 @@ impl<T: Copy> PcmLoopReader<T> {
                 {
                     active.mode = PcmLoopMode::Replay;
                     active.cursor = 0;
+                    active.wrap_pending = true;
                 }
                 if active.mode == PcmLoopMode::Replay {
                     if active.cursor >= active.frames.len() {
@@ -961,29 +1061,46 @@ impl<T: Copy> PcmLoopReader<T> {
                             active.mode = PcmLoopMode::Capture;
                         } else {
                             active.cursor = 0;
+                            active.wrap_pending = true;
                         }
                     }
                     if active.mode == PcmLoopMode::Replay {
                         let cursor = active.cursor;
                         active.cursor += 1;
+                        let wrapped = active.wrap_pending;
+                        active.wrap_pending = false;
+                        let wraps_again = !active.exit_after_cycle
+                            && active.frames.len() >= active.target_frames;
                         return Some(TimedPcm {
-                            frame: active.frames[cursor],
-                            media_time: active.window.start + cursor as f64 / self.sample_rate,
+                            frame: if wraps_again {
+                                Self::replay_frame(active, cursor)
+                            } else {
+                                active.frames[cursor]
+                            },
+                            source_timing: SourceTiming {
+                                media_time: active.window.start + cursor as f64 / self.sample_rate,
+                                loop_generation: active.generation,
+                                loop_active: true,
+                                loop_wrapped: wrapped,
+                            },
                         });
                     }
                 }
             }
 
-            let packet = self.pop_linear(raw)?;
+            let mut packet = self.pop_linear(raw)?;
             self.remember_linear(packet);
             let Some(active) = self.active.as_mut() else {
+                packet.source_timing.loop_generation = self.seen_generation.unwrap_or(0);
+                packet.source_timing.loop_active = false;
+                packet.source_timing.loop_wrapped = false;
                 return Some(packet);
             };
             if active.mode != PcmLoopMode::Capture {
                 continue;
             }
-            if packet.media_time.is_finite()
-                && packet.media_time + 0.5 / self.sample_rate >= active.window.end()
+            if packet.media_time().is_finite()
+                && packet.media_time() + 0.5 / self.sample_rate >= active.window.end()
             {
                 if active.frames.is_empty() {
                     // The history should always contain an audible in-point. Never fabricate a
@@ -995,10 +1112,14 @@ impl<T: Copy> PcmLoopReader<T> {
                 active.frames.resize(active.target_frames, fill);
                 active.mode = PcmLoopMode::Replay;
                 active.cursor = 0;
+                active.wrap_pending = true;
                 self.linear_pending.push_front(packet);
                 continue;
             }
             Self::capture_packet(self.sample_rate, active, packet);
+            packet.source_timing.loop_generation = active.generation;
+            packet.source_timing.loop_active = true;
+            packet.source_timing.loop_wrapped = false;
             return Some(packet);
         }
     }
@@ -1029,7 +1150,7 @@ pub fn run_pitch_preserving_pipeline<T, D>(
     seek: Option<StreamSeekControl>,
 ) -> Result<StreamMetadata>
 where
-    T: TimeStretchFrame,
+    T: TimeStretchFrame + FrameLerp,
     D: FnOnce(StreamWriter<T>, Arc<dyn Fn() -> bool + Send + Sync>) -> Result<StreamMetadata>
         + Send
         + 'static,
@@ -1077,17 +1198,36 @@ where
             .unwrap_or((None, None));
         loop_reader.sync(loop_generation, loop_snapshot);
         if let Some(packet) = loop_reader.next(&raw) {
-            stretcher.push_timed(
+            let packet_loop_generation = packet.source_timing.loop_generation;
+            let mut superseded = false;
+            stretcher.push_transport_timed(
                 packet.frame,
-                packet.media_time,
-                |output, media_advance, tempo_revision, out_time| {
-                    output_writer.push_with_media_timing(
+                packet.source_timing,
+                |output, media_advance, tempo_revision, source_timing| {
+                    if superseded {
+                        return Ok(());
+                    }
+                    let delivered = output_writer.push_with_transport_timing_interruptible(
                         output,
                         media_advance,
                         tempo_revision,
-                        out_time,
+                        source_timing,
                         &*cancelled,
-                    )
+                        || {
+                            loop_window.as_ref().is_some_and(|window| {
+                                let (generation, snapshot) = window.versioned_snapshot();
+                                snapshot.is_some_and(|window| {
+                                    generation != packet_loop_generation
+                                        && source_timing.media_time.is_finite()
+                                        && source_timing.media_time
+                                            + 0.5 / f64::from(output_sample_rate.max(1))
+                                            >= window.end()
+                                })
+                            })
+                        },
+                    )?;
+                    superseded = !delivered;
+                    Ok(())
                 },
             )?;
             continue;
@@ -1099,12 +1239,12 @@ where
         // only; yielding here keeps it from stealing the UI/audio callback's time slice.
         thread::sleep(Duration::from_millis(1));
     }
-    stretcher.finish_timed(|output, media_advance, tempo_revision, out_time| {
-        output_writer.push_with_media_timing(
+    stretcher.finish_transport_timed(|output, media_advance, tempo_revision, source_timing| {
+        output_writer.push_with_transport_timing(
             output,
             media_advance,
             tempo_revision,
-            out_time,
+            source_timing,
             &*cancelled,
         )
     })?;
@@ -2574,7 +2714,7 @@ impl LiveStemResampler {
                     previous.lerp(current, fraction),
                     1.0,
                     0,
-                    media_time,
+                    SourceTiming::linear(media_time),
                     cancelled,
                     interrupted,
                 )? {
@@ -2986,7 +3126,7 @@ mod tests {
     fn timed_value(value: usize, sample_rate: u32) -> TimedPcm<[f32; 2]> {
         TimedPcm {
             frame: [value as f32, value as f32],
-            media_time: value as f64 / f64::from(sample_rate),
+            source_timing: SourceTiming::linear(value as f64 / f64::from(sample_rate)),
         }
     }
 
@@ -2998,7 +3138,7 @@ mod tests {
         for value in 0..frames {
             let packet = timed_value(value, sample_rate);
             writer
-                .push_at(packet.frame, packet.media_time, || false)
+                .push_at(packet.frame, packet.media_time(), || false)
                 .unwrap();
         }
         (source, writer)
@@ -3017,12 +3157,86 @@ mod tests {
             .collect();
         assert_eq!(linear, (0..10).collect::<Vec<_>>());
 
-        window.set(1.0, 0.4);
+        let generation = window.set(1.0, 0.4);
         reader.sync(Some(window.generation()), window.snapshot());
-        let played: Vec<usize> = (0..12)
-            .map(|_| reader.next(&raw).unwrap().frame[0] as usize)
-            .collect();
-        assert_eq!(played, vec![10, 11, 12, 13, 10, 11, 12, 13, 10, 11, 12, 13]);
+        let packets: Vec<_> = (0..12).map(|_| reader.next(&raw).unwrap()).collect();
+        assert_eq!(
+            packets
+                .iter()
+                .map(|packet| packet.frame[0] as usize)
+                .collect::<Vec<_>>(),
+            vec![10, 11, 12, 13, 10, 11, 12, 13, 10, 11, 12, 13]
+        );
+        assert!(packets
+            .iter()
+            .all(|packet| packet.source_timing.loop_generation == generation));
+        assert_eq!(
+            packets
+                .iter()
+                .filter(|packet| packet.source_timing.loop_wrapped)
+                .count(),
+            2
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn pcm_loop_replay_smooths_only_the_circular_seam() {
+        let frames = (0..256)
+            .map(|index| [index as f32 / 255.0; 2])
+            .collect::<Vec<_>>();
+        let active = PcmLoop {
+            generation: 2,
+            window: LoopWindowSnapshot {
+                start: 0.0,
+                length: 0.256,
+            },
+            target_frames: frames.len(),
+            frames,
+            mode: PcmLoopMode::Replay,
+            cursor: 0,
+            exit_after_cycle: false,
+            wrap_pending: false,
+        };
+        let around_seam = (224..288)
+            .map(|index| PcmLoopReader::replay_frame(&active, index % 256)[0])
+            .collect::<Vec<_>>();
+        let maximum_step = around_seam
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(maximum_step < 0.05, "seam step remained {maximum_step}");
+    }
+
+    #[test]
+    fn exiting_loop_preserves_unsmoothed_tail_before_linear_pcm() {
+        let (raw, writer) = raw_ramp(4, 1_000);
+        let mut reader = PcmLoopReader::new(1_000);
+        reader.seen_generation = Some(4);
+        reader.linear_pending.push_back(TimedPcm {
+            frame: [1.01, 1.01],
+            source_timing: SourceTiming::linear(0.256),
+        });
+        reader.active = Some(PcmLoop {
+            generation: 2,
+            window: LoopWindowSnapshot {
+                start: 0.0,
+                length: 0.256,
+            },
+            target_frames: 256,
+            frames: (0..256)
+                .map(|index| [index as f32 / 255.0; 2])
+                .collect(),
+            mode: PcmLoopMode::Replay,
+            cursor: 255,
+            exit_after_cycle: true,
+            wrap_pending: false,
+        });
+
+        let tail = reader.next(&raw).unwrap().frame[0];
+        let linear = reader.next(&raw).unwrap().frame[0];
+        assert!((tail - 1.0).abs() < 1.0e-6);
+        assert!((linear - 1.01).abs() < 1.0e-6);
         drop(writer);
     }
 
@@ -3146,7 +3360,8 @@ mod tests {
         let mut times = Vec::new();
         let mut cleared = false;
         while std::time::Instant::now() < deadline {
-            if let Some((_frame, _advance, _revision, time)) = output.pop_callback_timed() {
+            if let Some((_frame, _advance, _revision, timing)) = output.pop_callback_timed() {
+                let time = timing.media_time;
                 if !cleared
                     && times
                         .last()
@@ -3183,6 +3398,88 @@ mod tests {
             output.counters.generation.load(Ordering::Acquire),
             0,
             "natural wraps must not invalidate the callback ring"
+        );
+    }
+
+    #[test]
+    fn running_pipeline_switches_loop_generations_only_at_tagged_audio_boundaries() {
+        let sample_rate = 8_000;
+        let window = Arc::new(LoopWindow::new());
+        let (output, output_writer) = StreamSource::<[f32; 2]>::bounded(384);
+        let stop = Arc::new(AtomicBool::new(false));
+        let cancelled: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new({
+            let stop = Arc::clone(&stop);
+            move || stop.load(Ordering::Acquire)
+        });
+        let worker_window = Arc::clone(&window);
+        let handle = thread::spawn(move || {
+            run_pitch_preserving_pipeline(
+                TempoControl::new(1.25),
+                sample_rate,
+                sample_rate as usize * 2,
+                output_writer,
+                move |mut writer, cancelled| {
+                    for frame in 0..sample_rate as usize * 2 {
+                        writer.push_at(
+                            [frame as f32, frame as f32],
+                            frame as f64 / f64::from(sample_rate),
+                            &*cancelled,
+                        )?;
+                    }
+                    writer.finish();
+                    Ok(StreamMetadata {
+                        duration: Some(2.0),
+                        source_sample_rate: sample_rate,
+                        output_sample_rate: sample_rate,
+                    })
+                },
+                cancelled,
+                Some(worker_window),
+                None,
+            )
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut armed_generation = None;
+        let mut saw_active_generation = false;
+        let mut wraps = 0;
+        let mut previous_time: Option<f64> = None;
+        while std::time::Instant::now() < deadline {
+            if let Some((_frame, _advance, _revision, timing)) = output.pop_callback_timed() {
+                if armed_generation.is_none() && timing.media_time >= 0.4 {
+                    armed_generation = Some(window.set(timing.media_time, 0.08));
+                }
+                if Some(timing.loop_generation) == armed_generation && timing.loop_active {
+                    saw_active_generation = true;
+                }
+                if previous_time.is_some_and(|previous| timing.media_time + 0.005 < previous) {
+                    assert!(
+                        timing.loop_wrapped,
+                        "a backward source clock must carry an atomic loop-wrap marker"
+                    );
+                    wraps += 1;
+                    if wraps == 2 {
+                        window.clear();
+                    }
+                }
+                previous_time = Some(timing.media_time);
+                continue;
+            }
+            if output.drained() {
+                break;
+            }
+            thread::yield_now();
+        }
+        if !output.drained() {
+            stop.store(true, Ordering::Release);
+            while output.pop_callback_timed().is_some() {}
+        }
+        handle.join().expect("loop pipeline thread").unwrap();
+
+        assert!(saw_active_generation);
+        assert!(
+            wraps >= 2,
+            "the armed short loop never reached the callback"
         );
     }
 

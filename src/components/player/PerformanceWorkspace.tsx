@@ -162,6 +162,9 @@ export interface PerformanceDeckModel {
   /** 引擎级无缝循环窗口（曲目秒）；null 表示线性播放。 */
   loopStart: number | null;
   loopLength: number | null;
+  effectiveLoopStart: number | null;
+  effectiveLoopLength: number | null;
+  effectiveLoopGeneration: number;
 }
 
 export interface PerformanceMixerValues {
@@ -224,7 +227,7 @@ export interface PerformanceWorkspaceProps {
   onMasterVolumeChange: (volume: number) => void;
   onToggleStemAll: (side: 0 | 1) => void;
   onDeckPfl: (side: 0 | 1, enabled: boolean) => void;
-  onToggleLoop: (side: 0 | 1, length: number) => void;
+  onToggleLoop: (side: 0 | 1, length: number, quantize: boolean) => void;
   onResizeLoop: (side: 0 | 1, length: number) => void;
   onSaveCuePoints: (track: Track, cues: CuePoint[]) => Promise<void>;
   onSaveMainCue: (track: Track, cueMs: number) => Promise<void>;
@@ -332,6 +335,15 @@ function readCrossfaderEnabled(): boolean {
 }
 
 const LOOP_BEAT_CHOICES = [0.25, 0.5, 1, 2, 4, 8, 16, 32];
+const MAX_NATIVE_LOOP_SECONDS = 32;
+
+function boundedLoopBeats(beats: number, beatSecondsValue: number): number {
+  const maximum = MAX_NATIVE_LOOP_SECONDS / Math.max(beatSecondsValue, Number.EPSILON);
+  return [...LOOP_BEAT_CHOICES]
+    .reverse()
+    .find((choice) => choice <= beats && choice <= maximum + 1.0e-9)
+    ?? LOOP_BEAT_CHOICES[0];
+}
 
 function nextLoopBeats(current: number, delta: number): number {
   if (!delta) return current;
@@ -595,8 +607,9 @@ function DeckWave({
           cueMs={track.cue_ms}
           endMs={track.end_ms}
           cuePoints={track.cue_points}
-          loopStart={deck.loopStart}
-          loopLength={deck.loopLength}
+          loopStart={deck.effectiveLoopStart}
+          loopLength={deck.effectiveLoopLength}
+          loopGeneration={deck.effectiveLoopGeneration}
           height={50}
           seekable={false}
           showBeatGrid
@@ -960,7 +973,8 @@ function LoopControls({ deck, side, beats, jumpBeats, onBeats, onJumpBeats, onTo
   const looping = deck.loopStart !== null && deck.loopLength !== null;
   const stepBeats = (direction: -1 | 1) => {
     const index = LOOP_BEAT_CHOICES.indexOf(beats);
-    const next = LOOP_BEAT_CHOICES[clamp(index + direction, 0, LOOP_BEAT_CHOICES.length - 1)];
+    const selected = LOOP_BEAT_CHOICES[clamp(index + direction, 0, LOOP_BEAT_CHOICES.length - 1)];
+    const next = beat ? boundedLoopBeats(selected, beat) : selected;
     onBeats(next);
     if (looping && beat) onResizeLoop(side, next);
   };
@@ -2267,6 +2281,8 @@ export function PerformanceWorkspace({
   deckPflRef.current = deckPfl;
   const [midiPort, setMidiPort] = useState<string | null>(null);
   const [loopBeats, setLoopBeats] = useState<[number, number]>(readLoopBeats);
+  const loopBeatsRef = useRef(loopBeats);
+  loopBeatsRef.current = loopBeats;
   const [jumpBeats, setJumpBeats] = useState<[number, number]>(readJumpBeats);
   const [fxMode, setFxMode] = useState<[FxPanelMode, FxPanelMode]>(["knobs", "knobs"]);
   const [fxSlots, setFxSlots] = useState<[DeckFxSlots, DeckFxSlots]>([
@@ -2909,7 +2925,14 @@ export function PerformanceWorkspace({
     const beat = beatSeconds(decks[side].track);
     if (decks[side].loopStart === null || !beat) return;
     cancelPendingSyncCorrection();
-    const length = beats * beat;
+    const boundedBeats = boundedLoopBeats(beats, beat);
+    if (boundedBeats !== beats) {
+      const next: [number, number] = [loopBeatsRef.current[0], loopBeatsRef.current[1]];
+      next[side] = boundedBeats;
+      loopBeatsRef.current = next;
+      setLoopBeats(next);
+    }
+    const length = boundedBeats * beat;
     onResizeLoop(side, length);
   };
   const handleLoopToggle = (side: 0 | 1) => {
@@ -2919,8 +2942,15 @@ export function PerformanceWorkspace({
     cancelPendingSyncCorrection();
     // Rust samples loop-in from the callback in the same command that toggles the loop. The UI
     // intentionally sends no position, so a delayed React snapshot can never jump the song.
-    const length = loopBeats[side] * beat;
-    onToggleLoop(side, length);
+    const boundedBeats = boundedLoopBeats(loopBeatsRef.current[side], beat);
+    if (boundedBeats !== loopBeatsRef.current[side]) {
+      const next: [number, number] = [loopBeatsRef.current[0], loopBeatsRef.current[1]];
+      next[side] = boundedBeats;
+      loopBeatsRef.current = next;
+      setLoopBeats(next);
+    }
+    const length = boundedBeats * beat;
+    onToggleLoop(side, length, quantize);
   };
   const handleManualPlatter: PerformanceWorkspaceProps["onPlatter"] = (side, event) => {
     cancelPendingSyncCorrection();
@@ -3338,7 +3368,13 @@ export function PerformanceWorkspace({
         return;
       }
       case "loopSize": {
-        const beats = nextLoopBeats(loopBeats[action.deck], action.delta);
+        const beats = nextLoopBeats(loopBeatsRef.current[action.deck], action.delta);
+        const immediate: [number, number] = [
+          loopBeatsRef.current[0],
+          loopBeatsRef.current[1],
+        ];
+        immediate[action.deck] = beats;
+        loopBeatsRef.current = immediate;
         setLoopBeats((current) => {
           const next: [number, number] = [current[0], current[1]];
           next[action.deck] = beats;
@@ -3685,7 +3721,13 @@ export function PerformanceWorkspace({
         side={side}
         beats={loopBeats[side]}
         jumpBeats={jumpBeats[side]}
-        onBeats={(beats) => setLoopBeats((current) => side === 0 ? [beats, current[1]] : [current[0], beats])}
+        onBeats={(beats) => {
+          const next: [number, number] = side === 0
+            ? [beats, loopBeatsRef.current[1]]
+            : [loopBeatsRef.current[0], beats];
+          loopBeatsRef.current = next;
+          setLoopBeats(next);
+        }}
         onJumpBeats={(beats) => setJumpBeats((current) => side === 0 ? [beats, current[1]] : [current[0], beats])}
         onToggleLoop={handleLoopToggle}
         onResizeLoop={handleResizeLoop}

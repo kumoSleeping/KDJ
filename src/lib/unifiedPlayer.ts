@@ -91,6 +91,11 @@ export interface UnifiedDeckState {
   /** 引擎级无缝循环窗口（曲目秒）；null 表示线性播放。 */
   loopStart: number | null;
   loopLength: number | null;
+  effectiveLoopGeneration: number;
+  effectiveLoopStart: number | null;
+  effectiveLoopLength: number | null;
+  loopWrapCount: number;
+  loopStallFrames: number;
 }
 
 export interface UnifiedDeckMixer {
@@ -216,7 +221,7 @@ export interface UnifiedPlayer {
     gains?: [number, number, number, number],
   ): Promise<UnifiedPlayerState>;
   /** Toggle Auto Loop; Rust captures loop-in from the native callback clock. */
-  toggleDeckLoop(deck: 0 | 1, length: number): Promise<UnifiedPlayerState>;
+  toggleDeckLoop(deck: 0 | 1, length: number, quantize?: boolean): Promise<UnifiedPlayerState>;
   /** Resize the active loop while preserving its native loop-in frame. */
   resizeDeckLoop(deck: 0 | 1, length: number): Promise<UnifiedPlayerState>;
   seek(seconds: number): Promise<UnifiedPlayerState>;
@@ -273,6 +278,11 @@ const INITIAL_STATE: UnifiedPlayerState = {
     scratchHeld: false,
     loopStart: null,
     loopLength: null,
+    effectiveLoopGeneration: 0,
+    effectiveLoopStart: null,
+    effectiveLoopLength: null,
+    loopWrapCount: 0,
+    loopStallFrames: 0,
   })) as [UnifiedDeckState, UnifiedDeckState],
 };
 
@@ -582,12 +592,21 @@ interface DesktopDeckSnapshotRaw {
   peakLevel?: number;
   loopStart?: number | null;
   loopLength?: number | null;
+  effectiveLoopGeneration?: number;
+  effectiveLoopStart?: number | null;
+  effectiveLoopLength?: number | null;
+  loopWrapCount?: number;
+  loopStallFrames?: number;
 }
 
 interface DesktopCommandAckRaw {
   commandId: number;
   acceptedSequence: number;
   snapshot: DesktopPlaybackSnapshotRaw;
+}
+
+interface DesktopControlAckRaw {
+  acceptedSequence: number;
 }
 
 interface DesktopLevelsRaw {
@@ -600,6 +619,7 @@ interface DesktopPlaybackClockRaw {
   outputSampleRate: number;
   callbackTimeNs: number;
   presentationTimeNs: number;
+  foregroundDeck: number;
   decks: [DesktopPlaybackDeckClockRaw, DesktopPlaybackDeckClockRaw];
 }
 
@@ -616,6 +636,11 @@ interface DesktopPlaybackDeckClockRaw {
   discontinuityRevision: number;
   playing: boolean;
   scratchHeld: boolean;
+  loopGeneration: number;
+  loopStart: number | null;
+  loopLength: number | null;
+  loopWrapCount: number;
+  loopStallFrames: number;
 }
 
 export interface LiveDeckClock extends DesktopPlaybackDeckClockRaw {
@@ -634,6 +659,7 @@ const liveDeckSpectrum: [number[], number[]] = [
 ];
 let liveDeckLevelsActive = false;
 let livePlaybackClock: [LiveDeckClock | null, LiveDeckClock | null] = [null, null];
+let liveForegroundDeck: 0 | 1 = 0;
 let liveClockOffsetMs: number | null = null;
 let liveClockLastOutputFrame = 0;
 const liveClockListeners = new Set<() => void>();
@@ -649,6 +675,10 @@ export function getLiveDeckSpectrum(deck: 0 | 1): readonly number[] | null {
 
 export function getLiveDeckClock(deck: 0 | 1): LiveDeckClock | null {
   return livePlaybackClock[deck];
+}
+
+export function getLiveForegroundDeck(): 0 | 1 {
+  return liveForegroundDeck;
 }
 
 export function subscribeLivePlaybackClock(listener: () => void): () => void {
@@ -669,6 +699,7 @@ function acceptPlaybackClock(raw: DesktopPlaybackClockRaw): void {
     liveClockOffsetMs = Math.min(liveClockOffsetMs, offsetSample);
   }
   liveClockLastOutputFrame = raw.outputFrame;
+  liveForegroundDeck = raw.foregroundDeck === 1 ? 1 : 0;
   const clientPresentationTimeMs = Math.max(0, raw.presentationTimeNs) / 1_000_000
     + liveClockOffsetMs;
   livePlaybackClock = raw.decks.map((deck) => ({
@@ -746,6 +777,13 @@ function normalizedDesktop(raw: DesktopPlaybackSnapshotRaw): UnifiedPlayerState 
       scratchHeld: deck.scratchHeld ?? false,
       loopStart: typeof deck.loopStart === "number" ? deck.loopStart : null,
       loopLength: typeof deck.loopLength === "number" ? deck.loopLength : null,
+      effectiveLoopGeneration: deck.effectiveLoopGeneration ?? 0,
+      effectiveLoopStart:
+        typeof deck.effectiveLoopStart === "number" ? deck.effectiveLoopStart : null,
+      effectiveLoopLength:
+        typeof deck.effectiveLoopLength === "number" ? deck.effectiveLoopLength : null,
+      loopWrapCount: deck.loopWrapCount ?? 0,
+      loopStallFrames: deck.loopStallFrames ?? 0,
     })) as [UnifiedDeckState, UnifiedDeckState],
   };
 }
@@ -881,7 +919,7 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     const operation = (async () => {
       if (!isCurrent()) return this.snapshot;
       await this.initialize();
-      await invoke<DesktopCommandAckRaw>("playback_control", { command });
+      await invoke<DesktopControlAckRaw>("playback_control", { command });
       return this.snapshot;
     })();
     return operation;
@@ -1268,9 +1306,13 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     });
   }
 
-  toggleDeckLoop(deck: 0 | 1, length: number): Promise<UnifiedPlayerState> {
+  toggleDeckLoop(
+    deck: 0 | 1,
+    length: number,
+    quantize = false,
+  ): Promise<UnifiedPlayerState> {
     this.loopRevisions[deck] += 1;
-    return this.command({ type: "toggleDeckLoop", deck, length });
+    return this.command({ type: "toggleDeckLoop", deck, length, quantize });
   }
 
   resizeDeckLoop(deck: 0 | 1, length: number): Promise<UnifiedPlayerState> {
@@ -1467,6 +1509,11 @@ class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
       scratchHeld: false,
       loopStart: null,
       loopLength: null,
+      effectiveLoopGeneration: 0,
+      effectiveLoopStart: null,
+      effectiveLoopLength: null,
+      loopWrapCount: 0,
+      loopStallFrames: 0,
     };
     this.publish({ ...this.snapshot, decks });
     if (source.autoplay) await djEngine.hardPlay(audio);

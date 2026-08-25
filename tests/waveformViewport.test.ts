@@ -15,14 +15,14 @@ import {
   beatMarkerRangePercent,
 } from "../src/lib/waveformViewport";
 import {
+  correctedLiveWaveformRate,
   liveWaveformAnimationTimeMs,
   liveWaveformLoopAnimationTimeMs,
-  liveWaveformAuthoritySeconds,
+  liveWaveformPhaseError,
   liveWaveformPlaybackRate,
   loopedWaveformPosition,
   projectedLiveWaveformPosition,
   shouldPauseLiveWaveformClock,
-  shouldRetargetLiveWaveformClock,
   shouldLandPlatterWaveform,
   updateWaveformMotionClock,
   waveformMotionClockPosition,
@@ -297,24 +297,12 @@ test("the live waveform follows DAC-audible tempo instead of building target-rat
     0,
     "a parked Deck must not fall back to TEMPO and keep the rail walking",
   );
-  assert.equal(shouldRetargetLiveWaveformClock(80, false), false);
-  assert.equal(shouldRetargetLiveWaveformClock(80, true), false);
-  assert.equal(shouldRetargetLiveWaveformClock(1_251, false), false);
 });
 
 test("platter authority projects the queued callback cursor onto the client clock", () => {
   assert.ok(Math.abs(projectedLiveWaveformPosition(10, 1_020, 1_000, 2, 180) - 9.96) < 1e-12);
   assert.ok(Math.abs(projectedLiveWaveformPosition(10, 1_000, 1_050, -2, 180) - 9.9) < 1e-12);
   assert.equal(projectedLiveWaveformPosition(179.9, 1_000, 1_200, 2, 180), 180);
-});
-
-test("live clock never seeks bake and beat-grid independently", () => {
-  assert.equal(
-    shouldRetargetLiveWaveformClock(20, true),
-    false,
-    "a second currentTime landing after layout is the Play/Seek relative shake",
-  );
-  assert.equal(shouldRetargetLiveWaveformClock(2_000, true), false);
 });
 
 test("platter phase lands once at contact instead of seeking on every velocity sample", () => {
@@ -356,14 +344,12 @@ test("a seek handoff must not pause the live waveform compositor", () => {
   );
 });
 
-test("seek and Play land on the authority sample instead of the DAC projection", () => {
-  assert.equal(liveWaveformAuthoritySeconds(10, 10.08, false), 10.08);
-  assert.equal(
-    liveWaveformAuthoritySeconds(10, 10.08, true),
-    10,
-    "a seek/Play edge must not shove the rail by leftover output-buffer time",
-  );
-  assert.equal(liveWaveformAuthoritySeconds(10, 9.92, true), 10);
+test("live waveform PLL applies bounded correction and understands circular loop phase", () => {
+  assert.ok(Math.abs(liveWaveformPhaseError(10.01, 10, null) - 0.01) < 1e-12);
+  assert.ok(Math.abs(liveWaveformPhaseError(8.01, 11.99, 4) - 0.02) < 1e-12);
+  assert.ok(Math.abs(correctedLiveWaveformRate(1, 0.1) - 1.005) < 1e-12);
+  assert.ok(Math.abs(correctedLiveWaveformRate(1, -0.1) - 0.995) < 1e-12);
+  assert.equal(correctedLiveWaveformRate(0, 1), 0);
 });
 
 test("a far seek must not clamp the live waveform animation to the old bake endpoints", () => {

@@ -34,6 +34,13 @@ pub struct TransportSnapshot {
     pub deck_audible_rate_revisions: [u64; 2],
     pub deck_discontinuity_revisions: [u64; 2],
     pub deck_scratch_held: [bool; 2],
+    /// Loop generation and window that have actually reached the DAC-facing callback.
+    pub deck_loop_generations: [u64; 2],
+    pub deck_loop_active: [bool; 2],
+    pub deck_loop_start_frames: [u64; 2],
+    pub deck_loop_length_frames: [u64; 2],
+    pub deck_loop_wrap_counts: [u64; 2],
+    pub deck_loop_stall_frames: [u64; 2],
     /// Callback-observed output-ring starvation transitions for the currently installed source.
     pub deck_output_underruns: [u64; 2],
     /// Lowest callback-boundary output-ring fill for the current source; zero means unobserved.
@@ -67,6 +74,12 @@ pub(crate) struct SharedState {
     deck_audible_rate_revisions: [AtomicU64; 2],
     deck_discontinuity_revisions: [AtomicU64; 2],
     deck_scratch_held: [AtomicBool; 2],
+    deck_loop_generations: [AtomicU64; 2],
+    deck_loop_active: [AtomicBool; 2],
+    deck_loop_start_frames: [AtomicU64; 2],
+    deck_loop_length_frames: [AtomicU64; 2],
+    deck_loop_wrap_counts: [AtomicU64; 2],
+    deck_loop_stall_frames: [AtomicU64; 2],
     deck_a_output_underruns: AtomicU64,
     deck_b_output_underruns: AtomicU64,
     deck_a_min_buffered_frames: AtomicU64,
@@ -101,6 +114,12 @@ impl Default for SharedState {
             deck_audible_rate_revisions: std::array::from_fn(|_| AtomicU64::new(0)),
             deck_discontinuity_revisions: std::array::from_fn(|_| AtomicU64::new(0)),
             deck_scratch_held: std::array::from_fn(|_| AtomicBool::new(false)),
+            deck_loop_generations: std::array::from_fn(|_| AtomicU64::new(0)),
+            deck_loop_active: std::array::from_fn(|_| AtomicBool::new(false)),
+            deck_loop_start_frames: std::array::from_fn(|_| AtomicU64::new(0)),
+            deck_loop_length_frames: std::array::from_fn(|_| AtomicU64::new(0)),
+            deck_loop_wrap_counts: std::array::from_fn(|_| AtomicU64::new(0)),
+            deck_loop_stall_frames: std::array::from_fn(|_| AtomicU64::new(0)),
             deck_a_output_underruns: AtomicU64::new(0),
             deck_b_output_underruns: AtomicU64::new(0),
             deck_a_min_buffered_frames: AtomicU64::new(0),
@@ -134,6 +153,12 @@ impl SharedState {
         deck_audible_rate_revisions: [u64; 2],
         deck_discontinuity_revisions: [u64; 2],
         deck_scratch_held: [bool; 2],
+        deck_loop_generations: [u64; 2],
+        deck_loop_active: [bool; 2],
+        deck_loop_start_frames: [u64; 2],
+        deck_loop_length_frames: [u64; 2],
+        deck_loop_wrap_counts: [u64; 2],
+        deck_loop_stall_frames: [u64; 2],
         deck_output_underruns: [u64; 2],
         deck_min_buffered_frames: [u64; 2],
         deck_peak_levels: [f32; 2],
@@ -181,6 +206,17 @@ impl SharedState {
             self.deck_discontinuity_revisions[index]
                 .store(deck_discontinuity_revisions[index], Ordering::Relaxed);
             self.deck_scratch_held[index].store(deck_scratch_held[index], Ordering::Relaxed);
+            self.deck_loop_generations[index]
+                .store(deck_loop_generations[index], Ordering::Relaxed);
+            self.deck_loop_active[index].store(deck_loop_active[index], Ordering::Relaxed);
+            self.deck_loop_start_frames[index]
+                .store(deck_loop_start_frames[index], Ordering::Relaxed);
+            self.deck_loop_length_frames[index]
+                .store(deck_loop_length_frames[index], Ordering::Relaxed);
+            self.deck_loop_wrap_counts[index]
+                .store(deck_loop_wrap_counts[index], Ordering::Relaxed);
+            self.deck_loop_stall_frames[index]
+                .store(deck_loop_stall_frames[index], Ordering::Relaxed);
         }
         self.deck_a_output_underruns
             .store(deck_output_underruns[0], Ordering::Relaxed);
@@ -262,6 +298,24 @@ impl SharedState {
                 deck_scratch_held: std::array::from_fn(|index| {
                     self.deck_scratch_held[index].load(Ordering::Relaxed)
                 }),
+                deck_loop_generations: std::array::from_fn(|index| {
+                    self.deck_loop_generations[index].load(Ordering::Relaxed)
+                }),
+                deck_loop_active: std::array::from_fn(|index| {
+                    self.deck_loop_active[index].load(Ordering::Relaxed)
+                }),
+                deck_loop_start_frames: std::array::from_fn(|index| {
+                    self.deck_loop_start_frames[index].load(Ordering::Relaxed)
+                }),
+                deck_loop_length_frames: std::array::from_fn(|index| {
+                    self.deck_loop_length_frames[index].load(Ordering::Relaxed)
+                }),
+                deck_loop_wrap_counts: std::array::from_fn(|index| {
+                    self.deck_loop_wrap_counts[index].load(Ordering::Relaxed)
+                }),
+                deck_loop_stall_frames: std::array::from_fn(|index| {
+                    self.deck_loop_stall_frames[index].load(Ordering::Relaxed)
+                }),
                 deck_output_underruns: [
                     self.deck_a_output_underruns.load(Ordering::Relaxed),
                     self.deck_b_output_underruns.load(Ordering::Relaxed),
@@ -321,6 +375,12 @@ mod tests {
             [1, 1],
             [0, 0],
             [false, false],
+            [0, 0],
+            [false, false],
+            [0, 0],
+            [0, 0],
+            [0, 0],
+            [0, 0],
             [0, 0],
             [0, 0],
             [0.0, 0.0],
