@@ -507,6 +507,11 @@ pub fn work_scheduler() -> &'static Arc<WorkScheduler> {
 mod tests {
     use super::*;
 
+    // CI runners can be descheduled for well over 100 ms while six release jobs compile in
+    // parallel. The scheduler itself polls every few milliseconds; keep a generous wall-clock
+    // ceiling here so these tests assert bounded cancellation rather than runner availability.
+    const BOUNDED_TEST_LATENCY: Duration = Duration::from_millis(500);
+
     #[test]
     fn queued_work_transitions_to_active_and_releases() {
         let scheduler = WorkScheduler::new(1);
@@ -535,7 +540,7 @@ mod tests {
             started.elapsed() >= Duration::from_millis(15)
         });
         assert!(matches!(result, Err(WorkAcquireError::Cancelled)));
-        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(started.elapsed() < BOUNDED_TEST_LATENCY);
     }
 
     #[test]
@@ -613,6 +618,6 @@ mod tests {
             || false,
         );
         assert!(matches!(result, Err(WorkAcquireError::DeadlineExceeded)));
-        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(started.elapsed() < BOUNDED_TEST_LATENCY);
     }
 }

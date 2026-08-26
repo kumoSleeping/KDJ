@@ -145,7 +145,6 @@ jobs:
             echo
             echo "### Android"
             echo "- **大多数新设备（ARM64，推荐）**：[下载 APK]($base_url/app-arm64-release.apk)"
-            echo "- **较旧的 32 位 ARM 设备**：[下载 APK]($base_url/app-arm-release.apk)"
             echo
             echo "> .sig、.app.tar.gz、latest.json 和 latest-labs.json 是自动更新所需文件，普通用户无需下载。"
             echo ">"

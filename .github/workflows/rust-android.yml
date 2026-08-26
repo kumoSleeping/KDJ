@@ -271,11 +271,29 @@ jobs:
       # release.yml 检测到新版本号后 dispatch 到 tag ref，或者手动 push tag。
       - name: 发布 Release（仅 tag）
         if: steps.shell.outputs.present == 'true' && startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          # 不在这里抢 Latest；桌面 latest-json 写好清单后再提升。
-          make_latest: false
-          files: |
-            src-tauri/gen/android/app/build/outputs/apk/**/release/*-release.apk
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          files=(src-tauri/gen/android/app/build/outputs/apk/**/release/*-release.apk)
+          if (( ${#files[@]} == 0 )); then
+            echo "::error::没有找到可发布的 APK"
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            uploaded=0
+            for attempt in 1 2 3 4; do
+              if gh release upload "$GITHUB_REF_NAME" "$file" --clobber; then
+                uploaded=1
+                break
+              fi
+              echo "::warning::上传 $(basename "$file") 失败，第 $attempt/4 次；稍后重试"
+              sleep $((attempt * 15))
+            done
+            if (( uploaded == 0 )); then
+              echo "::error::APK 连续上传失败"
+              exit 1
+            fi
+          done

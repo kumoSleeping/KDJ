@@ -35,12 +35,18 @@ fn write_kdj_log(data_dir: &Path, line: &str) {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn process_rss_mb() -> Option<f64> {
     let pid = sysinfo::Pid::from_u32(std::process::id());
     let mut sys = sysinfo::System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
     sys.process(pid)
         .map(|process| process.memory() as f64 / (1024.0 * 1024.0))
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn process_rss_mb() -> Option<f64> {
+    None
 }
 
 fn escape_log_file_name(name: &str) -> String {
