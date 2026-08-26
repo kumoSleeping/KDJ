@@ -52,6 +52,15 @@ export function updatePendingOneLibraryDownload(
   savePendingOneLibraryDownloads(next);
 }
 
+/** 用户取消下载后同时清掉对应的设备补写，避免下次启动又把它重新入队。 */
+export function removePendingOneLibraryDownloadTasks(taskIds: Iterable<string>): void {
+  const ids = new Set(taskIds);
+  if (ids.size === 0) return;
+  savePendingOneLibraryDownloads(
+    loadPendingOneLibraryDownloads().filter((row) => !ids.has(row.task_id)),
+  );
+}
+
 /** 彻底删除 KDJ 虚拟盘后，旧下载不能在将来重建的新盘上继续补写。 */
 export function removePendingVirtualDiskDownloads(): void {
   savePendingOneLibraryDownloads(

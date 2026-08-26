@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use super::auth::YoutubeAuth;
 use super::decipher::PlayerScript;
 use crate::net::http_timeouts;
+use crate::provider::{ProtectedPoTokenBinding, ProtectedPreviewIdentity};
 
 pub const BASE: &str = "https://music.youtube.com/youtubei/v1";
 /// music.youtube.com 网页端的公开 InnerTube key（ytmusicapi 同款）。
@@ -30,7 +31,7 @@ const IOS_USER_AGENT: &str =
     "com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)";
 // Keep these in lock-step with Metrolist's working WEB_REMIX playback path.
 const PLAYBACK_WEB_VERSION: &str = "1.20260707.12.00";
-const PLAYBACK_WEB_USER_AGENT: &str =
+pub const PLAYBACK_WEB_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0";
 const BOTGUARD_API_KEY: &str = "AIzaSyDyT5W0Jh49F30Pqqtyfdf7pDLFKLJoAnw";
 /// 只搜单曲的 filter 参数（ytmusicapi 的 songs filter 同款）。
@@ -79,6 +80,7 @@ pub struct YtmClient {
     http: reqwest::Client,
     innertube_key: String,
     script: ScriptCache,
+    protected_identity: RwLock<Option<(std::time::Instant, ProtectedPreviewIdentity)>>,
     /// YouTube Music provider 独占的浏览器 Cookie 会话。
     auth: Arc<YoutubeAuth>,
 }
@@ -95,6 +97,7 @@ impl YtmClient {
             http,
             innertube_key: env_or("KDJ_YTM_INNERTUBE_KEY", DEFAULT_INNERTUBE_KEY),
             script: RwLock::new(ScriptState::None),
+            protected_identity: RwLock::new(None),
             auth,
         })
     }
@@ -134,13 +137,19 @@ impl YtmClient {
     }
 
     async fn post(&self, endpoint: &str, body: Value) -> Result<Value> {
+        self.post_with_auth(endpoint, body, true).await
+    }
+
+    async fn post_with_auth(&self, endpoint: &str, body: Value, with_auth: bool) -> Result<Value> {
         let url = format!(
             "{BASE}/{endpoint}?key={}&prettyPrint=false",
             self.innertube_key
         );
         let mut request = self.http.post(&url).json(&body);
-        for (name, value) in self.auth.request_headers("https://music.youtube.com") {
-            request = request.header(name, value);
+        if with_auth {
+            for (name, value) in self.auth.request_headers("https://music.youtube.com") {
+                request = request.header(name, value);
+            }
         }
         let response = request
             .send()
@@ -224,14 +233,18 @@ impl YtmClient {
 
     /// Metrolist 的 WEB_REMIX 播放路径：Music origin、登录头、同一登录页的
     /// Visitor/DataSync，以及 session-bound player POT。
-    pub async fn protected_web_player(
-        &self,
+    fn protected_web_player_body(
         video_id: &str,
-        po_token: &str,
+        po_token: Option<&str>,
         visitor_data: &str,
         data_sync_id: &str,
-    ) -> Result<Value> {
-        let body = json!({
+        signature_timestamp: u64,
+    ) -> Value {
+        let mut user = json!({ "lockedSafetyMode": false });
+        if let Some(delegated) = delegated_session_id(data_sync_id) {
+            user["onBehalfOfUser"] = Value::String(delegated.to_string());
+        }
+        let mut body = json!({
             "context": {
                 "client": {
                     "clientName": "WEB_REMIX",
@@ -240,22 +253,41 @@ impl YtmClient {
                     "gl": "US",
                     "visitorData": visitor_data,
                 },
-                "request": { "internalExperimentFlags": [], "useSsl": true },
-                "user": {
-                    "lockedSafetyMode": false,
-                    "onBehalfOfUser": data_sync_id,
-                },
+                "user": user,
             },
             "videoId": video_id,
             "playbackContext": { "contentPlaybackContext": {
                 "html5Preference": "HTML5_PREF_WANTS",
-                "signatureTimestamp": 20684,
+                "signatureTimestamp": signature_timestamp,
             }},
-            "serviceIntegrityDimensions": { "poToken": po_token },
             "contentCheckOk": true,
             "racyCheckOk": true,
             "videoCheckOk": true,
         });
+        // Current WEB_REMIX requires a GVS token, but not a player-request token. Supplying a
+        // token with the wrong binding can opt the response into an incompatible experiment, so
+        // omit this object unless the selected client policy explicitly asks for one.
+        if let Some(po_token) = po_token {
+            body["serviceIntegrityDimensions"] = json!({ "poToken": po_token });
+        }
+        body
+    }
+
+    pub async fn protected_web_player(
+        &self,
+        video_id: &str,
+        po_token: Option<&str>,
+        visitor_data: &str,
+        data_sync_id: &str,
+        signature_timestamp: u64,
+    ) -> Result<Value> {
+        let body = Self::protected_web_player_body(
+            video_id,
+            po_token,
+            visitor_data,
+            data_sync_id,
+            signature_timestamp,
+        );
         let url = format!("{BASE}/player?prettyPrint=false");
         let mut request = self
             .http
@@ -270,6 +302,11 @@ impl YtmClient {
             .header("X-Youtube-Client-Version", PLAYBACK_WEB_VERSION)
             .json(&body);
         for (name, value) in self.auth.request_headers("https://music.youtube.com") {
+            if name.eq_ignore_ascii_case("user-agent")
+                || name.eq_ignore_ascii_case("x-goog-visitor-id")
+            {
+                continue;
+            }
             request = request.header(name, value);
         }
         let response = request
@@ -294,15 +331,39 @@ impl YtmClient {
         Ok(payload)
     }
 
-    pub async fn protected_web_identity(&self) -> Result<(String, String)> {
-        let mut request = self.http.get("https://music.youtube.com/");
-        for (name, value) in self.auth.request_headers("https://music.youtube.com") {
-            request = request.header(name, value);
+    pub async fn protected_web_identity(&self) -> Result<ProtectedPreviewIdentity> {
+        if let Some((created_at, identity)) = self.protected_identity.read().unwrap().as_ref() {
+            if created_at.elapsed() < std::time::Duration::from_secs(5 * 60) {
+                return Ok(identity.clone());
+            }
         }
-        let html = request
-            .send()
-            .await
-            .context("打开 YouTube Music 首页失败")?
+        let mut response = None;
+        let mut last_error = None;
+        for attempt in 0..3_u64 {
+            let mut request = self.http.get("https://music.youtube.com/");
+            for (name, value) in self.auth.request_headers("https://music.youtube.com") {
+                request = request.header(name, value);
+            }
+            match request.send().await {
+                Ok(value) => {
+                    response = Some(value);
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    tokio::time::sleep(std::time::Duration::from_millis(200 * (attempt + 1))).await;
+                }
+            }
+        }
+        let html = response
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "打开 YouTube Music 首页失败: {}",
+                    last_error
+                        .map(|error| error.to_string())
+                        .unwrap_or_default()
+                )
+            })?
             .error_for_status()
             .context("YouTube Music 首页返回错误")?
             .text()
@@ -310,13 +371,19 @@ impl YtmClient {
             .context("读取 YouTube Music 首页失败")?;
         let visitor_data = extract_ytcfg_value(&html, "VISITOR_DATA")
             .context("YouTube Music 首页没有返回 Visitor Data")?;
-        let data_sync_id = extract_ytcfg_value(&html, "DATASYNC_ID")
-            .unwrap_or_default()
-            .split("||")
-            .next()
-            .unwrap_or_default()
-            .to_string();
-        Ok((visitor_data, data_sync_id))
+        let data_sync_id = extract_ytcfg_value(&html, "DATASYNC_ID").unwrap_or_default();
+        // yt-dlp detects this page experiment before selecting the WebPO content binding. Outside
+        // that experiment an authenticated web session binds GVS to DATASYNC_ID; logged-out web
+        // sessions bind it to Visitor Data.
+        let gvs_binding = select_gvs_binding(&html, &data_sync_id);
+        let identity = ProtectedPreviewIdentity {
+            visitor_data,
+            data_sync_id,
+            gvs_binding,
+        };
+        *self.protected_identity.write().unwrap() =
+            Some((std::time::Instant::now(), identity.clone()));
+        Ok(identity)
     }
 
     pub async fn protected_botguard(&self, operation: &str, payload: &Value) -> Result<Value> {
@@ -370,6 +437,54 @@ impl YtmClient {
         let map = body.as_object_mut().expect("context 一定是对象");
         map.insert("browseId".into(), Value::String(browse_id.to_string()));
         self.post("browse", body).await
+    }
+
+    /// 打开一首歌的「下一首 / 相关」面板（`next`），用来拿歌词 browseId（`MPLYt…`）。
+    /// 与 ytmusicapi `get_watch_playlist` 同款请求体；不拉续页曲目。
+    pub async fn next_watch(&self, video_id: &str) -> Result<Value> {
+        let mut body = Self::web_remix_context();
+        let map = body.as_object_mut().expect("context 一定是对象");
+        map.insert("enablePersistentPlaylistPanel".into(), json!(true));
+        map.insert("isAudioOnly".into(), json!(true));
+        map.insert(
+            "tunerSettingValue".into(),
+            Value::String("AUTOMIX_SETTING_NORMAL".into()),
+        );
+        map.insert("videoId".into(), Value::String(video_id.to_string()));
+        map.insert(
+            "playlistId".into(),
+            Value::String(format!("RDAMVM{video_id}")),
+        );
+        map.insert(
+            "watchEndpointMusicSupportedConfigs".into(),
+            json!({
+                "watchEndpointMusicConfig": {
+                    "hasPersistentPlaylistPanel": true,
+                    "musicVideoType": "MUSIC_VIDEO_TYPE_ATV",
+                }
+            }),
+        );
+        self.post("next", body).await
+    }
+
+    /// 用 Android Music 客户端 browse 歌词页：只有移动端会返回 `timedLyricsData`。
+    /// 版本号与 ytmusicapi `as_mobile()` 保持一致。
+    ///
+    /// 故意不带浏览器 Cookie / SAPISIDHASH：WEB 会话的 Authorization 会让
+    /// `ANDROID_MUSIC` browse 直接 400，只能落到无时间轴的网页歌词。
+    pub async fn browse_android_music(&self, browse_id: &str) -> Result<Value> {
+        let body = json!({
+            "context": {
+                "client": {
+                    "clientName": "ANDROID_MUSIC",
+                    "clientVersion": "7.21.50",
+                    "hl": "zh-CN",
+                    "gl": "US",
+                }
+            },
+            "browseId": browse_id,
+        });
+        self.post_with_auth("browse", body, false).await
     }
 
     /// 登录账号的 YouTube Music 播放列表目录；与 ytmusicapi 使用同一 browseId。
@@ -457,6 +572,31 @@ impl YtmClient {
     }
 }
 
+fn delegated_session_id(data_sync_id: &str) -> Option<&str> {
+    let (delegated, user) = data_sync_id.split_once("||")?;
+    (!delegated.is_empty() && !user.is_empty()).then_some(delegated)
+}
+
+fn generates_content_po_token(html: &str) -> bool {
+    [
+        "html5_generate_content_po_token=true",
+        "html5_generate_content_po_token%3Dtrue",
+        r"html5_generate_content_po_token\u003dtrue",
+    ]
+    .iter()
+    .any(|marker| html.contains(marker))
+}
+
+fn select_gvs_binding(html: &str, data_sync_id: &str) -> ProtectedPoTokenBinding {
+    if generates_content_po_token(html) {
+        ProtectedPoTokenBinding::VideoId
+    } else if !data_sync_id.is_empty() {
+        ProtectedPoTokenBinding::DataSyncId
+    } else {
+        ProtectedPoTokenBinding::VisitorData
+    }
+}
+
 fn extract_ytcfg_value(html: &str, key: &str) -> Option<String> {
     let marker = format!("\"{key}\":\"");
     let start = html.find(&marker)? + marker.len();
@@ -532,6 +672,78 @@ mod tests {
             Some(true)
         );
         assert_eq!(body.get("racyCheckOk").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn protected_player_uses_the_timestamp_from_the_same_player_script() {
+        let body = YtmClient::protected_web_player_body(
+            "abcDEF12345",
+            Some("pot"),
+            "visitor",
+            "sync",
+            20_777,
+        );
+        assert_eq!(
+            body.pointer("/playbackContext/contentPlaybackContext/signatureTimestamp")
+                .and_then(Value::as_u64),
+            Some(20_777)
+        );
+        assert_eq!(
+            body.pointer("/serviceIntegrityDimensions/poToken")
+                .and_then(Value::as_str),
+            Some("pot")
+        );
+    }
+
+    #[test]
+    fn web_remix_player_omits_an_unrequired_player_token_and_primary_delegation() {
+        let body = YtmClient::protected_web_player_body(
+            "abcDEF12345",
+            None,
+            "visitor",
+            "primary-user||",
+            20_777,
+        );
+        assert!(body.get("serviceIntegrityDimensions").is_none());
+        assert!(body.pointer("/context/user/onBehalfOfUser").is_none());
+        let secondary = YtmClient::protected_web_player_body(
+            "abcDEF12345",
+            None,
+            "visitor",
+            "delegated||user",
+            20_777,
+        );
+        assert_eq!(
+            secondary
+                .pointer("/context/user/onBehalfOfUser")
+                .and_then(Value::as_str),
+            Some("delegated")
+        );
+    }
+
+    #[test]
+    fn page_experiment_selects_video_bound_gvs_proofs() {
+        assert!(generates_content_po_token(
+            r#"{"serializedExperimentFlags":"x=1&html5_generate_content_po_token=true"}"#
+        ));
+        assert!(generates_content_po_token(
+            r#"{"serializedExperimentFlags":"html5_generate_content_po_token%3Dtrue"}"#
+        ));
+        assert!(!generates_content_po_token(
+            "html5_generate_content_po_token=false"
+        ));
+        assert_eq!(
+            select_gvs_binding("html5_generate_content_po_token=true", "delegated||user"),
+            ProtectedPoTokenBinding::VideoId
+        );
+        assert_eq!(
+            select_gvs_binding("", "primary-user||"),
+            ProtectedPoTokenBinding::DataSyncId
+        );
+        assert_eq!(
+            select_gvs_binding("", ""),
+            ProtectedPoTokenBinding::VisitorData
+        );
     }
 
     #[test]

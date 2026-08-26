@@ -58,16 +58,20 @@ fn response_of(
     }
 }
 
-/// 只保留网易云 / QQ，去重且保序；空则默认网易云 → QQ。
+fn is_lyric_engine(platform: Platform) -> bool {
+    matches!(platform, Platform::Wyy | Platform::Qqm | Platform::Ytm)
+}
+
+/// 只保留网易云 / QQ / YouTube Music，去重且保序；空则默认三家。
 fn normalize_engines(engines: &[Platform]) -> Vec<Platform> {
     let mut out = Vec::new();
     for platform in engines {
-        if matches!(platform, Platform::Wyy | Platform::Qqm) && !out.contains(platform) {
+        if is_lyric_engine(*platform) && !out.contains(platform) {
             out.push(*platform);
         }
     }
     if out.is_empty() {
-        out.extend([Platform::Wyy, Platform::Qqm]);
+        out.extend([Platform::Wyy, Platform::Qqm, Platform::Ytm]);
     }
     out
 }
@@ -76,7 +80,17 @@ fn parse_prefer(raw: &str) -> Option<Platform> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "wyy" => Some(Platform::Wyy),
         "qqm" => Some(Platform::Qqm),
+        "ytm" => Some(Platform::Ytm),
         _ => None, // follow / 空 / 未知
+    }
+}
+
+fn engine_label(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Wyy => "网易云",
+        Platform::Qqm => "QQ 音乐",
+        Platform::Ytm => "YouTube Music",
+        _ => "其它",
     }
 }
 
@@ -144,9 +158,7 @@ pub async fn lookup(state: &AppState, req: LyricsRequest) -> ApiResult<LyricsRes
             }
         }
         None => req.platform.filter(|platform| {
-            matches!(platform, Platform::Wyy | Platform::Qqm)
-                && engines.contains(platform)
-                && !req.key.trim().is_empty()
+            is_lyric_engine(*platform) && engines.contains(platform) && !req.key.trim().is_empty()
         }),
         _ => None,
     };
@@ -225,11 +237,7 @@ pub async fn lookup(state: &AppState, req: LyricsRequest) -> ApiResult<LyricsRes
 
     let engine_label = search_platforms
         .iter()
-        .map(|platform| match platform {
-            Platform::Wyy => "网易云",
-            Platform::Qqm => "QQ 音乐",
-            _ => "其它",
-        })
+        .map(|platform| engine_label(*platform))
         .collect::<Vec<_>>()
         .join(" / ");
     Err(ApiError::not_found(format!(

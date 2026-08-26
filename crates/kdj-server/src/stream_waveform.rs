@@ -651,9 +651,8 @@ impl StreamWaveformCoordinator {
         });
     }
 
-    /// Android bounded Range 的持久缓存回退只在播放器租约、会话写入和波形分析都
+    /// 受保护或移动网络媒体的持久缓存回退只在播放器租约、会话写入和波形分析都
     /// 已结束后启动；返回 true 才允许另发整轨请求。
-    #[cfg(any(target_os = "android", test))]
     pub(crate) fn is_session_idle(&self, key: &str) -> bool {
         let inner = self.inner.lock().expect("stream waveform state");
         inner.entries.get(key).is_none_or(|entry| {

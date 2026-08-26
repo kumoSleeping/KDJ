@@ -131,6 +131,22 @@ pub enum TaskState {
     Canceled,
 }
 
+/// 下载任务在当前顶层状态内正在执行的统一阶段。平台协议差异只能映射到这些阶段，
+/// 前端不再通过平台名猜测“为什么还没开始传输”。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskPhase {
+    #[default]
+    Waiting,
+    Authorizing,
+    Resolving,
+    Downloading,
+    PostProcessing,
+    Relocating,
+    Importing,
+    Completed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AccountState {
@@ -350,10 +366,10 @@ pub struct LyricsRequest {
     pub platform: Option<Platform>,
     #[serde(default)]
     pub key: String,
-    /// 启用的搜词引擎（顺序=同分偏好）。空则默认网易云 → QQ。
+    /// 启用的搜词引擎（顺序=同分偏好）。空则默认网易云 → QQ → YouTube Music。
     #[serde(default)]
     pub engines: Vec<Platform>,
-    /// 显示来源：`follow`（跟随曲库）/ `wyy` / `qqm`。
+    /// 显示来源：`follow`（跟随曲库）/ `wyy` / `qqm` / `ytm`。
     #[serde(default)]
     pub prefer: String,
 }
@@ -420,8 +436,6 @@ pub struct MergedGroup {
     pub best_source_index: usize,
     #[serde(default)]
     pub score: f64,
-    #[serde(default)]
-    pub in_library: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -617,6 +631,8 @@ pub struct DownloadTask {
     #[serde(default)]
     pub quality: String,
     pub state: TaskState,
+    #[serde(default)]
+    pub phase: TaskPhase,
     /// 0..1
     pub progress: f64,
     pub downloaded_bytes: u64,
@@ -631,6 +647,9 @@ pub struct DownloadTask {
     /// 入队时指定的目标曲库文件夹；前端用来在对应文件夹列表里画「待下载」行。
     #[serde(default)]
     pub dest_dir: String,
+    /// 入队时冻结的实际成品目录。默认下载目录不等于“显式拖入曲库”。
+    #[serde(default)]
+    pub output_dir: String,
     /// 搜索结果带来的封面 URL；刷新页面后左表待下载行还要能画出缩略图。
     #[serde(default)]
     pub cover: String,

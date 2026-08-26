@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Copy, FolderOpen, Inbox, Play, Trash2, X } from "lucide-react";
+import { Copy, FolderOpen, Inbox, PencilLine, Play, Trash2, X } from "lucide-react";
 import { api } from "../../lib/api";
 import { copyText } from "../../lib/copyText";
 import { DASH, folderName, formatBytes, formatPercent, formatSpeed } from "../../lib/format";
@@ -14,7 +14,7 @@ import { forgetQueueDraft } from "../../lib/queueTaskDraft";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
 import { useLibraryStore } from "../../stores/libraryStore";
-import type { DownloadTask, FolderNode, Quality, TaskState } from "../../types";
+import type { DownloadTask, FolderNode, Quality, TaskPhase, TaskState } from "../../types";
 import { Button, ContextMenu, EmptyState, InlineNotice, ProgressBar } from "../common";
 import { PLATFORM_LABEL } from "./MergedGroupRow";
 import { QueueRowConfig } from "./QueueRowConfig";
@@ -28,14 +28,25 @@ const STATE_LABEL: Record<TaskState, string> = {
   canceled: "已取消",
 };
 
+const PHASE_LABEL: Record<TaskPhase, string> = {
+  waiting: "排队",
+  authorizing: "获取授权",
+  resolving: "解析来源",
+  downloading: "下载中",
+  post_processing: "整理媒体",
+  relocating: "移动文件",
+  importing: "加入曲库",
+  completed: "完成",
+};
+
 function stateLabel(task: DownloadTask): string {
-  if (task.state === "running") {
-    return task.kind === "vj_export" ? "导出中" : "下载中";
-  }
-  if (task.state === "processing") {
-    // B 站 DASH 的音画流下载完之后，FFmpeg 仍须合并；开启转码时同一阶段
-    // 还会重编码，随后再移动并入库。没有把两种情况都硬叫「转码中」。
-    return task.kind === "video" ? "合并媒体中" : "整理入库中";
+  if (
+    task.state === "queued" ||
+    task.state === "running" ||
+    task.state === "processing"
+  ) {
+    if (task.kind === "vj_export" && task.phase === "post_processing") return "导出中";
+    return PHASE_LABEL[task.phase] ?? STATE_LABEL[task.state];
   }
   return STATE_LABEL[task.state];
 }
@@ -133,11 +144,11 @@ function QueueRow({
           >
             {retrying ? "重试中" : "重试"}
           </button>
-        ) : task.state !== "queued" ? (
+        ) : (
           <span className="kd-chip" data-tone={STATE_TONE[task.state]}>
             {stateLabel(task)}
           </span>
-        ) : null}
+        )}
         {active ? (
           <Button
             variant="ghost"
@@ -186,18 +197,18 @@ function QueueRow({
         <span className="kd-faint">·</span>
         <span className="kd-mono">{PLATFORM_LABEL[task.platform] ?? task.platform}</span>
         {task.quality && <span className="kd-mono">{task.quality.toUpperCase()}</span>}
-        {task.dest_dir?.trim() ? (
+        {(task.output_dir || task.dest_dir)?.trim() ? (
           <>
             <span className="kd-faint">·</span>
-            <span className="kd-mono" title={task.dest_dir}>
-              → {folderName(task.dest_dir)}
+            <span className="kd-mono" title={task.output_dir || task.dest_dir}>
+              → {folderName(task.output_dir || task.dest_dir || "")}
             </span>
           </>
         ) : null}
         <span className="kd-toolbar-gap" />
         {task.state === "running" && <span>{formatSpeed(task.speed_bps)}</span>}
-        {task.state === "processing" && (
-          <span className="kd-muted">下载完成，正在生成文件</span>
+        {(task.state === "processing" || (task.state === "running" && task.phase !== "downloading")) && (
+          <span className="kd-muted">{PHASE_LABEL[task.phase]}</span>
         )}
         {task.total_bytes > 0 && (
           <span>
@@ -220,6 +231,11 @@ function QueueRow({
       {task.error && (
         <div className="kd-queue-meta" style={{ color: "var(--kd-danger)" }} title={task.error}>
           <span className="kd-truncate">{task.error}</span>
+        </div>
+      )}
+      {task.one_library_error && (
+        <div className="kd-queue-meta" style={{ color: "var(--kd-danger)" }} title={task.one_library_error}>
+          <span className="kd-truncate">{task.one_library_error}</span>
         </div>
       )}
 
@@ -276,22 +292,28 @@ function QueueRow({
  */
 function QueuePrefsBar({
   canStart,
+  canCancel,
   canClear,
   queuedCount,
   retryableCount,
   activeCount,
   totalCount,
   onStart,
+  onCancel,
   onClear,
+  onError,
 }: {
   canStart: boolean;
+  canCancel: boolean;
   canClear: boolean;
   queuedCount: number;
   retryableCount: number;
   activeCount: number;
   totalCount: number;
   onStart(): void;
+  onCancel(): void;
   onClear(): void;
+  onError(message: string): void;
 }) {
   const settings = useAppStore((store) => store.settings);
   const saveSettings = useAppStore((store) => store.saveSettings);
@@ -329,11 +351,21 @@ function QueuePrefsBar({
         <button
           type="button"
           className="kd-text-action"
+          disabled={!canCancel}
+          title={canCancel ? `取消 ${activeCount} 个活动任务` : "没有活动任务"}
+          onClick={onCancel}
+        >
+          <X size={12} />
+          取消全部
+        </button>
+        <button
+          type="button"
+          className="kd-text-action"
           disabled={!canClear}
           title={
             canClear
-              ? "清掉排队中 / 已完成 / 失败 / 已取消的记录，下载中的留着"
-              : "没有可清掉的记录（下载中的需先取消）"
+              ? "清掉已完成、失败和已取消的记录"
+              : "没有已结束的记录"
           }
           onClick={onClear}
         >
@@ -381,15 +413,34 @@ function QueuePrefsBar({
         <button
           type="button"
           className="kd-save-dest"
-          title={`默认下载目录（拖进文件夹时以目标文件夹为准）。点击更换：${downloadDir}`}
+          title={`打开默认下载文件夹：${downloadDir}`}
+          disabled={!downloadDir}
           onClick={() => {
-            void window.kdj?.pickFolder().then((dir) => {
-              if (dir) void saveSettings({ download_dir: dir, video_download_dir: dir });
-            });
+            if (!downloadDir) return;
+            void window.kdj?.openPath(downloadDir).catch((error: unknown) =>
+              onError(`打开下载文件夹失败：${(error as Error).message}`),
+            );
           }}
         >
           <FolderOpen size={11} />
           <span className="kd-truncate">{downloadDir || "未设置"}</span>
+        </button>
+        <button
+          type="button"
+          className="kd-text-action"
+          title="更改默认下载文件夹"
+          onClick={() => {
+            void window.kdj?.pickFolder()
+              .then((dir) => {
+                if (dir) return saveSettings({ download_dir: dir, video_download_dir: dir });
+              })
+              .catch((error: unknown) =>
+                onError(`更改下载文件夹失败：${(error as Error).message}`),
+              );
+          }}
+        >
+          <PencilLine size={11} />
+          更改
         </button>
       </div>
     </div>
@@ -400,7 +451,7 @@ export function QueuePanel() {
   const list = useDownloadStore((store) => store.list);
   const activeCount = useDownloadStore((store) => store.activeCount);
   const clear = useDownloadStore((store) => store.clear);
-  const cancel = useDownloadStore((store) => store.cancel);
+  const cancelAll = useDownloadStore((store) => store.cancelAll);
   const [dropActive, setDropActive] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const folders = useLibraryStore((store) => store.folders);
@@ -412,7 +463,7 @@ export function QueuePanel() {
     (sum, task) => sum + (task.state === "failed" && task.kind === "audio" ? 1 : 0),
     0,
   );
-  const canClear = finishedCount > 0 || queuedCount > 0;
+  const canClear = finishedCount > 0;
   /**
    * 「开始下载」同时放行当前队列并重试失败歌曲；以后新加的任务仍继续排队，
    * 不会因为点过一次「开始下载」就永久锁进自动下载模式。
@@ -479,6 +530,7 @@ export function QueuePanel() {
     >
       <QueuePrefsBar
         canStart={canStart}
+        canCancel={activeCount > 0}
         canClear={canClear}
         queuedCount={queuedCount}
         retryableCount={retryableCount}
@@ -494,24 +546,19 @@ export function QueuePanel() {
             }
           })();
         }}
+        onCancel={() => {
+          setActionError("");
+          void cancelAll().catch((error: unknown) =>
+            setActionError(`取消全部失败：${(error as Error).message}`),
+          );
+        }}
         onClear={() => {
           setActionError("");
-          void (async () => {
-            try {
-              const queued = list.filter((task) => task.state === "queued");
-              await clear();
-              await Promise.all(
-                queued.map((task) =>
-                  cancel(task.id)
-                    .then(() => forgetQueueDraft(task.id))
-                    .catch(() => undefined),
-                ),
-              );
-            } catch (error: unknown) {
-              setActionError(`清空失败：${(error as Error).message}`);
-            }
-          })();
+          void clear().catch((error: unknown) =>
+            setActionError(`清空失败：${(error as Error).message}`),
+          );
         }}
+        onError={setActionError}
       />
 
       <InlineNotice text={actionError} onDismiss={() => setActionError("")} block />

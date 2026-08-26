@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use kdj_core::models::{
     Account, CollectionResolveResponse, CollectionResult, LyricText, Platform, QrSession,
     QrStateValue, Quality, ResolveResponse, SearchKind, SongSource, StreamPlaylist,
-    StreamPlaylistResponse,
+    StreamPlaylistResponse, VideoDownloadRequest, VideoInfo,
 };
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -152,6 +152,8 @@ pub struct Capabilities {
     pub has_quality_tiers: bool,
     /// 下载产物是视频而不是音频
     pub is_video: bool,
+    /// 下载前是否需要由外部挑战适配器提供一次性媒体源。
+    pub external_download_preparation: bool,
     /// provider 真正实现的搜索维度；前端筛选器和后端门禁都读这里。
     pub search_kinds: &'static [SearchKind],
 }
@@ -163,18 +165,21 @@ impl Capabilities {
         supports_login: true,
         has_quality_tiers: true,
         is_video: false,
+        external_download_preparation: false,
         search_kinds: SONG_SEARCH_KINDS,
     };
     pub const VIDEO: Capabilities = Capabilities {
         supports_login: true,
         has_quality_tiers: false,
         is_video: true,
+        external_download_preparation: false,
         search_kinds: SONG_SEARCH_KINDS,
     };
     pub const ANONYMOUS_MUSIC: Capabilities = Capabilities {
         supports_login: false,
         has_quality_tiers: true,
         is_video: false,
+        external_download_preparation: false,
         search_kinds: SONG_SEARCH_KINDS,
     };
 }
@@ -195,6 +200,9 @@ pub struct DownloadJob<'a> {
     pub quality: Quality,
     pub cancel: CancellationToken,
     pub progress: ProgressSink,
+    /// 由外部挑战适配器准备并由服务端校验过的临时媒体地址。
+    /// Provider 只消费统一的 Prepared Source，不知道挑战发生在 WebView 还是原生服务。
+    pub prepared_source_url: Option<&'a str>,
 }
 
 impl<'a> DownloadJob<'a> {
@@ -204,6 +212,7 @@ impl<'a> DownloadJob<'a> {
             quality,
             cancel: CancellationToken::new(),
             progress: noop_progress(),
+            prepared_source_url: None,
         }
     }
 
@@ -214,6 +223,11 @@ impl<'a> DownloadJob<'a> {
 
     pub fn with_progress(mut self, progress: ProgressSink) -> Self {
         self.progress = progress;
+        self
+    }
+
+    pub fn with_prepared_source_url(mut self, url: Option<&'a str>) -> Self {
+        self.prepared_source_url = url.filter(|value| !value.is_empty());
         self
     }
 
@@ -234,12 +248,24 @@ impl<'a> DownloadJob<'a> {
 pub struct ProtectedPreviewCipher {
     pub signature_cipher: String,
     pub player_url: String,
+    pub sabr_url: Option<String>,
+    pub video_playback_ustreamer_config: Option<String>,
+    pub sabr_formats: Vec<Value>,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtectedPoTokenBinding {
+    VideoId,
+    DataSyncId,
+    VisitorData,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtectedPreviewIdentity {
     pub visitor_data: String,
     pub data_sync_id: String,
+    pub gvs_binding: ProtectedPoTokenBinding,
 }
 
 #[async_trait]
@@ -328,9 +354,17 @@ pub trait MusicProvider: Send + Sync {
         &self,
         _source: &SongSource,
         _quality: Quality,
-        _po_token: &str,
+        _po_token: Option<&str>,
         _identity: &ProtectedPreviewIdentity,
+        _player_url: &str,
+        _signature_timestamp: u64,
     ) -> Result<Option<ProtectedPreviewCipher>> {
+        Ok(None)
+    }
+
+    /// 返回与当前登录页同一会话选中的播放器脚本。签名请求里的 STS 和后续
+    /// sig/n 解密必须来自这一份脚本，否则播放器 A/B 轮换期间 CDN 会返回 403。
+    async fn protected_preview_player_url(&self) -> Result<Option<String>> {
         Ok(None)
     }
 
@@ -358,6 +392,19 @@ pub trait MusicProvider: Send + Sync {
         let _ = key;
         Ok(None)
     }
+}
+
+/// 视频解析/下载能力端口。应用层按能力注入，不再保存并匹配具体 Provider 类型。
+#[async_trait]
+pub trait VideoProvider: Send + Sync {
+    fn platform(&self) -> Platform;
+    async fn resolve_video(&self, input: &str) -> Result<VideoInfo>;
+    async fn download_video(
+        &self,
+        request: &VideoDownloadRequest,
+        cancel: &CancellationToken,
+        progress: &ProgressSink,
+    ) -> Result<PathBuf>;
 }
 
 /// 没有登录体系的 provider 可以直接复用这几个默认实现。

@@ -48,6 +48,7 @@ const SETTINGS_FIELDS: &[&str] = &[
     "filter_resonance",
     "key_notation",
     "virtual_disk_auto_grow",
+    "experimental_one_library",
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,6 +123,9 @@ pub struct Settings {
     /// KDJ 虚拟磁盘空间不足时，是否允许创建更大的镜像并迁移后重试。
     #[serde(default = "yes")]
     pub virtual_disk_auto_grow: bool,
+    /// 实验性 OneLibrary 入口与板块；全新安装与升级缺省均为关闭，手动开启后持久化。
+    #[serde(default)]
+    pub experimental_one_library: bool,
 }
 
 impl Settings {
@@ -157,6 +161,7 @@ impl Settings {
             filter_resonance: FilterResonance::High,
             key_notation: KeyNotation::Camelot,
             virtual_disk_auto_grow: true,
+            experimental_one_library: false,
         }
     }
 }
@@ -524,6 +529,7 @@ mod tests {
         assert_eq!(config.to_settings().key_notation, KeyNotation::Camelot);
         assert!(config.to_settings().virtual_disk_auto_grow);
         assert!(!config.to_settings().experimental_dj_mode);
+        assert!(!config.to_settings().experimental_one_library);
     }
 
     #[test]

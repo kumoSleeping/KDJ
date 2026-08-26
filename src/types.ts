@@ -7,6 +7,15 @@ export type Platform = "wyy" | "qqm" | "soundcloud" | "ytm" | "youtube" | "bilib
 export type Quality = "flac" | "320" | "128";
 export type SearchKind = "song" | "playlist" | "artist" | "album" | "radio";
 export type TaskState = "queued" | "running" | "processing" | "done" | "failed" | "canceled";
+export type TaskPhase =
+  | "waiting"
+  | "authorizing"
+  | "resolving"
+  | "downloading"
+  | "post_processing"
+  | "relocating"
+  | "importing"
+  | "completed";
 export type AccountState = "missing" | "valid" | "expired" | "unknown";
 export type QrStateValue = "waiting" | "scanned" | "done" | "expired" | "refused" | "error";
 
@@ -52,7 +61,7 @@ export interface Settings {
   write_tags_after_analyze: boolean;
   analysis_duration: number;
   theme: "light" | "dark" | "system";
-  /** 是否显示顶栏里的实验性 DJ 模式入口；全新安装默认关闭。 */
+  /** 是否显示顶栏里的实验性 DJ 模式入口；全新安装默认关闭，手动开启后持久化。 */
   experimental_dj_mode: boolean;
   soundcloud_enabled: boolean;
   netease_use_download_api: boolean;
@@ -80,6 +89,8 @@ export interface Settings {
   key_notation: KeyNotation;
   /** KDJ 虚拟磁盘空间不足时，创建更大的镜像、迁移数据并重试。 */
   virtual_disk_auto_grow: boolean;
+  /** 实验性 OneLibrary 入口与板块；缺省关闭，手动开启后持久化。 */
+  experimental_one_library: boolean;
   /**
    * 只读派生字段（后端 GET/PUT /api/settings 附带）：全新安装的默认下载落点
    * ——系统「下载」目录 + KDJ。「保存到」菜单里的「系统下载」项用它。
@@ -195,7 +206,7 @@ export interface LyricsRequest {
   key?: string;
   /** 启用的搜词引擎（顺序=同分偏好）。 */
   engines?: Platform[];
-  /** follow | wyy | qqm */
+  /** follow | wyy | qqm | ytm */
   prefer?: string;
 }
 
@@ -226,7 +237,6 @@ export interface MergedGroup {
   sources: SongSource[];
   best_source_index: number;
   score: number;
-  in_library: boolean;
 }
 
 export interface CollectionResult {
@@ -271,8 +281,6 @@ export interface CollectionResolveResponse {
   platform: Platform;
   title: string;
   sources: SongSource[];
-  /** 已存在于本地曲库的 `platform:key`，用于避免把远程集合误标成全新。 */
-  in_library_source_keys?: string[];
 }
 
 export type IntakeKind =
@@ -331,6 +339,8 @@ export interface DownloadTask {
   artist: string;
   quality: string;
   state: TaskState;
+  /** 与平台无关的执行阶段；UI 不再根据 ytm/qqm/wyy 猜测状态。 */
+  phase: TaskPhase;
   progress: number;
   downloaded_bytes: number;
   total_bytes: number;
@@ -340,6 +350,10 @@ export interface DownloadTask {
   track_id: number | null;
   /** 入队时指定的目标文件夹；前端用来在对应列表画「待下载」行。 */
   dest_dir?: string;
+  /** 入队时冻结的实际成品目录；默认下载也必须明确展示。 */
+  output_dir?: string;
+  /** 本地下载成功后，补写 OneLibrary/USB 目标失败的独立错误。 */
+  one_library_error?: string;
   /** 仅前端：搜索结果带来的封面 URL，占位行用来避免只剩 BV 号。 */
   cover?: string;
   created_at: number;
@@ -421,7 +435,6 @@ export interface StreamPlaylistResponse {
   key: string;
   title: string;
   sources: SongSource[];
-  in_library_source_keys?: string[];
 }
 
 export interface Track {
@@ -504,6 +517,32 @@ export interface FolderTree {
   roots: FolderNode[];
   /** 落在所有曲库根目录之外的曲目数。 */
   outside: number;
+}
+
+export interface DuplicateCandidate {
+  track: Track;
+  quality_score: number;
+  quality_label: string;
+}
+
+export interface DuplicateGroup {
+  group_id: string;
+  confidence: "high" | "possible";
+  reason: string;
+  keep_id: number;
+  candidates: DuplicateCandidate[];
+}
+
+export interface DuplicateAnalysisResult {
+  all: boolean;
+  folders: string[];
+  include_subfolders: boolean;
+  scanned: number;
+  /** 数据库仍有记录、但原路径已经不存在的曲目。 */
+  missing_tracks: Track[];
+  /** 整个曲库根离线时只警告，不允许按“失效记录”释放。 */
+  offline_roots: string[];
+  groups: DuplicateGroup[];
 }
 
 /** 从软件移出文件夹：摘库记录，不删磁盘。 */
@@ -840,6 +879,8 @@ export interface ScanProgress {
    * 真正的失败发生在之后。没有这个字段的话，失败在界面上和"扫出来 0 首"长得一模一样。
    */
   error?: string | null;
+  /** 用户主动取消；旧后端不返回，所以保持可选。 */
+  cancelled?: boolean;
 }
 
 export interface AnalyzeProgress {
@@ -874,6 +915,7 @@ export type WsEvent =
   | { type: "analyze.progress"; payload: AnalyzeProgress }
   | { type: "maintenance.progress"; payload: MaintenanceProgress }
   | { type: "library.updated"; payload: { track_ids: number[] } }
+  | { type: "library.folders.updated"; payload: Record<string, never> }
   | { type: "account.changed"; payload: Account };
 
 /* ---------------------------------------------------------------- preload */

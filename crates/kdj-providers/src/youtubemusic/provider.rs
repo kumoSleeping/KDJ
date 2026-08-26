@@ -12,9 +12,8 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use futures_util::StreamExt as _;
 use kdj_core::models::{
-    Account, AccountState, Platform, QrSession, QrStateValue, Quality, ResolveKind,
+    Account, AccountState, LyricText, Platform, QrSession, QrStateValue, Quality, ResolveKind,
     ResolveResponse, SongSource, StreamPlaylist, StreamPlaylistResponse,
 };
 use kdj_core::paths::render_filename;
@@ -22,7 +21,7 @@ use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt as _;
 
 use super::auth::YoutubeAuth;
-use super::client::YtmClient;
+use super::client::{YtmClient, PLAYBACK_WEB_USER_AGENT};
 use crate::net::{create_download_writer, host_is, AtomicDownload};
 use crate::provider::{
     effective_limit, full_listing, no_login, str_field, unique_download_path, Capabilities,
@@ -32,6 +31,19 @@ use crate::tags;
 
 const LABEL: &str = "YouTube Music";
 const DISABLED_MESSAGE: &str = "未启用，在「下载」里打开开关";
+/// WEB_REMIX player 发下来的 GVS URL 不是普通公开文件地址。媒体 GET 必须保持
+/// 同一 Music origin / referer / client UA；遗漏这些头时 player 请求本身成功，
+/// 随后的试听和下载却都会在 googlevideo 上变成 403。
+pub fn gvs_playback_request(client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
+    client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "*/*")
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN-US,zh-CN;q=0.9")
+        .header(reqwest::header::ORIGIN, "https://music.youtube.com")
+        .header(reqwest::header::REFERER, "https://music.youtube.com/")
+        .header(reqwest::header::USER_AGENT, PLAYBACK_WEB_USER_AGENT)
+}
 /// 契约音质 → YouTube Music 现实里最接近的码率目标。
 /// 平台没有无损档：flac 和 320 都对准会员上限（约 256k AAC）。
 fn target_bitrate(quality: Quality) -> i64 {
@@ -45,6 +57,20 @@ fn target_bitrate(quality: Quality) -> i64 {
 enum StreamSource {
     Direct { url: String, ext: String },
     Hls { url: String },
+}
+
+fn stream_source_from_prepared_url(url: &str) -> Result<StreamSource> {
+    let parsed = url::Url::parse(url).context("YouTube Music 播放流 URL 无效")?;
+    let mime = parsed
+        .query_pairs()
+        .find_map(|(key, value)| (key == "mime").then(|| value.into_owned()))
+        .unwrap_or_default();
+    anyhow::ensure!(mime.starts_with("audio/"), "YouTube Music 播放流不是音频");
+    let ext = if mime.contains("webm") { "webm" } else { "m4a" };
+    Ok(StreamSource::Direct {
+        url: url.to_string(),
+        ext: ext.to_string(),
+    })
 }
 
 pub struct YoutubeMusicProvider {
@@ -87,12 +113,7 @@ impl YoutubeMusicProvider {
         let formats = audio_formats(&player);
         if !formats.is_empty() {
             let format = if lowest {
-                formats
-                    .iter()
-                    .filter(|format| format.bitrate > 0)
-                    .min_by_key(|format| format.bitrate)
-                    .or_else(|| formats.first())
-                    .expect("上面已确认非空")
+                pick_lowest_format(&formats)
             } else {
                 pick_format(&formats, quality)
             };
@@ -212,6 +233,107 @@ impl YoutubeMusicProvider {
         job.report(size, size);
         Ok(())
     }
+
+    /// 播放 API 的 Opus 装在 WebM 容器里。WebM 在曲库中会被当成视频，而且
+    /// 常见 DJ 软件无法写封面；无损重封装成 Ogg Opus 后再走统一标签链路。
+    async fn remux_webm_opus(&self, input: &std::path::Path, job: &DownloadJob<'_>) -> Result<()> {
+        anyhow::ensure!(
+            crate::ffmpeg::available(),
+            "需要 FFmpeg 才能整理 WebM 音频格式"
+        );
+        let converted =
+            input.with_extension(format!("ytm-opus-{:016x}.partial", rand::random::<u64>()));
+        let log_path = self.ctx.data_dir.join("ytm-audio-ffmpeg.log");
+        let args = vec![
+            "-y".to_string(),
+            "-i".to_string(),
+            input.to_string_lossy().into_owned(),
+            "-vn".to_string(),
+            "-map".to_string(),
+            "0:a:0".to_string(),
+            "-c:a".to_string(),
+            "copy".to_string(),
+            "-f".to_string(),
+            "opus".to_string(),
+            converted.to_string_lossy().into_owned(),
+        ];
+        if let Err(error) = crate::ffmpeg::run(&args, &log_path, &job.cancel).await {
+            let _ = tokio::fs::remove_file(&converted).await;
+            return Err(error).context("整理 YouTube Music Opus 音频失败");
+        }
+        job.check_canceled()?;
+        tokio::fs::remove_file(input)
+            .await
+            .context("移除 YouTube Music WebM 临时文件失败")?;
+        if let Err(error) = tokio::fs::rename(&converted, input).await {
+            let _ = tokio::fs::remove_file(&converted).await;
+            return Err(error).context("提交 YouTube Music Opus 音频失败");
+        }
+        Ok(())
+    }
+
+    async fn consume_prepared_spool(
+        &self,
+        source: &std::path::Path,
+        destination: &std::path::Path,
+        job: &DownloadJob<'_>,
+    ) -> Result<()> {
+        let source = tokio::fs::canonicalize(source)
+            .await
+            .context("受保护媒体会话文件不存在")?;
+        let allowed = tokio::fs::canonicalize(self.ctx.data_dir.join("media-spool"))
+            .await
+            .context("受保护媒体会话目录不存在")?;
+        anyhow::ensure!(
+            source.starts_with(&allowed)
+                && source
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("ytm-")),
+            "拒绝读取媒体会话目录之外的文件"
+        );
+        let total = tokio::fs::metadata(&source)
+            .await
+            .context("读取媒体会话文件信息失败")?
+            .len();
+        job.check_canceled()?;
+        if tokio::fs::rename(&source, destination).await.is_ok() {
+            job.report(total, total);
+            return Ok(());
+        }
+        let result: Result<()> = async {
+            let mut input = tokio::fs::File::open(&source)
+                .await
+                .context("打开媒体会话文件失败")?;
+            let mut output = create_download_writer(destination)
+                .await
+                .context("创建下载临时文件失败")?;
+            let mut copied = 0_u64;
+            let mut buffer = vec![0_u8; 256 * 1024];
+            job.report(0, total);
+            loop {
+                job.check_canceled()?;
+                let read = tokio::io::AsyncReadExt::read(&mut input, &mut buffer)
+                    .await
+                    .context("读取媒体会话文件失败")?;
+                if read == 0 {
+                    break;
+                }
+                output
+                    .write_all(&buffer[..read])
+                    .await
+                    .context("写入下载临时文件失败")?;
+                copied += read as u64;
+                job.report(copied, total);
+            }
+            anyhow::ensure!(copied == total, "媒体会话文件复制不完整");
+            output.flush().await.context("提交下载缓冲失败")?;
+            Ok(())
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&source).await;
+        result
+    }
 }
 
 #[async_trait]
@@ -225,7 +347,10 @@ impl MusicProvider for YoutubeMusicProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::MUSIC
+        Capabilities {
+            external_download_preparation: true,
+            ..Capabilities::MUSIC
+        }
     }
 
     async fn account(&self) -> Account {
@@ -382,8 +507,10 @@ impl MusicProvider for YoutubeMusicProvider {
         &self,
         source: &SongSource,
         quality: Quality,
-        po_token: &str,
+        po_token: Option<&str>,
         identity: &ProtectedPreviewIdentity,
+        player_url: &str,
+        signature_timestamp: u64,
     ) -> Result<Option<ProtectedPreviewCipher>> {
         self.ensure_enabled()?;
         let key = Self::video_id(source)?;
@@ -394,10 +521,15 @@ impl MusicProvider for YoutubeMusicProvider {
                 po_token,
                 &identity.visitor_data,
                 &identity.data_sync_id,
+                signature_timestamp,
             )
             .await?;
         ensure_playable(&player)?;
         let formats = audio_formats(&player);
+        anyhow::ensure!(
+            formats.iter().any(native_playback_format),
+            "YouTube Music 播放 API 没有返回 KDJ 可解码的 AAC 音频流"
+        );
         let format = (!formats.is_empty()).then(|| pick_format(&formats, quality));
         let Some(format) = format else {
             bail!("YouTube Music 没有返回可签名的音频流");
@@ -406,14 +538,48 @@ impl MusicProvider for YoutubeMusicProvider {
             !format.cipher.is_empty(),
             "YouTube Music Web player 没有返回 signatureCipher"
         );
-        let player_url = self
-            .client
-            .protected_player_url(player.pointer("/assets/js").and_then(Value::as_str))
-            .await?;
+        let player_url = self.client.protected_player_url(Some(player_url)).await?;
+        let sabr_url = player
+            .pointer("/streamingData/serverAbrStreamingUrl")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let video_playback_ustreamer_config = player
+            .pointer(
+                "/playerConfig/mediaCommonConfig/mediaUstreamerRequestConfig/videoPlaybackUstreamerConfig",
+            )
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let sabr_formats = player
+            .pointer("/streamingData/adaptiveFormats")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let duration_ms = player
+            .pointer("/videoDetails/lengthSeconds")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<u64>().ok())
+            .and_then(|seconds| seconds.checked_mul(1000))
+            .or_else(|| {
+                sabr_formats.iter().find_map(|format| {
+                    format
+                        .get("approxDurationMs")
+                        .and_then(Value::as_str)
+                        .and_then(|value| value.parse::<u64>().ok())
+                })
+            })
+            .unwrap_or_default();
         Ok(Some(ProtectedPreviewCipher {
             signature_cipher: format.cipher.clone(),
             player_url,
+            sabr_url,
+            video_playback_ustreamer_config,
+            sabr_formats,
+            duration_ms,
         }))
+    }
+
+    async fn protected_preview_player_url(&self) -> Result<Option<String>> {
+        Ok(Some(self.client.protected_player_url(None).await?))
     }
 
     async fn protected_preview_player_script(&self, player_url: &str) -> Result<Option<String>> {
@@ -421,11 +587,7 @@ impl MusicProvider for YoutubeMusicProvider {
     }
 
     async fn protected_preview_identity(&self) -> Result<Option<ProtectedPreviewIdentity>> {
-        let (visitor_data, data_sync_id) = self.client.protected_web_identity().await?;
-        Ok(Some(ProtectedPreviewIdentity {
-            visitor_data,
-            data_sync_id,
-        }))
+        Ok(Some(self.client.protected_web_identity().await?))
     }
 
     async fn protected_preview_botguard(
@@ -438,15 +600,51 @@ impl MusicProvider for YoutubeMusicProvider {
         ))
     }
 
+    async fn lyric(&self, key: &str) -> Result<Option<LyricText>> {
+        let video_id = key.trim();
+        if video_id.is_empty() || !looks_like_video_id(video_id) {
+            return Ok(None);
+        }
+        let next = self
+            .client
+            .next_watch(video_id)
+            .await
+            .context("请求 YouTube Music 歌词入口失败")?;
+        let Some(browse_id) = lyrics_browse_id(&next) else {
+            return Ok(None);
+        };
+        // 先走 Android Music：只有移动端会给逐行时间戳。
+        if let Ok(body) = self.client.browse_android_music(browse_id).await {
+            if let Some(text) = lyric_text_from_browse(&body) {
+                return Ok(Some(text));
+            }
+        }
+        // 回退网页端：通常只有纯文本（LyricFind / Musixmatch 说明页）。
+        let body = self
+            .client
+            .browse(browse_id)
+            .await
+            .context("读取 YouTube Music 歌词失败")?;
+        Ok(lyric_text_from_browse(&body))
+    }
+
     async fn download(&self, job: DownloadJob<'_>) -> Result<PathBuf> {
         self.ensure_enabled()?;
         job.check_canceled()?;
         let source = job.source;
-        let key = Self::video_id(source)?;
-        let stream = self.stream_source(&key, job.quality, false).await?;
+        Self::video_id(source)?;
+        // iOS 裸直链现在普遍要求 GVS PO Token。桌面队列优先使用 WebView 在点击
+        // “开始”时通过同一播放 API 生成的新鲜 URL；没有 WebView 的调用方仍保留
+        // 旧解析路径作为兼容回退。
+        let stream = match job.prepared_source_url {
+            Some(url) => stream_source_from_prepared_url(url)?,
+            None => bail!("YouTube Music 下载流尚未就绪，请重试"),
+        };
         job.check_canceled()?;
 
+        let remux_webm = matches!(&stream, StreamSource::Direct { ext, .. } if ext == "webm");
         let ext = match &stream {
+            StreamSource::Direct { .. } if remux_webm => "opus".to_string(),
             StreamSource::Direct { ext, .. } => ext.clone(),
             // HLS 交给 FFmpeg 提取音轨，产物统一 m4a（TS 里的 AAC 原样封装）
             StreamSource::Hls { .. } => "m4a".to_string(),
@@ -465,40 +663,80 @@ impl MusicProvider for YoutubeMusicProvider {
         let guard = AtomicDownload::new(&final_path);
         match stream {
             StreamSource::Direct { url, .. } => {
-                let response = self
-                    .client
-                    .http()
-                    .get(&url)
-                    .send()
-                    .await
-                    .context("YouTube Music 音频下载失败")?;
-                if response.status() == reqwest::StatusCode::FORBIDDEN {
-                    bail!("YouTube Music 拒绝了音频请求（签名可能已失效，稍后重试）");
+                let parsed = url::Url::parse(&url).context("YouTube Music 播放流 URL 无效")?;
+                if parsed.scheme() == "file" {
+                    let source = parsed
+                        .to_file_path()
+                        .map_err(|_| anyhow::anyhow!("媒体会话文件路径无效"))?;
+                    self.consume_prepared_spool(&source, guard.partial(), &job)
+                        .await?;
+                } else {
+                    // 与试听代理使用同样的裸 reqwest client。不要复用 InnerTube client
+                    // 上伪装的 Chrome UA：GVS URL/PO Token 来自当前 WebView 播放会话，
+                    // 下载请求必须保持播放链路的请求身份与重定向策略。
+                    let playback_http = reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::limited(5))
+                        .build()
+                        .context("创建 YouTube Music 播放流客户端失败")?;
+                    let mut file = create_download_writer(guard.partial())
+                        .await
+                        .context("创建下载临时文件失败")?;
+                    let mut downloaded = 0u64;
+                    let mut expected_total = 0u64;
+                    // GVS 会主动把大文件切成多个 206；像播放缓存一样按 Content-Range
+                    // 续拉，不能把第一段 EOF 当成整首完成。
+                    for _ in 0..2048 {
+                        let mut response = gvs_playback_request(&playback_http, &url)
+                            .header(reqwest::header::RANGE, gvs_download_range(downloaded))
+                            .send()
+                            .await
+                            .context("YouTube Music 音频下载失败")?;
+                        if response.status() == reqwest::StatusCode::FORBIDDEN {
+                            bail!("YouTube Music GVS 拒绝下载请求（403），播放授权可能已失效");
+                        }
+                        let status = response.status();
+                        let segment =
+                            direct_response_segment(status, response.headers(), downloaded)?;
+                        if expected_total > 0
+                            && segment.total > 0
+                            && expected_total != segment.total
+                        {
+                            bail!("YouTube Music 音频总长度在续传时发生变化");
+                        }
+                        expected_total = expected_total.max(segment.total);
+                        job.report(downloaded, expected_total);
+                        let segment_start = downloaded;
+                        while let Some(chunk) =
+                            response.chunk().await.context("YouTube Music 音频流中断")?
+                        {
+                            job.check_canceled()?;
+                            file.write_all(&chunk).await.context("写入下载文件失败")?;
+                            downloaded += chunk.len() as u64;
+                            job.report(downloaded, expected_total.max(downloaded));
+                        }
+                        if segment.total == 0 || downloaded >= segment.total {
+                            break;
+                        }
+                        anyhow::ensure!(
+                            downloaded > segment_start
+                                && downloaded == segment.end.saturating_add(1),
+                            "YouTube Music 音频分段不连续"
+                        );
+                    }
+                    anyhow::ensure!(
+                        expected_total == 0 || downloaded == expected_total,
+                        "YouTube Music 音频没有完整下载"
+                    );
+                    file.flush().await.context("提交下载缓冲失败")?;
+                    drop(file);
                 }
-                let response = response
-                    .error_for_status()
-                    .context("YouTube Music 音频下载失败")?;
-                let total = response.content_length().unwrap_or(0);
-                job.report(0, total);
-
-                let mut file = create_download_writer(guard.partial())
-                    .await
-                    .context("创建下载临时文件失败")?;
-                let mut downloaded = 0u64;
-                let mut stream = response.bytes_stream();
-                while let Some(chunk) = stream.next().await {
-                    job.check_canceled()?;
-                    let chunk = chunk.context("YouTube Music 音频流中断")?;
-                    file.write_all(&chunk).await.context("写入下载文件失败")?;
-                    downloaded += chunk.len() as u64;
-                    job.report(downloaded, total.max(downloaded));
-                }
-                file.flush().await.context("提交下载缓冲失败")?;
-                drop(file);
             }
             StreamSource::Hls { url } => {
                 self.download_hls(&url, guard.partial(), &job).await?;
             }
+        }
+        if remux_webm {
+            self.remux_webm_opus(guard.partial(), &job).await?;
         }
         let path = guard.commit()?;
 
@@ -519,6 +757,66 @@ impl MusicProvider for YoutubeMusicProvider {
         }
         Ok(path)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectResponseSegment {
+    end: u64,
+    total: u64,
+}
+
+fn direct_response_segment(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    requested_start: u64,
+) -> Result<DirectResponseSegment> {
+    if status == reqwest::StatusCode::OK {
+        anyhow::ensure!(
+            requested_start == 0,
+            "YouTube Music 续传请求被错误地从头返回"
+        );
+        let total = headers
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        return Ok(DirectResponseSegment {
+            end: total.saturating_sub(1),
+            total,
+        });
+    }
+    anyhow::ensure!(
+        status == reqwest::StatusCode::PARTIAL_CONTENT,
+        "YouTube Music 音频请求返回 {status}"
+    );
+    let raw = headers
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .context("YouTube Music 音频分段缺少 Content-Range")?;
+    let value = raw
+        .trim()
+        .strip_prefix("bytes ")
+        .context("YouTube Music Content-Range 无效")?;
+    let (span, total) = value
+        .split_once('/')
+        .context("YouTube Music Content-Range 无效")?;
+    let (start, end) = span
+        .split_once('-')
+        .context("YouTube Music Content-Range 无效")?;
+    let start = start.parse::<u64>().context("YouTube Music 分段起点无效")?;
+    let end = end.parse::<u64>().context("YouTube Music 分段终点无效")?;
+    let total = total
+        .parse::<u64>()
+        .context("YouTube Music 音频总长度无效")?;
+    anyhow::ensure!(
+        start == requested_start && start <= end && end < total,
+        "YouTube Music 音频分段范围不连续"
+    );
+    Ok(DirectResponseSegment { end, total })
+}
+
+fn gvs_download_range(start: u64) -> String {
+    format!("bytes={start}-")
 }
 
 // ---------------------------------------------------------------- 流与音质
@@ -562,10 +860,35 @@ fn audio_formats(player: &Value) -> Vec<AudioFormat> {
 /// 没有无损档可降级，所以不需要 netease 那种梯度回退——目标本身就是就近匹配。
 fn pick_format(formats: &[AudioFormat], quality: Quality) -> &AudioFormat {
     let target = target_bitrate(quality);
+    // 当前原生解码器支持 MP4/AAC，但 Symphonia 0.5 没有 Opus decoder。WebM/Opus
+    // 即使网络响应完全正常也会报 unsupported audio format；播放 API 同时提供 AAC
+    // 时必须优先 AAC。下载复用同一选择，最终文件也才能直接进入 KDJ/DJ 软件。
+    let has_native_format = formats.iter().any(native_playback_format);
     formats
         .iter()
+        .filter(|format| !has_native_format || native_playback_format(format))
         .min_by_key(|format| ((format.bitrate - target).abs(), -format.bitrate))
         .expect("调用方已确认非空")
+}
+
+fn pick_lowest_format(formats: &[AudioFormat]) -> &AudioFormat {
+    let has_native_format = formats.iter().any(native_playback_format);
+    formats
+        .iter()
+        .filter(|format| !has_native_format || native_playback_format(format))
+        .filter(|format| format.bitrate > 0)
+        .min_by_key(|format| format.bitrate)
+        .or_else(|| {
+            formats
+                .iter()
+                .find(|format| !has_native_format || native_playback_format(format))
+        })
+        .expect("调用方已确认非空")
+}
+
+fn native_playback_format(format: &AudioFormat) -> bool {
+    let mime = format.mime.to_ascii_lowercase();
+    (mime.starts_with("audio/mp4") && !mime.contains("opus")) || mime.starts_with("audio/mpeg")
 }
 
 fn ext_of(format: &AudioFormat) -> String {
@@ -1055,6 +1378,151 @@ fn playlist_contents_from_browse(body: &Value) -> (String, Vec<SongSource>) {
     (title, sources)
 }
 
+// ---------------------------------------------------------------- 歌词
+
+/// `next` 响应里的歌词页 browseId（`MPLYt…`）。
+/// 不跳过 `unselectable`：部分曲目 UI 先灰掉歌词 tab，但 browseId 仍可用。
+fn lyrics_browse_id(next: &Value) -> Option<&str> {
+    let tabs = next
+        .pointer(
+            "/contents/singleColumnMusicWatchNextResultsRenderer/tabbedRenderer/\
+             watchNextTabbedResultsRenderer/tabs",
+        )
+        .and_then(Value::as_array)?;
+    for tab in tabs {
+        let page = tab
+            .pointer(
+                "/tabRenderer/endpoint/browseEndpoint/\
+                 browseEndpointContextSupportedConfigs/\
+                 browseEndpointContextMusicConfig/pageType",
+            )
+            .and_then(Value::as_str);
+        if page != Some("MUSIC_PAGE_TYPE_TRACK_LYRICS") {
+            continue;
+        }
+        if let Some(browse_id) = tab
+            .pointer("/tabRenderer/endpoint/browseEndpoint/browseId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            return Some(browse_id);
+        }
+    }
+    None
+}
+
+fn lyric_text_from_browse(body: &Value) -> Option<LyricText> {
+    if let Some(lrc) = timed_lrc_from_browse(body) {
+        return Some(LyricText {
+            lrc,
+            translated_lrc: String::new(),
+            romaji_lrc: String::new(),
+        });
+    }
+    let plain = plain_lyrics_from_browse(body)?;
+    // 无时间轴时按行落成 00:00.00，至少能进面板；真正卡拉 OK 仍依赖 timed 路径。
+    let lrc = plain
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| format!("[00:00.00]{line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if lrc.is_empty() {
+        return None;
+    }
+    Some(LyricText {
+        lrc,
+        translated_lrc: String::new(),
+        romaji_lrc: String::new(),
+    })
+}
+
+fn timed_lrc_from_browse(body: &Value) -> Option<String> {
+    let lines = body
+        .pointer(
+            "/contents/elementRenderer/newElement/type/componentType/model/\
+             timedLyricsModel/lyricsData/timedLyricsData",
+        )
+        .and_then(Value::as_array)?;
+    let mut out = Vec::new();
+    for line in lines {
+        let text = line
+            .get("lyricLine")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        // ♪ 是器乐间奏占位，LRC 解析会丢掉空正文，这里直接跳过。
+        if text.is_empty() || text == "♪" {
+            continue;
+        }
+        let start_ms = line
+            .pointer("/cueRange/startTimeMilliseconds")
+            .and_then(parse_millis)?;
+        out.push(format!("{}{text}", format_lrc_stamp(start_ms)));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out.join("\n"))
+    }
+}
+
+fn plain_lyrics_from_browse(body: &Value) -> Option<String> {
+    // messageRenderer 常见于「Lyrics not available」，不当正文。
+    if let Some(runs) = body
+        .pointer("/contents/messageRenderer/text/runs")
+        .and_then(Value::as_array)
+    {
+        let text = join_runs(runs);
+        if text.is_empty() || text.eq_ignore_ascii_case("Lyrics not available") {
+            return None;
+        }
+    }
+    let sections = body
+        .pointer("/contents/sectionListRenderer/contents")
+        .and_then(Value::as_array)?;
+    for section in sections {
+        let runs = section
+            .pointer("/musicDescriptionShelfRenderer/description/runs")
+            .and_then(Value::as_array);
+        if let Some(runs) = runs {
+            let text = join_runs(runs);
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+fn join_runs(runs: &[Value]) -> String {
+    runs.iter()
+        .filter_map(|run| run.get("text").and_then(Value::as_str))
+        .collect::<String>()
+}
+
+fn parse_millis(value: &Value) -> Option<u64> {
+    match value {
+        Value::String(text) => text.parse().ok(),
+        Value::Number(number) => number.as_u64().or_else(|| {
+            number
+                .as_f64()
+                .filter(|n| n.is_finite() && *n >= 0.0)
+                .map(|n| n as u64)
+        }),
+        _ => None,
+    }
+}
+
+fn format_lrc_stamp(ms: u64) -> String {
+    let total_cs = ms / 10;
+    let minutes = total_cs / 6_000;
+    let seconds = (total_cs % 6_000) / 100;
+    let cs = total_cs % 100;
+    format!("[{minutes:02}:{seconds:02}.{cs:02}]")
+}
+
 fn playlist_from_browse(body: &Value) -> Option<(String, Vec<SongSource>)> {
     let contents = playlist_contents_from_browse(body);
     (!contents.1.is_empty()).then_some(contents)
@@ -1083,6 +1551,76 @@ fn first_text(value: &Value, keys: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_protected_spool_is_a_valid_prepared_audio_source() {
+        let stream = stream_source_from_prepared_url(
+            "file:///tmp/media-spool/ytm-test.m4a?mime=audio%2Fmp4",
+        )
+        .unwrap();
+        assert!(matches!(
+            stream,
+            StreamSource::Direct { url, ext }
+                if url.starts_with("file://") && ext == "m4a"
+        ));
+    }
+
+    #[tokio::test]
+    async fn completed_protected_spool_is_consumed_without_another_network_request() {
+        let root = std::env::temp_dir().join(format!(
+            "kdj-ytm-provider-spool-test-{:016x}",
+            rand::random::<u64>()
+        ));
+        let data = root.join("data");
+        let spool_dir = data.join("media-spool");
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&spool_dir).await.unwrap();
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let spool = spool_dir.join("ytm-test.m4a");
+        let destination = output_dir.join("song.partial");
+        let expected = vec![7_u8; 512 * 1024];
+        tokio::fs::write(&spool, &expected).await.unwrap();
+        let ctx = ProviderContext::new(
+            data,
+            crate::provider::ProviderLiveSettings {
+                download_dir: output_dir,
+                filename_template: "{title}.{ext}".into(),
+                default_quality: Quality::Q128,
+                netease_use_download_api: false,
+                soundcloud_enabled: false,
+                soundcloud_client_id: String::new(),
+                soundcloud_client_secret: String::new(),
+                ytm_enabled: true,
+                youtube_enabled: false,
+                video_dir: None,
+                video_format: "mp4".into(),
+            },
+        );
+        let auth = Arc::new(YoutubeAuth::new(&ctx, Platform::Ytm).unwrap());
+        let provider = YoutubeMusicProvider::new(ctx, auth).unwrap();
+        let source = SongSource {
+            platform: Platform::Ytm,
+            key: "video".into(),
+            title: "title".into(),
+            artists: vec![],
+            album: String::new(),
+            duration: None,
+            cover: String::new(),
+            max_quality: None,
+            vip: false,
+            payload: Default::default(),
+        };
+        let job = DownloadJob::new(&source, Quality::Q128);
+
+        provider
+            .consume_prepared_spool(&spool, &destination, &job)
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), expected);
+        assert!(tokio::fs::metadata(&spool).await.is_err());
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
 
     fn song_item(video_id: &str, title: &str) -> Value {
         json!({
@@ -1219,6 +1757,30 @@ mod tests {
             Some("lo"),
             "只有低码率时就它"
         );
+        let webm_closer = vec![
+            AudioFormat {
+                bitrate: 128_000,
+                mime: "audio/webm; codecs=opus".into(),
+                url: Some("opus".into()),
+                cipher: String::new(),
+            },
+            AudioFormat {
+                bitrate: 140_000,
+                mime: "audio/mp4; codecs=mp4a.40.2".into(),
+                url: Some("aac".into()),
+                cipher: String::new(),
+            },
+        ];
+        assert_eq!(
+            pick_format(&webm_closer, Quality::Q128).url.as_deref(),
+            Some("aac"),
+            "原生播放/下载必须优先可解码的 AAC，不能因 Opus 更接近目标码率而选 WebM"
+        );
+        assert_eq!(
+            pick_lowest_format(&webm_closer).url.as_deref(),
+            Some("aac"),
+            "最低码率试听同样不能选原生解码器不支持的 Opus"
+        );
     }
 
     #[test]
@@ -1237,6 +1799,58 @@ mod tests {
         };
         assert_eq!(ext_of(&mp4), "m4a");
         assert_eq!(ext_of(&webm), "webm");
+    }
+
+    #[test]
+    fn prepared_playback_urls_keep_their_real_audio_container() {
+        let webm = stream_source_from_prepared_url(
+            "https://rr1---sn.example.googlevideo.com/videoplayback?mime=audio%2Fwebm%3Bcodecs%3Dopus",
+        )
+        .unwrap();
+        assert!(matches!(webm, StreamSource::Direct { ext, .. } if ext == "webm"));
+
+        let m4a = stream_source_from_prepared_url(
+            "https://rr1---sn.example.googlevideo.com/videoplayback?mime=audio%2Fmp4%3Bcodecs%3Dmp4a.40.2",
+        )
+        .unwrap();
+        assert!(matches!(m4a, StreamSource::Direct { ext, .. } if ext == "m4a"));
+        assert!(stream_source_from_prepared_url(
+            "https://rr1---sn.example.googlevideo.com/videoplayback?mime=video%2Fmp4"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn direct_download_ranges_must_be_contiguous() {
+        assert_eq!(gvs_download_range(0), "bytes=0-");
+        assert_eq!(gvs_download_range(524288), "bytes=524288-");
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_RANGE,
+            "bytes 524288-1048575/2000000".parse().unwrap(),
+        );
+        assert_eq!(
+            direct_response_segment(reqwest::StatusCode::PARTIAL_CONTENT, &headers, 524288)
+                .unwrap(),
+            DirectResponseSegment {
+                end: 1048575,
+                total: 2000000,
+            }
+        );
+        assert!(
+            direct_response_segment(reqwest::StatusCode::PARTIAL_CONTENT, &headers, 0).is_err()
+        );
+
+        let mut complete = reqwest::header::HeaderMap::new();
+        complete.insert(reqwest::header::CONTENT_LENGTH, "1234".parse().unwrap());
+        assert_eq!(
+            direct_response_segment(reqwest::StatusCode::OK, &complete, 0).unwrap(),
+            DirectResponseSegment {
+                end: 1233,
+                total: 1234,
+            }
+        );
+        assert!(direct_response_segment(reqwest::StatusCode::OK, &complete, 10).is_err());
     }
 
     #[test]
@@ -1367,5 +1981,112 @@ mod tests {
     #[test]
     fn empty_browse_is_rejected() {
         assert!(playlist_from_browse(&json!({})).is_none());
+    }
+
+    #[test]
+    fn lyrics_browse_id_reads_unselectable_tab() {
+        let next = json!({
+            "contents": {"singleColumnMusicWatchNextResultsRenderer": {
+                "tabbedRenderer": {"watchNextTabbedResultsRenderer": {"tabs": [
+                    {"tabRenderer": {"title": "Up next"}},
+                    {"tabRenderer": {
+                        "unselectable": true,
+                        "endpoint": {"browseEndpoint": {
+                            "browseId": "MPLYt_abc",
+                            "browseEndpointContextSupportedConfigs": {
+                                "browseEndpointContextMusicConfig": {
+                                    "pageType": "MUSIC_PAGE_TYPE_TRACK_LYRICS"
+                                }
+                            }
+                        }}
+                    }}
+                ]}}
+            }}
+        });
+        assert_eq!(lyrics_browse_id(&next), Some("MPLYt_abc"));
+    }
+
+    #[test]
+    fn timed_lyrics_convert_to_lrc() {
+        let body = json!({
+            "contents": {
+                "elementRenderer": {
+                    "newElement": {
+                        "type": {
+                            "componentType": {
+                                "model": {
+                                    "timedLyricsModel": {
+                                        "lyricsData": {
+                                            "timedLyricsData": [
+                                                {
+                                                    "lyricLine": "♪",
+                                                    "cueRange": {
+                                                        "startTimeMilliseconds": "0",
+                                                        "endTimeMilliseconds": "1000"
+                                                    }
+                                                },
+                                                {
+                                                    "lyricLine": "We're no strangers to love",
+                                                    "cueRange": {
+                                                        "startTimeMilliseconds": "19620",
+                                                        "endTimeMilliseconds": "23000"
+                                                    }
+                                                },
+                                                {
+                                                    "lyricLine": "You know the rules",
+                                                    "cueRange": {
+                                                        "startTimeMilliseconds": "23100",
+                                                        "endTimeMilliseconds": "25000"
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let text = lyric_text_from_browse(&body).unwrap();
+        assert!(text.lrc.contains("[00:19.62]We're no strangers to love"));
+        assert!(text.lrc.contains("[00:23.10]You know the rules"));
+        assert!(!text.lrc.contains('♪'));
+    }
+
+    #[test]
+    fn plain_lyrics_fall_back_to_zero_stamps() {
+        let body = json!({
+            "contents": {
+                "sectionListRenderer": {
+                    "contents": [
+                        {
+                            "musicDescriptionShelfRenderer": {
+                                "description": {
+                                    "runs": [{ "text": "Line one\nLine two" }]
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        });
+        let text = lyric_text_from_browse(&body).unwrap();
+        assert_eq!(text.lrc, "[00:00.00]Line one\n[00:00.00]Line two");
+    }
+
+    #[test]
+    fn unavailable_message_is_not_lyrics() {
+        let body = json!({
+            "contents": {
+                "messageRenderer": {
+                    "text": {
+                        "runs": [{ "text": "Lyrics not available" }]
+                    }
+                }
+            }
+        });
+        assert!(lyric_text_from_browse(&body).is_none());
     }
 }

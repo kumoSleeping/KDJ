@@ -24,8 +24,9 @@ mod desktop_media;
 mod desktop_player;
 #[cfg(desktop)]
 mod midi;
-#[cfg(desktop)]
+#[cfg(all(desktop, feature = "labs"))]
 mod virtual_disk;
+#[cfg(desktop)]
 #[cfg(desktop)]
 pub use cli::Launch;
 
@@ -1313,10 +1314,11 @@ pub fn run() {
         return;
     }
 
-    let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_opener::init());
+    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_dialog::init());
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let builder = builder.plugin(tauri_plugin_deep_link::init());
     // Android：出声已切共享 coordinator（CPAL/AAudio）；native-audio 插件仍入包，
     // 负责前台保活、歌词 overlay、相册等。iOS 仍由插件内 AVPlayer 出声。
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -1329,8 +1331,11 @@ pub fn run() {
 
     let builder = builder.setup(|app| {
         app.manage(UpdateProgressState::default());
-        #[cfg(desktop)]
-        app.manage(virtual_disk::VirtualDiskManager::default());
+        #[cfg(all(desktop, feature = "labs"))]
+        {
+            virtual_disk::configure_resources(app.handle());
+            app.manage(virtual_disk::VirtualDiskManager::default());
+        }
         #[cfg(desktop)]
         app.manage(midi::MidiHub::spawn(app.handle().clone()));
         #[cfg(any(desktop, target_os = "android"))]
@@ -1341,7 +1346,7 @@ pub fn run() {
         let (bridge, theme) = start_server(app.handle())?;
         tracing::info!("KDJ 后端就绪：{}", bridge.base_url);
         app.manage(bridge);
-        #[cfg(desktop)]
+        #[cfg(all(desktop, feature = "labs"))]
         virtual_disk::sync_existing(app.handle());
         // 服务起好再显示窗口。窗口在配置里是 visible:false，这里补一次 show()——
         // Electron 版靠 `ready-to-show` 做同样的事，为的是不让用户看见
@@ -1374,7 +1379,7 @@ pub fn run() {
         Ok(())
     });
 
-    #[cfg(desktop)]
+    #[cfg(all(desktop, feature = "labs"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_bridge_info,
         open_path,
@@ -1397,6 +1402,30 @@ pub fn run() {
         virtual_disk::virtual_disk_grow,
         virtual_disk::virtual_disk_eject,
         virtual_disk::virtual_disk_delete,
+        desktop_player::playback_initialize,
+        desktop_player::playback_command,
+        desktop_player::playback_control,
+        desktop_player::playback_state,
+        midi::midi_devices,
+        midi::midi_send
+    ]);
+    #[cfg(all(desktop, not(feature = "labs")))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        get_bridge_info,
+        open_path,
+        reveal_path,
+        save_login_qr,
+        open_external,
+        open_soundcloud_oauth_window,
+        check_desktop_update,
+        get_update_progress,
+        apply_update,
+        pick_folder,
+        pick_folders,
+        export_cli_skill,
+        window_control,
+        set_window_background,
+        set_desktop_lyrics,
         desktop_player::playback_initialize,
         desktop_player::playback_command,
         desktop_player::playback_control,
@@ -1463,6 +1492,7 @@ pub fn run() {
                 if let Some(dir) = app_handle.try_state::<RuntimeDir>() {
                     cli::remove_runtime(&dir.0);
                 }
+                #[cfg(feature = "labs")]
                 virtual_disk::eject_on_exit(app_handle);
             }
             #[cfg(target_os = "macos")]

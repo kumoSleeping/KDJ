@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -95,8 +96,29 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
             post(ytm_protected_preview_player),
         )
         .route(
+            "/api/song/preview/ytm/player-url",
+            get(ytm_protected_preview_player_url),
+        )
+        .route(
             "/api/song/preview/ytm/player-script",
             post(ytm_protected_preview_player_script),
+        )
+        .route("/api/song/preview/ytm/sabr/proxy", post(ytm_sabr_proxy))
+        .route(
+            "/api/song/preview/ytm/sabr/spools",
+            post(ytm_sabr_spool_create),
+        )
+        .route(
+            "/api/song/preview/ytm/sabr/spools/{token}",
+            post(ytm_sabr_spool_append),
+        )
+        .route(
+            "/api/song/preview/ytm/sabr/spools/{token}/complete",
+            post(ytm_sabr_spool_complete),
+        )
+        .route(
+            "/api/song/preview/ytm/sabr/spools/{token}/fail",
+            post(ytm_sabr_spool_fail),
         )
         .route("/api/song/preview", post(song_preview))
         .route(
@@ -111,8 +133,21 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/resolve", post(resolve))
         .route("/api/intake", post(intake))
         .route("/api/downloads", get(list_downloads).post(enqueue))
+        .route(
+            "/api/downloads/preparations/pending",
+            get(pending_download_preparations),
+        )
+        .route(
+            "/api/downloads/{id}/prepared-source",
+            post(attach_prepared_download_source),
+        )
+        .route(
+            "/api/downloads/{id}/preparation-failed",
+            post(fail_download_preparation),
+        )
         .route("/api/downloads/{id}", delete(remove_download))
         .route("/api/downloads/start", post(start_downloads))
+        .route("/api/downloads/cancel-all", post(cancel_all_downloads))
         .route("/api/downloads/{id}/cancel", post(cancel_download))
         .route("/api/downloads/{id}/retry", post(retry_download))
         .route("/api/downloads/clear", post(clear_downloads))
@@ -200,13 +235,19 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/library/folders/upgrade", post(folder_upgrade))
         .route("/api/library/waveforms/upgrade", post(waveform_upgrade))
         .route("/api/library/folders/move", post(folder_move))
+        .route("/api/library/folders/merge", post(folder_merge))
         .route("/api/library/folders/order", post(folder_order))
         .route(
             "/api/library/folders/undo",
             get(folder_undo_status).post(folder_undo),
         )
         .route("/api/library/folders/apply", post(folder_apply))
+        .route(
+            "/api/library/duplicates/analyze",
+            post(analyze_duplicate_tracks),
+        )
         .route("/api/library/scan", post(library_scan))
+        .route("/api/library/scan/cancel", post(library_scan_cancel))
         .route("/api/library/analyze", post(library_analyze))
         .route("/api/library/analyze/cancel", post(library_analyze_cancel))
         .route("/api/library/audio/{id}", get(library_audio))
@@ -263,9 +304,24 @@ struct SettingsView {
     default_download_dir: String,
 }
 
+#[cfg(not(feature = "onelibrary"))]
+fn build_visible_settings(mut settings: Settings) -> Settings {
+    // Stable KDJ is a separate product boundary, not a runtime switch. Old user settings may
+    // still contain true after upgrading from a Labs-capable release; never expose or persist
+    // those experimental toggles in the stable build.
+    settings.experimental_dj_mode = false;
+    settings.experimental_one_library = false;
+    settings
+}
+
+#[cfg(feature = "onelibrary")]
+fn build_visible_settings(settings: Settings) -> Settings {
+    settings
+}
+
 fn settings_view(settings: Settings) -> SettingsView {
     SettingsView {
-        settings,
+        settings: build_visible_settings(settings),
         default_download_dir: kdj_core::config::default_download_root()
             .to_string_lossy()
             .into_owned(),
@@ -282,7 +338,7 @@ async fn put_settings(
     Json(payload): Json<Settings>,
 ) -> Json<SettingsView> {
     let previous_download_dir = state.config.download_dir();
-    let settings = state.config.apply_settings(payload);
+    let settings = state.config.apply_settings(build_visible_settings(payload));
     if state.config.download_dir() != previous_download_dir {
         // 已完成的旧目录缓存保留给用户自行处理；但所有 pending/writer 必须失效，
         // 否则它们会在设置切换后继续写进统计/清理看不到的旧目录。
@@ -480,7 +536,11 @@ async fn ytm_browser_login(
 ) -> ApiResult<Json<Account>> {
     let session = import_youtube_browser(state.ytm_auth.clone(), payload).await?;
     state.ytm_auth.save(session)?;
-    let account = state.youtubemusic.account().await;
+    let account = state
+        .provider(Platform::Ytm)
+        .ok_or_else(|| ApiError::bad_request("YouTube Music provider 不可用"))?
+        .account()
+        .await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
 }
@@ -492,7 +552,11 @@ async fn youtube_browser_login(
 ) -> ApiResult<Json<Account>> {
     let session = import_youtube_browser(state.youtube_auth.clone(), payload).await?;
     state.youtube_auth.save(session)?;
-    let account = state.youtube.account().await;
+    let account = state
+        .provider(Platform::Youtube)
+        .ok_or_else(|| ApiError::bad_request("YouTube provider 不可用"))?
+        .account()
+        .await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
 }
@@ -512,7 +576,11 @@ async fn ytm_headers_login(
     Json(payload): Json<YoutubeHeadersLoginBody>,
 ) -> ApiResult<Json<Account>> {
     save_headers_session(&state.ytm_auth, &payload.headers)?;
-    let account = state.youtubemusic.account().await;
+    let account = state
+        .provider(Platform::Ytm)
+        .ok_or_else(|| ApiError::bad_request("YouTube Music provider 不可用"))?
+        .account()
+        .await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
 }
@@ -523,7 +591,11 @@ async fn youtube_headers_login(
     Json(payload): Json<YoutubeHeadersLoginBody>,
 ) -> ApiResult<Json<Account>> {
     save_headers_session(&state.youtube_auth, &payload.headers)?;
-    let account = state.youtube.account().await;
+    let account = state
+        .provider(Platform::Youtube)
+        .ok_or_else(|| ApiError::bad_request("YouTube provider 不可用"))?
+        .account()
+        .await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
 }
@@ -650,35 +722,10 @@ async fn search_capabilities(
     Json(result)
 }
 
-fn in_library_source_keys(state: &AppState, sources: &[SongSource]) -> Vec<String> {
-    let known = crate::aggregate::library_source_keys(state);
-    sources
-        .iter()
-        .filter_map(|source| {
-            let token = format!("{}:{}", source.platform, source.key);
-            known.contains(&token).then_some(token)
-        })
-        .collect()
-}
-
-#[derive(Serialize)]
-struct CollectionResolveApiResponse {
-    #[serde(flatten)]
-    response: CollectionResolveResponse,
-    in_library_source_keys: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct StreamPlaylistApiResponse {
-    #[serde(flatten)]
-    response: StreamPlaylistResponse,
-    in_library_source_keys: Vec<String>,
-}
-
 async fn resolve_collection(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CollectionResolveRequest>,
-) -> ApiResult<Json<CollectionResolveApiResponse>> {
+) -> ApiResult<Json<CollectionResolveResponse>> {
     if payload.key.trim().is_empty() || !payload.kind.is_collection() {
         return Err(ApiError::bad_request("集合来源参数不完整"));
     }
@@ -692,11 +739,7 @@ async fn resolve_collection(
         .resolve_collection(payload.kind, &payload.key, payload.limit)
         .await?
         .ok_or_else(|| ApiError::bad_request("该集合暂时无法展开"))?;
-    let in_library_source_keys = in_library_source_keys(&state, &response.sources);
-    Ok(Json(CollectionResolveApiResponse {
-        response,
-        in_library_source_keys,
-    }))
+    Ok(Json(response))
 }
 
 /// 按曲名 / 艺人自动搜歌词（网易云 + QQ）。有 source_platform/key 时优先直取。
@@ -718,15 +761,21 @@ struct SongPreviewBody {
     /// Tauri WebView 在真实浏览器环境中生成的内容绑定 WebPO token。
     #[serde(default)]
     po_token: Option<String>,
+    /// GVS currently consumes one video-bound proof per accepted 1 MiB media range.
+    #[serde(default)]
+    po_tokens: Vec<String>,
     /// 与 token 同一 WebView 会话执行官方播放器签名器后得到的 GVS URL。
     #[serde(default)]
     resolved_url: Option<String>,
+    #[serde(default)]
+    resolved_urls: Vec<String>,
 }
 
 #[derive(Serialize)]
 struct YtmProtectedIdentityResponse {
     visitor_data: String,
     data_sync_id: String,
+    gvs_binding: &'static str,
 }
 
 async fn ytm_protected_preview_identity(
@@ -739,9 +788,15 @@ async fn ytm_protected_preview_identity(
         .protected_preview_identity()
         .await?
         .ok_or_else(|| ApiError::bad_request("YouTube Music 登录会话标识不可用"))?;
+    let gvs_binding = match identity.gvs_binding {
+        kdj_providers::provider::ProtectedPoTokenBinding::VideoId => "video_id",
+        kdj_providers::provider::ProtectedPoTokenBinding::DataSyncId => "data_sync_id",
+        kdj_providers::provider::ProtectedPoTokenBinding::VisitorData => "visitor_data",
+    };
     Ok(Json(YtmProtectedIdentityResponse {
         visitor_data: identity.visitor_data,
         data_sync_id: identity.data_sync_id,
+        gvs_binding,
     }))
 }
 
@@ -774,9 +829,12 @@ async fn ytm_protected_preview_botguard(
 #[derive(Deserialize)]
 struct YtmProtectedPlayerBody {
     source: SongSource,
-    po_token: String,
+    #[serde(default)]
+    po_token: Option<String>,
     visitor_data: String,
     data_sync_id: String,
+    player_url: String,
+    signature_timestamp: u64,
     #[serde(default)]
     quality: Option<Quality>,
 }
@@ -785,6 +843,10 @@ struct YtmProtectedPlayerBody {
 struct YtmProtectedPlayerResponse {
     signature_cipher: String,
     player_url: String,
+    sabr_url: Option<String>,
+    video_playback_ustreamer_config: Option<String>,
+    sabr_formats: Vec<Value>,
+    duration_ms: u64,
 }
 
 async fn ytm_protected_preview_player(
@@ -792,12 +854,18 @@ async fn ytm_protected_preview_player(
     Json(body): Json<YtmProtectedPlayerBody>,
 ) -> ApiResult<Json<YtmProtectedPlayerResponse>> {
     if body.source.platform != Platform::Ytm
-        || !valid_web_po_token(&body.po_token)
+        || body
+            .po_token
+            .as_deref()
+            .is_some_and(|token| !valid_web_po_token(token))
         || body.visitor_data.is_empty()
         || body.visitor_data.len() > 4096
         || body.visitor_data.contains(['\r', '\n'])
         || body.data_sync_id.len() > 512
         || body.data_sync_id.contains(['\r', '\n'])
+        || body.player_url.len() > 4096
+        || body.player_url.contains(['\r', '\n'])
+        || !(10_000..=100_000).contains(&body.signature_timestamp)
     {
         return Err(ApiError::bad_request("YouTube Music WebPO 参数无效"));
     }
@@ -811,18 +879,40 @@ async fn ytm_protected_preview_player(
         .protected_preview_cipher(
             &body.source,
             quality,
-            &body.po_token,
+            body.po_token.as_deref(),
             &ProtectedPreviewIdentity {
                 visitor_data: body.visitor_data,
                 data_sync_id: body.data_sync_id,
+                // Binding was already selected by the identity endpoint and consumed in the
+                // WebView while minting the GVS proof; the player request itself does not use it.
+                gvs_binding: kdj_providers::provider::ProtectedPoTokenBinding::VideoId,
             },
+            &body.player_url,
+            body.signature_timestamp,
         )
         .await?
         .ok_or_else(|| ApiError::bad_request("YouTube Music 没有返回受保护试听流"))?;
     Ok(Json(YtmProtectedPlayerResponse {
         signature_cipher: protected.signature_cipher,
         player_url: protected.player_url,
+        sabr_url: protected.sabr_url,
+        video_playback_ustreamer_config: protected.video_playback_ustreamer_config,
+        sabr_formats: protected.sabr_formats,
+        duration_ms: protected.duration_ms,
     }))
+}
+
+async fn ytm_protected_preview_player_url(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<String>> {
+    let provider = state
+        .provider(Platform::Ytm)
+        .ok_or_else(|| ApiError::not_found("YouTube Music 平台不可用"))?;
+    let player_url = provider
+        .protected_preview_player_url()
+        .await?
+        .ok_or_else(|| ApiError::bad_request("YouTube Music 播放器脚本不可用"))?;
+    Ok(Json(player_url))
 }
 
 #[derive(Deserialize)]
@@ -852,6 +942,233 @@ async fn ytm_protected_preview_player_script(
         javascript,
     )
         .into_response())
+}
+
+fn validated_ytm_sabr_url(value: &str) -> ApiResult<String> {
+    if value.is_empty() || value.len() > 8192 || value.contains(['\r', '\n']) {
+        return Err(ApiError::bad_request("YouTube SABR URL 无效"));
+    }
+    let url =
+        reqwest::Url::parse(value).map_err(|_| ApiError::bad_request("YouTube SABR URL 无效"))?;
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    if url.scheme() != "https"
+        || url.port_or_known_default() != Some(443)
+        || (host != "googlevideo.com" && !host.ends_with(".googlevideo.com"))
+        || url.path() != "/videoplayback"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ApiError::bad_request("YouTube SABR URL 不受信任"));
+    }
+    Ok(url.into())
+}
+
+async fn ytm_sabr_proxy(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<Response> {
+    if body.is_empty() || body.len() > 1024 * 1024 {
+        return Err(ApiError::bad_request("YouTube SABR 请求体无效"));
+    }
+    let url = headers
+        .get("x-kdj-sabr-url")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::bad_request("YouTube SABR URL 缺失"))?;
+    let url = validated_ytm_sabr_url(url)?;
+    let upstream = state
+        .preview_http
+        .post(url)
+        .header(header::CONTENT_TYPE, "application/x-protobuf")
+        .header(header::ACCEPT, "application/vnd.yt-ump")
+        .header(header::ACCEPT_ENCODING, "identity")
+        .header(header::ORIGIN, "https://music.youtube.com")
+        .header(header::REFERER, "https://music.youtube.com/")
+        .header(
+            header::USER_AGENT,
+            kdj_providers::youtubemusic::client::PLAYBACK_WEB_USER_AGENT,
+        )
+        .body(body)
+        .send()
+        .await
+        .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
+    let status = upstream.status();
+    let content_type = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .cloned()
+        .unwrap_or_else(|| header::HeaderValue::from_static("application/octet-stream"));
+    let stream = upstream
+        .bytes_stream()
+        .map(|result| result.map_err(std::io::Error::other));
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from_stream(stream))
+        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
+#[derive(Deserialize)]
+struct YtmSabrSpoolCreateBody {
+    source: SongSource,
+    total: u64,
+    content_type: String,
+    #[serde(default)]
+    quality: Option<Quality>,
+    #[serde(default)]
+    bypass_cache: bool,
+}
+
+async fn ytm_sabr_spool_create(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<YtmSabrSpoolCreateBody>,
+) -> ApiResult<Json<Value>> {
+    if body.source.platform != Platform::Ytm
+        || body.total == 0
+        || body.total > 512 * 1024 * 1024
+        || !matches!(body.content_type.as_str(), "audio/mp4" | "audio/webm")
+    {
+        return Err(ApiError::bad_request("YouTube SABR 媒体参数无效"));
+    }
+    let quality = body
+        .quality
+        .unwrap_or_else(|| state.config.to_settings().stream_quality);
+    let cache_key = crate::stream_cache::StreamCache::key(&body.source, quality);
+    let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
+    if body.bypass_cache {
+        state.stream_cache.invalidate(&cache_root, &cache_key).await;
+        state.stream_waveforms.remove(&cache_key);
+    } else if state.config.to_settings().stream_cache_enabled {
+        if let Some(cached) = state
+            .stream_cache
+            .lookup(&cache_root, &cache_key, &body.source, quality)
+            .await
+        {
+            if cached
+                .mime
+                .split(';')
+                .next()
+                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case(body.content_type.as_str()))
+            {
+                state
+                    .stream_waveforms
+                    .observe(cache_key.clone(), cached.path, cached.bytes, true);
+                schedule_stream_cache_verification(
+                    state.stream_cache.clone(),
+                    state.stream_waveforms.clone(),
+                    cache_root,
+                    cache_key.clone(),
+                );
+                return Ok(insert_song_preview_ticket(
+                    &state,
+                    SongPreviewTicket {
+                        source: body.source,
+                        quality,
+                        cache_key: Some(cache_key),
+                        cached: true,
+                        url: String::new(),
+                        browser_resolved: true,
+                        protected_spool: None,
+                        last_used_at: std::time::Instant::now(),
+                    },
+                ));
+            }
+        }
+    }
+    let extension = if body.content_type == "audio/webm" {
+        "webm"
+    } else {
+        "m4a"
+    };
+    let spool = crate::protected_media::ProtectedMediaSpool::start_upload(
+        crate::protected_media::spool_path(&state.config.data_dir, extension),
+        body.total,
+        body.content_type,
+    )
+    .await
+    .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    schedule_protected_spool_cache(
+        state.clone(),
+        Arc::clone(&spool),
+        body.source.clone(),
+        quality,
+        cache_key.clone(),
+    );
+    Ok(insert_song_preview_ticket(
+        &state,
+        SongPreviewTicket {
+            source: body.source,
+            quality,
+            cache_key: Some(cache_key),
+            cached: false,
+            url: String::new(),
+            browser_resolved: true,
+            protected_spool: Some(spool),
+            last_used_at: std::time::Instant::now(),
+        },
+    ))
+}
+
+fn ytm_upload_spool(
+    state: &AppState,
+    token: &str,
+) -> ApiResult<Arc<crate::protected_media::ProtectedMediaSpool>> {
+    let ticket = state
+        .song_previews
+        .lock()
+        .unwrap()
+        .get_and_touch(token)
+        .ok_or_else(|| ApiError::not_found("YouTube SABR 媒体会话不存在"))?;
+    if ticket.source.platform != Platform::Ytm || !ticket.browser_resolved || ticket.cached {
+        return Err(ApiError::bad_request("YouTube SABR 媒体会话无效"));
+    }
+    ticket
+        .protected_spool
+        .ok_or_else(|| ApiError::bad_request("YouTube SABR 媒体会话无效"))
+}
+
+async fn ytm_sabr_spool_append(
+    State(state): State<Arc<AppState>>,
+    AxumPath(token): AxumPath<String>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    let spool = ytm_upload_spool(&state, &token)?;
+    let (available, total) = spool
+        .append_upload(&body)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(Json(json!({ "available": available, "total": total })))
+}
+
+async fn ytm_sabr_spool_complete(
+    State(state): State<Arc<AppState>>,
+    AxumPath(token): AxumPath<String>,
+) -> ApiResult<StatusCode> {
+    ytm_upload_spool(&state, &token)?
+        .finish_upload()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct YtmSabrSpoolFailBody {
+    error: String,
+}
+
+async fn ytm_sabr_spool_fail(
+    State(state): State<Arc<AppState>>,
+    AxumPath(token): AxumPath<String>,
+    Json(body): Json<YtmSabrSpoolFailBody>,
+) -> ApiResult<StatusCode> {
+    let message = body.error.trim().chars().take(500).collect::<String>();
+    ytm_upload_spool(&state, &token)?.fail_upload(if message.is_empty() {
+        "YouTube SABR 媒体会话失败".to_string()
+    } else {
+        message
+    });
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn song_cache_stats(
@@ -992,6 +1309,14 @@ async fn song_preview(
     {
         return Err(ApiError::bad_request("YouTube Music WebPO token 无效"));
     }
+    if body.source.platform == Platform::Ytm
+        && body
+            .po_tokens
+            .iter()
+            .any(|token| !valid_web_po_token(token))
+    {
+        return Err(ApiError::bad_request("YouTube Music WebPO token 列表无效"));
+    }
     let cache_key = crate::stream_cache::StreamCache::key(&body.source, quality);
     let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
     if body.bypass_cache {
@@ -1003,32 +1328,79 @@ async fn song_preview(
             .lookup(&cache_root, &cache_key, &body.source, quality)
             .await
         {
-            state
-                .stream_waveforms
-                .observe(cache_key.clone(), cached.path, cached.bytes, true);
-            schedule_stream_cache_verification(
-                state.stream_cache.clone(),
-                state.stream_waveforms.clone(),
-                cache_root,
-                cache_key.clone(),
-            );
-            return Ok(insert_song_preview_ticket(
-                &state,
-                SongPreviewTicket {
-                    source: body.source,
-                    quality,
-                    cache_key: Some(cache_key),
-                    cached: true,
-                    url: String::new(),
-                    browser_resolved: body.po_token.is_some(),
-                    last_used_at: std::time::Instant::now(),
-                },
-            ));
+            if body.source.platform == Platform::Ytm
+                && cached
+                    .mime
+                    .split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("audio/webm"))
+            {
+                // 旧版本可能缓存了 Symphonia 0.5 无法解码的 Opus/WebM。命中它会
+                // 永久重复 unsupported format；丢掉后重新走播放 API 选择 AAC。
+                state.stream_cache.invalidate(&cache_root, &cache_key).await;
+                state.stream_waveforms.remove(&cache_key);
+            } else {
+                state
+                    .stream_waveforms
+                    .observe(cache_key.clone(), cached.path, cached.bytes, true);
+                schedule_stream_cache_verification(
+                    state.stream_cache.clone(),
+                    state.stream_waveforms.clone(),
+                    cache_root,
+                    cache_key.clone(),
+                );
+                return Ok(insert_song_preview_ticket(
+                    &state,
+                    SongPreviewTicket {
+                        source: body.source,
+                        quality,
+                        cache_key: Some(cache_key),
+                        cached: true,
+                        url: String::new(),
+                        browser_resolved: body.po_token.is_some(),
+                        protected_spool: None,
+                        last_used_at: std::time::Instant::now(),
+                    },
+                ));
+            }
         }
     }
+    let mut protected_spool = None;
     let preview = if body.source.platform == Platform::Ytm {
         match (body.po_token.as_deref(), body.resolved_url.as_deref()) {
-            (Some(token), Some(url)) => Some(validated_ytm_browser_stream_url(url, token)?),
+            (Some(token), Some(url)) => {
+                let url = validated_ytm_browser_stream_url(url, token)?;
+                let resolved_urls = body
+                    .resolved_urls
+                    .iter()
+                    .zip(body.po_tokens.iter())
+                    .map(|(url, token)| validated_ytm_browser_stream_url(url, token))
+                    .collect::<ApiResult<Vec<_>>>()?;
+                let extension =
+                    if url.contains("mime=audio%2Fwebm") || url.contains("mime=audio/webm") {
+                        "webm"
+                    } else {
+                        "m4a"
+                    };
+                let path = crate::protected_media::spool_path(&state.config.data_dir, extension);
+                let spool = crate::protected_media::ProtectedMediaSpool::start(
+                    &state.preview_http,
+                    &url,
+                    &resolved_urls,
+                    path,
+                )
+                .await
+                .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
+                schedule_protected_spool_cache(
+                    state.clone(),
+                    Arc::clone(&spool),
+                    body.source.clone(),
+                    quality,
+                    cache_key.clone(),
+                );
+                protected_spool = Some(spool);
+                Some(url)
+            }
             (None, None) => {
                 provider
                     .preview_url_at_quality(&body.source, quality)
@@ -1051,6 +1423,7 @@ async fn song_preview(
                 cached: false,
                 url,
                 browser_resolved: body.po_token.is_some(),
+                protected_spool,
                 last_used_at: std::time::Instant::now(),
             },
         )),
@@ -1092,6 +1465,60 @@ fn validated_ytm_browser_stream_url(value: &str, po_token: &str) -> ApiResult<St
         ));
     }
     Ok(url.into())
+}
+
+fn validate_ytm_preflight_response(
+    status: StatusCode,
+    content_type: Option<&str>,
+) -> ApiResult<()> {
+    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            format!("YouTube Music GVS 授权被拒绝（上游 {status}）"),
+        ));
+    }
+    if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
+        return Err(ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            format!("YouTube Music GVS 预检返回 {status}"),
+        ));
+    }
+    let media_type = content_type
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !media_type.is_empty()
+        && media_type != "application/octet-stream"
+        && !media_type.starts_with("audio/")
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "YouTube Music GVS 没有返回音频内容",
+        ));
+    }
+    Ok(())
+}
+
+fn validated_fresh_ytm_download_url(value: &str, po_token: &str) -> ApiResult<String> {
+    let url = validated_ytm_browser_stream_url(value, po_token)?;
+    let parsed = reqwest::Url::parse(&url)
+        .map_err(|_| ApiError::bad_request("YouTube Music 音频 URL 无效"))?;
+    let params: HashMap<String, String> = parsed.query_pairs().into_owned().collect();
+    let expires = params
+        .get("expire")
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| ApiError::bad_request("YouTube Music 音频 URL 缺少有效期"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    if expires <= now.saturating_add(60) {
+        return Err(ApiError::bad_request("YouTube Music 音频 URL 已过期"));
+    }
+    Ok(url)
 }
 
 /// 试听直链代理。平台 CDN 常返回 WebView 不认识的 Content-Type，或要求浏览器
@@ -1146,23 +1573,52 @@ async fn song_preview_stream(
     }
 
     // 缓存票据故意不解析平台短链；缓存被关闭、清掉或校验失败时才回源。
-    if ticket.cached || ticket.url.is_empty() {
+    if ticket.cached || (ticket.url.is_empty() && ticket.protected_spool.is_none()) {
         refresh_song_preview_ticket(&state, &token, &mut ticket).await?;
     }
+    if let Some(spool) = &ticket.protected_spool {
+        let (start, end) = match range.as_deref() {
+            Some(raw) => parse_range(raw, spool.total())
+                .ok_or_else(|| ApiError::new(StatusCode::RANGE_NOT_SATISFIABLE, "试听范围无效"))?,
+            None => (0, spool.total() - 1),
+        };
+        let requested_end = range.as_ref().map(|_| end);
+        let slice = spool
+            .read_range(start, requested_end)
+            .await
+            .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
+        return Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_TYPE, slice.content_type)
+            .header(header::CONTENT_LENGTH, slice.bytes.len().to_string())
+            .header(
+                header::CONTENT_RANGE,
+                format!("bytes {}-{}/{}", slice.start, slice.end, slice.total),
+            )
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(axum::body::Body::from(slice.bytes))
+            .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()));
+    }
 
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()
-        .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
     let mut upstream =
-        request_song_preview_upstream(&client, &ticket.url, range.as_deref()).await?;
+        request_song_preview_upstream(&state.preview_http, &ticket.url, range.as_deref()).await?;
     let mut status = preview_upstream_status(&upstream);
+    if ticket.browser_resolved {
+        tracing::warn!(
+            range = range.as_deref().unwrap_or("none"),
+            status = %status,
+            "YTM GVS 代理请求"
+        );
+    }
 
     // 网易云 vkey、QQ sip 等短链可能在票据有效期内先过期。只在明确的鉴权/失效
     // 状态下按原 source + quality 刷新一次，并原样重放 Range；单次请求绝不死循环。
     if song_preview_url_needs_refresh(status) {
         refresh_song_preview_ticket(&state, &token, &mut ticket).await?;
-        upstream = request_song_preview_upstream(&client, &ticket.url, range.as_deref()).await?;
+        upstream =
+            request_song_preview_upstream(&state.preview_http, &ticket.url, range.as_deref())
+                .await?;
         status = preview_upstream_status(&upstream);
     }
 
@@ -1170,18 +1626,20 @@ async fn song_preview_stream(
         return Err(ApiError::new(status, format!("试听源返回 HTTP {status}")));
     }
     let mut upstream_headers = upstream.headers().clone();
-    let mut content_type = preview_audio_mime(&upstream_headers, "audio/mpeg");
+    let mut content_type = preview_audio_mime_for_url(&upstream_headers, &ticket.url);
     if content_type.is_none() {
         // 某些过期短链用 200 + HTML/JSON 错误页伪装成功；刷新一次再判，绝不把
         // 错误页送进 audio 或缓存成一首“歌曲”。
         refresh_song_preview_ticket(&state, &token, &mut ticket).await?;
-        upstream = request_song_preview_upstream(&client, &ticket.url, range.as_deref()).await?;
+        upstream =
+            request_song_preview_upstream(&state.preview_http, &ticket.url, range.as_deref())
+                .await?;
         status = preview_upstream_status(&upstream);
         if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
             return Err(ApiError::new(status, format!("试听源返回 HTTP {status}")));
         }
         upstream_headers = upstream.headers().clone();
-        content_type = preview_audio_mime(&upstream_headers, "audio/mpeg");
+        content_type = preview_audio_mime_for_url(&upstream_headers, &ticket.url);
     }
     let content_type = content_type
         .ok_or_else(|| ApiError::new(StatusCode::BAD_GATEWAY, "试听源返回的不是音频内容"))?;
@@ -1189,25 +1647,36 @@ async fn song_preview_stream(
     let response_segment = preview_response_segment(status, &upstream_headers);
     state.stream_waveforms.media_started(&cache_key);
     if persistent_cache_enabled {
-        // Android 的播放器和后台整轨 CDN 下载共用一条移动网络与同一块闪存，首播
-        // 400ms 后再拉第二份整曲会直接表现成卡顿/爆音。移动端改为把播放器本来
-        // 就收到的完整 0-based 响应 inline tee 进 StreamCacheWriter，不启动第二 GET。
-        #[cfg(not(target_os = "android"))]
-        schedule_song_preview_cache(
-            state.clone(),
-            token,
-            ticket.clone(),
-            cache_key.clone(),
-            content_type.clone(),
-        );
-        #[cfg(target_os = "android")]
-        schedule_song_preview_cache_when_session_idle(
-            state.clone(),
-            token.clone(),
-            ticket.clone(),
-            cache_key.clone(),
-            content_type.clone(),
-        );
+        if ticket.browser_resolved {
+            // WEB_REMIX 的同一张 GVS 票据还要承受 MP4 probe/seek。播放期间绝不能再
+            // 开一个整轨缓存请求与它并发；等会话空闲后再补缓存。
+            schedule_song_preview_cache_when_session_idle(
+                state.clone(),
+                token.clone(),
+                ticket.clone(),
+                cache_key.clone(),
+                content_type.clone(),
+            );
+        } else {
+            // Android 的播放器和后台整轨 CDN 下载共用一条移动网络与同一块闪存，首播
+            // 400ms 后再拉第二份整曲会直接表现成卡顿/爆音。移动端改为等会话空闲。
+            #[cfg(not(target_os = "android"))]
+            schedule_song_preview_cache(
+                state.clone(),
+                token,
+                ticket.clone(),
+                cache_key.clone(),
+                content_type.clone(),
+            );
+            #[cfg(target_os = "android")]
+            schedule_song_preview_cache_when_session_idle(
+                state.clone(),
+                token.clone(),
+                ticket.clone(),
+                cache_key.clone(),
+                content_type.clone(),
+            );
+        }
     }
     let capture_plan = if persistent_cache_enabled {
         #[cfg(target_os = "android")]
@@ -1256,6 +1725,57 @@ async fn song_preview_stream(
     builder
         .body(captured_preview_body(upstream, capture_plan))
         .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
+}
+
+fn schedule_protected_spool_cache(
+    state: Arc<AppState>,
+    spool: Arc<crate::protected_media::ProtectedMediaSpool>,
+    source: SongSource,
+    quality: Quality,
+    cache_key: String,
+) {
+    if !state.config.to_settings().stream_cache_enabled {
+        return;
+    }
+    tokio::spawn(async move {
+        if spool.wait_complete().await.is_err() {
+            return;
+        }
+        let root = crate::stream_cache::StreamCache::cache_dir(&state.config);
+        let Ok(Some(mut writer)) = state
+            .stream_cache
+            .begin_write(
+                &root,
+                cache_key.clone(),
+                &source,
+                quality,
+                spool.content_type().to_string(),
+                Some(spool.total()),
+            )
+            .await
+        else {
+            return;
+        };
+        let mut offset = 0_u64;
+        while offset < spool.total() {
+            let requested_end = offset
+                .saturating_add(crate::protected_media::LOCAL_RANGE_CHUNK_BYTES - 1)
+                .min(spool.total() - 1);
+            let Ok(slice) = spool.read_range(offset, Some(requested_end)).await else {
+                return;
+            };
+            if !matches!(writer.write_chunk(&slice.bytes).await, Ok(true)) {
+                return;
+            }
+            offset = slice.end.saturating_add(1);
+        }
+        if matches!(writer.finish().await, Ok(true)) {
+            let path = crate::stream_cache::StreamCache::media_path(&root, &cache_key);
+            state
+                .stream_waveforms
+                .observe(cache_key, path, spool.total(), true);
+        }
+    });
 }
 
 fn session_preview_capture_plan(
@@ -1626,7 +2146,6 @@ fn schedule_song_preview_cache(
     });
 }
 
-#[cfg(target_os = "android")]
 fn schedule_song_preview_cache_when_session_idle(
     state: Arc<AppState>,
     token: String,
@@ -1781,9 +2300,14 @@ async fn cache_song_preview_background(
             return Ok(());
         }
         let requested_range = format!("bytes={offset}-");
-        let request = client.get(&url).header(
+        let request = if is_googlevideo_url(&url) {
+            kdj_providers::youtubemusic::gvs_playback_request(&client, &url)
+        } else {
+            client.get(&url)
+        }
+        .header(
             reqwest::header::RANGE,
-            bounded_preview_upstream_range(&url, &requested_range),
+            gvs_upstream_range(&url, &requested_range),
         );
         let mut response = tokio::time::timeout(std::time::Duration::from_secs(30), request.send())
             .await
@@ -1948,6 +2472,21 @@ fn preview_audio_mime(headers: &HeaderMap, fallback: &str) -> Option<String> {
     None
 }
 
+/// GVS 常把 WebM/MP4 音频标成 application/octet-stream。此前一律伪装成
+/// audio/mpeg，导致原生播放器拿 MP3 hint 探测 WebM，最终报 unsupported format。
+/// 播放 API 的受信任 URL 已携带真实 mime，应以它作为降级值。
+fn preview_audio_mime_for_url(headers: &HeaderMap, url: &str) -> Option<String> {
+    let fallback = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| {
+            url.query_pairs()
+                .find_map(|(key, value)| (key == "mime").then(|| value.into_owned()))
+        })
+        .filter(|mime| mime.starts_with("audio/"))
+        .unwrap_or_else(|| "audio/mpeg".to_string());
+    preview_audio_mime(headers, &fallback)
+}
+
 fn song_preview_url_needs_refresh(status: StatusCode) -> bool {
     matches!(
         status,
@@ -1955,13 +2494,15 @@ fn song_preview_url_needs_refresh(status: StatusCode) -> bool {
     )
 }
 
-fn bounded_preview_upstream_range(url: &str, range: &str) -> String {
-    const GVS_CHUNK_BYTES: u64 = 512 * 1024;
-    let googlevideo = reqwest::Url::parse(url)
+fn is_googlevideo_url(value: &str) -> bool {
+    reqwest::Url::parse(value)
         .ok()
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|host| host == "googlevideo.com" || host.ends_with(".googlevideo.com"));
-    if !googlevideo {
+        .is_some_and(|host| host == "googlevideo.com" || host.ends_with(".googlevideo.com"))
+}
+
+fn gvs_upstream_range(url: &str, range: &str) -> String {
+    if !is_googlevideo_url(url) {
         return range.to_string();
     }
     let Some(start) = range
@@ -1972,9 +2513,10 @@ fn bounded_preview_upstream_range(url: &str, range: &str) -> String {
     else {
         return range.to_string();
     };
+    const WEB_MEDIA_CHUNK_BYTES: u64 = 1024 * 1024;
     format!(
         "bytes={start}-{}",
-        start.saturating_add(GVS_CHUNK_BYTES - 1)
+        start.saturating_add(WEB_MEDIA_CHUNK_BYTES - 1)
     )
 }
 
@@ -1983,12 +2525,16 @@ async fn request_song_preview_upstream(
     url: &str,
     range: Option<&str>,
 ) -> ApiResult<reqwest::Response> {
-    let mut request = client.get(url);
+    let mut request = if is_googlevideo_url(url) {
+        kdj_providers::youtubemusic::gvs_playback_request(client, url)
+    } else {
+        client.get(url)
+    };
     if let Some(range) = range {
-        request = request.header(
-            reqwest::header::RANGE,
-            bounded_preview_upstream_range(url, range),
-        );
+        // Keep each protected GVS response finite. The loopback source will request the next
+        // contiguous segment after EOF; this also avoids leaving an aborted open-ended probe alive
+        // while MP4 immediately seeks elsewhere.
+        request = request.header(reqwest::header::RANGE, gvs_upstream_range(url, range));
     }
     request
         .send()
@@ -2088,7 +2634,7 @@ async fn intake(
 
     // 并发但收着点：每条 entry 自己还会再并发打各平台，外层再开大
     // 就等于对平台接口发起几十路并发，非常容易被限流。`buffered` 保序。
-    let mut items: Vec<IntakeItem> = futures_util::stream::iter(entries.into_iter().map(|entry| {
+    let items: Vec<IntakeItem> = futures_util::stream::iter(entries.into_iter().map(|entry| {
         let state = &state;
         let payload = &payload;
         async move {
@@ -2102,11 +2648,6 @@ async fn intake(
     .buffered(INTAKE_WORKERS)
     .collect()
     .await;
-    // 「已在库」角标：整批只查一次曲库
-    let known = crate::aggregate::library_source_keys(&state);
-    for item in &mut items {
-        crate::aggregate::mark_in_library(&mut item.groups, &known);
-    }
     Ok(Json(IntakeResponse {
         items,
         skipped,
@@ -2183,6 +2724,101 @@ async fn intake_one(state: &Arc<AppState>, entry: &str, payload: &IntakeRequest)
 
 async fn list_downloads(axum::Extension(ctx): axum::Extension<Ctx>) -> Json<Vec<DownloadTask>> {
     Json(ctx.downloads.list())
+}
+
+async fn pending_download_preparations(
+    axum::Extension(ctx): axum::Extension<Ctx>,
+) -> Json<Vec<crate::downloads::PendingDownloadPreparation>> {
+    Json(ctx.downloads.pending_download_preparations())
+}
+
+#[derive(Deserialize)]
+struct PreparedDownloadSourceBody {
+    proof: String,
+    resolved_url: String,
+}
+
+async fn attach_prepared_download_source(
+    axum::Extension(ctx): axum::Extension<Ctx>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<PreparedDownloadSourceBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let task = ctx
+        .downloads
+        .get(&id)
+        .ok_or_else(|| ApiError::not_found("任务不存在"))?;
+    let url = match task.platform {
+        Platform::Ytm => {
+            if !valid_web_po_token(&body.proof) {
+                return Err(ApiError::bad_request("YouTube Music WebPO token 无效"));
+            }
+            let url = validated_fresh_ytm_download_url(&body.resolved_url, &body.proof)?;
+            url
+        }
+        _ => return Err(ApiError::bad_request("当前平台不需要外部媒体准备")),
+    };
+    let path = crate::protected_media::spool_path(&ctx.state.config.data_dir, "m4a");
+    let spool = crate::protected_media::ProtectedMediaSpool::start(
+        &ctx.state.preview_http,
+        &url,
+        &[],
+        path,
+    )
+    .await
+    .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
+    let completed = spool.wait_complete();
+    tokio::pin!(completed);
+    loop {
+        tokio::select! {
+            result = &mut completed => {
+                result.map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
+                break;
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                let (downloaded, total) = spool.progress();
+                ctx.downloads.progress(&id, downloaded, total);
+                if ctx.downloads.get(&id).is_none_or(|task| task.state == TaskState::Canceled) {
+                    spool.cancel();
+                    return Err(ApiError::bad_request("下载已取消"));
+                }
+            }
+        }
+    }
+    ctx.downloads.progress(&id, spool.total(), spool.total());
+    let path = spool.persist();
+    let mut prepared = reqwest::Url::from_file_path(&path)
+        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "媒体会话路径无效"))?;
+    prepared
+        .query_pairs_mut()
+        .append_pair("mime", spool.content_type());
+    if let Err(error) = ctx.downloads.attach_prepared_source(&id, prepared.into()) {
+        let _ = tokio::fs::remove_file(path).await;
+        return Err(ApiError::bad_request(error.to_string()));
+    }
+    Ok(Json(json!({ "prepared": true })))
+}
+
+#[derive(Deserialize)]
+struct FailedDownloadPreparationBody {
+    error: String,
+}
+
+async fn fail_download_preparation(
+    axum::Extension(ctx): axum::Extension<Ctx>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<FailedDownloadPreparationBody>,
+) -> ApiResult<Json<DownloadTask>> {
+    let message = body.error.trim();
+    let message = if message.is_empty() {
+        "下载来源准备失败"
+    } else {
+        message
+    };
+    let task = ctx
+        .downloads
+        .fail_preparation(&id, message)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(Json(task))
 }
 
 async fn start_downloads(
@@ -2267,6 +2903,12 @@ async fn cancel_download(
         .ok_or_else(|| ApiError::not_found("任务不存在"))
 }
 
+async fn cancel_all_downloads(
+    axum::Extension(ctx): axum::Extension<Ctx>,
+) -> Json<serde_json::Value> {
+    Json(json!({ "canceled": ctx.downloads.cancel_all() }))
+}
+
 async fn retry_download(
     State(state): State<Arc<AppState>>,
     axum::Extension(ctx): axum::Extension<Ctx>,
@@ -2332,11 +2974,10 @@ async fn video_resolve(
             .map(|_| Platform::Youtube)
             .unwrap_or(Platform::Bilibili)
     });
-    let info = match platform {
-        Platform::Youtube => state.youtube.resolve_video(url).await?,
-        Platform::Bilibili => state.bilibili.resolve_video(url).await?,
-        _ => return Err(ApiError::bad_request("这个来源不是视频平台")),
-    };
+    let provider = state
+        .video_provider(platform)
+        .ok_or_else(|| ApiError::bad_request("这个来源不是视频平台"))?;
+    let info = provider.resolve_video(url).await?;
     Ok(Json(info))
 }
 
@@ -2449,7 +3090,7 @@ async fn video_preview(
         .max_height
         .unwrap_or_else(|| state.config.to_settings().video_playback_max_height);
     let stream = state
-        .bilibili
+        .bilibili_preview
         .preview_stream_at_height(&params.bvid, params.page, max_height, range)
         .await?;
     let mut builder = Response::builder()
@@ -2574,7 +3215,7 @@ async fn video_calibrate(
         return Err(ApiError::not_found("用于校准的本地音频文件已丢失"));
     }
     let (video_url, cookies) = state
-        .bilibili
+        .bilibili_preview
         .calibration_audio_source(&body.bvid, body.page)
         .await
         .map_err(|err| {
@@ -2688,7 +3329,7 @@ async fn stream_playlists(
 async fn stream_playlist(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<StreamPlaylistRequest>,
-) -> ApiResult<Json<StreamPlaylistApiResponse>> {
+) -> ApiResult<Json<StreamPlaylistResponse>> {
     if payload.key.trim().is_empty() {
         return Err(ApiError::bad_request("歌单来源缺少 key"));
     }
@@ -2710,11 +3351,7 @@ async fn stream_playlist(
             "平台歌单返回了混合来源，已拒绝展示",
         ));
     }
-    let in_library_source_keys = in_library_source_keys(&state, &response.sources);
-    Ok(Json(StreamPlaylistApiResponse {
-        response,
-        in_library_source_keys,
-    }))
+    Ok(Json(response))
 }
 
 async fn library_tracks(
@@ -3759,6 +4396,308 @@ fn folder_tree(state: &AppState) -> ApiResult<FolderTree> {
     Ok(kdj_library::folders::build_tree(&roots, &paths))
 }
 
+#[derive(Deserialize)]
+struct DuplicateAnalyzeRequest {
+    #[serde(default)]
+    all: bool,
+    #[serde(default)]
+    folders: Vec<String>,
+    #[serde(default)]
+    include_subfolders: bool,
+}
+
+#[derive(Serialize)]
+struct DuplicateCandidate {
+    track: Track,
+    quality_score: i64,
+    quality_label: String,
+}
+
+#[derive(Serialize)]
+struct DuplicateGroup {
+    group_id: String,
+    confidence: &'static str,
+    reason: String,
+    keep_id: i64,
+    candidates: Vec<DuplicateCandidate>,
+}
+
+#[derive(Serialize)]
+struct DuplicateAnalysisResult {
+    all: bool,
+    folders: Vec<String>,
+    include_subfolders: bool,
+    scanned: usize,
+    missing_tracks: Vec<Track>,
+    offline_roots: Vec<String>,
+    groups: Vec<DuplicateGroup>,
+}
+
+fn path_under_root(path: &Path, root: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let path = path
+            .to_string_lossy()
+            .replace(char::from(92), "/")
+            .to_ascii_lowercase();
+        let root = root
+            .to_string_lossy()
+            .replace(char::from(92), "/")
+            .trim_end_matches('/')
+            .to_ascii_lowercase();
+        return path == root || path.starts_with(&(root + "/"));
+    }
+    #[cfg(not(target_os = "windows"))]
+    path.starts_with(root)
+}
+
+fn unavailable_library_tracks(
+    tracks: &[Track],
+    configured_roots: &[PathBuf],
+) -> (Vec<Track>, Vec<String>, Vec<Track>) {
+    let offline_root_paths: Vec<&PathBuf> = configured_roots
+        .iter()
+        .filter(|root| !root.is_dir())
+        .collect();
+    let mut offline_roots: Vec<String> = offline_root_paths
+        .iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect();
+    offline_roots.sort();
+    offline_roots.dedup();
+    let mut missing_tracks = Vec::new();
+    let mut available_tracks = Vec::new();
+    for track in tracks {
+        let path = Path::new(&track.path);
+        if offline_root_paths
+            .iter()
+            .any(|root| path_under_root(path, root))
+        {
+            continue;
+        }
+        if path.is_file() {
+            available_tracks.push(track.clone());
+        } else {
+            missing_tracks.push(track.clone());
+        }
+    }
+    (missing_tracks, offline_roots, available_tracks)
+}
+
+fn duplicate_text(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|ch| ch.is_alphanumeric())
+        .collect()
+}
+
+fn duplicate_quality(track: &Track) -> (i64, String) {
+    let format = track.format.trim().to_ascii_lowercase();
+    let lossless = matches!(format.as_str(), "flac" | "wav" | "aiff" | "aif" | "alac");
+    let format_rank = if lossless { 2_i64 } else { 1_i64 };
+    let sample_rate = track.samplerate.unwrap_or(0).max(0);
+    let bitrate = track.bitrate.unwrap_or(0).max(0);
+    let channels = track.channels.unwrap_or(0).max(0);
+    let score = format_rank * 1_000_000_000_000_000
+        + sample_rate * 100_000_000
+        + channels * 1_000_000
+        + if lossless {
+            (track.size.max(0) / 1024).min(999_999)
+        } else {
+            (bitrate * 1000).min(999_999)
+        };
+    let mut details = vec![format.to_uppercase()];
+    if sample_rate > 0 {
+        details.push(format!("{:.1} kHz", sample_rate as f64 / 1000.0));
+    }
+    if bitrate > 0 && !lossless {
+        details.push(format!("{bitrate} kbps"));
+    }
+    (score, details.join(" · "))
+}
+
+fn duplicate_groups(mut tracks: Vec<Track>) -> Vec<DuplicateGroup> {
+    let mut buckets: BTreeMap<(String, String), Vec<Track>> = BTreeMap::new();
+    for track in tracks.drain(..) {
+        let title = if track.title.trim().is_empty() {
+            Path::new(&track.filename)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or(&track.filename)
+        } else {
+            &track.title
+        };
+        let title = duplicate_text(title);
+        if title.len() < 2 {
+            continue;
+        }
+        buckets
+            .entry((title, duplicate_text(&track.artist)))
+            .or_default()
+            .push(track);
+    }
+
+    let mut groups = Vec::new();
+    for ((title, artist), mut bucket) in buckets {
+        if bucket.len() < 2 {
+            continue;
+        }
+        bucket.sort_by(|left, right| {
+            left.duration
+                .unwrap_or(f64::MAX)
+                .total_cmp(&right.duration.unwrap_or(f64::MAX))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let mut partitions: Vec<Vec<Track>> = Vec::new();
+        for track in bucket {
+            let fits = partitions.last().and_then(|part| {
+                let base = part.first()?.duration?;
+                let duration = track.duration?;
+                Some((duration - base).abs() <= 3.0)
+            });
+            if fits.unwrap_or(false) {
+                partitions.last_mut().unwrap().push(track);
+            } else {
+                partitions.push(vec![track]);
+            }
+        }
+        for partition in partitions.into_iter().filter(|part| part.len() > 1) {
+            let same_source = partition
+                .first()
+                .filter(|track| !track.source_key.trim().is_empty())
+                .is_some_and(|first| {
+                    partition.iter().all(|track| {
+                        track.source_platform == first.source_platform
+                            && track.source_key == first.source_key
+                    })
+                });
+            let same_size = partition.first().is_some_and(|first| {
+                first.size > 0 && partition.iter().all(|track| track.size == first.size)
+            });
+            // 只有平台来源键完全相同才默认勾选删除。文件大小相同不是内容哈希，
+            // 不足以证明两个不同母带/剪辑真的一样。
+            let confidence = if same_source { "high" } else { "possible" };
+            let reason = if same_source {
+                "来源标识相同，标题、艺人和时长一致"
+            } else if same_size {
+                "标题、艺人、时长和文件大小一致"
+            } else {
+                "标题、艺人和时长接近，请试听确认"
+            }
+            .to_string();
+            let mut candidates: Vec<DuplicateCandidate> = partition
+                .into_iter()
+                .map(|track| {
+                    let (quality_score, quality_label) = duplicate_quality(&track);
+                    DuplicateCandidate {
+                        track,
+                        quality_score,
+                        quality_label,
+                    }
+                })
+                .collect();
+            candidates.sort_by(|left, right| {
+                right
+                    .quality_score
+                    .cmp(&left.quality_score)
+                    .then_with(|| left.track.id.cmp(&right.track.id))
+            });
+            let keep_id = candidates[0].track.id;
+            groups.push(DuplicateGroup {
+                group_id: format!("{title}:{artist}:{}", groups.len()),
+                confidence,
+                reason,
+                keep_id,
+                candidates,
+            });
+        }
+    }
+    groups
+}
+
+async fn analyze_duplicate_tracks(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<DuplicateAnalyzeRequest>,
+) -> ApiResult<Json<DuplicateAnalysisResult>> {
+    if !payload.all && payload.folders.is_empty() {
+        return Err(ApiError::bad_request("至少选择一个文件夹"));
+    }
+    let mut folders: Vec<String> = if payload.all {
+        Vec::new()
+    } else {
+        payload
+            .folders
+            .iter()
+            .map(|folder| normalize_dest_dir(&state, folder))
+            .collect::<ApiResult<_>>()?
+    };
+    folders.sort();
+    folders.dedup();
+    let mut roots: Vec<String> = Vec::new();
+    for folder in folders {
+        let path = Path::new(&folder);
+        if payload.include_subfolders && roots.iter().any(|root| path.starts_with(Path::new(root)))
+        {
+            continue;
+        }
+        roots.push(folder);
+    }
+    let mut tracks = Vec::new();
+    let mut seen = HashSet::new();
+    let query_roots: Vec<Option<&String>> = if payload.all {
+        vec![None]
+    } else {
+        roots.iter().map(Some).collect()
+    };
+    for folder in query_roots {
+        let mut offset = 0;
+        loop {
+            let page = state.library.list_tracks(&TrackQuery {
+                folder: folder.cloned().unwrap_or_default(),
+                folder_deep: payload.include_subfolders,
+                sort: "id".into(),
+                order: "asc".into(),
+                limit: 2000,
+                offset,
+                ..TrackQuery::default()
+            })?;
+            let count = page.items.len() as i64;
+            for track in page.items {
+                if seen.insert(track.id) {
+                    tracks.push(track);
+                }
+            }
+            offset += count;
+            if count == 0 || offset >= page.total {
+                break;
+            }
+        }
+    }
+    let scanned = tracks.len();
+    // 配置里的根不能先走 resolve_roots：它会过滤离线卷，之后就无法区分“文件已
+    // 移动/删除”和“整块 U 盘没挂载”。离线根只提示，不允许一键释放整盘记录。
+    let configured_roots: Vec<PathBuf> = state
+        .config
+        .to_settings()
+        .library_dirs
+        .iter()
+        .filter(|root| !root.trim().is_empty())
+        .map(|root| kdj_core::config::expand_user(root))
+        .collect();
+    let (missing_tracks, offline_roots, available_tracks) =
+        unavailable_library_tracks(&tracks, &configured_roots);
+    Ok(Json(DuplicateAnalysisResult {
+        all: payload.all,
+        folders: roots,
+        include_subfolders: payload.include_subfolders,
+        scanned,
+        missing_tracks,
+        offline_roots,
+        groups: duplicate_groups(available_tracks),
+    }))
+}
+
 async fn library_folders(State(state): State<Arc<AppState>>) -> ApiResult<Json<FolderTree>> {
     Ok(Json(folder_tree(&state)?))
 }
@@ -3913,6 +4852,111 @@ async fn folder_move(
         state.hub.publish_library_updated(&ids);
     }
     Ok(Json(folder_tree(&state)?))
+}
+
+#[derive(Deserialize)]
+struct FolderMergeRequest {
+    paths: Vec<String>,
+    dest_parent: String,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct FolderMergeResponse {
+    tree: FolderTree,
+    target: String,
+}
+
+/// 把多个文件夹归并到用户指定位置的新文件夹中。
+///
+/// 保留每个来源文件夹作为子目录，不做危险的扁平化；同名目录在预检阶段直接拒绝。
+/// 任一步失败都会把已经移动的目录按原父级回滚，并同步恢复数据库路径。
+async fn folder_merge(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<FolderMergeRequest>,
+) -> ApiResult<Json<FolderMergeResponse>> {
+    if payload.paths.len() < 2 {
+        return Err(ApiError::bad_request("至少选择两个文件夹才能合并"));
+    }
+    let roots = require_roots(&state)?;
+    let dest_parent = kdj_library::folders::ensure_inside(Path::new(&payload.dest_parent), &roots)?;
+    if !dest_parent.is_dir() {
+        return Err(ApiError::bad_request("新文件夹位置不存在"));
+    }
+    let mut sources: Vec<PathBuf> = payload
+        .paths
+        .iter()
+        .map(|path| kdj_library::folders::ensure_inside(Path::new(path), &roots))
+        .collect::<anyhow::Result<_>>()?;
+    sources.sort();
+    sources.dedup();
+    sources = sources
+        .iter()
+        .filter(|source| {
+            !sources
+                .iter()
+                .any(|parent| parent != *source && source.starts_with(parent))
+        })
+        .cloned()
+        .collect();
+    if sources.len() < 2 {
+        return Err(ApiError::bad_request("选择中只有一个独立文件夹"));
+    }
+    for source in &sources {
+        if roots.iter().any(|root| source == root) {
+            return Err(ApiError::bad_request("曲库根目录不能参与合并"));
+        }
+        if !source.is_dir() {
+            return Err(ApiError::bad_request(format!(
+                "文件夹不存在：{}",
+                source.display()
+            )));
+        }
+    }
+    let names: Vec<_> = sources.iter().filter_map(|path| path.file_name()).collect();
+    let unique_names: HashSet<_> = names.iter().collect();
+    if unique_names.len() != names.len() {
+        return Err(ApiError::bad_request("所选文件夹存在同名项，无法安全归并"));
+    }
+
+    let target = kdj_library::folders::create_folder(&dest_parent, &payload.name, &roots)?;
+    if sources.iter().any(|source| target.starts_with(source)) {
+        let _ = std::fs::remove_dir(&target);
+        return Err(ApiError::bad_request("新文件夹不能建在待合并文件夹内部"));
+    }
+
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut changed_ids = Vec::new();
+    for source in &sources {
+        match kdj_library::folders::move_folder(source, &target, &roots) {
+            Ok((old, new)) => {
+                changed_ids.extend(state.library.rebase_paths(&old, &new)?);
+                moved.push((old, new));
+            }
+            Err(error) => {
+                for (old, new) in moved.iter().rev() {
+                    if let Some(parent) = old.parent() {
+                        if let Ok((rollback_old, rollback_new)) =
+                            kdj_library::folders::move_folder(new, parent, &roots)
+                        {
+                            let _ = state.library.rebase_paths(&rollback_old, &rollback_new);
+                        }
+                    }
+                }
+                let _ = std::fs::remove_dir(&target);
+                return Err(ApiError::bad_request(format!(
+                    "合并失败并已回滚：{error:#}"
+                )));
+            }
+        }
+    }
+    changed_ids.sort_unstable();
+    changed_ids.dedup();
+    state.hub.publish_library_updated(&changed_ids);
+    Ok(Json(FolderMergeResponse {
+        tree: folder_tree(&state)?,
+        target: target.to_string_lossy().into_owned(),
+    }))
 }
 
 /// 合并写清单：同一份 `.kdj/manifest.json` 里既有子目录名（文件夹树的顺序）
@@ -4295,6 +5339,20 @@ async fn library_scan(
     // 大目录要几十秒，HTTP 请求会被拖到超时，而且那是在 async 执行器上做阻塞 IO。
     // v0.1.0 就是为了这个才立刻返回的。
     Ok(Json(ScanResponse { job_id, found: 0 }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ScanCancelParams {
+    /// 传当前进度里的 job_id；省略时作为兜底取消全部显式扫描。
+    #[serde(default)]
+    job_id: String,
+}
+
+async fn library_scan_cancel(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ScanCancelParams>,
+) -> Json<crate::jobs::ScanCancelReport> {
+    Json(state.scans.cancel(&params.job_id))
 }
 
 async fn library_analyze(
@@ -5001,24 +6059,40 @@ mod tests {
     }
 
     #[test]
-    fn googlevideo_open_ranges_are_bounded_for_native_streaming() {
+    fn googlevideo_detection_only_accepts_the_media_host() {
+        assert!(is_googlevideo_url(
+            "https://rr1---sn.example.googlevideo.com/videoplayback?id=x"
+        ));
+        assert!(!is_googlevideo_url("https://cdn.example.test/audio"));
         assert_eq!(
-            bounded_preview_upstream_range(
+            gvs_upstream_range(
                 "https://rr1---sn.example.googlevideo.com/videoplayback?id=x",
-                "bytes=524288-"
+                "bytes=65536-"
             ),
-            "bytes=524288-1048575"
+            "bytes=65536-1114111"
         );
         assert_eq!(
-            bounded_preview_upstream_range("https://cdn.example.test/audio", "bytes=10-"),
+            gvs_upstream_range("https://cdn.example.test/audio", "bytes=10-"),
             "bytes=10-"
         );
+    }
+
+    #[test]
+    fn ytm_preflight_turns_gvs_rejection_into_a_refreshable_authorization_error() {
+        let rejected =
+            validate_ytm_preflight_response(StatusCode::FORBIDDEN, Some("text/plain")).unwrap_err();
+        assert_eq!(rejected.status, StatusCode::UNAUTHORIZED);
+        assert!(validate_ytm_preflight_response(
+            StatusCode::PARTIAL_CONTENT,
+            Some("application/octet-stream")
+        )
+        .is_ok());
+        assert!(validate_ytm_preflight_response(StatusCode::OK, Some("audio/mp4")).is_ok());
         assert_eq!(
-            bounded_preview_upstream_range(
-                "https://rr1---sn.example.googlevideo.com/videoplayback?id=x",
-                "bytes=10-20"
-            ),
-            "bytes=10-20"
+            validate_ytm_preflight_response(StatusCode::OK, Some("text/html"))
+                .unwrap_err()
+                .status,
+            StatusCode::BAD_GATEWAY
         );
     }
 
@@ -5038,6 +6112,29 @@ mod tests {
             &token
         )
         .is_err());
+    }
+
+    #[test]
+    fn ytm_download_urls_must_still_be_fresh_when_the_queue_starts() {
+        let token = "A".repeat(120);
+        let future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        let fresh = format!(
+            "https://rr1---sn.example.googlevideo.com/videoplayback?mime=audio%2Fwebm&pot={token}&expire={future}"
+        );
+        assert!(validated_fresh_ytm_download_url(&fresh, &token).is_ok());
+
+        let expired = format!(
+            "https://rr1---sn.example.googlevideo.com/videoplayback?mime=audio%2Fwebm&pot={token}&expire=1"
+        );
+        assert!(validated_fresh_ytm_download_url(&expired, &token).is_err());
+        let no_expiry = format!(
+            "https://rr1---sn.example.googlevideo.com/videoplayback?mime=audio%2Fwebm&pot={token}"
+        );
+        assert!(validated_fresh_ytm_download_url(&no_expiry, &token).is_err());
     }
 
     #[test]
@@ -5154,6 +6251,24 @@ mod tests {
         assert_eq!(
             preview_audio_mime(&headers, "audio/mpeg").as_deref(),
             Some("audio/mpeg")
+        );
+        assert_eq!(
+            preview_audio_mime_for_url(
+                &headers,
+                "https://rr1---sn.example.googlevideo.com/videoplayback?mime=audio%2Fwebm%3Bcodecs%3Dopus"
+            )
+            .as_deref(),
+            Some("audio/webm;codecs=opus"),
+            "GVS octet-stream must retain the playback API's real container"
+        );
+        let empty = HeaderMap::new();
+        assert_eq!(
+            preview_audio_mime_for_url(
+                &empty,
+                "https://rr1---sn.example.googlevideo.com/videoplayback?mime=audio%2Fmp4"
+            )
+            .as_deref(),
+            Some("audio/mp4")
         );
         assert!(looks_like_text_error_payload(b"  <!doctype html><html>"));
         assert!(!looks_like_text_error_payload(b"ID3\x04\0\0\0"));
@@ -5796,5 +6911,83 @@ testsrc=size=320x240:rate=10:duration=6[b];[a][b]concat=n=2:v=1:a=0";
         let (offset, score) = correlate_offset(&local, &video);
         assert_eq!(offset, 10_000);
         assert!(score > 0.5);
+    }
+
+    #[test]
+    fn duplicate_analysis_recommends_the_lossless_copy() {
+        let lossy = Track {
+            id: 1,
+            title: "Same Song".into(),
+            artist: "Artist".into(),
+            duration: Some(180.0),
+            format: "mp3".into(),
+            bitrate: Some(320),
+            samplerate: Some(44_100),
+            size: 8_000_000,
+            source_platform: "wyy".into(),
+            source_key: "same".into(),
+            ..Track::default()
+        };
+        let lossless = Track {
+            id: 2,
+            format: "flac".into(),
+            bitrate: Some(900),
+            size: 30_000_000,
+            ..lossy.clone()
+        };
+        let groups = duplicate_groups(vec![lossy, lossless]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].keep_id, 2);
+        assert_eq!(groups[0].confidence, "high");
+    }
+
+    #[test]
+    fn optimization_distinguishes_missing_files_from_an_offline_library_root() {
+        let base = scratch("optimization-missing");
+        let online = base.join("online");
+        std::fs::create_dir_all(&online).unwrap();
+        let missing = Track {
+            id: 1,
+            path: online.join("moved.mp3").to_string_lossy().into_owned(),
+            filename: "moved.mp3".into(),
+            ..Track::default()
+        };
+        let offline_root = base.join("offline-usb");
+        let offline = Track {
+            id: 2,
+            path: offline_root.join("song.mp3").to_string_lossy().into_owned(),
+            filename: "song.mp3".into(),
+            ..Track::default()
+        };
+        let (missing_tracks, offline_roots, available_tracks) = unavailable_library_tracks(
+            &[missing.clone(), offline],
+            &[online, offline_root.clone()],
+        );
+        assert_eq!(missing_tracks.len(), 1);
+        assert_eq!(missing_tracks[0].id, missing.id);
+        assert_eq!(
+            offline_roots,
+            vec![offline_root.to_string_lossy().into_owned()]
+        );
+        assert!(available_tracks.is_empty());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn duplicate_analysis_does_not_merge_different_length_versions() {
+        let original = Track {
+            id: 1,
+            title: "Same Song".into(),
+            artist: "Artist".into(),
+            duration: Some(180.0),
+            format: "flac".into(),
+            ..Track::default()
+        };
+        let live = Track {
+            id: 2,
+            duration: Some(240.0),
+            ..original.clone()
+        };
+        assert!(duplicate_groups(vec![original, live]).is_empty());
     }
 }

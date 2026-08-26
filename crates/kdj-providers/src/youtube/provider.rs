@@ -1,8 +1,8 @@
 //! 普通 YouTube 视频：关键词搜索、单视频/Shorts、播放列表与音视频下载。
 //!
-//! 元数据与流提取使用社区 Rust 实现 rusty_ytdl；登录使用普通 YouTube 自己的
-//! 浏览器 Cookie，不与 YouTube Music 共用状态。YouTube 的 PO Token 策略持续变化，403 会转成明确的
-//! 重新连接浏览器/PO Token 提示，而不是留下空文件。
+//! 元数据与流提取由本模块的轻量 InnerTube 客户端完成；不嵌入 JavaScript VM，
+//! 也不依赖通用网页抓取器。登录使用普通 YouTube 自己的浏览器 Cookie，不与
+//! YouTube Music 共用状态。403 会转成明确提示，而不是留下空文件。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,40 +16,37 @@ use kdj_core::models::{
     StreamPlaylistResponse, VideoDownloadRequest, VideoInfo, VideoPage, VideoStreamOption,
 };
 use kdj_core::paths::{finalize_filename, sanitize_filename_value};
-use rusty_ytdl::search::{SearchOptions, SearchResult, SearchType, YouTube};
-use rusty_ytdl::{RequestOptions, Video, VideoFormat, VideoOptions};
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt as _;
 use tokio_util::sync::CancellationToken;
 
 use crate::ffmpeg;
-use crate::net::http_timeouts;
 use crate::provider::{
     effective_limit, full_listing, no_login, unique_download_path, Capabilities, DownloadJob,
-    MusicProvider, ProgressSink, ProviderContext,
+    MusicProvider, ProgressSink, ProviderContext, VideoProvider,
 };
 use crate::tags;
 use crate::youtubemusic::auth::YoutubeAuth;
+
+#[cfg(test)]
+use super::client::MediaMime;
+use super::client::{Thumbnail, VideoDetails, VideoFormat, YoutubeClient, USER_AGENT};
 
 const LABEL: &str = "YouTube Video";
 const DISABLED_MESSAGE: &str = "未启用，在「下载源」里打开开关";
 const YOUTUBE_SEARCH_KINDS: &[SearchKind] = &[SearchKind::Song];
 const INNERTUBE_KEY: &str = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30";
-const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
-                         (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 pub struct YoutubeProvider {
     ctx: ProviderContext,
     auth: Arc<YoutubeAuth>,
-    http: reqwest::Client,
+    client: YoutubeClient,
 }
 
 impl YoutubeProvider {
     pub fn new(ctx: ProviderContext, auth: Arc<YoutubeAuth>) -> Result<Self> {
-        let http = http_timeouts(reqwest::Client::builder().user_agent(USER_AGENT))
-            .build()
-            .context("构建 YouTube 视频客户端失败")?;
-        Ok(Self { ctx, auth, http })
+        let client = YoutubeClient::new(auth.clone())?;
+        Ok(Self { ctx, auth, client })
     }
 
     fn ensure_enabled(&self) -> Result<()> {
@@ -57,36 +54,8 @@ impl YoutubeProvider {
         Ok(())
     }
 
-    fn request_options(&self) -> RequestOptions {
-        RequestOptions {
-            cookies: self.auth.snapshot().map(|session| session.cookie),
-            max_retries: Some(3),
-            ..Default::default()
-        }
-    }
-
-    fn video(&self, url_or_id: &str) -> Result<Video> {
-        Video::new_with_options(
-            url_or_id,
-            VideoOptions {
-                request_options: self.request_options(),
-                ..Default::default()
-            },
-        )
-        .map_err(|err| anyhow::anyhow!(youtube_error(err)))
-    }
-
-    fn search_client(&self) -> Result<YouTube> {
-        YouTube::new_with_options(&self.request_options())
-            .map_err(|err| anyhow::anyhow!(youtube_error(err)))
-    }
-
     async fn video_source(&self, id: &str) -> Result<SongSource> {
-        let info = self
-            .video(id)?
-            .get_info()
-            .await
-            .map_err(|err| anyhow::anyhow!(youtube_error(err)))?;
+        let info = self.client.video_info(id).await?;
         Ok(source_from_details(&info.video_details))
     }
 
@@ -119,7 +88,7 @@ impl YoutubeProvider {
         let url = format!(
             "https://www.youtube.com/youtubei/v1/browse?key={INNERTUBE_KEY}&prettyPrint=false"
         );
-        let mut request = self.http.post(&url).json(&body);
+        let mut request = self.client.http().post(&url).json(&body);
         for (name, value) in self.auth.request_headers("https://www.youtube.com") {
             request = request.header(name, value);
         }
@@ -150,7 +119,7 @@ impl YoutubeProvider {
                 break;
             }
             let page_body = json!({ "context": context.clone(), "continuation": token });
-            let mut request = self.http.post(&url).json(&page_body);
+            let mut request = self.client.http().post(&url).json(&page_body);
             for (name, value) in self.auth.request_headers("https://www.youtube.com") {
                 request = request.header(name, value);
             }
@@ -195,7 +164,7 @@ impl YoutubeProvider {
         let url = format!(
             "https://www.youtube.com/youtubei/v1/browse?key={INNERTUBE_KEY}&prettyPrint=false"
         );
-        let mut request = self.http.post(&url).json(&body);
+        let mut request = self.client.http().post(&url).json(&body);
         for (name, value) in self.auth.request_headers("https://www.youtube.com") {
             request = request.header(name, value);
         }
@@ -216,11 +185,8 @@ impl YoutubeProvider {
 
     pub async fn resolve_video(&self, url_or_id: &str) -> Result<VideoInfo> {
         self.ensure_enabled()?;
-        let info = self
-            .video(url_or_id)?
-            .get_info()
-            .await
-            .map_err(|err| anyhow::anyhow!(youtube_error(err)))?;
+        let video_id = video_id_from_input(url_or_id)?;
+        let info = self.client.video_info(&video_id).await?;
         let details = &info.video_details;
         let mut options: Vec<VideoStreamOption> = info
             .formats
@@ -276,11 +242,8 @@ impl YoutubeProvider {
             req.bvid.trim()
         };
         anyhow::ensure!(!target.is_empty(), "缺少 YouTube 视频链接或 ID");
-        let info = self
-            .video(target)?
-            .get_info()
-            .await
-            .map_err(|err| anyhow::anyhow!(youtube_error(err)))?;
+        let video_id = video_id_from_input(target)?;
+        let info = self.client.video_info(&video_id).await?;
         if cancel.is_cancelled() {
             bail!("下载已取消");
         }
@@ -378,35 +341,69 @@ impl YoutubeProvider {
         progress: &ProgressSink,
     ) -> Result<()> {
         anyhow::ensure!(!format.url.is_empty(), "YouTube 流缺少下载地址");
-        let mut request = self
-            .http
-            .get(&format.url)
-            .header(reqwest::header::REFERER, "https://www.youtube.com/");
-        if let Some(session) = self.auth.snapshot() {
-            request = request.header(reqwest::header::COOKIE, session.cookie);
-        }
-        let response = request.send().await.context("YouTube 流请求失败")?;
-        if response.status() == reqwest::StatusCode::FORBIDDEN {
-            bail!("YouTube 返回 403：请重新连接已登录的浏览器；若仍失败，该视频当前需要 PO Token")
-        }
-        let response = response.error_for_status().context("YouTube 流下载失败")?;
-        let total = response.content_length().unwrap_or(0);
         let mut downloaded = 0u64;
+        let mut expected_total = format.content_length.unwrap_or(0);
         let mut file = tokio::fs::File::create(output)
             .await
             .context("创建 YouTube 暂存文件失败")?;
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            if cancel.is_cancelled() {
-                bail!("下载已取消");
+        for _ in 0..2048 {
+            let mut request = self
+                .client
+                .http()
+                .get(&format.url)
+                .header(reqwest::header::REFERER, "https://www.youtube.com/")
+                .header(reqwest::header::RANGE, format!("bytes={downloaded}-"));
+            if let Some(session) = self.auth.snapshot() {
+                request = request.header(reqwest::header::COOKIE, session.cookie);
             }
-            let chunk = chunk.context("YouTube 流中断")?;
-            file.write_all(&chunk)
-                .await
-                .context("写入 YouTube 暂存文件失败")?;
-            downloaded += chunk.len() as u64;
-            progress(downloaded, total.max(downloaded));
+            let response = request.send().await.context("YouTube 流请求失败")?;
+            if response.status() == reqwest::StatusCode::FORBIDDEN {
+                bail!(
+                    "YouTube 返回 403：请重新连接已登录的浏览器；若仍失败，该视频当前需要 PO Token"
+                )
+            }
+            let status = response.status();
+            anyhow::ensure!(status.is_success(), "YouTube 流请求返回 {status}");
+            anyhow::ensure!(
+                downloaded == 0 || status == reqwest::StatusCode::PARTIAL_CONTENT,
+                "YouTube 续传请求被错误地从头返回"
+            );
+            let range_total = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.rsplit_once('/'))
+                .and_then(|(_, total)| total.parse::<u64>().ok())
+                .unwrap_or(0);
+            expected_total = expected_total.max(range_total).max(
+                response
+                    .content_length()
+                    .unwrap_or(0)
+                    .saturating_add(downloaded),
+            );
+            progress(downloaded, expected_total);
+            let segment_start = downloaded;
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                if cancel.is_cancelled() {
+                    bail!("下载已取消");
+                }
+                let chunk = chunk.context("YouTube 流中断")?;
+                file.write_all(&chunk)
+                    .await
+                    .context("写入 YouTube 暂存文件失败")?;
+                downloaded += chunk.len() as u64;
+                progress(downloaded, expected_total.max(downloaded));
+            }
+            if expected_total == 0 || downloaded >= expected_total {
+                break;
+            }
+            anyhow::ensure!(downloaded > segment_start, "YouTube 流续传没有取得新数据");
         }
+        anyhow::ensure!(
+            expected_total == 0 || downloaded >= expected_total,
+            "YouTube 流没有完整下载"
+        );
         file.flush().await.context("提交 YouTube 暂存缓冲失败")?;
         Ok(())
     }
@@ -535,23 +532,11 @@ impl MusicProvider for YoutubeProvider {
         if keyword.is_empty() || !self.ctx.youtube_enabled() {
             return Ok(Vec::new());
         }
-        let options = SearchOptions {
-            limit: effective_limit(limit, 20) as u64,
-            search_type: SearchType::Video,
-            safe_search: false,
-        };
-        let rows = self
-            .search_client()?
-            .search(keyword, Some(&options))
-            .await
-            .map_err(|err| anyhow::anyhow!(youtube_error(err)))?;
-        Ok(rows
-            .iter()
-            .filter_map(|row| match row {
-                SearchResult::Video(video) => Some(source_from_search_video(video)),
-                _ => None,
-            })
-            .collect())
+        let limit = effective_limit(limit, 20);
+        let body = self.client.search(keyword).await?;
+        let mut rows = Vec::new();
+        collect_video_renderers(&body, &mut rows, limit);
+        Ok(rows)
     }
 
     async fn search_collections(
@@ -675,7 +660,7 @@ impl MusicProvider for YoutubeProvider {
             let cover = if job.source.cover.is_empty() {
                 None
             } else {
-                match self.http.get(&job.source.cover).send().await {
+                match self.client.http().get(&job.source.cover).send().await {
                     Ok(response) if response.status().is_success() => {
                         response.bytes().await.ok().map(|bytes| bytes.to_vec())
                     }
@@ -756,6 +741,18 @@ fn valid_video_id(text: &str) -> Option<String> {
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'))
     .then(|| text.to_string())
+}
+
+fn video_id_from_input(text: &str) -> Result<String> {
+    let text = text.trim();
+    if let Some(id) = valid_video_id(text) {
+        return Ok(id);
+    }
+    match parse_youtube_url(text) {
+        Some(YoutubeTarget::Video(id)) => Ok(id),
+        Some(YoutubeTarget::Playlist(_)) => bail!("这里需要单个 YouTube 视频，不是播放列表"),
+        None => bail!("YouTube 视频链接或 ID 无效"),
+    }
 }
 
 fn web_client_version() -> String {
@@ -1010,6 +1007,17 @@ fn collect_playlist_lockups(value: &Value, out: &mut Vec<SongSource>, limit: usi
     }
     match value {
         Value::Object(map) => {
+            if let Some(renderer) = map
+                .get("videoRenderer")
+                .or_else(|| map.get("compactVideoRenderer"))
+            {
+                if let Some(source) = youtube_playlist_video_renderer(renderer) {
+                    if !out.iter().any(|item| item.key == source.key) {
+                        out.push(source);
+                    }
+                }
+                return;
+            }
             if let Some(renderer) = map.get("playlistVideoRenderer") {
                 if let Some(source) = youtube_playlist_video_renderer(renderer) {
                     if !out.iter().any(|item| item.key == source.key) {
@@ -1099,6 +1107,10 @@ fn collect_playlist_lockups(value: &Value, out: &mut Vec<SongSource>, limit: usi
     }
 }
 
+fn collect_video_renderers(value: &Value, out: &mut Vec<SongSource>, limit: usize) {
+    collect_playlist_lockups(value, out, limit);
+}
+
 fn playlist_continuation(value: &Value) -> Option<String> {
     match value {
         Value::Array(items) => {
@@ -1160,29 +1172,7 @@ fn parse_clock_seconds(text: &str) -> Option<f64> {
     }
 }
 
-fn source_from_search_video(video: &rusty_ytdl::search::Video) -> SongSource {
-    let mut payload = serde_json::Map::new();
-    payload.insert("video_id".into(), json!(video.id));
-    payload.insert("audio_only".into(), json!(false));
-    SongSource {
-        platform: Platform::Youtube,
-        key: video.id.clone(),
-        title: video.title.clone(),
-        artists: if video.channel.name.trim().is_empty() {
-            Vec::new()
-        } else {
-            vec![video.channel.name.clone()]
-        },
-        album: String::new(),
-        duration: Some(video.duration as f64 / 1000.0).filter(|duration| *duration > 0.0),
-        cover: best_thumbnail(&video.thumbnails),
-        max_quality: None,
-        vip: false,
-        payload,
-    }
-}
-
-fn source_from_details(details: &rusty_ytdl::VideoDetails) -> SongSource {
+fn source_from_details(details: &VideoDetails) -> SongSource {
     let mut payload = serde_json::Map::new();
     payload.insert("video_id".into(), json!(details.video_id));
     payload.insert("audio_only".into(), json!(false));
@@ -1208,7 +1198,7 @@ fn source_from_details(details: &rusty_ytdl::VideoDetails) -> SongSource {
     }
 }
 
-fn best_thumbnail(items: &[rusty_ytdl::Thumbnail]) -> String {
+fn best_thumbnail(items: &[Thumbnail]) -> String {
     items
         .iter()
         .max_by_key(|item| item.width.saturating_mul(item.height))
@@ -1266,23 +1256,31 @@ fn select_formats(
     Ok(vec![video, audio])
 }
 
-fn youtube_error(error: rusty_ytdl::VideoError) -> String {
-    let text = error.to_string();
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("403") || lower.contains("not a bot") || lower.contains("source empty") {
-        format!("YouTube 风控拒绝了请求；请连接已登录的浏览器。若仍失败，该内容当前需要 PO Token（{text}）")
-    } else if lower.contains("private") {
-        format!("这是私密或账号受限内容，请连接有访问权限的浏览器 Profile（{text}）")
-    } else {
-        format!("YouTube 请求失败：{text}")
-    }
-}
-
 struct TempDirGuard(PathBuf);
 
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[async_trait]
+impl VideoProvider for YoutubeProvider {
+    fn platform(&self) -> Platform {
+        Platform::Youtube
+    }
+
+    async fn resolve_video(&self, input: &str) -> Result<VideoInfo> {
+        YoutubeProvider::resolve_video(self, input).await
+    }
+
+    async fn download_video(
+        &self,
+        request: &VideoDownloadRequest,
+        cancel: &CancellationToken,
+        progress: &ProgressSink,
+    ) -> Result<PathBuf> {
+        YoutubeProvider::download_video(self, request, cancel, progress).await
     }
 }
 
@@ -1363,6 +1361,16 @@ mod tests {
             parse_youtube_url("https://www.youtube.com/playlist?list=PLxyz"),
             Some(YoutubeTarget::Playlist("PLxyz".into()))
         );
+    }
+
+    #[test]
+    fn video_entry_points_normalize_urls_before_calling_innertube() {
+        assert_eq!(
+            video_id_from_input("https://www.youtube.com/watch?v=abcDEF12345").unwrap(),
+            "abcDEF12345"
+        );
+        assert_eq!(video_id_from_input("abcDEF12345").unwrap(), "abcDEF12345");
+        assert!(video_id_from_input("https://www.youtube.com/playlist?list=PLxyz").is_err());
     }
 
     #[test]
@@ -1471,34 +1479,19 @@ mod tests {
     fn format_selection_prefers_progressive_under_ceiling() {
         let format = |height: u64, video: bool, audio: bool, bitrate: u64| VideoFormat {
             itag: height,
-            mime_type: serde_json::from_str(r#""video/mp4; codecs=\"avc1.4d401f, mp4a.40.2\"""#)
-                .unwrap(),
+            mime_type: MediaMime {
+                container: "mp4".into(),
+                video_codec: Some("avc1.4d401f".into()),
+            },
             bitrate,
-            width: Some(height * 16 / 9),
             height: Some(height),
-            init_range: None,
-            index_range: None,
-            last_modified: None,
             content_length: None,
-            quality: None,
-            fps: None,
             quality_label: Some(format!("{height}p")),
-            projection_type: None,
-            average_bitrate: None,
-            high_replication: None,
-            audio_quality: None,
-            color_info: None,
-            approx_duration_ms: None,
-            audio_sample_rate: None,
-            audio_channels: None,
             audio_bitrate: None,
-            loudness_db: None,
             url: "https://cdn.example/x".into(),
             has_video: video,
             has_audio: audio,
             is_live: false,
-            is_hls: false,
-            is_dash_mpd: false,
         };
         let formats = vec![
             format(1080, true, true, 10),

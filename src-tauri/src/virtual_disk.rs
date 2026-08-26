@@ -22,7 +22,7 @@ const MAX_SIZE_MIB: u64 = 64 * 1024;
 const GROWTH_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 const MARKER_BODY: &str = "KDJ managed virtual disk v1\n";
 #[cfg(any(target_os = "macos", test))]
-const MACOS_VOLUME_ICON: &[u8] = include_bytes!("../icons/icon.icns");
+static MACOS_VOLUME_ICON_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_VOLUME_ICON: &[u8] = include_bytes!("../icons/icon.ico");
 #[cfg(any(target_os = "windows", test))]
@@ -173,11 +173,28 @@ fn write_if_changed(path: &Path, contents: &[u8], label: &str) -> Result<(), Str
 
 #[cfg(any(target_os = "macos", test))]
 fn write_macos_volume_icon(root: &Path) -> Result<(), String> {
-    write_if_changed(
-        &root.join(".VolumeIcon.icns"),
-        MACOS_VOLUME_ICON,
-        "macOS 虚拟盘图标",
-    )
+    let configured = MACOS_VOLUME_ICON_PATH.get().cloned();
+    let source = configured.unwrap_or_else(|| {
+        // Tests and an unbundled dev executable still read the tracked icon from disk. The release
+        // binary never embeds these bytes; setup records Contents/Resources/icon.icns below.
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("icons")
+            .join("icon.icns")
+    });
+    let icon = fs::read(&source)
+        .map_err(|err| format!("无法读取 KDJ 应用图标 {}：{err}", source.display()))?;
+    write_if_changed(&root.join(".VolumeIcon.icns"), &icon, "macOS 虚拟盘图标")
+}
+
+/// Record the already-bundled application resource instead of embedding a second ICNS copy in
+/// the executable. KDJ Labs is the only flavor that includes virtual-disk support.
+pub fn configure_resources<R: Runtime>(app: &tauri::AppHandle<R>) {
+    #[cfg(target_os = "macos")]
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let _ = MACOS_VOLUME_ICON_PATH.set(resource_dir.join("icon.icns"));
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -1323,7 +1340,7 @@ mod tests {
 
         assert_eq!(
             fs::read(root.join(".VolumeIcon.icns")).unwrap(),
-            MACOS_VOLUME_ICON
+            fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("icons/icon.icns")).unwrap()
         );
         assert_eq!(fs::read(root.join("KDJ.ico")).unwrap(), WINDOWS_VOLUME_ICON);
         assert_eq!(fs::read(root.join("autorun.inf")).unwrap(), WINDOWS_AUTORUN);

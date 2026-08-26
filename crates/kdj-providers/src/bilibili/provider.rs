@@ -33,6 +33,7 @@ use crate::net::{create_download_writer, ensure_media_url, AtomicDownload};
 use crate::provider::{
     effective_limit, full_listing, loose_int, qr_data_url_from_text, str_field,
     unique_download_path, Capabilities, DownloadJob, MusicProvider, ProgressSink, ProviderContext,
+    VideoProvider,
 };
 
 const LABEL: &str = "哔哩哔哩";
@@ -1171,6 +1172,26 @@ struct TempDirGuard(PathBuf);
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[async_trait]
+impl VideoProvider for BilibiliProvider {
+    fn platform(&self) -> Platform {
+        Platform::Bilibili
+    }
+
+    async fn resolve_video(&self, input: &str) -> Result<VideoInfo> {
+        BilibiliProvider::resolve_video(self, input).await
+    }
+
+    async fn download_video(
+        &self,
+        request: &VideoDownloadRequest,
+        cancel: &CancellationToken,
+        progress: &ProgressSink,
+    ) -> Result<PathBuf> {
+        BilibiliProvider::download_video(self, request, cancel, progress).await
     }
 }
 

@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   desktop:
-    name: ${{ matrix.label }}
+    name: ${{ matrix.label }} / ${{ matrix.flavor }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -40,14 +40,32 @@ jobs:
           # 代价是要装两个 rust target 并编译两遍。
           - os: macos-latest
             label: macos-universal
+            flavor: stable
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            tauri_args: --target universal-apple-darwin
+          - os: macos-latest
+            label: macos-universal
+            flavor: labs
             rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
             tauri_args: --target universal-apple-darwin
           - os: ubuntu-latest
             label: linux-x86_64
+            flavor: stable
+            rust_targets: ""
+            tauri_args: ""
+          - os: ubuntu-latest
+            label: linux-x86_64
+            flavor: labs
             rust_targets: ""
             tauri_args: ""
           - os: windows-latest
             label: windows-x86_64
+            flavor: stable
+            rust_targets: ""
+            tauri_args: ""
+          - os: windows-latest
+            label: windows-x86_64
+            flavor: labs
             rust_targets: ""
             tauri_args: ""
 
@@ -64,7 +82,7 @@ jobs:
       - name: Rust 构建缓存
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.label }}
+          key: ${{ matrix.label }}-${{ matrix.flavor }}
 
       - uses: actions/setup-node@v4
         with:
@@ -128,17 +146,26 @@ jobs:
       # 否则一个 Windows 时序/权限 flaky 测试会卡死全平台更新通道。
       - name: Rust 全量测试
         id: rust_test
+        if: matrix.flavor == 'stable'
         continue-on-error: true
-        run: cargo test --workspace
+        # Vendored rookie's rustdoc examples open real browser profiles and are not hermetic CI
+        # tests. Run every workspace unit/integration target while deliberately excluding doctests.
+        run: cargo test --workspace --lib --bins --tests
+
+      - name: KDJ Labs OneLibrary 测试
+        id: labs_test
+        if: matrix.flavor == 'labs'
+        continue-on-error: true
+        run: cargo test -p kdj-server --features onelibrary --lib
 
       - name: 分支构建要求测试通过
-        if: ${{ !startsWith(github.ref, 'refs/tags/') && steps.rust_test.outcome == 'failure' }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/') && (steps.rust_test.outcome == 'failure' || steps.labs_test.outcome == 'failure') }}
         run: |
           echo "::error::main 分支构建要求 cargo test 通过"
           exit 1
 
       - name: 正式 tag 测试失败仅告警
-        if: ${{ startsWith(github.ref, 'refs/tags/') && steps.rust_test.outcome == 'failure' }}
+        if: ${{ startsWith(github.ref, 'refs/tags/') && (steps.rust_test.outcome == 'failure' || steps.labs_test.outcome == 'failure') }}
         run: |
           echo "::warning::tag 构建上 cargo test 失败，仍继续打包以便更新通道不因单测卡死；请尽快修测试。"
 
@@ -196,7 +223,9 @@ jobs:
             mv /tmp/conf.json src-tauri/tauri.conf.json
           fi
           run_tauri_build() {
-            if node -e "process.exit((require('./package.json').scripts||{})['tauri:build']?0:1)"; then
+            if [ "${{ matrix.flavor }}" = "labs" ]; then
+              npm run tauri:build:labs -- ${{ matrix.tauri_args }}
+            elif node -e "process.exit((require('./package.json').scripts||{})['tauri:build']?0:1)"; then
               npm run tauri:build -- ${{ matrix.tauri_args }}
             else
               npx --yes @tauri-apps/cli@^2 build ${{ matrix.tauri_args }}
@@ -219,6 +248,11 @@ jobs:
             sleep 20
           done
 
+      - name: 记录安装包体积
+        if: steps.shell.outputs.present == 'true'
+        shell: bash
+        run: bash scripts/report-bundle-size.sh target | tee -a "$GITHUB_STEP_SUMMARY"
+
       # 产物路径用宽松的 `**` 通配：src-tauri 是不是 workspace 成员会决定
       # 产物落在 `target/` 还是 `src-tauri/target/`，加上 --target 又会多一层
       # 三元组目录。与其猜，不如让 glob 兜住所有情况。
@@ -233,7 +267,7 @@ jobs:
         if: steps.shell.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: kdj-rust-${{ matrix.label }}
+          name: kdj-rust-${{ matrix.flavor }}-${{ matrix.label }}
           path: |
             **/release/bundle/dmg/*.dmg
             **/release/bundle/macos/*.app.tar.gz
@@ -274,7 +308,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # 一键更新的"版本清单"。updater 拉 releases/latest/download/latest.json。
+  # 两个独立应用身份的更新清单：稳定 KDJ 读取 latest.json，KDJ Labs 读取
+  # latest-labs.json。两个清单必须从各自 flavor 的 artifact 取包，不能串台。
   # 旧规则是三平台全绿才写清单；任一平台挂掉就 skip，再叠加「新 Release
   # 立刻变 Latest + 旧清单占位」，客户端会静默冻结在旧 version。
   # 新规则：
@@ -309,92 +344,86 @@ jobs:
           python3 - <<'PY'
           import json, os, glob, sys
           from datetime import datetime, timezone
+          from urllib.parse import quote
 
           tag = os.environ["TAG"]
           repo = os.environ["REPO"]
           version = tag.lstrip("v")
 
-          def find(pattern):
-              hits = sorted(glob.glob(f"bundles/**/{pattern}", recursive=True))
-              # 只要正式包，跳过误匹配到的 .sig
-              hits = [h for h in hits if not h.endswith(".sig")]
-              return hits[0] if hits else None
+          def find(flavor, pattern):
+              hits = sorted(glob.glob(f"bundles/kdj-rust-{flavor}-*/**/{pattern}", recursive=True))
+              return next((hit for hit in hits if not hit.endswith(".sig")), None)
 
-          def entry(art):
-              sig = art + ".sig"
-              if not os.path.exists(sig):
-                  raise SystemExit(f"::error::{os.path.basename(art)} 缺少签名：{sig}")
-              name = os.path.basename(art)
+          def entry(artifact):
+              signature = artifact + ".sig"
+              if not os.path.exists(signature):
+                  raise SystemExit(f"::error::{os.path.basename(artifact)} 缺少签名：{signature}")
+              name = os.path.basename(artifact)
               return {
-                  "signature": open(sig).read().strip(),
-                  "url": f"https://github.com/{repo}/releases/download/{tag}/{name}",
+                  "signature": open(signature).read().strip(),
+                  "url": f"https://github.com/{repo}/releases/download/{tag}/{quote(name)}",
               }
 
-          platforms = {}
-          missing = []
+          def build_manifest(flavor, product):
+              platforms = {}
+              missing = []
+              mac = find(flavor, "*.app.tar.gz")
+              if mac:
+                  item = entry(mac)
+                  for arch in ("aarch64", "x86_64"):
+                      platforms[f"darwin-{arch}-app"] = item
+                      platforms[f"darwin-{arch}"] = item
+              else:
+                  missing.append("macOS")
 
-          mac = find("*.app.tar.gz")
-          if mac:
-              mac_entry = entry(mac)
-              # universal 一个包喂两个架构；-app 是 updater 2.10+ 精确键，
-              # 无后缀键留给已装出去的旧 updater。
-              for arch in ("aarch64", "x86_64"):
-                  platforms[f"darwin-{arch}-app"] = mac_entry
-                  platforms[f"darwin-{arch}"] = mac_entry
-          else:
-              missing.append("macOS")
+              nsis = find(flavor, "*-setup.exe")
+              msi = find(flavor, "*.msi")
+              if nsis:
+                  item = entry(nsis)
+                  platforms["windows-x86_64-nsis"] = item
+                  platforms["windows-x86_64"] = item
+              if msi:
+                  platforms["windows-x86_64-msi"] = entry(msi)
+              if not nsis and not msi:
+                  missing.append("Windows")
 
-          nsis = find("*-setup.exe")
-          msi = find("*.msi")
-          if nsis:
-              nsis_entry = entry(nsis)
-              platforms["windows-x86_64-nsis"] = nsis_entry
-              platforms["windows-x86_64"] = nsis_entry
-          if msi:
-              platforms["windows-x86_64-msi"] = entry(msi)
-          if not nsis and not msi:
-              missing.append("Windows")
+              appimage = find(flavor, "*.AppImage")
+              deb = find(flavor, "*.deb")
+              rpm = find(flavor, "*.rpm")
+              if appimage:
+                  item = entry(appimage)
+                  platforms["linux-x86_64-appimage"] = item
+                  platforms["linux-x86_64"] = item
+              if deb:
+                  platforms["linux-x86_64-deb"] = entry(deb)
+              if rpm:
+                  platforms["linux-x86_64-rpm"] = entry(rpm)
+              if not appimage and not deb and not rpm:
+                  missing.append("Linux")
 
-          appimage = find("*.AppImage")
-          deb = find("*.deb")
-          rpm = find("*.rpm")
-          if appimage:
-              appimage_entry = entry(appimage)
-              platforms["linux-x86_64-appimage"] = appimage_entry
-              platforms["linux-x86_64"] = appimage_entry
-          if deb:
-              platforms["linux-x86_64-deb"] = entry(deb)
-          if rpm:
-              platforms["linux-x86_64-rpm"] = entry(rpm)
-          if not appimage and not deb and not rpm:
-              missing.append("Linux")
+              for name in missing:
+                  print(f"::warning::{product} 本版缺少 {name} 更新包；其它平台仍可更新")
+              if not platforms:
+                  raise SystemExit(f"::error::{product} 没有任何更新包，拒绝发布更新清单")
+              return {
+                  "version": version,
+                  "notes": f"{product} {tag}",
+                  "pub_date": datetime.now(timezone.utc).isoformat(),
+                  "platforms": platforms,
+              }
 
-          for name in missing:
-              print(f"::warning::本版缺少 {name} 更新包，latest.json 不含该平台；其它平台仍可更新")
-
-          if not platforms:
-              raise SystemExit(
-                  "::error::没有任何平台更新包，拒绝写入 latest.json，也不提升 Latest；"
-                  "上一版继续作为更新通道"
-              )
-
-          manifest = {
-              "version": version,
-              "notes": f"KDJ {tag}",
-              "pub_date": datetime.now(timezone.utc).isoformat(),
-              "platforms": platforms,
+          manifests = {
+              "latest.json": build_manifest("stable", "KDJ"),
+              "latest-labs.json": build_manifest("labs", "KDJ Labs"),
           }
-          with open("latest.json", "w") as fh:
-              json.dump(manifest, fh, indent=2)
-              fh.write("\n")
-          print(json.dumps(manifest, indent=2)[:1200])
-          if missing:
-              print(f"partial platforms; missing={','.join(missing)}", file=sys.stderr)
-          else:
-              print("all desktop platform families present", file=sys.stderr)
+          for filename, manifest in manifests.items():
+              with open(filename, "w") as handle:
+                  json.dump(manifest, handle, indent=2)
+                  handle.write("\n")
+              print(f"{filename}: {len(manifest['platforms'])} platform keys")
           PY
 
-          gh release upload "$TAG" latest.json --repo "$REPO" --clobber
+          gh release upload "$TAG" latest.json latest-labs.json --repo "$REPO" --clobber
           # 清单就绪后才抢 Latest；此前 release.yml 用 --latest=false 建的空壳
           # 不会让 /releases/latest/download/latest.json 指向残缺发版。
           gh release edit "$TAG" --repo "$REPO" --latest

@@ -1,13 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   CSSProperties,
   PointerEvent as ReactPointerEvent,
   RefObject,
 } from "react";
-import { Monitor, Moon, Sun, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Monitor, Moon, Sun, Trash2 } from "lucide-react";
 import {
   DJ_BARS_OPTIONS,
-  DJ_EFFECTS,
   DJ_TRANSITIONS,
   mixSeconds,
   useDjConfig,
@@ -35,6 +34,7 @@ import {
 } from "../../lib/lyricsPrefs";
 import { usePlaybackPrefs } from "../../lib/playbackPrefs";
 import { useTrackClickPrefs } from "../../lib/trackClickPrefs";
+const LABS_BUILD = typeof __KDJ_LABS__ !== "undefined" && __KDJ_LABS__;
 import {
   APP_FONT_SCALE_MAX,
   APP_FONT_SCALE_MIN,
@@ -50,7 +50,6 @@ import { patchEnabledPlatform } from "../../lib/enabledPlatforms";
 import { normalizeEnabledPlatforms, SEARCH_PLATFORMS } from "../../lib/searchPlatforms";
 import { useAppStore } from "../../stores/appStore";
 import type {
-  FilterResonance,
   KeyNotation,
   Quality,
   StreamCacheStats,
@@ -64,7 +63,7 @@ import { UpdateRow } from "./UpdateRow";
 /**
  * 「设置」住在右侧详情栏，由顶栏那颗小齿轮呼出。
  *
- * 外观：互斥分段。列表点击：横/竖屏播放手势。接播：左文右开关。接歌长度：可拖动的离散滑条。
+ * General 含外观（无小标题）、列表手势与接播（小标题）。流媒体与歌词同板，歌词保留小标题。
  */
 
 function formatSeconds(value: number): string {
@@ -149,10 +148,15 @@ function CycleToggle<T extends string>({
 }
 
 const ENGINE_MODE_OPTIONS = [
-  { id: "both" as const, text: "双开", brand: "both" as const },
+  { id: "all" as const, text: "全部", brand: "both" as const },
   { id: "wyy" as const, text: "网易云", brand: "wyy" as const },
   { id: "qqm" as const, text: "QQ", brand: "qqm" as const },
-] satisfies ReadonlyArray<{ id: LyricsEngineMode; text: string; brand: "both" | "wyy" | "qqm" }>;
+  { id: "ytm" as const, text: "YTM", brand: "both" as const },
+] satisfies ReadonlyArray<{
+  id: LyricsEngineMode;
+  text: string;
+  brand: "both" | "wyy" | "qqm";
+}>;
 
 /** 指针拖动滑条：避开原生 range 在 Tauri 里拖不动的问题。 */
 function usePointerSlider(
@@ -570,6 +574,34 @@ function LyricsColorRow({
   );
 }
 
+/** 接播只保留低频交接与共振滤波两种方案。 */
+const HANDOFF_TRANSITIONS = DJ_TRANSITIONS.filter(
+  (item) => item.id === "eq" || item.id === "filter",
+);
+
+function SettingsExpandToggle({
+  expanded,
+  onToggle,
+  label,
+}: {
+  expanded: boolean;
+  onToggle(): void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      className="kd-djp-section-toggle"
+      aria-expanded={expanded}
+      aria-label={expanded ? `收起${label}` : `展开${label}`}
+      title={expanded ? "收起" : "展开"}
+      onClick={onToggle}
+    >
+      {expanded ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
+    </button>
+  );
+}
+
 function CliSkillExport() {
   const bridge = getBridge();
   const exportSkill = bridge.exportCliSkill;
@@ -598,7 +630,7 @@ function CliSkillExport() {
   };
 
   return (
-    <Panel heading="CLI" dense>
+    <Panel heading="操作 skills" dense>
       <div className="kd-djp-choice" role="group" aria-label="导出 CLI 手册">
         {(
           [
@@ -653,19 +685,20 @@ export function SettingsPanel() {
   const [streamCacheBusy, setStreamCacheBusy] = useState(false);
   const [streamCacheError, setStreamCacheError] = useState("");
   const transitions = useDjConfig((state) => state.transitions);
-  const effects = useDjConfig((state) => state.effects);
   const bars = useDjConfig((state) => state.bars);
   const vocalCut = useDjConfig((state) => state.vocalCut);
   const applyInOutPoints = useDjConfig((state) => state.applyInOutPoints);
   const autoBeatSync = useDjConfig((state) => state.autoBeatSync);
   const playOnLoad = useDjConfig((state) => state.playOnLoad);
   const toggleTransition = useDjConfig((state) => state.toggleTransition);
-  const toggleEffect = useDjConfig((state) => state.toggleEffect);
   const setBars = useDjConfig((state) => state.setBars);
   const setVocalCut = useDjConfig((state) => state.setVocalCut);
   const setApplyInOutPoints = useDjConfig((state) => state.setApplyInOutPoints);
   const setAutoBeatSync = useDjConfig((state) => state.setAutoBeatSync);
   const setPlayOnLoad = useDjConfig((state) => state.setPlayOnLoad);
+  const [lyricsExpanded, setLyricsExpanded] = useState(false);
+  const [djExpanded, setDjExpanded] = useState(false);
+  const [oneLibraryExpanded, setOneLibraryExpanded] = useState(false);
 
   const widePlay = useTrackClickPrefs((state) => state.widePlay);
   const setWidePlay = useTrackClickPrefs((state) => state.setWidePlay);
@@ -791,8 +824,11 @@ export function SettingsPanel() {
   const bpmLabel = bpm ? `${Math.round(bpm)} BPM` : "120 BPM（未分析，按默认估）";
   const lengthHint = `约 ${formatSeconds(mixSeconds(bpm, bars))} · ${bpmLabel}`;
 
-  // YouTube Music 与 YouTube 视频各自一行、各自登录和退出。
-  const accountRows = accounts.filter((account) => account.supports_login);
+  // 各平台账号与下载源开关合并在同一面板。
+  const accountsByPlatform = useMemo(
+    () => new Map(accounts.map((account) => [account.platform, account])),
+    [accounts],
+  );
   const autoCheck = useUpdateStore((s) => s.autoCheck);
   const setAutoCheck = useUpdateStore((s) => s.setAutoCheck);
   const focusEpoch = useUpdateStore((s) => s.focusEpoch);
@@ -821,383 +857,6 @@ export function SettingsPanel() {
   return (
     <div className="kd-col" style={{ height: "100%", minHeight: 0 }}>
       <div className="kd-scroll kd-djp" style={{ minHeight: 0 }}>
-        <Panel heading="外观" dense>
-          <div
-            className="kd-djp-choice kd-djp-theme"
-            role="radiogroup"
-            aria-label="外观主题"
-          >
-            {(
-              [
-                ["light", "浅色", Sun],
-                ["dark", "深色", Moon],
-                ["system", "跟随系统", Monitor],
-              ] as const
-            ).map(([value, label, Icon]) => (
-              <button
-                key={value}
-                type="button"
-                role="radio"
-                aria-checked={theme === value}
-                aria-label={label}
-                title={label}
-                className="kd-djp-theme-btn"
-                data-theme={value}
-                onClick={() => void saveSettings({ theme: value })}
-              >
-                <Icon size={16} strokeWidth={2} aria-hidden="true" />
-              </button>
-            ))}
-          </div>
-          <FontScaleSlider
-            value={appFontScale}
-            onChange={(next) => {
-              setFontScale(next);
-              setAppFontScale(next);
-            }}
-          />
-        </Panel>
-
-        <Panel heading="列表点击" dense>
-          <div className="kd-djp-switch-list" aria-label="列表点击">
-            <Switch
-              checked={widePlay === "double"}
-              label="横屏播放"
-              onState="双击"
-              offState="单击"
-              title="横屏下列表点播放的手势：双击播放（单击选中），或改成单击即播。"
-              onChange={() => setWidePlay(widePlay === "double" ? "single" : "double")}
-            />
-            <Switch
-              checked
-              disabled
-              label="竖屏播放"
-              onState="单击"
-              offState="单击"
-              title="移动端歌曲列表固定单击播放；详情请点底部正在播放的歌曲。"
-              onChange={() => undefined}
-            />
-          </div>
-        </Panel>
-
-        <Panel heading="播放" dense>
-          <div className="kd-djp-switch-list" aria-label="播放选项">
-            <Switch
-              checked={transportFade}
-              label="播放 / 暂停渐入渐出"
-              title="播放时用约 120 毫秒渐入，暂停时用约 120 毫秒渐出；关掉后立即播放或暂停。"
-              onChange={() => setTransportFade(!transportFade)}
-            />
-            <Switch
-              checked={quantize}
-              label="节拍量化"
-              title="主 CUE、Hot Cue 与 Loop 起点吸附到分析节拍网格。"
-              onChange={() => setQuantize(!quantize)}
-            />
-            <CycleToggle<FilterResonance>
-              label="FILTER 共振"
-              value={settings?.filter_resonance ?? "high"}
-              options={[
-                { id: "low", text: "低" },
-                { id: "medium", text: "中" },
-                { id: "high", text: "高" },
-              ]}
-              title="Performance 双极 FILTER 的共振强度。高档为默认；低档与此前的固定滤波响应一致。"
-              onChange={(next) => void saveSettings({ filter_resonance: next })}
-            />
-          </div>
-        </Panel>
-
-        <Panel heading="实验性内容" dense>
-          <div className="kd-djp-switch-list" aria-label="实验性内容">
-            <Switch
-              checked={settings?.experimental_dj_mode ?? false}
-              disabled={!settings}
-              label="DJ 模式"
-              title="开启后在顶栏显示 DJ 模式切换按钮；关闭后返回管理器模式并隐藏入口。"
-              onChange={() =>
-                void saveSettings({
-                  experimental_dj_mode: !(settings?.experimental_dj_mode ?? false),
-                })
-              }
-            />
-          </div>
-        </Panel>
-
-        <Panel heading="OneLibrary" dense>
-          <div className="kd-djp-switch-list" aria-label="OneLibrary 选项">
-            <CycleToggle<KeyNotation>
-              label="列表调性"
-              value={settings?.key_notation ?? "camelot"}
-              options={[
-                { id: "camelot", text: "Camelot" },
-                { id: "traditional", text: "音名" },
-              ]}
-              title="本地与 OneLibrary 歌曲列表统一显示 Camelot 数字制或传统音名；不会改写曲目数据。"
-              onChange={(next) => void saveSettings({ key_notation: next })}
-            />
-            <Switch
-              checked={settings?.virtual_disk_auto_grow ?? true}
-              disabled={!settings}
-              label="空间不足时自动迁移至更大的镜像"
-              title="仅用于 KDJ 虚拟磁盘；关闭后空间不足会停止写入并报错。"
-              onChange={() =>
-                void saveSettings({
-                  virtual_disk_auto_grow: !(settings?.virtual_disk_auto_grow ?? true),
-                })
-              }
-            />
-          </div>
-        </Panel>
-
-        <Panel heading="流媒体播放" dense>
-          <div className="kd-djp-switch-list" aria-label="流媒体播放">
-            <CycleToggle<Quality>
-              label="音质"
-              value={settings?.stream_quality ?? "128"}
-              options={[
-                { id: "128", text: "128K" },
-                { id: "320", text: "320K" },
-                { id: "flac", text: "FLAC" },
-              ]}
-              title="在线流媒体播放请求的起始音质；平台、版权或会员不允许时会自动降级。"
-              onChange={(next) => void saveSettings({ stream_quality: next })}
-            />
-            <CycleToggle
-              label="视频画质"
-              value={String(settings?.video_playback_max_height ?? 1080)}
-              options={[
-                { id: "360", text: "360p" },
-                { id: "480", text: "480p" },
-                { id: "720", text: "720p" },
-                { id: "1080", text: "1080p" },
-                { id: "2160", text: "4K" },
-              ]}
-              title="视频在线播放画质上限；实际画质仍由平台账号和视频本身决定。"
-              onChange={(next) => void saveSettings({ video_playback_max_height: Number(next) })}
-            />
-            <Switch
-              checked={settings?.stream_cache_enabled ?? false}
-              disabled={!settings || streamCacheBusy}
-              label="缓存在线播放"
-              title={
-                streamCacheStats?.path
-                  ? `完整音频在后台写入 ${streamCacheStats.path}；命中后直接从本地播放。`
-                  : "完整音频在后台写入下载目录的 .kdj/stream-cache；命中后直接从本地播放。"
-              }
-              onChange={() => void toggleStreamCache()}
-            />
-            <div className="kd-stream-cache-row" title={streamCacheStats?.path}>
-              <span className="kd-muted">
-                {streamCacheStats
-                  ? `${streamCacheStats.files} 首 · ${formatBytes(streamCacheStats.bytes)}`
-                  : "正在读取缓存…"}
-                {streamCacheStats?.active_writes
-                  ? ` · ${streamCacheStats.active_writes} 首缓存中`
-                  : streamCacheStats?.partial_files
-                    ? ` · ${streamCacheStats.partial_files} 个未完成 · ${formatBytes(streamCacheStats.partial_bytes)}`
-                    : ""}
-              </span>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={
-                  streamCacheBusy ||
-                  !streamCacheStats ||
-                  (streamCacheStats.files === 0 &&
-                    streamCacheStats.partial_files === 0 &&
-                    streamCacheStats.active_writes === 0)
-                }
-                title="清理已完成和未完成的在线播放缓存"
-                onClick={() => void clearStreamCache()}
-              >
-                <Trash2 size={12} aria-hidden="true" />
-                清理
-              </Button>
-            </div>
-            <InlineNotice
-              text={streamCacheError}
-              block
-              onDismiss={() => setStreamCacheError("")}
-            />
-          </div>
-        </Panel>
-
-        <Panel heading="歌词" dense>
-          <div className="kd-djp-switch-list" aria-label="歌词选项">
-            <Switch
-              checked={settings?.download_lyrics ?? true}
-              label="下载歌词"
-              title="下载音频后按当前平台歌曲 ID 获取 LRC，保存到歌曲所在目录的 .kdj/lyrics/；歌词失败不影响歌曲下载。"
-              onChange={() => void saveSettings({ download_lyrics: !(settings?.download_lyrics ?? true) })}
-            />
-            <Switch
-              checked={tryOnlineWhenMissing}
-              label="无歌词时尝试匹配"
-              title="本地 .kdj/lyrics/ 没有歌词时，才按曲名、艺人和时长在线匹配；关闭后只使用本地歌词。在线试听仍按来源 ID 取词。"
-              onChange={() => setTryOnlineWhenMissing(!tryOnlineWhenMissing)}
-            />
-            {canOverlayLyrics ? (
-              <>
-                <Switch
-                  checked={desktopLyricsLocked}
-                  label={overlayIsNative ? "触摸穿透（开启后不能拖动）" : "鼠标穿透（开启后不能拖动）"}
-                  title={
-                    overlayIsNative
-                      ? "关闭时按住歌词即可上下拖动；开启后触摸会穿过歌词浮层落到下面的应用，需要回这里关闭才能再次拖动。"
-                      : "关闭时按住歌词即可自由拖动；开启后点击会穿过歌词窗口，需要回这里关闭才能再次拖动。"
-                  }
-                  onChange={() => setDesktopLyricsLocked(!desktopLyricsLocked)}
-                />
-                <RatioSlider
-                  label="悬浮字号"
-                  ariaLabel="悬浮歌词字号"
-                  min={DESKTOP_FONT_SCALE_MIN}
-                  max={DESKTOP_FONT_SCALE_MAX}
-                  value={desktopLyricsFontScale}
-                  onChange={setDesktopLyricsFontScale}
-                />
-                <RatioSlider
-                  label="不透明度"
-                  ariaLabel="悬浮歌词不透明度"
-                  min={DESKTOP_OPACITY_MIN}
-                  max={1}
-                  value={desktopLyricsOpacity}
-                  onChange={setDesktopLyricsOpacity}
-                />
-                <LyricsColorRow
-                  label={overlayIsNative ? "高亮色" : "主行颜色"}
-                  title="主行已唱部分：黑 / 白 / 单色（色相线）/ 渐变。超长句跟着进度滚动。"
-                  value={desktopAccent}
-                  onChange={setDesktopAccentPaint}
-                />
-                <LyricsColorRow
-                  label="副行颜色"
-                  title="翻译或下一句已唱部分：跟随主行 / 黑 / 白 / 单色 / 渐变。超长句跟着进度滚动。"
-                  value={desktopSecondary}
-                  onChange={setDesktopSecondaryPaint}
-                  allowFollow
-                />
-                <LyricsColorRow
-                  label="未唱颜色"
-                  title="还没唱到的字：黑 / 白 / 灰 / 单色 / 渐变。主行与副行共用。"
-                  value={desktopDim}
-                  onChange={setDesktopDimPaint}
-                  allowGray
-                />
-                <LyricsColorRow
-                  label="边框颜色"
-                  title="描边（整行始终绘制）：黑 / 白 / 单色 / 渐变 / 无。"
-                  value={desktopStroke}
-                  onChange={setDesktopStrokePaint}
-                  allowNone
-                />
-              </>
-            ) : null}
-            <CycleToggle
-              label="搜词引擎"
-              value={enginesMode(lyricsEngines)}
-              options={ENGINE_MODE_OPTIONS}
-              title="点击切换：双开 / 仅网易云 / 仅 QQ。至少保留一家。"
-              onChange={(mode) => setLyricsEngines(enginesFromMode(mode))}
-            />
-          </div>
-        </Panel>
-
-        <Panel heading="接播" dense>
-          <div className="kd-djp-groups">
-            <div className="kd-djp-switch-list" aria-label="接播选项">
-              {DJ_TRANSITIONS.map((item) => (
-                <Switch
-                  key={item.id}
-                  checked={transitions.includes(item.id)}
-                  label={item.label}
-                  title={`${item.hint}。每次接歌会从已选方案中随机组合。`}
-                  onChange={() => toggleTransition(item.id)}
-                />
-              ))}
-              <Switch
-                checked={vocalCut}
-                label="人声渐消"
-                title="接歌时渐进削弱上一首的中置人声；保留立体声侧声道和补偿增益。"
-                onChange={() => setVocalCut(!vocalCut)}
-              />
-              <Switch
-                checked={applyInOutPoints}
-                label="应用开始 / 结束点"
-                title="自动接播与自动续播时：有开始点就从那里起播，有结束点就到点切下一首；关掉则按首拍起播、波形尾段切歌。"
-                onChange={() => setApplyInOutPoints(!applyInOutPoints)}
-              />
-              <Switch
-                checked={autoBeatSync}
-                label="自动对拍"
-                title="开启后：点波形落到被点 1/4 小节内与当前播放相同的相位；SYNC 锁小节（黄线对齐）；接歌等到下一小节边界。关掉则点击精确落点，SYNC 只锁拍子（灰线对齐）。"
-                onChange={() => setAutoBeatSync(!autoBeatSync)}
-              />
-              <Switch
-                checked={playOnLoad}
-                label="加载后立即播放"
-                title="DJ 模式下把曲目装入 Deck 后立即从首拍起播；关掉则只装盘，停在首拍等你按播放。"
-                onChange={() => setPlayOnLoad(!playOnLoad)}
-              />
-              {DJ_EFFECTS.map((item) => (
-                <Switch
-                  key={item.id}
-                  checked={effects.includes(item.id)}
-                  label={item.label}
-                  title={`${item.hint}。强度会在接歌过程中自动推进。`}
-                  onChange={() => toggleEffect(item.id)}
-                />
-              ))}
-            </div>
-
-            <div className="kd-djp-group">
-              <span className="kd-djp-label">接歌长度</span>
-              <BarsSlider bars={bars} onChange={setBars} hint={lengthHint} />
-            </div>
-          </div>
-        </Panel>
-
-        <Panel heading="下载源" dense>
-          <div className="kd-djp-switch-list" aria-label="下载源">
-            {SEARCH_PLATFORMS.map((item) => {
-              const enabled = normalizeEnabledPlatforms(settings?.enabled_platforms).includes(
-                item.id,
-              );
-              return (
-                <Switch
-                  key={item.id}
-                  checked={enabled}
-                  label={item.label}
-                  title={
-                    enabled
-                      ? `关闭后搜索条里「${item.label}」会变灰，也无法搜索或下载`
-                      : `开启后可在搜索条勾选「${item.label}」`
-                  }
-                  onChange={() => {
-                    if (!settings) return;
-                    // 最后一个开着的不准关。
-                    const current = normalizeEnabledPlatforms(settings.enabled_platforms);
-                    if (enabled && current.length <= 1) return;
-                    void saveSettings(patchEnabledPlatform(settings, item.id, !enabled));
-                  }}
-                />
-              );
-            })}
-          </div>
-        </Panel>
-
-        <Panel heading="账号" dense>
-          <InlineNotice text={accountsError} block />
-          {accountRows.length === 0 ? (
-            <p className="kd-muted">账号状态还没拉到，稍等一下。</p>
-          ) : (
-            accountRows.map((account) => <AccountRow key={account.platform} account={account} />)
-          )}
-        </Panel>
-
-        <CliSkillExport />
-
         <div ref={updateSectionRef} id="kd-settings-update">
           <Panel heading="软件更新" dense>
             <UpdateRow />
@@ -1211,6 +870,401 @@ export function SettingsPanel() {
             </div>
           </Panel>
         </div>
+
+        <Panel heading="General" dense>
+          <div className="kd-djp-groups" aria-label="General">
+            <div>
+              <div
+                className="kd-djp-choice kd-djp-theme"
+                role="radiogroup"
+                aria-label="外观主题"
+              >
+                {(
+                  [
+                    ["light", "浅色", Sun],
+                    ["dark", "深色", Moon],
+                    ["system", "跟随系统", Monitor],
+                  ] as const
+                ).map(([value, label, Icon]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={theme === value}
+                    aria-label={label}
+                    title={label}
+                    className="kd-djp-theme-btn"
+                    data-theme={value}
+                    onClick={() => void saveSettings({ theme: value })}
+                  >
+                    <Icon size={16} strokeWidth={2} aria-hidden="true" />
+                  </button>
+                ))}
+              </div>
+              <FontScaleSlider
+                value={appFontScale}
+                onChange={(next) => {
+                  setFontScale(next);
+                  setAppFontScale(next);
+                }}
+              />
+            </div>
+            <div className="kd-djp-switch-list" aria-label="列表与播放">
+              <CycleToggle<KeyNotation>
+                label="列表调性"
+                value={settings?.key_notation ?? "camelot"}
+                options={[
+                  { id: "camelot", text: "Camelot" },
+                  { id: "traditional", text: "音名" },
+                ]}
+                title="本地与 OneLibrary 歌曲列表统一显示 Camelot 数字制或传统音名；不会改写曲目数据。"
+                onChange={(next) => void saveSettings({ key_notation: next })}
+              />
+              <Switch
+                checked={widePlay === "double"}
+                label="横屏播放"
+                onState="双击"
+                offState="单击"
+                title="横屏下列表点播放的手势：双击播放（单击选中），或改成单击即播。"
+                onChange={() => setWidePlay(widePlay === "double" ? "single" : "double")}
+              />
+              <Switch
+                checked
+                disabled
+                label="竖屏播放"
+                onState="单击"
+                offState="单击"
+                title="移动端歌曲列表固定单击播放；详情请点底部正在播放的歌曲。"
+                onChange={() => undefined}
+              />
+              <Switch
+                checked={transportFade}
+                label="播放 / 暂停渐入渐出"
+                title="播放时用约 120 毫秒渐入，暂停时用约 120 毫秒渐出；关掉后立即播放或暂停。"
+                onChange={() => setTransportFade(!transportFade)}
+              />
+              <Switch
+                checked={quantize}
+                label="小节线自动对齐"
+                title="主 CUE、Hot Cue 与 Loop 起点吸附到分析节拍网格。"
+                onChange={() => setQuantize(!quantize)}
+              />
+            </div>
+            <div className="kd-djp-group">
+              <span className="kd-djp-label">接播</span>
+              <div className="kd-djp-switch-list" aria-label="接播选项">
+                {HANDOFF_TRANSITIONS.map((item) => (
+                  <Switch
+                    key={item.id}
+                    checked={transitions.includes(item.id)}
+                    label={item.label}
+                    title={`${item.hint}。每次接歌会从已选方案中随机组合。`}
+                    onChange={() => toggleTransition(item.id)}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        </Panel>
+
+        <Panel heading="流媒体播放" dense>
+          <div className="kd-djp-groups">
+            <div className="kd-djp-switch-list" aria-label="流媒体播放">
+              <CycleToggle<Quality>
+                label="音质"
+                value={settings?.stream_quality ?? "128"}
+                options={[
+                  { id: "128", text: "128K" },
+                  { id: "320", text: "320K" },
+                  { id: "flac", text: "FLAC" },
+                ]}
+                title="在线流媒体播放请求的起始音质；平台、版权或会员不允许时会自动降级。"
+                onChange={(next) => void saveSettings({ stream_quality: next })}
+              />
+              <CycleToggle
+                label="视频画质"
+                value={String(settings?.video_playback_max_height ?? 1080)}
+                options={[
+                  { id: "360", text: "360p" },
+                  { id: "480", text: "480p" },
+                  { id: "720", text: "720p" },
+                  { id: "1080", text: "1080p" },
+                  { id: "2160", text: "4K" },
+                ]}
+                title="视频在线播放画质上限；实际画质仍由平台账号和视频本身决定。"
+                onChange={(next) => void saveSettings({ video_playback_max_height: Number(next) })}
+              />
+              <Switch
+                checked={settings?.stream_cache_enabled ?? false}
+                disabled={!settings || streamCacheBusy}
+                label="缓存在线播放"
+                title={
+                  streamCacheStats?.path
+                    ? `完整音频在后台写入 ${streamCacheStats.path}；命中后直接从本地播放。`
+                    : "完整音频在后台写入下载目录的 .kdj/stream-cache；命中后直接从本地播放。"
+                }
+                onChange={() => void toggleStreamCache()}
+              />
+              <div className="kd-stream-cache-row" title={streamCacheStats?.path}>
+                <span className="kd-muted">
+                  {streamCacheStats
+                    ? `${streamCacheStats.files} 首 · ${formatBytes(streamCacheStats.bytes)}`
+                    : "正在读取缓存…"}
+                  {streamCacheStats?.active_writes
+                    ? ` · ${streamCacheStats.active_writes} 首缓存中`
+                    : streamCacheStats?.partial_files
+                      ? ` · ${streamCacheStats.partial_files} 个未完成 · ${formatBytes(streamCacheStats.partial_bytes)}`
+                      : ""}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={
+                    streamCacheBusy ||
+                    !streamCacheStats ||
+                    (streamCacheStats.files === 0 &&
+                      streamCacheStats.partial_files === 0 &&
+                      streamCacheStats.active_writes === 0)
+                  }
+                  title="清理已完成和未完成的在线播放缓存"
+                  onClick={() => void clearStreamCache()}
+                >
+                  <Trash2 size={12} aria-hidden="true" />
+                  清理
+                </Button>
+              </div>
+              <InlineNotice
+                text={streamCacheError}
+                block
+                onDismiss={() => setStreamCacheError("")}
+              />
+            </div>
+            <div className="kd-djp-group">
+              <div className="kd-djp-label-row">
+                <span className="kd-djp-label">歌词</span>
+                <SettingsExpandToggle
+                  expanded={lyricsExpanded}
+                  onToggle={() => setLyricsExpanded((open) => !open)}
+                  label="歌词"
+                />
+              </div>
+              {lyricsExpanded ? (
+                <div className="kd-djp-switch-list" aria-label="歌词选项">
+                <Switch
+                  checked={settings?.download_lyrics ?? true}
+                  label="下载歌词"
+                  title="下载音频后按当前平台歌曲 ID 获取 LRC，保存到歌曲所在目录的 .kdj/lyrics/；歌词失败不影响歌曲下载。"
+                  onChange={() =>
+                    void saveSettings({ download_lyrics: !(settings?.download_lyrics ?? true) })
+                  }
+                />
+                <Switch
+                  checked={tryOnlineWhenMissing}
+                  label="无歌词时尝试匹配"
+                  title="本地 .kdj/lyrics/ 没有歌词时，才按曲名、艺人和时长在线匹配；关闭后只使用本地歌词。在线试听仍按来源 ID 取词。"
+                  onChange={() => setTryOnlineWhenMissing(!tryOnlineWhenMissing)}
+                />
+                <CycleToggle
+                  label="搜词引擎"
+                  value={enginesMode(lyricsEngines)}
+                  options={ENGINE_MODE_OPTIONS}
+                  title="点击切换：全部 / 仅网易云 / 仅 QQ / 仅 YouTube Music。至少保留一家。"
+                  onChange={(mode) => setLyricsEngines(enginesFromMode(mode))}
+                />
+                {canOverlayLyrics ? (
+                  <>
+                    <Switch
+                      checked={desktopLyricsLocked}
+                      label={
+                        overlayIsNative
+                          ? "触摸穿透（开启后不能拖动）"
+                          : "鼠标穿透（开启后不能拖动）"
+                      }
+                      title={
+                        overlayIsNative
+                          ? "关闭时按住歌词即可上下拖动；开启后触摸会穿过歌词浮层落到下面的应用，需要回这里关闭才能再次拖动。"
+                          : "关闭时按住歌词即可自由拖动；开启后点击会穿过歌词窗口，需要回这里关闭才能再次拖动。"
+                      }
+                      onChange={() => setDesktopLyricsLocked(!desktopLyricsLocked)}
+                    />
+                    <RatioSlider
+                      label="悬浮字号"
+                      ariaLabel="悬浮歌词字号"
+                      min={DESKTOP_FONT_SCALE_MIN}
+                      max={DESKTOP_FONT_SCALE_MAX}
+                      value={desktopLyricsFontScale}
+                      onChange={setDesktopLyricsFontScale}
+                    />
+                    <RatioSlider
+                      label="不透明度"
+                      ariaLabel="悬浮歌词不透明度"
+                      min={DESKTOP_OPACITY_MIN}
+                      max={1}
+                      value={desktopLyricsOpacity}
+                      onChange={setDesktopLyricsOpacity}
+                    />
+                    <LyricsColorRow
+                      label={overlayIsNative ? "高亮色" : "主行颜色"}
+                      title="主行已唱部分：黑 / 白 / 单色（色相线）/ 渐变。超长句跟着进度滚动。"
+                      value={desktopAccent}
+                      onChange={setDesktopAccentPaint}
+                    />
+                    <LyricsColorRow
+                      label="副行颜色"
+                      title="翻译或下一句已唱部分：跟随主行 / 黑 / 白 / 单色 / 渐变。超长句跟着进度滚动。"
+                      value={desktopSecondary}
+                      onChange={setDesktopSecondaryPaint}
+                      allowFollow
+                    />
+                    <LyricsColorRow
+                      label="未唱颜色"
+                      title="还没唱到的字：黑 / 白 / 灰 / 单色 / 渐变。主行与副行共用。"
+                      value={desktopDim}
+                      onChange={setDesktopDimPaint}
+                      allowGray
+                    />
+                    <LyricsColorRow
+                      label="边框颜色"
+                      title="描边（整行始终绘制）：黑 / 白 / 单色 / 渐变 / 无。"
+                      value={desktopStroke}
+                      onChange={setDesktopStrokePaint}
+                      allowNone
+                    />
+                  </>
+                ) : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </Panel>
+
+        <Panel heading="下载源与账号" dense>
+          <InlineNotice text={accountsError} block />
+          <div className="kd-djp-switch-list" aria-label="下载源与账号">
+            {SEARCH_PLATFORMS.map((item) => {
+              const enabled = normalizeEnabledPlatforms(settings?.enabled_platforms).includes(
+                item.id,
+              );
+              const account = accountsByPlatform.get(item.id);
+              if (!account) return null;
+              const current = normalizeEnabledPlatforms(settings?.enabled_platforms);
+              return (
+                <AccountRow
+                  key={item.id}
+                  account={account}
+                  sourceEnabled={enabled}
+                  sourceToggleDisabled={!settings || (enabled && current.length <= 1)}
+                  onToggleSource={() => {
+                    if (!settings) return;
+                    void saveSettings(patchEnabledPlatform(settings, item.id, !enabled));
+                  }}
+                />
+              );
+            })}
+          </div>
+        </Panel>
+
+        {LABS_BUILD ? <Panel heading="实验性内容" dense>
+          <div className="kd-djp-groups">
+            <div className="kd-djp-switch-list" aria-label="实验性内容">
+              <Switch
+                checked={settings?.experimental_dj_mode ?? false}
+                disabled={!settings}
+                label="DJ 模式"
+                title="开启后在顶栏显示 DJ 模式切换按钮；关闭后返回管理器模式并隐藏入口。"
+                onChange={() =>
+                  void saveSettings({
+                    experimental_dj_mode: !(settings?.experimental_dj_mode ?? false),
+                  })
+                }
+              />
+              <Switch
+                checked={settings?.experimental_one_library ?? false}
+                disabled={!settings}
+                label="OneLibrary"
+                title="开启后在侧栏与多板块中显示 OneLibrary 入口。"
+                onChange={() =>
+                  void saveSettings({
+                    experimental_one_library: !(settings?.experimental_one_library ?? false),
+                  })
+                }
+              />
+            </div>
+            {settings?.experimental_dj_mode ? (
+              <div className="kd-djp-group">
+                <div className="kd-djp-label-row">
+                  <span className="kd-djp-label">DJ 模式</span>
+                  <SettingsExpandToggle
+                    expanded={djExpanded}
+                    onToggle={() => setDjExpanded((open) => !open)}
+                    label="DJ 模式"
+                  />
+                </div>
+                {djExpanded ? (
+                  <div className="kd-djp-switch-list" aria-label="DJ 模式选项">
+                    <Switch
+                      checked={vocalCut}
+                      label="人声渐消"
+                      title="接歌时渐进削弱上一首的中置人声；保留立体声侧声道和补偿增益。"
+                      onChange={() => setVocalCut(!vocalCut)}
+                    />
+                    <Switch
+                      checked={applyInOutPoints}
+                      label="应用开始 / 结束点"
+                      title="自动接播与自动续播时：有开始点就从那里起播，有结束点就到点切下一首；关掉则按首拍起播、波形尾段切歌。"
+                      onChange={() => setApplyInOutPoints(!applyInOutPoints)}
+                    />
+                    <Switch
+                      checked={autoBeatSync}
+                      label="自动对拍"
+                      title="开启后：点波形落到被点 1/4 小节内与当前播放相同的相位；SYNC 锁小节（黄线对齐）；接歌等到下一小节边界。关掉则点击精确落点，SYNC 只锁拍子（灰线对齐）。"
+                      onChange={() => setAutoBeatSync(!autoBeatSync)}
+                    />
+                    <Switch
+                      checked={playOnLoad}
+                      label="加载后立即播放"
+                      title="DJ 模式下把曲目装入 Deck 后立即从首拍起播；关掉则只装盘，停在首拍等你按播放。"
+                      onChange={() => setPlayOnLoad(!playOnLoad)}
+                    />
+                    <div className="kd-djp-group">
+                      <span className="kd-djp-label">接歌长度</span>
+                      <BarsSlider bars={bars} onChange={setBars} hint={lengthHint} />
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {settings?.experimental_one_library ? (
+              <div className="kd-djp-group">
+                <div className="kd-djp-label-row">
+                  <span className="kd-djp-label">OneLibrary</span>
+                  <SettingsExpandToggle
+                    expanded={oneLibraryExpanded}
+                    onToggle={() => setOneLibraryExpanded((open) => !open)}
+                    label="OneLibrary"
+                  />
+                </div>
+                {oneLibraryExpanded ? (
+                  <div className="kd-djp-switch-list" aria-label="OneLibrary 选项">
+                    <Switch
+                      checked={settings?.virtual_disk_auto_grow ?? true}
+                      disabled={!settings}
+                      label="空间不足时自动迁移至更大的镜像"
+                      title="仅用于 KDJ 虚拟磁盘；关闭后空间不足会停止写入并报错。"
+                      onChange={() =>
+                        void saveSettings({
+                          virtual_disk_auto_grow: !(settings?.virtual_disk_auto_grow ?? true),
+                        })
+                      }
+                    />
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        </Panel> : null}
+
+        <CliSkillExport />
       </div>
     </div>
   );

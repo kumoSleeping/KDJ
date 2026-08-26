@@ -42,6 +42,7 @@ function usePlayerPosition(trackId: number | null): number {
 function sourceLabel(platform: string | undefined): string {
   if (platform === "wyy") return "网易云";
   if (platform === "qqm") return "QQ 音乐";
+  if (platform === "ytm") return "YouTube Music";
   return "";
 }
 

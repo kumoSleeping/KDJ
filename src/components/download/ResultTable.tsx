@@ -6,7 +6,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Disc3,
-  Download,
   LoaderCircle,
   ListMusic,
   RotateCcw,
@@ -528,30 +527,28 @@ export function ResultTable({
             </span>
           ) : null}
           {item.platform ? <PlatformMark id={item.platform} size={13} /> : null}
-          <span className="kd-chip" data-tone="theme">
-            {KIND_LABEL[item.kind]}
-          </span>
           <strong className="kd-truncate" title={item.title || item.entry}>
             {item.title || item.entry}
           </strong>
+          {pickableCount > 0 ? (
+            <button
+              type="button"
+              className="kd-result-download-inline"
+              aria-label={`下载「${item.title || item.entry}」全部曲目`}
+              title="下载全部曲目"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDownloadItem(index);
+              }}
+            >
+              下载
+            </button>
+          ) : null}
           <span className="kd-faint">
             {item.groups.length} {item.platform === "bilibili" ? "个视频" : "首"}
           </span>
           <span className="kd-result-package-actions" style={{ marginLeft: "auto" }}>
             {!collapsed ? renderCollectionPager(item, pageWindow, true) : null}
-            {pickableCount > 0 ? (
-              <button
-                type="button"
-                className="kd-result-download-all"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onDownloadItem(index);
-                }}
-              >
-                <Download size={12} />
-                全部下载
-              </button>
-            ) : null}
           </span>
         </span>
       </td>
@@ -735,7 +732,7 @@ export function ResultTable({
                       totalColumns={totalColumns}
                       layout={layout}
                       rowNumber={flatRowOffset + position + 1}
-                      selectable={!group.in_library}
+                      selectable={group.sources.some((source) => source.platform !== "local")}
                       selected={selected.has(selectionKey(index, group.group_id))}
                       selectionMode={selectionMode}
                       onToggleSelect={() => onToggleSelect(selectionKey(index, group.group_id))}
@@ -897,18 +894,34 @@ export function ResultTable({
                   </td>
                   <td colSpan={Math.max(1, visibleColumns.length + 1)}>
                     <span className="kd-row" style={{ gap: "0.45rem", minWidth: 0 }}>
-                      <span
-                        className="kd-chip"
-                        data-tone={item.kind === "error" ? "danger" : "theme"}
-                      >
-                        {KIND_LABEL[item.kind]}
-                      </span>
                       {item.kind === "playlist" || item.kind === "artist" || item.kind === "album" ? (
                         <ListMusic size={13} className="kd-muted" />
-                      ) : null}
+                      ) : (
+                        <span
+                          className="kd-chip"
+                          data-tone={item.kind === "error" ? "danger" : "theme"}
+                        >
+                          {KIND_LABEL[item.kind]}
+                        </span>
+                      )}
                       <strong className="kd-truncate" title={item.title || item.entry}>
                         {item.title || item.entry}
                       </strong>
+                      {(item.kind === "playlist" || item.kind === "artist" || item.kind === "album") &&
+                        pickable.length > 0 ? (
+                          <button
+                            type="button"
+                            className="kd-result-download-inline"
+                            aria-label={`下载「${item.title || item.entry}」全部曲目`}
+                            title="下载全部曲目"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onDownloadItem(index);
+                            }}
+                          >
+                            下载
+                          </button>
+                        ) : null}
                       {item.error && (
                         <span
                           className="kd-row kd-truncate"
@@ -933,20 +946,6 @@ export function ResultTable({
                       <span className="kd-result-package-actions" style={{ marginLeft: "auto" }}>
                         {item.collections.length > 0 ? `${item.collections.length} 个集合` : ""}
                         {item.groups.length > 0 ? `${item.collections.length > 0 ? " · " : ""}${item.groups.length} 首` : ""}
-                        {(item.kind === "playlist" || item.kind === "artist" || item.kind === "album") &&
-                          pickable.length > 0 && (
-                            <button
-                              type="button"
-                              className="kd-result-download-all"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                onDownloadItem(index);
-                              }}
-                            >
-                              <Download size={12} />
-                              全部下载
-                            </button>
-                          )}
                       </span>
                     </span>
                   </td>

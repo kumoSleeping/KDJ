@@ -3,8 +3,8 @@ import type { SongSource } from "../types";
 import { copyText } from "./copyText";
 import { resolveLibraryPasteOp } from "./libraryPaste";
 import { isOutsideFolder } from "./outsideFolder";
+import { enqueueMediaDownloads } from "./mediaActions";
 import { useAppStore } from "../stores/appStore";
-import { useDownloadStore } from "../stores/downloadStore";
 import { useLibraryStore } from "../stores/libraryStore";
 import { usePlaylistStore } from "../stores/playlistStore";
 
@@ -177,11 +177,10 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
         if (searchClip?.length) {
           event.preventDefault();
           const quality = useAppStore.getState().settings?.default_quality ?? null;
-          void useDownloadStore
-            .getState()
-            .enqueue(searchClip, { quality, one_library_target: oneLibraryTarget })
-            .then(() => useAppStore.getState().openQueuePanel())
-            .catch(() => undefined);
+          void enqueueMediaDownloads(searchClip, {
+            quality,
+            one_library_target: oneLibraryTarget,
+          }).catch(() => undefined);
           return;
         }
       }
@@ -195,11 +194,7 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
           void search!.enqueueChosen();
         } else {
           const quality = useAppStore.getState().settings?.default_quality ?? null;
-          void useDownloadStore
-            .getState()
-            .enqueue(sources, { quality })
-            .then(() => useAppStore.getState().openQueuePanel())
-            .catch(() => undefined);
+          void enqueueMediaDownloads(sources, { quality }).catch(() => undefined);
         }
         return;
       }
@@ -212,11 +207,7 @@ export function useLibraryClipboard(search?: SearchListClipboard): void {
         if (!dest || isOutsideFolder(dest)) return;
         event.preventDefault();
         const quality = useAppStore.getState().settings?.default_quality ?? null;
-        void useDownloadStore
-          .getState()
-          .enqueue(searchClip, { quality, dest_dir: dest })
-          .then(() => useAppStore.getState().openQueuePanel())
-          .catch(() => undefined);
+        void enqueueMediaDownloads(searchClip, { quality, dest_dir: dest }).catch(() => undefined);
         return;
       }
 

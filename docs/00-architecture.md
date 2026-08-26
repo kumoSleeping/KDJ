@@ -90,8 +90,12 @@ sidecar/kdj/
 | POST | `/intake` | `IntakeRequest`（一大段文本，按行/逗号拆） | `IntakeResponse` |
 | GET | `/downloads` | — | `DownloadTask[]` |
 | POST | `/downloads` | `DownloadRequest` | `DownloadTask[]` |
+| GET | `/downloads/preparations/pending` | — | 需要外部挑战适配器的待准备任务 |
+| POST | `/downloads/{task_id}/prepared-source` | 一次性受信媒体源 | `{prepared: true}` |
+| POST | `/downloads/{task_id}/preparation-failed` | `{error: str}` | `DownloadTask` |
 | POST | `/downloads/{task_id}/cancel` | — | `DownloadTask` |
 | POST | `/downloads/clear` | — | `{removed: int}` |
+| POST | `/downloads/cancel-all` | — | `{canceled: int}` |
 | POST | `/video/resolve` | `{url: str}` | `VideoInfo` |
 | POST | `/video/download` | `VideoDownloadRequest` | `DownloadTask` |
 | GET | `/library/tracks` | query: `q,key,bpm_min,bpm_max,energy_min,sort,order,limit,offset,analyzed,folder,folder_deep` | `TrackPage` |
@@ -111,7 +115,9 @@ sidecar/kdj/
 | POST | `/library/folders/init` | `{path?}` | `FolderTree`（每层写 `.kdj/manifest.json`） |
 | POST | `/library/folders/order` | `{path, names[]}` | `FolderTree` |
 | POST | `/library/folders/move` | `{path, dest_parent}` | `FolderTree`（整枝搬走并 rebase path） |
+| POST | `/library/folders/merge` | `{paths[], dest_parent, name}` | `{tree, target}`（归并到指定位置的新文件夹） |
 | POST | `/library/folders/apply` | `{track_ids[], dest, op: "move"\|"link"}` | `FolderOpResult` |
+| POST | `/library/duplicates/analyze` | `{all, folders[], include_subfolders}` | 曲库优化结果：失效记录、离线根、重复组及推荐保留版本 |
 | GET | `/library/audio/{id}` | — | 音频文件流（`Range` 支持，供试听） |
 | GET | `/library/cover/{id}` | — | 封面 jpeg/png，无则 404 |
 
@@ -445,7 +451,13 @@ Serato 的交叉点：红↔绿 ≈ 200 Hz，绿↔蓝 ≈ 1.5 kHz。
 
 - 无标记的数字 = 库里有几首（`total_count`）
 - 红色 `+N` = 磁盘上有、库里还没有（`pending_count`）。**点这个文件夹就自动扫描导入**，
-  按设置决定要不要顺带分析。用户不该为了看见歌先去顶栏点一次「扫描目录」。
+  按设置决定要不要顺带分析。它同时是目录监听不可用时的安全兜底。
+
+桌面后端用递归文件系统监听维护曲库根。Finder / Explorer 在根内复制、移动、改名或
+删除媒体文件后，事件静默防抖并增量入库；文件夹树走独立的
+`library.folders.updated` 刷新，不占用手工扫描的进度条。完整 rename 事件会续用原
+track id，保留分析、评分和 Cue；曲库根掉挂载时绝不按“整库删除”处理。应用启动后
+还会在 WebSocket 连好时补扫一次，接住关机期间新增的文件。
 
 ### 曲库根目录不允许嵌套
 

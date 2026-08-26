@@ -39,11 +39,14 @@
   },
   "plugins": {
     "deep-link": {
-      "desktop": {
-        "schemes": [
-          "kdj"
-        ]
-      }
+      "mobile": [
+        {
+          "scheme": ["kdj"],
+          "host": "soundcloud",
+          "pathPrefix": ["/callback"],
+          "appLink": false
+        }
+      ]
     },
     "updater": {
       "endpoints": [

@@ -21,15 +21,55 @@ license = "GPL-3.0-or-later"
 
 [profile.release]
 # Audio decode, waveform extraction and realtime DSP are throughput paths. `z` more than doubled
-# cold waveform latency on M2; LTO + stripping still keep release artifacts compact at level 2.
-opt-level = 2
+# cold waveform latency on M2. Keep the application/server/provider surface size-optimized while
+# pinning the actual audio/DSP packages back to level 2 below.
+opt-level = "s"
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
 
-# Keep the latency-sensitive STEM crate explicitly pinned if the global profile is retuned later.
+# Latency-sensitive workspace crates. These own decode, waveform, realtime playback and STEM DSP.
+[profile.release.package.kdj-analysis]
+opt-level = 2
 [profile.release.package.kdj-stems]
+opt-level = 2
+[profile.release.package.kdj-player]
+opt-level = 2
+[profile.release.package.kdj-playback]
+opt-level = 2
+
+# Their hot loops live mostly in dependencies, so only overriding the workspace wrappers is not
+# enough. Keep codecs/resamplers/FFT throughput-optimized while the rest of the graph uses `s`.
+[profile.release.package.rubato]
+opt-level = 2
+[profile.release.package.rustfft]
+opt-level = 2
+[profile.release.package.realfft]
+opt-level = 2
+[profile.release.package.symphonia]
+opt-level = 2
+[profile.release.package.symphonia-core]
+opt-level = 2
+[profile.release.package.symphonia-bundle-flac]
+opt-level = 2
+[profile.release.package.symphonia-bundle-mp3]
+opt-level = 2
+[profile.release.package.symphonia-codec-aac]
+opt-level = 2
+[profile.release.package.symphonia-codec-alac]
+opt-level = 2
+[profile.release.package.symphonia-codec-pcm]
+opt-level = 2
+[profile.release.package.symphonia-codec-vorbis]
+opt-level = 2
+[profile.release.package.symphonia-format-isomp4]
+opt-level = 2
+[profile.release.package.symphonia-format-mkv]
+opt-level = 2
+[profile.release.package.symphonia-format-ogg]
+opt-level = 2
+[profile.release.package.symphonia-format-riff]
 opt-level = 2
 
 # tauri:dev 默认是 debug：波形/分析在未优化下单曲要几十秒，播放条会一直空着。

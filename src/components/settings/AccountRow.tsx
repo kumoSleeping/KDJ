@@ -163,7 +163,17 @@ function isMachineIdDetail(detail: string): boolean {
  * 整页都是红块。账号在设置里只是"连没连上"这一件事，一行就够了：
  * 左边名字 + 状态，右边一个文字按钮。
  */
-export function AccountRow({ account }: { account: Account }) {
+export function AccountRow({
+  account,
+  sourceEnabled,
+  sourceToggleDisabled = false,
+  onToggleSource,
+}: {
+  account: Account;
+  sourceEnabled: boolean;
+  sourceToggleDisabled?: boolean;
+  onToggleSource(): void;
+}) {
   const refreshAccounts = useAppStore((state) => state.refreshAccounts);
   const openSettingsPanel = useAppStore((state) => state.openSettingsPanel);
   const [busy, setBusy] = useState(false);
@@ -596,7 +606,36 @@ export function AccountRow({ account }: { account: Account }) {
           <InlineNotice text={notice} onDismiss={() => setNotice("")} />
         </div>
       </div>
-      <div style={settingRow.control}>
+      <div
+        style={{
+          ...settingRow.control,
+          display: "flex",
+          alignItems: "center",
+          gap: "0.1rem",
+        }}
+      >
+        <Button
+          size="sm"
+          variant="ghost"
+          role="switch"
+          aria-checked={sourceEnabled}
+          aria-label={account.label + "下载源：" + (sourceEnabled ? "开" : "关")}
+          title={
+            sourceToggleDisabled
+              ? "至少保留一个下载源"
+              : (sourceEnabled ? "关闭" : "开启") + account.label + "搜索与下载"
+          }
+          disabled={sourceToggleDisabled}
+          onClick={onToggleSource}
+        >
+          <span
+            className="kd-djp-toggle-state"
+            aria-hidden="true"
+            data-onoff={sourceEnabled ? "on" : "off"}
+          >
+            {sourceEnabled ? "开" : "关"}
+          </span>
+        </Button>
         {!account.supports_login ? (
           <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>
             无需登录

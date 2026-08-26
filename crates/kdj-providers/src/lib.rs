@@ -15,5 +15,5 @@ pub mod youtubemusic;
 
 pub use provider::{
     Capabilities, DownloadJob, MusicProvider, ProgressSink, ProtectedPreviewIdentity,
-    ProviderContext, ProviderLiveSettings,
+    ProviderContext, ProviderLiveSettings, VideoProvider,
 };

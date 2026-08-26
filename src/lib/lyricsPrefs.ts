@@ -21,9 +21,9 @@ const STORAGE_KEY = "kd-lyrics-prefs";
 /** 0.2.27 曾把在线补词默认设成关闭；新默认开启，并迁移旧的未配置状态。 */
 const ONLINE_LYRICS_PREF_VERSION = 1;
 
-export type LyricsEngine = "wyy" | "qqm";
+export type LyricsEngine = "wyy" | "qqm" | "ytm";
 /** 跟随曲库来源，或强制只用来源平台搜/取词。 */
-export type LyricsDisplaySource = "follow" | "wyy" | "qqm";
+export type LyricsDisplaySource = "follow" | "wyy" | "qqm" | "ytm";
 /**
  * 歌词附加层（面板右上角一字切换）：
  * off=原词 · meaning=意（翻译） · romaji=音（罗马音）
@@ -42,7 +42,7 @@ export interface LyricsPrefs {
   autoShow: boolean;
   /** 启用的搜词引擎；顺序 = 同分时的偏好。至少保留一家。 */
   engines: LyricsEngine[];
-  /** 显示来源：跟随曲目 / 强制网易云 / 强制 QQ。 */
+  /** 显示来源：跟随曲目 / 强制网易云 / 强制 QQ / 强制 YouTube Music。 */
   displaySource: LyricsDisplaySource;
   /** 本地没有下载歌词时，是否再按标题/艺人在线匹配。 */
   tryOnlineWhenMissing: boolean;
@@ -98,7 +98,7 @@ export interface LyricsPrefs {
 
 const DEFAULTS: LyricsPrefs = {
   autoShow: false,
-  engines: ["wyy", "qqm"],
+  engines: ["wyy", "qqm", "ytm"],
   displaySource: "follow",
   tryOnlineWhenMissing: true,
   lyricExtra: "meaning",
@@ -198,13 +198,19 @@ function normalizeEngines(value: unknown): LyricsEngine[] {
   if (!Array.isArray(value)) return [...DEFAULTS.engines];
   const out: LyricsEngine[] = [];
   for (const item of value) {
-    if ((item === "wyy" || item === "qqm") && !out.includes(item)) out.push(item);
+    if ((item === "wyy" || item === "qqm" || item === "ytm") && !out.includes(item)) {
+      out.push(item);
+    }
+  }
+  // 旧版默认双开（网易云+QQ）自动带上 YTM，正式启用原生歌词。
+  if (out.includes("wyy") && out.includes("qqm") && !out.includes("ytm")) {
+    out.push("ytm");
   }
   return out.length ? out : [...DEFAULTS.engines];
 }
 
 function normalizeSource(value: unknown): LyricsDisplaySource {
-  if (value === "wyy" || value === "qqm" || value === "follow") return value;
+  if (value === "wyy" || value === "qqm" || value === "ytm" || value === "follow") return value;
   return DEFAULTS.displaySource;
 }
 
@@ -227,19 +233,22 @@ function normalizeDesktopFontScale(value: unknown): number {
     : DEFAULTS.desktopFontScale;
 }
 
-/** 搜词引擎三态：双开 / 仅网易云 / 仅 QQ。 */
-export type LyricsEngineMode = "both" | "wyy" | "qqm";
+/** 搜词引擎：全部 / 仅网易云 / 仅 QQ / 仅 YouTube Music。 */
+export type LyricsEngineMode = "all" | "wyy" | "qqm" | "ytm";
 
 export function enginesMode(engines: readonly LyricsEngine[]): LyricsEngineMode {
   const hasWyy = engines.includes("wyy");
   const hasQqm = engines.includes("qqm");
-  if (hasWyy && hasQqm) return "both";
-  if (hasQqm && !hasWyy) return "qqm";
+  const hasYtm = engines.includes("ytm");
+  const count = [hasWyy, hasQqm, hasYtm].filter(Boolean).length;
+  if (count >= 2) return "all";
+  if (hasYtm) return "ytm";
+  if (hasQqm) return "qqm";
   return "wyy";
 }
 
 export function enginesFromMode(mode: LyricsEngineMode): LyricsEngine[] {
-  if (mode === "both") return ["wyy", "qqm"];
+  if (mode === "all") return ["wyy", "qqm", "ytm"];
   return [mode];
 }
 
@@ -500,7 +509,9 @@ export const useLyricsPrefs = create<LyricsPrefsState>((set, get) => ({
     let displaySource = get().displaySource;
     // 关掉的正是强制来源时，退回跟随。
     if (
-      (displaySource === "wyy" || displaySource === "qqm") &&
+      (displaySource === "wyy" ||
+        displaySource === "qqm" ||
+        displaySource === "ytm") &&
       !normalized.includes(displaySource)
     ) {
       displaySource = "follow";
@@ -534,7 +545,7 @@ export const useLyricsPrefs = create<LyricsPrefsState>((set, get) => ({
     const source = normalizeSource(displaySource);
     let engines = get().engines;
     // 强制某家时自动启用对应引擎。
-    if ((source === "wyy" || source === "qqm") && !engines.includes(source)) {
+    if ((source === "wyy" || source === "qqm" || source === "ytm") && !engines.includes(source)) {
       engines = [...engines, source];
     }
     set((state) => ({ displaySource: source, engines, prefsEpoch: state.prefsEpoch + 1 }));

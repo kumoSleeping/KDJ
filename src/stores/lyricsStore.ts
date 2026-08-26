@@ -73,7 +73,7 @@ const EMPTY_ENTRY = emptyEntry();
 
 function platformOf(track: Track): Platform | null {
   const raw = track.source_platform?.trim().toLowerCase();
-  if (raw === "wyy" || raw === "qqm") return raw;
+  if (raw === "wyy" || raw === "qqm" || raw === "ytm") return raw;
   return null;
 }
 
@@ -84,7 +84,7 @@ function requestOf(track: Track) {
   let platform = platformOf(track);
   let key = track.source_key || "";
 
-  if (prefer === "wyy" || prefer === "qqm") {
+  if (prefer === "wyy" || prefer === "qqm" || prefer === "ytm") {
     // 强制来源：曲库 key 对得上才直取，否则清空 key 让后端按该引擎搜。
     if (platform === prefer && key) {
       platform = prefer;
@@ -92,7 +92,7 @@ function requestOf(track: Track) {
       platform = prefer;
       key = "";
     }
-  } else if (platform === "wyy" || platform === "qqm") {
+  } else if (platform === "wyy" || platform === "qqm" || platform === "ytm") {
     if (!engines.includes(platform)) {
       // 跟随，但曲库来源引擎被关掉了：改走搜索。
       platform = null;

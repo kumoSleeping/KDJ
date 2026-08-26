@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ChevronDown,
@@ -26,8 +26,10 @@ import {
   RefreshCw,
   Trash2,
   Undo2,
+  X,
 } from "lucide-react";
 import { api } from "../../lib/api";
+import { isPlatformEnabled } from "../../lib/enabledPlatforms";
 import {
   FOLDER_DROP_PATH_ATTR,
   PLAYLIST_DROP_DEVICE_ATTR,
@@ -71,6 +73,7 @@ import { ContextMenu, InlineNotice } from "../common";
 import { PlatformMark } from "../download/PlatformMark";
 import { PlaylistSection } from "./PlaylistSection";
 import { isMidiBrowseActivate, midiBrowseItemProps } from "../../lib/midiLibraryNav";
+const LABS_BUILD = typeof __KDJ_LABS__ !== "undefined" && __KDJ_LABS__;
 
 /** @deprecated 请从 `lib/trackDrag` 引用；保留 re-export 以免旧 import 断掉。 */
 export { TRACK_DND_TYPE };
@@ -327,6 +330,7 @@ export function NarrowFolderRail({
   const filter = useLibraryStore((state) => state.filter);
   const setFilter = useLibraryStore((state) => state.setFilter);
   const settings = useAppStore((state) => state.settings);
+  const experimentalOneLibrary = LABS_BUILD && (settings?.experimental_one_library ?? false);
   const applyFolderOp = useLibraryStore((state) => state.applyFolderOp);
   const oneLibraryDevices = usePlaylistStore((state) => state.devices);
   const oneLibraryPlaylists = usePlaylistStore((state) => state.playlistsByDevice);
@@ -390,13 +394,14 @@ export function NarrowFolderRail({
     // 初次挂载优先恢复用户上次停留的来源；只有运行期间真正打开了另一份
     // 在线歌单，才跟随到对应平台。否则刷新/横竖屏切换会被旧播放状态抢走。
     if (!effectiveActiveStreamPlaylist || effectiveActiveStreamKey === previousKey) return;
+    if (!isPlatformEnabled(settings, effectiveActiveStreamPlaylist.platform)) return;
     setNarrowSource((current) =>
       current.kind === "stream" &&
       current.platform === effectiveActiveStreamPlaylist.platform
         ? current
         : { kind: "stream", platform: effectiveActiveStreamPlaylist.platform },
     );
-  }, [effectiveActiveStreamKey, effectiveActiveStreamPlaylist]);
+  }, [effectiveActiveStreamKey, effectiveActiveStreamPlaylist, settings]);
 
   useEffect(() => {
     if (narrowSource.kind !== "local") return;
@@ -407,6 +412,20 @@ export function NarrowFolderRail({
     const fallback = matching ?? roots[0];
     if (fallback) setNarrowSource({ kind: "local", rootPath: fallback.path });
   }, [filter.folder, folders, narrowSource]);
+
+  useEffect(() => {
+    if (narrowSource.kind !== "stream") return;
+    if (isPlatformEnabled(settings, narrowSource.platform)) return;
+    const fallback = roots[0];
+    setNarrowSource(
+      fallback ? { kind: "local", rootPath: fallback.path } : { kind: "local", rootPath: "" },
+    );
+  }, [narrowSource, roots, settings]);
+
+  const enabledStreamRoots = useMemo(
+    () => STREAM_ROOTS.filter((streamRoot) => isPlatformEnabled(settings, streamRoot.id)),
+    [settings],
+  );
 
   useEffect(() => {
     const clearDrop = () => setNarrowDrop("");
@@ -696,18 +715,20 @@ export function NarrowFolderRail({
       <span className="kd-narrow-rail-sep" />
       <div className="kd-narrow-source-roots kd-scroll" aria-label="媒体来源">
         {roots.map((root) => renderLocalFolderButton(root, true))}
-        <button
-          type="button"
-          data-active={narrowSource.kind === "onelibrary" || undefined}
-          {...midiBrowseItemProps("onelibrary", "onelibrary:root")}
-          aria-label="显示 OneLibrary 列表"
-          title="在下方显示 OneLibrary 列表"
-          onClick={() => setNarrowSource({ kind: "onelibrary" })}
-        >
-          <ListMusic size={15} />
-          <small>OneLibrary</small>
-        </button>
-        {STREAM_ROOTS.map((streamRoot) => (
+        {experimentalOneLibrary ? (
+          <button
+            type="button"
+            data-active={narrowSource.kind === "onelibrary" || undefined}
+            {...midiBrowseItemProps("onelibrary", "onelibrary:root")}
+            aria-label="显示 OneLibrary 列表"
+            title="在下方显示 OneLibrary 列表"
+            onClick={() => setNarrowSource({ kind: "onelibrary" })}
+          >
+            <ListMusic size={15} />
+            <small>OneLibrary</small>
+          </button>
+        ) : null}
+        {enabledStreamRoots.map((streamRoot) => (
           <button
             key={`narrow-stream-root:${streamRoot.id}`}
             type="button"
@@ -913,6 +934,7 @@ export function FolderTree({
   const applyFolderOp = useLibraryStore((state) => state.applyFolderOp);
   const paste = useLibraryStore((state) => state.paste);
   const startScan = useLibraryStore((state) => state.startScan);
+  const cancelScan = useLibraryStore((state) => state.cancelScan);
   const startAnalyze = useLibraryStore((state) => state.startAnalyze);
   const forgetFolder = useLibraryStore((state) => state.forgetFolder);
   const undo = useLibraryStore((state) => state.undo);
@@ -941,6 +963,10 @@ export function FolderTree({
   const [forgetArmed, setForgetArmed] = useState("");
 
   const roots = folders?.roots ?? [];
+  const enabledStreamRoots = useMemo(
+    () => STREAM_ROOTS.filter((streamRoot) => isPlatformEnabled(settings, streamRoot.id)),
+    [settings],
+  );
   const allTrackCount =
     statsTotal ??
     roots.reduce((sum, root) => sum + root.total_count, 0) + (folders?.outside ?? 0);
@@ -949,6 +975,11 @@ export function FolderTree({
   const [dropTarget, setDropTarget] = useState("");
   const [dropEdge, setDropEdge] = useState<"" | "before" | "after">("");
   const [menu, setMenu] = useState<MenuState | null>(null);
+  const [allMenu, setAllMenu] = useState<{ x: number; y: number } | null>(null);
+  /** 整库重扫会遍历所有根：第一次点只在原右键面板里上膛，第二次才启动。 */
+  const [rescanArmed, setRescanArmed] = useState(false);
+  const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
+  const folderSelectionAnchor = useRef("");
   const [newFolder, setNewFolder] = useState<{ parent: string; name: string; saving: boolean } | null>(null);
   /**
    * 文件夹操作失败就地贴在这一栏底下。原来走的是全局弹窗，
@@ -958,6 +989,54 @@ export function FolderTree({
   const [notice, setNotice] = useState("");
   const effectiveActiveStreamPlaylist =
     activeStreamPlaylist === undefined ? cachedActiveStreamPlaylist : activeStreamPlaylist;
+
+  const visibleFolderPaths = useMemo(() => {
+    const paths: string[] = [];
+    const visit = (nodes: FolderNode[]) => {
+      for (const node of nodes) {
+        paths.push(node.path);
+        if (expanded.has(node.path)) visit(node.children);
+      }
+    };
+    visit(roots);
+    return paths;
+  }, [expanded, roots]);
+
+  const folderByPath = useMemo(() => {
+    const nodes = new Map<string, FolderNode>();
+    const visit = (items: FolderNode[]) => {
+      for (const node of items) {
+        nodes.set(node.path, node);
+        visit(node.children);
+      }
+    };
+    visit(roots);
+    return nodes;
+  }, [roots]);
+
+  const selectFolderRow = (event: React.MouseEvent, node: FolderNode): boolean => {
+    if (event.metaKey || event.ctrlKey) {
+      setSelectedFolders((current) => {
+        const next = new Set(current);
+        if (!next.delete(node.path)) next.add(node.path);
+        return next;
+      });
+      folderSelectionAnchor.current = node.path;
+      return true;
+    }
+    if (event.shiftKey && folderSelectionAnchor.current) {
+      const start = visibleFolderPaths.indexOf(folderSelectionAnchor.current);
+      const end = visibleFolderPaths.indexOf(node.path);
+      if (start >= 0 && end >= 0) {
+        const [from, to] = start < end ? [start, end] : [end, start];
+        setSelectedFolders(new Set(visibleFolderPaths.slice(from, to + 1)));
+        return true;
+      }
+    }
+    setSelectedFolders(new Set([node.path]));
+    folderSelectionAnchor.current = node.path;
+    return false;
+  };
 
   useEffect(() => {
     const clearDrop = () => {
@@ -1052,6 +1131,26 @@ export function FolderTree({
         );
       })
       .catch((error: unknown) => setNotice(`操作失败：${(error as Error).message}`));
+  };
+
+  const analyzeFolderPaths = async (paths: string[] | null, includeSubfolders: boolean) => {
+    const ids = new Set<number>();
+    const scopes = paths ?? [""];
+    for (const folder of scopes) {
+      let offset = 0;
+      while (true) {
+        const page = await api.tracks({
+          folder,
+          folder_deep: includeSubfolders ? 1 : 0,
+          limit: 1000,
+          offset,
+        });
+        page.items.forEach((track) => ids.add(track.id));
+        offset += page.items.length;
+        if (page.items.length === 0 || offset >= page.total) break;
+      }
+    }
+    await startAnalyze([...ids], false);
   };
 
   const prompt = (title: string, initial = "") => {
@@ -1360,6 +1459,7 @@ export function FolderTree({
           {...{ [FOLDER_DROP_PATH_ATTR]: node.path }}
           {...midiBrowseItemProps("local", `local:folder:${node.path}`)}
           data-active={active}
+          data-selected={selectedFolders.has(node.path) || undefined}
           data-drop={dropTarget === node.path && dropEdge === ""}
           data-edge={dropTarget === node.path ? dropEdge || undefined : undefined}
           style={{ paddingLeft: `${0.35 + depth * 0.85}rem` }}
@@ -1368,6 +1468,7 @@ export function FolderTree({
           // 而且它没有"父目录的清单"可写。
           onClick={(event) => {
             if (hasTextSelectionWithin(event.currentTarget)) return;
+            if (selectFolderRow(event, node)) return;
             // 进文件夹默认按手排顺序看（set 是按演出顺序排的）；
             // 回到全库时手排没有意义，还原成默认的按入库时间。
             setFilter(
@@ -1380,6 +1481,11 @@ export function FolderTree({
           }}
           onContextMenu={(event) => {
             event.preventDefault();
+            setAllMenu(null);
+            if (!selectedFolders.has(node.path)) {
+              setSelectedFolders(new Set([node.path]));
+              folderSelectionAnchor.current = node.path;
+            }
             setMenu({ node, x: event.clientX, y: event.clientY });
           }}
           onDragOverCapture={(event) => {
@@ -1476,6 +1582,7 @@ export function FolderTree({
             disabled={node.children.length === 0}
             onClick={(event) => {
               event.stopPropagation();
+              setAllMenu(null);
               toggle(node.path);
             }}
           >
@@ -1530,6 +1637,11 @@ export function FolderTree({
             aria-label="文件夹操作"
             onClick={(event) => {
               event.stopPropagation();
+              setAllMenu(null);
+              if (!selectedFolders.has(node.path)) {
+                setSelectedFolders(new Set([node.path]));
+                folderSelectionAnchor.current = node.path;
+              }
               const rect = event.currentTarget.getBoundingClientRect();
               setMenu({ node, x: rect.left, y: rect.bottom + 2 });
             }}
@@ -1564,6 +1676,25 @@ export function FolderTree({
     );
   };
 
+  const menuPaths = menu
+    ? selectedFolders.has(menu.node.path)
+      ? [...selectedFolders]
+      : [menu.node.path]
+    : [];
+  const selectionToken = menuPaths.slice().sort().join("|");
+  const canDeleteSelectedFolders =
+    menuPaths.length > 1 &&
+    menuPaths.every((path) => {
+      const node = folderByPath.get(path);
+      return Boolean(
+        node &&
+          !node.is_root &&
+          node.total_count === 0 &&
+          node.pending_count === 0 &&
+          node.children.length === 0,
+      );
+    });
+
   return (
     <div className="kd-folder-pane">
       {/* 原来这里有一行「文件夹」标题 + 「初始化顺序」图标 + 「含子级」勾选。
@@ -1597,8 +1728,16 @@ export function FolderTree({
           style={{ paddingLeft: "0.35rem" }}
           title="拖入下载会落到默认下载文件夹"
           onClick={() => {
+            setSelectedFolders(new Set());
             setFilter({ folder: "", sort: "added_at", order: "desc" });
             onNavigate?.();
+          }}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setMenu(null);
+            setSelectedFolders(new Set());
+            setRescanArmed(false);
+            setAllMenu({ x: event.clientX, y: event.clientY });
           }}
           onDragOverCapture={(event) => {
             if (!isSearchDownloadDrag(event)) return;
@@ -1628,9 +1767,24 @@ export function FolderTree({
           <Library size={13} />
           <span className="kd-truncate">全部曲目</span>
           <span className="kd-folder-count">{allTrackCount}</span>
+          <button
+            type="button"
+            className="kd-folder-more"
+            aria-label="全部曲目操作"
+            onClick={(event) => {
+              event.stopPropagation();
+              setMenu(null);
+              setSelectedFolders(new Set());
+              setRescanArmed(false);
+              const rect = event.currentTarget.getBoundingClientRect();
+              setAllMenu({ x: rect.left, y: rect.bottom + 2 });
+            }}
+          >
+            <MoreHorizontal size={12} />
+          </button>
         </div>
         <PlaylistSection onNavigate={onNavigate} onNotice={setNotice} />
-        {STREAM_ROOTS.map(renderStreamRoot)}
+        {enabledStreamRoots.map(renderStreamRoot)}
         {roots.map((root) => render(root, 0))}
         {roots.length === 0 && (
           <p className="kd-faint" style={{ padding: "0.6rem 0.5rem", lineHeight: 1.5 }}>
@@ -1719,25 +1873,123 @@ export function FolderTree({
             <PencilLine size={12} />
             重命名
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              const paths = menuPaths;
+              setMenu(null);
+              useAppStore.getState().openDuplicatePanel(paths);
+            }}
+          >
+            <Files size={12} />
+            曲库优化分析（含子文件夹）
+            {menuPaths.length > 1 ? " · " + menuPaths.length + " 个" : ""}
+          </button>
+          {menuPaths.length > 1 ? (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  const paths = menuPaths;
+                  setMenu(null);
+                  void window.kdj?.pickFolder()
+                    .then((destParent) => {
+                      if (!destParent) return;
+                      const name = prompt("新文件夹名称", "合并文件夹");
+                      if (!name) return;
+                      return api.mergeFolders(paths, destParent, name);
+                    })
+                    .then((result) => {
+                      if (!result) return;
+                      setSelectedFolders(new Set([result.target]));
+                      setExpanded((current) => new Set(current).add(result.target));
+                      setFilter({ folder: result.target, sort: "custom" });
+                      return refreshFolders();
+                    })
+                    .catch((error: unknown) => setNotice("合并失败：" + (error as Error).message));
+                }}
+              >
+                <FolderDown size={12} />
+                合并到新文件夹…
+              </button>
+              <button
+                type="button"
+                data-danger="true"
+                onClick={() => {
+                  if (forgetArmed !== selectionToken) {
+                    setForgetArmed(selectionToken);
+                    return;
+                  }
+                  const paths = menuPaths.slice().sort((left, right) => right.length - left.length);
+                  setMenu(null);
+                  setForgetArmed("");
+                  void (async () => {
+                    let removed = 0;
+                    for (const path of paths) {
+                      removed += (await api.forgetFolder(path)).removed;
+                    }
+                    setSelectedFolders(new Set());
+                    await Promise.all([
+                      refreshFolders(),
+                      useLibraryStore.getState().refresh(),
+                      useLibraryStore.getState().refreshStats(),
+                    ]);
+                    setNotice("已批量移出曲库 " + removed + " 首（磁盘文件保留）");
+                  })().catch((error: unknown) =>
+                    setNotice("批量移出失败：" + (error as Error).message),
+                  );
+                }}
+              >
+                <ListX size={12} />
+                {forgetArmed === selectionToken
+                  ? "再次点击确认批量移出"
+                  : "批量移出曲库（文件保留）"}
+              </button>
+              <button
+                type="button"
+                data-danger="true"
+                disabled={!canDeleteSelectedFolders}
+                title={
+                  canDeleteSelectedFolders
+                    ? "从磁盘删除所选空文件夹"
+                    : "只有不含曲目、待导入文件和子目录的文件夹才能批量删除"
+                }
+                onClick={() => {
+                  const paths = menuPaths.slice().sort((left, right) => right.length - left.length);
+                  setMenu(null);
+                  void (async () => {
+                    for (const path of paths) await api.deleteFolder(path);
+                    setSelectedFolders(new Set());
+                    await refreshFolders();
+                  })().catch((error: unknown) =>
+                    setNotice("批量删除失败：" + (error as Error).message),
+                  );
+                }}
+              >
+                <Trash2 size={12} />
+                批量删除空文件夹
+              </button>
+            </>
+          ) : null}
           <button type="button" onClick={() => {
-            const folder = menu.node.path;
+            const paths = menuPaths;
             setMenu(null);
-            void (async () => {
-              // 后端单页最多 1000 首，文件夹可能远大于这个数；完整翻页后
-              // 一次性交给分析队列，避免右键看似成功却只分析前 1000 首。
-              const ids: number[] = [];
-              let offset = 0;
-              while (true) {
-                const page = await api.tracks({ folder, folder_deep: 1, limit: 1000, offset });
-                ids.push(...page.items.map((track) => track.id));
-                offset += page.items.length;
-                if (page.items.length === 0 || offset >= page.total) break;
-              }
-              await startAnalyze(ids, false);
-            })().catch((error: unknown) => setNotice((error as Error).message));
+            void analyzeFolderPaths(paths, true).catch((error: unknown) =>
+              setNotice((error as Error).message),
+            );
           }}>
             <BarChart3 size={12} />
-            分析此文件夹
+            分析曲目（含子文件夹）
+          </button>
+          <button type="button" onClick={() => {
+            const paths = menuPaths;
+            setMenu(null);
+            void analyzeFolderPaths(paths, false).catch((error: unknown) =>
+              setNotice((error as Error).message),
+            );
+          }}>
+            <BarChart3 size={12} />
+            仅分析当前层
           </button>
           <button
             type="button"
@@ -1893,6 +2145,87 @@ export function FolderTree({
             <Trash2 size={12} />
             删除空文件夹
           </button>
+        </ContextMenu>
+      )}
+      {allMenu && (
+        <ContextMenu
+          x={allMenu.x}
+          y={allMenu.y}
+          onClose={() => {
+            setAllMenu(null);
+            setRescanArmed(false);
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              setAllMenu(null);
+              useAppStore.getState().openDuplicatePanel([], { all: true });
+            }}
+          >
+            <Files size={12} />
+            曲库优化分析
+          </button>
+          <button
+            type="button"
+            disabled={allTrackCount === 0}
+            onClick={() => {
+              setAllMenu(null);
+              void analyzeFolderPaths(null, true).catch((error: unknown) =>
+                setNotice((error as Error).message),
+              );
+            }}
+          >
+            <BarChart3 size={12} />
+            分析全部曲目
+          </button>
+          <button
+            type="button"
+            data-danger={scanning || rescanArmed ? "true" : undefined}
+            disabled={scanning ? scan?.current === "正在取消…" : roots.length === 0}
+            title={
+              scanning
+                ? "停止扫描；已经完成入库的曲目会保留"
+                : rescanArmed
+                  ? "再次点击后才会重新遍历全部曲库文件夹"
+                  : "需要在当前右键面板中再次确认"
+            }
+            onClick={() => {
+              if (scanning) {
+                setAllMenu(null);
+                setRescanArmed(false);
+                void cancelScan().catch((error: unknown) =>
+                  setNotice(`取消扫描失败：${(error as Error).message}`),
+                );
+                return;
+              }
+              if (!rescanArmed) {
+                setRescanArmed(true);
+                return;
+              }
+              const paths = roots.map((root) => root.path);
+              setAllMenu(null);
+              setRescanArmed(false);
+              void startScan(paths, true).catch((error: unknown) =>
+                setNotice((error as Error).message),
+              );
+            }}
+          >
+            {scanning ? <X size={12} /> : <RefreshCw size={12} />}
+            {scanning
+              ? scan?.current === "正在取消…"
+                ? "正在取消扫描"
+                : "取消正在进行的扫描"
+              : rescanArmed
+                ? `确认重新扫描 ${roots.length} 个文件夹？`
+                : "重新扫描全部文件夹…"}
+          </button>
+          {rescanArmed && !scanning ? (
+            <button type="button" onClick={() => setRescanArmed(false)}>
+              <X size={12} />
+              取消
+            </button>
+          ) : null}
         </ContextMenu>
       )}
     </div>

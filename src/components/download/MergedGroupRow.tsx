@@ -190,11 +190,6 @@ export function MergedGroupRow({
         />
       </span>
       <span className="kd-result-title-text">{group.title}</span>
-      {group.in_library && (
-        <span className="kd-chip" data-tone="ok" style={{ marginLeft: "0.4rem" }}>
-          已入库
-        </span>
-      )}
     </>
   );
 

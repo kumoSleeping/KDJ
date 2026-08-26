@@ -61,7 +61,6 @@ export function resolvedCollectionItem(
   response: CollectionResolveResponse,
 ): IntakeItem {
   const token = collectionToken(collection);
-  const inLibrary = new Set(response.in_library_source_keys ?? []);
   const groups: MergedGroup[] = response.sources.map((source, index) => ({
     group_id: `${token}:${source.key}:${index}`,
     title: source.title,
@@ -72,7 +71,6 @@ export function resolvedCollectionItem(
     sources: [source],
     best_source_index: 0,
     score: 0,
-    in_library: inLibrary.has(`${source.platform}:${source.key}`),
   }));
 
   return {

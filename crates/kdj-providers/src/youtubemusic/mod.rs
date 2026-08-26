@@ -5,4 +5,4 @@ pub mod client;
 pub mod decipher;
 pub mod provider;
 
-pub use provider::YoutubeMusicProvider;
+pub use provider::{gvs_playback_request, YoutubeMusicProvider};

@@ -789,7 +789,6 @@ pub fn merge_results(
                 sources: cluster,
                 best_source_index: best_index,
                 score,
-                in_library: false,
             },
         ));
     }
@@ -832,47 +831,7 @@ pub fn singleton_group(source: SongSource) -> MergedGroup {
         best_source_index: 0,
         // 单来源没有"跨平台覆盖度"可言，分数留 0，和 Python 版一致
         score: 0.0,
-        in_library: false,
         sources: vec![source],
-    }
-}
-
-/// 曲库里已经有的 `platform:key` 集合。
-///
-/// 逐组查库太慢（一次搜索几十组），一次取回来在内存里比。取不到就当作空集：
-/// 这个集合只影响一个角标，读失败不该让整条搜索接口失败。
-pub fn library_source_keys(state: &AppState) -> HashSet<String> {
-    let query = || -> anyhow::Result<HashSet<String>> {
-        let conn = state.library.db().conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT source_platform, source_key FROM tracks \
-             WHERE source_key IS NOT NULL AND source_key <> ''",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(format!(
-                "{}:{}",
-                row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                row.get::<_, String>(1)?
-            ))
-        })?;
-        Ok(rows.filter_map(std::result::Result::ok).collect())
-    };
-    match query() {
-        Ok(keys) => keys,
-        Err(err) => {
-            tracing::warn!("读取曲库来源索引失败：{err:#}");
-            HashSet::new()
-        }
-    }
-}
-
-/// 给每一组打上「曲库里已经有了」的标记。
-pub fn mark_in_library(groups: &mut [MergedGroup], known: &HashSet<String>) {
-    for group in groups {
-        group.in_library = group.sources.iter().any(|source| {
-            source.platform == Platform::Local
-                || known.contains(&format!("{}:{}", source.platform, source.key))
-        });
     }
 }
 
@@ -1028,7 +987,7 @@ pub async fn search(state: &Arc<AppState>, payload: &SearchRequest) -> SearchRes
     // 梯队和优先级用**请求里原样的** platforms，不是过滤后的 targets：
     // 网易云和 QQ 共用靠前那一个的梯队，其中一家没搜（未登录/provider 缺失）时，
     // 另一家仍然应该继承它的位置——用 targets 的话 B 站会趁虚上浮到音乐平台前面。
-    let mut groups = if payload.kind == SearchKind::Song {
+    let groups = if payload.kind == SearchKind::Song {
         if payload.merge {
             merge_results(&payload.query, &per_platform, &payload.platforms)
         } else {
@@ -1038,9 +997,6 @@ pub async fn search(state: &Arc<AppState>, payload: &SearchRequest) -> SearchRes
     } else {
         Vec::new()
     };
-    // 「已在库」角标：一次取回曲库里的来源键，在内存里比
-    mark_in_library(&mut groups, &library_source_keys(state));
-
     // 同一关键词的集合结果按用户的平台优先级稳定排列；集合之间不跨平台合并，
     // 因为不同平台的作者/专辑 ID 没有可证明的一一对应关系。
     collections.sort_by_key(|item| {
@@ -1337,28 +1293,6 @@ mod tests {
     }
 
     #[test]
-    fn in_library_lights_up_when_any_source_is_already_downloaded() {
-        let mut group = singleton_group(source(Platform::Qqm, "S", &["x"], 100.0));
-        let key = format!("{}:{}", Platform::Qqm, group.sources[0].key);
-
-        mark_in_library(std::slice::from_mut(&mut group), &HashSet::new());
-        assert!(!group.in_library);
-
-        mark_in_library(std::slice::from_mut(&mut group), &HashSet::from([key]));
-        assert!(group.in_library, "曲库里已经有这一条来源，角标要亮");
-    }
-
-    #[test]
-    fn local_source_is_always_marked_as_in_library() {
-        let mut group = singleton_group(source(Platform::Local, "S", &["x"], 100.0));
-        mark_in_library(std::slice::from_mut(&mut group), &HashSet::new());
-        assert!(
-            group.in_library,
-            "本地平台只来自曲库数据库，本身就代表已入库"
-        );
-    }
-
-    #[test]
     fn online_source_wins_download_choice_over_local_flac() {
         let mut local = source(Platform::Local, "S", &["x"], 100.0);
         local.max_quality = Some(Quality::Flac);
@@ -1369,15 +1303,6 @@ mod tests {
             1,
             "本地只提示已有，不能成为在线下载请求的 source"
         );
-    }
-
-    #[test]
-    fn in_library_does_not_match_across_platforms() {
-        // 键必须是 "平台:key"，只比 key 的话网易云的 123 会点亮 QQ 的 123
-        let mut group = singleton_group(source(Platform::Qqm, "S", &["x"], 100.0));
-        let foreign = format!("{}:{}", Platform::Wyy, group.sources[0].key);
-        mark_in_library(std::slice::from_mut(&mut group), &HashSet::from([foreign]));
-        assert!(!group.in_library);
     }
 
     #[test]
@@ -1540,18 +1465,6 @@ mod tests {
         let titles: Vec<&str> = groups.iter().map(|g| g.title.as_str()).collect();
         assert_eq!(titles, vec!["w1", "q1", "w2"], "顺序要交错，不是按平台分块");
         assert!(groups.iter().all(|g| g.sources.len() == 1));
-    }
-
-    #[test]
-    fn the_in_library_badge_matches_on_platform_and_key() {
-        let mut groups = vec![
-            singleton_group(source(Platform::Wyy, "有", &[], 1.0)),
-            singleton_group(source(Platform::Qqm, "没有", &[], 1.0)),
-        ];
-        let known: HashSet<String> = ["wyy:wyy-有".to_string()].into_iter().collect();
-        mark_in_library(&mut groups, &known);
-        assert!(groups[0].in_library);
-        assert!(!groups[1].in_library, "同名不同平台不能算命中");
     }
 }
 

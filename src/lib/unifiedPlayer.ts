@@ -199,6 +199,10 @@ export interface UnifiedPlayer {
   setQueue(sources: UnifiedPlayerSource[]): Promise<UnifiedPlayerState>;
   play(): Promise<UnifiedPlayerState>;
   pause(): Promise<UnifiedPlayerState>;
+  /** Explicit source replacement fence: silence current output without waiting behind UI commandTail. */
+  interruptPause(): Promise<UnifiedPlayerState>;
+  /** Stop and physically remove the installed source before resolving an unrelated online track. */
+  interruptClear(): Promise<UnifiedPlayerState>;
   playDeck(deck: 0 | 1): Promise<UnifiedPlayerState>;
   pauseDeck(deck: 0 | 1): Promise<UnifiedPlayerState>;
   setDeckPfl(deck: 0 | 1, enabled: boolean): Promise<UnifiedPlayerState>;
@@ -432,6 +436,14 @@ class MobileNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
 
   pause(): Promise<UnifiedPlayerState> {
     return this.enqueue(pause);
+  }
+
+  interruptPause(): Promise<UnifiedPlayerState> {
+    return this.pause();
+  }
+
+  interruptClear(): Promise<UnifiedPlayerState> {
+    return this.pause();
   }
 
   playDeck(): Promise<UnifiedPlayerState> {
@@ -1078,6 +1090,22 @@ class DesktopNativePlayer extends PlayerStateOwner implements UnifiedPlayer {
     return this.command({ type: "pause" }, () => revision === this.transportRevision);
   }
 
+  interruptPause(): Promise<UnifiedPlayerState> {
+    // A new unresolved source must silence the installed Deck even when a stale load/queue command
+    // still occupies the serialized intent lane. Control commands share the Rust actor but bypass
+    // commandTail and cannot be invalidated by a later transport revision before submission.
+    this.transportRevision += 1;
+    return this.control({ type: "pause" });
+  }
+
+  interruptClear(): Promise<UnifiedPlayerState> {
+    this.transportRevision += 1;
+    this.loadRevision += 1;
+    this.prepareRevision += 1;
+    this.queueRevision += 1;
+    return this.control({ type: "clear" });
+  }
+
   playDeck(deck: 0 | 1): Promise<UnifiedPlayerState> {
     return this.command({ type: "playDeck", deck });
   }
@@ -1586,6 +1614,18 @@ class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
     djEngine.cancel();
     djEngine.hardPause(djEngine.frontElement());
     return Promise.resolve(this.publish({ ...this.snapshot, status: "paused", playing: false }));
+  }
+
+  interruptPause(): Promise<UnifiedPlayerState> {
+    return this.pause();
+  }
+
+  interruptClear(): Promise<UnifiedPlayerState> {
+    this.pause();
+    const audio = djEngine.frontElement();
+    audio.removeAttribute("src");
+    audio.load();
+    return Promise.resolve(this.publish(INITIAL_STATE));
   }
 
   async playDeck(deck: 0 | 1): Promise<UnifiedPlayerState> {

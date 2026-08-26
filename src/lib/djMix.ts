@@ -2683,6 +2683,27 @@ export const djEngine = {
     if (wasTransitioning) setTransitionPhase("idle");
   },
 
+  /** Explicit unrelated-source boundary: unlike cancel(), this also removes the current front.
+   * cancel() intentionally preserves the front Deck for normal DJ rollback; online resolution
+   * must not have that rollback source available after the UI has switched titles. */
+  clearAllPlayback(): void {
+    djEngine.cancel();
+    djEngine.releaseDecodedPlayback();
+    clearPreparedNextDeck();
+    for (const el of elements) {
+      try {
+        el.pause();
+        el.removeAttribute("src");
+        el.load();
+      } catch {
+        // A detached WebView media element may already be unavailable during source replacement.
+      }
+    }
+    if (ctx && decks) {
+      for (const deck of decks) neutralize(ctx, deck, 0);
+    }
+  },
+
   /** 普通起播前调用：避免上次软停把 fader 留在 0 导致「按了播放却没声」。 */
   ensureAudible(): void {
     abortTransport();

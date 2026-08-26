@@ -16,6 +16,7 @@ import { withDownloadDisplay } from "./downloadDisplay";
 import { rememberVideoEnqueue } from "./queueTaskDraft";
 import { useAppStore } from "../stores/appStore";
 import { useDownloadStore } from "../stores/downloadStore";
+import { enqueueMediaDownloads } from "./mediaActions";
 import { useLibraryStore } from "../stores/libraryStore";
 import {
   dispatchStreamDeckDrop,
@@ -502,7 +503,7 @@ export async function enqueueSearchQueuePayload(payload: ActiveSearchDrag): Prom
   }
   if (payload.sources.length === 0) throw new Error("没有可下载的在线来源");
   const quality = useAppStore.getState().settings?.default_quality ?? null;
-  await downloads.enqueue(payload.sources, { quality });
+  await enqueueMediaDownloads(payload.sources, { quality });
 }
 
 /** 在线歌曲直接下载到当前设备 OneLibrary 列表；成品先进入本地曲库，再由持久化补写器复制到设备。 */
@@ -515,7 +516,7 @@ export async function enqueueSearchOneLibraryPayload(
   }
   useAppStore.getState().openQueuePanel();
   const quality = useAppStore.getState().settings?.default_quality ?? null;
-  await useDownloadStore.getState().enqueue(payload.sources, {
+  await enqueueMediaDownloads(payload.sources, {
     quality,
     one_library_target: target,
   });
@@ -571,6 +572,7 @@ export async function enqueueSearchPayload(
         artist,
         quality: payload.request.audio_only ? "audio" : `${payload.request.max_height ?? 1080}p`,
         state: "queued",
+        phase: "waiting",
         progress: 0,
         downloaded_bytes: 0,
         total_bytes: 0,
@@ -615,6 +617,7 @@ export async function enqueueSearchPayload(
     artist: source.artists?.filter(Boolean).join(", ") || "",
     quality: String(quality ?? ""),
     state: "queued" as const,
+    phase: "waiting" as const,
     progress: 0,
     downloaded_bytes: 0,
     total_bytes: 0,
@@ -624,12 +627,18 @@ export async function enqueueSearchPayload(
     track_id: null,
     dest_dir: dest,
     cover: source.cover?.trim() || undefined,
-    created_at: now,
-    updated_at: now,
+    // 同一批乐观行也要保留来源顺序；完全相同的时间只能退回随机 UUID 排，
+    // 队列就会在真实任务回来前短暂乱序。
+    created_at: now + index * 0.000001,
+    updated_at: now + index * 0.000001,
   }));
   downloads.mergeTasks(optimistic);
   try {
-    const tasks = await downloads.enqueue(payload.sources, { quality, dest_dir: dest });
+    const tasks = await enqueueMediaDownloads(payload.sources, {
+      quality,
+      dest_dir: dest,
+      revealQueue: false,
+    });
     for (const task of optimistic) downloads.removeLocal(task.id);
     // 服务端任务不带封面；按入队顺序把搜索结果封面盖回去。
     downloads.mergeTasks(

@@ -18,11 +18,20 @@ use kdj_core::models::{
 };
 use kdj_core::musical_key::parse_musical_key;
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 use crate::one_library_analysis::{preserve_external_cue_sections, AnalysisBundle, LocalAnalysis};
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 use diesel::{Connection, RunQueryDsl};
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 use rbox::one_library::{FileType, NewContent, OneLibrary};
 
 const DB_RELATIVE: [&str; 3] = ["PIONEER", "rekordbox", "exportLibrary.db"];
@@ -45,16 +54,25 @@ static AUTHORIZED_REMOVABLE_DISKS: RwLock<Vec<PathBuf>> = RwLock::new(Vec::new()
 /// 就会在 macOS 上变成多轮全卷枚举。写入仍由 `current_device(..., true)` 强制重扫。
 const DEVICE_READ_CACHE_TTL: Duration = Duration::from_secs(10);
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 struct CachedDeviceEnumeration {
     refreshed_at: Instant,
     devices: Vec<RemovableDevice>,
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 static DEVICE_ENUMERATION_CACHE: Mutex<Option<CachedDeviceEnumeration>> = Mutex::new(None);
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileRevision {
     exists: bool,
@@ -62,14 +80,20 @@ struct FileRevision {
     modified_ns: u128,
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OneLibraryRevision {
     database: FileRevision,
     wal: FileRevision,
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 #[derive(Debug, Clone)]
 struct CachedCoverSource {
     image: Option<PathBuf>,
@@ -86,7 +110,10 @@ pub(crate) struct OneLibraryContentFile {
     pub portable_waveform_dir: Option<PathBuf>,
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 struct CachedOneLibraryRead {
     revision: OneLibraryRevision,
     playlists: Option<Vec<OneLibraryPlaylist>>,
@@ -95,7 +122,10 @@ struct CachedOneLibraryRead {
     cover_sources: HashMap<i32, CachedCoverSource>,
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 impl CachedOneLibraryRead {
     fn new(revision: OneLibraryRevision) -> Self {
         Self {
@@ -110,19 +140,28 @@ impl CachedOneLibraryRead {
 
 /// 只缓存反序列化后的只读快照，不缓存 SQLCipher 连接。djay 写 WAL 后 revision
 /// 改变，下一轮自动丢弃旧快照；这样保留跨进程刷新，又不会每三秒重开加密库。
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 static ONE_LIBRARY_READ_CACHE: LazyLock<RwLock<HashMap<PathBuf, CachedOneLibraryRead>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// schema 只会在数据库文件被替换时变化。creation time 在 macOS ExFAT 与 Windows
 /// VHD 上都稳定，不会像 mtime 一样被普通曲目写入反复打掉。
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 static DJAY_SCHEMA_CHECKED: LazyLock<RwLock<HashMap<PathBuf, Option<u128>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// 旧 KDJ 导出可能没有 `analysisDataFilePath`。每个数据库文件只扫描一次；新导出
 /// 从创建时就带占位 ANLZ，不需要靠轮询反复检查。
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 static ANALYSIS_PATHS_CHECKED: LazyLock<RwLock<HashMap<PathBuf, Option<u128>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
@@ -160,12 +199,18 @@ fn one_library_db(root: &Path) -> PathBuf {
         .join(DB_RELATIVE[2])
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn cache_key(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn file_revision(path: &Path) -> FileRevision {
     let Ok(metadata) = path.metadata() else {
         return FileRevision {
@@ -187,7 +232,10 @@ fn file_revision(path: &Path) -> FileRevision {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn one_library_revision(db_path: &Path) -> OneLibraryRevision {
     OneLibraryRevision {
         database: file_revision(db_path),
@@ -195,7 +243,10 @@ fn one_library_revision(db_path: &Path) -> OneLibraryRevision {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn schema_created_ns(db_path: &Path) -> Option<u128> {
     db_path
         .metadata()
@@ -207,7 +258,10 @@ fn schema_created_ns(db_path: &Path) -> Option<u128> {
         .map(|value| value.as_nanos())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn invalidate_one_library_read_cache(db_path: &Path) {
     ONE_LIBRARY_READ_CACHE
         .write()
@@ -215,7 +269,10 @@ fn invalidate_one_library_read_cache(db_path: &Path) {
         .remove(&cache_key(db_path));
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn invalidate_one_library_schema_cache(db_path: &Path) {
     let key = cache_key(db_path);
     DJAY_SCHEMA_CHECKED
@@ -228,7 +285,10 @@ fn invalidate_one_library_schema_cache(db_path: &Path) {
         .remove(&key);
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn cached_playlists(
     db_path: &Path,
     revision: OneLibraryRevision,
@@ -242,7 +302,10 @@ fn cached_playlists(
         .flatten()
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn cached_playlist_tracks(
     db_path: &Path,
     revision: OneLibraryRevision,
@@ -257,7 +320,10 @@ fn cached_playlist_tracks(
         .flatten()
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn cached_content_file(
     db_path: &Path,
     revision: OneLibraryRevision,
@@ -298,7 +364,10 @@ fn one_library_content_file_snapshot(
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn cached_cover_source(
     db_path: &Path,
     revision: OneLibraryRevision,
@@ -313,7 +382,10 @@ fn cached_cover_source(
         .flatten()
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn update_read_cache(
     db_path: &Path,
     revision: OneLibraryRevision,
@@ -335,7 +407,10 @@ fn update_read_cache(
     update(entry);
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn file_signature(path: &Path) -> (u64, u128) {
     let Ok(metadata) = path.metadata() else {
         return (0, 0);
@@ -349,7 +424,10 @@ fn file_signature(path: &Path) -> (u64, u128) {
     (metadata.len(), modified_ns)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn read_one_library(db_path: &Path) -> Result<OneLibrary> {
     // djay 与 KDJ 会交替读写同一份 SQLCipher/WAL 数据库。长期缓存 r2d2 池会让
     // KDJ 在界面轮询结束后仍持有 db/wal/shm；djay 随后的拖入操作可能因此拿不到
@@ -387,7 +465,10 @@ fn macos_pseudo_or_system_volume(path: &Path) -> bool {
         || path.starts_with("/Volumes/com.apple.TimeMachine.localsnapshots")
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn cached_removable_devices() -> Option<Vec<RemovableDevice>> {
     DEVICE_ENUMERATION_CACHE
         .lock()
@@ -397,7 +478,10 @@ fn cached_removable_devices() -> Option<Vec<RemovableDevice>> {
         .map(|cached| cached.devices.clone())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn remember_removable_devices(devices: &[RemovableDevice]) {
     *DEVICE_ENUMERATION_CACHE
         .lock()
@@ -407,7 +491,10 @@ fn remember_removable_devices(devices: &[RemovableDevice]) {
     });
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn removable_devices() -> Vec<RemovableDevice> {
     let disks = sysinfo::Disks::new_with_refreshed_list();
     let managed = managed_virtual_disk_mount();
@@ -470,7 +557,10 @@ pub fn removable_devices() -> Vec<RemovableDevice> {
     devices
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn authorize_removable_device(requested: &str) -> Result<RemovableDevice> {
     let requested = Path::new(requested)
         .canonicalize()
@@ -524,18 +614,21 @@ pub fn authorize_removable_device(requested: &str) -> Result<RemovableDevice> {
         .context("移动存储已授权，但重新枚举时没有找到该卷")
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn removable_devices() -> Vec<RemovableDevice> {
     Vec::new()
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn authorize_removable_device(_requested: &str) -> Result<RemovableDevice> {
     anyhow::bail!("移动端不支持授权 OneLibrary 外置存储")
 }
 
 /// 每次写入前重新枚举，前端五秒前看到的 U 盘可能已经被拔掉。
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn current_device(requested: &str, require_writable: bool) -> Result<RemovableDevice> {
     let requested = Path::new(requested);
     let requested = requested
@@ -571,7 +664,10 @@ fn current_device(requested: &str, require_writable: bool) -> Result<RemovableDe
     Ok(device)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn checked_device(requested: &str) -> Result<RemovableDevice> {
     current_device(requested, true)
 }
@@ -657,7 +753,10 @@ fn copy_atomic(source: &Path, destination: &Path) -> Result<u64> {
     Ok(copied)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn write_analysis_bundle(
     root: &Path,
     bundle: AnalysisBundle,
@@ -729,7 +828,10 @@ fn write_analysis_bundle(
     Ok(changed)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn write_missing_analysis_bundle(
     root: &Path,
     bundle: AnalysisBundle,
@@ -767,7 +869,10 @@ fn write_missing_analysis_bundle(
     Ok(changed)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn file_type(path: &Path) -> Result<i32> {
     let extension = path
         .extension()
@@ -778,7 +883,10 @@ fn file_type(path: &Path) -> Result<i32> {
         .map_err(anyhow::Error::msg)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn backup_database(db_path: &Path) -> Result<Option<PathBuf>> {
     if !db_path.exists() {
         return Ok(None);
@@ -806,7 +914,10 @@ fn backup_database(db_path: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(backup))
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn restore_database(db_path: &Path, backup: Option<&Path>) {
     invalidate_one_library_read_cache(db_path);
     invalidate_one_library_schema_cache(db_path);
@@ -822,14 +933,20 @@ fn restore_database(db_path: &Path, backup: Option<&Path>) {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 #[derive(diesel::QueryableByName)]
 struct SqlCount {
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     count: i64,
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn schema_column_count(
     conn: &mut rbox::one_library::DbConn,
     table: &str,
@@ -846,7 +963,10 @@ fn schema_column_count(
 /// 更新计数错误初始化为 0，与官方 OneLibrary 基线不一致。同时补齐官方默认的
 /// Hot Cue 自动载入标记。只迁移缺失项；官方/djay 所建的
 /// 兼容库检测通过后不写。
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn repair_djay_schema(db_path: &Path) -> Result<bool> {
     let key = cache_key(db_path);
     let created_ns = schema_created_ns(db_path);
@@ -1025,7 +1145,10 @@ fn repair_djay_schema(db_path: &Path) -> Result<bool> {
 /// 0.2.39 只在 djay 自己完成分析后才可能得到 `analysisDataFilePath`。但 djay 的
 /// Cue 持久化目标正是 ANLZ；没有路径时 Cue 只留在当前 deck，另一 deck 立即读不到。
 /// 为旧 KDJ 曲目补最小可写 bundle，不伪造 beatgrid/波形，也绝不替换已有分析文件。
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn repair_missing_kdj_analysis_bundles(db_path: &Path) -> Result<bool> {
     let key = cache_key(db_path);
     let created_ns = schema_created_ns(db_path);
@@ -1123,7 +1246,10 @@ fn repair_missing_kdj_analysis_bundles(db_path: &Path) -> Result<bool> {
 /// rbox 0.1.5 的首版建库 migration 有两组拼写问题：`originalartist_id` 与 ORM
 /// 字段名不一致，而且外键引用了各 lookup 表里不存在的 `id` 列。读取现成的官方
 /// OneLibrary 不受影响；只有 KDJ 新建库时要补这层兼容列/触发器。
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn repair_new_rbox_schema(db_path: &Path) -> Result<()> {
     let mut conn = rbox::one_library::establish_connection(
         db_path
@@ -1165,7 +1291,10 @@ fn repair_new_rbox_schema(db_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn open_or_create_library(db_path: &Path) -> Result<OneLibrary> {
     if db_path.is_file() {
         repair_djay_schema(db_path)?;
@@ -1185,7 +1314,10 @@ fn open_or_create_library(db_path: &Path) -> Result<OneLibrary> {
 /// OneLibrary 的 1-based 顺序读取，并会把两首歌的 `0, 1` 判成缺少序号 2。
 /// 所有写操作结束后统一改成每个列表内连续的 `1..=N`；相同旧序号再按 content id
 /// 排序，以便顺便修复旧版写出的重复/断档数据。
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn normalize_playlist_content_sequences(db_path: &Path) -> Result<usize> {
     let mut conn = rbox::one_library::establish_connection(
         db_path
@@ -1233,7 +1365,10 @@ fn checked_one_library_name(name: &str) -> Result<String> {
     Ok(name.to_owned())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn one_library_playlists(requested_device: &str) -> Result<Vec<OneLibraryPlaylist>> {
     let device = current_device(requested_device, false)?;
     let db_path = one_library_db(Path::new(&device.path));
@@ -1271,7 +1406,10 @@ pub fn one_library_playlists(requested_device: &str) -> Result<Vec<OneLibraryPla
     Ok(playlists)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn cue_time_ms(usec: Option<i32>, frame_150: Option<i32>) -> Option<i64> {
     if let Some(usec) = usec.filter(|value| *value >= 0) {
         return Some((i64::from(usec) + 500) / 1_000);
@@ -1282,7 +1420,10 @@ fn cue_time_ms(usec: Option<i32>, frame_150: Option<i32>) -> Option<i64> {
 }
 
 /// 一次读完整张 cue/color 表再按 content 分组，避免列表中每首歌各占一次加密库连接。
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn one_library_cue_points(library: &OneLibrary) -> Result<HashMap<i32, Vec<CuePoint>>> {
     let colors: HashMap<i32, String> = library
         .get_colors()?
@@ -1321,7 +1462,10 @@ fn one_library_cue_points(library: &OneLibrary) -> Result<HashMap<i32, Vec<CuePo
     Ok(by_content)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn managed_cues_equal(existing: &[CuePoint], managed: &[CuePoint]) -> bool {
     let normalize = |cues: &[CuePoint]| {
         let mut values: Vec<_> = cues
@@ -1348,14 +1492,20 @@ fn managed_cues_equal(existing: &[CuePoint], managed: &[CuePoint]) -> bool {
     normalize(existing) == normalize(managed)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn cue_frame_150(ms: i64) -> i32 {
     i32::try_from(ms.saturating_mul(150).saturating_add(500) / 1_000).unwrap_or(i32::MAX)
 }
 
 /// 同步 OneLibrary 标准 cue 表。ANLZ 负责播放器加载，数据库负责列表交换与颜色/备注；
 /// Engine DJ 一样维护两份，不能只写其中一边。
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn replace_one_library_cues(
     db_path: &Path,
     content_id: i32,
@@ -1434,7 +1584,10 @@ fn replace_one_library_cues(
     Ok(())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn one_library_playlist_tracks(
     requested_device: &str,
     playlist_id: i32,
@@ -1616,7 +1769,10 @@ pub fn one_library_playlist_tracks(
     Ok(tracks)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn one_library_relative_path(root: &Path, value: &str) -> Result<PathBuf> {
     let relative = Path::new(value.trim_start_matches(['/', '\\']));
     anyhow::ensure!(
@@ -1628,7 +1784,10 @@ fn one_library_relative_path(root: &Path, value: &str) -> Result<PathBuf> {
     Ok(root.join(relative))
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn one_library_existing_path(root: &Path, value: &str) -> Result<PathBuf> {
     let canonical_root = root
         .canonicalize()
@@ -1636,7 +1795,10 @@ fn one_library_existing_path(root: &Path, value: &str) -> Result<PathBuf> {
     one_library_existing_path_from_root(&canonical_root, root, value)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn one_library_existing_path_from_root(
     canonical_root: &Path,
     root: &Path,
@@ -1653,7 +1815,10 @@ fn one_library_existing_path_from_root(
     Ok(canonical_path)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub(crate) fn one_library_content_file(
     requested_device: &str,
     content_id: i32,
@@ -1690,7 +1855,10 @@ pub(crate) fn one_library_content_file(
     Ok(result)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn cover_extension_and_mime(data: &[u8]) -> Result<(&'static str, String)> {
     if data.starts_with(b"\x89PNG\r\n\x1a\n") {
         Ok(("png", "image/png".into()))
@@ -1701,7 +1869,10 @@ fn cover_extension_and_mime(data: &[u8]) -> Result<(&'static str, String)> {
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn read_one_library_cover_source(source: &CachedCoverSource) -> Result<(Vec<u8>, String)> {
     if let Some(image_path) = &source.image {
         if let Ok(data) = fs::read(image_path) {
@@ -1713,7 +1884,10 @@ fn read_one_library_cover_source(source: &CachedCoverSource) -> Result<(Vec<u8>,
     kdj_providers::tags::read_cover(&source.audio).context("没有封面")
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn one_library_cover(requested_device: &str, content_id: i32) -> Result<(Vec<u8>, String)> {
     anyhow::ensure!(content_id > 0, "OneLibrary 曲目无效");
     let device = current_device(requested_device, false)?;
@@ -1752,7 +1926,10 @@ pub fn one_library_cover(requested_device: &str, content_id: i32) -> Result<(Vec
     read_one_library_cover_source(&source)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn set_one_library_cover(
     requested_device: &str,
     content_id: i32,
@@ -1778,7 +1955,10 @@ pub fn set_one_library_cover(
     Ok(local_track_id)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn set_one_library_cover_at_root(root: &Path, content_id: i32, data: &[u8]) -> Result<()> {
     anyhow::ensure!(content_id > 0, "OneLibrary 曲目无效");
     let (extension, _) = cover_extension_and_mime(data)?;
@@ -1869,7 +2049,10 @@ fn set_one_library_cover_at_root(root: &Path, content_id: i32, data: &[u8]) -> R
     Ok(())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn set_one_library_rating(
     requested_device: &str,
     content_id: i32,
@@ -1895,7 +2078,10 @@ pub fn set_one_library_rating(
     Ok(local_track_id)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn set_one_library_rating_at_root(root: &Path, content_id: i32, rating: i32) -> Result<()> {
     anyhow::ensure!(content_id > 0, "OneLibrary 曲目无效");
     anyhow::ensure!((0..=5).contains(&rating), "评分必须在 0 到 5 星之间");
@@ -1928,7 +2114,10 @@ fn set_one_library_rating_at_root(root: &Path, content_id: i32, rating: i32) -> 
     Ok(())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn linked_one_library_content_ids(root: &Path, local_track_id: i64) -> Result<Vec<i32>> {
     let Some(master_id) = i32::try_from(local_track_id).ok() else {
         return Ok(Vec::new());
@@ -1952,7 +2141,10 @@ fn linked_one_library_content_ids(root: &Path, local_track_id: i64) -> Result<Ve
         .collect())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn sync_local_rating_to_one_libraries(local_track_id: i64, rating: i32) -> Result<()> {
     let mut errors = Vec::new();
     for device in removable_devices()
@@ -1975,7 +2167,10 @@ pub fn sync_local_rating_to_one_libraries(local_track_id: i64, rating: i32) -> R
     Ok(())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn sync_local_cover_to_one_libraries(local_track_id: i64, data: &[u8]) -> Result<()> {
     let mut errors = Vec::new();
     for device in removable_devices()
@@ -1998,7 +2193,10 @@ pub fn sync_local_cover_to_one_libraries(local_track_id: i64, data: &[u8]) -> Re
     Ok(())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn move_one_library_playlist(
     requested_device: &str,
     playlist_id: i32,
@@ -2042,7 +2240,10 @@ pub fn move_one_library_playlist(
     one_library_playlists(requested_device)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn copy_one_library_playlist_tracks(
     source_device_path: &str,
     source_playlist_id: i32,
@@ -2174,7 +2375,10 @@ pub fn copy_one_library_playlist_tracks(
     one_library_playlist_tracks(target_device_path, target_playlist_id)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn reorder_one_library_contents(
     library: &OneLibrary,
     playlist_id: i32,
@@ -2209,7 +2413,10 @@ fn reorder_one_library_contents(
     Ok(())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn reorder_one_library_playlist_tracks(
     requested_device: &str,
     playlist_id: i32,
@@ -2234,7 +2441,10 @@ pub fn reorder_one_library_playlist_tracks(
     one_library_playlist_tracks(requested_device, playlist_id)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn remove_one_library_playlist_tracks(
     requested_device: &str,
     playlist_id: i32,
@@ -2280,7 +2490,10 @@ pub fn remove_one_library_playlist_tracks(
     one_library_playlist_tracks(requested_device, playlist_id)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn create_one_library_playlist(
     requested_device: &str,
     name: &str,
@@ -2314,7 +2527,10 @@ pub fn create_one_library_playlist(
     result
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn rename_one_library_playlist(
     requested_device: &str,
     playlist_id: i32,
@@ -2340,7 +2556,10 @@ pub fn rename_one_library_playlist(
     result
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn delete_one_library_playlist(requested_device: &str, playlist_id: i32) -> Result<()> {
     let device = checked_device(requested_device)?;
     let db_path = one_library_db(Path::new(&device.path));
@@ -2401,7 +2620,10 @@ fn write_m3u(root: &Path, playlist_name: &str, entries: &[(Track, PathBuf)]) -> 
     Ok(())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn one_library_image_is_readable(
     root: &Path,
     library: &OneLibrary,
@@ -2427,7 +2649,10 @@ fn one_library_image_is_readable(
 
 /// 把音频内嵌封面变成 OneLibrary 的显式 image 记录。djay 浏览 OneLibrary 时只看
 /// 这个关联，不会像 KDJ 自己的封面端点一样回退读取音频标签。
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn export_embedded_cover(
     root: &Path,
     source: &Path,
@@ -2477,7 +2702,10 @@ fn export_embedded_cover(
     Ok(Some(image.id))
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn existing_kdj_content_paths(db_path: &Path) -> Result<HashMap<i64, String>> {
     if !db_path.is_file() {
         return Ok(HashMap::new());
@@ -2523,7 +2751,10 @@ fn existing_kdj_content_paths(db_path: &Path) -> Result<HashMap<i64, String>> {
         .collect())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 fn export_playlist_to_device(
     device: RemovableDevice,
     target_playlist_id: Option<i32>,
@@ -2959,7 +3190,10 @@ fn export_playlist_to_device(
     result
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn add_one_library_playlist_tracks(
     requested_device: &str,
     playlist_id: i32,
@@ -2979,7 +3213,10 @@ pub fn add_one_library_playlist_tracks(
     export_playlist_to_device(device, Some(playlist_id), &name, tracks, analysis_cache_dir)
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn one_library_capacity_plan(
     requested_device: &str,
     tracks: &[Track],
@@ -3012,53 +3249,53 @@ pub fn one_library_capacity_plan(
     })
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn one_library_playlists(_requested_device: &str) -> Result<Vec<OneLibraryPlaylist>> {
     Ok(Vec::new())
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn one_library_cover(_requested_device: &str, _content_id: i32) -> Result<(Vec<u8>, String)> {
-    anyhow::bail!("移动端暂不支持读取 OneLibrary")
+    anyhow::bail!("当前构建不支持读取 OneLibrary")
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub(crate) fn one_library_content_file(
     _requested_device: &str,
     _content_id: i32,
 ) -> Result<OneLibraryContentFile> {
-    anyhow::bail!("移动端暂不支持读取 OneLibrary")
+    anyhow::bail!("当前构建不支持读取 OneLibrary")
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn set_one_library_cover(
     _requested_device: &str,
     _content_id: i32,
     _data: &[u8],
 ) -> Result<Option<i64>> {
-    anyhow::bail!("移动端暂不支持写入 OneLibrary")
+    anyhow::bail!("当前构建不支持写入 OneLibrary")
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn set_one_library_rating(
     _requested_device: &str,
     _content_id: i32,
     _rating: i32,
 ) -> Result<Option<i64>> {
-    anyhow::bail!("移动端暂不支持写入 OneLibrary")
+    anyhow::bail!("当前构建不支持写入 OneLibrary")
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn sync_local_rating_to_one_libraries(_local_track_id: i64, _rating: i32) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn sync_local_cover_to_one_libraries(_local_track_id: i64, _data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn one_library_playlist_tracks(
     _requested_device: &str,
     _playlist_id: i32,
@@ -3066,17 +3303,17 @@ pub fn one_library_playlist_tracks(
     Ok(Vec::new())
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn move_one_library_playlist(
     _requested_device: &str,
     _playlist_id: i32,
     _parent_id: i32,
     _sequence: Option<i32>,
 ) -> Result<Vec<OneLibraryPlaylist>> {
-    anyhow::bail!("移动端暂不支持写入 OneLibrary")
+    anyhow::bail!("当前构建不支持写入 OneLibrary")
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn copy_one_library_playlist_tracks(
     _source_device_path: &str,
     _source_playlist_id: i32,
@@ -3084,67 +3321,67 @@ pub fn copy_one_library_playlist_tracks(
     _target_playlist_id: i32,
     _content_ids: Vec<i32>,
 ) -> Result<Vec<OneLibraryTrack>> {
-    anyhow::bail!("移动端暂不支持写入 OneLibrary")
+    anyhow::bail!("当前构建不支持写入 OneLibrary")
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn reorder_one_library_playlist_tracks(
     _requested_device: &str,
     _playlist_id: i32,
     _content_ids: Vec<i32>,
 ) -> Result<Vec<OneLibraryTrack>> {
-    anyhow::bail!("移动端暂不支持写入 OneLibrary")
+    anyhow::bail!("当前构建不支持写入 OneLibrary")
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn remove_one_library_playlist_tracks(
     _requested_device: &str,
     _playlist_id: i32,
     _content_ids: Vec<i32>,
 ) -> Result<Vec<OneLibraryTrack>> {
-    anyhow::bail!("移动端暂不支持写入 OneLibrary")
+    anyhow::bail!("当前构建不支持写入 OneLibrary")
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn create_one_library_playlist(
     _requested_device: &str,
     _name: &str,
     _parent_id: Option<i32>,
     _folder: bool,
 ) -> Result<OneLibraryPlaylist> {
-    anyhow::bail!("移动端暂不支持写入 OneLibrary")
+    anyhow::bail!("当前构建不支持写入 OneLibrary")
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn rename_one_library_playlist(
     _requested_device: &str,
     _playlist_id: i32,
     _name: &str,
 ) -> Result<()> {
-    anyhow::bail!("移动端暂不支持写入 OneLibrary")
+    anyhow::bail!("当前构建不支持写入 OneLibrary")
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn delete_one_library_playlist(_requested_device: &str, _playlist_id: i32) -> Result<()> {
-    anyhow::bail!("移动端暂不支持写入 OneLibrary")
+    anyhow::bail!("当前构建不支持写入 OneLibrary")
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn add_one_library_playlist_tracks(
     _requested_device: &str,
     _playlist_id: i32,
     _tracks: Vec<Track>,
     _analysis_cache_dir: Option<&Path>,
 ) -> Result<PlaylistExportResult> {
-    anyhow::bail!("移动端暂不支持写入 OneLibrary")
+    anyhow::bail!("当前构建不支持写入 OneLibrary")
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(not(feature = "onelibrary"), target_os = "android", target_os = "ios"))]
 pub fn one_library_capacity_plan(
     _requested_device: &str,
     _tracks: &[Track],
 ) -> Result<OneLibraryCapacityPlan> {
-    anyhow::bail!("移动端暂不支持写入 OneLibrary")
+    anyhow::bail!("当前构建不支持写入 OneLibrary")
 }
 
 #[cfg(test)]
@@ -3184,14 +3421,20 @@ mod tests {
         );
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(
+        feature = "onelibrary",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     #[derive(diesel::QueryableByName)]
     struct PlaylistContentSequence {
         #[diesel(sql_type = diesel::sql_types::Integer)]
         sequence_no: i32,
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(
+        feature = "onelibrary",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     fn playlist_content_sequences(db_path: &Path, playlist_id: i32) -> Vec<i32> {
         let mut conn = rbox::one_library::establish_connection(db_path.to_str().unwrap()).unwrap();
         diesel::sql_query(
@@ -3279,7 +3522,10 @@ mod tests {
         }
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(
+        feature = "onelibrary",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     #[test]
     fn read_snapshot_cache_invalidates_for_database_and_wal_changes() {
         let root = std::env::temp_dir().join(format!(
@@ -3333,7 +3579,10 @@ mod tests {
         assert!(!first.1.is_absolute());
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(
+        feature = "onelibrary",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     #[test]
     fn reads_standard_one_library_memory_hot_and_loop_cues() {
         let root = std::env::temp_dir().join(format!(
@@ -3397,7 +3646,10 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(
+        feature = "onelibrary",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     #[test]
     fn repairs_missing_kdj_analysis_path_or_files_with_a_writable_cue_bundle() {
         let root = std::env::temp_dir().join(format!(
@@ -3449,7 +3701,10 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(
+        feature = "onelibrary",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     #[test]
     fn repairs_old_kdj_rows_without_overriding_an_explicit_hot_cue_setting() {
         let root = std::env::temp_dir().join(format!(
@@ -3501,7 +3756,10 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(
+        feature = "onelibrary",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     #[test]
     fn one_library_content_paths_cannot_escape_the_device_root() {
         let base = std::env::temp_dir().join(format!(
@@ -3534,7 +3792,10 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(
+        feature = "onelibrary",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     #[test]
     fn one_library_cover_updates_audio_and_database_image_together() {
         let root = std::env::temp_dir().join(format!(
@@ -3612,7 +3873,10 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(
+        feature = "onelibrary",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     #[test]
     fn portable_export_links_embedded_cover_for_new_and_reused_content() {
         let base = std::env::temp_dir().join(format!(
@@ -3672,7 +3936,10 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(
+        feature = "onelibrary",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     #[test]
     fn one_library_rating_updates_only_the_database_content() {
         let root = std::env::temp_dir().join(format!(
@@ -3721,7 +3988,10 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(
+        feature = "onelibrary",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     #[test]
     fn portable_export_creates_a_readable_encrypted_onelibrary() {
         let base = std::env::temp_dir().join(format!(
@@ -3830,7 +4100,10 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(
+        feature = "onelibrary",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     #[test]
     fn portable_export_round_trips_managed_hot_loops_and_explicit_clear() {
         let base = std::env::temp_dir().join(format!(
@@ -3916,7 +4189,10 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(
+        feature = "onelibrary",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     #[test]
     fn portable_export_reuses_cached_local_analysis_without_decoding_audio() {
         let base = std::env::temp_dir().join(format!(
@@ -3950,10 +4226,10 @@ mod tests {
             &kdj_core::models::Waveform {
                 track_id: track.id,
                 duration: 4.0,
-                amp: vec![0.0, 0.4, 1.0, 0.3],
-                r: vec![0, 255, 64, 32],
-                g: vec![0, 64, 255, 64],
-                b: vec![0, 32, 64, 255],
+                amp: vec![0.4; crate::waveform::RELEASE_OVERVIEW_BUCKETS],
+                r: vec![255; crate::waveform::RELEASE_OVERVIEW_BUCKETS],
+                g: vec![64; crate::waveform::RELEASE_OVERVIEW_BUCKETS],
+                b: vec![32; crate::waveform::RELEASE_OVERVIEW_BUCKETS],
             },
         )
         .unwrap();
@@ -4021,7 +4297,10 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(all(
+        feature = "onelibrary",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     #[test]
     fn one_library_writes_djay_compatible_playlist_content_sequences() {
         let base = std::env::temp_dir().join(format!(

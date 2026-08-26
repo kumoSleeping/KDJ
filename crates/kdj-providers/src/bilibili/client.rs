@@ -136,30 +136,71 @@ impl BiliClient {
     // ------------------------------------------------------------ API
 
     async fn get_json(&self, url: &str) -> Result<Value> {
-        let mut request = self
-            .http
-            .get(url)
-            .header(reqwest::header::REFERER, "https://www.bilibili.com/");
-        let cookie = self.cookie_header();
-        if !cookie.is_empty() {
-            request = request.header(reqwest::header::COOKIE, cookie);
+        const ATTEMPTS: usize = 3;
+        let mut last_error = String::new();
+        for attempt in 0..ATTEMPTS {
+            let mut request = self
+                .http
+                .get(url)
+                .header(reqwest::header::REFERER, "https://www.bilibili.com/")
+                .header(reqwest::header::ORIGIN, "https://www.bilibili.com")
+                .header(reqwest::header::ACCEPT, "application/json, text/plain, */*");
+            let cookie = self.cookie_header();
+            if !cookie.is_empty() {
+                request = request.header(reqwest::header::COOKIE, cookie);
+            }
+            match request.send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    let content_type = response
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    let bytes = response
+                        .bytes()
+                        .await
+                        .with_context(|| format!("读取 B 站响应失败：{url}"))?;
+                    if let Ok(body) = serde_json::from_slice::<Value>(&bytes) {
+                        let code = body.get("code").and_then(Value::as_i64).unwrap_or(0);
+                        if code == 0 && status.is_success() {
+                            return Ok(body.get("data").cloned().unwrap_or(Value::Null));
+                        }
+                        let message = body
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("未知错误");
+                        last_error = format!("B 站接口返回 HTTP {status} code={code}：{message}");
+                        // -412 / 429 / 5xx are transient anti-abuse or edge responses. A short
+                        // backoff lets the post-download playlist refresh recover by itself.
+                        let transient = code == -412
+                            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                            || status.is_server_error();
+                        if !transient {
+                            anyhow::bail!(last_error);
+                        }
+                    } else {
+                        let preview = String::from_utf8_lossy(&bytes)
+                            .chars()
+                            .filter(|ch| !ch.is_control())
+                            .take(120)
+                            .collect::<String>();
+                        last_error = format!(
+                            "B 站响应不是合法 JSON：HTTP {status} content-type={content_type} {preview}"
+                        );
+                    }
+                }
+                Err(error) => {
+                    last_error = format!("B 站请求失败：{error}");
+                }
+            }
+            if attempt + 1 < ATTEMPTS {
+                tokio::time::sleep(std::time::Duration::from_millis(300 * (attempt as u64 + 1)))
+                    .await;
+            }
         }
-        let body: Value = request
-            .send()
-            .await
-            .with_context(|| format!("B 站请求失败：{url}"))?
-            .json()
-            .await
-            .with_context(|| format!("B 站响应不是合法 JSON：{url}"))?;
-        let code = body.get("code").and_then(Value::as_i64).unwrap_or(0);
-        if code != 0 {
-            let message = body
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("未知错误");
-            anyhow::bail!("B 站接口返回 code={code}：{message}");
-        }
-        Ok(body.get("data").cloned().unwrap_or(Value::Null))
+        anyhow::bail!("{last_error}：{url}")
     }
 
     /// 当前是否登录（顺带拿昵称/头像）。

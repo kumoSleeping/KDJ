@@ -29,6 +29,8 @@ const UPSERT_BATCH_SIZE: usize = 64;
 
 /// 进度回调：(已完成, 总数, 当前文件)
 pub type ProgressFn<'a> = &'a (dyn Fn(usize, usize, &str) + Send + Sync);
+/// 协作式取消：遍历目录和每批入库前都会检查。
+pub type CancelFn<'a> = &'a (dyn Fn() -> bool + Send + Sync);
 
 fn skip_dir(name: &str) -> bool {
     let lowered = name.to_lowercase();
@@ -48,7 +50,11 @@ fn is_audio(name: &str) -> bool {
 }
 
 /// 把入参里的文件/目录展开成去重后的音频文件列表（已归一化路径）。
-pub fn collect_files(paths: &[String], recursive: bool) -> Vec<String> {
+fn collect_files_cancellable(
+    paths: &[String],
+    recursive: bool,
+    should_cancel: CancelFn<'_>,
+) -> (Vec<String>, bool) {
     let mut found: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = Default::default();
     let mut add = |candidate: &Path, found: &mut Vec<String>| {
@@ -59,6 +65,9 @@ pub fn collect_files(paths: &[String], recursive: bool) -> Vec<String> {
     };
 
     for raw in paths {
+        if should_cancel() {
+            return (found, true);
+        }
         let root = PathBuf::from(normalize_path(Path::new(raw)));
         if root.is_file() {
             let name = root
@@ -86,6 +95,9 @@ pub fn collect_files(paths: &[String], recursive: bool) -> Vec<String> {
                 .collect();
             names.sort();
             for path in names {
+                if should_cancel() {
+                    return (found, true);
+                }
                 let name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -110,6 +122,9 @@ pub fn collect_files(paths: &[String], recursive: bool) -> Vec<String> {
                 !skip_dir(&entry.file_name().to_string_lossy())
             });
         for entry in walker.filter_map(|entry| entry.ok()) {
+            if should_cancel() {
+                return (found, true);
+            }
             // 目录不进结果；符号链接**要**进（follow_links(false) 下它的 file_type
             // 是 symlink 而不是 file），指向文件的链接和普通文件一样是曲目。
             // 指向目录的链接不展开，否则一个指回上层的链接会让遍历无限递归。
@@ -126,7 +141,11 @@ pub fn collect_files(paths: &[String], recursive: bool) -> Vec<String> {
             }
         }
     }
-    found
+    (found, false)
+}
+
+pub fn collect_files(paths: &[String], recursive: bool) -> Vec<String> {
+    collect_files_cancellable(paths, recursive, &|| false).0
 }
 
 /// 一次扫描的结果。
@@ -143,6 +162,8 @@ pub struct ScanReport {
     /// TCC 被拒、外置盘掉线，全是这个形状）。不存在的路径不算在内：
     /// 那是"还没建好"，不是"读不了"。
     pub unreadable_roots: Vec<String>,
+    /// 用户是否在任务结束前请求了取消。已经提交的小批次不会回滚。
+    pub cancelled: bool,
 }
 
 /// 探测请求的根目录哪些 readdir 直接失败。只查一层：子目录读不了由
@@ -163,14 +184,33 @@ pub fn scan_paths(
     recursive: bool,
     on_progress: ProgressFn<'_>,
 ) -> Result<ScanReport> {
-    let files = collect_files(paths, recursive);
+    scan_paths_cancellable(service, paths, recursive, on_progress, &|| false)
+}
+
+/// 可取消的扫描入口。取消是协作式的：已经提交的批次保留，尚未开始的批次不再读取。
+pub fn scan_paths_cancellable(
+    service: &LibraryService,
+    paths: &[String],
+    recursive: bool,
+    on_progress: ProgressFn<'_>,
+    should_cancel: CancelFn<'_>,
+) -> Result<ScanReport> {
+    let (files, cancelled) = collect_files_cancellable(paths, recursive, should_cancel);
     let total = files.len();
     on_progress(0, total, "");
+    if cancelled || should_cancel() {
+        return Ok(ScanReport {
+            track_ids: Vec::new(),
+            unreadable_roots: Vec::new(),
+            cancelled: true,
+        });
+    }
     let unreadable_roots = probe_unreadable_roots(paths);
     if total == 0 {
         return Ok(ScanReport {
             track_ids: Vec::new(),
             unreadable_roots,
+            cancelled: false,
         });
     }
 
@@ -179,6 +219,13 @@ pub fn scan_paths(
     let mut track_ids: Vec<i64> = Vec::with_capacity(total);
 
     for (chunk_index, chunk) in files.chunks(UPSERT_BATCH_SIZE).enumerate() {
+        if should_cancel() {
+            return Ok(ScanReport {
+                track_ids,
+                unreadable_roots,
+                cancelled: true,
+            });
+        }
         let start = chunk_index * UPSERT_BATCH_SIZE;
         let mut ids = vec![None; chunk.len()];
         let mut changed_paths = Vec::new();
@@ -234,6 +281,8 @@ pub fn scan_paths(
     Ok(ScanReport {
         track_ids,
         unreadable_roots,
+        // 最后一批提交后也再看一次；取消恰好落在末批时仍要阻止后续自动分析。
+        cancelled: should_cancel(),
     })
 }
 
@@ -402,6 +451,27 @@ mod tests {
         let events = events.lock().unwrap();
         assert_eq!(events[0], (0, 3), "第一条就要给出真实总数");
         assert_eq!(events.last().copied(), Some((3, 3)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancellation_stops_before_files_are_imported() {
+        let dir = scratch("cancel");
+        std::fs::write(dir.join("a.mp3"), b"x").unwrap();
+        let service =
+            crate::service::LibraryService::new(crate::db::Database::open_in_memory().unwrap());
+        let report = scan_paths_cancellable(
+            &service,
+            &[dir.to_string_lossy().into_owned()],
+            true,
+            &|_, _, _| {},
+            &|| true,
+        )
+        .unwrap();
+
+        assert!(report.cancelled);
+        assert!(report.track_ids.is_empty());
+        assert!(service.all_paths().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

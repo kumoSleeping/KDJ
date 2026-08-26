@@ -71,13 +71,15 @@ export interface AsideHeadProps {
   onFaceChange?: (face: TrackAsideFace) => void;
   /** 宽屏右栏开合键：弹出时挂在右栏顶条最右端。 */
   asideToggle?: ReactNode;
+  /** 当前面板自己的动作，例如下载队列固定键。 */
+  tools?: ReactNode;
 }
 
 /**
  * 右栏眉目：可拖窗口 + 当前面板标题（或详情/歌词分段）。
  * 开合键弹出时在右栏顶条右端；收起时在曲库工作条搜索键右侧。
  */
-export function AsideHead({ title, face, onFaceChange, asideToggle }: AsideHeadProps) {
+export function AsideHead({ title, face, onFaceChange, asideToggle, tools }: AsideHeadProps) {
   const bipolar = Boolean(face && onFaceChange);
 
   return (
@@ -96,7 +98,12 @@ export function AsideHead({ title, face, onFaceChange, asideToggle }: AsideHeadP
         <span className="kd-aside-head-title">{title}</span>
       ) : null}
       <span className="kd-aside-head-drag" data-tauri-drag-region aria-hidden="true" />
-      {asideToggle ? <span className="kd-aside-head-tools">{asideToggle}</span> : null}
+      {tools || asideToggle ? (
+        <span className="kd-aside-head-tools">
+          {tools}
+          {asideToggle}
+        </span>
+      ) : null}
     </div>
   );
 }

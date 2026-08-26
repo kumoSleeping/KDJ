@@ -126,6 +126,34 @@ test("playSongPreview puts the track on the Deck before the provider URL resolve
   }
 });
 
+test("requestSongPreview starts the first double-click without waiting for an App listener", async () => {
+  installBrowserStubs();
+  const played: string[] = [];
+  (globalThis.window as unknown as EventTarget).addEventListener("kd:play", (event) => {
+    const detail = (event as CustomEvent<{ track: { title: string } }>).detail;
+    played.push(detail.track.title);
+  });
+  const { api } = await import("../src/lib/api");
+  const originalPreview = api.songPreview;
+  api.songPreview = async () => ({
+    url: "http://127.0.0.1:43123/api/song/preview/direct",
+    waveform_token: "wave-direct",
+  });
+  try {
+    const { requestSongPreview } = await import("../src/lib/songPreview");
+    requestSongPreview({
+      source: ytmSource("LOUDER"),
+      title: "LOUDER",
+      artist: "Roselia",
+      autoPlay: true,
+    });
+    await Promise.resolve();
+    assert.deepEqual(played, ["LOUDER"]);
+  } finally {
+    api.songPreview = originalPreview;
+  }
+});
+
 test("unresolved stream tracks are identified so PlayerBar can hard-cut instead of DJ-wait", async () => {
   installBrowserStubs();
   const { makePendingSongStreamTrack, makeSongStreamTrack, isUnresolvedStreamTrack } = await import(

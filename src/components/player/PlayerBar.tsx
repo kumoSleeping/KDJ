@@ -90,7 +90,7 @@ import {
   streamWaveformToken,
 } from "../../lib/streamTrack";
 import { playSongPreview } from "../../lib/songPreview";
-import { useDownloadStore } from "../../stores/downloadStore";
+import { enqueueMediaDownloads } from "../../lib/mediaActions";
 import {
   requestLocalVideo,
   seekVideoPip,
@@ -574,12 +574,10 @@ export function PlayerBar({
   const toggleDjEnabled = useDjConfig((state) => state.toggleEnabled);
   const transportFade = usePlaybackPrefs((state) => state.transportFade);
   const focusLibrary = useAppStore((state) => state.focusLibrary);
-  const openQueuePanel = useAppStore((state) => state.openQueuePanel);
   const defaultQuality = useAppStore((state) => state.settings?.default_quality ?? null);
   const filterResonance = useAppStore((state) => state.settings?.filter_resonance ?? "high");
   const stemMode = STEM_MODE;
   const allStemMask = stemMaskForMode(stemMode);
-  const enqueueDownload = useDownloadStore((state) => state.enqueue);
   const [enqueueBusy, setEnqueueBusy] = useState(false);
   const desktopLyricsOn = useLyricsPrefs((state) => state.desktopEnabled);
   const setDesktopLyricsOn = useLyricsPrefs((state) => state.setDesktopEnabled);
@@ -988,6 +986,7 @@ export function PlayerBar({
   }, []);
   /** 换曲/外部同步仍由 effect 执行；主按钮已在 click 调用栈内直接完成走带。 */
   const transportHandledRef = useRef(false);
+  const sourceReplacementFenceRef = useRef<Promise<void>>(Promise.resolve());
   /**
    * 主按钮最近一次指针接触的时刻。Android WebView 无视 pointerdown 的 preventDefault
    * 照样合成 click（detail 值还不可靠），只能按"这个 click 是否紧跟一次指针手势"
@@ -1038,6 +1037,12 @@ export function PlayerBar({
   const nativeLoadInFlightRef = useRef(false);
   /** 快速连点换歌时，迟到的旧 decode 结果不能覆盖新曲目的 UI/transport。 */
   const nativeLoadGenerationRef = useRef(0);
+  /** Load ACK 只代表协调器接单；目标 Deck 真正激活前必须继续压住旧 transport。 */
+  const nativeLoadTargetRef = useRef<{ trackId: number; generation: number } | null>(null);
+  /** 解析在线地址时旧 Deck 必须先停；这里单独保留“解析成功后自动播放”的意图。 */
+  const deferredStreamAutoplayRef = useRef<number | null>(null);
+  /** UI 已切到新曲、Rust 仍报告旧物理 Deck 的窗口。旧快照不得冒充新曲状态。 */
+  const pendingTrackSwitchRef = useRef<{ trackId: number; intent: number } | null>(null);
   /** 桌面端 state.trackId 连续与 UI 曲目不一致的拍数；稳定分叉时以 UI 为准自愈。 */
   const nativeTrackMismatchRef = useRef(0);
   /** 同一首曲目的自愈补偿节流：补偿失败也不能每一拍都重发 load。 */
@@ -1474,6 +1479,36 @@ export function PlayerBar({
         djEngine.setVolume(playerVolumeRef.current);
       }
       const isLocalVideo = isVideoTrack(next.format);
+      // 在线占位曲目的封面/标题会立刻换，但媒体 URL 还在 BotGuard/player 请求中。
+      // 必须在 PLAY_EVENT 这一拍就停掉旧 Deck；等 React 的 load effect 才 pause，
+      // 网络慢或失败时用户会看到新标题却持续听到上一首，误以为双击播错歌。
+      if (autoPlay && isUnresolvedStreamTrack(next)) {
+        deferredStreamAutoplayRef.current = next.id;
+        pendingTrackSwitchRef.current = {
+          trackId: next.id,
+          intent: playbackIntentRef.current,
+        };
+        // 在 React effect 与网络解析之前就立 fence。否则原生旧 Deck 的 10Hz 快照会把
+        // 旧时长/旧播放态写到新标题下，1.5 秒对账还会把旧歌重新认成“正在播放”。
+        nativeLoadInFlightRef.current = true;
+        commitPlaying(false);
+        playingRef.current = false;
+        // Native and WebAudio can overlap during a handoff. Clear both ownership domains now;
+        // pausing only Rust still leaves djEngine's preserved front Deck able to resume an old song.
+        djEngine.clearAllPlayback();
+        if (nativePlayer) {
+          transportHandledRef.current = true;
+          const fence = nativePlayer.interruptClear().then(() => undefined);
+          sourceReplacementFenceRef.current = fence;
+          void fence.catch(() => {
+            transportHandledRef.current = false;
+          });
+        }
+        else sourceReplacementFenceRef.current = Promise.resolve();
+      } else {
+        deferredStreamAutoplayRef.current = null;
+        pendingTrackSwitchRef.current = null;
+      }
       // 本地视频的 LOCAL_VIDEO 已在 playTrack 发出；这里只补面板档的详情栏。
       // 音频：playTrack 已 clear 预览会话；非流媒体仍进曲库详情。
       if (isLocalVideo) {
@@ -1553,7 +1588,7 @@ export function PlayerBar({
       if (usesLocalLibraryRecord(next)) selectTrack(next);
       setPosition(0);
       setDuration(next.duration ?? 0);
-      commitPlaying(autoPlay);
+      commitPlaying(autoPlay && !isUnresolvedStreamTrack(next));
       // 手动点播的也记进"放过了"：不然自动续播会把用户刚听完的那首再接一遍
       if (autoPlay) markPlayed(next.id);
     };
@@ -1653,8 +1688,10 @@ export function PlayerBar({
     autoInOutCueRef.current = null;
     const loadGeneration = ++nativeLoadGenerationRef.current;
     nativeLoadInFlightRef.current = true;
+    nativeLoadTargetRef.current = { trackId: track.id, generation: loadGeneration };
     const player = nativePlayer;
     const stillCurrent = () => loadGeneration === nativeLoadGenerationRef.current;
+    const autoplayAfterResolve = deferredStreamAutoplayRef.current === track.id;
     const stopAfterFailedLoad = () => {
       // Native handoff keeps the old Deck audible until the replacement is ready. If the new
       // online source fails, explicitly stop that retained Deck; updating React state alone
@@ -1665,22 +1702,29 @@ export function PlayerBar({
     };
     void (async () => {
       try {
-        if (isUnresolvedStreamTrack(track)) {
+        const wasUnresolved = isUnresolvedStreamTrack(track);
+        if (wasUnresolved) {
           // 唱盘已经换到这首；解析直链期间先停掉上一首，避免封面已经是新歌、喇叭还在放旧歌。
-          if (player) void player.pause().catch(() => {});
+          if (player) {
+            // PLAY_EVENT already submitted a physical Clear on the control lane. Await its ACK so
+            // this new Load cannot race ahead and leave the previous Deck available for rollback.
+            await sourceReplacementFenceRef.current;
+          }
           else {
             djEngine.releaseDecodedPlayback();
             djEngine.cancel();
             djEngine.hardPause(djEngine.frontElement());
           }
-          await ensurePlaybackTrackReady(track);
-          if (!stillCurrent()) return;
-          setBrowserMediaStatus("loading");
         }
-        const source = mediaUrlForTrack(track);
-        if (isStreamTrack(track) && !source) {
-          throw new Error("平台没有返回可播放地址");
-        }
+        // 本地文件、OneLibrary 与平台流只在 playbackTrack adapter 内解析来源；
+        // 从这里开始全部使用同一个 UnifiedPlayerSource 契约。
+        const prepared = await playbackSourceForTrack(track, {
+          position: initialPosition,
+          autoplay: autoplayAfterResolve || playingRef.current,
+        });
+        if (!stillCurrent()) return;
+        if (wasUnresolved) setBrowserMediaStatus("loading");
+        const source = prepared.src;
         if (player) {
           if (desktopNative) {
             djEngine.cancel();
@@ -1692,35 +1736,40 @@ export function PlayerBar({
           // at zero gain.
           void player.setVolume(playerVolumeRef.current).catch(() => {});
           void player
-            .load({
-              src: source,
-              track,
-              position: initialPosition,
-              autoplay: playingRef.current,
-              artworkUrl: playbackCoverUrl(track),
-            })
+            .load(prepared)
             .then((state) => {
               if (!stillCurrent()) return;
               if (state.status === "error") {
+                if (deferredStreamAutoplayRef.current === track.id) {
+                  deferredStreamAutoplayRef.current = null;
+                }
                 stopAfterFailedLoad();
+                nativeLoadTargetRef.current = null;
+                nativeLoadInFlightRef.current = false;
                 setNotice(state.error || "原生播放器无法播放这个文件");
                 return;
               }
               setPosition(state.currentTime);
               setDuration(state.duration || track.duration || 0);
+              // ACK 时目标通常仍在 Loading。此处若 commitPlaying(true)，transport effect
+              // 会向仍装着上一首的物理 front Deck 发 Play，正是“双击后立即播放旧歌”。
+              // 真正激活由原生 snapshot 的 target-id + !buffering 边沿提交。
               setNotice("");
             })
             .catch((error: unknown) => {
               if (!stillCurrent()) return;
+              if (deferredStreamAutoplayRef.current === track.id) {
+                deferredStreamAutoplayRef.current = null;
+              }
+              nativeLoadTargetRef.current = null;
+              nativeLoadInFlightRef.current = false;
               stopAfterFailedLoad();
               setNotice(`播放失败：${error instanceof Error ? error.message : String(error)}`);
             })
-            .finally(() => {
-              if (stillCurrent()) nativeLoadInFlightRef.current = false;
-            });
           return;
         }
         nativeLoadInFlightRef.current = false;
+        nativeLoadTargetRef.current = null;
         if (desktopNative) void playerRuntime.pause();
         // 硬切歌（双击列表、回上一首）顺手掐掉可能还在进行的过渡：
         // 不掐的话暗处退场那台 deck 还会再响好几秒
@@ -1754,9 +1803,17 @@ export function PlayerBar({
           djEngine.prepareDecodedSeek(track, source);
         }
         setNotice("");
+        if (autoplayAfterResolve) {
+          deferredStreamAutoplayRef.current = null;
+          commitPlaying(true);
+        }
       } catch (error: unknown) {
         if (!stillCurrent()) return;
         stopAfterFailedLoad();
+        if (deferredStreamAutoplayRef.current === track.id) {
+          deferredStreamAutoplayRef.current = null;
+        }
+        nativeLoadTargetRef.current = null;
         setNotice(`播放失败：${error instanceof Error ? error.message : String(error)}`);
         nativeLoadInFlightRef.current = false;
       }
@@ -2344,6 +2401,50 @@ export function PlayerBar({
     const unsubscribe = nativePlayer.subscribe((state, previous) => {
       setPerformanceDeckStates(state.decks);
       setPerformanceSyncState(state.sync);
+      const pendingSwitch = pendingTrackSwitchRef.current;
+      const pendingCurrent = trackRef.current;
+      if (
+        pendingSwitch &&
+        pendingSwitch.intent === playbackIntentRef.current &&
+        pendingCurrent?.id === pendingSwitch.trackId &&
+        state.trackId !== pendingSwitch.trackId
+      ) {
+        // 这是上一首的权威快照，不是当前 UI 曲目的快照。保留物理 Deck 诊断，但绝不
+        // 把旧时间、旧 ended/error 或旧 playing 写到新歌上，也不触发自动接下一首。
+        setBrowserMediaStatus("resolving");
+        return;
+      }
+      if (
+        pendingSwitch &&
+        (pendingSwitch.intent !== playbackIntentRef.current ||
+          pendingCurrent?.id !== pendingSwitch.trackId)
+      ) {
+        pendingTrackSwitchRef.current = null;
+      }
+      const loadTarget = nativeLoadTargetRef.current;
+      if (
+        loadTarget &&
+        loadTarget.generation === nativeLoadGenerationRef.current &&
+        state.trackId === loadTarget.trackId &&
+        !state.buffering &&
+        state.status !== "loading"
+      ) {
+        nativeLoadTargetRef.current = null;
+        nativeLoadInFlightRef.current = false;
+        if (pendingTrackSwitchRef.current?.trackId === loadTarget.trackId) {
+          pendingTrackSwitchRef.current = null;
+        }
+        if (
+          state.status !== "error" &&
+          deferredStreamAutoplayRef.current === loadTarget.trackId
+        ) {
+          deferredStreamAutoplayRef.current = null;
+          // The target Deck is now physically installed and no longer buffering. This is the first
+          // safe point to release the deferred autoplay intent; waiting for state.playing here is a
+          // deadlock because Clear + Load intentionally left transport paused.
+          commitPlaying(true);
+        }
+      }
       // 跳转回声抑制：seek 已提交但状态还没落到目标附近时，在飞的旧位置
       // 事件会把进度条弹回去再跳回来；落地、超时或换曲后恢复正常跟随。
       let pendingSeek = pendingSeekRef.current;
@@ -2444,6 +2545,7 @@ export function PlayerBar({
       if (
         state.playing &&
         !playingRef.current &&
+        !nativeLoadInFlightRef.current &&
         performance.now() - pauseCommitAtRef.current > 1500
       ) {
         commitPlaying(true);
@@ -2512,11 +2614,22 @@ export function PlayerBar({
       if (state.status === "error") {
         if (!nativeErrorEpisodeRef.current) nativeErrorRecoveryAvailableRef.current = true;
         nativeErrorEpisodeRef.current = true;
+        const wantedStreamPlayback = Boolean(
+          current &&
+            isStreamTrack(current) &&
+            (playingRef.current || deferredStreamAutoplayRef.current === current.id),
+        );
         const retrySource =
-          current && isStreamTrack(current) && playingRef.current
+          current && wantedStreamPlayback
             ? claimStreamCacheRetry(current)
             : null;
         commitPlaying(false);
+        pendingTrackSwitchRef.current = null;
+        nativeLoadTargetRef.current = null;
+        nativeLoadInFlightRef.current = false;
+        if (current && deferredStreamAutoplayRef.current === current.id) {
+          deferredStreamAutoplayRef.current = null;
+        }
         if (retrySource && current) {
           setBrowserMediaStatus("loading");
           setNotice("本地缓存或在线地址异常，正在重新连接…");
@@ -3803,8 +3916,7 @@ export function PlayerBar({
     const source = streamTrack && isStreamTrack(streamTrack) ? streamMeta(streamTrack)?.source : null;
     if (!source || enqueueBusy) return;
     setEnqueueBusy(true);
-    void enqueueDownload([source], { quality: defaultQuality })
-      .then(() => openQueuePanel())
+    void enqueueMediaDownloads([source], { quality: defaultQuality })
       .catch((error: unknown) => {
         setNotice(`下载失败：${error instanceof Error ? error.message : String(error)}`);
       })

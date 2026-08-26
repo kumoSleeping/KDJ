@@ -60,6 +60,8 @@ export interface AppStore {
   /** 强制把右栏/抽屉切到下载队列（曲库页也能看队列，不必先搜一次）。 */
   showQueue: boolean;
   queuePanelEpoch: number;
+  /** 手动固定后，被动选歌/切换中间列表不能顶掉下载队列。 */
+  queuePinned: boolean;
   /** 右栏/抽屉显示搜索结果预览（音频试听或视频预览），与下载队列互斥。 */
   showPreview: boolean;
   previewPanelEpoch: number;
@@ -69,6 +71,12 @@ export interface AppStore {
   /** 右栏显示「按顺序导出 VJ」设置面板。 */
   showVjExport: boolean;
   vjExportPanelEpoch: number;
+  /** 右栏显示所选本地文件夹的重复曲目分析结果。 */
+  showDuplicates: boolean;
+  duplicateFolders: string[];
+  duplicateAll: boolean;
+  duplicateIncludeSubfolders: boolean;
+  duplicatesPanelEpoch: number;
   /** 右栏显示 KDJ 虚拟磁盘的正式创建与挂载管理面板。 */
   showVirtualDisk: boolean;
   virtualDiskPanelEpoch: number;
@@ -100,12 +108,17 @@ export interface AppStore {
   openSettingsPanel(): void;
   toggleQueuePanel(): void;
   openQueuePanel(): void;
+  setQueuePinned(value: boolean): void;
   /** 打开预览旁路（点搜索结果音频/视频时走这条，不跟下载队列挤一栏）。 */
   openPreviewPanel(): void;
   toggleFoldersPanel(): void;
   openFoldersPanel(): void;
   /** 打开「按顺序导出 VJ」旁路（由文件夹右键触发）。 */
   openVjExportPanel(): void;
+  openDuplicatePanel(
+    folders: string[],
+    options?: { all?: boolean; includeSubfolders?: boolean },
+  ): void;
   openVirtualDiskPanel(): void;
   /** 打开右栏歌词面板。 */
   openLyricsPanel(): void;
@@ -119,6 +132,7 @@ export interface AppStore {
     | "preview"
     | "folders"
     | "vjExport"
+    | "duplicates"
     | "virtualDisk"
     | "lyrics"
     | null;
@@ -136,9 +150,19 @@ function clearOverlays() {
     showPreview: false,
     showFolders: false,
     showVjExport: false,
+    showDuplicates: false,
     showVirtualDisk: false,
     showLyrics: false,
+    queuePinned: false,
   } as const;
+}
+
+/** 被动导航尊重手动固定的下载栏；显式打开其它旁路仍走 clearOverlays。 */
+function clearPassiveOverlays(state: Pick<AppStore, "showQueue" | "queuePinned">) {
+  if (state.showQueue && state.queuePinned) {
+    return { ...clearOverlays(), showQueue: true, queuePinned: true } as const;
+  }
+  return clearOverlays();
 }
 
 /** StrictMode 下 effect 会跑两次，用同一个 promise 挡掉重复的启动请求。 */
@@ -151,12 +175,18 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   settingsPanelEpoch: 0,
   showQueue: false,
   queuePanelEpoch: 0,
+  queuePinned: false,
   showPreview: false,
   previewPanelEpoch: 0,
   showFolders: false,
   foldersPanelEpoch: 0,
   showVjExport: false,
   vjExportPanelEpoch: 0,
+  showDuplicates: false,
+  duplicateFolders: [],
+  duplicateAll: false,
+  duplicateIncludeSubfolders: true,
+  duplicatesPanelEpoch: 0,
   showVirtualDisk: false,
   virtualDiskPanelEpoch: 0,
   showLyrics: false,
@@ -173,7 +203,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   setListMode(mode) {
     // 用户点了曲库/搜索/文件夹，就是在切换当前关注的内容；旁路面板
     // 应该自动让位，不能逼用户先找到右上角的关闭按钮。
-    set({ listMode: mode, ...clearOverlays() });
+    set((state) => ({ listMode: mode, ...clearPassiveOverlays(state) }));
   },
 
   setHasResults(value) {
@@ -183,18 +213,23 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   },
 
   showTrackDetail() {
-    set({ listMode: "library", ...clearOverlays() });
+    set((state) => ({ listMode: "library", ...clearPassiveOverlays(state) }));
   },
 
   focusLibrary() {
-    set({
+    set((state) => state.showQueue && state.queuePinned ? {
+      listMode: "library",
+      ...clearPassiveOverlays(state),
+    } : {
       listMode: "library",
       showSettings: false,
       showQueue: false,
       showPreview: false,
       showFolders: false,
       showVjExport: false,
+      showDuplicates: false,
       showVirtualDisk: false,
+      queuePinned: false,
     });
   },
 
@@ -222,16 +257,25 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     set({
       ...clearOverlays(),
       showQueue: open,
+      // 顶栏下载按钮是明确的手动打开动作，打开后默认固定。
+      queuePinned: open,
       queuePanelEpoch: open ? get().queuePanelEpoch + 1 : get().queuePanelEpoch,
     });
   },
 
   openQueuePanel() {
+    const pinned = get().showQueue && get().queuePinned;
     set({
       ...clearOverlays(),
       showQueue: true,
+      // 入队自动弹出不强制固定；已经由用户固定的则保持。
+      queuePinned: pinned,
       queuePanelEpoch: get().queuePanelEpoch + 1,
     });
+  },
+
+  setQueuePinned(value) {
+    set({ queuePinned: get().showQueue ? value : false });
   },
 
   openPreviewPanel() {
@@ -267,6 +311,20 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     });
   },
 
+  openDuplicatePanel(folders, options) {
+    const unique = [...new Set(folders.map((folder) => folder.trim()).filter(Boolean))];
+    const all = options?.all === true;
+    if (!all && unique.length === 0) return;
+    set({
+      ...clearOverlays(),
+      showDuplicates: true,
+      duplicateFolders: unique,
+      duplicateAll: all,
+      duplicateIncludeSubfolders: options?.includeSubfolders ?? true,
+      duplicatesPanelEpoch: get().duplicatesPanelEpoch + 1,
+    });
+  },
+
   openVirtualDiskPanel() {
     set({
       ...clearOverlays(),
@@ -299,6 +357,7 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     if (state.showPreview) return "preview";
     if (state.showQueue) return "queue";
     if (state.showVjExport) return "vjExport";
+    if (state.showDuplicates) return "duplicates";
     if (state.showVirtualDisk) return "virtualDisk";
     if (state.showLyrics) return "lyrics";
     return null;
@@ -369,6 +428,14 @@ export const useAppStore = create<AppStore>()((set, get) => ({
       const saved = await api.putSettings(next);
       set({ settings: saved, savingSettings: false });
       applyTheme(saved.theme);
+      if (
+        saved.auto_start_downloads &&
+        !current.auto_start_downloads
+      ) {
+        void import("../lib/mediaActions").then(({ resumePendingDownloadPreparations }) =>
+          resumePendingDownloadPreparations(),
+        );
+      }
     } catch (error) {
       set({ settings: current, savingSettings: false });
       applyTheme(current.theme);

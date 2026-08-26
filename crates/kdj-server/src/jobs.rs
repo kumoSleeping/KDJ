@@ -73,6 +73,7 @@ fn scan_done_event(
     done: usize,
     total: usize,
     error: Option<String>,
+    cancelled: bool,
 ) -> serde_json::Value {
     json!({
         "job_id": job_id,
@@ -81,7 +82,51 @@ fn scan_done_event(
         "current": "",
         "phase": "done",
         "error": error,
+        "cancelled": cancelled,
     })
+}
+
+/// 正在遍历/入库的扫描任务。与分析一样使用协作式取消，但扫描只需记录 token：
+/// 每批的实时数量已经通过 `scan.progress` 对外发布。
+#[derive(Default)]
+pub struct ScanRegistry {
+    jobs: Mutex<BTreeMap<String, CancellationToken>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ScanCancelReport {
+    pub canceled: usize,
+}
+
+impl ScanRegistry {
+    fn register(&self, job_id: &str) -> CancellationToken {
+        let cancel = CancellationToken::new();
+        self.jobs
+            .lock()
+            .unwrap()
+            .insert(job_id.to_string(), cancel.clone());
+        cancel
+    }
+
+    fn unregister(&self, job_id: &str) {
+        self.jobs.lock().unwrap().remove(job_id);
+    }
+
+    /// 有 id 时只取消对应任务；空 id 用于兜底停止全部显式扫描。
+    pub fn cancel(&self, job_id: &str) -> ScanCancelReport {
+        let jobs = self.jobs.lock().unwrap();
+        let selected: Vec<&CancellationToken> = if job_id.is_empty() {
+            jobs.values().collect()
+        } else {
+            jobs.get(job_id).into_iter().collect()
+        };
+        for cancel in &selected {
+            cancel.cancel();
+        }
+        ScanCancelReport {
+            canceled: selected.len(),
+        }
+    }
 }
 
 /// 起一次扫描。立刻返回 job_id，实际工作在后台线程里跑。
@@ -93,6 +138,8 @@ pub fn spawn_scan(
 ) -> String {
     let job_id = new_job_id();
     let job = job_id.clone();
+    // 在 blocking 任务排队前登记，用户看到进度后立刻点取消也不会扑空。
+    let cancel = state.scans.register(&job_id);
     // 扫描是阻塞 IO，放 blocking 线程池，别占着 async 执行器
     tokio::task::spawn_blocking(move || {
         let hub = state.hub.clone();
@@ -110,7 +157,13 @@ pub fn spawn_scan(
             }
         };
 
-        let result = kdj_library::scan::scan_paths(&state.library, &paths, recursive, &progress);
+        let result = kdj_library::scan::scan_paths_cancellable(
+            &state.library,
+            &paths,
+            recursive,
+            &progress,
+            &|| cancel.is_cancelled(),
+        );
         let report = match result {
             Ok(report) => report,
             Err(err) => {
@@ -120,13 +173,25 @@ pub fn spawn_scan(
                 // 一首歌都没进来，而"为什么"全在他看不见的服务端日志里。
                 hub.publish(
                     "scan.progress",
-                    &scan_done_event(&job, 0, 0, Some(format!("{err:#}"))),
+                    &scan_done_event(&job, 0, 0, Some(format!("{err:#}")), false),
                 );
+                state.scans.unregister(&job);
                 return;
             }
         };
 
         let total = report.track_ids.len();
+        if report.cancelled || cancel.is_cancelled() {
+            hub.publish(
+                "scan.progress",
+                &scan_done_event(&job, total, total, None, true),
+            );
+            if !report.track_ids.is_empty() {
+                hub.publish_library_updated(&report.track_ids);
+            }
+            state.scans.unregister(&job);
+            return;
+        }
         // 根目录读不了（权限被拒/挂载断开）不能静默：扫出 0 首和文件夹真空
         // 在界面上长得一模一样。终局事件的 error 字段就是干这个的。
         let error = if report.unreadable_roots.is_empty() {
@@ -137,12 +202,19 @@ pub fn spawn_scan(
                 total == 0,
             ))
         };
-        hub.publish("scan.progress", &scan_done_event(&job, total, total, error));
+        hub.publish(
+            "scan.progress",
+            &scan_done_event(&job, total, total, error, false),
+        );
         hub.publish_library_updated(&report.track_ids);
 
         // 扫描可能比用户点「暂停自动分析」早开始许久。这里重新读设置，
         // 才不会在暂停后仍把刚导入的一整批曲目塞进分析队列。
-        if analyze && state.config.to_settings().auto_analyze && !report.track_ids.is_empty() {
+        if analyze
+            && !cancel.is_cancelled()
+            && state.config.to_settings().auto_analyze
+            && !report.track_ids.is_empty()
+        {
             match state
                 .library
                 .pending_analysis_ids(Some(&report.track_ids), false)
@@ -154,6 +226,7 @@ pub fn spawn_scan(
                 Err(err) => tracing::warn!("取待分析队列失败：{err:#}"),
             }
         }
+        state.scans.unregister(&job);
     });
     job_id
 }
@@ -914,10 +987,28 @@ mod tests {
     }
 
     #[test]
+    fn scan_cancel_only_stops_the_requested_job() {
+        let registry = ScanRegistry::default();
+        let first = registry.register("scan-a");
+        let second = registry.register("scan-b");
+
+        assert_eq!(registry.cancel("scan-a").canceled, 1);
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
+        assert_eq!(registry.cancel("missing").canceled, 0);
+    }
+
+    #[test]
     fn a_failed_import_says_why_in_the_final_event() {
         // 浮层通知删掉之后，这是失败原因唯一的出路：只回 0/0 的话，
         // 用户看到的是"进度条闪了一下，一首都没进来"，和空目录一模一样
-        let event = scan_done_event("job-x", 0, 0, Some("目录读不了：Permission denied".into()));
+        let event = scan_done_event(
+            "job-x",
+            0,
+            0,
+            Some("目录读不了：Permission denied".into()),
+            false,
+        );
         assert_eq!(event["phase"], "done");
         assert_eq!(event["error"], "目录读不了：Permission denied");
     }
@@ -926,10 +1017,17 @@ mod tests {
     fn a_successful_import_still_carries_the_error_key_as_null() {
         // 缺键和 null 在前端是两回事：缺键时它没法把上一次失败的提示盖掉，
         // 用户会看着一条早就过期的红字，怎么重试都不消失
-        let event = scan_done_event("job-x", 7, 7, None);
+        let event = scan_done_event("job-x", 7, 7, None, false);
         assert!(event.as_object().unwrap().contains_key("error"));
         assert!(event["error"].is_null());
         assert_eq!(event["done"], 7);
         assert_eq!(event["total"], 7);
+    }
+
+    #[test]
+    fn a_cancelled_import_is_distinct_from_a_failure() {
+        let event = scan_done_event("job-x", 3, 3, None, true);
+        assert_eq!(event["cancelled"], true);
+        assert!(event["error"].is_null());
     }
 }

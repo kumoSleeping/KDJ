@@ -13,7 +13,6 @@ import {
 } from "./streamTrack";
 import type { SongSource } from "../types";
 
-export const SONG_PREVIEW_EVENT = "kd:song-preview";
 export const SONG_PREVIEW_STATE_EVENT = "kd:song-preview-state";
 
 export interface SongPreviewItem {
@@ -79,7 +78,13 @@ function errorText(reason: unknown): string {
 }
 
 export function requestSongPreview(request: SongPreviewRequest): void {
-  window.dispatchEvent(new CustomEvent<SongPreviewRequest>(SONG_PREVIEW_EVENT, { detail: request }));
+  // Do not bounce this user gesture through a temporary window listener. During startup/HMR the
+  // result table can become interactive one passive-effect tick before App installs that listener;
+  // the first double-click was then dropped while the second worked. Start the owned async lane
+  // directly; playSongPreview already has latest-intent sequencing for late provider responses.
+  void playSongPreview(request).catch((reason: unknown) => {
+    console.warn("在线试听解析失败", reason);
+  });
 }
 
 export function sourceKey(source: SongSource): string {
@@ -161,18 +166,4 @@ export function retrySongPreview(
 ): Promise<void> {
   if (!request) return Promise.reject(new Error("没有可重试的在线试听"));
   return playSongPreview({ ...request, bypassCache: true });
-}
-
-/** 挂到 window，供 Workspace / App 一次性订阅。 */
-export function bindSongPreviewToPlayer(): () => void {
-  const onPreview = (event: Event) => {
-    const detail = (event as CustomEvent<SongPreviewRequest>).detail;
-    if (!detail?.source) return;
-    void playSongPreview(detail).catch((reason: unknown) => {
-      // 错误已经进入可订阅状态；开发日志仍保留原始异常，不能再无声吞掉。
-      console.warn("在线试听解析失败", reason);
-    });
-  };
-  window.addEventListener(SONG_PREVIEW_EVENT, onPreview);
-  return () => window.removeEventListener(SONG_PREVIEW_EVENT, onPreview);
 }

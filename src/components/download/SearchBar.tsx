@@ -175,7 +175,7 @@ export function SearchBar({
         <div className="kd-searchbar-copy" data-empty={!query || undefined}>
           {!query && (
             <span className="kd-search-placeholder" aria-hidden="true">
-              开发者最近在补"全金属狂潮"!
+              开发者最近看了「全金属狂潮」「水果篮子(老版)」！
             </span>
           )}
           <textarea
@@ -238,9 +238,11 @@ export function SearchPlatforms({
   /** 传入 onReorder = Explore 独立条：勾选/排序自管，不跟顶栏同步。 */
   const independent = Boolean(onReorder);
   const orderedIds = normalizePriority(priority);
+  // 顶栏：设置里关掉的源直接不出现；Explore 独立条仍列出全部，点选时可顺手启用。
   const ordered = orderedIds
     .map((id) => SEARCH_PLATFORMS.find((item) => item.id === id))
-    .filter((item): item is (typeof SEARCH_PLATFORMS)[number] => Boolean(item));
+    .filter((item): item is (typeof SEARCH_PLATFORMS)[number] => Boolean(item))
+    .filter((item) => independent || isPlatformEnabled(settings, item.id));
 
   const reorder = (from: Platform, to: Platform) => {
     if (from === to) return;
@@ -293,15 +295,8 @@ export function SearchPlatforms({
         }
         onTogglePlatform(id);
       } else {
-        const enabled = isPlatformEnabled(snap, id);
-        if (!enabled) {
-          if (snap) {
-            void saveSettings(patchEnabledPlatform(snap, id, true));
-            if (!platforms.includes(id)) onTogglePlatform(id);
-          }
-        } else {
-          onTogglePlatform(id);
-        }
+        // 顶栏只渲染已启用源，点击只切换搜索勾选。
+        onTogglePlatform(id);
       }
     }
     setDragging(null);
@@ -369,28 +364,23 @@ export function SearchPlatforms({
           : "搜索平台（拖动排序 = 来源优先级）"
       }
     >
-      {ordered.map((item) => {
-        const off = independent ? false : !isPlatformEnabled(settings, item.id);
-        return (
+      {ordered.map((item) => (
           <button
             key={item.id}
             type="button"
             className="kd-plat"
-            aria-pressed={!off && platforms.includes(item.id)}
+            aria-pressed={platforms.includes(item.id)}
             aria-label={item.label}
             data-platform={item.id}
-            data-off={off || undefined}
             data-dragging={dragging === item.id || undefined}
             data-drop={over === item.id || undefined}
             draggable={false}
             title={
-              off
-                ? `${item.label}：未在设置中启用，点一下开启`
-                : item.video
-                  ? item.id === "bilibili"
-                    ? `${item.label}（贴链接或 BV 号自动走视频解析）· 拖动排序`
-                    : `${item.label}（视频 / Shorts / 播放列表）· 拖动排序`
-                  : `${item.label} · 拖动排序：排前面的优先作为下载来源`
+              item.video
+                ? item.id === "bilibili"
+                  ? `${item.label}（贴链接或 BV 号自动走视频解析）· 拖动排序`
+                  : `${item.label}（视频 / Shorts / 播放列表）· 拖动排序`
+                : `${item.label} · 拖动排序：排前面的优先作为下载来源`
             }
             onPointerDown={(event) => onPointerDown(event, item.id)}
             onDragStart={(event) => event.preventDefault()}
@@ -401,8 +391,7 @@ export function SearchPlatforms({
           >
             <PlatformMark id={item.id} />
           </button>
-        );
-      })}
+        ))}
     </div>
   );
 }

@@ -142,19 +142,22 @@ watch_run rust-android || red "安卓构建失败，桌面更新不受影响但 
 # ---- 终检：更新端点必须已经是新版本 ------------------------------------------
 info "验证更新端点"
 served=""
+served_labs=""
 for i in $(seq 1 10); do
   served=$(curl -sL "https://github.com/$repo/releases/latest/download/latest.json" \
     | python3 -c "import json,sys;print(json.load(sys.stdin)['version'])" 2>/dev/null || true)
-  [[ "$served" == "$VERSION" ]] && break
+  served_labs=$(curl -sL "https://github.com/$repo/releases/latest/download/latest-labs.json" \
+    | python3 -c "import json,sys;print(json.load(sys.stdin)['version'])" 2>/dev/null || true)
+  [[ "$served" == "$VERSION" && "$served_labs" == "$VERSION" ]] && break
   [[ "$i" == "10" ]] && {
-    red "latest.json 仍是 ${served:-未知}，需要人工排查"
+    red "更新清单未全部就绪：stable=${served:-未知} labs=${served_labs:-未知}"
     [[ "$build_ok" == "1" ]] || red "（rust-build 本身也没有成功）"
     exit 1
   }
   sleep 20
 done
 if [[ "$build_ok" != "1" ]]; then
-  green "✅ KDJ v$VERSION 更新通道已就绪（latest.json = ${served}），但 rust-build 有失败步骤，请去 Actions 核对缺了哪些平台。"
+  green "✅ KDJ v$VERSION 双更新通道已就绪（stable=${served}, labs=${served_labs}），但 rust-build 有失败步骤，请去 Actions 核对缺了哪些平台。"
 else
-  green "✅ KDJ v$VERSION 发版完成，latest.json = ${served}，客户端可以检测到更新了。"
+  green "✅ KDJ v$VERSION 发版完成，stable/labs 更新清单均为该版本。"
 fi

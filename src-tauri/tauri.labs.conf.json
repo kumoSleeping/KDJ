@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "KDJ Labs",
+  "identifier": "com.kdj.app.labs",
+  "build": {
+    "beforeDevCommand": "npm run tauri:web:labs",
+    "beforeBuildCommand": "npm run tauri:web:build:labs"
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/kumoSleeping/KDJ/releases/latest/download/latest-labs.json"
+      ]
+    }
+  }
+}

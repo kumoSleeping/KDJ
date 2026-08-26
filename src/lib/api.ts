@@ -3,6 +3,7 @@
  */
 
 import { getBridge } from "./bridge";
+import { createYoutubeSabrPreview, type YoutubeSabrBootstrap } from "./youtubeSabr";
 import {
   decodeWaveformBinary,
   isWaveformBinaryContentType,
@@ -16,6 +17,7 @@ import type {
   SearchCapabilities,
   DownloadRequest,
   DownloadTask,
+  DuplicateAnalysisResult,
   FileOp,
   FileDisposalMode,
   FolderForgetResult,
@@ -53,6 +55,7 @@ import type {
   LyricsResponse,
   LocalLyricsResponse,
   Platform,
+  Quality,
   SearchRequest,
   SearchResponse,
   Settings,
@@ -72,6 +75,23 @@ import type {
 // 壳可能是 Tauri / Electron / 浏览器预览，由 bridge.ts 运行时探测。
 // 保持同步取用：audioUrl / coverUrl / WebSocket 这些调用点不能改成 async。
 const bridge = () => getBridge();
+
+async function browserYoutubeBotguard(
+  operation: "Create" | "GenerateIT",
+  payload: unknown[],
+): Promise<unknown> {
+  const response = await fetch("https://www.youtube.com/api/jnn/v1/" + operation, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json+protobuf",
+      "X-Goog-Api-Key": "AIzaSyDyT5W0Jh49F30Pqqtyfdf7pDLFKLJoAnw",
+      "X-User-Agent": "grpc-web-javascript/0.1",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error("YouTube BotGuard 返回 HTTP " + response.status);
+  return response.json();
+}
 
 export class ApiError extends Error {
   constructor(
@@ -181,8 +201,274 @@ function safeParse(text: string): unknown {
 const post = <T>(path: string, body?: unknown) =>
   request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
 
+interface YtmProtectedIdentity {
+  visitor_data: string;
+  data_sync_id: string;
+  gvs_binding: "video_id" | "data_sync_id" | "visitor_data";
+}
+
+function alternateYtmGvsBinding(identity: YtmProtectedIdentity): YtmProtectedIdentity["gvs_binding"] {
+  if (identity.gvs_binding === "video_id") {
+    return identity.data_sync_id ? "data_sync_id" : "visitor_data";
+  }
+  return "video_id";
+}
+
+interface PendingDownloadPreparation {
+  id: string;
+  platform: Platform;
+  source: SongSource;
+  quality: Quality;
+}
+
+async function resolveYtmProtectedStream(
+  source: SongSource,
+  quality?: Quality,
+  knownIdentity?: YtmProtectedIdentity,
+  forceFreshProof = false,
+  alternateBinding = false,
+): Promise<{ poToken: string; poTokens: string[]; resolvedUrl: string; resolvedUrls: string[] }> {
+  const videoId = source.payload?.video_id;
+  if (source.platform !== "ytm" || typeof videoId !== "string") {
+    throw new Error("YouTube Music 歌曲缺少视频 ID");
+  }
+  const {
+    decipherYoutubeWebStream,
+    youtubeWebPlayerConfig,
+    youtubeWebPoSession,
+  } = await import("./youtubePoToken");
+  const identity = knownIdentity ?? await request<YtmProtectedIdentity>(
+    "/song/preview/ytm/identity",
+    { cache: "no-store" },
+  );
+  const gvsBinding = alternateBinding ? alternateYtmGvsBinding(identity) : identity.gvs_binding;
+  const proof = await youtubeWebPoSession(
+    videoId,
+    identity.visitor_data,
+    identity.data_sync_id,
+    gvsBinding,
+    browserYoutubeBotguard,
+    forceFreshProof,
+  );
+  const playerUrl = await request<string>("/song/preview/ytm/player-url", {
+    cache: "no-store",
+  });
+  const loadPlayerScript = (url: string) => post<string>(
+    "/song/preview/ytm/player-script",
+    { player_url: url },
+  );
+  const playerConfig = await youtubeWebPlayerConfig(playerUrl, loadPlayerScript);
+  const resolvedUrls: string[] = [];
+  for (let index = 0; index < proof.gvsPoTokens.length; index += 1) {
+    const protectedPlayer = await post<{
+      signature_cipher: string;
+      player_url: string;
+    }>("/song/preview/ytm/player", {
+      source,
+      quality,
+      po_token: undefined,
+      visitor_data: identity.visitor_data,
+      data_sync_id: identity.data_sync_id,
+      player_url: playerUrl,
+      signature_timestamp: playerConfig.signatureTimestamp,
+    });
+    resolvedUrls.push(await decipherYoutubeWebStream(
+      protectedPlayer.signature_cipher,
+      protectedPlayer.player_url,
+      proof.gvsPoTokens[index],
+      loadPlayerScript,
+    ));
+  }
+  return {
+    poToken: proof.gvsPoToken,
+    poTokens: proof.gvsPoTokens,
+    resolvedUrl: resolvedUrls[0],
+    resolvedUrls,
+  };
+}
+
+async function resolveYtmSabrPlayback(
+  source: SongSource,
+  forceFreshProof = false,
+  alternateBinding = false,
+): Promise<YoutubeSabrBootstrap> {
+  const videoId = source.payload?.video_id;
+  if (source.platform !== "ytm" || typeof videoId !== "string") {
+    throw new Error("YouTube Music 歌曲缺少视频 ID");
+  }
+  const {
+    decipherYoutubeWebUrl,
+    youtubeWebPlayerConfig,
+    youtubeWebPoSession,
+  } = await import("./youtubePoToken");
+  const identity = await request<YtmProtectedIdentity>(
+    "/song/preview/ytm/identity",
+    { cache: "no-store" },
+  );
+  const gvsBinding = alternateBinding ? alternateYtmGvsBinding(identity) : identity.gvs_binding;
+  const proof = await youtubeWebPoSession(
+    videoId,
+    identity.visitor_data,
+    identity.data_sync_id,
+    gvsBinding,
+    browserYoutubeBotguard,
+    forceFreshProof,
+  );
+  const playerUrl = await request<string>("/song/preview/ytm/player-url", {
+    cache: "no-store",
+  });
+  const loadPlayerScript = (url: string) => post<string>(
+    "/song/preview/ytm/player-script",
+    { player_url: url },
+  );
+  const playerConfig = await youtubeWebPlayerConfig(playerUrl, loadPlayerScript);
+  const player = await post<{
+    player_url: string;
+    sabr_url?: string;
+    video_playback_ustreamer_config?: string;
+    sabr_formats: unknown[];
+    duration_ms: number;
+  }>("/song/preview/ytm/player", {
+    source,
+    po_token: undefined,
+    visitor_data: identity.visitor_data,
+    data_sync_id: identity.data_sync_id,
+    player_url: playerUrl,
+    signature_timestamp: playerConfig.signatureTimestamp,
+  });
+  if (
+    !player.sabr_url
+    || !player.video_playback_ustreamer_config
+    || !Array.isArray(player.sabr_formats)
+    || player.sabr_formats.length === 0
+    || !Number.isSafeInteger(player.duration_ms)
+    || player.duration_ms <= 0
+  ) {
+    throw new Error("YouTube Music Player 没有返回 SABR 音频会话");
+  }
+  return {
+    serverAbrStreamingUrl: await decipherYoutubeWebUrl(
+      player.sabr_url,
+      player.player_url,
+      loadPlayerScript,
+    ),
+    videoPlaybackUstreamerConfig: player.video_playback_ustreamer_config,
+    formats: player.sabr_formats,
+    durationMs: player.duration_ms,
+    poToken: proof.gvsPoToken,
+  };
+}
+
+let ytmPlaybackPrewarm: Promise<void> | null = null;
+
+async function prewarmYtmPlayback(): Promise<void> {
+  if (ytmPlaybackPrewarm) return ytmPlaybackPrewarm;
+  ytmPlaybackPrewarm = (async () => {
+    const {
+      prewarmYoutubeWebPoMinter,
+      youtubeWebPlayerConfig,
+    } = await import("./youtubePoToken");
+    const playerUrlPromise = request<string>("/song/preview/ytm/player-url", {
+      cache: "no-store",
+    });
+    await Promise.all([
+      request<YtmProtectedIdentity>("/song/preview/ytm/identity", { cache: "no-store" }),
+      prewarmYoutubeWebPoMinter(browserYoutubeBotguard),
+      playerUrlPromise.then((playerUrl) => youtubeWebPlayerConfig(
+        playerUrl,
+        (url) => post<string>("/song/preview/ytm/player-script", { player_url: url }),
+      )),
+    ]);
+  })().catch((error) => {
+    ytmPlaybackPrewarm = null;
+    throw error;
+  });
+  return ytmPlaybackPrewarm;
+}
+
+interface DownloadPreparationContext {
+  ytmIdentity?: YtmProtectedIdentity;
+}
+
+type DownloadPreparationHandler = (
+  item: PendingDownloadPreparation,
+  context: DownloadPreparationContext,
+  forceFreshProof?: boolean,
+  alternateBinding?: boolean,
+) => Promise<{ proof: string; resolvedUrl: string }>;
+
+/** 平台挑战只在这个注册表里注入；下载 store、面板和按钮不再识别平台。 */
+const downloadPreparationHandlers: Partial<Record<Platform, DownloadPreparationHandler>> = {
+  ytm: async (item, context, forceFreshProof = false, alternateBinding = false) => {
+    if (forceFreshProof) context.ytmIdentity = undefined;
+    context.ytmIdentity ??= await request<YtmProtectedIdentity>(
+      "/song/preview/ytm/identity",
+      { cache: "no-store" },
+    );
+    const stream = await resolveYtmProtectedStream(
+      item.source,
+      item.quality,
+      context.ytmIdentity,
+      forceFreshProof,
+      alternateBinding,
+    );
+    return { proof: stream.poToken, resolvedUrl: stream.resolvedUrl };
+  },
+};
+
+async function preparePendingDownloads(onlyId?: string): Promise<void> {
+  const pending = await request<PendingDownloadPreparation[]>("/downloads/preparations/pending", {
+    cache: "no-store",
+  });
+  const selected = onlyId ? pending.filter((item) => item.id === onlyId) : pending;
+  if (selected.length === 0) return;
+  const context: DownloadPreparationContext = {};
+  let firstError: unknown = null;
+  // 浏览器挑战按队列顺序串行；真正的媒体传输仍由后端按统一并发设置调度。
+  for (const item of selected) {
+    try {
+      const handler = downloadPreparationHandlers[item.platform];
+      if (!handler) throw new Error("平台 " + item.platform + " 没有注册下载准备适配器");
+      let prepared = await handler(item, context);
+      try {
+        await post(`/downloads/${encodeURIComponent(item.id)}/prepared-source`, {
+          proof: prepared.proof,
+          resolved_url: prepared.resolvedUrl,
+        });
+      } catch (error) {
+        const rejectedProof = error instanceof ApiError && (error.status === 401 || error.status === 403);
+        if (item.platform !== "ytm" || !rejectedProof) throw error;
+        prepared = await handler(item, context, true);
+        try {
+          await post(`/downloads/${encodeURIComponent(item.id)}/prepared-source`, {
+            proof: prepared.proof,
+            resolved_url: prepared.resolvedUrl,
+          });
+        } catch (freshError) {
+          const freshRejected = freshError instanceof ApiError
+            && (freshError.status === 401 || freshError.status === 403);
+          if (!freshRejected) throw freshError;
+          prepared = await handler(item, context, true, true);
+          await post(`/downloads/${encodeURIComponent(item.id)}/prepared-source`, {
+            proof: prepared.proof,
+            resolved_url: prepared.resolvedUrl,
+          });
+        }
+      }
+    } catch (error) {
+      firstError ??= error;
+      const message = error instanceof Error ? error.message : String(error);
+      await post(`/downloads/${encodeURIComponent(item.id)}/preparation-failed`, {
+        error: message,
+      }).catch(() => undefined);
+    }
+  }
+  if (firstError) throw firstError;
+}
+
 export const api = {
   health: () => request<Health>("/health"),
+  prewarmYtmPlayback,
 
   getSettings: () => request<Settings>("/settings"),
   putSettings: (settings: Settings) =>
@@ -225,7 +511,7 @@ export const api = {
       key: collection.key,
       limit,
     }),
-  /** 按曲名/艺人自动搜歌词（网易云 + QQ）；有来源 key 时优先直取。 */
+  /** 按曲名/艺人自动搜歌词（网易云 / QQ / YouTube Music）；有来源 key 时优先直取。 */
   lyrics: (body: LyricsRequest) => post<LyricsResponse>("/lyrics", body),
   libraryLyrics: (trackId: number) => request<LocalLyricsResponse>(`/library/lyrics/${trackId}`),
   /**
@@ -233,50 +519,40 @@ export const api = {
    * QQ 的 media_mid、SoundCloud 的 transcoding_url 都在 payload 里。
    */
   songPreview: async (source: SongSource, bypassCache = false) => {
-    const videoId = source.payload?.video_id;
-    let poToken: string | undefined;
-    let resolvedUrl: string | undefined;
-    if (source.platform === "ytm" && typeof videoId === "string") {
-      const { decipherYoutubeWebStream, youtubeWebPoSession } = await import("./youtubePoToken");
-      const identity = await request<{
-        visitor_data: string;
-        data_sync_id: string;
-      }>("/song/preview/ytm/identity", { cache: "no-store" });
-      const proof = await youtubeWebPoSession(
-        videoId,
-        identity.visitor_data,
-        (operation, payload) => post<unknown>("/song/preview/ytm/botguard", {
-          operation,
-          payload,
-        }),
-      );
-      poToken = proof.gvsPoToken;
-      const protectedPlayer = await post<{
-        signature_cipher: string;
-        player_url: string;
-      }>("/song/preview/ytm/player", {
-        source,
-        po_token: proof.playerPoToken,
-        visitor_data: identity.visitor_data,
-        data_sync_id: identity.data_sync_id,
-      });
-      resolvedUrl = await decipherYoutubeWebStream(
-        protectedPlayer.signature_cipher,
-        protectedPlayer.player_url,
-        poToken,
-        (playerUrl) => post<string>("/song/preview/ytm/player-script", {
-          player_url: playerUrl,
-        }),
-      );
+    // Normal path: cached selected binding -> fresh selected binding -> fresh alternate binding.
+    // An explicit cache-bypass already starts fresh, so it only needs selected -> alternate.
+    const attempts = source.platform === "ytm" ? (bypassCache ? 2 : 3) : 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        if (source.platform === "ytm") {
+          const bootstrap = await resolveYtmSabrPlayback(
+            source,
+            bypassCache || attempt > 0,
+            bypassCache ? attempt > 0 : attempt > 1,
+          );
+          return await createYoutubeSabrPreview(source, bootstrap, bypassCache);
+        }
+        let poToken: string | undefined;
+        let poTokens: string[] | undefined;
+        let resolvedUrl: string | undefined;
+        let resolvedUrls: string[] | undefined;
+        const result = await post<{ url: string; cached?: boolean; waveform_token?: string }>("/song/preview", {
+          source,
+          bypass_cache: bypassCache,
+          po_token: poToken,
+          po_tokens: poTokens,
+          resolved_url: resolvedUrl,
+          resolved_urls: resolvedUrls,
+        });
+        if (!result.url.startsWith("/")) return result;
+        return { ...result, url: bridge().baseUrl + result.url };
+      } catch (error) {
+        const rejectedProof = error instanceof ApiError && (error.status === 401 || error.status === 403);
+        if (source.platform !== "ytm" || !rejectedProof || attempt + 1 >= attempts) throw error;
+        // The next iteration drops both the WebPO token cache and its attestation minter.
+      }
     }
-    const result = await post<{ url: string; cached?: boolean; waveform_token?: string }>("/song/preview", {
-      source,
-      bypass_cache: bypassCache,
-      po_token: poToken,
-      resolved_url: resolvedUrl,
-    });
-    if (!result.url.startsWith("/")) return result;
-    return { ...result, url: `${bridge().baseUrl}${result.url}` };
+    throw new ApiError("YouTube Music 没有返回可播放地址", 502);
   },
   /** token 只由 songPreview 返回；服务端据此查当前会话，绝不让前端传缓存路径/key。 */
   songPreviewWaveform: (token: string) =>
@@ -291,9 +567,18 @@ export const api = {
 
   downloads: () => request<DownloadTask[]>("/downloads"),
   enqueue: (body: DownloadRequest) => post<DownloadTask[]>("/downloads", body),
-  startDownloads: () => post<{ started: boolean; retried: number }>("/downloads/start"),
+  preparePendingDownloads: (onlyId?: string) => preparePendingDownloads(onlyId),
+  startDownloads: async () => {
+    // 某条外部挑战失败已经写回该任务；不能因此挡住同批普通平台任务开始。
+    await preparePendingDownloads().catch(() => undefined);
+    return post<{ started: boolean; retried: number }>("/downloads/start");
+  },
   cancelDownload: (id: string) => post<DownloadTask>(`/downloads/${id}/cancel`),
-  retryDownload: (id: string) => post<DownloadTask>(`/downloads/${id}/retry`),
+  cancelAllDownloads: () => post<{ canceled: number }>("/downloads/cancel-all"),
+  retryDownload: async (id: string) => {
+    await preparePendingDownloads(id);
+    return post<DownloadTask>(`/downloads/${id}/retry`);
+  },
   /** 只移除一条已结束的队列记录，避免「清空」影响其他历史任务。 */
   removeDownload: (id: string) => request<{ removed: boolean }>(`/downloads/${id}`, { method: "DELETE" }),
   clearDownloads: () => post<{ removed: number }>("/downloads/clear"),
@@ -489,6 +774,10 @@ export const api = {
     }),
   scan: (paths: string[], analyze = false) =>
     post<ScanResponseLike>("/library/scan", { paths, recursive: true, analyze }),
+  cancelScan: (jobId = "") =>
+    post<{ canceled: number }>(
+      `/library/scan/cancel${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`,
+    ),
   analyze: (
     trackIds: number[] | null,
     force = false,
@@ -570,12 +859,23 @@ export const api = {
   upgradeWaveforms: () => post<{ job_id: string }>("/library/waveforms/upgrade", {}),
   moveFolder: (path: string, destParent: string) =>
     post<FolderTree>("/library/folders/move", { path, dest_parent: destParent }),
+  mergeFolders: (paths: string[], destParent: string, name: string) =>
+    post<{ tree: FolderTree; target: string }>("/library/folders/merge", {
+      paths,
+      dest_parent: destParent,
+      name,
+    }),
   orderFolder: (path: string, names: string[]) =>
     post<FolderTree>("/library/folders/order", { path, names }),
   folderUndoStatus: () => request<FolderUndoStatus>("/library/folders/undo"),
   undoFolderOp: () => post<FolderUndoResponse>("/library/folders/undo"),
   applyFolderOp: (trackIds: number[], dest: string, op: FileOp) =>
     post<FolderOpResult>("/library/folders/apply", { track_ids: trackIds, dest, op }),
+  analyzeDuplicates: (request: {
+    all: boolean;
+    folders: string[];
+    include_subfolders: boolean;
+  }) => post<DuplicateAnalysisResult>("/library/duplicates/analyze", request),
 
   audioUrl: (id: number) => {
     const { baseUrl } = bridge();

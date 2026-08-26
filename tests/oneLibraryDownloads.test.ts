@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   persistOneLibraryDownloadTasks,
+  removePendingOneLibraryDownloadTasks,
   removePendingVirtualDiskDownloads,
   updatePendingOneLibraryDownload,
 } from "../src/lib/oneLibraryDownloadPersistence";
@@ -44,6 +45,7 @@ const task: DownloadTask = {
   artist: "Artist",
   quality: "flac",
   state: "queued",
+  phase: "waiting",
   progress: 0,
   downloaded_bytes: 0,
   total_bytes: 0,
@@ -81,5 +83,16 @@ test("deleting the managed virtual disk forgets only its pending writes", () => 
   const stored = JSON.parse(storage.getItem("kd-onelibrary-download-targets-v1") ?? "[]");
   assert.equal(stored.length, 1);
   assert.equal(stored[0].target.device_path, "/Volumes/USB");
+  storage.removeItem("kd-onelibrary-download-targets-v1");
+});
+
+test("canceling queued downloads also forgets their pending device writes", () => {
+  persistOneLibraryDownloadTasks(target, [source], [{ ...task, id: "keep" }]);
+  persistOneLibraryDownloadTasks(target, [source], [{ ...task, id: "cancel" }]);
+
+  removePendingOneLibraryDownloadTasks(["cancel"]);
+
+  const stored = JSON.parse(storage.getItem("kd-onelibrary-download-targets-v1") ?? "[]");
+  assert.deepEqual(stored.map((row: { task_id: string }) => row.task_id), ["keep"]);
   storage.removeItem("kd-onelibrary-download-targets-v1");
 });

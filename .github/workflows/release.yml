@@ -139,11 +139,15 @@ jobs:
             echo "- **Fedora / RHEL / openSUSE**：[下载 RPM 安装包]($base_url/KDJ-${VERSION}-1.x86_64.rpm)"
             echo "- **其他发行版**：[下载 AppImage]($base_url/KDJ_${VERSION}_amd64.AppImage)"
             echo
+            echo "### KDJ Labs（实验版，桌面）"
+            echo "Labs 与稳定 KDJ 独立安装、独立更新，包含实验 DJ 与 OneLibrary。"
+            echo "请在下方 Assets 中选择文件名以 KDJ Labs 开头的对应桌面安装包。"
+            echo
             echo "### Android"
             echo "- **大多数新设备（ARM64，推荐）**：[下载 APK]($base_url/app-arm64-release.apk)"
             echo "- **较旧的 32 位 ARM 设备**：[下载 APK]($base_url/app-arm-release.apk)"
             echo
-            echo "> .sig、.app.tar.gz 和 latest.json 是自动更新所需文件，普通用户无需下载。"
+            echo "> .sig、.app.tar.gz、latest.json 和 latest-labs.json 是自动更新所需文件，普通用户无需下载。"
             echo ">"
             echo "> 本 Release 在桌面更新清单就绪前不会被标为 Latest；"
             echo "> 自动更新通道在构建完成前仍指向上一可用版本。"

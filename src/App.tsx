@@ -7,7 +7,6 @@ import { VideoPipHost } from "./components/player/VideoPipHost";
 import { startAutoAnalyze } from "./lib/autoAnalyze";
 import { startDataUpgrade } from "./lib/dataUpgrade";
 import { djEngine } from "./lib/djMix";
-import { bindSongPreviewToPlayer } from "./lib/songPreview";
 import { isEditable } from "./lib/useLibraryClipboard";
 import { useLayoutSignals } from "./lib/useLayoutMode";
 import { bootAll, connectEvents, selectConnected, useAppStore } from "./stores/appStore";
@@ -15,6 +14,8 @@ import { usePlaylistStore } from "./stores/playlistStore";
 import { useLyricsPrefs } from "./lib/lyricsPrefs";
 import { useUpdateStore } from "./stores/updateStore";
 import { readWorkMode, writeWorkMode, type WorkMode } from "./lib/workMode";
+import { api } from "./lib/api";
+const LABS_BUILD = typeof __KDJ_LABS__ !== "undefined" && __KDJ_LABS__;
 
 const DEVICE_REFRESH_FALLBACK_MS = 60_000;
 const DEVICE_REFRESH_MIN_GAP_MS = 5_000;
@@ -49,7 +50,7 @@ export default function App() {
   const [workMode, setWorkModeState] = useState<WorkMode>("manager");
   const [performanceOpen, setPerformanceOpen] = useState(false);
   const workModePreferenceReady = useRef(false);
-  const experimentalDjMode = settings?.experimental_dj_mode ?? false;
+  const experimentalDjMode = LABS_BUILD && (settings?.experimental_dj_mode ?? false);
   const platform = window.kdj?.platform;
   const isMac = platform === "darwin";
   const isMobile = platform === "android" || platform === "ios";
@@ -84,14 +85,14 @@ export default function App() {
     return () => document.removeEventListener("copy", onCopy);
   }, []);
 
-  // 搜索结果在线试听 → 主播放条（不再开右栏）
-  useEffect(() => bindSongPreviewToPlayer(), []);
-
   // 分析不该由人来推动：选中、播放、以及空闲时的后台补齐都自动排队。
   // 挂在 connected 上而不是无条件挂——后端还没起来时轮询只会打出一串失败请求。
   useEffect(() => {
     if (!connected) return;
     startDataUpgrade();
+    // BotGuard VM construction and player-script analysis are session work, not click work.
+    // Warm both in parallel so the first YTM double-click only pays Player + first SABR prefix.
+    void api.prewarmYtmPlayback().catch(() => undefined);
     return startAutoAnalyze();
   }, [connected]);
 
@@ -104,7 +105,7 @@ export default function App() {
   // 外置卷的生命周期不属于任何一个面板。启动、回到前台时立即同步；保持前台
   // 时只留一分钟兜底，避免 macOS 每三秒完整枚举卷并触发 CacheDelete/CarbonCore。
   useEffect(() => {
-    if (!connected) return;
+    if (!connected || !LABS_BUILD) return;
     let lastRefreshAt = 0;
     const refreshWhenVisible = () => {
       const now = Date.now();

@@ -22,7 +22,7 @@ function biliSource(key: string): SongSource {
   };
 }
 
-function group(id: string, source: SongSource, inLibrary = false): MergedGroup {
+function group(id: string, source: SongSource): MergedGroup {
   return {
     group_id: id,
     title: source.title,
@@ -33,21 +33,20 @@ function group(id: string, source: SongSource, inLibrary = false): MergedGroup {
     sources: [source],
     best_source_index: 0,
     score: 0,
-    in_library: inLibrary,
   };
 }
 
-test("B 站收藏夹视频进入全选集合，已入库和纯本地条目除外", () => {
+test("B 站收藏夹视频全部可重新下载，纯本地条目除外", () => {
   const first = group("bili-1", biliSource("BV1L94y1H7CV"));
   const second = group("bili-2", biliSource("BV1xx411c7mD"));
-  const inLibrary = group("bili-local", biliSource("BV1Q541167Qg"), true);
+  const redownload = group("bili-redownload", biliSource("BV1Q541167Qg"));
   const local = group("local", { ...biliSource("local"), platform: "local" });
   const item: IntakeItem = {
     entry: "https://space.bilibili.com/1/favlist?fid=2",
     kind: "playlist",
     platform: "bilibili",
     title: "收藏夹",
-    groups: [first, second, inLibrary, local],
+    groups: [first, second, redownload, local],
     collections: [],
     errors: {},
     error: "",
@@ -56,6 +55,7 @@ test("B 站收藏夹视频进入全选集合，已入库和纯本地条目除外
   assert.deepEqual(selectableGroups(item).map((entry) => entry.group_id), [
     "bili-1",
     "bili-2",
+    "bili-redownload",
   ]);
   assert.notEqual(selectionKey(0, first.group_id), selectionKey(1, first.group_id));
 });

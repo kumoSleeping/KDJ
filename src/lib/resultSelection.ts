@@ -16,11 +16,9 @@ export function resultRowActionUsesSelection(
   return selected.has(rowKey);
 }
 
-/** 歌曲和 B 站视频共用批量选择；已入库及纯本地组不重复入队。 */
+/** 歌曲和视频共用批量选择；纯本地组没有可下载来源。 */
 export function selectableGroups(item: IntakeItem): MergedGroup[] {
   return item.groups.filter(
-    (group) =>
-      !group.in_library &&
-      group.sources.some((source) => source.platform !== "local"),
+    (group) => group.sources.some((source) => source.platform !== "local"),
   );
 }

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use kdj_core::models::{FolderUndoOp, FolderUndoStatus, Platform, Quality, SongSource};
 use kdj_core::{AppConfig, EventHub};
 use kdj_library::service::DeletedTrack;
@@ -17,7 +17,7 @@ use kdj_providers::soundcloud::SoundCloudProvider;
 use kdj_providers::youtube::YoutubeProvider;
 use kdj_providers::youtubemusic::auth::YoutubeAuth;
 use kdj_providers::youtubemusic::YoutubeMusicProvider;
-use kdj_providers::{MusicProvider, ProviderContext, ProviderLiveSettings};
+use kdj_providers::{MusicProvider, ProviderContext, ProviderLiveSettings, VideoProvider};
 
 /// 账号页和搜索页的平台顺序。`local` 不是真的 provider，不在这里。
 pub const PLATFORMS: [Platform; 6] = [
@@ -45,6 +45,9 @@ pub struct SongPreviewTicket {
     pub url: String,
     /// YTM URL 是否带 WebView 生成的内容绑定 PO Token；这类 URL 不能在后端刷新。
     pub browser_resolved: bool,
+    /// WebPO/GVS is consumed by one uninterrupted upstream request. Local decoder seeks read
+    /// arbitrary ranges from this growing spool instead of reopening the protected capability.
+    pub protected_spool: Option<Arc<crate::protected_media::ProtectedMediaSpool>>,
     pub last_used_at: Instant,
 }
 
@@ -181,20 +184,20 @@ pub struct OneLibrarySyncSnapshot {
 
 pub struct AppState {
     pub config: Arc<AppConfig>,
+    /// 在线媒体代理共用连接池。Range seek 每次都新建 Client 会让即使命中 CDN
+    /// 缓存的请求仍重复支付 DNS/TCP/TLS 建链时间。
+    pub preview_http: reqwest::Client,
     pub hub: EventHub,
     pub library: Arc<LibraryService>,
     providers: BTreeMap<Platform, Arc<dyn MusicProvider>>,
-    /// B 站的视频接口不在 `MusicProvider` trait 上（那是音乐管线的形状），
-    /// 单独留一份具体类型的引用给 `/api/video/*` 用。
-    pub bilibili: Arc<BilibiliProvider>,
+    video_providers: BTreeMap<Platform, Arc<dyn VideoProvider>>,
+    /// 旧 B 站预览/校准端口；解析与下载已迁移到 video_providers，后续再拆成预览能力。
+    pub bilibili_preview: Arc<BilibiliProvider>,
     /// SoundCloud OAuth 回调需要访问具体 provider 的短期 PKCE 会话。
     pub soundcloud: Arc<SoundCloudProvider>,
     /// 两个平台的登录态严格隔离；退出或重新连接任一来源不会影响另一个。
     pub ytm_auth: Arc<YoutubeAuth>,
     pub youtube_auth: Arc<YoutubeAuth>,
-    pub youtubemusic: Arc<YoutubeMusicProvider>,
-    /// 普通 YouTube 视频解析/下载接口需要具体 provider。
-    pub youtube: Arc<YoutubeProvider>,
     /// 所有 provider 共享的 live 设置句柄；`PUT /api/settings` 后刷这份即可。
     provider_ctx: ProviderContext,
     /// 在线歌曲试听的短期代理票据：浏览器只拿本地 URL，不直接碰各平台 CDN。
@@ -206,6 +209,8 @@ pub struct AppState {
     /// 正在跑的分析批次，供「停止分析」用。挂在这里而不是做成模块级 static：
     /// static 会被同进程里的多个 AppState（测试、将来的多实例）串在一起。
     pub analysis: crate::jobs::AnalysisRegistry,
+    /// 正在遍历/入库的显式扫描任务，供「取消扫描」使用。
+    pub scans: crate::jobs::ScanRegistry,
     /// 波形单飞：同一首歌的并发请求共享一次解码。
     pub waveforms: Arc<crate::waveform::WaveformCoordinator>,
     /// The fixed classical Redress STEM coordinator owns background separation; it never enters playback
@@ -238,8 +243,15 @@ impl AppState {
     pub fn new_with_control(
         config: Arc<AppConfig>,
     ) -> Result<(Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<UiControl>)> {
+        crate::protected_media::cleanup_stale(&config.data_dir);
         let database = Database::open(&config.db_path())?;
         let library = Arc::new(LibraryService::new(database));
+        let preview_http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .context("构建在线媒体代理 HTTP 客户端失败")?;
         let ctx = provider_context(&config);
         let netease = Arc::new(NeteaseProvider::new(ctx.clone())?);
         let qqmusic = Arc::new(QqMusicProvider::new(ctx.clone())?);
@@ -256,6 +268,9 @@ impl AppState {
         providers.insert(Platform::Ytm, youtubemusic.clone());
         providers.insert(Platform::Youtube, youtube.clone());
         providers.insert(Platform::Bilibili, bilibili.clone());
+        let mut video_providers: BTreeMap<Platform, Arc<dyn VideoProvider>> = BTreeMap::new();
+        video_providers.insert(Platform::Youtube, youtube);
+        video_providers.insert(Platform::Bilibili, bilibili.clone());
         let waveforms = crate::waveform::WaveformCoordinator::new(library.clone());
         let stems = kdj_stems::StemCoordinator::new(&config.data_dir);
         let stream_cache = crate::stream_cache::StreamCache::default();
@@ -264,20 +279,21 @@ impl AppState {
         Ok((
             Arc::new(AppState {
                 config,
+                preview_http,
                 hub: EventHub::default(),
                 library,
                 providers,
-                bilibili,
+                video_providers,
+                bilibili_preview: bilibili,
                 soundcloud,
                 ytm_auth,
                 youtube_auth,
-                youtubemusic,
-                youtube,
                 provider_ctx: ctx,
                 song_previews: Mutex::new(SongPreviewTickets::default()),
                 stream_cache,
                 stream_waveforms: Default::default(),
                 analysis: Default::default(),
+                scans: Default::default(),
                 waveforms,
                 stems,
                 maintenance: Default::default(),
@@ -310,6 +326,10 @@ impl AppState {
 
     pub fn provider(&self, platform: Platform) -> Option<&Arc<dyn MusicProvider>> {
         self.providers.get(&platform)
+    }
+
+    pub fn video_provider(&self, platform: Platform) -> Option<&Arc<dyn VideoProvider>> {
+        self.video_providers.get(&platform)
     }
 
     /// 把当前 settings 刷进所有 provider 共享的 live 配置。
@@ -392,6 +412,7 @@ mod tests {
             cached: false,
             url: format!("https://cdn.example/{key}"),
             browser_resolved: false,
+            protected_spool: None,
             last_used_at: at,
         }
     }

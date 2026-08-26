@@ -7,8 +7,10 @@ import {
   LocateFixed,
   Music2,
   Pause,
+  Pin,
   Play,
   Scissors,
+  ScanSearch,
   Search,
   X,
 } from "lucide-react";
@@ -104,12 +106,23 @@ function LibrarySearchField({
 export function LibraryWorkRail({
   showDownloads = false,
   asideToggle,
+  aggregateSearchOpen = true,
+  onOpenAggregateSearch,
+  localPanePinned = false,
+  onLocalPanePinnedChange,
 }: {
   showDownloads?: boolean;
   /** 宽屏右栏开合键，始终位于本栏工具组最右侧。 */
   asideToggle?: ReactNode;
+  /** 顶栏混合搜索是否展开；收起时在定位右侧显示重新打开。 */
+  aggregateSearchOpen?: boolean;
+  onOpenAggregateSearch?(): void;
+  /** 固定本地曲库后，OneLibrary 与在线内容在右侧并排打开。 */
+  localPanePinned?: boolean;
+  onLocalPanePinnedChange?(pinned: boolean): void;
 }) {
   const scan = useLibraryStore((state) => state.scan);
+  const cancelScan = useLibraryStore((state) => state.cancelScan);
   const analyze = useLibraryStore((state) => state.analyze);
   const maintenance = useLibraryStore((state) => state.maintenance);
   const autoAnalyzeSuspended = useLibraryStore((state) => state.autoAnalyzeSuspended);
@@ -264,25 +277,67 @@ export function LibraryWorkRail({
     </button>
   );
 
-  const trailingTools = (
-    <span className="kd-activity-trailing-tools">
-      {folderSearchToggle}
+  const locatePlayingToggle = (
+    <button
+      type="button"
+      className="kd-activity-search-toggle"
+      aria-label="定位正在播放"
+      title={
+        locatableTrack
+          ? `定位正在播放：${locatableTrack.title || locatableTrack.filename}`
+          : "当前没有可定位的曲目"
+      }
+      disabled={!locatableTrack || locating}
+      onClick={() => {
+        void locatePlaying();
+      }}
+    >
+      <LocateFixed size={14} strokeWidth={2.25} />
+    </button>
+  );
+
+  const localPanePinToggle = onLocalPanePinnedChange ? (
+    <button
+      type="button"
+      className="kd-activity-search-toggle"
+      data-action="workspace-pin"
+      data-pinned={localPanePinned ? "true" : undefined}
+      aria-pressed={localPanePinned}
+      aria-label={localPanePinned ? "取消固定本地曲库" : "固定本地曲库"}
+      title={
+        localPanePinned
+          ? "本地曲库已固定；OneLibrary 和在线内容会并排打开"
+          : "当前为覆盖打开；点击固定本地曲库"
+      }
+      onClick={() => onLocalPanePinnedChange(!localPanePinned)}
+    >
+      <Pin
+        size={14}
+        strokeWidth={2.25}
+        fill={localPanePinned ? "currentColor" : "none"}
+      />
+    </button>
+  ) : null;
+
+  const aggregateSearchToggle =
+    !aggregateSearchOpen && onOpenAggregateSearch ? (
       <button
         type="button"
         className="kd-activity-search-toggle"
-        aria-label="定位正在播放"
-        title={
-          locatableTrack
-            ? `定位正在播放：${locatableTrack.title || locatableTrack.filename}`
-            : "当前没有可定位的曲目"
-        }
-        disabled={!locatableTrack || locating}
-        onClick={() => {
-          void locatePlaying();
-        }}
+        aria-label="展开混合搜索"
+        title="展开混合搜索"
+        onClick={onOpenAggregateSearch}
       >
-        <LocateFixed size={14} strokeWidth={2.25} />
+        <ScanSearch size={14} strokeWidth={2.25} />
       </button>
+    ) : null;
+
+  const trailingTools = (
+    <span className="kd-activity-trailing-tools">
+      {folderSearchToggle}
+      {locatePlayingToggle}
+      {localPanePinToggle}
+      {aggregateSearchToggle}
       {asideToggle}
     </span>
   );
@@ -350,22 +405,9 @@ export function LibraryWorkRail({
               onClear={clearSearch}
               onBlurEmpty={() => setSearchOpen(false)}
             />
-            <button
-              type="button"
-              className="kd-activity-search-toggle"
-              aria-label="定位正在播放"
-              title={
-                locatableTrack
-                  ? `定位正在播放：${locatableTrack.title || locatableTrack.filename}`
-                  : "当前没有可定位的曲目"
-              }
-              disabled={!locatableTrack || locating}
-              onClick={() => {
-                void locatePlaying();
-              }}
-            >
-              <LocateFixed size={14} strokeWidth={2.25} />
-            </button>
+            {locatePlayingToggle}
+            {localPanePinToggle}
+            {aggregateSearchToggle}
             {asideToggle}
           </span>
         }
@@ -400,6 +442,19 @@ export function LibraryWorkRail({
         正在导入 {scan.done}/{scan.total}
         {scan.current ? ` · ${scan.current}` : ""}
       </span>,
+    );
+    texts.push(
+      <button
+        key="scan-cancel"
+        type="button"
+        className="kd-activity-control"
+        disabled={scan.current === "正在取消…"}
+        title="停止扫描；已经完成入库的曲目会保留"
+        onClick={() => void cancelScan().catch(() => undefined)}
+      >
+        <X size={11} />
+        {scan.current === "正在取消…" ? "正在取消扫描" : "取消扫描"}
+      </button>,
     );
   }
   if (analyze !== null) {

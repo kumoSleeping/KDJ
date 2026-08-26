@@ -66,6 +66,13 @@ pub fn candidate_data_dirs(explicit: Option<&Path>) -> Vec<PathBuf> {
                 .unwrap_or_else(|| home_dir().join(".config"))
         }
     };
+    #[cfg(feature = "labs")]
+    {
+        // KDJ Labs has an independent application/update identity and must never hand its CLI
+        // commands to a concurrently running stable KDJ process.
+        return vec![support.join("com.kdj.app.labs").join("data")];
+    }
+    #[cfg(not(feature = "labs"))]
     vec![
         support.join("kdj").join("data"),
         support.join("com.kdj.app").join("data"),

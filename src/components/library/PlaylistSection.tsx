@@ -31,6 +31,7 @@ import { usePlaylistStore } from "../../stores/playlistStore";
 import { useAppStore } from "../../stores/appStore";
 import type { OneLibraryPlaylist, RemovableDevice } from "../../types";
 import { ContextMenu } from "../common";
+const LABS_BUILD = typeof __KDJ_LABS__ !== "undefined" && __KDJ_LABS__;
 
 const PLAYLIST_TREE_DND = "application/x-kdj-onelibrary-playlist";
 
@@ -115,6 +116,10 @@ export function PlaylistSection({
   const openPlaylist = usePlaylistStore((state) => state.openPlaylist);
   const selectedTarget = usePlaylistStore((state) => state.selectedTarget);
   const openVirtualDiskPanel = useAppStore((state) => state.openVirtualDiskPanel);
+  const configuredOneLibrary = useAppStore(
+    (state) => state.settings?.experimental_one_library ?? false,
+  );
+  const experimentalOneLibrary = LABS_BUILD && configuredOneLibrary;
   const [treeUi, setTreeUi] = useState<OneLibraryTreeUiState>(() => {
     const restored = readSidebarTreeState().oneLibrary;
     return {
@@ -543,6 +548,8 @@ export function PlaylistSection({
       </div>
     );
   };
+
+  if (!experimentalOneLibrary) return null;
 
   return (
     <>

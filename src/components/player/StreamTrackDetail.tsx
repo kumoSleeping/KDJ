@@ -14,13 +14,13 @@ import {
   subscribeSongPreviewState,
 } from "../../lib/songPreview";
 import { streamCoverUrl, streamMeta } from "../../lib/streamTrack";
+import { enqueueMediaDownloads } from "../../lib/mediaActions";
 import {
   streamAnalysisSnapshot,
   subscribeStreamAnalysis,
   type StreamAnalysisSnapshot,
 } from "../../lib/streamAnalysis";
 import { useAppStore } from "../../stores/appStore";
-import { useDownloadStore } from "../../stores/downloadStore";
 import type { Track } from "../../types";
 import { Button, InlineNotice, Panel } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
@@ -168,8 +168,6 @@ export function StreamTrackDetail({ track }: { track: Track }) {
     getSongPreviewState,
   );
   const settings = useAppStore((state) => state.settings);
-  const openQueuePanel = useAppStore((state) => state.openQueuePanel);
-  const enqueue = useDownloadStore((state) => state.enqueue);
   const [downloadBusy, setDownloadBusy] = useState(false);
   const [actionError, setActionError] = useState("");
   const subscribeAnalysis = useCallback(
@@ -233,12 +231,11 @@ export function StreamTrackDetail({ track }: { track: Track }) {
     setDownloadBusy(true);
     setActionError("");
     try {
-      await enqueue([source], {
+      await enqueueMediaDownloads([source], {
         quality: settings?.default_quality ?? null,
         // 这里只不覆盖“下载后入库分析”策略；上面的试听临时分析与下载任务无关。
         analyze: null,
       });
-      openQueuePanel();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -320,7 +317,7 @@ export function StreamTrackDetail({ track }: { track: Track }) {
         </Button>
         <Button
           size="sm"
-          variant="primary"
+          variant="ghost"
           disabled={!source || downloadBusy}
           onClick={() => void download()}
         >

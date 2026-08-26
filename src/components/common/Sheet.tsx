@@ -6,6 +6,8 @@ export interface SheetProps {
   title: string;
   /** 替换默认标题文案（例如详情/歌词分段）。 */
   heading?: ReactNode;
+  /** 标题右侧、关闭键左侧的面板动作。 */
+  tools?: ReactNode;
   onClose(): void;
   children: ReactNode;
 }
@@ -17,7 +19,7 @@ export interface SheetProps {
  * 占约 70% 中间区宽，左侧用轻透明遮罩；点遮罩、按 Esc、或把面板往右拖即可关闭。
  * 入场动画刻意做得很短很轻，不拖泥带水。
  */
-export function Sheet({ open, title, heading, onClose, children }: SheetProps) {
+export function Sheet({ open, title, heading, tools, onClose, children }: SheetProps) {
   /** 拖动时的即时位移（px，向右为正）。松手时要么归零、要么关掉。 */
   const [drag, setDrag] = useState(0);
   const dragRef = useRef(0);
@@ -103,6 +105,7 @@ export function Sheet({ open, title, heading, onClose, children }: SheetProps) {
           }}
         >
           {heading ?? <span className="kd-sheet-title">{title}</span>}
+          {tools}
           <button
             type="button"
             className="kd-sheet-close"

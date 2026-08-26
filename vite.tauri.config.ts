@@ -40,8 +40,13 @@ function stripElectronCsp(): Plugin {
 // `tauri dev --host` 会设这个变量：真机调试时 HMR 不能连 localhost。
 const host = process.env.TAURI_DEV_HOST;
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [react(), stripElectronCsp()],
+  // Stable KDJ deliberately compiles out every experimental entry. KDJ Labs is a separate
+  // application identity and opts the frontend/backend into those surfaces together.
+  define: {
+    __KDJ_LABS__: JSON.stringify(mode === "labs"),
+  },
   // Tauri CLI 自己要打印编译进度，vite 清屏会把它冲掉
   clearScreen: false,
   envPrefix: ["VITE_", "TAURI_ENV_"],
@@ -62,4 +67,4 @@ export default defineConfig({
     minify: process.env.TAURI_ENV_DEBUG ? false : "esbuild",
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
   },
-});
+}));

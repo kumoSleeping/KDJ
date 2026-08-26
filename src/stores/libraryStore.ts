@@ -266,6 +266,8 @@ export interface LibraryStore {
    * 不用再引导用户点第二个按钮。
    */
   startScan(paths: string[], analyze?: boolean): Promise<ScanResponseLike>;
+  /** 停止当前扫描；已经提交的小批次保留，后续文件不再读取。 */
+  cancelScan(): Promise<void>;
   startAnalyze(
     trackIds: number[] | null,
     force?: boolean,
@@ -643,8 +645,33 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
 
   async startScan(paths, analyze = false) {
     const response = await api.scan(paths, analyze);
-    set({ scan: { job_id: response.job_id, done: 0, total: response.found, current: "", phase: "walk" } });
+    // 空目录可能在 POST 返回前就通过 WS 发完终局事件；不能再用 walk 占位把 done
+    // 覆盖掉，否则界面会永久显示一场其实早已结束、也取消不了的扫描。
+    set((current) =>
+      current.scan?.job_id === response.job_id
+        ? {}
+        : {
+            scan: {
+              job_id: response.job_id,
+              done: 0,
+              total: response.found,
+              current: "",
+              phase: "walk",
+            },
+          },
+    );
     return response;
+  },
+
+  async cancelScan() {
+    const current = get().scan;
+    if (!current || current.phase === "done") return;
+    await api.cancelScan(current.job_id);
+    // 保持任务为进行中，直到后端发终局事件，避免取消尚在收尾时又起一批并发扫描。
+    const latest = get().scan;
+    if (latest?.job_id === current.job_id && latest.phase !== "done") {
+      set({ scan: { ...latest, current: "正在取消…" } });
+    }
   },
 
   async startAnalyze(trackIds, force = false, priority = false, version = "v1", limit, folder = "") {
@@ -855,6 +882,12 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
           void get().refresh();
           void get().refreshStats();
         }, FILTER_DEBOUNCE_MS);
+        return;
+      }
+      case "library.folders.updated": {
+        // 外部 Finder/Explorer 操作没有对应的前端 action；目录 watcher 靠这条
+        // 单独刷新真实文件夹和计数，不拿 scan.progress 冒充一次手工导入。
+        void get().refreshFolders();
         return;
       }
       default:

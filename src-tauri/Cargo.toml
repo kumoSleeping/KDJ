@@ -20,7 +20,7 @@ anyhow = "1.0.104"
 base64 = "0.22"
 kdj-core = { version = "0.2.41", path = "../crates/kdj-core" }
 kdj-library = { version = "0.2.41", path = "../crates/kdj-library" }
-kdj-server = { version = "0.2.41", path = "../crates/kdj-server" }
+kdj-server = { version = "0.2.41", path = "../crates/kdj-server", default-features = false }
 rand = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }
 # tauri.conf.json 里一有 `plugins` 段，`generate_context!` 展开出来的代码就会
@@ -30,8 +30,6 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0"
 # macOS 的透明 WebView 构建器受该 feature 保护；桌面歌词窗口需要真透明背景。
 tauri = { version = "2.11", features = ["macos-private-api"] }
-tauri-plugin-dialog = "2.7"
-tauri-plugin-deep-link = "2.4.9"
 tauri-plugin-opener = "2.5"
 tokio = { version = "1.53.1", features = ["sync"] }
 tracing = "0.1.44"
@@ -47,13 +45,17 @@ souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 midir = "0.11"
 clap = { version = "4.5", features = ["derive"] }
+tauri-plugin-dialog = "2.7"
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-deep-link = "2.4.9"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # hdiutil / diskutil 的 -plist 输出不受系统显示语言影响；不要解析本地化文本。
-plist = "1.10"
+plist = { version = "1.10", optional = true }
 
 # Android Playback v2：与桌面共用 coordinator + CPAL/AAudio；Kotlin 插件只留
 # MediaSession / 前台保活 / 歌词 overlay，不再用 ExoPlayer 出声。
@@ -69,6 +71,9 @@ tauri-plugin-native-audio = { version = "=1.0.5", path = "../plugins/native-audi
 tauri-plugin-native-audio = { version = "=1.0.5", path = "../plugins/native-audio" }
 
 [features]
+default = []
+# Separate KDJ Labs product: enables every experimental desktop surface and OneLibrary backend.
+labs = ["kdj-server/onelibrary", "dep:plist"]
 # `tauri build` 会自动带上这个 feature，`generate_context!` 才会去读
 # frontendDist 把前端产物嵌进二进制；不带的时候（`cargo build` / `tauri dev`）
 # 走 devUrl。**不要删**：删了之后光 `cargo build` 就会因为找不到 dist-tauri/ 而失败。

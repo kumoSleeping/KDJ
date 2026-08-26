@@ -8,9 +8,15 @@ pub mod aggregate;
 pub mod downloads;
 pub mod error;
 pub mod jobs;
-pub mod lyrics;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod library_watch;
+pub mod lyrics;
+#[cfg(all(
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 mod one_library_analysis;
+pub mod protected_media;
 pub mod routes;
 pub mod state;
 pub mod stems;
@@ -85,6 +91,10 @@ pub async fn serve(
     tokio::sync::mpsc::UnboundedReceiver<state::UiControl>,
 )> {
     let (state, control_rx) = AppState::new_with_control(config.clone())?;
+    // 先挂监听再起 HTTP：这样 WebView 启动期间发生的文件变化也不会漏掉。
+    // 首轮补扫会等 WebSocket 连好再做，避免刷新事件发在前端订阅之前。
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    library_watch::spawn(state.clone());
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port))

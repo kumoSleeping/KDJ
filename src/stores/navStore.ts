@@ -16,6 +16,7 @@ export type OverlayKind =
   | "preview"
   | "folders"
   | "vjExport"
+  | "duplicates"
   | "virtualDisk"
   | "lyrics";
 
@@ -36,6 +37,7 @@ function overlayOf(): OverlayKind | null {
   if (app.showPreview) return "preview";
   if (app.showQueue) return "queue";
   if (app.showVjExport) return "vjExport";
+  if (app.showDuplicates) return "duplicates";
   if (app.showVirtualDisk) return "virtualDisk";
   if (app.showLyrics) return "lyrics";
   return null;
@@ -77,6 +79,11 @@ function applyOverlay(overlay: OverlayKind | null): void {
   else if (overlay === "queue") app.openQueuePanel();
   else if (overlay === "folders") app.openFoldersPanel();
   else if (overlay === "vjExport") app.openVjExportPanel();
+  else if (overlay === "duplicates")
+    app.openDuplicatePanel(app.duplicateFolders, {
+      all: app.duplicateAll,
+      includeSubfolders: app.duplicateIncludeSubfolders,
+    });
   else if (overlay === "virtualDisk") app.openVirtualDiskPanel();
   else if (overlay === "lyrics") app.openLyricsPanel();
   else app.dismissOverlay();
@@ -94,8 +101,10 @@ export function applyPlace(place: Place): void {
       showPreview: false,
       showFolders: false,
       showVjExport: false,
+      showDuplicates: false,
       showVirtualDisk: false,
       showLyrics: false,
+      queuePinned: false,
     });
     if (lib.filter.folder !== place.folder || lib.filter.folderDeep !== place.folderDeep) {
       lib.setFilter({ folder: place.folder, folderDeep: place.folderDeep });

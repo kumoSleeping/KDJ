@@ -11,6 +11,8 @@ import { create } from "zustand";
 import { api } from "../lib/api";
 import { isSparseDownloadTitle, withDownloadDisplay } from "../lib/downloadDisplay";
 import { rememberVideoEnqueue } from "../lib/queueTaskDraft";
+import { shouldRefreshYtmDownloadAuthorization } from "../lib/downloadRetryPolicy";
+import { sortDownloadTasks } from "../lib/downloadOrder";
 import {
   hintForDownload,
   pruneDownloadDisplayCache,
@@ -29,6 +31,8 @@ import type {
 const ACTIVE_STATES = new Set(["queued", "running", "processing"]);
 /** 兼容仍在运行的旧后端：queued 取消会回一条 canceled，前端必须把它挡掉。 */
 const removedQueuedTasks = new Set<string>();
+/** A failed YTM task gets one transparent fresh-POT retry; persistent failures remain visible. */
+const refreshedYtmAuthorization = new Set<string>();
 
 interface Derived {
   list: DownloadTask[];
@@ -41,9 +45,7 @@ interface Derived {
  * zustand v5 每次 render 都会拿到新数组引用，直接触发无限重渲染。
  */
 function derive(tasks: Map<string, DownloadTask>): Derived {
-  const list = [...tasks.values()].sort(
-    (a, b) => b.created_at - a.created_at || b.updated_at - a.updated_at || a.id.localeCompare(b.id),
-  );
+  const list = sortDownloadTasks(tasks.values());
   let activeCount = 0;
   for (const task of list) if (ACTIVE_STATES.has(task.state)) activeCount += 1;
   return { list, activeCount };
@@ -65,7 +67,14 @@ function mergeTask(prev: DownloadTask | undefined, next: DownloadTask): Download
     cover: prev?.cover,
     dest_dir: prev?.dest_dir,
   });
-  const merged = withDownloadDisplay(fromPrev, cached ?? {});
+  const merged = {
+    ...withDownloadDisplay(fromPrev, cached ?? {}),
+    ...(next.one_library_error !== undefined
+      ? { one_library_error: next.one_library_error }
+      : prev?.one_library_error !== undefined
+        ? { one_library_error: prev.one_library_error }
+        : {}),
+  };
   // 服务端已经解析出真标题时，别被缓存里的旧 BV 盖回去
   if (!isSparseDownloadTitle(next.title) && merged.title !== next.title) {
     return { ...merged, title: next.title };
@@ -114,6 +123,7 @@ export interface DownloadStore {
     },
   ): Promise<DownloadTask[]>;
   cancel(taskId: string): Promise<void>;
+  cancelAll(): Promise<void>;
   retry(taskId: string): Promise<void>;
   remove(taskId: string): Promise<void>;
   clear(): Promise<void>;
@@ -184,6 +194,19 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       ? tasks.map((task) => ({ ...task, dest_dir: task.dest_dir || destDir }))
       : tasks;
     get().mergeTasks(stamped);
+    const autoStart = (await import("./appStore")).useAppStore.getState().settings
+      ?.auto_start_downloads;
+    if (
+      autoStart &&
+      stamped.some((task) => task.kind === "audio")
+    ) {
+      // 入队和播放授权是两件事：先把 queued 行交给统一下载管理并立即返回，
+      // 再在后台运行平台注册的来源准备适配器。以前 await 在这里，调用方要等“解析”完
+      // 才打开下载栏，看起来像根本没入队；QQ/网易云却立即出现，行为完全不一致。
+      void api.preparePendingDownloads().catch((error) => {
+        console.warn("下载来源准备失败", error);
+      });
+    }
     return stamped;
   },
 
@@ -198,6 +221,10 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       throw error;
     }
     if (wasQueued) {
+      const { removePendingOneLibraryDownloadTasks } = await import(
+        "../lib/oneLibraryDownloadPersistence"
+      );
+      removePendingOneLibraryDownloadTasks([taskId]);
       const map = new Map(get().tasks);
       map.delete(taskId);
       set({ tasks: map, ...derive(map) });
@@ -206,13 +233,31 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
     get().mergeTasks([task]);
   },
 
+  async cancelAll() {
+    const ids = get().list
+      .filter((task) => ACTIVE_STATES.has(task.state))
+      .map((task) => task.id);
+    if (ids.length === 0) return;
+    await api.cancelAllDownloads();
+    const [{ removePendingOneLibraryDownloadTasks }, { forgetQueueDraft }] = await Promise.all([
+      import("../lib/oneLibraryDownloadPersistence"),
+      import("../lib/queueTaskDraft"),
+    ]);
+    removePendingOneLibraryDownloadTasks(ids);
+    ids.forEach(forgetQueueDraft);
+    await get().refresh();
+  },
+
   async retry(taskId) {
+    // A manual retry starts a new user-owned attempt and may receive one automatic refresh again.
+    refreshedYtmAuthorization.delete(taskId);
     const task = await api.retryDownload(taskId);
     get().mergeTasks([task]);
   },
 
   async remove(taskId) {
     await api.removeDownload(taskId);
+    refreshedYtmAuthorization.delete(taskId);
     const map = new Map(get().tasks);
     map.delete(taskId);
     set({ tasks: map, ...derive(map) });
@@ -250,6 +295,21 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
     if (event.type === "download.updated") {
       if (removedQueuedTasks.has(event.payload.id)) return;
       get().mergeTasks([event.payload]);
+      if (event.payload.state === "done" || event.payload.state === "canceled") {
+        refreshedYtmAuthorization.delete(event.payload.id);
+      } else if (
+        shouldRefreshYtmDownloadAuthorization(event.payload)
+        && !refreshedYtmAuthorization.has(event.payload.id)
+      ) {
+        refreshedYtmAuthorization.add(event.payload.id);
+        // retryDownload first asks the WebView to mint a new POT and resolve a fresh GVS URL,
+        // then restarts the same task id. Keep the guard set if it fails again to avoid a loop.
+        void api.retryDownload(event.payload.id)
+          .then((task) => get().mergeTasks([task]))
+          .catch((error: unknown) => {
+            console.warn("YouTube Music 下载授权自动刷新失败", error);
+          });
+      }
       void import("../lib/oneLibraryDownloads").then(({ handleOneLibraryDownloadTask }) =>
         handleOneLibraryDownloadTask(event.payload),
       );

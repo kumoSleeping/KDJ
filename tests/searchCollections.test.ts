@@ -42,7 +42,6 @@ const response: CollectionResolveResponse = {
   platform: "wyy",
   title: "详情标题",
   sources: [source],
-  in_library_source_keys: ["wyy:song-1"],
 };
 
 function searchItem(collections: CollectionResult[]): IntakeItem {
@@ -58,12 +57,11 @@ function searchItem(collections: CollectionResult[]): IntakeItem {
   };
 }
 
-test("resolved collection keeps collection cover and local-library state", () => {
+test("resolved collection keeps the collection cover", () => {
   const resolved = resolvedCollectionItem(collection, response);
 
   assert.equal(resolved.title, "详情标题");
   assert.equal(resolved.groups[0]?.cover, "playlist-cover");
-  assert.equal(resolved.groups[0]?.in_library, true);
 });
 
 test("loaded collection is promoted while the remaining search results stay available", () => {

@@ -152,7 +152,7 @@ export function VjSearchPanel({ track }: { track: Track }) {
           )}
         </div>
         <div className="kd-vj-actions">
-          <Button variant="primary" size="sm" onClick={runSearch}>
+          <Button variant="ghost" size="sm" onClick={runSearch}>
             <Search size={12} />
             搜索{taggedCount > 0 && `（${taggedCount}）`}
           </Button>

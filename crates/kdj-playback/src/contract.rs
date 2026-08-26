@@ -223,6 +223,9 @@ pub enum PlaybackCommand {
     },
     Play,
     Pause,
+    /// Explicit source-replacement boundary. Stops output, cancels pending workers and removes
+    /// both installed Decks so a failed online load cannot ever resume the previous song.
+    Clear,
     PlayDeck {
         deck: u8,
     },

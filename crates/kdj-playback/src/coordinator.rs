@@ -63,6 +63,24 @@ const SYNC_PHASE_TOLERANCE_SEC: f64 = 0.003;
 /// 50ms used to let SYNC phase-align seeks leak the old playhead, which the UI interpolated
 /// as the needle and beat grid reversing under a centered playhead.
 const LIVE_CLOCK_SAME_ORIGIN_SEC: f64 = 0.008;
+
+fn remote_playback_error(error: &anyhow::Error) -> String {
+    let chain = format!("{error:#}");
+    if chain.contains("online audio proxy returned HTTP 401") {
+        return "在线试听授权已失效，正在请求新的播放地址".into();
+    }
+    if chain.contains("online audio proxy returned HTTP 403") {
+        return "在线媒体源拒绝了播放请求（HTTP 403）".into();
+    }
+    if chain.contains("online audio proxy returned HTTP") {
+        return chain
+            .split("online audio proxy returned ")
+            .nth(1)
+            .map(|reason| format!("在线试听代理返回 {reason}"))
+            .unwrap_or_else(|| "在线试听代理请求失败".into());
+    }
+    format!("在线试听无法播放：{chain}")
+}
 const TRANSPORT_FADE_MS: u64 = 120;
 /// 拔掉耳机/切换输出设备后，系统枚举新默认设备有滞后；重开输出按这个节奏退避重试。
 const DEVICE_RECOVERY_ATTEMPTS: usize = 8;
@@ -763,6 +781,7 @@ impl Actor {
             }
             PlaybackCommand::Play => self.set_playing(true),
             PlaybackCommand::Pause => self.set_playing(false),
+            PlaybackCommand::Clear => self.clear_installed_sources(),
             PlaybackCommand::PlayDeck { deck } => self.set_deck_playing(deck, true),
             PlaybackCommand::PauseDeck { deck } => self.set_deck_playing(deck, false),
             PlaybackCommand::SetDeckPfl { deck, enabled } => self.send(RtCommand::SetDeckPfl {
@@ -2627,6 +2646,38 @@ impl Actor {
         Ok(())
     }
 
+    fn clear_installed_sources(&mut self) -> Result<(), String> {
+        if self.player.is_some() {
+            self.send(RtCommand::SetPlaying {
+                playing: false,
+                fade_frames: 0,
+            })?;
+        }
+        self.retire_deck(DeckId::A);
+        self.retire_deck(DeckId::B);
+        self.pending = [None, None];
+        self.pending_preroll = [None, None];
+        self.deferred_stream = None;
+        self.retire_after_transition = None;
+        self.stem_recoveries = [None, None];
+        self.queue.clear();
+        self.sync_group = None;
+        self.manual_mode = false;
+        self.manual_desired_playing = [false; 2];
+        let sequence = self.state.sequence;
+        let last_command_id = self.state.last_command_id;
+        let transport_fade_enabled = self.state.transport_fade_enabled;
+        self.state = PlaybackSnapshot {
+            sequence,
+            last_command_id,
+            volume: self.volume,
+            transport_fade_enabled,
+            ..PlaybackSnapshot::default()
+        };
+        tracing::warn!("显式换源已清除全部物理 Deck");
+        Ok(())
+    }
+
     fn seek(&mut self, position: f64) -> Result<(), String> {
         if self.manual_mode {
             return self.seek_deck(self.front as u8, position);
@@ -3123,7 +3174,7 @@ impl Actor {
                             PlaybackSourceKind::Local => format!(
                                 "本地音频文件无法播放，可能已被移动或所在设备已断开：{error:#}"
                             ),
-                            PlaybackSourceKind::Remote => format!("在线试听无法播放：{error:#}"),
+                            PlaybackSourceKind::Remote => remote_playback_error(&error),
                         }
                     }
                 });
@@ -4841,6 +4892,17 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::Mutex;
 
+    #[test]
+    fn remote_http_failure_is_not_misreported_as_an_audio_codec_error() {
+        let error = anyhow::anyhow!(
+            "unsupported audio format: loopback ticket: online audio proxy returned HTTP 401 Unauthorized"
+        );
+        assert_eq!(
+            remote_playback_error(&error),
+            "在线试听授权已失效，正在请求新的播放地址"
+        );
+    }
+
     /// 不起真实声卡的输出替身：记录发送、按开关注入失败，快照由测试直接摆弄。
     struct FakeKnobs {
         fail_send: AtomicBool,
@@ -5490,6 +5552,36 @@ mod tests {
             seek: StreamSeekControl::new(),
             scratch_cache: None,
         }
+    }
+
+    #[test]
+    fn explicit_clear_removes_the_previous_physical_source_before_online_resolution() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().unwrap();
+        actor.decks[DeckId::A as usize] = Some(live_runtime(7, 12.0));
+        actor.state.track_id = Some(7);
+        actor.state.phase = PlaybackPhase::Playing;
+        actor.state.desired_playing = true;
+        actor.state.is_playing = true;
+        actor.queue.push(source(8, 0.0));
+
+        actor
+            .apply_command(42, PlaybackCommand::Clear)
+            .expect("clear must be accepted");
+
+        assert!(actor.decks.iter().all(Option::is_none));
+        assert!(actor.pending.iter().all(Option::is_none));
+        assert!(actor.queue.is_empty());
+        assert_eq!(actor.state.track_id, None);
+        assert_eq!(actor.state.phase, PlaybackPhase::Idle);
+        assert!(!actor.state.desired_playing);
+        assert!(knobs
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| matches!(command, RtCommand::SetPlaying { playing: false, .. })));
     }
 
     fn drained_runtime(track_id: i64, position: f64) -> DeckRuntime {
