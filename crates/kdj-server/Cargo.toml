@@ -14,11 +14,11 @@ anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws", "macros"] }
 chrono = "0.4.45"
 futures-util = "0.3.33"
-kdj-analysis = { version = "0.2.41", path = "../kdj-analysis" }
-kdj-core = { version = "0.2.41", path = "../kdj-core" }
-kdj-library = { version = "0.2.41", path = "../kdj-library" }
-kdj-providers = { version = "0.2.41", path = "../kdj-providers" }
-kdj-stems = { version = "0.2.41", path = "../kdj-stems" }
+kdj-analysis = { version = "0.2.42", path = "../kdj-analysis" }
+kdj-core = { version = "0.2.42", path = "../kdj-core" }
+kdj-library = { version = "0.2.42", path = "../kdj-library" }
+kdj-providers = { version = "0.2.42", path = "../kdj-providers" }
+kdj-stems = { version = "0.2.42", path = "../kdj-stems" }
 rand = "0.10.2"
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "stream"] }
 serde = { version = "1.0.229", features = ["derive"] }

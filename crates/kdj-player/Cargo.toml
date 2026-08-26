@@ -8,8 +8,8 @@ license.workspace = true
 [dependencies]
 anyhow = "=1.0.104"
 cpal = "=0.18.1"
-kdj-core = { version = "0.2.41", path = "../kdj-core" }
-kdj-stems = { version = "0.2.41", path = "../kdj-stems" }
+kdj-core = { version = "0.2.42", path = "../kdj-core" }
+kdj-stems = { version = "0.2.42", path = "../kdj-stems" }
 rtrb = "=0.3.4"
 symphonia = { version = "=0.5.5", default-features = false, features = ["aac", "alac", "mp3", "isomp4", "mkv", "ogg", "vorbis", "flac", "wav", "pcm"] }
 tracing = "=0.1.44"
