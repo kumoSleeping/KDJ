@@ -117,7 +117,7 @@ git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1 \
   || { red "5 分钟内没看到 v$VERSION tag，去 Actions 看 release.yml"; exit 1; }
 
 watch_run() { # $1=workflow 名
-  local wf="$1" run_id=""
+  local wf="$1" run_id="" status="" conclusion="" interruptions=0
   for _ in $(seq 1 12); do
     run_id=$(gh run list --workflow="$wf" --limit 5 --json databaseId,headBranch,event \
       --jq ".[] | select(.headBranch==\"v$VERSION\") | .databaseId" 2>/dev/null | head -1)
@@ -126,7 +126,30 @@ watch_run() { # $1=workflow 名
   done
   [[ -n "$run_id" ]] || { red "没找到 $wf 在 v$VERSION 上的运行"; return 1; }
   info "$wf 运行中：$(gh run view "$run_id" --json url --jq .url)"
-  gh run watch "$run_id" --exit-status --interval 30 >/dev/null
+  # `gh run watch` 偶尔会在长达数十分钟的构建中因 GitHub API EOF 退出。构建
+  # 本身仍在继续；不要把一次网络断流误报成发行失败，重新查询状态并续看。
+  while (( interruptions < 12 )); do
+    if gh run watch "$run_id" --exit-status --interval 30 >/dev/null; then
+      return 0
+    fi
+    status=""
+    conclusion=""
+    for _ in $(seq 1 6); do
+      status=$(gh run view "$run_id" --json status --jq .status 2>/dev/null || true)
+      conclusion=$(gh run view "$run_id" --json conclusion --jq .conclusion 2>/dev/null || true)
+      [[ -n "$status" ]] && break
+      sleep 10
+    done
+    if [[ "$status" == "completed" ]]; then
+      [[ "$conclusion" == "success" ]]
+      return
+    fi
+    interruptions=$((interruptions + 1))
+    info "$wf 监看连接中断，重新连接（$interruptions/12）"
+    sleep 15
+  done
+  red "$wf 监看连续中断，无法确认最终状态"
+  return 1
 }
 
 info "盯桌面三平台构建（rust-build）"

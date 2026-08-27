@@ -291,22 +291,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          shopt -s globstar nullglob
-          files=(
-            **/release/bundle/dmg/*.dmg
-            **/release/bundle/macos/*.app.tar.gz
-            **/release/bundle/macos/*.app.tar.gz.sig
-            **/release/bundle/nsis/*.exe
-            **/release/bundle/nsis/*.exe.sig
-            **/release/bundle/msi/*.msi
-            **/release/bundle/msi/*.msi.sig
-            **/release/bundle/appimage/*.AppImage
-            **/release/bundle/appimage/*.AppImage.sig
-            **/release/bundle/deb/*.deb
-            **/release/bundle/deb/*.deb.sig
-            **/release/bundle/rpm/*.rpm
-            **/release/bundle/rpm/*.rpm.sig
-          )
+          # macOS runner still ships Bash 3.2, which has no `globstar`. Use portable find
+          # patterns rather than ** expansion so the exact same step works on all runners.
+          files=()
+          while IFS= read -r -d '' file; do
+            files+=("$file")
+          done < <(find . -type f \( -path '*/release/bundle/dmg/*.dmg' -o -path '*/release/bundle/macos/*.app.tar.gz' -o -path '*/release/bundle/macos/*.app.tar.gz.sig' -o -path '*/release/bundle/nsis/*.exe' -o -path '*/release/bundle/nsis/*.exe.sig' -o -path '*/release/bundle/msi/*.msi' -o -path '*/release/bundle/msi/*.msi.sig' -o -path '*/release/bundle/appimage/*.AppImage' -o -path '*/release/bundle/appimage/*.AppImage.sig' -o -path '*/release/bundle/deb/*.deb' -o -path '*/release/bundle/deb/*.deb.sig' -o -path '*/release/bundle/rpm/*.rpm' -o -path '*/release/bundle/rpm/*.rpm.sig' \) -print0)
           if (( ${#files[@]} == 0 )); then
             echo "::error::没有找到可上传的 Release 产物"
             exit 1

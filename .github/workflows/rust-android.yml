@@ -54,6 +54,11 @@ jobs:
 
       - name: 安装 Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The action's default includes the obsolete `tools` package, which aliases the
+          # emulator and intermittently downloads a corrupt archive. We install every required
+          # SDK/NDK package explicitly below, so only bootstrap platform-tools here.
+          packages: platform-tools
 
       # setup-android 只给 cmdline-tools，NDK 要自己点名装。
       # ANDROID_NDK_HOME / NDK_HOME 两个变量都要给：Tauri 读前者，
@@ -276,8 +281,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          shopt -s globstar nullglob
-          files=(src-tauri/gen/android/app/build/outputs/apk/**/release/*-release.apk)
+          files=()
+          while IFS= read -r -d '' file; do
+            files+=("$file")
+          done < <(find src-tauri/gen/android/app/build/outputs/apk -type f -path '*/release/*-release.apk' -print0)
           if (( ${#files[@]} == 0 )); then
             echo "::error::没有找到可发布的 APK"
             exit 1
