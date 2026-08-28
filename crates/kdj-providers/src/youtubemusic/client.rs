@@ -416,7 +416,18 @@ impl YtmClient {
         if let Some(value) = preferred.filter(|value| !value.is_empty()) {
             return trusted_player_url(value);
         }
+        let remembered = {
+            let state = self.script.read().unwrap();
+            match &*state {
+                ScriptState::Pending(url) | ScriptState::Ready(url, _) => Some(url.clone()),
+                ScriptState::None => None,
+            }
+        };
+        if let Some(url) = remembered {
+            return trusted_player_url(&url);
+        }
         let (url, _) = self.script_url_from_homepage().await?;
+        self.refresh_script_url(&url);
         trusted_player_url(&url)
     }
 

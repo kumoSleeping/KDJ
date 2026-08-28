@@ -467,16 +467,16 @@ impl NeteaseProvider {
     }
 
     /// 扫码成功后拉一次登录态写进会话，重启后不用发请求就能显示昵称。
-    async fn finish_login(&self) {
+    async fn finish_login(&self) -> Result<()> {
         match self
             .client
             .weapi("/weapi/w/nuser/account/get", Map::new())
             .await
         {
-            Ok(status) => self.client.set_profile(Some(status)),
+            Ok(status) => self.client.set_profile(Some(status))?,
             Err(err) => tracing::warn!("写入网易云登录信息失败：{err}"),
         }
-        self.client.save_session();
+        self.client.save_session()
     }
 }
 
@@ -527,7 +527,9 @@ impl MusicProvider for NeteaseProvider {
         let account_id = data.get("account").and_then(|a| a.get("id"));
         if let (Some(profile), Some(account_id)) = (profile, account_id) {
             if !profile.is_null() {
-                self.client.set_profile(Some(status.clone()));
+                if let Err(err) = self.client.set_profile(Some(status.clone())) {
+                    tracing::warn!("缓存网易云账号资料失败：{err:#}");
+                }
                 let vip_type = profile.get("vipType").and_then(Value::as_i64).unwrap_or(0);
                 let mut account = Account::new(
                     Platform::Wyy,
@@ -660,7 +662,7 @@ impl MusicProvider for NeteaseProvider {
             }
             803 => {
                 self.qr_sessions.lock().unwrap().remove(session_id);
-                self.finish_login().await;
+                self.finish_login().await?;
                 Ok((QrStateValue::Done, or_default(message, "登录成功")))
             }
             _ => Ok((QrStateValue::Waiting, message)),

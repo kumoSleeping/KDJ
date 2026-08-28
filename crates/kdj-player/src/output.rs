@@ -73,6 +73,9 @@ pub struct DynamicPlayer {
     next_source_id: u64,
 }
 
+// The payloads are intentionally never read: retaining these Arcs keeps callback pointers valid
+// until the realtime thread acknowledges retirement.
+#[allow(dead_code)]
 enum OwnedSource {
     Decoded(Arc<DecodedTrack>),
     Stream(Arc<StreamSource>, Option<Arc<ScratchPcmCache>>),

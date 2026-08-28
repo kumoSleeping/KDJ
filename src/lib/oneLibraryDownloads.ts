@@ -1,4 +1,5 @@
 import type { DownloadTask, OneLibraryTarget, SongSource } from "../types";
+import { api, ApiError } from "./api";
 import {
   loadPendingOneLibraryDownloads as load,
   persistOneLibraryDownloadTasks,
@@ -8,6 +9,12 @@ import {
 
 const activeWrites = new Set<string>();
 let resumeInFlight: Promise<void> | null = null;
+
+function isMissingLocalTrack(error: unknown): error is ApiError {
+  return error instanceof ApiError
+    && error.status === 404
+    && error.message.startsWith("曲目不存在");
+}
 
 export function registerOneLibraryDownloads(
   target: OneLibraryTarget,
@@ -30,10 +37,22 @@ async function flush(row: PendingOneLibraryDownload): Promise<string> {
         candidate.path === row.target.device_path && candidate.is_virtual === row.target.is_virtual,
     );
     if (!device) return `目标设备未连接：${row.target.device_name}`;
+    // 已完成下载的本地记录可能后来被用户删除。先做一次无副作用检查，避免
+    // addTracks 把这个永久失效的 id 写进 OneLibrary 全局错误栏。
+    await api.track(row.track_id);
     await state.addTracks(device.path, row.target.playlist_id, [row.track_id]);
     update(row.id, () => null);
     return "";
   } catch (error) {
+    if (isMissingLocalTrack(error)) {
+      // 用户已经删除本地成品，不再把旧下载强行复活；这条补写也随之作废。
+      update(row.id, () => null);
+      const { usePlaylistStore } = await import("../stores/playlistStore");
+      if (usePlaylistStore.getState().deviceError === error.message) {
+        usePlaylistStore.setState({ deviceError: "" });
+      }
+      return "";
+    }
     // 卷被推出、UAC 被取消或空间暂时不足：保留记录，下次刷新设备后继续，
     // 同时把原因放回下载行，不能继续静默显示“完成”。
     return `写入 ${row.target.device_name} 失败：${(error as Error).message}`;

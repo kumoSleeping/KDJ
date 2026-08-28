@@ -4,6 +4,7 @@ import { buildSabrFormat, EnabledTrackTypes } from "googlevideo/utils";
 
 import type { SongSource } from "../types";
 import { getBridge } from "./bridge";
+import { hasCompleteFmp4MediaSegment } from "./fmp4Prefix";
 
 export interface YoutubeSabrBootstrap {
   serverAbrStreamingUrl: string;
@@ -36,13 +37,16 @@ async function localJson<T>(path: string, init: RequestInit): Promise<T> {
   return value as T;
 }
 
-function concatenate(
-  left: Uint8Array<ArrayBufferLike>,
-  right: Uint8Array<ArrayBufferLike>,
+function joinChunks(
+  chunks: Uint8Array<ArrayBufferLike>[],
+  length: number,
 ): Uint8Array<ArrayBuffer> {
-  const value = new Uint8Array(left.length + right.length);
-  value.set(left, 0);
-  value.set(right, left.length);
+  const value = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    value.set(chunk, offset);
+    offset += chunk.length;
+  }
   return value;
 }
 
@@ -74,24 +78,37 @@ async function pumpAudio(
   stream: ReadableStream<Uint8Array>,
 ): Promise<void> {
   const reader = stream.getReader();
-  let pending = new Uint8Array();
+  let pendingChunks: Uint8Array<ArrayBufferLike>[] = [];
+  let pendingLength = 0;
   let firstSegmentPublished = false;
+  let nextPrefixInspection = 64 * 1024;
+  const takePending = (): Uint8Array<ArrayBuffer> => {
+    const bytes = joinChunks(pendingChunks, pendingLength);
+    pendingChunks = [];
+    pendingLength = 0;
+    return bytes;
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      pending = concatenate(pending, value);
-      const ready = firstSegmentPublished
-        ? pending.length >= 256 * 1024
-        : pending.length >= 1024 * 1024;
+      pendingChunks.push(value);
+      pendingLength += value.length;
+      let ready = firstSegmentPublished && pendingLength >= 256 * 1024;
+      if (!firstSegmentPublished && pendingLength >= nextPrefixInspection) {
+        const prefix = takePending();
+        pendingChunks = [prefix];
+        pendingLength = prefix.length;
+        ready = hasCompleteFmp4MediaSegment(prefix) || pendingLength >= 1024 * 1024;
+        nextPrefixInspection = (Math.floor(pendingLength / (64 * 1024)) + 1) * 64 * 1024;
+      }
       if (ready) {
-        await appendSpool(token, pending);
-        pending = new Uint8Array();
+        await appendSpool(token, takePending());
         firstSegmentPublished = true;
       }
     }
-    if (pending.length > 0) {
-      await appendSpool(token, pending);
+    if (pendingLength > 0) {
+      await appendSpool(token, takePending());
     }
     const complete = await localFetch(
       "/song/preview/ytm/sabr/spools/" + encodeURIComponent(token) + "/complete",

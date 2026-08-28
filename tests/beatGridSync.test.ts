@@ -229,15 +229,13 @@ test("native promotion owns seek lead for both original and STEM followers", () 
   almost(syncFollowerSeekPositionWithLead(input, syncSeekLeadSeconds(false)) ?? -1, 10);
 });
 
-test("manual SYNC matches 80.9 to 128.4 as half-time without pinning to a ±10% fader", () => {
-  const plan = deckSyncRate(128.4, 80.9, ENGINE_TEMPO_MIN, ENGINE_TEMPO_MAX);
+test("manual SYNC matches the two displayed effective BPM values without half-time folding", () => {
+  const plan = deckSyncRate(114.5, 172.9, ENGINE_TEMPO_MIN, ENGINE_TEMPO_MAX);
   assert.ok(plan);
-  assert.equal(plan.multiple, 2);
-  almost(plan.rate, 128.4 / (80.9 * 2), 1e-9);
-  assert.ok(plan.rate < 0.9, "±10% would have wrongly stopped at 0.9 and shown 72.8 BPM");
-  const clamped = deckSyncRate(128.4, 80.9, 0.9, 1.1);
-  assert.ok(clamped);
-  almost(clamped.rate, 0.9);
+  assert.equal(plan.multiple, 1);
+  almost(plan.rate, 114.5 / 172.9, 1e-9);
+  almost(172.9 * plan.rate, 114.5, 1e-9);
+  assert.equal(deckSyncRate(114.5, 172.9, 0.9, 1.1), null);
 });
 
 test("beat lock treats a one-beat offset as already aligned; bar lock does not", () => {
@@ -368,13 +366,13 @@ test("crossfader tempo moves between original endpoints through a shared midpoin
   almost(120 * right.rates[0], 132 * right.rates[1]);
 });
 
-test("crossfader tempo folds half-time BPM before interpolation", () => {
+test("crossfader tempo interpolates the real BPM values without half-time folding", () => {
   const plan = crossfaderTempoPlan(0.5, [70, 140]);
   assert.ok(plan);
-  assert.equal(plan.relation.multiple, 2);
-  almost(plan.targetBpm, 140);
-  almost(plan.rates[0], 1);
-  almost(plan.rates[1], 1);
+  assert.equal(plan.relation.multiple, 1);
+  almost(plan.targetBpm, 105);
+  almost(plan.rates[0], 1.5);
+  almost(plan.rates[1], 0.75);
 });
 
 test("crossfader tempo refuses missing BPM or a pair outside the shared engine range", () => {

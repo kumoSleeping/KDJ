@@ -42,13 +42,20 @@ export function correctedLiveWaveformRate(rate: number, phaseErrorSeconds: numbe
   return nominal + correction;
 }
 
-/** Platter phase is landed once at grab (or a real source discontinuity), never every clock tick. */
+/**
+ * Land once at platter handoff or any callback-declared source discontinuity.
+ *
+ * Native SYNC usually corrects only a few milliseconds. Letting that small jump enter the visual
+ * PLL instead of assigning the new callback phase left the two bar rails visibly close-but-not-
+ * equal for several seconds even though audio was already locked.
+ */
 export function shouldLandPlatterWaveform(
   wasActive: boolean,
   active: boolean,
   discontinuity: boolean,
 ): boolean {
-  return active ? !wasActive || discontinuity : wasActive;
+  if (discontinuity) return true;
+  return active ? !wasActive : wasActive;
 }
 
 /**

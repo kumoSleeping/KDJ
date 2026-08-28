@@ -41,6 +41,7 @@
   --kd-panel: #0d1117;
   --kd-panel-raised: #151b23;
   --kd-panel-inset: #010409;
+  --kd-video-matte: #000000;
   /* KDJ 的分隔线密度高于 GitHub 网页，采用较柔和的 GitHub Dark 线色。 */
   --kd-line: #30363d;
   --kd-line-soft: #212830;
@@ -153,6 +154,7 @@
   --kd-panel: #ffffff;
   --kd-panel-raised: #ffffff;
   --kd-panel-inset: #f9fafb;
+  --kd-video-matte: #ffffff;
   --kd-line: #e5e7eb;
   --kd-line-soft: #f0f0f2;
   --kd-hover: #f4f4f5;
@@ -4514,6 +4516,84 @@ body[data-kd-search-pointer-dragging="true"] * {
     transparent
   );
 }
+/* DJ/VJ 最终输出：独立于单视频预览小窗，只展示 A/B 的合成画布。 */
+.kd-performance-vj-output {
+  position: fixed;
+  z-index: 84;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 0.45rem;
+  background: var(--kd-video-matte);
+  box-shadow: 0 0.55rem 1.4rem rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(255, 255, 255, 0.1);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.kd-performance-vj-output:active { cursor: grabbing; }
+.kd-performance-vj-output > canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--kd-video-matte);
+  pointer-events: none;
+}
+.kd-performance-vj-output-bar {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  min-height: 2rem;
+  padding: 0.28rem 0.36rem 0.5rem 0.5rem;
+  color: #fff;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.65), transparent);
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+.kd-performance-vj-output:hover > .kd-performance-vj-output-bar,
+.kd-performance-vj-output:focus-within > .kd-performance-vj-output-bar {
+  opacity: 1;
+}
+.kd-performance-vj-output-bar > b {
+  font: 800 0.61rem/1 var(--kd-font-mono);
+  letter-spacing: 0.12em;
+}
+.kd-performance-vj-output-bar > button {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.28rem;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.kd-performance-vj-output-bar > button:hover { background: rgba(255, 255, 255, 0.18); }
+.kd-performance-vj-output > [data-vj-resize] {
+  position: absolute;
+  z-index: 3;
+  right: 0;
+  bottom: 0;
+  width: 0.9rem;
+  height: 0.9rem;
+  cursor: nwse-resize;
+  background: linear-gradient(
+    135deg,
+    transparent 52%,
+    rgba(255, 255, 255, 0.62) 53% 63%,
+    transparent 64% 72%,
+    rgba(255, 255, 255, 0.62) 73% 82%,
+    transparent 83%
+  );
+}
 .kd-wave-playhead {
   position: absolute;
   left: 0;
@@ -8870,7 +8950,7 @@ button.kd-stream-status {
   --kd-knob-boost: #e24b4b;
   --kd-knob-cut: #4d8af0;
   --kd-knob-needle: #fff;
-  --kd-beat-tick: rgba(255, 255, 255, 0.28);
+  --kd-beat-tick: rgba(255, 255, 255, 0.16);
   --kd-beat-bar: #ffe600;
   --kd-beat-label: #fff3a0;
   --kd-beat-label-shadow: 0 1px #000, 1px 0 #000, -1px 0 #000;
@@ -9053,7 +9133,7 @@ button.kd-stream-status {
 .kd-performance-focus-wave .kd-wave-playhead-motion {
   display: none;
 }
-/* 参考演出软件：灰色拍线退后，荧光黄小节线满高压在波形上，每小节连续编号。 */
+/* 灰色拍线退后；小节线保留格点，每两个小节才突出并编号，避免高 BPM 时挤成栅栏。 */
 .kd-performance-focus-wave .kd-wave-rail-zoom {
   /* Cues sit above PCM. Beat numbers now live on the bake strip so negative
      time is the same lattice; this rail is transparent and only holds markers. */
@@ -9065,16 +9145,20 @@ button.kd-stream-status {
   box-shadow: none;
 }
 .kd-performance-focus-wave .kd-wave-beat-grid > i[data-bar="true"] {
-  /* Half a CSS pixel flickers on 1× displays as the rail crosses the pixel grid. */
   width: 1px;
-  background: var(--kd-beat-bar);
+  background: color-mix(in srgb, var(--kd-beat-bar) 28%, transparent);
   box-shadow: none;
 }
+.kd-performance-focus-wave .kd-wave-beat-grid > i[data-major-bar="true"] {
+  width: 2px;
+  background: var(--kd-beat-bar);
+  box-shadow: 1px 0 color-mix(in srgb, var(--kd-beat-bar) 35%, transparent);
+}
 @media (min-resolution: 2dppx) {
-  .kd-performance-focus-wave .kd-wave-beat-grid > i[data-bar="true"] { width: 0.5px; }
+  .kd-performance-focus-wave .kd-wave-beat-grid > i:not([data-bar]) { width: 0.5px; }
 }
 .kd-performance-focus-wave .kd-wave-beat-grid > i:not(:empty) {
-  /* 左 padding 会把 i 的背景一起撑宽，让 0.5px 小节线重新变成粗色块。 */
+  /* padding 留在竖线盒内，避免把 2px 主小节线继续撑宽。 */
   padding: 2px 0 0;
   overflow: visible;
   color: var(--kd-beat-label);
@@ -9836,7 +9920,7 @@ button.kd-stream-status {
   --kd-knob-boost: #d1242f;
   --kd-knob-cut: #1f6feb;
   --kd-knob-needle: #1c1c1e;
-  --kd-beat-tick: rgba(28, 28, 30, 0.48);
+  --kd-beat-tick: rgba(28, 28, 30, 0.20);
   --kd-beat-bar: #c2410c;
   --kd-beat-label: #9a3412;
   --kd-beat-label-shadow: 0 1px rgba(255, 255, 255, 0.92);
@@ -11469,7 +11553,7 @@ button.kd-stream-status {
   min-width: 0;
   min-height: 8.3rem;
   display: grid;
-  grid-template-columns: minmax(3.4rem, 4.2rem) minmax(12rem, 1.5fr) minmax(9.2rem, 0.86fr);
+  grid-template-columns: minmax(3.4rem, 4.2rem) minmax(8rem, 1fr) minmax(17rem, 21rem);
   align-items: stretch;
   background: color-mix(in srgb, var(--kd-panel) 78%, transparent);
 }
@@ -11485,7 +11569,7 @@ button.kd-stream-status {
   box-shadow: inset 0 0 18px rgba(154, 140, 255, 0.12);
 }
 .kd-performance-main-deck[data-side="b"] {
-  grid-template-columns: minmax(9.2rem, 0.86fr) minmax(12rem, 1.5fr) minmax(3.4rem, 4.2rem);
+  grid-template-columns: minmax(17rem, 21rem) minmax(8rem, 1fr) minmax(3.4rem, 4.2rem);
 }
 .kd-performance-main-deck + .kd-performance-main-deck {
   border-left: 1px solid var(--kd-border-subtle);
@@ -11886,12 +11970,14 @@ button.kd-stream-status {
   flex-direction: row-reverse;
 }
 .kd-performance-deck-mix-module .kd-dj-eq-chart {
-  flex: 1 1 auto;
-  align-self: stretch;
+  flex: 0 1 auto;
+  align-self: center;
   width: auto;
   min-width: 0;
   min-height: 0;
-  height: auto;
+  height: 100%;
+  max-width: 100%;
+  aspect-ratio: 16 / 9;
 }
 .kd-performance-deck-mix-module .kd-dj-eq-knobs {
   flex: 0 0 2.05rem;
@@ -11991,6 +12077,44 @@ button.kd-stream-status {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.kd-performance-deck-video {
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  display: block;
+  overflow: hidden;
+  background: var(--kd-video-matte);
+  pointer-events: none;
+}
+.kd-performance-deck-video > video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--kd-video-matte);
+}
+.kd-performance-deck-video[data-error="true"] > video { opacity: 0; }
+.kd-performance-vj-output-open {
+  position: absolute;
+  z-index: 7;
+  top: 0.3rem;
+  right: 0.3rem;
+  display: grid;
+  place-items: center;
+  width: 1.45rem;
+  height: 1.45rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.28rem;
+  color: rgba(255, 255, 255, 0.88);
+  background: rgba(0, 0, 0, 0.48);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
+  opacity: 0;
+  cursor: pointer;
+}
+.kd-dj-eq-chart[data-video="true"]:hover .kd-performance-vj-output-open,
+.kd-performance-vj-output-open:focus-visible { opacity: 1; }
+.kd-performance-vj-output-open:hover { background: rgba(255, 255, 255, 0.16); }
 .kd-dj-eq-knobs {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -12259,11 +12383,11 @@ button.kd-stream-status {
 
 @media (max-width: 1200px) {
   .kd-performance-main-deck {
-    grid-template-columns: minmax(3.2rem, 3.8rem) minmax(10rem, 1fr) minmax(8.2rem, 0.8fr);
+    grid-template-columns: minmax(3.2rem, 3.8rem) minmax(7rem, 1fr) minmax(15rem, 18rem);
     grid-template-rows: minmax(8.3rem, auto);
   }
   .kd-performance-main-deck[data-side="b"] {
-    grid-template-columns: minmax(8.2rem, 0.8fr) minmax(10rem, 1fr) minmax(3.2rem, 3.8rem);
+    grid-template-columns: minmax(15rem, 18rem) minmax(7rem, 1fr) minmax(3.2rem, 3.8rem);
   }
   .kd-performance-transport-layout {
     /* Medium layout uses MIX 0.85 of the 1.85fr left after the 4.2rem TEMPO track. */

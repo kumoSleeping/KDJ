@@ -44,12 +44,11 @@ export function barPhase(
 }
 
 /**
- * Performance 台面上的手动 SYNC：把按下的那台 Deck 对齐到另一台的**有效** BPM。
+ * Performance 台面上的手动 SYNC：把按下的那台 Deck 对齐到另一台的**真实有效** BPM。
  *
- * 先试半倍/原倍/双倍，取对数距离最近——140 对 70 会按半拍关系对齐而不是硬拉一倍速。
- * 手动同步是用户的明确指令，不做容差放弃。速率只按引擎 0.5–2.0 钳，不得按
- * TEMPO 推子量程钳：推子拇指可以钉在边界，读数必须是真实有效 BPM。
- * otherEffective = multiple × syncedEffective。
+ * 这里故意不把半拍/双拍当作同速。114.5 与 229 虽然共享拍点，但两台的走带速度、
+ * BPM 读数和小节密度仍相差一倍，不能显示成已经 SYNC。目标超出引擎 0.5–2.0 边界时
+ * 返回 null，避免钳位后亮起一个实际上没有同速的锁。
  */
 export function deckSyncRate(
   otherEffectiveBpm: number | null,
@@ -58,22 +57,9 @@ export function deckSyncRate(
   maxRate = ENGINE_TEMPO_MAX,
 ): { rate: number; multiple: number } | null {
   if (!otherEffectiveBpm || !syncedBpm || otherEffectiveBpm <= 0 || syncedBpm <= 0) return null;
-  let bestMultiple = 1;
-  let bestRate = 1;
-  let bestDistance = Infinity;
-  for (const multiple of [0.5, 1, 2]) {
-    const rate = otherEffectiveBpm / (syncedBpm * multiple);
-    const distance = Math.abs(Math.log2(rate));
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      bestRate = rate;
-      bestMultiple = multiple;
-    }
-  }
-  return {
-    rate: Math.min(maxRate, Math.max(minRate, bestRate)),
-    multiple: bestMultiple,
-  };
+  const rate = otherEffectiveBpm / syncedBpm;
+  if (!Number.isFinite(rate) || rate < minRate || rate > maxRate) return null;
+  return { rate, multiple: 1 };
 }
 
 /**
@@ -309,16 +295,16 @@ export function adoptNativeSyncRelation(
 export interface CrossfaderTempoPlan {
   rates: [number, number];
   relation: DeckSyncRelation;
-  /** Common beat-equivalent BPM after folding the left Deck by relation.multiple. */
+  /** Shared effective BPM. */
   targetBpm: number;
 }
 
 /**
  * Two-Deck tempo plan driven by the crossfader position.
  *
- * The left original BPM (folded through the nearest half/double-time relation) anchors 0, the
- * right original BPM anchors 1, and the centre is their arithmetic mean. Both rates always map
- * to the same beat-equivalent target, so an already aligned bar phase stays aligned while the
+ * The left original BPM anchors 0, the right original BPM anchors 1, and the centre is their
+ * arithmetic mean. Both rates always map
+ * to the same effective-BPM target, so an already aligned bar phase stays aligned while the
  * fader moves. Return null rather than independently clamping either Deck: independent clamps
  * would silently break the BPM lock.
  */
@@ -337,10 +323,8 @@ export function crossfaderTempoPlan(
     || !(rightBpm > 0)
     || !Number.isFinite(ratio)
   ) return null;
-  const folded = deckSyncRate(rightBpm, leftBpm, minRate, maxRate);
-  if (!folded) return null;
-  const relation: DeckSyncRelation = { base: 0, multiple: folded.multiple };
-  const leftAnchor = leftBpm * folded.multiple;
+  const relation: DeckSyncRelation = { base: 0, multiple: 1 };
+  const leftAnchor = leftBpm;
   const rightAnchor = rightBpm;
   const position = clamp(ratio, 0, 1);
   const targetBpm = leftAnchor + (rightAnchor - leftAnchor) * position;

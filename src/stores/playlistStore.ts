@@ -7,7 +7,10 @@ import {
 } from "../lib/oneLibraryTrack";
 import { useAppStore } from "./appStore";
 import { useLibraryStore } from "./libraryStore";
-import { removePendingVirtualDiskDownloads } from "../lib/oneLibraryDownloadPersistence";
+import {
+  reconcilePendingOneLibraryTargets,
+  removePendingVirtualDiskDownloads,
+} from "../lib/oneLibraryDownloadPersistence";
 import {
   readWorkspaceSession,
   setRestorableWorkspaceSource,
@@ -134,14 +137,32 @@ async function readPlaylists(devices: RemovableDevice[]) {
       .filter((device) => device.one_library_file_system)
       .map(async (device) => {
         try {
-          return [device.path, await api.oneLibraryPlaylists(device.path)] as const;
+          return {
+            device,
+            playlists: await api.oneLibraryPlaylists(device.path),
+            loaded: true,
+          } as const;
         } catch {
-          // 一个损坏/刚拔掉的卷不能挡住其它 OneLibrary 设备。
-          return [device.path, []] as const;
+          // 一个损坏/刚拔掉的卷不能挡住其它 OneLibrary 设备。失败结果不能参与
+          // pending 目标清理，否则一次临时读错就会吞掉尚未补写的下载。
+          return { device, playlists: [] as OneLibraryPlaylist[], loaded: false } as const;
         }
       }),
   );
-  return Object.fromEntries(entries) as Record<string, OneLibraryPlaylist[]>;
+  reconcilePendingOneLibraryTargets(
+    entries
+      .filter((entry) => entry.loaded)
+      .map((entry) => ({
+        device_path: entry.device.path,
+        is_virtual: entry.device.is_virtual,
+        playlist_ids: entry.playlists
+          .filter((playlist) => playlist.attribute === 0)
+          .map((playlist) => playlist.id),
+      })),
+  );
+  return Object.fromEntries(
+    entries.map((entry) => [entry.device.path, entry.playlists]),
+  ) as Record<string, OneLibraryPlaylist[]>;
 }
 
 export const usePlaylistStore = create<PlaylistStore>()((set, get) => ({

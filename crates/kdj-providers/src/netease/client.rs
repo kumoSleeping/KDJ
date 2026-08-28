@@ -90,9 +90,12 @@ impl NeteaseClient {
         self.state.read().unwrap().profile.clone()
     }
 
-    pub fn set_profile(&self, profile: Option<Value>) {
-        self.state.write().unwrap().profile = profile;
-        self.save_session();
+    pub fn set_profile(&self, profile: Option<Value>) -> Result<()> {
+        let mut next = self.state.read().unwrap().clone();
+        next.profile = profile;
+        self.persist_session(&next)?;
+        *self.state.write().unwrap() = next;
+        Ok(())
     }
 
     // ------------------------------------------------------------ 登录态落盘
@@ -112,31 +115,24 @@ impl NeteaseClient {
                 Ok(state) => {
                     tracing::info!("已从 netease.pyncm 迁移网易云登录态");
                     *self.state.write().unwrap() = state;
-                    self.save_session();
+                    if let Err(err) = self.save_session() {
+                        tracing::warn!("迁移后的网易云登录态写入失败：{err:#}");
+                    }
                 }
                 Err(err) => tracing::warn!("迁移 netease.pyncm 失败：{err}"),
             }
         }
     }
 
-    pub fn save_session(&self) {
+    pub fn save_session(&self) -> Result<()> {
         let state = self.state.read().unwrap().clone();
-        if let Some(parent) = self.session_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let tmp = self.session_path.with_extension("json.tmp");
-        let body = match serde_json::to_string_pretty(&state) {
-            Ok(body) => body,
-            Err(err) => {
-                tracing::warn!("网易云登录态序列化失败：{err}");
-                return;
-            }
-        };
-        if let Err(err) =
-            std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &self.session_path))
-        {
-            tracing::warn!("网易云登录态写入失败：{err}");
-        }
+        self.persist_session(&state)
+    }
+
+    fn persist_session(&self, state: &SessionState) -> Result<()> {
+        let body = serde_json::to_vec_pretty(state).context("网易云登录态序列化失败")?;
+        kdj_core::fs::atomic_write_private(&self.session_path, &body)
+            .context("网易云登录态写入失败")
     }
 
     pub fn clear_session(&self) {
@@ -404,7 +400,7 @@ mod tests {
                 .unwrap()
                 .cookies
                 .insert("MUSIC_U".into(), "zzz".into());
-            client.save_session();
+            client.save_session().unwrap();
         }
         let reopened = NeteaseClient::new(&dir).unwrap();
         assert!(reopened.logged_in());

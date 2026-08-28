@@ -83,10 +83,6 @@ impl InstantStemPool {
         bail!("旧版即时 STEM pool 已移除；请使用经典实时分离")
     }
 
-    pub(crate) fn new_for_parent(_runtime_directory: &Path, _pool_id: u64) -> Result<Arc<Self>> {
-        bail!("旧版即时 STEM pool 已移除；请使用经典实时分离")
-    }
-
     pub fn prepare_track(&self, _path: &Path) -> Result<InstantTrackTicket> {
         bail!("旧版即时 STEM pool 已移除；请使用经典实时分离")
     }

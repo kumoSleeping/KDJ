@@ -867,7 +867,7 @@ impl MusicProvider for BilibiliProvider {
                 Ok((QrStateValue::Expired, "二维码已过期，请重新获取".into()))
             }
             Ok(login::QrPoll::Done(cookies)) => {
-                self.client.store_cookies(&cookies);
+                self.client.store_cookies(&cookies)?;
                 self.qr_sessions.lock().unwrap().remove(session_id);
                 Ok((QrStateValue::Done, "登录成功".into()))
             }

@@ -2,11 +2,12 @@
 //!
 //! settings.json 落在 data_dir 下。读写规则原样沿用 Python 版：
 //! - 读：缺字段用默认值补齐；**单个字段值非法只丢弃这个字段**，不能让整份配置作废。
-//! - 写：先写 `.tmp` 再 rename 原子替换——直接覆写时进程被 kill 会留下半截 JSON。
+//! - 写：同目录私密临时文件 + 跨平台原子替换，落盘成功后才更新进程内状态。
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -388,7 +389,7 @@ impl AppConfig {
     // ------------------------------------------------------------ 读写
 
     /// 用一份完整 Settings 覆盖当前配置并落盘。
-    pub fn apply_settings(&self, settings: Settings) -> Settings {
+    pub fn apply_settings(&self, settings: Settings) -> anyhow::Result<Settings> {
         let mut next = settings;
         sync_soundcloud_flag(&mut next);
         // 对外返回和落盘都使用展开后的确定路径；相同 PUT 不应白写 settings.json。
@@ -397,16 +398,18 @@ impl AppConfig {
             .into_owned();
         let current = self.to_settings();
         if current == next {
-            return current;
+            return Ok(current);
         }
+        let body = serde_json::to_vec_pretty(&next).context("settings.json 序列化失败")?;
+        crate::fs::atomic_write_private(&self.settings_path(), &body)
+            .context("settings.json 写入失败")?;
         {
             let mut guard = self.inner.write().unwrap();
             guard.download_dir = expand_user(&next.download_dir);
             guard.settings = next;
         }
         self.ensure_dirs();
-        self.save();
-        self.to_settings()
+        Ok(self.to_settings())
     }
 
     /// 从 settings.json 覆盖当前值；文件不存在 / 损坏时保持默认值。
@@ -444,27 +447,6 @@ impl AppConfig {
         let mut guard = self.inner.write().unwrap();
         guard.download_dir = expand_user(&settings.download_dir);
         guard.settings = settings;
-    }
-
-    pub fn save(&self) {
-        let settings = self.to_settings();
-        let path = self.settings_path();
-        let tmp = path.with_extension("json.tmp");
-        let body = match serde_json::to_string_pretty(&settings) {
-            Ok(body) => body,
-            Err(err) => {
-                tracing::warn!("settings.json 序列化失败：{err}");
-                return;
-            }
-        };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        // 先写 .tmp 再 rename：直接覆写时进程被 kill 会留下半截 JSON。
-        if let Err(err) = std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &path)) {
-            tracing::warn!("settings.json 写入失败：{err}");
-            let _ = std::fs::remove_file(&tmp);
-        }
     }
 }
 
@@ -566,7 +548,7 @@ mod tests {
         settings.stream_cache_enabled = true;
         settings.filter_resonance = FilterResonance::Medium;
         settings.experimental_dj_mode = true;
-        config.apply_settings(settings.clone());
+        config.apply_settings(settings.clone()).unwrap();
 
         let reopened = AppConfig::create(dir.join("data"), dir.join("dl"), 0);
         assert_eq!(reopened.to_settings(), settings);
@@ -578,12 +560,12 @@ mod tests {
         let config = AppConfig::create(dir.join("data"), dir.join("dl"), 0);
         let mut settings = config.to_settings();
         settings.auto_analyze = false;
-        config.apply_settings(settings.clone());
+        config.apply_settings(settings.clone()).unwrap();
         let path = config.settings_path();
         let before = std::fs::metadata(&path).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(25));
 
-        config.apply_settings(settings);
+        config.apply_settings(settings).unwrap();
 
         let after = std::fs::metadata(path).unwrap().modified().unwrap();
         assert_eq!(before, after, "完全相同的 PUT 不应触碰 settings.json");
@@ -596,7 +578,7 @@ mod tests {
         let config = AppConfig::create(dir.join("data"), dir.join("first"), 0);
         let mut settings = config.to_settings();
         settings.download_dir = dir.join("chosen").to_string_lossy().into_owned();
-        config.apply_settings(settings);
+        config.apply_settings(settings).unwrap();
 
         let reopened = AppConfig::create(dir.join("data"), dir.join("second"), 0);
         assert_eq!(reopened.download_dir(), dir.join("chosen"));
@@ -608,7 +590,7 @@ mod tests {
         let config = AppConfig::create(dir.join("data"), dir.join("dl"), 0);
         let mut settings = config.to_settings();
         settings.video_download_dir = dir.join("legacy-video").to_string_lossy().into_owned();
-        config.apply_settings(settings);
+        config.apply_settings(settings).unwrap();
         assert_eq!(config.video_dir(), config.download_dir());
     }
 }

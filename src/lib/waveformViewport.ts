@@ -23,18 +23,18 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 /**
- * Performance zoom is a source-time scale, not a transport-rate control.
+ * Performance zoom displays one shared wall-clock window for both Decks.
  *
- * Rekordbox/Mixxx-style rails keep the PCM and beat lattice fixed while TEMPO changes their
- * velocity under the needle. Scaling the viewport on every fader packet made React zoom the rail
- * at the requested rate while the DAC clock updated its translation at the audible rate. Those
- * two owners produced a visible stop/start cadence on an otherwise idle Deck.
- *
- * Keep the argument for the stable public helper used by callers/tests, but deliberately ignore
- * it until zoom becomes an explicit user preference.
+ * A Deck at rate `r` advances `r` source seconds per wall second, so a 30-second wall window must
+ * contain `30 * r` source seconds. This is what makes two SYNCed tracks with different original
+ * BPMs draw the same beat/bar width. The waveform uses a separate CSS scale layer, so changing
+ * this value does not rebuild the baked PCM canvas or take ownership of transport velocity.
  */
-export function performanceWaveformViewportSeconds(_playbackRate: number): number {
-  return PERFORMANCE_WAVEFORM_SECONDS_PER_SCREEN;
+export function performanceWaveformViewportSeconds(playbackRate: number): number {
+  const rate = Number.isFinite(playbackRate) && playbackRate > 0
+    ? clamp(playbackRate, 0.5, 2)
+    : 1;
+  return PERFORMANCE_WAVEFORM_SECONDS_PER_SCREEN * rate;
 }
 
 /**

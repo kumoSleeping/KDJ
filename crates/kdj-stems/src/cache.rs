@@ -1,11 +1,22 @@
-use std::fs::{self, File};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+#[cfg(test)]
+use std::fs;
+#[cfg(test)]
+use std::io::Write;
+#[cfg(test)]
+use std::path::PathBuf;
+
+#[cfg(test)]
+use anyhow::Context;
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
 use crate::RUNTIME_ID;
 
 const MAGIC: &[u8; 8] = b"KDJSTEM1";
@@ -51,6 +62,7 @@ pub struct StemCacheHeader {
 
 /// Historical random-access PCM cache writer. It owns only audio frames; STEM waveform sidecars
 /// were removed with the display pipeline.
+#[cfg(test)]
 pub(crate) struct StemCacheWriter {
     destination: PathBuf,
     temporary: PathBuf,
@@ -59,6 +71,7 @@ pub(crate) struct StemCacheWriter {
     written_frames: u64,
 }
 
+#[cfg(test)]
 impl StemCacheWriter {
     pub fn create(destination: &Path, header: StemCacheHeader) -> Result<Self> {
         let parent = destination.parent().context("STEM cache 没有父目录")?;
@@ -154,10 +167,12 @@ pub fn read_cache_header(path: &Path) -> Result<StemCacheHeader> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn algorithm_fingerprint() -> [u8; 32] {
     Sha256::digest(RUNTIME_ID.as_bytes()).into()
 }
 
+#[cfg(test)]
 fn write_header(writer: &mut impl Write, header: &StemCacheHeader) -> Result<()> {
     writer.write_all(MAGIC)?;
     writer.write_all(&VERSION.to_le_bytes())?;
@@ -169,6 +184,7 @@ fn write_header(writer: &mut impl Write, header: &StemCacheHeader) -> Result<()>
     Ok(())
 }
 
+#[cfg(test)]
 fn finite(value: f32) -> f32 {
     if value.is_finite() {
         value

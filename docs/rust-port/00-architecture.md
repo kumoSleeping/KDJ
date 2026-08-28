@@ -59,8 +59,9 @@ Linux AppImage 204MB。体积来源实测：
 - 安卓上绑 127.0.0.1 端口是允许的。
 - 代价：axum + tokio 约 +1.5MB。值。
 
-安全模型原样保留：**只绑 127.0.0.1**，每次启动生成随机 token，
-HTTP 走 `X-KDJ-Token` 头、WS 走 `?token=`，比较用 constant-time。
+安全模型原样保留：**只绑 127.0.0.1**，每次启动生成随机 256-bit token。
+token 作为 `baseUrl` 的 capability 路径段统一覆盖 HTTP、媒体元素和 WS，服务端
+在进入路由前用 constant-time 比较；CORS 只允许 Tauri origin 与本地开发 origin。
 
 ## 3. Workspace 布局
 

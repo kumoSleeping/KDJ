@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { PanelTopClose, Pin } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
 import { clearTextSelection } from "../../lib/textSelection";
@@ -134,7 +134,6 @@ import { LibraryWorkRail } from "../chrome/LibraryWorkRail";
 import { OneLibraryWorkRail } from "../chrome/OneLibraryWorkRail";
 import { SearchWorkRail } from "../chrome/SearchWorkRail";
 import { QueuePanel } from "../download/QueuePanel";
-import { DuplicateAnalysisPanel } from "../library/DuplicateAnalysisPanel";
 import { isApplyingNav, readPlace, useNavStore } from "../../stores/navStore";
 import { useVideoPip } from "../../lib/videoPip";
 import type { WorkMode } from "../../lib/workMode";
@@ -146,17 +145,39 @@ import {
 } from "../download/SearchBar";
 import { VideoPreview } from "../download/VideoPreview";
 import { FolderTree, NarrowFolderRail } from "../library/FolderTree";
-import { VjExportPanel } from "../library/VjExportPanel";
-import { VirtualDiskPanel } from "../library/VirtualDiskPanel";
-import { OneLibraryTrackTable } from "../library/OneLibraryTrackTable";
-import { OneLibraryTrackDetail } from "../library/OneLibraryTrackDetail";
 import { DETAIL_EVENT } from "../library/TrackTable";
 import { LyricsView } from "../player/LyricsView";
 import { StreamTrackDetail } from "../player/StreamTrackDetail";
-import { SettingsPanel } from "../settings/SettingsPanel";
 import { LibraryToolbar } from "../library/LibraryToolbar";
 import { TrackDetail } from "../library/TrackDetail";
 import { TrackTable } from "../library/TrackTable";
+
+const DuplicateAnalysisPanel = lazy(() =>
+  import("../library/DuplicateAnalysisPanel").then(({ DuplicateAnalysisPanel }) => ({
+    default: DuplicateAnalysisPanel,
+  })),
+);
+const VjExportPanel = lazy(() =>
+  import("../library/VjExportPanel").then(({ VjExportPanel }) => ({ default: VjExportPanel })),
+);
+const VirtualDiskPanel = lazy(() =>
+  import("../library/VirtualDiskPanel").then(({ VirtualDiskPanel }) => ({
+    default: VirtualDiskPanel,
+  })),
+);
+const OneLibraryTrackTable = lazy(() =>
+  import("../library/OneLibraryTrackTable").then(({ OneLibraryTrackTable }) => ({
+    default: OneLibraryTrackTable,
+  })),
+);
+const OneLibraryTrackDetail = lazy(() =>
+  import("../library/OneLibraryTrackDetail").then(({ OneLibraryTrackDetail }) => ({
+    default: OneLibraryTrackDetail,
+  })),
+);
+const SettingsPanel = lazy(() =>
+  import("../settings/SettingsPanel").then(({ SettingsPanel }) => ({ default: SettingsPanel })),
+);
 
 const LABS_BUILD = typeof __KDJ_LABS__ !== "undefined" && __KDJ_LABS__;
 
@@ -1658,6 +1679,7 @@ export function Workspace({
   ) : lyricsAside ? (
     <LyricsView track={lyricsTrack} />
   ) : detailAside ? trackDetailPanel : null;
+  const suspendedAsidePanel = <Suspense fallback={null}>{asidePanel}</Suspense>;
   const queueOpen =
     showQueue &&
     !showSettings &&
@@ -2437,11 +2459,13 @@ export function Workspace({
                             : undefined
                         }
                       />
-                      <OneLibraryTrackTable
-                        layout={layout}
-                        onInspect={inspectOneLibraryTrack}
-                        shortcutActive={activeWorkspacePane === "onelibrary"}
-                      />
+                      <Suspense fallback={null}>
+                        <OneLibraryTrackTable
+                          layout={layout}
+                          onInspect={inspectOneLibraryTrack}
+                          shortcutActive={activeWorkspacePane === "onelibrary"}
+                        />
+                      </Suspense>
                     </>
                   ) : null}
                 </div>
@@ -2602,7 +2626,7 @@ export function Workspace({
                       tools={queuePinButton}
                       asideToggle={asideToggle}
                     />
-                    <div className="kd-split-aside-body kd-scroll">{asidePanel}</div>
+                    <div className="kd-split-aside-body kd-scroll">{suspendedAsidePanel}</div>
                   </aside>
                 </>
               )}
@@ -2626,7 +2650,7 @@ export function Workspace({
             tools={queuePinButton}
             onClose={closeAsideForUser}
           >
-            {asidePanel}
+            {suspendedAsidePanel}
           </Sheet>
         )}
         </div>

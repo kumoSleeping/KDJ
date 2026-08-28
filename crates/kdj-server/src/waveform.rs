@@ -1190,6 +1190,7 @@ fn read_profile_cached(
 ///
 /// OneLibrary 导出走这条只读路径：缓存不存在时由目标软件沿用原来的分析兜底，
 /// 不能因为一次拖放在后台偷偷再解一遍整首音频。
+#[cfg(any(feature = "onelibrary", test))]
 pub(crate) fn load_cached_default(
     track_id: i64,
     path: &Path,
@@ -1230,7 +1231,11 @@ pub(crate) fn load_cached_default(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "onelibrary",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub(crate) fn write_cached_default_for_test(
     track_id: i64,
     path: &Path,

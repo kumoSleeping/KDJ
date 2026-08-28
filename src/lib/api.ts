@@ -221,28 +221,49 @@ interface PendingDownloadPreparation {
   quality: Quality;
 }
 
+interface YtmResolvedPlayback {
+  poToken: string;
+  poTokens: string[];
+  resolvedUrl: string;
+  resolvedUrls: string[];
+  sabr: YoutubeSabrBootstrap | null;
+}
+
+/**
+ * Resolve one WEB_REMIX Player response into both transports. Playback consumes the direct GVS
+ * capability first, like Metrolist/Media3; SABR remains a compatibility fallback. Downloads reuse
+ * the same direct capability and therefore do not pay for a second Player request.
+ */
 async function resolveYtmProtectedStream(
   source: SongSource,
   quality?: Quality,
   knownIdentity?: YtmProtectedIdentity,
   forceFreshProof = false,
   alternateBinding = false,
-): Promise<{ poToken: string; poTokens: string[]; resolvedUrl: string; resolvedUrls: string[] }> {
+): Promise<YtmResolvedPlayback> {
   const videoId = source.payload?.video_id;
   if (source.platform !== "ytm" || typeof videoId !== "string") {
     throw new Error("YouTube Music 歌曲缺少视频 ID");
   }
   const {
     decipherYoutubeWebStream,
+    decipherYoutubeWebUrl,
     youtubeWebPlayerConfig,
     youtubeWebPoSession,
   } = await import("./youtubePoToken");
-  const identity = knownIdentity ?? await request<YtmProtectedIdentity>(
-    "/song/preview/ytm/identity",
-    { cache: "no-store" },
-  );
+  const [identity, playerUrl] = await Promise.all([
+    knownIdentity ?? request<YtmProtectedIdentity>(
+      "/song/preview/ytm/identity",
+      { cache: "no-store" },
+    ),
+    request<string>("/song/preview/ytm/player-url", { cache: "no-store" }),
+  ]);
   const gvsBinding = alternateBinding ? alternateYtmGvsBinding(identity) : identity.gvs_binding;
-  const proof = await youtubeWebPoSession(
+  const loadPlayerScript = (url: string) => post<string>(
+    "/song/preview/ytm/player-script",
+    { player_url: url },
+  );
+  const proofPromise = youtubeWebPoSession(
     videoId,
     identity.visitor_data,
     identity.data_sync_id,
@@ -250,19 +271,16 @@ async function resolveYtmProtectedStream(
     browserYoutubeBotguard,
     forceFreshProof,
   );
-  const playerUrl = await request<string>("/song/preview/ytm/player-url", {
-    cache: "no-store",
-  });
-  const loadPlayerScript = (url: string) => post<string>(
-    "/song/preview/ytm/player-script",
-    { player_url: url },
-  );
-  const playerConfig = await youtubeWebPlayerConfig(playerUrl, loadPlayerScript);
-  const resolvedUrls: string[] = [];
-  for (let index = 0; index < proof.gvsPoTokens.length; index += 1) {
-    const protectedPlayer = await post<{
+  // The current WEB_REMIX Player request deliberately omits a player POT. Player and the
+  // video-bound GVS mint are independent, so overlap them instead of serializing two RTTs.
+  const playerPromise = youtubeWebPlayerConfig(playerUrl, loadPlayerScript).then((playerConfig) =>
+    post<{
       signature_cipher: string;
       player_url: string;
+      sabr_url?: string;
+      video_playback_ustreamer_config?: string;
+      sabr_formats: unknown[];
+      duration_ms: number;
     }>("/song/preview/ytm/player", {
       source,
       quality,
@@ -271,91 +289,41 @@ async function resolveYtmProtectedStream(
       data_sync_id: identity.data_sync_id,
       player_url: playerUrl,
       signature_timestamp: playerConfig.signatureTimestamp,
-    });
-    resolvedUrls.push(await decipherYoutubeWebStream(
-      protectedPlayer.signature_cipher,
-      protectedPlayer.player_url,
-      proof.gvsPoTokens[index],
+    })
+  );
+  const [proof, player] = await Promise.all([proofPromise, playerPromise]);
+  const resolvedUrlsPromise = Promise.all(proof.gvsPoTokens.map((poToken) =>
+    decipherYoutubeWebStream(
+      player.signature_cipher,
+      player.player_url,
+      poToken,
       loadPlayerScript,
-    ));
-  }
+    )
+  ));
+  const sabrPromise = player.sabr_url
+    && player.video_playback_ustreamer_config
+    && Array.isArray(player.sabr_formats)
+    && player.sabr_formats.length > 0
+    && Number.isSafeInteger(player.duration_ms)
+    && player.duration_ms > 0
+    ? decipherYoutubeWebUrl(player.sabr_url, player.player_url, loadPlayerScript).then(
+        (serverAbrStreamingUrl): YoutubeSabrBootstrap => ({
+          serverAbrStreamingUrl,
+          videoPlaybackUstreamerConfig: player.video_playback_ustreamer_config!,
+          formats: player.sabr_formats,
+          durationMs: player.duration_ms,
+          poToken: proof.gvsPoToken,
+        }),
+      )
+    : Promise.resolve(null);
+  const [resolvedUrls, sabr] = await Promise.all([resolvedUrlsPromise, sabrPromise]);
+  if (!resolvedUrls[0]) throw new Error("YouTube Music Player 没有返回可播放的 GVS 音频流");
   return {
     poToken: proof.gvsPoToken,
     poTokens: proof.gvsPoTokens,
     resolvedUrl: resolvedUrls[0],
     resolvedUrls,
-  };
-}
-
-async function resolveYtmSabrPlayback(
-  source: SongSource,
-  forceFreshProof = false,
-  alternateBinding = false,
-): Promise<YoutubeSabrBootstrap> {
-  const videoId = source.payload?.video_id;
-  if (source.platform !== "ytm" || typeof videoId !== "string") {
-    throw new Error("YouTube Music 歌曲缺少视频 ID");
-  }
-  const {
-    decipherYoutubeWebUrl,
-    youtubeWebPlayerConfig,
-    youtubeWebPoSession,
-  } = await import("./youtubePoToken");
-  const identity = await request<YtmProtectedIdentity>(
-    "/song/preview/ytm/identity",
-    { cache: "no-store" },
-  );
-  const gvsBinding = alternateBinding ? alternateYtmGvsBinding(identity) : identity.gvs_binding;
-  const proof = await youtubeWebPoSession(
-    videoId,
-    identity.visitor_data,
-    identity.data_sync_id,
-    gvsBinding,
-    browserYoutubeBotguard,
-    forceFreshProof,
-  );
-  const playerUrl = await request<string>("/song/preview/ytm/player-url", {
-    cache: "no-store",
-  });
-  const loadPlayerScript = (url: string) => post<string>(
-    "/song/preview/ytm/player-script",
-    { player_url: url },
-  );
-  const playerConfig = await youtubeWebPlayerConfig(playerUrl, loadPlayerScript);
-  const player = await post<{
-    player_url: string;
-    sabr_url?: string;
-    video_playback_ustreamer_config?: string;
-    sabr_formats: unknown[];
-    duration_ms: number;
-  }>("/song/preview/ytm/player", {
-    source,
-    po_token: undefined,
-    visitor_data: identity.visitor_data,
-    data_sync_id: identity.data_sync_id,
-    player_url: playerUrl,
-    signature_timestamp: playerConfig.signatureTimestamp,
-  });
-  if (
-    !player.sabr_url
-    || !player.video_playback_ustreamer_config
-    || !Array.isArray(player.sabr_formats)
-    || player.sabr_formats.length === 0
-    || !Number.isSafeInteger(player.duration_ms)
-    || player.duration_ms <= 0
-  ) {
-    throw new Error("YouTube Music Player 没有返回 SABR 音频会话");
-  }
-  return {
-    serverAbrStreamingUrl: await decipherYoutubeWebUrl(
-      player.sabr_url,
-      player.player_url,
-      loadPlayerScript,
-    ),
-    videoPlaybackUstreamerConfig: player.video_playback_ustreamer_config,
-    formats: player.sabr_formats,
-    durationMs: player.duration_ms,
-    poToken: proof.gvsPoToken,
+    sabr,
   };
 }
 
@@ -525,12 +493,34 @@ export const api = {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
         if (source.platform === "ytm") {
-          const bootstrap = await resolveYtmSabrPlayback(
+          const playback = await resolveYtmProtectedStream(
             source,
+            undefined,
+            undefined,
             bypassCache || attempt > 0,
             bypassCache ? attempt > 0 : attempt > 1,
           );
-          return await createYoutubeSabrPreview(source, bootstrap, bypassCache);
+          try {
+            const direct = await post<{ url: string; cached?: boolean; waveform_token?: string }>(
+              "/song/preview",
+              {
+                source,
+                bypass_cache: bypassCache,
+                po_token: playback.poToken,
+                po_tokens: playback.poTokens,
+                resolved_url: playback.resolvedUrl,
+                resolved_urls: playback.resolvedUrls,
+              },
+            );
+            if (!direct.url.startsWith("/")) return direct;
+            return { ...direct, url: bridge().baseUrl + direct.url };
+          } catch (directError) {
+            // Direct bounded GVS is the low-latency path. Some account/content experiments still
+            // reject ordinary Range while accepting SABR with the same proof, so retain SABR as
+            // a fallback rather than making it the cost paid by every successful playback.
+            if (!playback.sabr) throw directError;
+            return await createYoutubeSabrPreview(source, playback.sabr, bypassCache);
+          }
         }
         let poToken: string | undefined;
         let poTokens: string[] | undefined;
@@ -596,7 +586,7 @@ export const api = {
     }),
   /**
    * 视频预览流（后端代理 B 站 CDN，见 routes.rs::video_preview）。
-   * 后端代理 B 站防盗链；本机 API 开放，无需额外令牌。
+   * 后端代理 B 站防盗链；一次性 capability 已包含在 bridge.baseUrl 中。
    */
   videoPreviewUrl: (bvid: string, page = 0) => {
     const { baseUrl } = bridge();

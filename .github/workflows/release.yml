@@ -80,8 +80,15 @@ jobs:
             echo "new=true" >> "$GITHUB_OUTPUT"
           fi
 
-  cut:
+  quality:
     needs: gate
+    if: needs.gate.outputs.new == 'true'
+    uses: ./.github/workflows/quality.yml
+    permissions:
+      contents: read
+
+  cut:
+    needs: [gate, quality]
     if: needs.gate.outputs.new == 'true'
     runs-on: ubuntu-latest
     env:

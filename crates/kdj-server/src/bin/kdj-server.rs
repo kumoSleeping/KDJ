@@ -29,10 +29,14 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(8788);
 
     let config = Arc::new(AppConfig::create(data_dir, download_dir, port));
-    let (port, handle, _control) = kdj_server::serve(config.clone()).await?;
+    // 独立二进制只服务于本机 Vite 预览。默认值与 vite.rust.config.ts 对齐，
+    // 需要共享调试服务时可显式设置 KDJ_AUTH_TOKEN。
+    let auth_token = std::env::var("KDJ_AUTH_TOKEN").unwrap_or_else(|_| "dev-token".into());
+    let (port, auth_token, handle, _control) =
+        kdj_server::serve_with_token(config.clone(), auth_token).await?;
 
     println!("KDJ Rust 服务已启动");
-    println!("  http://127.0.0.1:{port}");
+    println!("  http://127.0.0.1:{port}/_kdj/{auth_token}");
     println!("  data  = {}", config.data_dir.display());
     handle.await?;
     Ok(())

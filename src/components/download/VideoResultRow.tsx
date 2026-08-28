@@ -1,7 +1,8 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { Check, Copy, Download } from "lucide-react";
+import { Check, Copy, Download, Link2 } from "lucide-react";
 import { api } from "../../lib/api";
 import { copyText } from "../../lib/copyText";
+import { platformShareLink } from "../../lib/shareLink";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { rememberVideoEnqueue } from "../../lib/queueTaskDraft";
 import { beginVideoPointerDrag } from "../../lib/searchDrag";
@@ -132,6 +133,7 @@ export function VideoResultRow({
   const playClick = playClickForLayout({ widePlay, narrowPlay }, layout);
 
   const cacheKey = `${platform}:${bvid}`;
+  const shareLink = platformShareLink(platform, bvid);
   const [info, setInfo] = useState<VideoInfo | null>(given ?? resolvedCache.get(cacheKey) ?? null);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
@@ -408,6 +410,18 @@ export function VideoResultRow({
             <Copy size={12} />
             复制标题
           </button>
+          {shareLink ? (
+            <button
+              type="button"
+              onClick={() => {
+                void copyText(shareLink);
+                setRowMenu(null);
+              }}
+            >
+              <Link2 size={12} />
+              复制分享链接
+            </button>
+          ) : null}
           {selectable ? (
             <button
               type="button"

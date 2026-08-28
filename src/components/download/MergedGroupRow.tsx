@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Check, Copy, Download, Play } from "lucide-react";
+import { ChevronDown, ChevronRight, Check, Copy, Download, Link2, Play } from "lucide-react";
 import { DASH, formatDuration, thumbUrl } from "../../lib/format";
 import { api } from "../../lib/api";
 import { requestSongPreview, type SongPreviewItem } from "../../lib/songPreview";
@@ -7,6 +7,7 @@ import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelect
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import type { MergedGroup, Platform, SongSource } from "../../types";
 import { copyText } from "../../lib/copyText";
+import { firstSourceShareLink } from "../../lib/shareLink";
 import { ContextMenu } from "../common";
 import { CoverImage } from "../common/VinylPlaceholder";
 import { playTrack } from "../library/TrackTable";
@@ -95,6 +96,7 @@ export function MergedGroupRow({
   onPointerDragStart,
 }: MergedGroupRowProps) {
   const active = group.sources[sourceIndex] ?? group.sources[0];
+  const shareLink = firstSourceShareLink(group.sources, sourceIndex);
   const multi = group.sources.length > 1;
   const pressTimerRef = useRef<number | null>(null);
   const pointerDragCleanupRef = useRef<(() => void) | null>(null);
@@ -523,6 +525,18 @@ export function MergedGroupRow({
             <Copy size={12} />
             复制标题
           </button>
+          {shareLink && (
+            <button
+              type="button"
+              onClick={() => {
+                void copyText(shareLink);
+                setRowMenu(null);
+              }}
+            >
+              <Link2 size={12} />
+              复制分享链接
+            </button>
+          )}
           {selectable && (
             <button
               type="button"

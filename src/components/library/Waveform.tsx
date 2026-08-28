@@ -17,7 +17,11 @@ import {
   beatMarkerRangePercent,
   type WaveformBakeWindow,
 } from "../../lib/waveformViewport";
-import { beatGridMarkers, type BeatGridMarker } from "../../lib/performanceCues";
+import {
+  beatGridMarkers,
+  trackBarGridOrigin,
+  type BeatGridMarker,
+} from "../../lib/performanceCues";
 import { barPhaseAlignedSeek } from "../../lib/beatGridSync";
 import {
   correctedLiveWaveformRate,
@@ -25,7 +29,6 @@ import {
   liveWaveformLoopAnimationTimeMs,
   liveWaveformPhaseError,
   liveWaveformPlaybackRate,
-  projectedNativeWaveformPosition,
   projectedLiveWaveformPosition,
   shouldLandPlatterWaveform,
   shouldPauseLiveWaveformClock,
@@ -78,13 +81,14 @@ function WaveformBeatGrid({
         <i
           key={`${marker.positionSec}:${marker.beat}`}
           data-bar={marker.beat === 1 ? "true" : undefined}
+          data-major-bar={marker.beat === 1 && Math.abs(marker.bar) % 2 === 1 ? "true" : undefined}
           style={{
             left: `${beatMarkerRangePercent(marker.positionSec, rangeStartSec, rangeEndSec)}%`,
             transform: unstretch,
             transformOrigin: "0 50%",
           }}
         >
-          {marker.beat === 1 ? marker.bar : null}
+          {marker.beat === 1 && Math.abs(marker.bar) % 2 === 1 ? marker.bar : null}
         </i>
       ))}
     </span>
@@ -248,7 +252,10 @@ export function Waveform({
   const previewPositionRef = useRef(0);
   const phaseAnchorRef = useRef<number | null>(null);
   const preserveBarPhaseRef = useRef(preserveBarPhase);
-  const gridRef = useRef({ bpm: track?.bpm ?? null, firstBeat: track?.first_beat ?? null });
+  const gridRef = useRef({
+    bpm: track?.bpm ?? null,
+    firstBeat: track ? trackBarGridOrigin(track) : null,
+  });
   const [railAnimationReady, setRailAnimationReady] = useState(
     () => document.visibilityState === "visible",
   );
@@ -323,8 +330,12 @@ export function Waveform({
     trackIdRef.current = trackId;
     customSeekRef.current = onSeek;
     preserveBarPhaseRef.current = preserveBarPhase;
-    gridRef.current = { bpm: track?.bpm ?? null, firstBeat: track?.first_beat ?? null };
-  }, [trackId, onSeek, preserveBarPhase, track?.bpm, track?.first_beat]);
+    gridRef.current = {
+      bpm: track?.bpm ?? null,
+      // Seek phase must use the same origin as the painted rail and native SYNC request.
+      firstBeat: track ? trackBarGridOrigin(track) : null,
+    };
+  }, [trackId, onSeek, preserveBarPhase, track]);
 
   // 拖动中组件被卸载（切歌/切试听流）也必须松开 PlayerBar 的 scrub 标记，
   // 否则权威时钟被永久压制、播放头冻结。卸载时 trackId 可能已换，走 ref。
@@ -448,11 +459,7 @@ export function Waveform({
     && railPosition < compositorLoopEnd
     && !interactiveScrub;
   const platterLive = interactiveScrub || Math.abs(Number(playbackRate) || 0) > 0.02;
-  const nativeVsyncMotion = nativeDeck !== undefined && viewport.active;
-  const nativeFallbackPositionRef = useRef(railPosition);
-  nativeFallbackPositionRef.current = railPosition;
   const continuousRailMotion = viewport.active
-    && !nativeVsyncMotion
     && typeof Element !== "undefined"
     && typeof Element.prototype.animate === "function"
     && railAnimationReady
@@ -510,8 +517,6 @@ export function Waveform({
 
   useLayoutEffect(() => {
     if (
-      nativeVsyncMotion
-      ||
       continuousRailMotion
       || !bakeRangeChanged
       || !animateRail
@@ -540,7 +545,6 @@ export function Waveform({
     bakeRangeChanged,
     continuousRailMotion,
     motionPosition,
-    nativeVsyncMotion,
     railPosition,
   ]);
 
@@ -740,77 +744,8 @@ export function Waveform({
     viewport.active,
   ]);
 
-  useLayoutEffect(() => {
-    if (!nativeVsyncMotion || nativeDeck === undefined || !bake || total <= 0) return;
-    const bakeElement = bakeRef.current;
-    const railElement = railRef.current;
-    if (!bakeElement || !railElement) return;
-
-    // Native playback has one display owner: each VSync projects the latest DAC-correlated clock
-    // directly into two static source-time rails. React never retargets this transform, and rapid
-    // loop revisions cannot pause or rebuild an animation from stale component state.
-    motionAnimationsRef.current?.bake?.cancel();
-    motionAnimationsRef.current?.rail?.cancel();
-    motionAnimationsRef.current = null;
-    let request = 0;
-    let lastBake = Number.NaN;
-    let lastRail = Number.NaN;
-    let bakeVisible = true;
-    const paint = () => {
-      const live = getLiveDeckClock(nativeDeck);
-      let sourcePosition = nativeFallbackPositionRef.current ?? 0;
-      if (live && live.trackId === trackId) {
-        const rate = liveWaveformPlaybackRate(
-          live.targetRate,
-          live.audibleRate,
-          live.scratchHeld,
-        );
-        sourcePosition = projectedNativeWaveformPosition(
-          live.currentTime,
-          live.clientPresentationTimeMs,
-          performance.now(),
-          rate,
-          total,
-          live.loopStart,
-          live.loopLength,
-        );
-      }
-
-      const inBake = sourcePosition >= bake.startSec && sourcePosition <= bake.endSec;
-      if (inBake !== bakeVisible) {
-        bakeVisible = inBake;
-        bakeElement.style.visibility = inBake ? "visible" : "hidden";
-      }
-      if (inBake) {
-        const nextBake = waveformBakeTranslatePercent(bake, sourcePosition);
-        if (Math.abs(nextBake - lastBake) > 1.0e-7) {
-          bakeElement.style.transform = "translate3d(-" + nextBake + "%, 0, 0)";
-          lastBake = nextBake;
-        }
-      }
-      const nextRail = sourcePosition / total * 100;
-      if (Math.abs(nextRail - lastRail) > 1.0e-7) {
-        railElement.style.transform = "translate3d(-" + nextRail + "%, 0, 0)";
-        lastRail = nextRail;
-      }
-      request = window.requestAnimationFrame(paint);
-    };
-    paint();
-    return () => {
-      window.cancelAnimationFrame(request);
-      bakeElement.style.visibility = "visible";
-    };
-  }, [
-    bake?.endSec,
-    bake?.startSec,
-    nativeDeck,
-    nativeVsyncMotion,
-    total,
-    trackId,
-  ]);
-
   useEffect(() => {
-    if (nativeDeck === undefined || !viewport.active || nativeVsyncMotion) return;
+    if (nativeDeck === undefined || !viewport.active) return;
     return subscribeLivePlaybackClock(() => {
       const live = getLiveDeckClock(nativeDeck);
       const owner = motionAnimationsRef.current;
@@ -949,7 +884,7 @@ export function Waveform({
         }
       });
     });
-  }, [nativeDeck, nativeVsyncMotion, trackId, viewport.active]);
+  }, [nativeDeck, trackId, viewport.active]);
 
   // Overview and DJ detail share frequency hues but deliberately keep different aggregation and
   // contrast policies: macro preview rejects sub-pixel outliers; the beat rail preserves peaks.
@@ -1048,7 +983,7 @@ export function Waveform({
     ? beatGridMarkers(
         total,
         track.bpm,
-        track.first_beat,
+        trackBarGridOrigin(track),
         beatRangeStart,
         beatRangeEnd,
         track.bpm_confidence,
@@ -1130,8 +1065,8 @@ export function Waveform({
               bottom: 0,
               left: "50%",
               width: `${bake.widthScale * 100}%`,
-              transform: nativeVsyncMotion ? undefined : `translate3d(-${bake.translatePercent}%, 0, 0)`,
-              transition: !nativeVsyncMotion && !continuousRailMotion && animateRail && !bakeRangeChanged
+              transform: `translate3d(-${bake.translatePercent}%, 0, 0)`,
+              transition: !continuousRailMotion && animateRail && !bakeRangeChanged
                 ? `transform ${interactiveScrub ? PERFORMANCE_WAVEFORM_SCRATCH_SMOOTHING_MS : PERFORMANCE_WAVEFORM_SMOOTHING_MS}ms linear`
                 : "none",
               willChange: "transform",
@@ -1181,14 +1116,12 @@ export function Waveform({
           bottom: 0,
           left: viewport.active ? "50%" : 0,
           width: `${viewport.baseRailScale * 100}%`,
-          transform: nativeVsyncMotion
-            ? undefined
-            : viewport.active
-              ? `translate3d(-${motionViewport.railTranslatePercent}%, 0, 0)`
-              : "none",
+          transform: viewport.active
+            ? `translate3d(-${motionViewport.railTranslatePercent}%, 0, 0)`
+            : "none",
           // Loop/scratch and old WebView fallback: overlap sparse snapshots without queueing them.
           // Ordinary playback is owned by the continuous compositor animation above.
-          transition: !nativeVsyncMotion && !continuousRailMotion && animateRail
+          transition: !continuousRailMotion && animateRail
             ? `transform ${interactiveScrub ? PERFORMANCE_WAVEFORM_SCRATCH_SMOOTHING_MS : PERFORMANCE_WAVEFORM_SMOOTHING_MS}ms linear`
             : "none",
           willChange: viewport.active ? "transform" : undefined,

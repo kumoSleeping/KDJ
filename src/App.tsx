@@ -1,9 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { LoaderCircle, PlugZap, RefreshCw } from "lucide-react";
 import { Button, EmptyState, ToastHost } from "./components/common";
-import { Workspace } from "./components/workspace/Workspace";
-import { PlayerBar } from "./components/player/PlayerBar";
-import { VideoPipHost } from "./components/player/VideoPipHost";
 import { startAutoAnalyze } from "./lib/autoAnalyze";
 import { startDataUpgrade } from "./lib/dataUpgrade";
 import { djEngine } from "./lib/djMix";
@@ -15,6 +12,18 @@ import { useLyricsPrefs } from "./lib/lyricsPrefs";
 import { useUpdateStore } from "./stores/updateStore";
 import { readWorkMode, writeWorkMode, type WorkMode } from "./lib/workMode";
 import { api } from "./lib/api";
+
+const Workspace = lazy(() =>
+  import("./components/workspace/Workspace").then(({ Workspace }) => ({ default: Workspace })),
+);
+const PlayerBar = lazy(() =>
+  import("./components/player/PlayerBar").then(({ PlayerBar }) => ({ default: PlayerBar })),
+);
+const VideoPipHost = lazy(() =>
+  import("./components/player/VideoPipHost").then(({ VideoPipHost }) => ({
+    default: VideoPipHost,
+  })),
+);
 const LABS_BUILD = typeof __KDJ_LABS__ !== "undefined" && __KDJ_LABS__;
 
 const DEVICE_REFRESH_FALLBACK_MS = 60_000;
@@ -163,10 +172,12 @@ export default function App() {
     >
       <div className="kd-body">
         {connected ? (
-          <Workspace
-            workMode={workMode}
-            onWorkModeChange={setWorkMode}
-          />
+          <Suspense fallback={null}>
+            <Workspace
+              workMode={workMode}
+              onWorkModeChange={setWorkMode}
+            />
+          </Suspense>
         ) : (
           <section className="kd-section">
             {booting || retrying ? (
@@ -197,13 +208,13 @@ export default function App() {
       <ToastHost />
       {/* 没连上时不渲染播放条：没有可播的曲目，留个空条只会占地方 */}
       {connected && (
-        <>
+        <Suspense fallback={null}>
           <PlayerBar
             workMode={workMode}
             performanceOpen={performanceOpen}
           />
           <VideoPipHost />
-        </>
+        </Suspense>
       )}
     </div>
   );

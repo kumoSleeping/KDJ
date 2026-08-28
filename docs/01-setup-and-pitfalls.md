@@ -87,3 +87,6 @@ npx electron --version                     # v33.4.11
 ```
 
 全绿才进入下一步。
+> **历史归档（已失效）**：本文仅保留 Electron/Python sidecar 早期踩坑记录，
+> 不得按其中命令启动、修复或验收当前项目。当前开发与验证入口见仓库 `AGENTS.md`
+> 和 `docs/rust-port/00-architecture.md`。

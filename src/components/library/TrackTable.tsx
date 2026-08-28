@@ -6,6 +6,7 @@ import {
   Copy,
   Download,
   FolderOpen,
+  Link2,
   ListX,
   LoaderCircle,
   Play,
@@ -20,6 +21,11 @@ import { TableRating } from "../common/TableRating";
 import { TableSortMark } from "../common/TableSortMark";
 import { TrackKeyChip } from "../common/TrackKeyChip";
 import { copyText } from "../../lib/copyText";
+import {
+  matchedTrackShareLink,
+  trackShareLink,
+  trackShareSearchQuery,
+} from "../../lib/shareLink";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import { observeTrackScroller } from "../../lib/autoAnalyze";
 import { getBridge } from "../../lib/bridge";
@@ -888,6 +894,45 @@ export function TrackTable({
       ? selectedIds
       : [rowMenu.track.id]
     : [];
+  const rowShareLink = rowMenu ? trackShareLink(rowMenu.track) : null;
+  const canSearchRowShareLink = Boolean(
+    rowMenu
+      && !isVideoTrack(rowMenu.track.format)
+      && trackShareSearchQuery(rowMenu.track),
+  );
+  const copyTrackShareLink = async (track: Track) => {
+    setRowMenu(null);
+    const direct = trackShareLink(track);
+    if (direct) {
+      await copyText(direct);
+      return;
+    }
+
+    const query = trackShareSearchQuery(track);
+    if (!query) return;
+    setNotice("正在查找分享链接…");
+    try {
+      const response = await api.search({
+        query,
+        platforms: ["wyy", "qqm"],
+        limit: 8,
+        merge: false,
+        kind: "song",
+      });
+      const link = matchedTrackShareLink(
+        track,
+        response.groups.flatMap((group) => group.sources),
+      );
+      if (!link) {
+        setNotice("没有找到标题、艺人和时长都能确认的 QQ / 网易云歌曲");
+        return;
+      }
+      await copyText(link);
+      setNotice("");
+    } catch (error) {
+      setNotice(`查找分享链接失败：${(error as Error).message}`);
+    }
+  };
   const playFromTable = (track: Track) => {
     playTrack(track);
   };
@@ -1763,6 +1808,17 @@ export function TrackTable({
             <Copy size={12} />
             复制标题
           </button>
+          {(rowShareLink || canSearchRowShareLink) && (
+            <button
+              type="button"
+              onClick={() => {
+                void copyTrackShareLink(rowMenu.track);
+              }}
+            >
+              <Link2 size={12} />
+              复制分享链接
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {

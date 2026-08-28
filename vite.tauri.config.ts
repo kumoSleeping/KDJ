@@ -66,5 +66,31 @@ export default defineConfig(({ mode }) => ({
     target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
     minify: process.env.TAURI_ENV_DEBUG ? false : "esbuild",
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    rollupOptions: {
+      onwarn(warning, warn) {
+        // These imports deliberately defer store-cycle access until an action runs; they are not
+        // intended as split points. The real UI split points are the React.lazy boundaries below.
+        if (warning.message.includes("dynamic import will not move module into another chunk")) {
+          return;
+        }
+        warn(warning);
+      },
+      output: {
+        manualChunks(id) {
+          const normalized = id.replaceAll("\\", "/");
+          if (!normalized.includes("/node_modules/")) return undefined;
+          // Keep the opt-in YouTube runtime away from the ordinary app bootstrap. This grouping is
+          // purely packaging: the implementation remains owned by its existing dynamic import.
+          if (
+            normalized.includes("/bgutils-js/")
+            || normalized.includes("/googlevideo/")
+            || normalized.includes("/meriyah/")
+          ) {
+            return "youtube-runtime";
+          }
+          return "vendor";
+        },
+      },
+    },
   },
 }));

@@ -52,7 +52,7 @@ function silenceMediaForExit(): void {
   }
 }
 
-/** `get_bridge_info` 的返回：Rust 侧启动 axum 之后才知道端口和 token。 */
+/** `get_bridge_info` 的返回：baseUrl 已包含 Rust 启动时生成的 capability。 */
 interface BridgeInfo {
   baseUrl: string;
   platform: string;
@@ -280,10 +280,10 @@ async function createTauriBridge(): Promise<KdjBridge> {
 function createBrowserBridge(): KdjBridge {
   const port =
     (import.meta.env.VITE_KDJ_PORT as string | undefined) ??
-    (import.meta.env.VITE_KDJ_PORT as string | undefined) ??
     "8788";
+  const injectedBaseUrl = window.kdj?.baseUrl;
   return {
-    baseUrl: `http://127.0.0.1:${port}`,
+    baseUrl: injectedBaseUrl || `http://127.0.0.1:${port}/_kdj/dev-token`,
     platform: "browser",
     // 浏览器里没有原生对话框和文件管理器，只能降级成提示
     openPath: async (path: string) => {
@@ -332,7 +332,7 @@ let current: KdjBridge | null = null;
 let pending: Promise<KdjBridge> | null = null;
 
 /**
- * 初始化桥接层。Tauri 下 baseUrl/token 要等 Rust 起完 axum 才知道，
+ * 初始化桥接层。Tauri 下带 capability 的 baseUrl 要等 Rust 起完 axum 才知道，
  * 所以必须在 React 挂载之前 await 一次（见 `src/main.tsx`）——
  * `api.audioUrl` / `coverUrl` / WebSocket 都是同步读 baseUrl 的。
  *

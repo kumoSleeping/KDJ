@@ -1,0 +1,51 @@
+name: quality
+
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: quality
+
+      - name: 安装 Linux 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential libasound2-dev libssl-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf
+
+      - name: 前端质量门禁
+        run: |
+          npm ci
+          npm run typecheck
+          npm run tauri:web:build
+          npm run test:frontend-logic
+          npm audit --omit=dev --audit-level=high
+
+      - name: Rust 稳定版与 Labs 测试
+        run: |
+          cargo check --locked --workspace --bins
+          cargo test --locked --workspace --lib --tests
+          cargo test --locked -p kdj-server --features onelibrary --lib
+
+      - name: Rust 漏洞、许可证与来源门禁
+        uses: EmbarkStudios/cargo-deny-action@v1
+        with:
+          command: check advisories licenses sources

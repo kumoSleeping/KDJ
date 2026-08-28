@@ -336,9 +336,11 @@ async fn put_settings(
     State(state): State<Arc<AppState>>,
     axum::Extension(ctx): axum::Extension<Ctx>,
     Json(payload): Json<Settings>,
-) -> Json<SettingsView> {
+) -> ApiResult<Json<SettingsView>> {
     let previous_download_dir = state.config.download_dir();
-    let settings = state.config.apply_settings(build_visible_settings(payload));
+    let settings = state
+        .config
+        .apply_settings(build_visible_settings(payload))?;
     if state.config.download_dir() != previous_download_dir {
         // 已完成的旧目录缓存保留给用户自行处理；但所有 pending/writer 必须失效，
         // 否则它们会在设置切换后继续写进统计/清理看不到的旧目录。
@@ -355,7 +357,7 @@ async fn put_settings(
     ctx.downloads.set_concurrency(settings.concurrent_downloads);
     // auto_start_downloads 保留在配置契约中兼容旧 settings.json，但下载队列现在
     // 使用一次性 generation 放行，避免点击「开始下载」后把未来新任务也自动启动。
-    Json(settings_view(settings))
+    Ok(Json(settings_view(settings)))
 }
 
 // ---------------------------------------------------------------- 账号
@@ -2776,7 +2778,7 @@ async fn attach_prepared_download_source(
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                 let (downloaded, total) = spool.progress();
-                ctx.downloads.progress(&id, downloaded, total);
+                ctx.downloads.preparation_progress(&id, downloaded, total);
                 if ctx.downloads.get(&id).is_none_or(|task| task.state == TaskState::Canceled) {
                     spool.cancel();
                     return Err(ApiError::bad_request("下载已取消"));
@@ -2784,7 +2786,8 @@ async fn attach_prepared_download_source(
             }
         }
     }
-    ctx.downloads.progress(&id, spool.total(), spool.total());
+    ctx.downloads
+        .preparation_progress(&id, spool.total(), spool.total());
     let path = spool.persist();
     let mut prepared = reqwest::Url::from_file_path(&path)
         .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "媒体会话路径无效"))?;
@@ -4356,7 +4359,9 @@ fn library_roots(state: &AppState) -> Vec<PathBuf> {
     if let Some(dirs) = adopt {
         tracing::info!("从已入库路径反推曲库根目录：{dirs:?}");
         settings.library_dirs = dirs;
-        state.config.apply_settings(settings);
+        if let Err(err) = state.config.apply_settings(settings) {
+            tracing::warn!("反推曲库根目录后写入设置失败：{err:#}");
+        }
     }
     roots
 }
@@ -4769,7 +4774,7 @@ async fn folder_forget(
             }
         }
         settings.library_dirs = next_roots;
-        state.config.apply_settings(settings);
+        state.config.apply_settings(settings)?;
         state.sync_provider_context();
     }
     if !removed_ids.is_empty() {
@@ -5295,13 +5300,14 @@ fn merge_library_roots(existing: &[String], paths: &[String]) -> Vec<String> {
     merged
 }
 
-fn register_library_roots(state: &AppState, paths: &[String]) {
+fn register_library_roots(state: &AppState, paths: &[String]) -> ApiResult<()> {
     let mut settings = state.config.to_settings();
     let merged = merge_library_roots(&settings.library_dirs, paths);
     if merged != settings.library_dirs {
         settings.library_dirs = merged;
-        state.config.apply_settings(settings);
+        state.config.apply_settings(settings)?;
     }
+    Ok(())
 }
 
 async fn library_scan(
@@ -5323,7 +5329,7 @@ async fn library_scan(
             .map(|root| root.to_string_lossy().into_owned())
             .collect()
     } else {
-        register_library_roots(&state, &requested);
+        register_library_roots(&state, &requested)?;
         requested
     };
     if paths.is_empty() {

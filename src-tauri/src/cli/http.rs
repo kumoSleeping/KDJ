@@ -46,18 +46,6 @@ impl HttpClient {
         self.send_json(reqwest::Method::POST, path, body)
     }
 
-    pub fn patch_json<T: Serialize>(&self, path: &str, body: &T) -> Result<serde_json::Value> {
-        self.send_json(reqwest::Method::PATCH, path, body)
-    }
-
-    pub fn delete_query<T: Serialize + ?Sized>(
-        &self,
-        path: &str,
-        query: &T,
-    ) -> Result<serde_json::Value> {
-        self.read(self.inner.delete(self.url(path)).query(query).send())
-    }
-
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
     }

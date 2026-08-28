@@ -23,6 +23,7 @@ import { djEngine } from "./djMix";
 import { EQ_GRAPH_BAND_COUNT } from "./eqGraph";
 import { usesRemotePlaybackSource } from "./playbackTrackSource";
 import {
+  BEATS_PER_BAR,
   SYNC_PHASE_TOLERANCE_SEC,
   syncFollowerSeekPositionWithLead,
 } from "./beatGridSync";
@@ -1761,7 +1762,9 @@ class BrowserPreviewPlayer extends PlayerStateOwner implements UnifiedPlayer {
       masterFirstBeatSec: request.masterFirstBeat,
       masterRate: this.deckBaseRates[request.master],
       multiple: 1,
-      beatsPerCell: request.beatsPerBar ?? 4,
+      // A SYNC button press is always downbeat/bar phase. Fractional cells are a platter-only
+      // affordance and must never leak through a permissive browser fallback.
+      beatsPerCell: BEATS_PER_BAR,
     }, 0, SYNC_PHASE_TOLERANCE_SEC);
     if (seekTo !== null && !followerAudio.paused) followerAudio.currentTime = seekTo;
     return this.refresh();

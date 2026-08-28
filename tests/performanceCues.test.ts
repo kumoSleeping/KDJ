@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { CuePoint } from "../src/types";
-import { beatGridMarkers, channelFaderGain, crossfaderChannelGains, eqBandDb, HOT_CUE_COLORS, HOT_CUE_PAD_COUNT, nextLoadedDeckIndex, performanceLoadDeckIndex, removeHotCue, shouldDropSeekPreview, snapCueSeconds, updateHotCueComment, upsertHotCue, validateCuePoints } from "../src/lib/performanceCues";
+import { beatGridMarkers, channelFaderGain, crossfaderChannelGains, eqBandDb, HOT_CUE_COLORS, HOT_CUE_PAD_COUNT, nextLoadedDeckIndex, performanceLoadDeckIndex, removeHotCue, shouldDropSeekPreview, snapCueSeconds, trackBarGridOrigin, updateHotCueComment, upsertHotCue, validateCuePoints } from "../src/lib/performanceCues";
 
 const cue = (values: Partial<CuePoint>): CuePoint => ({ id: 1, hot_cue: null, start_ms: 0, end_ms: null, color_index: null, color: "", comment: "", active_loop: false, ...values });
 
@@ -19,6 +19,41 @@ test("beat grid marks each fourth beat as a new bar", () => {
     { positionSec: 1.6, beat: 4, bar: 1 },
     { positionSec: 2.1, beat: 1, bar: 2 },
   ]);
+});
+
+test("bar rendering and SYNC share the classified downbeat origin", () => {
+  assert.equal(trackBarGridOrigin({
+    bpm: 120,
+    first_beat: 0.1,
+    beat_origin: 0.1,
+    beat_times: [0.1, 0.6],
+    downbeat_confidence: 0.9,
+    downbeat_origin: 0.6,
+    downbeats: [0.6, 2.6],
+  }), 0.6);
+  assert.equal(trackBarGridOrigin({
+    bpm: 120,
+    first_beat: 0.1,
+    beat_origin: 0.1,
+    beat_times: [0.1, 0.6],
+    downbeat_confidence: 0.4,
+    downbeat_origin: 0.6,
+    downbeats: [0.6, 2.6],
+  }), 0.1);
+});
+
+test("raw detected beats recover a grid phase when low confidence leaves first_beat empty", () => {
+  const origin = trackBarGridOrigin({
+    bpm: 120,
+    first_beat: null,
+    beat_origin: null,
+    beat_times: [50.2, 50.7, 51.2, 51.7],
+    downbeat_confidence: null,
+    downbeat_origin: null,
+    downbeats: [],
+  });
+  assert.ok(origin != null);
+  assert.ok(Math.abs(origin - 0.2) < 1e-9, `origin=${origin}`);
 });
 
 test("beat grid keeps first_beat as the downbeat instead of wrapping it into one beat", () => {
@@ -60,9 +95,9 @@ test("a leftover positive overlay is dropped once TIME is already in preroll", (
   assert.equal(shouldDropSeekPreview(null, -5, false), false);
 });
 
-test("beat grid does not invent phase or show a rejected low-confidence fit", () => {
+test("beat grid requires a phase but keeps a low-confidence fitted phase visible", () => {
   assert.deepEqual(beatGridMarkers(20, 120, null), []);
-  assert.deepEqual(beatGridMarkers(20, 120, 0.1, 0, 20, 0.2), []);
+  assert.ok(beatGridMarkers(20, 120, 0.1, 0, 20, 0.2).length > 0);
   assert.ok(beatGridMarkers(20, 120, 0.1, 0, 20, 0.8).length > 0);
 });
 

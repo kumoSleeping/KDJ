@@ -666,13 +666,17 @@ pub fn analyze_tempo(samples: &[f32], sr: f64) -> TempoResult {
     let frames = beat_track_dp(&env, period);
     let beat_times: Vec<f64> = frames.iter().map(|f| *f as f64 / fps).collect();
     if frames.len() < 3 {
-        let interval = 60.0 / bpm_guess;
+        // The persisted BPM is the beat-grid period authority. Keep millibpm precision and derive
+        // the interval from that exact published value; storing a two-decimal BPM beside an
+        // interval/origin fitted from an unrounded value creates cumulative phase drift.
+        let bpm = round_to(bpm_guess, 3);
+        let interval = 60.0 / bpm;
         return TempoResult {
-            bpm: round_to(bpm_guess, 2),
+            bpm,
             bpm_raw: round_to(bpm_raw, 2),
             confidence: 0.0,
             first_beat: beat_times.first().copied().unwrap_or(0.0),
-            beat_interval: interval,
+            beat_interval: round_to(interval, 9),
             beat_times,
             beat_strengths: frames
                 .iter()
@@ -688,13 +692,16 @@ pub fn analyze_tempo(samples: &[f32], sr: f64) -> TempoResult {
         bpm = bpm_guess;
     }
 
+    // BPM and interval must describe one identical lattice after serialization. Two-decimal BPM
+    // can drift several visible pixels over a long track even though the original fit was exact.
+    let bpm = round_to(bpm, 3);
     let beat_interval = 60.0 / bpm;
     TempoResult {
-        bpm: round_to(bpm, 2),
+        bpm,
         bpm_raw: round_to(bpm_raw, 2),
         confidence: round_to(confidence, 3),
         first_beat: round_to(beat_times[0], 4),
-        beat_interval: round_to(beat_interval, 6),
+        beat_interval: round_to(beat_interval, 9),
         beat_times: beat_times.iter().map(|t| round_to(*t, 4)).collect(),
         beat_strengths: frames
             .iter()
@@ -764,7 +771,10 @@ mod tests {
             "第一拍应当靠近开头：{}",
             got.first_beat
         );
-        assert!((got.beat_interval - 60.0 / got.bpm).abs() < 1e-5);
+        assert!(
+            (got.beat_interval - 60.0 / got.bpm).abs() < 1e-9,
+            "published BPM and interval must remain one exact grid",
+        );
     }
 
     #[test]

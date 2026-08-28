@@ -14,6 +14,7 @@ import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 
 const API_PORT = process.env.KDJ_PORT ?? "8788";
+const API_TOKEN = process.env.KDJ_AUTH_TOKEN ?? "dev-token";
 
 function devBridge(): Plugin {
   return {
@@ -25,7 +26,7 @@ function devBridge(): Plugin {
           injectTo: "head-prepend",
           children: `
 window.kdj = {
-  baseUrl: "http://127.0.0.1:${API_PORT}",
+  baseUrl: "http://127.0.0.1:${API_PORT}/_kdj/${API_TOKEN}",
   platform: "browser",
   // 浏览器预览没有 Tauri 原生对话框，只能降级
   openPath: async (p) => { console.info("[dev] openPath", p); },

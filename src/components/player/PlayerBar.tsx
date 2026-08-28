@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   Blend,
@@ -149,15 +149,17 @@ import {
 } from "../../lib/playbackTrack";
 import { decideNativeLatestIntent, LatestIntentGate } from "../../lib/latestIntentGate";
 import { LyricsHost } from "./LyricsHost";
-import {
-  clearPerformanceMixerSession,
-  PerformanceWorkspace,
-  type PerformanceDeckModel,
-  type PerformanceStemDeckModel,
-} from "./PerformanceWorkspace";
+import type { PerformanceDeckModel, PerformanceStemDeckModel } from "./PerformanceWorkspace";
+import { clearPerformanceMixerSession } from "../../lib/performanceMixerSession";
 import { eqBandDb, nextLoadedDeckIndex, performanceLoadDeckIndex } from "../../lib/performanceCues";
 import { allStemMask as stemMaskForMode, STEM_MODE } from "../../lib/stemMode";
 import { writeLocalStorageSoon } from "../../lib/storageWrite";
+
+const PerformanceWorkspace = lazy(() =>
+  import("./PerformanceWorkspace").then(({ PerformanceWorkspace }) => ({
+    default: PerformanceWorkspace,
+  })),
+);
 
 /** 广播播放位置的节流间隔：节拍网格的播放头不需要每帧更新。 */
 const POSITION_BROADCAST_MS = 200;
@@ -4470,7 +4472,8 @@ export function PlayerBar({
   };
 
   const performanceWorkspace = (
-    <PerformanceWorkspace
+    <Suspense fallback={null}>
+      <PerformanceWorkspace
       decks={performanceDecks}
       nativeSync={performanceSyncState}
       deckResetRevisions={performanceDeckResetRevisions}
@@ -4630,7 +4633,8 @@ export function PlayerBar({
       onResizeLoop={resizePerformanceLoop}
       onSaveCuePoints={savePerformanceCues}
       onSaveMainCue={savePerformanceMainCue}
-    />
+      />
+    </Suspense>
   );
 
   return (

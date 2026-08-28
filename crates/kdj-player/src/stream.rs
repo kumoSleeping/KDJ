@@ -501,14 +501,6 @@ impl<F: Copy> StreamWriter<F> {
         Ok(())
     }
 
-    fn push_interruptible<G, I>(&mut self, frame: F, cancelled: G, interrupted: I) -> Result<bool>
-    where
-        G: Fn() -> bool,
-        I: Fn() -> bool,
-    {
-        self.push_with_media_advance_interruptible(frame, 1.0, cancelled, interrupted)
-    }
-
     pub(crate) fn push_with_media_advance<G>(
         &mut self,
         frame: F,
@@ -529,6 +521,7 @@ impl<F: Copy> StreamWriter<F> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn push_with_media_timing<G>(
         &mut self,
         frame: F,
@@ -591,27 +584,6 @@ impl<F: Copy> StreamWriter<F> {
             media_advance,
             tempo_revision,
             source_timing,
-            cancelled,
-            interrupted,
-        )
-    }
-
-    fn push_with_media_advance_interruptible<G, I>(
-        &mut self,
-        frame: F,
-        media_advance: f32,
-        cancelled: G,
-        interrupted: I,
-    ) -> Result<bool>
-    where
-        G: Fn() -> bool,
-        I: Fn() -> bool,
-    {
-        self.push_with_media_timing_interruptible(
-            frame,
-            media_advance,
-            0,
-            SourceTiming::default(),
             cancelled,
             interrupted,
         )

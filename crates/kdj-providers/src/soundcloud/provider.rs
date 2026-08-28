@@ -175,20 +175,8 @@ impl SoundCloudProvider {
 
     fn save_session(&self, session: &SoundCloudSession) -> Result<()> {
         let path = self.session_path();
-        let tmp = path.with_extension("json.tmp");
         let body = serde_json::to_vec_pretty(session).context("序列化 SoundCloud 登录态失败")?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).context("创建 SoundCloud 会话目录失败")?;
-        }
-        std::fs::write(&tmp, body).context("保存 SoundCloud 登录态失败")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-                .context("保护 SoundCloud 登录态失败")?;
-        }
-        std::fs::rename(&tmp, &path).context("写入 SoundCloud 登录态失败")?;
-        Ok(())
+        kdj_core::fs::atomic_write_private(&path, &body).context("写入 SoundCloud 登录态失败")
     }
 
     fn session_snapshot(&self) -> Option<SoundCloudSession> {

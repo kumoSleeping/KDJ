@@ -28,13 +28,10 @@ pub fn runtime_path(data_dir: &Path) -> PathBuf {
 }
 
 pub fn write_runtime(data_dir: &Path, info: &RuntimeInfo) -> Result<()> {
-    fs::create_dir_all(data_dir)
-        .with_context(|| format!("创建数据目录失败：{}", data_dir.display()))?;
     let path = runtime_path(data_dir);
-    let tmp = path.with_extension("json.partial");
-    fs::write(&tmp, serde_json::to_vec_pretty(info)?)
-        .with_context(|| format!("写 runtime 临时文件失败：{}", tmp.display()))?;
-    fs::rename(&tmp, &path).with_context(|| format!("提交 runtime 失败：{}", path.display()))
+    let body = serde_json::to_vec_pretty(info).context("序列化 runtime 失败")?;
+    kdj_core::fs::atomic_write_private(&path, &body)
+        .with_context(|| format!("提交 runtime 失败：{}", path.display()))
 }
 
 pub fn remove_runtime(data_dir: &Path) {

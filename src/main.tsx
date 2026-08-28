@@ -31,9 +31,9 @@ darkQuery.addEventListener("change", syncTheme);
 syncTheme();
 
 /**
- * 先探测壳、拿到 baseUrl/token，再挂 React。
+ * 先探测壳、拿到包含一次性 capability 的 baseUrl，再挂 React。
  *
- * Tauri 下这两个值要 invoke 一次才知道（端口和 token 是 Rust 启动时才定的），
+ * Tauri 下这个值要 invoke 一次才知道（端口和 capability 是 Rust 启动时才定的），
  * 而 `api.audioUrl` / `coverUrl` / WebSocket 都是同步读的。挂载之后再补就有一个窗口期：
  * 首帧发出去的请求带着空 baseUrl，表现是"偶尔连不上、刷新一下又好了"这种最难查的抖动。
  *

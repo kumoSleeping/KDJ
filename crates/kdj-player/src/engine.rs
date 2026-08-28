@@ -749,6 +749,9 @@ impl AudioRenderer {
     /// Renders from sources installed by the control thread. The callback only follows stable
     /// addresses and never clones or drops their owning `Arc`; retirement is acknowledged through
     /// the reverse SPSC queue after a Deck switches away from an address.
+    // Production output uses the timed variant so callback/DAC latency stays explicit; this
+    // convenience entry point is retained for deterministic renderer tests only.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn render_prepared(
         &mut self,
         output: &mut [f32],
@@ -779,20 +782,6 @@ impl AudioRenderer {
         );
     }
 
-    pub(crate) fn render_prepared_i16(
-        &mut self,
-        output: &mut [i16],
-        output_sample_rate: u32,
-        output_channels: usize,
-    ) {
-        self.render_prepared_i16_timed(
-            output,
-            output_sample_rate,
-            output_channels,
-            OutputCallbackTiming::default(),
-        );
-    }
-
     pub(crate) fn render_prepared_i16_timed(
         &mut self,
         output: &mut [i16],
@@ -806,20 +795,6 @@ impl AudioRenderer {
             output_channels,
             timing,
             |sample| (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16,
-        );
-    }
-
-    pub(crate) fn render_prepared_u16(
-        &mut self,
-        output: &mut [u16],
-        output_sample_rate: u32,
-        output_channels: usize,
-    ) {
-        self.render_prepared_u16_timed(
-            output,
-            output_sample_rate,
-            output_channels,
-            OutputCallbackTiming::default(),
         );
     }
 
@@ -2788,10 +2763,6 @@ impl AudioRenderer {
         } else {
             self.raw_audible_rate(index)
         }
-    }
-
-    fn audible_rate(&self, index: usize) -> f32 {
-        self.published_audible_rate(index)
     }
 
     fn audible_rate_revision(&self, index: usize) -> u64 {

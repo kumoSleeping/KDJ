@@ -14,7 +14,7 @@
  * Web Audio 的接法有两个前置条件，都已在别处成立：
  * 1. createMediaElementSource 跨域要 CORS —— 服务端 CorsLayer::allow_origin(Any)；
  * 2. 元素必须在设 src 前带 crossOrigin="anonymous"，否则输出全零（静音）。
- *    token 走 query（见 api.audioUrl），不依赖请求头，anonymous 拿得到流。
+ *    capability 已包含在 baseUrl 路径中，不依赖媒体元素无法设置的请求头。
  */
 
 import { create } from "zustand";

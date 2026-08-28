@@ -10,7 +10,8 @@
 import { create } from "zustand";
 import { api } from "../lib/api";
 import { isSparseDownloadTitle, withDownloadDisplay } from "../lib/downloadDisplay";
-import { rememberVideoEnqueue } from "../lib/queueTaskDraft";
+import { forgetQueueDraft, rememberVideoEnqueue } from "../lib/queueTaskDraft";
+import { removePendingOneLibraryDownloadTasks } from "../lib/oneLibraryDownloadPersistence";
 import { shouldRefreshYtmDownloadAuthorization } from "../lib/downloadRetryPolicy";
 import { sortDownloadTasks } from "../lib/downloadOrder";
 import {
@@ -221,9 +222,6 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       throw error;
     }
     if (wasQueued) {
-      const { removePendingOneLibraryDownloadTasks } = await import(
-        "../lib/oneLibraryDownloadPersistence"
-      );
       removePendingOneLibraryDownloadTasks([taskId]);
       const map = new Map(get().tasks);
       map.delete(taskId);
@@ -239,10 +237,6 @@ export const useDownloadStore = create<DownloadStore>()((set, get) => ({
       .map((task) => task.id);
     if (ids.length === 0) return;
     await api.cancelAllDownloads();
-    const [{ removePendingOneLibraryDownloadTasks }, { forgetQueueDraft }] = await Promise.all([
-      import("../lib/oneLibraryDownloadPersistence"),
-      import("../lib/queueTaskDraft"),
-    ]);
     removePendingOneLibraryDownloadTasks(ids);
     ids.forEach(forgetQueueDraft);
     await get().refresh();

@@ -26,11 +26,12 @@ use crate::db::{Conn, Database};
 /// BPM/Key 第二代元数据当前使用的算法修订。
 ///
 /// v2 表与旧 tracks 分析列物理隔离；以后更换算法时只需提升这个值，所有旧修订
-/// 就会重新进入渐进回填队列，同时 v1 仍可作为读取兜底。
-pub const BPM_KEY_V2_REVISION: &str = "kdj-rust-bpm-key-v2.0.0";
+/// 就会重新进入渐进回填队列，同时最近一次 v2（再其次是 v1）继续作为读取兜底。
+pub const BPM_KEY_V2_REVISION: &str = "kdj-rust-bpm-key-v2.1.0";
 
 #[derive(Default)]
 struct BpmKeyV2Overlay {
+    current_revision: bool,
     bpm: Option<f64>,
     bpm_confidence: Option<f64>,
     first_beat: Option<f64>,
@@ -194,10 +195,11 @@ fn restore_from_trash(handle: &TrashHandle, original: &Path) -> Result<()> {
 /// sort 白名单：绝对不能把 query string 直接拼进 ORDER BY（SQL 注入），
 /// 也不能只做转义——SQLite 的标识符引用规则太松，白名单映射是唯一安全的做法。
 fn effective_bpm_key_column(column: &str) -> String {
+    // One v2 row exists per track. Keep its last good values visible while a newer analyzer
+    // revision is pending; successful v2 analysis intentionally retired the duplicate v1 fields.
     format!(
         "COALESCE((SELECT v2.{column} FROM track_bpm_key_analysis_v2 v2 \
-         WHERE v2.track_id = tracks.id AND v2.analyzer_revision = '{}'), tracks.{column})",
-        BPM_KEY_V2_REVISION
+         WHERE v2.track_id = tracks.id), tracks.{column})"
     )
 }
 
@@ -1035,10 +1037,10 @@ impl LibraryService {
         Ok(self.attach_tags(&conn, self.apply_bpm_key_v2(&conn, rows)?)?)
     }
 
-    /// 把当前修订的 v2 BPM/Key 覆盖到 API 返回对象上，但不改 tracks 里的 v1。
+    /// 把最新保存的 v2 BPM/Key 覆盖到 API 返回对象上，但不改 tracks 里的 v1。
     ///
-    /// 每个字段独立回退：例如 v2 只算出了 Key，BPM 仍沿用 v1；解码失败产生的
-    /// 空 v2 行也不会把一条原本完整的 v1 曲目显示成空白。
+    /// 提升算法修订时，上一版结果继续显示到回填完成；否则成功 v2 分析已经退役的
+    /// v1 列会让整库 BPM/Key 暂时变空。每个字段仍独立回退，部分失败不拖累另一类。
     fn apply_bpm_key_v2(&self, conn: &Conn, mut tracks: Vec<Track>) -> Result<Vec<Track>> {
         if tracks.is_empty() {
             return Ok(tracks);
@@ -1048,37 +1050,36 @@ impl LibraryService {
             let ids: Vec<i64> = chunk.iter().map(|track| track.id).collect();
             let placeholders = vec!["?"; ids.len()].join(",");
             let sql = format!(
-                "SELECT track_id, bpm, bpm_confidence, first_beat, beat_origin, beat_times_json, \
-                 downbeat_origin, downbeats_json, downbeat_confidence, music_key, camelot, open_key, \
-                 key_confidence FROM track_bpm_key_analysis_v2 \
-                 WHERE analyzer_revision = ? AND track_id IN ({placeholders})"
+                "SELECT track_id, analyzer_revision, bpm, bpm_confidence, first_beat, beat_origin, \
+                 beat_times_json, downbeat_origin, downbeats_json, downbeat_confidence, music_key, \
+                 camelot, open_key, key_confidence FROM track_bpm_key_analysis_v2 \
+                 WHERE track_id IN ({placeholders})"
             );
-            let mut params = Vec::with_capacity(ids.len() + 1);
-            params.push(SqlValue::Text(BPM_KEY_V2_REVISION.to_string()));
-            params.extend(ids.into_iter().map(SqlValue::Integer));
+            let params: Vec<SqlValue> = ids.into_iter().map(SqlValue::Integer).collect();
             let mut stmt = conn.prepare(&sql)?;
             for row in stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     BpmKeyV2Overlay {
-                        bpm: row.get(1)?,
-                        bpm_confidence: row.get(2)?,
-                        first_beat: row.get(3)?,
-                        beat_origin: row.get(4)?,
+                        current_revision: row.get::<_, String>(1)? == BPM_KEY_V2_REVISION,
+                        bpm: row.get(2)?,
+                        bpm_confidence: row.get(3)?,
+                        first_beat: row.get(4)?,
+                        beat_origin: row.get(5)?,
                         beat_times: serde_json::from_str(
-                            &row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                            &row.get::<_, Option<String>>(6)?.unwrap_or_default(),
                         )
                         .unwrap_or_default(),
-                        downbeat_origin: row.get(6)?,
+                        downbeat_origin: row.get(7)?,
                         downbeats: serde_json::from_str(
-                            &row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                            &row.get::<_, Option<String>>(8)?.unwrap_or_default(),
                         )
                         .unwrap_or_default(),
-                        downbeat_confidence: row.get(8)?,
-                        key: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
-                        camelot: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
-                        open_key: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
-                        key_confidence: row.get(12)?,
+                        downbeat_confidence: row.get(9)?,
+                        key: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                        camelot: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                        open_key: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                        key_confidence: row.get(13)?,
                     },
                 ))
             })? {
@@ -1092,7 +1093,7 @@ impl LibraryService {
             };
             if overlay.bpm.is_some() {
                 track.bpm = overlay.bpm;
-                track.bpm_v2 = true;
+                track.bpm_v2 = overlay.current_revision;
                 track.bpm_confidence = overlay.bpm_confidence;
                 track.first_beat = overlay.first_beat;
                 track.beat_origin = overlay.beat_origin;
@@ -4079,6 +4080,27 @@ mod tests {
                 .unwrap(),
             vec![a, b],
             "算法修订变化后旧 v2 行必须重新进入回填"
+        );
+        let stale = service.get(b).unwrap().unwrap();
+        assert_eq!(stale.bpm, Some(126.25));
+        assert_eq!(stale.music_key, "E minor");
+        assert!(
+            !stale.bpm_v2,
+            "旧修订可以兜底显示，但不能冒充已经完成当前分析"
+        );
+        assert_eq!(
+            service
+                .list_tracks(&TrackQuery {
+                    bpm_min: Some(126.0),
+                    ..Default::default()
+                })
+                .unwrap()
+                .items
+                .iter()
+                .map(|track| track.id)
+                .collect::<Vec<_>>(),
+            vec![b],
+            "排序/筛选也必须保留旧 v2，不能在回填期间清空 BPM"
         );
     }
 

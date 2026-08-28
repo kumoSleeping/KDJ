@@ -86,45 +86,24 @@ impl BiliClient {
         }
     }
 
-    pub fn store_cookies(&self, incoming: &BTreeMap<String, String>) {
-        {
-            let mut cookies = self.cookies.write().unwrap();
-            for (name, value) in incoming {
-                let name = name.to_ascii_lowercase();
-                if COOKIE_KEYS.contains(&name.as_str()) && !value.is_empty() {
-                    cookies.insert(name, value.clone());
-                }
+    pub fn store_cookies(&self, incoming: &BTreeMap<String, String>) -> Result<()> {
+        let mut next = self.cookies.read().unwrap().clone();
+        for (name, value) in incoming {
+            let name = name.to_ascii_lowercase();
+            if COOKIE_KEYS.contains(&name.as_str()) && !value.is_empty() {
+                next.insert(name, value.clone());
             }
         }
-        self.save_session();
+        self.save_session(&next)?;
+        *self.cookies.write().unwrap() = next;
         // 登录态变了，nav 回的 wbi key 也可能变
         self.wbi.invalidate();
+        Ok(())
     }
 
-    fn save_session(&self) {
-        let cookies = self.cookies.read().unwrap().clone();
-        if let Some(parent) = self.session_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let Ok(body) = serde_json::to_string_pretty(&cookies) else {
-            return;
-        };
-        let tmp = self.session_path.with_extension("json.tmp");
-        if let Err(err) =
-            std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &self.session_path))
-        {
-            tracing::warn!("写入 B 站登录态失败：{err}");
-            return;
-        }
-        // 登录态是敏感文件，别让同机其他用户读到
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(
-                &self.session_path,
-                std::fs::Permissions::from_mode(0o600),
-            );
-        }
+    fn save_session(&self, cookies: &BTreeMap<String, String>) -> Result<()> {
+        let body = serde_json::to_vec_pretty(cookies).context("序列化 B 站登录态失败")?;
+        kdj_core::fs::atomic_write_private(&self.session_path, &body).context("写入 B 站登录态失败")
     }
 
     pub fn clear_session(&self) {
@@ -367,10 +346,12 @@ mod tests {
         let dir = scratch("store");
         {
             let client = BiliClient::new(&dir).unwrap();
-            client.store_cookies(&BTreeMap::from([
-                ("SESSDATA".to_string(), "zzz".to_string()),
-                ("ignored".to_string(), "no".to_string()),
-            ]));
+            client
+                .store_cookies(&BTreeMap::from([
+                    ("SESSDATA".to_string(), "zzz".to_string()),
+                    ("ignored".to_string(), "no".to_string()),
+                ]))
+                .unwrap();
             assert!(client.has_credential());
         }
         let reopened = BiliClient::new(&dir).unwrap();

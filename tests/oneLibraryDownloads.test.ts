@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   persistOneLibraryDownloadTasks,
+  reconcilePendingOneLibraryTargets,
   removePendingOneLibraryDownloadTasks,
   removePendingVirtualDiskDownloads,
   updatePendingOneLibraryDownload,
@@ -94,5 +95,32 @@ test("canceling queued downloads also forgets their pending device writes", () =
 
   const stored = JSON.parse(storage.getItem("kd-onelibrary-download-targets-v1") ?? "[]");
   assert.deepEqual(stored.map((row: { task_id: string }) => row.task_id), ["keep"]);
+  storage.removeItem("kd-onelibrary-download-targets-v1");
+});
+
+test("a successfully loaded device forgets writes for deleted playlists only", () => {
+  const sibling = { ...target, playlist_id: 8, playlist_name: "Other" };
+  const offline = {
+    ...target,
+    device_path: "/Volumes/OFFLINE",
+    device_name: "OFFLINE",
+    is_virtual: false,
+  };
+  persistOneLibraryDownloadTasks(target, [source], [{ ...task, id: "deleted" }]);
+  persistOneLibraryDownloadTasks(sibling, [source], [{ ...task, id: "sibling" }]);
+  persistOneLibraryDownloadTasks(offline, [source], [{ ...task, id: "offline" }]);
+
+  reconcilePendingOneLibraryTargets([{
+    device_path: target.device_path,
+    is_virtual: target.is_virtual,
+    playlist_ids: [sibling.playlist_id],
+  }]);
+
+  const stored = JSON.parse(storage.getItem("kd-onelibrary-download-targets-v1") ?? "[]");
+  assert.deepEqual(
+    stored.map((row: { task_id: string }) => row.task_id),
+    ["sibling", "offline"],
+    "离线设备没有成功列表快照，不能被顺手清理",
+  );
   storage.removeItem("kd-onelibrary-download-targets-v1");
 });

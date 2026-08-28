@@ -82,6 +82,37 @@ fn round_to(value: f64, digits: i32) -> f64 {
     (value * factor).round() / factor
 }
 
+/// Fit one fixed-period phase from every detected beat rather than extrapolating the quantization
+/// error of a single onset frame. Circular averaging also keeps phases near 0/period adjacent.
+fn fitted_grid_phase(events: &[f64], period: f64) -> Option<f64> {
+    if !period.is_finite() || period <= 0.0 {
+        return None;
+    }
+    let scale = std::f64::consts::TAU / period;
+    let (x, y, count) = events
+        .iter()
+        .copied()
+        .filter(|event| event.is_finite())
+        .fold((0.0, 0.0, 0usize), |(x, y, count), event| {
+            let angle = event.rem_euclid(period) * scale;
+            (x + angle.cos(), y + angle.sin(), count + 1)
+        });
+    if count == 0 || x.hypot(y) <= f64::EPSILON {
+        return None;
+    }
+    Some((y.atan2(x) / scale).rem_euclid(period))
+}
+
+/// A classified downbeat chooses the beat number inside the bar, but its raw onset timestamp has
+/// one analysis-hop of jitter. Snap that classification onto the already-fitted beat lattice so
+/// beat alignment and bar alignment cannot disagree by 10–20 ms.
+fn fitted_event_on_grid(event: f64, phase: f64, period: f64) -> Option<f64> {
+    if !event.is_finite() || !phase.is_finite() || !period.is_finite() || period <= 0.0 {
+        return None;
+    }
+    Some(phase + ((event - phase) / period).round() * period)
+}
+
 /// 对已解码的样本做全部分析。`offset` 是这段样本在原曲里的起始秒数。
 ///
 /// 三个子分析互不影响：任何一个没结果都只记 errors，其余字段照常产出——
@@ -128,23 +159,31 @@ fn analyze_samples_timed(samples: &[f32], sr: f64, offset: f64) -> (AnalysisResu
         let stable_phase = tempo.confidence >= 0.70
             && (grid.grid_mode == GridMode::Constant || grid.confidence.overall >= 0.45);
         if stable_phase && tempo.beat_interval > 0.0 {
-            // 首个拟合拍锚住分析窗的相位。折进整小节（4 拍）而不是一拍，才能保留
-            // “这一拍是小节里的第几拍”；只折一拍会把 downbeat 错标成 beat 2/3/4。
-            let grid_phase = if grid.beat_interval_seconds.is_some() {
-                grid.first_beat_seconds
-            } else {
-                tempo.first_beat.rem_euclid(tempo.beat_interval)
-            };
+            // Fit phase against the exact interval represented by the persisted BPM. The DJ-grid
+            // validator may use a nearby candidate internally, while all later render/SYNC paths
+            // reconstruct their period as 60/BPM; mixing those two periods creates slow drift.
+            let grid_phase = fitted_grid_phase(&tempo.beat_times, tempo.beat_interval)
+                .unwrap_or_else(|| {
+                    if grid.beat_interval_seconds.is_some() {
+                        grid.first_beat_seconds.rem_euclid(tempo.beat_interval)
+                    } else {
+                        tempo.first_beat.rem_euclid(tempo.beat_interval)
+                    }
+                });
             let beat_origin = (offset + grid_phase).rem_euclid(tempo.beat_interval);
             result.beat_origin = Some(round_to(beat_origin, 4));
             let bar_interval = tempo.beat_interval * 4.0;
-            result.downbeat_origin = detected_downbeats
-                .first()
-                .map(|time| round_to((offset + time).rem_euclid(bar_interval), 4));
-            // Compatibility field: a trustworthy musical downbeat wins; otherwise preserve a
-            // regular four-beat grid without pretending the bar classification is reliable.
+            result.downbeat_origin = detected_downbeats.first().and_then(|time| {
+                fitted_event_on_grid(*time, grid_phase, tempo.beat_interval)
+                    .map(|fitted| round_to((offset + fitted).rem_euclid(bar_interval), 4))
+            });
+            // Compatibility field: only a trustworthy musical downbeat wins. A weak classifier
+            // result remains available as diagnostics, but must not bypass the frontend confidence
+            // gate through `first_beat` and silently label an arbitrary beat as the yellow line.
+            let trusted_downbeat = downbeat_confidence.is_some_and(|value| value >= 0.5);
             let origin = result
                 .downbeat_origin
+                .filter(|_| trusted_downbeat)
                 .unwrap_or_else(|| (offset + grid_phase).rem_euclid(bar_interval));
             result.first_beat = Some(round_to(origin, 4));
         }
@@ -344,6 +383,27 @@ mod tests {
     fn unknown_duration_falls_back_to_the_limit() {
         assert_eq!(analysis_window(None, 240.0), (0.0, Some(240.0)));
         assert_eq!(analysis_window(Some(0.0), 240.0), (0.0, Some(240.0)));
+    }
+
+    #[test]
+    fn fitted_downbeat_stays_on_the_same_lattice_as_regular_beats() {
+        let period = 0.5;
+        let beats = [0.101, 0.598, 1.103, 1.599, 2.102, 2.601];
+        let phase = fitted_grid_phase(&beats, period).expect("phase");
+        let raw_downbeat = 1.623; // one onset-frame late
+        let fitted = fitted_event_on_grid(raw_downbeat, phase, period).expect("downbeat");
+        let residual = (fitted - phase).rem_euclid(period);
+        assert!(residual.min(period - residual) < 1e-12);
+        assert!(
+            (fitted - raw_downbeat).abs() > 0.01,
+            "raw hop jitter should be removed"
+        );
+    }
+
+    #[test]
+    fn circular_phase_fit_does_not_split_events_around_period_zero() {
+        let phase = fitted_grid_phase(&[0.499, 0.001, 0.502, 0.998], 0.5).expect("phase");
+        assert!(phase < 0.01 || phase > 0.49, "phase={phase}");
     }
 
     #[test]

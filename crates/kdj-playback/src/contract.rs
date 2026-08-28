@@ -280,7 +280,9 @@ pub enum PlaybackCommand {
         rates: [f32; 2],
     },
     /// Manual SYNC is resolved against one native two-Deck clock sample. The coordinator changes
-    /// the follower rate and prepares its phase-aligned replacement from that same sample.
+    /// the follower rate and prepares its phase-aligned replacement from that same sample. The
+    /// wire field remains explicit for compatibility, but desktop native accepts only 4: a SYNC
+    /// press aligns bar lines, while half/quarter snapping is reserved for manual platter input.
     SyncDeck {
         follower: u8,
         master: u8,

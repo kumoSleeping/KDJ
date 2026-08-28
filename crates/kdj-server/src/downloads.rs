@@ -423,6 +423,44 @@ impl DownloadManager {
         self.update(id, |task| task.phase = phase);
     }
 
+    /// 外部播放授权正在被物化成单连接本地文件。即使字节已经收齐，任务仍处于
+    /// authorizing，直到一次性文件能力挂到任务上；不能提前进入 processing，否则
+    /// `attach_prepared_source` 会把刚完成的准备误判成“任务已经开始”。
+    pub(crate) fn preparation_progress(&self, id: &str, downloaded: u64, total: u64) {
+        let payload = {
+            let mut entries = self.entries.lock().unwrap();
+            let Some(entry) = entries.get_mut(id) else {
+                return;
+            };
+            let now = monotonic();
+            entry.task.downloaded_bytes = downloaded;
+            entry.task.total_bytes = total;
+            entry.task.progress = if total > 0 {
+                (downloaded as f64 / total as f64).min(1.0)
+            } else {
+                0.0
+            };
+            entry.task.state = TaskState::Running;
+            entry.task.phase = TaskPhase::Authorizing;
+            entry.samples.push_back((now, downloaded));
+            if entry.samples.len() > SPEED_SAMPLES {
+                entry.samples.pop_front();
+            }
+            entry.task.speed_bps = window_speed(&mut entry.samples, now);
+            entry.task.updated_at = now_secs();
+            let due = downloaded >= total && total > 0
+                || now - entry.last_emit >= PROGRESS_MIN_INTERVAL
+                || entry.task.progress - entry.last_progress >= PROGRESS_MIN_DELTA;
+            if !due {
+                return;
+            }
+            entry.last_emit = now;
+            entry.last_progress = entry.task.progress;
+            entry.task.clone()
+        };
+        self.hub.publish("download.updated", &payload);
+    }
+
     /// provider 的下载循环每收到一块就调一次：更新字节数和速度，广播则要过节流。
     pub(crate) fn progress(&self, id: &str, downloaded: u64, total: u64) {
         let payload = {
@@ -1733,6 +1771,11 @@ mod tests {
                 external_preparation: true,
             },
         );
+        manager.preparation_progress("running", 1024, 1024);
+        let prepared = manager.get("running").unwrap();
+        assert_eq!(prepared.state, TaskState::Running);
+        assert_eq!(prepared.phase, TaskPhase::Authorizing);
+        assert_eq!(prepared.progress, 1.0);
         manager
             .attach_prepared_source("running", "https://googlevideo.test/audio".into())
             .unwrap();

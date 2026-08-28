@@ -6,6 +6,7 @@
 import { useAppStore } from "../stores/appStore";
 import { useDownloadStore } from "../stores/downloadStore";
 import type { DownloadTask, OneLibraryTarget, Quality, SongSource } from "../types";
+import { api } from "./api";
 
 export interface EnqueueMediaOptions {
   quality?: Quality | null;
@@ -53,9 +54,7 @@ export async function enqueueMediaDownloads(
 
 /** 设置切到自动下载时恢复所有需要外部准备的任务；调用者不识别具体平台。 */
 export function resumePendingDownloadPreparations(): void {
-  void import("./api").then(({ api }) =>
-    api.preparePendingDownloads().catch((error) => {
-      console.warn("下载来源准备失败", error);
-    }),
-  );
+  void api.preparePendingDownloads().catch((error) => {
+    console.warn("下载来源准备失败", error);
+  });
 }

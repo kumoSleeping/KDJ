@@ -247,23 +247,13 @@ impl QqClient {
         }
     }
 
-    pub fn store_credential(&self, credential: Credential) {
-        if let Some(parent) = self.session_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match serde_json::to_string_pretty(&credential) {
-            Ok(body) => {
-                let tmp = self.session_path.with_extension("json.tmp");
-                if let Err(err) = std::fs::write(&tmp, body)
-                    .and_then(|_| std::fs::rename(&tmp, &self.session_path))
-                {
-                    tracing::warn!("写入 QQ 音乐凭证失败：{err}");
-                }
-            }
-            Err(err) => tracing::warn!("序列化 QQ 音乐凭证失败：{err}"),
-        }
+    pub fn store_credential(&self, credential: Credential) -> Result<()> {
+        let body = serde_json::to_vec_pretty(&credential).context("序列化 QQ 音乐凭证失败")?;
+        kdj_core::fs::atomic_write_private(&self.session_path, &body)
+            .context("写入 QQ 音乐凭证失败")?;
         *self.credential.write().unwrap() = credential;
         *self.credential_invalid.write().unwrap() = false;
+        Ok(())
     }
 
     pub fn clear_credential(&self) {
@@ -406,7 +396,7 @@ impl QqClient {
         let refreshed: Credential =
             serde_json::from_value(data).context("刷新回来的凭证字段不完整")?;
         anyhow::ensure!(!refreshed.musickey.is_empty(), "刷新没有拿到新的 musickey");
-        self.store_credential(refreshed.clone());
+        self.store_credential(refreshed.clone())?;
         Ok(refreshed)
     }
 
@@ -592,11 +582,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let client = QqClient::new(&dir).unwrap();
-        client.store_credential(Credential {
-            musicid: 1,
-            musickey: "k".into(),
-            ..Default::default()
-        });
+        client
+            .store_credential(Credential {
+                musicid: 1,
+                musickey: "k".into(),
+                ..Default::default()
+            })
+            .unwrap();
         assert!(dir.join("qqmusic.json").exists());
         assert!(!client.credential_invalid());
 

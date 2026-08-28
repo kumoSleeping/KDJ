@@ -1,6 +1,6 @@
 # 纯 Rust + Tauri 的桌面三平台打包（macOS / Windows / Linux）。
 # 2026-07-27 起这是 main 的**正式**流水线（rust-rewrite 已扶正并入 main）；
-# v0.1.0 的 Electron 线（build.yml / test.yml）已归档成 workflow_dispatch-only。
+# v0.1.0 的 Electron 线（build.yml / test.yml）已删除，避免误触发退休架构。
 #
 # 触发：
 #   - push 到 main：跑测试 + 打包，产物只当 artifact；
@@ -141,39 +141,37 @@ jobs:
       # 真库集成测试（tests/real_library.rs）靠 KDJ_TEST_DB 环境变量开关，
       # CI 上没有这个变量，会自己跳过。
       #
-      # 测试与打包解耦：continue-on-error 让后续步骤能看到 outcome。
-      # main 分支仍硬失败（见下一 step）；正式 tag 允许测试红了也继续打包——
-      # 否则一个 Windows 时序/权限 flaky 测试会卡死全平台更新通道。
       - name: Rust 全量测试
-        id: rust_test
         if: matrix.flavor == 'stable'
-        continue-on-error: true
         # Vendored rookie's rustdoc examples open real browser profiles and are not hermetic CI
-        # tests. Run every workspace unit/integration target while deliberately excluding doctests.
-        run: cargo test --workspace --lib --bins --tests
+        # tests. Check binaries for compilation, then run unit/integration targets while
+        # deliberately excluding doctests and the long-running development server binary.
+        run: |
+          cargo check --locked --workspace --bins
+          cargo test --locked --workspace --lib --tests
 
       - name: KDJ Labs OneLibrary 测试
-        id: labs_test
         if: matrix.flavor == 'labs'
-        continue-on-error: true
-        run: cargo test -p kdj-server --features onelibrary --lib
-
-      - name: 分支构建要求测试通过
-        if: ${{ !startsWith(github.ref, 'refs/tags/') && (steps.rust_test.outcome == 'failure' || steps.labs_test.outcome == 'failure') }}
-        run: |
-          echo "::error::main 分支构建要求 cargo test 通过"
-          exit 1
-
-      - name: 正式 tag 测试失败仅告警
-        if: ${{ startsWith(github.ref, 'refs/tags/') && (steps.rust_test.outcome == 'failure' || steps.labs_test.outcome == 'failure') }}
-        run: |
-          echo "::warning::tag 构建上 cargo test 失败，仍继续打包以便更新通道不因单测卡死；请尽快修测试。"
+        run: cargo test --locked -p kdj-server --features onelibrary --lib
 
       - name: 安装前端依赖
         run: npm ci
 
       - name: 前端类型检查
         run: npm run typecheck
+
+      - name: 前端逻辑测试
+        run: npm run test:frontend-logic
+
+      - name: 生产依赖漏洞检查
+        if: matrix.label == 'linux-x86_64' && matrix.flavor == 'stable'
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Rust 漏洞、许可证与来源检查
+        if: matrix.label == 'linux-x86_64' && matrix.flavor == 'stable'
+        uses: EmbarkStudios/cargo-deny-action@v1
+        with:
+          command: check advisories licenses sources
 
       # M7（Tauri 壳）落地之前 src-tauri/ 还不完整。这里探测一下而不是硬跑，
       # 让这条流水线在壳做好之前仍然能当"三平台 Rust 测试"用，红叉只留给真问题。

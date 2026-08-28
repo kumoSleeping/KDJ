@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, FolderOpen, Library, LoaderCircle, Play } from "lucide-react";
+import { Check, FolderOpen, Library, Link2, LoaderCircle, Play } from "lucide-react";
 import { api } from "../../lib/api";
 import { formatBpm } from "../../lib/format";
 import { useHarmonicScope } from "../../lib/harmonicScope";
 import { isOutsideFolder } from "../../lib/outsideFolder";
+import { trackShareLink } from "../../lib/shareLink";
+import { copyText } from "../../lib/copyText";
 import { clearTextSelection, hasTextSelectionWithin } from "../../lib/textSelection";
 import { endTrackDrag, writeTrackDragData } from "../../lib/trackDrag";
 import { useLibraryStore } from "../../stores/libraryStore";
@@ -45,6 +47,7 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
   // 不如让它退回全库并在按钮上说清楚。「其他」也不是真实目录，同样退回全库。
   const activeFolder = scope === "folder" && !isOutsideFolder(folder) ? folder : "";
   const selected = new Set(selectedIds);
+  const rowShareLink = rowMenu ? trackShareLink(rowMenu.track) : null;
 
   useEffect(() => {
     if (!selectionMode) return;
@@ -330,6 +333,18 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
             <Play size={12} />
             播放
           </button>
+          {rowShareLink && (
+            <button
+              type="button"
+              onClick={() => {
+                void copyText(rowShareLink);
+                setRowMenu(null);
+              }}
+            >
+              <Link2 size={12} />
+              复制分享链接
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {

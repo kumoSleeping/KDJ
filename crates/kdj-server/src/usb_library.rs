@@ -4,6 +4,8 @@
 //! OneLibrary 的数据库读写由精确钉住的 rbox 0.1.5 完成（最后一个 MIT/Apache
 //! 版本），这里负责挂载点边界、文件复制、增量复用和失败回滚。
 
+#![cfg_attr(not(feature = "onelibrary"), allow(dead_code, unused_imports))]
+
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;

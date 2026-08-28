@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { AudioLines, ChevronDown, Lock, LockOpen, Minus, Pause, Play, Plus } from "lucide-react";
+import { AudioLines, ChevronDown, Lock, LockOpen, Minus, Pause, PictureInPicture2, Play, Plus } from "lucide-react";
 import {
   channelFaderGain,
   crossfaderChannelGains,
@@ -8,12 +8,13 @@ import {
   removeHotCue,
   shouldDropSeekPreview,
   snapCueSeconds,
+  trackBarGridOrigin,
   updateHotCueComment,
   upsertHotCue,
 } from "../../lib/performanceCues";
 import { api } from "../../lib/api";
 import { camelotColor, parseCamelot } from "../../lib/camelot";
-import { formatDuration, formatSignedDuration } from "../../lib/format";
+import { formatDuration, formatSignedDuration, isVideoTrack } from "../../lib/format";
 import { PERFORMANCE_PREROLL_SECONDS } from "../../lib/deckPosition";
 import {
   finishTrackDrop,
@@ -49,6 +50,7 @@ import {
 } from "../../lib/waveformViewport";
 import { performanceWaveformAmplitudeScale } from "../../lib/waveformRenderPolicy";
 import { useDjConfig } from "../../lib/djMix";
+import { PERFORMANCE_MIXER_SESSION_KEY } from "../../lib/performanceMixerSession";
 import {
   getLiveDeckSpectrum,
   type UnifiedDeckSyncRequest,
@@ -105,6 +107,11 @@ import {
   trackIdRequest,
   type PlaybackTrackRequest,
 } from "../../lib/playbackTrack";
+import {
+  PerformanceDeckVideo,
+  PerformanceVideoOutput,
+  type PerformanceVideoRefs,
+} from "./PerformanceVideoMix";
 
 type TempoRangeId = "6" | "10" | "16" | "wide";
 
@@ -234,7 +241,6 @@ export interface PerformanceWorkspaceProps {
 }
 
 // 现场旋钮只在当前应用进程内保留；真正重启必须回到中性值。
-export const PERFORMANCE_MIXER_SESSION_KEY = "kd-performance-mixer-session-v1";
 const LOOP_BEATS_STORAGE_KEY = "kd-performance-loop-beats-v1";
 const JUMP_BEATS_STORAGE_KEY = "kd-performance-jump-beats-v1";
 const CROSSFADER_ENABLED_STORAGE_KEY = "kd-performance-crossfader-enabled-v1";
@@ -311,17 +317,6 @@ function readMixer(): [PerformanceMixerValues, PerformanceMixerValues] {
     // 坏存档回到中性参数。
   }
   return [{ ...DEFAULT_MIXER }, { ...DEFAULT_MIXER }];
-}
-
-/** Manager song loads start a neutral single-track context; DJ loads never call this. */
-export function clearPerformanceMixerSession(
-  storage: Pick<Storage, "removeItem"> = window.sessionStorage,
-): void {
-  try {
-    storage.removeItem(PERFORMANCE_MIXER_SESSION_KEY);
-  } catch {
-    // Storage may be unavailable in a restricted WebView; the mounted reset revision still wins.
-  }
 }
 
 function readCrossfaderEnabled(): boolean {
@@ -604,6 +599,9 @@ function DeckWave({
           height={50}
           seekable={false}
           showBeatGrid
+          // TEMPO owns the beat-lattice scale. Platter/jog velocity only moves the existing
+          // lattice under the needle; feeding that transient audible rate into the viewport made
+          // every hand sample look like a new BPM and visibly stretched the bar spacing.
           viewportSeconds={performanceWaveformViewportSeconds(deck.rate)}
           playing={deck.transportRunning || deck.scratchHeld || interactiveScrub}
           playbackRate={motionRate}
@@ -1899,12 +1897,14 @@ function smoothEqChartPath(points: EqChartPoint[]): string {
  * Fifteen genuine post-EQ levels form one moving spectrum line under the three-control preset.
  * The pointer gesture is relative: contact never jumps to an absolute y value.
  */
-function EqSpectrumChart({ side, values, filter, resonanceQ, playing, onAdjust, onReset }: {
+function EqSpectrumChart({ side, values, filter, resonanceQ, playing, video, onOpenVideoOutput, onAdjust, onReset }: {
   side: 0 | 1;
   values: EqGraphValues;
   filter: number;
   resonanceQ: number;
   playing: boolean;
+  video?: ReactNode;
+  onOpenVideoOutput?: () => void;
   onAdjust: (delta: EqGraphValues) => void;
   onReset: () => void;
 }) {
@@ -2068,14 +2068,17 @@ function EqSpectrumChart({ side, values, filter, resonanceQ, playing, onAdjust, 
       ref={rootRef}
       className="kd-dj-eq-chart"
       data-side={side === 0 ? "a" : "b"}
+      data-video={video ? "true" : undefined}
       role="group"
-      aria-label={`Deck ${side === 0 ? "A" : "B"} 三段手绘 EQ 与十五段实时响度`}
-      title="相对拖动手绘 EQ；双击恢复平直"
-      onPointerDown={onDown}
-      onPointerMove={applyPointerSamples}
-      onPointerUp={(event) => finishPointer(event, false)}
-      onPointerCancel={(event) => finishPointer(event, true)}
-      onDoubleClick={(event) => { event.preventDefault(); latestRef.current.onReset(); }}
+      aria-label={video
+        ? `Deck ${side === 0 ? "A" : "B"} 视频画面`
+        : `Deck ${side === 0 ? "A" : "B"} 三段手绘 EQ 与十五段实时响度`}
+      title={video ? "视频画面跟随本 Deck 音频时钟" : "相对拖动手绘 EQ；双击恢复平直"}
+      onPointerDown={video ? undefined : onDown}
+      onPointerMove={video ? undefined : applyPointerSamples}
+      onPointerUp={video ? undefined : (event) => finishPointer(event, false)}
+      onPointerCancel={video ? undefined : (event) => finishPointer(event, true)}
+      onDoubleClick={video ? undefined : (event) => { event.preventDefault(); latestRef.current.onReset(); }}
       onContextMenu={(event) => event.preventDefault()}
     >
       <svg className="kd-dj-eq-spectrum" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true">
@@ -2106,19 +2109,40 @@ function EqSpectrumChart({ side, values, filter, resonanceQ, playing, onAdjust, 
           <path d={smoothFilterPath} />
         </svg>
       ) : null}
+      {video ? (
+        <>
+          {video}
+          <button
+            type="button"
+            className="kd-performance-vj-output-open"
+            aria-label="打开 VJ 混合输出"
+            title="打开 VJ 混合输出"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenVideoOutput?.();
+            }}
+          >
+            <PictureInPicture2 size={12} />
+          </button>
+        </>
+      ) : null}
     </div>
   );
 }
 
 /** Single Deck mixer: the graph and the physical-style LOW/MID/HIGH knobs share one state. */
-function MixerStrip({ side, mixer, resonanceQ, playing, setMixer, adjustEq }: {
+function MixerStrip({ side, deck, mixer, resonanceQ, videoRefs, onOpenVideoOutput, setMixer, adjustEq }: {
   side: 0 | 1;
+  deck: PerformanceDeckModel;
   mixer: PerformanceMixerValues;
   resonanceQ: number;
-  playing: boolean;
+  videoRefs: PerformanceVideoRefs;
+  onOpenVideoOutput: () => void;
   setMixer: (patch: Partial<PerformanceMixerValues>) => void;
   adjustEq: (delta: EqGraphValues) => void;
 }) {
+  const hasVideo = Boolean(deck.track && isVideoTrack(deck.track.format));
   return (
     <div className="kd-performance-strip" data-side={side === 0 ? "a" : "b"}>
       <div className="kd-performance-strip-knobs">
@@ -2127,7 +2151,9 @@ function MixerStrip({ side, mixer, resonanceQ, playing, setMixer, adjustEq }: {
           values={mixer}
           filter={mixer.filter}
           resonanceQ={resonanceQ}
-          playing={playing}
+          playing={deck.playing}
+          video={hasVideo ? <PerformanceDeckVideo deck={deck} side={side} videoRefs={videoRefs} /> : undefined}
+          onOpenVideoOutput={onOpenVideoOutput}
           onAdjust={adjustEq}
           onReset={() => setMixer({ low: 0, mid: 0, high: 0 })}
         />
@@ -2237,6 +2263,24 @@ export function PerformanceWorkspace({
       };
     }) as [PerformanceDeckModel, PerformanceDeckModel],
   [sourceDecks, analyzedDeckTracks]);
+  const performanceVideoRefs = useRef<[HTMLVideoElement | null, HTMLVideoElement | null]>([
+    null,
+    null,
+  ]);
+  const videoTrackIds: readonly [number | null, number | null] = [
+    decks[0].track && isVideoTrack(decks[0].track.format) ? decks[0].track.id : null,
+    decks[1].track && isVideoTrack(decks[1].track.format) ? decks[1].track.id : null,
+  ];
+  const [videoOutputOpen, setVideoOutputOpen] = useState(false);
+  const previousVideoTrackIdsRef = useRef<readonly [number | null, number | null]>([null, null]);
+  useEffect(() => {
+    const previous = previousVideoTrackIdsRef.current;
+    const addedVideo = videoTrackIds.some((trackId) =>
+      trackId !== null && !previous.includes(trackId));
+    previousVideoTrackIdsRef.current = videoTrackIds;
+    if (addedVideo) setVideoOutputOpen(true);
+    if (videoTrackIds[0] === null && videoTrackIds[1] === null) setVideoOutputOpen(false);
+  }, [videoTrackIds[0], videoTrackIds[1]]);
   const autoBeatSync = useDjConfig((state) => state.autoBeatSync);
   const quantize = usePlaybackPrefs((state) => state.quantize);
   const [mixers, setMixers] = useState<[PerformanceMixerValues, PerformanceMixerValues]>(readMixer);
@@ -2802,8 +2846,8 @@ export function PerformanceWorkspace({
   const syncEnabled = Boolean(
     decks[0].track?.bpm
     && decks[1].track?.bpm
-    && decks[0].track?.first_beat != null
-    && decks[1].track?.first_beat != null,
+    && trackBarGridOrigin(decks[0].track) != null
+    && trackBarGridOrigin(decks[1].track) != null,
   );
   const previewDeckRate = (side: 0 | 1, rate: number, publishVisual = true): number => {
     const bpms = [decks[0].track?.bpm, decks[1].track?.bpm] as const;
@@ -2826,12 +2870,8 @@ export function PerformanceWorkspace({
   const requestNativeSync = (side: 0 | 1, masterSide: 0 | 1, rate: number) => {
     const follower = decksRef.current[side].track;
     const master = decksRef.current[masterSide].track;
-    const followerOrigin = (follower?.downbeat_confidence ?? 0) >= 0.5
-      ? follower?.downbeat_origin ?? follower?.downbeats?.[0] ?? follower?.first_beat
-      : follower?.first_beat;
-    const masterOrigin = (master?.downbeat_confidence ?? 0) >= 0.5
-      ? master?.downbeat_origin ?? master?.downbeats?.[0] ?? master?.first_beat
-      : master?.first_beat;
+    const followerOrigin = follower ? trackBarGridOrigin(follower) : null;
+    const masterOrigin = master ? trackBarGridOrigin(master) : null;
     if (
       !follower?.bpm
       || !master?.bpm
@@ -3006,7 +3046,7 @@ export function PerformanceWorkspace({
     const baseBpm = decks[side].track?.bpm;
     const otherDeck = decks[other];
     if (!baseBpm || !otherDeck.track?.bpm) return;
-    // 把按下的这台对齐到另一台的有效 BPM（先试半倍/原倍/双倍取最近档）。
+    // 把按下的这台对齐到另一台的真实有效 BPM；半拍/双拍不能冒充同速。
     // 推子量程只钉拇指；真实速率按引擎 0.5–2.0 走，机体推子仍停在原位，走软接管。
     const plan = deckSyncRate(
       otherDeck.track.bpm * otherDeck.rate,
@@ -3703,9 +3743,11 @@ export function PerformanceWorkspace({
       <div className="kd-performance-deck-mix-module">
         <MixerStrip
           side={side}
+          deck={decks[side]}
           mixer={mixers[side]}
           resonanceQ={filterResonanceQ}
-          playing={viewDecks[side].playing}
+          videoRefs={performanceVideoRefs}
+          onOpenVideoOutput={() => setVideoOutputOpen(true)}
           setMixer={(patch) => patchMixer(side, patch)}
           adjustEq={(delta) => adjustMixerEq(side, delta)}
         />
@@ -3873,6 +3915,18 @@ export function PerformanceWorkspace({
             {renderDeckFxPage(1)}
           </div>
         </div>
+        {videoOutputOpen && (videoTrackIds[0] !== null || videoTrackIds[1] !== null) ? (
+          <PerformanceVideoOutput
+            videoRefs={performanceVideoRefs}
+            state={{
+              playing: [decks[0].playing, decks[1].playing],
+              crossfaderEnabled,
+              crossfader,
+              channelFaders: [mixers[0].volume, mixers[1].volume],
+            }}
+            onClose={() => setVideoOutputOpen(false)}
+          />
+        ) : null}
       </div>
     </>
   );

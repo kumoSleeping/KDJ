@@ -59,6 +59,8 @@ const STEM_SEEK_STARTUP_BUFFER_MS: u64 = 250;
 const SEEK_HANDOFF_MS: u64 = 5;
 /// Below this wall-clock error a decoder replacement costs more than the residual phase offset.
 const SYNC_PHASE_TOLERANCE_SEC: f64 = 0.003;
+/// Manual SYNC is always a musical 4/4 bar lock. Beat/half-bar snapping belongs to platter input.
+const SYNC_BEATS_PER_BAR: u8 = 4;
 /// A pending replacement even a few milliseconds away must not publish the outgoing decoder.
 /// 50ms used to let SYNC phase-align seeks leak the old playhead, which the UI interpolated
 /// as the needle and beat grid reversing under a centered playhead.
@@ -391,7 +393,6 @@ struct NativeSyncGroup {
     follower_origin: f64,
     leader_bpm: f64,
     leader_origin: f64,
-    beats_per_bar: u8,
     /// Shared effective BPM both Decks play toward (leader_bpm × leader_rate).
     target_bpm: f64,
     /// Leader effective BPM = multiple × follower effective BPM (0.5 / 1 / 2).
@@ -594,6 +595,7 @@ impl Actor {
             self.promote_ready_streams();
             self.release_stem_pool_if_idle();
             self.refresh_from_audio();
+            self.confirm_sync_acquisition();
             self.handoff_settled_scratch_coasts();
             self.update_sync_snapshot();
             self.publish_levels();
@@ -809,7 +811,7 @@ impl Actor {
                 deck,
                 position,
                 play_when_ready,
-            } => self.seek_deck_when_ready(deck, position, play_when_ready),
+            } => self.seek_deck_from_user(deck, position, play_when_ready),
             PlaybackCommand::NudgeDeck { deck, amount } => self.nudge_deck(deck, amount),
             PlaybackCommand::SetDeckRate { deck, rate } => {
                 self.set_sync_aware_deck_rate(deck, rate)
@@ -1128,6 +1130,9 @@ impl Actor {
         if self.decks[index].is_none() {
             return Err("目标 Deck 尚未装入曲目".to_string());
         }
+        // A platter grab is an explicit phase override. Keep the linked persistent TEMPO, but do
+        // not let a late SYNC shadow land after the user's hand has taken ownership of the needle.
+        self.suspend_sync_phase_for_manual_input(deck);
         self.cancel_clocked_deck_seek(deck);
         // A jog touch is a source-cursor hold, not a hidden PauseDeck command.
         self.enter_manual_mode();
@@ -1368,7 +1373,18 @@ impl Actor {
     }
 
     fn seek_deck(&mut self, deck: u8, position: f64) -> Result<(), String> {
-        self.seek_deck_when_ready(deck, position, false)
+        self.seek_deck_from_user(deck, position, false)
+    }
+
+    fn seek_deck_from_user(
+        &mut self,
+        deck: u8,
+        position: f64,
+        play_when_ready: bool,
+    ) -> Result<(), String> {
+        let deck_id = deck_id(deck)?;
+        self.suspend_sync_phase_for_manual_input(deck_id);
+        self.seek_deck_when_ready(deck, position, play_when_ready)
     }
 
     fn seek_deck_when_ready(
@@ -1602,6 +1618,9 @@ impl Actor {
         if self.scratch_held[index] || self.scratch_coasting[index] {
             return Ok(());
         }
+        // Edge jog is the other manual phase control. It may temporarily move between the bar
+        // lines, but it must never be mistaken for another persistent BPM or an active acquire.
+        self.suspend_sync_phase_for_manual_input(deck);
         self.enter_manual_mode();
         let amount = amount.clamp(-1.0, 1.0);
         // Edge jog is temporary *tempo*, not callback resampling. Feeding the existing Rubber
@@ -1857,7 +1876,7 @@ impl Actor {
             || master_bpm <= 0.0
             || !follower_first_beat.is_finite()
             || !master_first_beat.is_finite()
-            || !(1..=16).contains(&beats_per_bar)
+            || beats_per_bar != SYNC_BEATS_PER_BAR
         {
             return Err("SYNC 网格参数无效".into());
         }
@@ -1880,6 +1899,14 @@ impl Actor {
             .source_for_deck(master)
             .map(|source| f64::from(source.rate))
             .unwrap_or(f64::from(self.state.decks[master_index].rate));
+        // Resolve tempo from the same native snapshot as phase. The WebView rate is an optimistic
+        // preview and can trail a recent master TEMPO command; trusting it here can lock the grid
+        // while leaving the effective BPM values slightly (or visibly) different.
+        let exact_follower_rate = master_bpm * master_rate / follower_bpm;
+        if !exact_follower_rate.is_finite() || !(0.5..=2.0).contains(&exact_follower_rate) {
+            return Err("SYNC 目标速度超出引擎范围".into());
+        }
+        let rate = exact_follower_rate as f32;
         let duration = self
             .source_for_deck(follower)
             .and_then(|source| source.duration);
@@ -1892,7 +1919,7 @@ impl Actor {
             master_bpm,
             master_first_beat,
             master_rate,
-            beats_per_bar: f64::from(beats_per_bar),
+            beats_per_bar: f64::from(SYNC_BEATS_PER_BAR),
             follower_duration: duration,
         })
         .ok_or_else(|| "SYNC 无法建立有效网格".to_string())?;
@@ -1911,7 +1938,10 @@ impl Actor {
                 .unwrap_or(self.state.decks[index].rate)
         });
         let target_bpm = master_bpm * master_rate;
-        let multiple = sync_fold_multiple(target_bpm, follower_bpm);
+        // Manual SYNC is an exact effective-BPM lock. A 2:1 beat lattice is useful analysis
+        // metadata, but accepting 114.5/229 as "same tempo" leaves both the transport and the
+        // rendered bar density visibly different.
+        let multiple = 1.0;
         self.sync_group = Some(NativeSyncGroup {
             leader: master,
             follower,
@@ -1920,7 +1950,6 @@ impl Actor {
             follower_origin: follower_first_beat,
             leader_bpm: master_bpm,
             leader_origin: master_first_beat,
-            beats_per_bar,
             target_bpm,
             multiple,
             correction_rate: rate,
@@ -2460,18 +2489,155 @@ impl Actor {
             .unwrap_or_default();
     }
 
-    fn on_seek_settled(&mut self, deck: DeckId) {
+    fn suspend_sync_phase_for_manual_input(&mut self, deck: DeckId) {
         let Some(sync) = self.sync_group else {
             return;
         };
-        // Only finish the one-shot SYNC acquire. A user click/Hot Cue/scratch must not start
-        // another decoder replacement: that second seek is what made waveform jumps jitter.
-        if deck != sync.follower || !sync.aligning_follower {
+        if deck != sync.follower && deck != sync.leader {
             return;
         }
         if let Some(group) = self.sync_group.as_mut() {
             group.aligning_follower = false;
-            group.phase = PlaybackSyncPhase::Locked;
+            group.phase_error_seconds = 0.0;
+            group.phase = PlaybackSyncPhase::Suspended;
+        }
+        if sync.aligning_follower {
+            // Either platter owns relative phase. Cancel the follower shadow as well when the
+            // leader was touched, otherwise that old SYNC landing can arrive after manual input.
+            self.cancel_clocked_deck_seek(sync.follower);
+        }
+        self.update_sync_snapshot();
+    }
+
+    fn on_seek_settled(&mut self, deck: DeckId) {
+        let Some(sync) = self.sync_group else {
+            return;
+        };
+        // Installation is not proof of phase lock. The callback may still expose the outgoing
+        // source, and a late producer may have supplied less catch-up PCM than the elapsed wall
+        // clock. Keep Acquiring/Correcting until `confirm_sync_acquisition` sees both new clocks
+        // in one callback snapshot.
+        if deck != sync.follower || !sync.aligning_follower {
+            return;
+        }
+        self.update_sync_snapshot();
+    }
+
+    /// Verify the one-shot SYNC landing against one callback sample.
+    ///
+    /// A first miss gets exactly one new bar-aligned seek. A second miss becomes Degraded rather
+    /// than entering an open-loop seek/tempo feedback cycle. Manual platter/jog/seek input flips
+    /// `aligning_follower` off before this method runs, so user phase adjustments always win.
+    fn confirm_sync_acquisition(&mut self) {
+        let Some(sync) = self.sync_group else {
+            return;
+        };
+        if !sync.aligning_follower || self.pending[sync.follower as usize].is_some() {
+            return;
+        }
+        let follower_index = sync.follower as usize;
+        let leader_index = sync.leader as usize;
+        let (Some(follower_runtime), Some(leader_runtime)) = (
+            self.decks[follower_index].as_ref(),
+            self.decks[leader_index].as_ref(),
+        ) else {
+            return;
+        };
+        // `refresh_from_audio` ran immediately before this method. Do not compare a newly
+        // installed follower with the previous callback generation or a replacing leader.
+        if self.latest_audio.deck_source_ids[follower_index] != follower_runtime.source_id
+            || self.latest_audio.deck_source_ids[leader_index] != leader_runtime.source_id
+        {
+            return;
+        }
+        let input = SyncPhaseInput {
+            follower_position: self.state.decks[follower_index].current_time,
+            follower_bpm: sync.follower_bpm,
+            follower_first_beat: sync.follower_origin,
+            follower_rate: f64::from(follower_runtime.request.rate),
+            master_position: self.state.decks[leader_index].current_time,
+            master_bpm: sync.leader_bpm,
+            master_first_beat: sync.leader_origin,
+            master_rate: f64::from(leader_runtime.request.rate),
+            beats_per_bar: f64::from(SYNC_BEATS_PER_BAR),
+            follower_duration: follower_runtime.request.duration,
+        };
+        let Some((error, _)) = sync_phase_error(input) else {
+            if let Some(group) = self.sync_group.as_mut() {
+                group.aligning_follower = false;
+                group.phase = PlaybackSyncPhase::Degraded;
+            }
+            self.update_sync_snapshot();
+            return;
+        };
+        if error.abs() <= SYNC_PHASE_TOLERANCE_SEC {
+            if let Some(group) = self.sync_group.as_mut() {
+                group.aligning_follower = false;
+                group.phase_error_seconds = error;
+                group.phase = PlaybackSyncPhase::Locked;
+            }
+            tracing::info!(
+                target: "kdj_sync",
+                event = "sync_phase_confirmed",
+                follower = sync.follower as u8,
+                leader = sync.leader as u8,
+                phase_error_ms = error * 1_000.0,
+                "manual SYNC bar phase confirmed from callback clocks"
+            );
+            self.update_sync_snapshot();
+            return;
+        }
+
+        // Correcting is the single retry state. Never turn a bad analysis grid or a starving
+        // decoder into an unbounded chain of shadow workers.
+        if sync.phase == PlaybackSyncPhase::Correcting {
+            if let Some(group) = self.sync_group.as_mut() {
+                group.aligning_follower = false;
+                group.phase_error_seconds = error;
+                group.phase = PlaybackSyncPhase::Degraded;
+            }
+            tracing::warn!(
+                target: "kdj_sync",
+                event = "sync_phase_degraded",
+                follower = sync.follower as u8,
+                leader = sync.leader as u8,
+                phase_error_ms = error * 1_000.0,
+                "manual SYNC retained tempo lock after one failed bar-phase correction"
+            );
+            self.update_sync_snapshot();
+            return;
+        }
+
+        let Some(target) = sync_phase_target(input) else {
+            if let Some(group) = self.sync_group.as_mut() {
+                group.aligning_follower = false;
+                group.phase_error_seconds = error;
+                group.phase = PlaybackSyncPhase::Degraded;
+            }
+            self.update_sync_snapshot();
+            return;
+        };
+        if let Some(group) = self.sync_group.as_mut() {
+            group.phase_error_seconds = error;
+            group.phase = PlaybackSyncPhase::Correcting;
+        }
+        tracing::warn!(
+            target: "kdj_sync",
+            event = "sync_phase_retry",
+            follower = sync.follower as u8,
+            leader = sync.leader as u8,
+            phase_error_ms = error * 1_000.0,
+            target,
+            "manual SYNC first landing missed; scheduling one bar-aligned correction"
+        );
+        if self
+            .seek_deck_when_ready(sync.follower as u8, target, false)
+            .is_err()
+        {
+            if let Some(group) = self.sync_group.as_mut() {
+                group.aligning_follower = false;
+                group.phase = PlaybackSyncPhase::Degraded;
+            }
         }
         self.update_sync_snapshot();
     }
@@ -4504,30 +4670,6 @@ fn sync_phase_target(input: SyncPhaseInput) -> Option<f64> {
     Some(target)
 }
 
-fn sync_fold_multiple(leader_effective_bpm: f64, follower_bpm: f64) -> f64 {
-    if !leader_effective_bpm.is_finite()
-        || leader_effective_bpm <= 0.0
-        || !follower_bpm.is_finite()
-        || follower_bpm <= 0.0
-    {
-        return 1.0;
-    }
-    let mut best_multiple = 1.0;
-    let mut best_distance = f64::INFINITY;
-    for multiple in [0.5, 1.0, 2.0] {
-        let rate = leader_effective_bpm / (follower_bpm * multiple);
-        if !rate.is_finite() || rate <= 0.0 {
-            continue;
-        }
-        let distance = rate.log2().abs();
-        if distance < best_distance {
-            best_distance = distance;
-            best_multiple = multiple;
-        }
-    }
-    best_multiple
-}
-
 fn validate_source(source: &PlaybackSource) -> Result<(), String> {
     if source.track_id == 0 {
         return Err("曲目 id 无效".into());
@@ -5091,13 +5233,6 @@ mod tests {
     }
 
     #[test]
-    fn sync_fold_multiple_picks_half_and_double_time() {
-        assert!((sync_fold_multiple(140.0, 70.0) - 2.0).abs() < 1e-9);
-        assert!((sync_fold_multiple(70.0, 140.0) - 0.5).abs() < 1e-9);
-        assert!((sync_fold_multiple(128.0, 128.0) - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
     fn native_sync_tempo_gesture_updates_both_persistent_deck_rates() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
@@ -5114,7 +5249,6 @@ mod tests {
             follower_origin: 0.0,
             leader_bpm: 125.0,
             leader_origin: 0.0,
-            beats_per_bar: 4,
             target_bpm: 125.0,
             multiple: 1.0,
             correction_rate: 1.25,
@@ -5167,7 +5301,6 @@ mod tests {
             follower_origin: 0.0,
             leader_bpm: 120.0,
             leader_origin: 0.0,
-            beats_per_bar: 4,
             target_bpm: 120.0,
             multiple: 1.0,
             correction_rate: 1.0,
@@ -5193,7 +5326,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_deck_snapshot_stores_shared_target_bpm_and_fold_multiple() {
+    fn sync_deck_snapshot_stores_shared_target_bpm_without_half_time_folding() {
         let knobs = Arc::new(FakeKnobs::default());
         let mut actor = test_actor(&knobs);
         actor.open_output().expect("打开测试输出");
@@ -5208,8 +5341,113 @@ mod tests {
         assert_eq!(actor.state.sync.follower, 0);
         assert_eq!(actor.state.sync.leader, 1);
         assert_eq!(actor.state.sync.phase, PlaybackSyncPhase::Locked);
-        assert!((actor.state.sync.multiple - 2.0).abs() < 1e-9);
+        assert!((actor.state.sync.multiple - 1.0).abs() < 1e-9);
         assert!((actor.state.sync.target_bpm - 140.0).abs() < 1e-9);
+        assert!((actor.state.decks[0].rate - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn native_manual_sync_rejects_beat_or_half_bar_cells() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 0.0));
+        actor.decks[1] = Some(live_runtime(2, 0.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[1].track_id = Some(2);
+
+        for beats_per_cell in [1, 2] {
+            assert!(
+                actor
+                    .sync_deck(0, 1, 1.0, 120.0, 0.0, 120.0, 0.0, beats_per_cell)
+                    .is_err(),
+                "manual SYNC must reject a {beats_per_cell}-beat subdivision"
+            );
+        }
+        assert!(actor.sync_group.is_none());
+    }
+
+    #[test]
+    fn sync_callback_confirmation_does_not_accept_a_one_beat_miss_as_bar_lock() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 0.5));
+        actor.decks[1] = Some(live_runtime(2, 0.0));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[1].track_id = Some(2);
+        actor.state.decks[0].current_time = 0.5;
+        actor.state.decks[1].current_time = 0.0;
+        actor.state.decks[0].is_playing = true;
+        actor.state.decks[1].is_playing = true;
+        actor.manual_mode = true;
+        actor.manual_desired_playing = [true, true];
+        actor.latest_audio.deck_source_ids = [101, 102];
+        actor.sync_group = Some(NativeSyncGroup {
+            leader: DeckId::B,
+            follower: DeckId::A,
+            base_rates: [1.0, 1.0],
+            follower_bpm: 120.0,
+            follower_origin: 0.0,
+            leader_bpm: 120.0,
+            leader_origin: 0.0,
+            target_bpm: 120.0,
+            multiple: 1.0,
+            correction_rate: 1.0,
+            phase_error_seconds: 0.0,
+            phase: PlaybackSyncPhase::Acquiring,
+            aligning_follower: true,
+        });
+
+        actor.confirm_sync_acquisition();
+
+        let sync = actor.sync_group.expect("SYNC group");
+        assert_eq!(sync.phase, PlaybackSyncPhase::Correcting);
+        assert!(sync.aligning_follower);
+        assert!((sync.phase_error_seconds - 0.5).abs() < 1e-9);
+        assert!(
+            actor.pending[DeckId::A as usize]
+                .as_ref()
+                .is_some_and(|pending| pending.clocked_seek.is_some()),
+            "a one-beat miss needs one new bar-aligned landing"
+        );
+    }
+
+    #[test]
+    fn sync_callback_confirmation_locks_only_after_the_bar_phase_matches() {
+        let knobs = Arc::new(FakeKnobs::default());
+        let mut actor = test_actor(&knobs);
+        actor.open_output().expect("打开测试输出");
+        actor.decks[0] = Some(live_runtime(1, 4.25));
+        actor.decks[1] = Some(live_runtime(2, 4.25));
+        actor.state.decks[0].track_id = Some(1);
+        actor.state.decks[1].track_id = Some(2);
+        actor.state.decks[0].current_time = 4.25;
+        actor.state.decks[1].current_time = 4.25;
+        actor.latest_audio.deck_source_ids = [101, 102];
+        actor.sync_group = Some(NativeSyncGroup {
+            leader: DeckId::B,
+            follower: DeckId::A,
+            base_rates: [1.0, 1.0],
+            follower_bpm: 120.0,
+            follower_origin: 0.0,
+            leader_bpm: 120.0,
+            leader_origin: 0.0,
+            target_bpm: 120.0,
+            multiple: 1.0,
+            correction_rate: 1.0,
+            phase_error_seconds: 0.5,
+            phase: PlaybackSyncPhase::Correcting,
+            aligning_follower: true,
+        });
+
+        actor.confirm_sync_acquisition();
+
+        let sync = actor.sync_group.expect("SYNC group");
+        assert_eq!(sync.phase, PlaybackSyncPhase::Locked);
+        assert!(!sync.aligning_follower);
+        assert!(sync.phase_error_seconds.abs() <= SYNC_PHASE_TOLERANCE_SEC);
+        assert!(actor.pending[DeckId::A as usize].is_none());
     }
 
     #[test]
@@ -5229,7 +5467,6 @@ mod tests {
             follower_origin: 0.0,
             leader_bpm: 140.0,
             leader_origin: 0.0,
-            beats_per_bar: 4,
             target_bpm: 140.0,
             multiple: 2.0,
             correction_rate: 1.0,
@@ -5265,7 +5502,6 @@ mod tests {
             follower_origin: 0.0,
             leader_bpm: 120.0,
             leader_origin: 0.0,
-            beats_per_bar: 4,
             target_bpm: 120.0,
             multiple: 1.0,
             correction_rate: 1.0,
@@ -5483,7 +5719,6 @@ mod tests {
             follower_origin: 0.0,
             leader_bpm: 120.0,
             leader_origin: 0.0,
-            beats_per_bar: 4,
             target_bpm: 120.0,
             multiple: 1.0,
             correction_rate: 1.0,

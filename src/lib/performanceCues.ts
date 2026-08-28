@@ -1,4 +1,4 @@
-import type { CuePoint } from "../types";
+import type { CuePoint, Track } from "../types";
 
 export const HOT_CUE_COLORS = [
   { index: 1, name: "pink", css: "#e6579a" },
@@ -21,6 +21,55 @@ export interface BeatGridMarker {
 }
 
 const MAX_BEAT_MARKERS = 8_192;
+
+/**
+ * One bar origin shared by the renderer and native SYNC request.
+ *
+ * `first_beat` is only a beat lattice anchor. Once the analyser has a trustworthy musical
+ * downbeat, drawing bars from `first_beat` while SYNC uses `downbeat_origin` puts the yellow lines
+ * on different beats even though the audio engine landed on the requested phase.
+ */
+export function trackBarGridOrigin(
+  track: Pick<
+    Track,
+    | "bpm"
+    | "first_beat"
+    | "beat_origin"
+    | "beat_times"
+    | "downbeat_confidence"
+    | "downbeat_origin"
+    | "downbeats"
+  >,
+): number | null {
+  const firstBeat = track.first_beat;
+  if ((track.downbeat_confidence ?? 0) >= 0.5) {
+    const classified = track.downbeat_origin ?? track.downbeats?.[0];
+    if (classified != null && Number.isFinite(classified)) return classified;
+  }
+  if (firstBeat != null && Number.isFinite(firstBeat)) return firstBeat;
+  if (track.beat_origin != null && Number.isFinite(track.beat_origin)) return track.beat_origin;
+
+  // Low-confidence analyses may reject a fixed `first_beat` while still retaining dozens of raw
+  // detected beats. Fit their circular phase against the published BPM instead of hiding the
+  // entire Performance grid (and disabling SYNC) merely because the compatibility field is null.
+  const bpm = track.bpm;
+  if (bpm == null || !Number.isFinite(bpm) || bpm <= 0) return null;
+  const interval = 60 / bpm;
+  const phases = (track.beat_times ?? [])
+    .filter((time) => Number.isFinite(time))
+    .map((time) => ((time % interval) + interval) % interval);
+  if (phases.length === 0) return null;
+  const angleScale = 2 * Math.PI / interval;
+  const vector = phases.reduce(
+    (sum, phase) => ({
+      x: sum.x + Math.cos(phase * angleScale),
+      y: sum.y + Math.sin(phase * angleScale),
+    }),
+    { x: 0, y: 0 },
+  );
+  const angle = Math.atan2(vector.y, vector.x);
+  return ((angle / angleScale) + interval) % interval;
+}
 
 /**
  * 中心满幅式三次方 crossfader：
@@ -245,7 +294,7 @@ export function beatGridMarkers(
     bpm <= 0 ||
     firstBeatSec === null ||
     !Number.isFinite(firstBeatSec) ||
-    (confidence !== null && (!Number.isFinite(confidence) || confidence < 0.45))
+    (confidence !== null && !Number.isFinite(confidence))
   ) return [];
   const interval = 60 / bpm;
   if (!Number.isFinite(interval) || interval <= 0) return [];

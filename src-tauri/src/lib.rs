@@ -1158,7 +1158,7 @@ fn resolve_download_dir(app: &tauri::AppHandle, data_dir: &Path) -> PathBuf {
     }
 }
 
-/// 起进程内的 axum server，返回前端要的 baseUrl / token。
+/// 起进程内的 axum server，返回包含一次性 capability 的 baseUrl。
 fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::Theme)> {
     // 环境变量只是给调试留的后门；正常启动走带旧数据迁移的 default_data_dir。
     let data_dir = env_path("KDJ_DATA_DIR")
@@ -1174,16 +1174,15 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
     // show() 前要用这份主题垫原生底色，否则浅色用户会先看到配置默认底闪一下。
     let theme = config.to_settings().theme;
     let data_dir_for_runtime = config.data_dir.clone();
-    let (port, _serve_task, control_rx) =
+    let (port, auth_token, _serve_task, control_rx) =
         tauri::async_runtime::block_on(kdj_server::serve(config))?;
-    let base_url = format!("http://127.0.0.1:{port}");
+    let base_url = format!("http://127.0.0.1:{port}/_kdj/{auth_token}");
 
     #[cfg(desktop)]
     {
         let gui = !NO_GUI.load(std::sync::atomic::Ordering::SeqCst);
-        if let Err(err) = cli::write_runtime(&data_dir_for_runtime, &base_url, gui) {
-            tracing::warn!("写 runtime.json 失败：{err:#}");
-        }
+        cli::write_runtime(&data_dir_for_runtime, &base_url, gui)
+            .map_err(|err| anyhow::anyhow!("写 runtime.json 失败：{err:#}"))?;
         app.manage(RuntimeDir(data_dir_for_runtime.clone()));
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {

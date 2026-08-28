@@ -51,8 +51,6 @@ pub struct StemRuntimeDiagnostics {
     pub refinement_deferred: u64,
     #[serde(skip)]
     recent_block_ms: VecDeque<u64>,
-    #[serde(skip)]
-    recent_instant_hop_ms: VecDeque<u64>,
 }
 
 impl StemRuntimeDiagnostics {
@@ -82,7 +80,6 @@ impl StemRuntimeDiagnostics {
             instant_failures: 0,
             refinement_deferred: 0,
             recent_block_ms: VecDeque::new(),
-            recent_instant_hop_ms: VecDeque::new(),
         }
     }
 
@@ -97,19 +94,6 @@ impl StemRuntimeDiagnostics {
             .saturating_sub(1)
             .min(samples.len() - 1);
         self.p95_block_ms = Some(samples[index]);
-    }
-
-    fn update_instant_p95(&mut self) {
-        if self.recent_instant_hop_ms.is_empty() {
-            self.instant_p95_hop_ms = None;
-            return;
-        }
-        let mut samples: Vec<_> = self.recent_instant_hop_ms.iter().copied().collect();
-        samples.sort_unstable();
-        let index = ((samples.len() as f64 * 0.95).ceil() as usize)
-            .saturating_sub(1)
-            .min(samples.len() - 1);
-        self.instant_p95_hop_ms = Some(samples[index]);
     }
 }
 
@@ -208,50 +192,6 @@ fn record_runtime_error(error: &anyhow::Error) {
     if memory_error {
         diagnostics.memory_errors = diagnostics.memory_errors.saturating_add(1);
     }
-}
-
-pub(crate) fn record_instant_available(available: bool) {
-    diagnostics_state().lock().unwrap().instant_available = available;
-}
-
-pub(crate) fn record_instant_worker_ready(deck: usize) {
-    if deck >= 8 {
-        return;
-    }
-    let mut diagnostics = diagnostics_state().lock().unwrap();
-    diagnostics.instant_available = true;
-    diagnostics.instant_ready_decks |= 1 << deck;
-}
-
-pub(crate) fn record_instant_pcm_preload(elapsed: Duration) {
-    diagnostics_state().lock().unwrap().instant_pcm_preload_ms =
-        Some(elapsed.as_millis().min(u128::from(u64::MAX)) as u64);
-}
-
-pub(crate) fn record_instant_pcm_cache_hit() {
-    let mut diagnostics = diagnostics_state().lock().unwrap();
-    diagnostics.instant_pcm_cache_hits = diagnostics.instant_pcm_cache_hits.saturating_add(1);
-}
-
-pub(crate) fn record_instant_hop(elapsed: Duration) {
-    let elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
-    let mut diagnostics = diagnostics_state().lock().unwrap();
-    diagnostics.instant_first_hop_ms.get_or_insert(elapsed_ms);
-    diagnostics.instant_last_hop_ms = Some(elapsed_ms);
-    if elapsed_ms > crate::INSTANT_HOP_BUDGET_MS {
-        diagnostics.instant_late_hops = diagnostics.instant_late_hops.saturating_add(1);
-    }
-    diagnostics.recent_instant_hop_ms.push_back(elapsed_ms);
-    if diagnostics.recent_instant_hop_ms.len() > DIAGNOSTIC_HISTORY {
-        diagnostics.recent_instant_hop_ms.pop_front();
-    }
-    diagnostics.update_instant_p95();
-}
-
-pub(crate) fn record_instant_failure(error: &str) {
-    let mut diagnostics = diagnostics_state().lock().unwrap();
-    diagnostics.instant_failures = diagnostics.instant_failures.saturating_add(1);
-    diagnostics.last_error = error.to_string();
 }
 
 fn record_refinement_deferred() {

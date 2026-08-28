@@ -1079,6 +1079,7 @@ mod tests {
             .all(|frame| (frame.reconstruction_gain - 1.0).abs() < f32::EPSILON));
     }
 
+    #[test]
     fn stem_unity_passthrough_keeps_eight_lane_samples() {
         let control = TempoControl::new(1.0);
         let mut processor = PitchPreservingStretcher::<StemFrame>::new(control, 48_000).unwrap();

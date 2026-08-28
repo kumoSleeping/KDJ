@@ -158,23 +158,30 @@ test("long tracks preserve the requested viewport instead of changing scroll spe
   assert.equal(layout.playheadPercent, 50);
 });
 
-test("Performance tempo changes velocity without changing the source-time zoom", () => {
+test("Performance tempo keeps one shared wall-time zoom across Decks", () => {
   const rates = [0.5, 1, 1.25, 2];
 
   assert.deepEqual(
     rates.map(performanceWaveformViewportSeconds),
-    [30, 30, 30, 30],
+    [15, 30, 37.5, 60],
   );
-  // The same source-time beat lattice stays fixed. TEMPO changes how quickly it crosses the
-  // needle; it must not make React resize every PCM/beat cell during a fader gesture.
+  // Every Deck crosses the screen at the same pixel velocity, even while unsynced. A Deck moves
+  // `rate` source seconds per wall second through a viewport containing `30 * rate` source seconds.
+  for (const rate of rates) {
+    const screensPerWallSecond = rate / performanceWaveformViewportSeconds(rate);
+    assert.ok(Math.abs(screensPerWallSecond - 1 / 30) < 1e-12);
+  }
+  // A faster effective BPM has narrower wall-time beat cells.
   const beatSeconds = 60 / 120;
   const normalBeatWidth = beatSeconds / performanceWaveformViewportSeconds(1);
   const fastBeatWidth = beatSeconds / performanceWaveformViewportSeconds(1.25);
-  assert.equal(fastBeatWidth, normalBeatWidth);
+  assert.ok(fastBeatWidth < normalBeatWidth);
 
-  const slowTrackBeatWidth = (60 / 100) / performanceWaveformViewportSeconds(1);
-  const fastTrackBeatWidth = (60 / 160) / performanceWaveformViewportSeconds(1);
-  assert.ok(slowTrackBeatWidth > fastTrackBeatWidth);
+  // Different source BPM/rate pairs that SYNC to 137.8 BPM must occupy exactly the same width.
+  const leaderWidth = (60 / 137.8) / performanceWaveformViewportSeconds(1);
+  const followerRate = 137.8 / 178.24;
+  const followerWidth = (60 / 178.24) / performanceWaveformViewportSeconds(followerRate);
+  assert.ok(Math.abs(leaderWidth - followerWidth) < 1e-12);
 });
 
 test("DJ detail keeps one hundred real envelope columns per second", () => {
@@ -325,7 +332,11 @@ test("platter phase lands once at contact instead of seeking on every velocity s
   assert.equal(shouldLandPlatterWaveform(true, true, false), false);
   assert.equal(shouldLandPlatterWaveform(true, true, true), true);
   assert.equal(shouldLandPlatterWaveform(true, false, false), true);
-  assert.equal(shouldLandPlatterWaveform(false, false, true), false);
+  assert.equal(
+    shouldLandPlatterWaveform(false, false, true),
+    true,
+    "a native SYNC/seek discontinuity must land even without platter contact",
+  );
 });
 
 test("a seek handoff must not pause the live waveform compositor", () => {

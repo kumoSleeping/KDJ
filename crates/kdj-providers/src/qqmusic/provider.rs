@@ -944,7 +944,7 @@ impl MusicProvider for QqMusicProvider {
                 if let Some(mobile) = &session.mobile {
                     mobile.abort();
                 }
-                self.client.store_credential(credential);
+                self.client.store_credential(credential)?;
                 *self.profile.lock().unwrap() = None;
                 Ok((QrStateValue::Done, "登录成功".into()))
             }

@@ -11,6 +11,12 @@ export interface PendingOneLibraryDownload {
   created_at: number;
 }
 
+export interface LoadedOneLibraryPlaylists {
+  device_path: string;
+  is_virtual: boolean;
+  playlist_ids: readonly number[];
+}
+
 export function loadPendingOneLibraryDownloads(): PendingOneLibraryDownload[] {
   try {
     const value: unknown = JSON.parse(localStorage.getItem(ONE_LIBRARY_DOWNLOAD_STORAGE_KEY) ?? "[]");
@@ -65,6 +71,31 @@ export function removePendingOneLibraryDownloadTasks(taskIds: Iterable<string>):
 export function removePendingVirtualDiskDownloads(): void {
   savePendingOneLibraryDownloads(
     loadPendingOneLibraryDownloads().filter((row) => !row.target.is_virtual),
+  );
+}
+
+/**
+ * 只用成功读出的设备列表清理目标。设备离线或 OneLibrary 暂时读失败时不在参数里，
+ * 其补写继续保留；已经删除的列表则不能每次刷新都重试一条陈旧曲目。
+ */
+export function reconcilePendingOneLibraryTargets(
+  loaded: Iterable<LoadedOneLibraryPlaylists>,
+): void {
+  const playlistsByDevice = new Map<string, Set<number>>();
+  for (const device of loaded) {
+    playlistsByDevice.set(
+      `${device.device_path}\u0000${device.is_virtual ? "virtual" : "physical"}`,
+      new Set(device.playlist_ids),
+    );
+  }
+  if (playlistsByDevice.size === 0) return;
+  savePendingOneLibraryDownloads(
+    loadPendingOneLibraryDownloads().filter((row) => {
+      const playlists = playlistsByDevice.get(
+        `${row.target.device_path}\u0000${row.target.is_virtual ? "virtual" : "physical"}`,
+      );
+      return playlists === undefined || playlists.has(row.target.playlist_id);
+    }),
   );
 }
 
