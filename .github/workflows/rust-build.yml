@@ -310,7 +310,15 @@ jobs:
           for sig in "${sigs[@]}"; do
             artifact=${sig%.sig}
             [ -f "$artifact" ] || { echo "::error::$sig 没有对应更新包"; exit 1; }
-            rsign verify "$artifact" -P "$public_key" -x "$sig" -q
+            # Tauri 的 .sig 是「完整 minisign 签名文本」再做一层 base64；
+            # rsign 读取的是解码后的四行 minisign 文件，不能直接把 .sig 传给它。
+            decoded_signature="$RUNNER_TEMP/$(basename "$sig").minisign"
+            node -e '
+              const fs = require("fs");
+              const encoded = fs.readFileSync(process.argv[1], "utf8").trim();
+              fs.writeFileSync(process.argv[2], Buffer.from(encoded, "base64"));
+            ' "$sig" "$decoded_signature"
+            rsign verify "$artifact" -P "$public_key" -x "$decoded_signature" -q
           done
           echo "✓ updater 私钥与 tauri.conf.json 内置公钥匹配"
 
