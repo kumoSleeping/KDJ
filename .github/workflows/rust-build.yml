@@ -78,7 +78,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS 分架构编译、签名和公证。updater 根据当前进程的
+          # macOS 分架构编译。updater 根据当前进程的
           # target_arch 请求 darwin-aarch64 / darwin-x86_64，不再下载
           # 大一倍的 universal 包。旧 universal 安装也能按实际 slice 平滑迁移。
           - os: macos-latest
@@ -201,66 +201,6 @@ jobs:
             echo "::warning::src-tauri/tauri.conf.json 还不存在（M7 未完成），本次跳过打包，只跑测试。"
           fi
 
-      - name: 配置 macOS 正式代码签名
-        if: steps.shell.outputs.present == 'true' && runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: |
-          set -euo pipefail
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
-            if [ -z "${!name:-}" ]; then
-              echo "::error::正式 macOS 构建缺少 $name"
-              exit 1
-            fi
-          done
-          certificate="$RUNNER_TEMP/kdj-signing.p12"
-          keychain="$RUNNER_TEMP/kdj-signing.keychain-db"
-          keychain_password=$(uuidgen)
-          printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$certificate"
-          security create-keychain -p "$keychain_password" "$keychain"
-          security default-keychain -s "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
-          security find-identity -v -p codesigning "$keychain" | grep -F "$APPLE_SIGNING_IDENTITY" \
-            || { echo "::error::导入证书后找不到 APPLE_SIGNING_IDENTITY"; exit 1; }
-
-      - name: 配置 Windows 正式代码签名
-        if: steps.shell.outputs.present == 'true' && runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE) -or
-              [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
-            throw '正式 Windows 构建缺少 WINDOWS_CERTIFICATE 或 WINDOWS_CERTIFICATE_PASSWORD'
-          }
-          $pfxPath = Join-Path $env:RUNNER_TEMP 'kdj-signing.pfx'
-          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $certificate = Import-PfxCertificate -FilePath $pfxPath -Password $password -CertStoreLocation 'Cert:\CurrentUser\My' |
-            Where-Object { $_.HasPrivateKey } |
-            Select-Object -First 1
-          if (-not $certificate) {
-            throw 'Windows PFX 未导入出可用私钥'
-          }
-          $configPath = Join-Path $env:RUNNER_TEMP 'kdj-tauri-signing.json'
-          @{
-            bundle = @{
-              windows = @{
-                certificateThumbprint = $certificate.Thumbprint
-                digestAlgorithm = 'sha256'
-                timestampUrl = 'https://timestamp.digicert.com'
-              }
-            }
-          } | ConvertTo-Json -Depth 4 | Set-Content -Path $configPath -Encoding utf8
-          "TAURI_RELEASE_CONFIG=$configPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "KDJ_WINDOWS_CERT_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
       # 脚本名以 package.json 为准：有 tauri:build 就用它（能带上项目自己的
       # 前置步骤），没有就直接调 npm ci 已从 lockfile 安装的本地 CLI；
       # --no-install 禁止 npx 在构建时临时解析或下载可漂移的 registry 包。
@@ -273,25 +213,22 @@ jobs:
         if: steps.shell.outputs.present == 'true'
         shell: bash
         env:
-          # tag 必须使用已导入的 Developer ID 并完成 notarization；普通分支显式 ad-hoc。
-          APPLE_SIGNING_IDENTITY: ${{ startsWith(github.ref, 'refs/tags/') && runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '-' }}
-          APPLE_ID: ${{ startsWith(github.ref, 'refs/tags/') && runner.os == 'macOS' && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/') && runner.os == 'macOS' && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ startsWith(github.ref, 'refs/tags/') && runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
+          # 与既有正式版一致：macOS 使用 ad-hoc 签名；更新包仍由 Tauri minisign 验签。
+          APPLE_SIGNING_IDENTITY: "-"
           CI: "true"
           # 一键更新的 minisign 私钥（见 docs/rust-port/08 §密钥）。
           # 分支构建没配 secret 时摘掉 createUpdaterArtifacts，只做普通包验证；
           # 正式 tag 缺密钥必须失败，不能发布一个更新链断掉的版本。
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
           set -euo pipefail
-          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || [ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]; then
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
             if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-              echo "::error::正式发行缺少 TAURI_SIGNING_PRIVATE_KEY 或 TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+              echo "::error::正式发行缺少 TAURI_SIGNING_PRIVATE_KEY"
               exit 1
             fi
-            echo "::warning::分支构建的 updater 私钥或口令不完整，本次只验证普通安装包"
+            echo "::warning::分支构建没有 updater 私钥，本次只验证普通安装包"
             jq 'del(.bundle.createUpdaterArtifacts)' src-tauri/tauri.conf.json > /tmp/conf.json
             mv /tmp/conf.json src-tauri/tauri.conf.json
           fi
@@ -299,9 +236,6 @@ jobs:
             build_args=()
             if [ -n "${{ matrix.tauri_args }}" ]; then
               read -r -a build_args <<< "${{ matrix.tauri_args }}"
-            fi
-            if [ -n "${TAURI_RELEASE_CONFIG:-}" ]; then
-              build_args+=(--config "$TAURI_RELEASE_CONFIG")
             fi
             if node -e "process.exit((require('./package.json').scripts||{})['tauri:build']?0:1)"; then
               npm run tauri:build -- "${build_args[@]}"
@@ -379,68 +313,6 @@ jobs:
             rsign verify "$artifact" -P "$public_key" -x "$sig" -q
           done
           echo "✓ updater 私钥与 tauri.conf.json 内置公钥匹配"
-
-      - name: 验证 macOS Developer ID 与 notarization
-        if: steps.shell.outputs.present == 'true' && runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
-        run: |
-          set -euo pipefail
-          apps=()
-          while IFS= read -r -d '' app; do apps+=("$app"); done \
-            < <(find target -type d -path '*/release/bundle/macos/*.app' -print0)
-          dmgs=()
-          while IFS= read -r -d '' dmg; do dmgs+=("$dmg"); done \
-            < <(find target -type f -path '*/release/bundle/dmg/*.dmg' -print0)
-          (( ${#apps[@]} > 0 && ${#dmgs[@]} > 0 )) \
-            || { echo "::error::缺少可验证的 .app 或 .dmg"; exit 1; }
-          for app in "${apps[@]}"; do
-            codesign --verify --deep --strict --verbose=2 "$app"
-            spctl --assess --type execute --verbose=2 "$app"
-          done
-          for dmg in "${dmgs[@]}"; do
-            xcrun stapler validate "$dmg"
-            spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
-          done
-
-      - name: 验证 Windows Authenticode 签名
-        if: steps.shell.outputs.present == 'true' && runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
-        run: |
-          $bundles = Get-ChildItem -Path target -Recurse -File -Include '*.exe','*.msi' |
-            Where-Object { $_.FullName -match '[\\/]release[\\/]bundle[\\/]' }
-          if (-not $bundles) { throw '没有找到 Windows 安装包' }
-          foreach ($bundle in $bundles) {
-            $signature = Get-AuthenticodeSignature -FilePath $bundle.FullName
-            if ($signature.Status -ne 'Valid') {
-              throw "$($bundle.Name) Authenticode 状态不是 Valid：$($signature.Status)"
-            }
-            if ($signature.SignerCertificate.Thumbprint -ne $env:KDJ_WINDOWS_CERT_THUMBPRINT) {
-              throw "$($bundle.Name) 的签名证书与本次导入证书不一致"
-            }
-          }
-
-      - name: 清理 macOS runner 签名材料
-        if: ${{ always() && steps.shell.outputs.present == 'true' && runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/') }}
-        run: |
-          set -euo pipefail
-          security delete-keychain "$RUNNER_TEMP/kdj-signing.keychain-db" 2>/dev/null || true
-          if [ -f "$RUNNER_TEMP/kdj-signing.p12" ]; then
-            rm -P "$RUNNER_TEMP/kdj-signing.p12"
-          fi
-
-      - name: 清理 Windows runner 签名材料
-        if: ${{ always() && steps.shell.outputs.present == 'true' && runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/') }}
-        shell: pwsh
-        run: |
-          if (-not [string]::IsNullOrWhiteSpace($env:KDJ_WINDOWS_CERT_THUMBPRINT)) {
-            $certPath = "Cert:\CurrentUser\My\$env:KDJ_WINDOWS_CERT_THUMBPRINT"
-            if (Test-Path $certPath) { Remove-Item -LiteralPath $certPath -Force }
-          }
-          foreach ($path in @(
-            (Join-Path $env:RUNNER_TEMP 'kdj-signing.pfx'),
-            (Join-Path $env:RUNNER_TEMP 'kdj-tauri-signing.json')
-          )) {
-            if (Test-Path $path) { Remove-Item -LiteralPath $path -Force }
-          }
 
       - name: 桌面安装包体积回归门禁
         if: steps.shell.outputs.present == 'true'
@@ -526,7 +398,7 @@ jobs:
           done
 
   # 正式 KDJ 每个 Release 都发布一份 latest.json 更新清单。
-  # 三个平台的测试、原生签名与 updater 验签必须全部通过，publish 才会上传安装包；
+  # 三个平台的测试、平台构建与 updater 验签必须全部通过，publish 才会上传安装包；
   # 清单最后生成并提升 Latest；带 -rc 后缀的正式推送同样进入全体用户更新通道。
   # 任一门禁失败都让上一可用版本继续作为 Latest。
   latest-json:

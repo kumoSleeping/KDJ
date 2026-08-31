@@ -5,13 +5,13 @@
 - 基线提交：`508a7cd`（`main`，整改尚未提交）
 - 有效架构：Rust + Tauri；未运行或修复已退役的 Electron/Python runtime
 - 候选版本：`1.0.0-rc1`（按正式全量更新发布）；远端最新标签：`v0.2.44`
-- 结论：**原审计的 15 项问题均已完成代码整改；桌面发布为 Conditional GO，Android 发布仍需环境验收。**
+- 结论：**14 项问题已完成代码整改；平台原生可信签名按发布负责人决定延期，桌面与 Android 发布仍以自动化门禁结果为准。**
 
 ## 1. 执行摘要
 
 整改覆盖了本地控制面鉴权、文件系统边界、Android 生命周期、会话秘密、远程脚本执行、SSRF、CI/CD、安装包签名、版本门禁、依赖不安全告警与 WebView 防御纵深。
 
-原始审计的 3 个 P1、9 个 P2、3 个 P3 均已有代码处置。合并冷启动时额外发现媒体 capability 会出现在封面下载错误日志中，该问题也已脱敏并增加回归测试。
+原始审计的 3 个 P1、9 个 P2、3 个 P3 均已有明确处置，其中 SEC-008 作为已知风险延期。合并冷启动时额外发现媒体 capability 会出现在封面下载错误日志中，该问题也已脱敏并增加回归测试。
 
 当前自动化结果为 npm 0 个已登记漏洞、Cargo 0 个已登记普通/unsound 漏洞。Cargo 仍报告 19 条停止维护提醒；它们主要来自 Tauri/GTK 上游链，不代表当前已确认漏洞，但需要随框架升级继续消减。
 
@@ -25,8 +25,8 @@
 | SEC-004 | NetEase/QQ 会话文件权限过宽 | 已修复 | 新增统一私密会话写入：目录 0700，临时/既有文件 0600，创建时限权、同步后原子替换。 |
 | SEC-005 | 高权限 WebView 执行远程 JavaScript | 已修复（隔离恢复功能） | 主 renderer 删除 BotGuard/player 动态执行并移除生产 CSP 的 `unsafe-eval`。普通 YouTube 使用唯一的官方 embed 子 WebView：非持久、无浏览器登录 Cookie，且首次远程导航前移除全部 Tauri user script/IPC；不再生成普通视频 proof、解析 `s`/`n` 或代理 GoogleVideo。YTM 必需的 challenge 与窄化 player 变换只在无 Cookie、无 Tauri IPC、网络受限的隐藏原生 WKWebView 中运行，并继续使用唯一的隔离 WebPO + SABR 音频链。 |
 | SEC-006 | tag 测试可失败、缺前端门禁 | 已修复 | tag/main Rust 测试硬失败；加入全部前端逻辑测试、生产 Web 构建、npm audit/签名与 cargo audit。 |
-| SEC-007 | CI 权限/Action/签名校验过宽 | 已修复 | 所有 Actions 固定完整 SHA；构建 job 只读、发布 job 独立写权限；敏感材料只进入签名步骤并清理；updater、Android、macOS、Windows 均签后验证身份。 |
-| SEC-008 | 首次安装包缺平台原生可信签名 | 流水线已修复，待凭据 | macOS 配置 Developer ID、notarization、stapling 与 Gatekeeper 验证；Windows 配置 Authenticode 与证书指纹验证。缺凭据会在创建 tag 前失败。 |
+| SEC-007 | CI 权限/Action/签名校验过宽 | 已修复 | 所有 Actions 固定完整 SHA；构建 job 只读、发布 job 独立写权限；updater 和 Android 均签后验证身份。 |
+| SEC-008 | 首次安装包缺平台原生可信签名 | 延期，沿用既有发布方式 | 本版与 `v0.2.44` 一致：macOS 使用 ad-hoc 签名，Windows 不做 Authenticode；Tauri updater 仍强制 minisign 验签。平台原生证书签名留待后续单独启用。 |
 | SEC-009 | Android 全局允许明文 HTTP | 已修复 | 全局 `usesCleartextTraffic=false`；Network Security Config 仅给 `localhost`/`127.0.0.1` 回环例外；远程媒体强制 HTTPS。 |
 | SEC-010 | 封面重定向 blind SSRF | 已修复 | 禁用自动重定向；每一跳校验 HTTPS、平台域名和解析后的公网 IP，并将校验结果固定到连接，最多 5 跳。短链与远程媒体路径采用同类公网地址限制。 |
 | SEC-011 | 二维码 IPC 无体积/结构限制 | 已修复 | 编码和解码均限制 2 MiB；校验 PNG signature、chunk 顺序/CRC、IHDR 参数、最大 4096 边长、最大约 1677 万像素及完整 IEND。 |
@@ -62,7 +62,7 @@
 ### 供应链与发布
 
 - GitHub Actions 固定到完整 commit SHA，build/sign/publish 权限分离。
-- updater minisign、Android 预期证书指纹、macOS Developer ID/notarization 与 Windows Authenticode 都有签后验证。
+- updater minisign 与 Android 预期证书指纹都有签后验证；macOS/Windows 平台原生证书签名本版继续沿用 `v0.2.44` 的方式。
 - Android 正式证书锚定现网 `v0.2.44` APK 的 SHA-256 指纹；秘密文件使用后清理。
 - 版本已在 `package.json`、`package-lock.json`、workspace `Cargo.toml`、`Cargo.lock` 与 `src-tauri/tauri.conf.json` 同步为 1.0.0-rc1。
 
@@ -89,12 +89,12 @@
 
 ## 5. 仍需发布负责人完成的外部验收
 
-这些项目不是可继续在仓库中“编造”完成的代码修复；发布门禁已设置为缺失即失败：
+这些项目需要由发布流程或设备环境完成：
 
-1. 使用 `scripts/configure-release-secrets.sh` 配置新的 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`，以及 Apple Developer ID/notarization、Windows Authenticode、Android 正式签名凭据。
+1. 使用既有的 Tauri updater 私钥与 Android 正式签名凭据；本版不新增 Apple/Windows 证书门禁。
 2. 在具备 Android SDK/NDK（包括 `aarch64-linux-android-clang`）的 runner 上完成正式 Android 构建，并在真机/模拟器验证冷启动、旋转、后台恢复与 Activity recreate。当前机器因缺工具链无法完成这项环境验证。
-3. 审阅并提交当前庞大的既有工作区改动。工作区仍为 dirty；`scripts/release.sh` 会按设计拒绝从未提交状态发布。本轮没有替用户清理、覆盖或提交无关改动。
-4. 使用正式凭据跑一次完整发布 workflow，确认 Apple notarization、Windows Authenticode、Android 指纹和 updater `.sig` 的线上验证全部通过。
+3. 发布前确认工作区已提交且 clean；`scripts/release.sh` 会按设计拒绝从未提交状态发布。
+4. 跑一次完整发布 workflow，确认 Android 指纹和 updater `.sig` 的线上验证全部通过。
 
 ## 6. 功能兼容与已知风险
 
@@ -106,14 +106,14 @@
 
 ### 桌面版
 
-**Conditional GO。** 代码层安全阻断已清除。必须先配置正式签名凭据、审阅并提交工作区、让加固后的 CI 全绿，才可创建 `v1.0.0-rc1` 标签并将其提升为面向全体用户的 Latest。
+**Conditional GO。** 代码层安全阻断已清除。沿用现有发布凭据并让加固后的 CI 全绿后，即可创建 `v1.0.0-rc1` 标签并将其提升为面向全体用户的 Latest。
 
 ### Android
 
-**暂时 NO-GO。** 代码修复和 CI 门禁已完成，但本机缺少 SDK/NDK，尚未完成 Android 构建与 Activity recreate 设备验收。该验证通过后可转为 GO。
+**Conditional GO。** 代码修复和 CI 门禁已完成；本机缺少 SDK/NDK，正式 Android runner 构建与设备验收结果仍需纳入发布观察。
 
 ### 不允许绕过的条件
 
-- 不得关闭签名/验签、测试、依赖审计或严格递增版本门禁来赶发布。
+- 不得关闭 updater/Android 签名验签、测试、依赖审计或严格递增版本门禁来赶发布；Apple/Windows 平台原生证书签名由发布负责人明确延期。
 - 不得在 dirty worktree 上直接发布。
 - 不得重新启用主 WebView 的远程动态代码执行。
