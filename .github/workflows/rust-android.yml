@@ -333,7 +333,7 @@ jobs:
           for file in "${files[@]}"; do
             uploaded=0
             for attempt in 1 2 3 4; do
-              if gh release upload "$GITHUB_REF_NAME" "$file" --clobber; then
+              if gh release upload "$GITHUB_REF_NAME" "$file" --repo "$GITHUB_REPOSITORY" --clobber; then
                 uploaded=1
                 break
               fi
