@@ -57,13 +57,19 @@ jobs:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
 
-      # GitHub Ubuntu runner 预装并维护 Android cmdline-tools；直接验证官方 sdkmanager，
-      # 避免为一次 PATH/bootstrap 操作引入一个未签名的第三方 Action 提交。
+      # GitHub Ubuntu runner 预装并维护 Android cmdline-tools，但 sdkmanager 所在
+      # 目录不保证进入 PATH；从官方 ANDROID_HOME 的固定位置验证并加入后续步骤 PATH。
       - name: 验证 Android SDK 工具链
         run: |
           set -euo pipefail
-          command -v sdkmanager
-          sdkmanager --version
+          sdkmanager_dir="$ANDROID_HOME/cmdline-tools/latest/bin"
+          sdkmanager="$sdkmanager_dir/sdkmanager"
+          [ -x "$sdkmanager" ] || {
+            echo "::error::找不到 GitHub runner 预装的 sdkmanager：$sdkmanager"
+            exit 1
+          }
+          echo "$sdkmanager_dir" >> "$GITHUB_PATH"
+          "$sdkmanager" --version
 
       # NDK 要自己点名装。
       # ANDROID_NDK_HOME / NDK_HOME 两个变量都要给：Tauri 读前者，
