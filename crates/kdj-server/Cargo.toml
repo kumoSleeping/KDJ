@@ -9,10 +9,10 @@ anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws", "macros"] }
 chrono = "0.4.45"
 futures-util = "0.3.33"
-kdj-analysis = { version = "1.0.0-rc1", path = "../kdj-analysis" }
-kdj-core = { version = "1.0.0-rc1", path = "../kdj-core", features = ["rustls-ring"] }
-kdj-library = { version = "1.0.0-rc1", path = "../kdj-library" }
-kdj-providers = { version = "1.0.0-rc1", path = "../kdj-providers" }
+kdj-analysis = { version = "1.0.0-rc2", path = "../kdj-analysis" }
+kdj-core = { version = "1.0.0-rc2", path = "../kdj-core", features = ["rustls-ring"] }
+kdj-library = { version = "1.0.0-rc2", path = "../kdj-library" }
+kdj-providers = { version = "1.0.0-rc2", path = "../kdj-providers" }
 rand = "0.10.2"
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
 serde = { version = "1.0.229", features = ["derive"] }
