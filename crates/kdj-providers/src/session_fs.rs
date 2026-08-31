@@ -76,9 +76,20 @@ fn create_private_temp(path: &Path) -> Result<(PathBuf, fs::File)> {
 
 #[cfg(windows)]
 fn commit_private_temp(tmp: &Path, path: &Path) -> Result<()> {
-    if !path.exists() {
-        return fs::rename(tmp, path)
-            .with_context(|| format!("提交会话文件失败：{}", path.display()));
+    let existing = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return fs::rename(tmp, path)
+                .with_context(|| format!("提交会话文件失败：{}", path.display()));
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("校验旧会话文件失败：{}", path.display()));
+        }
+    };
+    // 不能把目录、链接或其他特殊对象先挪走再替换。除了破坏用户数据，这还会让
+    // 调用方误以为一次本应失败的会话提交已经持久化成功。
+    if !existing.file_type().is_file() {
+        bail!("旧会话路径不是普通文件：{}", path.display());
     }
 
     // Windows 的 rename 不能覆盖现有文件。先把旧凭证移到同目录备份；新文件提交
