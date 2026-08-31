@@ -7,6 +7,7 @@ const START_MARKER = "<!-- release-package-size-badges:start -->";
 const END_MARKER = "<!-- release-package-size-badges:end -->";
 const LATEST_RELEASE_URL =
   "https://github.com/kumoSleeping/KDJ/releases/latest";
+const ALL_RELEASES_URL = "https://github.com/kumoSleeping/KDJ/releases";
 
 function latestAssetUrl(name) {
   return `${LATEST_RELEASE_URL}/download/${encodeURIComponent(name)}`;
@@ -32,6 +33,10 @@ function sizeInMb(bytes) {
 function renderBadge({ label, size, color, logo, logoColor, href }) {
   const badgeSize = `${size}_MB`;
   return `  <a href="${href}"><img src="https://img.shields.io/badge/${label}-${badgeSize}-${color}?style=for-the-badge&logo=${logo}&logoColor=${logoColor}" alt="${label} ${size} MB"></a>`;
+}
+
+function renderMoreBadge() {
+  return `  <a href="${ALL_RELEASES_URL}"><img src="https://img.shields.io/badge/More-Releases-555555?style=for-the-badge&logo=github&logoColor=white" alt="More releases"></a>`;
 }
 
 function replaceGeneratedBlock(source, generatedBlock, readmePath) {
@@ -163,6 +168,7 @@ async function main() {
       logoColor: "white",
       href: latestAssetUrl(android.name),
     }),
+    renderMoreBadge(),
     "</p>",
   ].join("\n");
 
