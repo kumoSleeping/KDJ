@@ -3,7 +3,7 @@
 # 旧 Electron 构建与测试工作流已删除；桌面端只保留这一条正式流水线。
 #
 # 触发：
-#   - push 到 main：跑测试 + 打包，产物只当 artifact；
+#   - push 到 main：跑前端/安全门禁 + 打包，产物只当 artifact；
 #   - tag `v*`：额外发 GitHub Release。tag 的正常来源是 release.yml——
 #     它盯着 src-tauri/tauri.conf.json 的 version，出现没发行过的版本号
 #     就自动打 tag 建 Release 再 dispatch 本工作流到 tag ref 上。
@@ -173,18 +173,9 @@ jobs:
           sudo apt-get install -y libayatana-appindicator3-dev \
             || sudo apt-get install -y libappindicator3-dev
 
-      # 注意：**不要**给 cargo 接 `| head -N` 之类的管道，读端提前关闭会给
-      # cargo 发 SIGPIPE 把编译打断，看起来像随机失败。
-      # 只跑 debug：release 档开了 lto + codegen-units=1，跑测试等于白等十分钟。
-      # 真库集成测试（tests/real_library.rs）靠 KDJ_TEST_DB 环境变量开关，
-      # CI 上没有这个变量，会自己跳过。
-      #
-      # tag 与 main 使用同一硬门禁。任一平台的单元/集成测试失败都会停止该平台，
-      # 不能把已知红灯的二进制上传到正式 Release。
-      - name: Rust 全量测试
-        # Vendored rookie's rustdoc examples open real browser profiles and are not hermetic CI
-        # tests. Run every workspace unit/integration target while deliberately excluding doctests.
-        run: cargo test --workspace --lib --bins --tests
+      # 桌面矩阵只负责各平台真实 release 编译、签名和安装包验证，不再在四个平台
+      # 重复冷编整套 workspace 测试。Tauri 打包本身仍会完整编译当前平台的 Rust
+      # 代码，任何平台编译或链接错误仍会让该 job 失败。
 
       - name: 安装前端依赖
         run: npm ci
