@@ -28,6 +28,10 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?
   exit 2
 fi
 
+# Windows MSI 只接受纯数字内部版本。这里在改文件、提交和推送前确认该版本
+# 能被自动映射；公开版本仍保持用户输入的完整 SemVer。
+node scripts/windows-msi-version.mjs "$VERSION" >/dev/null
+
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 info() { printf '\033[36m==> %s\033[0m\n' "$*"; }

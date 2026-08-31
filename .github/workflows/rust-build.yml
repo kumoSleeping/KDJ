@@ -59,6 +59,9 @@ jobs:
       - name: 前端逻辑测试
         run: npm run test:frontend-logic
 
+      - name: Windows 安装包版本映射测试
+        run: node --test tests/windowsMsiVersion.test.mjs
+
       - name: 前端生产构建
         run: npm run tauri:web:build
 
@@ -236,6 +239,16 @@ jobs:
             build_args=()
             if [ -n "${{ matrix.tauri_args }}" ]; then
               read -r -a build_args <<< "${{ matrix.tauri_args }}"
+            fi
+            # MSI 的内部 ProductVersion 只能是数字。公开版本、文件名和 updater
+            # 仍保留完整 SemVer（例如 1.0.0-rc1）；这里只给 WiX 合并临时覆盖。
+            if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
+              wix_version=$(node scripts/windows-msi-version.mjs)
+              echo "Windows MSI internal version: ${wix_version}"
+              build_args+=(
+                --config
+                "$(node scripts/windows-msi-version.mjs --config)"
+              )
             fi
             if node -e "process.exit((require('./package.json').scripts||{})['tauri:build']?0:1)"; then
               npm run tauri:build -- "${build_args[@]}"
