@@ -29,7 +29,7 @@ KDJ 是一款面向音乐收集、整理、分析和播放的跨平台应用。�
 
 ## 下载 & 安装 & 更新
 
-按系统选择下方入口，打开最新 [Releases](https://github.com/kumoSleeping/KDJ/releases/latest) 获取安装包。
+按系统选择下方入口获取最新版安装包。macOS 按钮默认下载 Apple Silicon（M 系列）版本；Intel Mac 请在最新 [Releases](https://github.com/kumoSleeping/KDJ/releases/latest) 中选择 x64 DMG。
 
 <!-- release-package-size-badges:start -->
 <p>

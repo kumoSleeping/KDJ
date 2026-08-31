@@ -8,6 +8,10 @@ const END_MARKER = "<!-- release-package-size-badges:end -->";
 const LATEST_RELEASE_URL =
   "https://github.com/kumoSleeping/KDJ/releases/latest";
 
+function latestAssetUrl(name) {
+  return `${LATEST_RELEASE_URL}/download/${encodeURIComponent(name)}`;
+}
+
 function fail(message) {
   throw new Error(message);
 }
@@ -25,9 +29,9 @@ function sizeInMb(bytes) {
   return (bytes / 1024 / 1024).toFixed(1);
 }
 
-function renderBadge({ label, size, color, logo, logoColor }) {
+function renderBadge({ label, size, color, logo, logoColor, href }) {
   const badgeSize = `${size}_MB`;
-  return `  <a href="${LATEST_RELEASE_URL}"><img src="https://img.shields.io/badge/${label}-${badgeSize}-${color}?style=for-the-badge&logo=${logo}&logoColor=${logoColor}" alt="${label} ${size} MB"></a>`;
+  return `  <a href="${href}"><img src="https://img.shields.io/badge/${label}-${badgeSize}-${color}?style=for-the-badge&logo=${logo}&logoColor=${logoColor}" alt="${label} ${size} MB"></a>`;
 }
 
 function replaceGeneratedBlock(source, generatedBlock, readmePath) {
@@ -57,7 +61,10 @@ async function main() {
 
   const release = JSON.parse(await readFile(releaseJsonPath, "utf8"));
   const tag = release.tag_name;
-  if (typeof tag !== "string" || !/^v\d+\.\d+\.\d+$/.test(tag)) {
+  if (
+    typeof tag !== "string" ||
+    !/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(tag)
+  ) {
     fail(`Release tag 不合法：${String(tag)}`);
   }
   if (!Array.isArray(release.assets)) {
@@ -111,7 +118,8 @@ async function main() {
 
   const linux = linuxCandidates.sort((left, right) => left.size - right.size)[0];
   // README 只放一个 macOS 体积徽章：取两架构中较大的一个，
-  // 这样对任意 Mac 用户都是保守上限，同时强制两个 DMG 都到齐才更新 README。
+  // 这样对任意 Mac 用户都是保守上限，同时强制两个 DMG 都到齐才更新 README；
+  // 下载入口默认直达更常用的 Apple Silicon 薄包，Intel 包仍保留在 Release 页面。
   const sizes = {
     macOS: sizeInMb(Math.max(macOSArm64.size, macOSX64.size)),
     macOSArm64: sizeInMb(macOSArm64.size),
@@ -129,6 +137,7 @@ async function main() {
       color: "black",
       logo: "apple",
       logoColor: "white",
+      href: latestAssetUrl(macOSArm64.name),
     }),
     renderBadge({
       label: "Windows",
@@ -136,6 +145,7 @@ async function main() {
       color: "0078D4",
       logo: "windows",
       logoColor: "white",
+      href: latestAssetUrl(windows.name),
     }),
     renderBadge({
       label: "Linux",
@@ -143,6 +153,7 @@ async function main() {
       color: "FCC624",
       logo: "linux",
       logoColor: "black",
+      href: latestAssetUrl(linux.name),
     }),
     renderBadge({
       label: "Android",
@@ -150,6 +161,7 @@ async function main() {
       color: "3DDC84",
       logo: "android",
       logoColor: "white",
+      href: latestAssetUrl(android.name),
     }),
     "</p>",
   ].join("\n");

@@ -27,7 +27,7 @@
 
 ## Get the app
 
-Choose your platform below to open the latest [Releases](https://github.com/kumoSleeping/KDJ/releases/latest). Available for macOS, Windows, Linux, and Android.
+Choose your platform below to download the latest installer. The macOS button defaults to Apple Silicon (M-series); Intel Mac users can select the x64 DMG from the latest [Releases](https://github.com/kumoSleeping/KDJ/releases/latest).
 
 <!-- release-package-size-badges:start -->
 <p>
