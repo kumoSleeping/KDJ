@@ -1797,16 +1797,17 @@ mod tests {
             FIRST_ANALYSIS_BYTES * 2,
             true,
         );
-        let epoch = coordinator.inner.lock().unwrap().entries[key].epoch;
+        // finish_job 在生产里只会接到 plan_job 生成的任务。让测试也走同一道状态
+        // 转换，确保 last_requested_path/bytes 与 inflight 都是真实值；否则下一次
+        // request 会把这个手工构造的“不可能状态”识别成一份从未分析过的新路径。
+        let job = {
+            let mut inner = coordinator.inner.lock().unwrap();
+            let entry = inner.entries.get_mut(key).unwrap();
+            entry.requested_until = Some(Instant::now() + REQUEST_LEASE);
+            plan_job(key, entry).unwrap()
+        };
         coordinator.finish_job(
-            AnalyzeJob {
-                key: key.to_string(),
-                path: final_path,
-                epoch,
-                complete: true,
-                analysis_duration: DEFAULT_STREAM_ANALYSIS_DURATION_SECONDS,
-                _ephemeral_file: None,
-            },
+            job,
             AnalyzeJobResult {
                 waveform: None,
                 waveform_error: "decode failed".into(),
