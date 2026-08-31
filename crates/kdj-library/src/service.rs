@@ -4987,10 +4987,13 @@ mod tests {
     #[test]
     fn harmonic_profile_matches_library_without_a_source_track_id() {
         let service = service();
+        let match_path = format!("{ROOT}{SEP}set{SEP}match.mp3");
+        let outside_path = format!("{ROOT}{SEP}other{SEP}outside.mp3");
+        let folder = format!("{ROOT}{SEP}set");
         insert(
             &service,
             Row {
-                path: "/lib/set/match.mp3",
+                path: &match_path,
                 title: "match",
                 camelot: "9a",
                 bpm: Some(127.0),
@@ -5000,7 +5003,7 @@ mod tests {
         insert(
             &service,
             Row {
-                path: "/lib/other/outside.mp3",
+                path: &outside_path,
                 title: "outside",
                 camelot: "8A",
                 bpm: Some(128.0),
@@ -5009,7 +5012,7 @@ mod tests {
         );
 
         let matches = service
-            .harmonic_matches_for_profile("8a", Some(128.0), 6.0, 50, false, "/lib/set")
+            .harmonic_matches_for_profile("8a", Some(128.0), 6.0, 50, false, &folder)
             .unwrap();
         assert_eq!(
             matches
