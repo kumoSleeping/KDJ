@@ -507,7 +507,38 @@ export interface StreamPlaylistTrackRemoveResponse {
   removed: boolean;
 }
 
-export interface Track {
+/** 曲目表长期持有的轻量标量投影；完整拍点、Cue、标签和备注按需读取 Track。 */
+export interface TrackSummary {
+  id: number;
+  path: string;
+  filename: string;
+  title: string;
+  artist: string;
+  album: string;
+  duration: number | null;
+  format: string;
+  size: number;
+  bpm: number | null;
+  bpm_v2?: boolean;
+  bpm_v3?: boolean;
+  music_key: string;
+  camelot: string;
+  open_key: string;
+  energy: number | null;
+  rms_db: number | null;
+  peak_db: number | null;
+  rating: number;
+  source_platform: string;
+  source_key: string;
+  analyzed_at: string | null;
+  /** 文件系统创建时间（Unix 秒）；不支持时由后端回退到修改时间。 */
+  file_created_at: number | null;
+  added_at: string;
+  modified_at: string;
+  folder: string;
+}
+
+export interface Track extends TrackSummary {
   id: number;
   path: string;
   filename: string;
@@ -557,6 +588,7 @@ export interface Track {
   source_platform: string;
   source_key: string;
   analyzed_at: string | null;
+  file_created_at: number | null;
   added_at: string;
   modified_at: string;
   analysis_error: string;
@@ -650,7 +682,7 @@ export interface FolderUndoResponse {
 }
 
 export interface TrackPage {
-  items: Track[];
+  items: TrackSummary[];
   total: number;
   offset: number;
   limit: number;
@@ -744,6 +776,11 @@ export interface StreamWaveformProgress {
   total_bytes?: number;
   complete: boolean;
   active: boolean;
+  /** 新后端把媒体缓存和波形解码拆成独立状态；省略时沿用旧 active/complete。 */
+  cache_status?: "waiting" | "caching" | "retrying" | "ready" | "failed";
+  cache_error?: string;
+  waveform_status?: "waiting" | "analyzing" | "partial" | "ready" | "failed";
+  waveform_error?: string;
   /** 完整音频分析；旧后端缺字段时前端按尚未提供处理。 */
   analysis_status?: "waiting" | "analyzing" | "ready" | "failed";
   analysis?: StreamAnalysisResult | null;
@@ -959,7 +996,7 @@ export interface KdjBridge {
     }>;
     control: (
       videoId: string,
-      action: "play" | "pause" | "mute" | "unmute" | "seek",
+      action: "play" | "pause" | "mute" | "unmute" | "seek" | "volume",
       value?: number,
     ) => Promise<void>;
     close: (videoId: string) => Promise<void>;
@@ -994,7 +1031,7 @@ export interface KdjBridge {
     control: (
       bvid: string,
       page: number,
-      action: "play" | "pause" | "mute" | "unmute" | "seek",
+      action: "play" | "pause" | "mute" | "unmute" | "seek" | "volume",
       value?: number,
     ) => Promise<void>;
     close: (bvid: string, page: number) => Promise<void>;
@@ -1015,8 +1052,10 @@ export interface KdjBridge {
     /** 普通文本接收方拿到的内容；URL 接收方始终拿到 url。 */
     text?: string;
     dragImage?: string;
+    /** “更多信息”模式才把封面作为 RTFD 附件并入同一个图文载荷。 */
+    includeArtwork?: boolean;
   }) => Promise<void>;
-  /** macOS：按“真实 PNG 在前、分享文字在后”写入两个原生剪贴板项目。 */
+  /** macOS：把真实 PNG 附件与分享文字写入同一个原生富文本剪贴板项目。 */
   writeShareClipboard?: (options: { text: string; png: string }) => Promise<void>;
   /** 把登录二维码 PNG 写到下载（桌面）或相册（手机），返回本机路径。 */
   saveLoginQr: (options: {
@@ -1032,6 +1071,8 @@ export interface KdjBridge {
   openExternal?: (url: string) => Promise<void>;
   /** 桌面独立 OAuth 窗口；同进程拦截回调，开发态无需注册 kdj://。 */
   openSoundcloudOAuth?: (url: string) => Promise<void>;
+  /** 桌面：在一次性 soundcloud.com WebView 中登录，不读取外部浏览器数据。 */
+  openSoundcloudWebLogin?: () => Promise<void>;
   /**
    * 桌面直接问 Tauri Updater 的清单；只有当前安装格式真的存在签名更新包时
    * 才会返回 newer=true。移动端/浏览器没有它，继续走 GitHub Release API。

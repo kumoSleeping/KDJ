@@ -563,6 +563,13 @@ impl PlaybackCoordinator {
         })
     }
 
+    /// Explicit lifecycle edge for application quit. `Drop` remains the final fallback, but
+    /// desktop media-session callbacks can outlive the WebView briefly, so shutdown must not rely
+    /// on state destruction order to release CPAL/WASAPI resources.
+    pub fn shutdown(&self) {
+        let _ = self.sender.send(Request::Shutdown);
+    }
+
     pub fn submit(&self, command: PlaybackCommand) -> Result<CommandAck, String> {
         let command_id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
         self.submit_with_id(command_id, command)
@@ -881,7 +888,7 @@ impl PlaybackCoordinator {
 
 impl Drop for PlaybackCoordinator {
     fn drop(&mut self) {
-        let _ = self.sender.send(Request::Shutdown);
+        self.shutdown();
     }
 }
 

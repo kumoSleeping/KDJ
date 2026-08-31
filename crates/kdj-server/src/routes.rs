@@ -15,7 +15,7 @@ use axum::{Extension, Json, Router};
 use futures_util::StreamExt;
 use kdj_core::models::*;
 use kdj_core::Settings;
-use kdj_library::service::{DeletedTrack, FileDisposal, TrackQuery};
+use kdj_library::service::{DeletedTrack, FileDisposal, TrackMediaSource, TrackQuery};
 use kdj_providers::{MusicProvider, ProtectedPreviewIdentity, VideoPreviewTrack};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -83,6 +83,10 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route(
             "/api/accounts/soundcloud/login/browser",
             post(soundcloud_browser_login),
+        )
+        .route(
+            "/api/accounts/soundcloud/login/webview",
+            post(soundcloud_webview_login),
         )
         .route("/api/accounts/ytm/login/browsers", get(browser_catalog))
         .route("/api/accounts/ytm/login/browser", post(ytm_browser_login))
@@ -191,6 +195,10 @@ pub fn router(ctx: Ctx) -> Router<Arc<AppState>> {
         .route("/api/video/preview", get(video_preview))
         .route("/api/video/calibrate", post(video_calibrate))
         .route("/api/library/tracks", get(library_tracks))
+        .route(
+            "/api/library/tracks/summaries",
+            post(library_track_summaries),
+        )
         .route("/api/stream/playlists/{platform}", get(stream_playlists))
         .route("/api/stream/playlist", post(stream_playlist))
         .route(
@@ -685,6 +693,13 @@ struct BrowserLoginBody {
 }
 
 #[derive(Debug, Deserialize)]
+struct SoundCloudWebviewLoginBody {
+    access_token: String,
+    #[serde(default)]
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
 struct YoutubeHeadersLoginBody {
     headers: String,
 }
@@ -708,6 +723,25 @@ async fn soundcloud_browser_login(
         return Err(ApiError::bad_request("请选择浏览器"));
     }
     state.soundcloud.import_browser(browser, profile).await?;
+    let account = state.soundcloud.account().await;
+    state.hub.publish("account.changed", &account);
+    Ok(Json(account))
+}
+
+/// KDJ 原生隔离窗口只把 SoundCloud 的网页登录会话交回本机后端；令牌不经过
+/// renderer。provider 会先请求 `/me` 验证，成功后才替换已有登录态。
+async fn soundcloud_webview_login(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SoundCloudWebviewLoginBody>,
+) -> ApiResult<Json<Account>> {
+    let access_token = payload.access_token.trim().to_string();
+    if access_token.is_empty() || access_token.len() > 4096 {
+        return Err(ApiError::bad_request("SoundCloud 登录窗口没有返回有效会话"));
+    }
+    state
+        .soundcloud
+        .import_webview_session(access_token, payload.expires_at)
+        .await?;
     let account = state.soundcloud.account().await;
     state.hub.publish("account.changed", &account);
     Ok(Json(account))
@@ -1501,15 +1535,22 @@ async fn song_preview_waveform(
                 .observe(cache_key.clone(), cached.path, cached.bytes, true);
         }
     }
-    let progress = state.stream_waveforms.request_with_analysis_duration(
+    let mut progress = state.stream_waveforms.request_with_analysis_duration(
         cache_key.clone(),
         state.config.to_settings().analysis_duration,
     );
-    let progress = crate::stream_waveform::StreamWaveformProgress {
-        active: progress.active
-            || (persistent_cache_enabled && state.stream_cache.is_writing(&cache_key)),
-        ..progress
-    };
+    let cache_writing = persistent_cache_enabled && state.stream_cache.is_writing(&cache_key);
+    progress.active |= cache_writing;
+    if cache_writing
+        && matches!(
+            progress.cache_status,
+            crate::stream_waveform::StreamCacheStatus::Waiting
+                | crate::stream_waveform::StreamCacheStatus::Failed
+        )
+    {
+        progress.cache_status = crate::stream_waveform::StreamCacheStatus::Caching;
+        progress.cache_error.clear();
+    }
     // 这不是静态资源：同一个 token 的覆盖秒数和 revision 会变。明确 no-store，
     // 否则部分 WebView/HTTP 缓存会把第一次的空快照一直复用。
     Ok((
@@ -2110,11 +2151,21 @@ impl InlinePreviewCacheCapture {
     }
 
     async fn finish(mut self, reached_eof: bool) -> std::io::Result<()> {
+        let partial_path = self.writer.partial_path().to_path_buf();
         if !reached_eof || self.response_bytes != self.total {
             // Drop 删除不完整 partial；不能把有缺口的文件提交成可命中缓存。
+            self.waveforms
+                .discard_cache_path(&self.cache_key, &partial_path);
             return Ok(());
         }
-        let committed = self.writer.finish().await?;
+        let committed = match self.writer.finish().await {
+            Ok(committed) => committed,
+            Err(error) => {
+                self.waveforms
+                    .discard_cache_path(&self.cache_key, &partial_path);
+                return Err(error);
+            }
+        };
         if committed {
             self.waveforms.observe(
                 self.cache_key.clone(),
@@ -2122,6 +2173,9 @@ impl InlinePreviewCacheCapture {
                 self.total,
                 true,
             );
+        } else {
+            self.waveforms
+                .discard_cache_path(&self.cache_key, &partial_path);
         }
         Ok(())
     }
@@ -2306,6 +2360,9 @@ fn schedule_song_preview_cache(
     let Some(mut reservation) = state.stream_cache.reserve(cache_key.clone()) else {
         return;
     };
+    let Some(cache_sequence) = state.stream_waveforms.begin_cache_sequence(&cache_key) else {
+        return;
+    };
     tokio::spawn(async move {
         // 先让 WebView 的首批缓冲独占链路；缓存是后台完整拉取，不参与首包延迟。
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -2313,9 +2370,15 @@ fn schedule_song_preview_cache(
         if !state.stream_waveforms.is_session_idle(&cache_key) {
             // 延迟任务醒来后用户可能已经重新播放同一首；此时宁可本轮不缓存，也
             // 不能让第二 GET 再次和 WebView 抢网络/闪存。
+            state
+                .stream_waveforms
+                .cancel_cache_sequence(&cache_key, cache_sequence);
             return;
         }
         if !reservation.is_valid() || !reservation.acquire_slot().await {
+            state
+                .stream_waveforms
+                .cancel_cache_sequence(&cache_key, cache_sequence);
             return;
         }
         let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
@@ -2329,19 +2392,136 @@ fn schedule_song_preview_cache(
                 .observe(cache_key, cached.path, cached.bytes, true);
             return;
         }
-        if let Err(error) = cache_song_preview_background(
+        run_song_preview_cache_sequence(
             state,
             token,
             ticket,
             cache_key,
             content_type_hint,
+            cache_sequence,
             reservation,
         )
-        .await
-        {
-            tracing::debug!(error = %error, "在线音频后台缓存未完成");
-        }
+        .await;
     });
+}
+
+const SONG_PREVIEW_CACHE_RETRY_DELAYS: [std::time::Duration; 2] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(4),
+];
+const SONG_PREVIEW_CACHE_ATTEMPTS: usize = SONG_PREVIEW_CACHE_RETRY_DELAYS.len() + 1;
+
+fn song_preview_cache_retry_delay_after(attempt: usize) -> Option<std::time::Duration> {
+    SONG_PREVIEW_CACHE_RETRY_DELAYS.get(attempt).copied()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewCacheOutcome {
+    Complete,
+    Cancelled,
+}
+
+async fn run_song_preview_cache_sequence(
+    state: Arc<AppState>,
+    token: String,
+    mut ticket: SongPreviewTicket,
+    cache_key: String,
+    content_type_hint: String,
+    cache_sequence: u64,
+    initial_reservation: crate::stream_cache::StreamCacheReservation,
+) {
+    let mut reservation = Some(initial_reservation);
+    for attempt in 0..SONG_PREVIEW_CACHE_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(SONG_PREVIEW_CACHE_RETRY_DELAYS[attempt - 1]).await;
+            if !state.config.to_settings().stream_cache_enabled {
+                state
+                    .stream_waveforms
+                    .cancel_cache_sequence(&cache_key, cache_sequence);
+                return;
+            }
+            match refresh_background_preview_url(&state, &token, &ticket).await {
+                Ok(url) => ticket.url = url,
+                Err(error) => {
+                    let retrying = song_preview_cache_retry_delay_after(attempt).is_some();
+                    if !state.stream_waveforms.cache_attempt_failed(
+                        &cache_key,
+                        cache_sequence,
+                        error.clone(),
+                        retrying,
+                    ) {
+                        return;
+                    }
+                    if retrying {
+                        tracing::debug!(attempt = attempt + 1, error = %error, "在线音频缓存刷新失败，等待重试");
+                        continue;
+                    }
+                    record_song_preview_cache_failure(&state, &ticket, &error);
+                    return;
+                }
+            }
+            let Some(mut next) = state.stream_cache.reserve(cache_key.clone()) else {
+                state
+                    .stream_waveforms
+                    .cancel_cache_sequence(&cache_key, cache_sequence);
+                return;
+            };
+            if !next.acquire_slot().await {
+                state
+                    .stream_waveforms
+                    .cancel_cache_sequence(&cache_key, cache_sequence);
+                return;
+            }
+            reservation = Some(next);
+        }
+
+        let result = cache_song_preview_background(
+            state.clone(),
+            ticket.clone(),
+            cache_key.clone(),
+            content_type_hint.clone(),
+            reservation
+                .take()
+                .expect("each cache attempt owns a fresh reservation"),
+        )
+        .await;
+        match result {
+            Ok(PreviewCacheOutcome::Complete) => return,
+            Ok(PreviewCacheOutcome::Cancelled) => {
+                state
+                    .stream_waveforms
+                    .cancel_cache_sequence(&cache_key, cache_sequence);
+                return;
+            }
+            Err(error) => {
+                let retrying = song_preview_cache_retry_delay_after(attempt).is_some();
+                if !state.stream_waveforms.cache_attempt_failed(
+                    &cache_key,
+                    cache_sequence,
+                    error.clone(),
+                    retrying,
+                ) {
+                    return;
+                }
+                if retrying {
+                    tracing::debug!(attempt = attempt + 1, error = %error, "在线音频后台缓存未完成，等待重试");
+                    continue;
+                }
+                record_song_preview_cache_failure(&state, &ticket, &error);
+                return;
+            }
+        }
+    }
+}
+
+fn record_song_preview_cache_failure(state: &AppState, ticket: &SongPreviewTicket, error: &str) {
+    tracing::warn!(source = %ticket.source.key, error, "在线音频后台缓存重试耗尽");
+    state.activity_log.record_level(
+        crate::activity_log::ActivityCategory::Network,
+        crate::activity_log::ActivityLevel::Warn,
+        "在线音频缓存失败",
+        error,
+    );
 }
 
 fn schedule_song_preview_cache_when_session_idle(
@@ -2467,12 +2647,11 @@ async fn refresh_background_preview_url(
 
 async fn cache_song_preview_background(
     state: Arc<AppState>,
-    token: String,
     ticket: SongPreviewTicket,
     cache_key: String,
     content_type_hint: String,
     reservation: crate::stream_cache::StreamCacheReservation,
-) -> Result<(), String> {
+) -> Result<PreviewCacheOutcome, String> {
     kdj_core::ensure_rustls_ring();
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(5))
@@ -2481,12 +2660,10 @@ async fn cache_song_preview_background(
         .build()
         .map_err(|error| error.to_string())?;
     let cache_root = crate::stream_cache::StreamCache::cache_dir(&state.config);
-    let mut url = ticket.url.clone();
     let mut offset = 0_u64;
     let mut expected_total = None;
     let mut writer: Option<crate::stream_cache::StreamCacheWriter> = None;
     let mut reservation = Some(reservation);
-    let mut refreshes_left = 1_u8;
     // 只在累计跨过一个有意义的增长量时 publish 给只读波形任务。每个网络 chunk
     // 都 flush 会把纯展示需求放大成大量 IO；最终提交会无条件再 publish 一次。
     let mut last_waveform_observed_bytes = 0_u64;
@@ -2497,7 +2674,7 @@ async fn cache_song_preview_background(
             || reservation.as_ref().is_some_and(|item| !item.is_valid())
             || writer.as_ref().is_some_and(|item| !item.is_valid())
         {
-            return Ok(());
+            return Ok(PreviewCacheOutcome::Cancelled);
         }
         let requested_range = format!("bytes={offset}-");
         let mut response = tokio::time::timeout(
@@ -2505,7 +2682,7 @@ async fn cache_song_preview_background(
             send_song_preview_upstream(
                 &client,
                 ticket.source.platform,
-                &url,
+                &ticket.url,
                 Some(&requested_range),
             ),
         )
@@ -2513,23 +2690,12 @@ async fn cache_song_preview_background(
         .map_err(|_| "缓存源连接超时".to_string())??;
         let status = preview_upstream_status(&response);
         if song_preview_url_needs_refresh(status) {
-            if refreshes_left == 0 {
-                return Err(format!("缓存源刷新后仍返回 HTTP {status}"));
-            }
-            // 网易云/QQ 的播放 URL 可能在分段下载中途过期。刷新后的地址仍指向
-            // 同一 source key，可以从当前 Range 继续；直接丢弃会让 DJ Deck 永远
-            // 得不到完整波形与 BPM，即使声音本身仍由前台代理正常播放。
-            refreshes_left -= 1;
-            url = refresh_background_preview_url(&state, &token, &ticket).await?;
-            continue;
+            // URL 或上游边界一旦失效，不能把刷新后的响应拼到旧 partial。外层会
+            // 重新解析 URL、创建新 writer，并严格从 bytes=0- 开始下一次尝试。
+            return Err(format!("缓存源返回 HTTP {status}"));
         }
         let Some(mime) = preview_audio_mime(response.headers(), &content_type_hint) else {
-            if refreshes_left == 0 {
-                return Err("缓存源刷新后仍返回非音频内容".into());
-            }
-            refreshes_left -= 1;
-            url = refresh_background_preview_url(&state, &token, &ticket).await?;
-            continue;
+            return Err("缓存源返回非音频内容".into());
         };
         let segment = preview_cache_segment(status, response.headers(), offset)
             .ok_or_else(|| format!("缓存源没有返回可续写的完整范围：HTTP {status}"))?;
@@ -2552,7 +2718,7 @@ async fn cache_song_preview_background(
                 .await
                 .map_err(|error| format!("创建缓存临时文件失败：{error}"))?;
             if writer.is_none() {
-                return Ok(());
+                return Ok(PreviewCacheOutcome::Cancelled);
             }
         }
 
@@ -2575,7 +2741,7 @@ async fn cache_song_preview_background(
                 .await
                 .map_err(|error| format!("写入缓存失败：{error}"))?;
             if !keep_writing {
-                return Ok(());
+                return Ok(PreviewCacheOutcome::Cancelled);
             }
             if writer
                 .written_bytes()
@@ -2619,8 +2785,9 @@ async fn cache_song_preview_background(
                     true,
                 );
                 tracing::debug!(source = %ticket.source.key, bytes = segment.total, "在线音频已缓存");
+                return Ok(PreviewCacheOutcome::Complete);
             }
-            return Ok(());
+            return Ok(PreviewCacheOutcome::Cancelled);
         }
     }
     Err("缓存源分段过多，已停止续传".into())
@@ -4635,6 +4802,32 @@ async fn video_calibrate(
 
 // ---------------------------------------------------------------- 曲库
 
+/// SQLite、标签和媒体容器解析都是同步阻塞工作。曲库请求先经过这道有界闸门再进
+/// blocking 池，避免快速滚动或封面瀑布把 Tokio 的工作线程与阻塞线程同时塞满。
+static LIBRARY_READ_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+async fn run_library_read<T, F>(work: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    let _permit = LIBRARY_READ_SLOTS.acquire().await.map_err(|err| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("曲库读取通道不可用：{err}"),
+        )
+    })?;
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|err| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("曲库读取任务异常结束：{err}"),
+            )
+        })?
+        .map_err(ApiError::from)
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct TrackQueryParams {
     #[serde(default)]
@@ -4747,17 +4940,25 @@ async fn stream_playlist_remove_track(
 async fn library_tracks(
     State(state): State<Arc<AppState>>,
     Query(params): Query<TrackQueryParams>,
-) -> ApiResult<Json<TrackPage>> {
+) -> ApiResult<Json<TrackSummaryPage>> {
+    let query = library_track_query(&state, params)?;
+    let library = Arc::clone(&state.library);
+    Ok(Json(
+        run_library_read(move || library.list_track_summaries(&query)).await?,
+    ))
+}
+
+fn library_track_query(state: &AppState, params: TrackQueryParams) -> ApiResult<TrackQuery> {
     let outside = params.folder.trim() == kdj_library::folders::OUTSIDE_FOLDER;
     let exclude_under = if outside {
-        library_roots(&state)?
+        library_roots(state)?
             .into_iter()
             .map(|root| root.to_string_lossy().into_owned())
             .collect()
     } else {
         Vec::new()
     };
-    let query = TrackQuery {
+    Ok(TrackQuery {
         q: params.q,
         key: params.key,
         bpm_min: params.bpm_min,
@@ -4771,14 +4972,38 @@ async fn library_tracks(
         },
         folder_deep: params.folder_deep,
         exclude_under,
-        sort: params.sort.unwrap_or_else(|| "added_at".into()),
+        sort: params.sort.unwrap_or_else(|| "file_created_at".into()),
         order: params.order.unwrap_or_else(|| "desc".into()),
         sort2: params.sort2.unwrap_or_default(),
         order2: params.order2.unwrap_or_else(|| "asc".into()),
-        limit: params.limit.unwrap_or(200).clamp(1, 1000),
+        limit: params.limit.unwrap_or(200).clamp(1, 10_000),
         offset: params.offset.unwrap_or(0).max(0),
-    };
-    Ok(Json(state.library.list_tracks(&query)?))
+    })
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TrackSummaryBatchRequest {
+    #[serde(default)]
+    track_ids: Vec<i64>,
+    #[serde(flatten)]
+    query: TrackQueryParams,
+}
+
+/// `library.updated` 的增量回填端点。请求中不存在的 id 不返回，前端可以在不重拉
+/// 整个已加载窗口的前提下识别删除；批量上限防止错误客户端把它当全库导出接口。
+async fn library_track_summaries(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<TrackSummaryBatchRequest>,
+) -> ApiResult<Json<Vec<TrackSummary>>> {
+    if payload.track_ids.len() > 500 {
+        return Err(ApiError::bad_request("一次最多读取 500 条曲目摘要"));
+    }
+    let query = library_track_query(&state, payload.query)?;
+    let track_ids = payload.track_ids;
+    let library = Arc::clone(&state.library);
+    Ok(Json(
+        run_library_read(move || library.track_summaries(&query, &track_ids)).await?,
+    ))
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -4857,9 +5082,9 @@ async fn library_track(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<i64>,
 ) -> ApiResult<Json<Track>> {
-    state
-        .library
-        .get(id)?
+    let library = Arc::clone(&state.library);
+    run_library_read(move || library.get(id))
+        .await?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("曲目不存在"))
 }
@@ -6462,8 +6687,12 @@ fn merge_library_roots(existing: &[String], paths: &[String]) -> Vec<String> {
         if kdj_library::folders::ensure_inside(&candidate, &roots).is_ok() {
             continue; // 已经在某个根里
         }
-        let normalized = candidate.to_string_lossy().into_owned();
-        if !merged.contains(&normalized) {
+        let normalized = kdj_library::service::normalize_path(&candidate);
+        let identity = kdj_core::paths::path_identity(Path::new(&normalized));
+        if !merged
+            .iter()
+            .any(|current| kdj_core::paths::path_identity(Path::new(current)) == identity)
+        {
             merged.push(normalized);
             // 新根可能把后面某个候选包住，重算一遍再判断下一个
             roots = kdj_library::folders::resolve_roots(&merged);
@@ -6945,13 +7174,26 @@ fn video_mime_for(path: &Path) -> String {
 async fn library_cover(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<i64>,
+    Query(params): Query<CoverQueryParams>,
 ) -> ApiResult<Response> {
-    let track = state
-        .library
-        .get(id)?
+    let library = Arc::clone(&state.library);
+    let source = run_library_read(move || library.media_source(id))
+        .await?
         .ok_or_else(|| ApiError::not_found("曲目不存在"))?;
-    let path = PathBuf::from(&track.path);
-    if let Some((data, mime)) = kdj_providers::tags::read_cover(&path) {
+    let path = PathBuf::from(&source.path);
+    if let Some(size) = params.size {
+        if let Some(data) =
+            cover_thumbnail(&source, &state.config.data_dir.join("covers"), size).await
+        {
+            return Ok((StatusCode::OK, cover_headers(JPEG_MIME.into()), data).into_response());
+        }
+        return Err(ApiError::not_found("没有可用封面"));
+    }
+
+    let cover_path = path.clone();
+    if let Some((data, mime)) =
+        run_library_read(move || Ok(kdj_providers::tags::read_cover(&cover_path))).await?
+    {
         return Ok((StatusCode::OK, cover_headers(mime), data).into_response());
     }
     // VJ 素材和 MV 是没有内嵌封面的，一律 404 的话曲库里那一批视频
@@ -6959,8 +7201,8 @@ async fn library_cover(
     if is_video_container(&path) {
         if let Some(data) = video_cover(
             &path,
-            track.id,
-            track.duration,
+            source.id,
+            source.duration,
             &state.config.data_dir.join("covers"),
         )
         .await
@@ -6971,7 +7213,106 @@ async fn library_cover(
     Err(ApiError::not_found("没有内嵌封面"))
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct CoverQueryParams {
+    /// 列表缩略图的最长边；不传表示详情/分享所需的原始封面。
+    size: Option<u32>,
+}
+
 const JPEG_MIME: &str = "image/jpeg";
+
+static COVER_THUMBNAIL_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
+static COVER_THUMBNAIL_LOCKS: std::sync::LazyLock<Vec<tokio::sync::Mutex<()>>> =
+    std::sync::LazyLock::new(|| (0..16).map(|_| tokio::sync::Mutex::new(())).collect());
+
+/// 音频内嵌图和视频抽帧统一生成固定尺寸 JPEG。缓存键带文件 mtime 与尺寸；空的
+/// `.none` 是负缓存，避免无封面曲目每次滚回屏幕都重新打开整个媒体容器。
+async fn cover_thumbnail(
+    source: &TrackMediaSource,
+    cache_dir: &Path,
+    requested_size: u32,
+) -> Option<Vec<u8>> {
+    let size = requested_size.clamp(32, 256);
+    let mtime = if source.file_mtime.is_finite() && source.file_mtime > 0.0 {
+        source.file_mtime as u64
+    } else {
+        file_mtime(Path::new(&source.path))
+    };
+    let thumb_dir = cache_dir.join("thumbs");
+    let target = thumb_dir.join(format!("{}-{mtime}-{size}.jpg", source.id));
+    let negative = thumb_dir.join(format!("{}-{mtime}-{size}.none", source.id));
+    if let Ok(data) = tokio::fs::read(&target).await {
+        if !data.is_empty() {
+            return Some(data);
+        }
+    }
+    if tokio::fs::metadata(&negative).await.is_ok() {
+        return None;
+    }
+
+    let lock_index = source.id.unsigned_abs() as usize % COVER_THUMBNAIL_LOCKS.len();
+    let _key_guard = COVER_THUMBNAIL_LOCKS[lock_index].lock().await;
+    // 同一首的并发请求在 key 锁内复查；第一个请求已经生成后，后续直接读缓存。
+    if let Ok(data) = tokio::fs::read(&target).await {
+        if !data.is_empty() {
+            return Some(data);
+        }
+    }
+    if tokio::fs::metadata(&negative).await.is_ok() {
+        return None;
+    }
+    tokio::fs::create_dir_all(&thumb_dir).await.ok()?;
+    let _slot = COVER_THUMBNAIL_SLOTS.acquire().await.ok()?;
+
+    let media_path = PathBuf::from(&source.path);
+    let embedded_target = target.clone();
+    let embedded = tokio::task::spawn_blocking(move || {
+        let data = kdj_providers::tags::read_cover_thumbnail(&media_path, size)?;
+        store_thumbnail_atomically(&embedded_target, &data);
+        Some(data)
+    })
+    .await
+    .ok()
+    .flatten();
+    if embedded.is_some() {
+        return embedded;
+    }
+
+    if is_video_container(Path::new(&source.path)) {
+        if let Some(frame) = video_cover(
+            Path::new(&source.path),
+            source.id,
+            source.duration,
+            cache_dir,
+        )
+        .await
+        {
+            let video_target = target.clone();
+            if let Some(data) = tokio::task::spawn_blocking(move || {
+                let data = kdj_providers::tags::thumbnail_cover_data(&frame, size)?;
+                store_thumbnail_atomically(&video_target, &data);
+                Some(data)
+            })
+            .await
+            .ok()
+            .flatten()
+            {
+                return Some(data);
+            }
+        }
+    }
+
+    let _ = tokio::fs::write(negative, []).await;
+    None
+}
+
+fn store_thumbnail_atomically(target: &Path, data: &[u8]) {
+    let partial = target.with_extension(format!("jpg.partial-{}", std::process::id()));
+    if std::fs::write(&partial, data).is_ok() && std::fs::rename(&partial, target).is_ok() {
+        return;
+    }
+    let _ = std::fs::remove_file(partial);
+}
 
 /// 同时最多几个抽帧进程。曲库列表一屏几十行，滚一下就是几十个封面请求同时进来，
 /// 不设闸等于一次 fork 出几十个视频解码进程，机器直接卡住（4K 素材尤其明显）。
@@ -7615,6 +7956,47 @@ https://rr1---sn.example.googlevideo.com/api/manifest/hls_playlist/id/high/playl
             Some(40),
             "session tee trusts the actual CDN response offset"
         );
+        assert!(
+            preview_cache_segment(StatusCode::OK, &whole, 40).is_none(),
+            "a resumed request returning 200 must restart in a fresh attempt from byte 0"
+        );
+    }
+
+    #[test]
+    fn background_cache_has_exactly_two_bounded_retries() {
+        assert_eq!(SONG_PREVIEW_CACHE_ATTEMPTS, 3);
+        assert_eq!(
+            song_preview_cache_retry_delay_after(0),
+            Some(std::time::Duration::from_secs(1))
+        );
+        assert_eq!(
+            song_preview_cache_retry_delay_after(1),
+            Some(std::time::Duration::from_secs(4))
+        );
+        assert_eq!(song_preview_cache_retry_delay_after(2), None);
+        assert_eq!(song_preview_cache_retry_delay_after(3), None);
+    }
+
+    #[test]
+    fn bounded_retry_policy_reaches_a_third_success_or_one_terminal_failure() {
+        fn simulate(successful_attempt: Option<usize>) -> (usize, usize) {
+            let mut attempts = 0;
+            let mut terminal_failures = 0;
+            for attempt in 0..SONG_PREVIEW_CACHE_ATTEMPTS {
+                attempts += 1;
+                if successful_attempt == Some(attempt) {
+                    break;
+                }
+                if song_preview_cache_retry_delay_after(attempt).is_none() {
+                    terminal_failures += 1;
+                    break;
+                }
+            }
+            (attempts, terminal_failures)
+        }
+
+        assert_eq!(simulate(Some(2)), (3, 0));
+        assert_eq!(simulate(None), (3, 1));
     }
 
     #[test]

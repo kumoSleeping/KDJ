@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use kdj_providers::tags::is_media_extension;
 
-use crate::service::{normalize_path, LibraryService};
+use crate::service::{metadata_file_times, normalize_path, LibraryService};
 
 /// 这些目录进去只有垃圾，还容易踩到几万个文件把扫描拖死。
 const SKIP_DIR_NAMES: [&str; 12] = [
@@ -59,7 +59,8 @@ fn collect_files_cancellable(
     let mut seen: std::collections::HashSet<String> = Default::default();
     let mut add = |candidate: &Path, found: &mut Vec<String>| {
         let key = normalize_path(candidate);
-        if seen.insert(key.clone()) {
+        let identity = kdj_core::paths::path_identity(Path::new(&key));
+        if seen.insert(identity) {
             found.push(key);
         }
     };
@@ -217,6 +218,7 @@ pub fn scan_paths_cancellable(
     // 一次性拉出已入库文件的 mtime，逐个查库在几万首的曲库上会慢得离谱
     let index = service.file_index()?;
     let mut track_ids: Vec<i64> = Vec::with_capacity(total);
+    let mut created_time_updates: Vec<(i64, f64)> = Vec::new();
 
     for (chunk_index, chunk) in files.chunks(UPSERT_BATCH_SIZE).enumerate() {
         if should_cancel() {
@@ -232,16 +234,24 @@ pub fn scan_paths_cancellable(
         let mut changed_positions = Vec::new();
 
         for (position, file_path) in chunk.iter().enumerate() {
-            if let Some((id, known_mtime, tags_missing)) = index.get(file_path) {
-                let mtime = std::fs::metadata(file_path)
+            let identity = kdj_core::paths::path_identity(Path::new(file_path));
+            if let Some((id, known_mtime, known_created_at, tags_missing)) = index.get(&identity) {
+                let times = std::fs::metadata(file_path)
                     .ok()
-                    .and_then(|meta| meta.modified().ok())
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_secs_f64());
+                    .map(|meta| metadata_file_times(&meta));
                 // 增量扫描：文件没动过就不重读标签。
                 // 库里标签可疑地空的行例外（见 `file_index`）——放它落到批量 upsert
                 // 重读一次，坏行才能自动愈合。
-                if !tags_missing && mtime.is_some_and(|mtime| (known_mtime - mtime).abs() < 1e-6) {
+                if !tags_missing
+                    && times.is_some_and(|(mtime, _)| (known_mtime - mtime).abs() < 1e-6)
+                {
+                    if let Some((_, Some(created_at))) = times {
+                        let changed = (*known_created_at)
+                            .map_or(true, |known| (known - created_at).abs() >= 1e-6);
+                        if created_at > 0.0 && changed {
+                            created_time_updates.push((*id, created_at));
+                        }
+                    }
                     ids[position] = Some(*id);
                     continue;
                 }
@@ -278,6 +288,7 @@ pub fn scan_paths_cancellable(
             on_progress(start + position + 1, total, file_path);
         }
     }
+    service.sync_file_created_times(&created_time_updates)?;
     Ok(ScanReport {
         track_ids,
         unreadable_roots,

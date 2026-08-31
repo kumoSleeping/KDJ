@@ -5,7 +5,7 @@
 //! JNI (`NativeAudioBridge`) into `submit_platform` or the shared
 //! `desktop-media-control` next/prev event.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use jni::objects::{JClass, JString};
 use jni::sys::jdouble;
@@ -20,7 +20,7 @@ const DEFAULT_SEEK_SECONDS: f64 = 10.0;
 
 struct RemoteBridge {
     app: AppHandle,
-    coordinator: Arc<OnceLock<Arc<PlaybackCoordinator>>>,
+    coordinator: Arc<OnceLock<Weak<PlaybackCoordinator>>>,
 }
 
 static REMOTE_BRIDGE: OnceLock<RemoteBridge> = OnceLock::new();
@@ -36,7 +36,7 @@ pub struct AndroidMediaSession {
 impl AndroidMediaSession {
     pub fn spawn(
         app: AppHandle,
-        coordinator: Arc<OnceLock<Arc<PlaybackCoordinator>>>,
+        coordinator: Arc<OnceLock<Weak<PlaybackCoordinator>>>,
     ) -> Result<Self, String> {
         REMOTE_BRIDGE
             .set(RemoteBridge {
@@ -175,7 +175,7 @@ fn handle_remote(action: &str, position: f64) {
         "next" => emit_frontend(&bridge.app, "next"),
         "previous" => emit_frontend(&bridge.app, "previous"),
         other => {
-            let Some(coordinator) = bridge.coordinator.get().cloned() else {
+            let Some(coordinator) = bridge.coordinator.get().and_then(Weak::upgrade) else {
                 tracing::warn!("播放器尚未绑定，忽略远程命令：{other}");
                 return;
             };

@@ -9,6 +9,7 @@ import {
 import { deckGain, previewGain, useCrossfade } from "../../lib/crossfade";
 import { djEngine } from "../../lib/djMix";
 import { formatDuration } from "../../lib/format";
+import { useMasterVolume } from "../../lib/masterVolume";
 import { attachYoutubeVideoPreview } from "../../lib/youtubeVideoPreview";
 import {
   MEDIA_SYNC_EVENT,
@@ -108,6 +109,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
 
   const coplay = useCrossfade((state) => state.coplay);
   const fadeX = useCrossfade((state) => state.x);
+  const masterVolume = useMasterVolume((state) => state.volume);
   const setCoplay = useCrossfade((state) => state.setCoplay);
   const setX = useCrossfade((state) => state.setX);
 
@@ -161,7 +163,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
       useCrossfade.getState().setCoplay(false);
       // store 的 React effect 要到下一帧才恢复 deck；这里同步兜底，避免推子在
       // 最右时退出后立刻点播放，进度在走但 element.volume 仍近似 0。
-      djEngine.setVolume(1);
+      djEngine.setVolume(useMasterVolume.getState().volume);
     },
     [clearDelay],
   );
@@ -250,12 +252,12 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
     return () => window.removeEventListener(MEDIA_SYNC_EVENT, onMediaSync);
   }, [offsetMs, clearDelay]);
 
-  // 推子分给预览这一侧的音量。volume 挂在 <video> 上，AnalyserNode 采到的
+  // MASTER 与推子分给预览这一侧的增益相乘。volume 挂在 <video> 上，AnalyserNode 采到的
   // 是衰减后的信号——波形跟着推子一起矮下去，正好和耳朵听到的一致。
   useEffect(() => {
     const video = videoRef.current;
-    if (video) video.volume = previewGain(coplay, fadeX);
-  }, [coplay, fadeX]);
+    if (video) video.volume = masterVolume * previewGain(coplay, fadeX);
+  }, [masterVolume, coplay, fadeX]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -341,10 +343,6 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
-      // 必须在 play() 前交出音频焦点。等 onPlay 才通知时，Rust/CPAL 唱盘仍在
-      // 发声，WebKit 的网络视频可能停在起播阶段；用户手动暂停唱盘后才会恢复。
-      // 协同模式由 PlayerBar 的焦点例外保留双路声音。
-      announceAudioFocus("preview");
       void video.play().catch((reason: unknown) => {
         setPlaying(false);
         setError(`播放启动失败：${reason instanceof Error ? reason.message : String(reason)}`);
@@ -382,7 +380,7 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
     clearDelay();
     if (useCrossfade.getState().coplay) {
       setCoplay(false);
-      djEngine.setVolume(1);
+      djEngine.setVolume(useMasterVolume.getState().volume);
       video?.pause();
       return;
     }
@@ -502,10 +500,14 @@ export function VideoPreview({ req }: { req: VideoPreviewRequest }) {
             setPlaying(true);
             setError("");
             ensureAnalyser();
-            announceAudioFocus("preview");
             if (!suppressSyncEventRef.current) {
               broadcastMediaSync({ owner: "preview", action: "play" });
             }
+          }}
+          onPlaying={() => {
+            // `play` 只表示播放意图已经接受，仍可能马上进入缓冲；等真正有媒体
+            // 帧输出后再暂停唱盘，失败的网络视频不能劫持全局音频焦点。
+            announceAudioFocus("preview");
           }}
           onPause={() => {
             setPlaying(false);

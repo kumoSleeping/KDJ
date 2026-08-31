@@ -103,6 +103,16 @@ test("workspace session validates a restorable online playlist and selected row"
   assert.equal(state.stream.scrollTop, 320);
 });
 
+test("legacy implicit library order migrates to filesystem creation order", () => {
+  const state = normalizeWorkspaceSession({
+    source: "local",
+    local: { sort: "added_at", order: "desc" },
+  });
+
+  assert.equal(state.local.sort, "file_created_at");
+  assert.equal(normalizeWorkspaceSession(null).local.sort, "file_created_at");
+});
+
 test("a pinned split restores the online right pane even when local was focused", () => {
   const session = normalizeWorkspaceSession({
     source: "local",

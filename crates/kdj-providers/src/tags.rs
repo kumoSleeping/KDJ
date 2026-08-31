@@ -9,6 +9,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use image::codecs::jpeg::JpegEncoder;
+use image::imageops::FilterType;
 use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
@@ -451,10 +453,8 @@ pub fn write_analysis_tags(
     Ok(())
 }
 
-/// 读内嵌封面，返回 `(字节, mime)`。
-///
-/// 曲库列表里每一行都要一张图，所以这里只取第一张、不做缩放——
-/// 缩放交给浏览器，省一个图像处理依赖。
+/// 读内嵌封面，返回 `(字节, mime)`。详情、分享和写标签仍需要原图；曲目表应调用
+/// [`read_cover_thumbnail`]，避免为几十像素的格子解码数百万像素的原图。
 pub fn read_cover(path: &Path) -> Option<(Vec<u8>, String)> {
     let tagged = Probe::open(path).ok()?.read().ok()?;
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
@@ -471,9 +471,32 @@ pub fn read_cover(path: &Path) -> Option<(Vec<u8>, String)> {
     Some((picture.data().to_vec(), mime))
 }
 
+/// 把任意已支持的封面字节等比缩进边长上限，并编码为体积稳定的 JPEG。
+/// 公开给视频抽帧复用，音频与视频缩略图由同一套尺寸约束产生。
+pub fn thumbnail_cover_data(data: &[u8], max_edge: u32) -> Option<Vec<u8>> {
+    let max_edge = max_edge.clamp(16, 512);
+    let decoded = image::load_from_memory(data).ok()?;
+    let thumbnail = decoded
+        .resize(max_edge, max_edge, FilterType::Triangle)
+        .to_rgb8();
+    let mut encoded = Vec::new();
+    JpegEncoder::new_with_quality(&mut encoded, 82)
+        .encode_image(&thumbnail)
+        .ok()?;
+    (!encoded.is_empty()).then_some(encoded)
+}
+
+/// 直接从媒体容器读取并生成列表缩略图。返回 JPEG 字节；失败与“没有封面”都为 None。
+pub fn read_cover_thumbnail(path: &Path, max_edge: u32) -> Option<Vec<u8>> {
+    let (data, _) = read_cover(path)?;
+    thumbnail_cover_data(&data, max_edge)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
+    use std::io::Cursor;
 
     #[test]
     fn audio_extension_check_is_case_insensitive_and_dot_tolerant() {
@@ -482,6 +505,16 @@ pub(crate) mod tests {
         assert!(is_audio_extension("opus"));
         assert!(!is_audio_extension("mp4v"));
         assert!(!is_audio_extension("txt"));
+    }
+
+    #[test]
+    fn thumbnail_encoder_bounds_both_dimensions() {
+        let source = DynamicImage::ImageRgb8(RgbImage::from_pixel(320, 160, Rgb([32, 64, 96])));
+        let mut png = Cursor::new(Vec::new());
+        source.write_to(&mut png, ImageFormat::Png).unwrap();
+        let encoded = thumbnail_cover_data(png.get_ref(), 64).unwrap();
+        let decoded = image::load_from_memory(&encoded).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (64, 32));
     }
 
     #[test]

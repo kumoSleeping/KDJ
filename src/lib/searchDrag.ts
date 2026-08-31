@@ -231,11 +231,12 @@ export function beginAudioPointerDrag(
   const payload: Extract<ActiveSearchDrag, { kind: "audio" }> = { kind: "audio", sources };
   const ghostTitle = displayTitle.trim() || sources[0]?.title || "在线歌曲";
   const shareLink = firstSourceShareLink(sources);
+  const shareContentMode = useSharePrefs.getState().contentMode;
   const shareText = shareLink
     ? formatShareText(
         shareLink,
         { title: ghostTitle, artists: sources[0]?.artists, album: sources[0]?.album },
-        useSharePrefs.getState().contentMode,
+        shareContentMode,
       )
     : "";
   const startLinkDrag = window.kdj?.startLinkDrag;
@@ -305,6 +306,7 @@ export function beginAudioPointerDrag(
         label: ghostTitle,
         text: shareText,
         dragImage: dragImage || undefined,
+        includeArtwork: shareContentMode === "more_info",
       }))
       .catch(onError);
     return true;

@@ -21,6 +21,7 @@ export interface YoutubeEmbedStatus {
 export interface YoutubeEmbedControllerOptions {
   videoId: string;
   muted: boolean;
+  volume: number;
   bounds: YoutubeEmbedBounds;
   onStatus: (status: YoutubeEmbedStatus) => void;
   onError: (error: Error) => void;
@@ -115,9 +116,7 @@ export class YoutubeEmbedController {
       this.options.onStatus(status);
       if (status.hasError) throw new Error("YouTube 官方播放器拒绝了这个视频");
       if (status.ready) {
-        if (this.options.muted) {
-          await this.bridge.control(this.options.videoId, "mute");
-        }
+        await this.applyVolume(this.options.muted ? 0 : this.options.volume);
         this.ready = true;
         this.scheduleStatusPoll();
         return;
@@ -165,6 +164,17 @@ export class YoutubeEmbedController {
     await this.done;
     if (this.disposed || !this.ready || !this.bridge) throw abortError();
     await this.bridge.control(this.options.videoId, "seek", position);
+  }
+
+  async setVolume(volume: number): Promise<void> {
+    await this.done;
+    await this.applyVolume(volume);
+  }
+
+  private async applyVolume(volume: number): Promise<void> {
+    if (this.disposed || !this.bridge) throw abortError();
+    const bounded = Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 0;
+    await this.bridge.control(this.options.videoId, "volume", bounded);
   }
 
   async setBounds(bounds: YoutubeEmbedBounds): Promise<void> {

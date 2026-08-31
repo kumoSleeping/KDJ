@@ -5,8 +5,7 @@
 //! WASAPI / AAudio) selection lives in `kdj-player`. System media-session policy stays outside:
 //! souvlaki on desktop, Kotlin MediaSession on Android.
 
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use kdj_playback::{
     CommandAck, ControlAck, PlaybackCommand, PlaybackCoordinator, PlaybackSnapshot,
@@ -117,7 +116,7 @@ impl DesktopPlayerHandle {
                 }
             })?);
             coordinator_slot
-                .set(Arc::clone(&coordinator))
+                .set(Arc::downgrade(&coordinator))
                 .map_err(|_| "系统媒体控制重复绑定播放器".to_string())?;
             {
                 let level_app = app.clone();
@@ -163,7 +162,7 @@ impl DesktopPlayerHandle {
                 }
             })?);
             coordinator_slot
-                .set(Arc::clone(&coordinator))
+                .set(Arc::downgrade(&coordinator))
                 .map_err(|_| "Android 媒体控制重复绑定播放器".to_string())?;
             {
                 let level_app = app.clone();
@@ -204,6 +203,10 @@ impl DesktopPlayerHandle {
 
     fn snapshot(&self) -> Result<PlaybackSnapshot, String> {
         self.coordinator.snapshot()
+    }
+
+    pub fn shutdown(&self) {
+        self.coordinator.shutdown();
     }
 }
 

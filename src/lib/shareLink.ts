@@ -101,21 +101,6 @@ function oneLine(value: string): string {
   return value.trim().replace(/\s+/g, " ");
 }
 
-function shareSourceLabel(link: string): string {
-  try {
-    const host = new URL(link).hostname.toLowerCase().replace(/^www\./, "");
-    if (host === "y.music.163.com" || host.endsWith(".music.163.com")) return "网易云音乐";
-    if (host === "y.qq.com" || host.endsWith(".y.qq.com")) return "QQ 音乐";
-    if (host === "music.youtube.com") return "YouTube Music";
-    if (host === "youtube.com" || host.endsWith(".youtube.com")) return "YouTube";
-    if (host === "bilibili.com" || host.endsWith(".bilibili.com")) return "哔哩哔哩";
-    if (host === "soundcloud.com" || host.endsWith(".soundcloud.com")) return "SoundCloud";
-  } catch {
-    // 链接生成器已经做过校验；这里解析失败时只省略来源，不影响分享。
-  }
-  return "";
-}
-
 /** 生成真正交给剪贴板或外部应用的分享文本。各档主体都保持单行。 */
 export function formatShareText(
   link: string,
@@ -128,20 +113,12 @@ export function formatShareText(
   const title = oneLine(info.title ?? "");
   const rawArtists = Array.isArray(info.artists) ? info.artists : [info.artists ?? ""];
   const artists = rawArtists.map(oneLine).filter(Boolean).join(", ");
-  const album = oneLine(info.album ?? "");
   const heading = title && artists ? `${title} - ${artists}` : title || artists;
+  const compact = heading ? `${heading} ${cleanLink}` : cleanLink;
   if (mode === "more_info") {
-    const source = shareSourceLabel(cleanLink);
-    const details = [
-      title ? `歌曲：${title}` : "",
-      artists ? `艺术家：${artists}` : "",
-      album ? `专辑：${album}` : "",
-      source ? `来源：${source}` : "",
-      `链接：${cleanLink}`,
-    ].filter(Boolean);
-    return `${details.join(" · ")}\nShare from KDJ v${packageVersion}`;
+    return `${compact}\nShare from KDJ v${packageVersion}`;
   }
-  return heading ? `${heading} ${cleanLink}` : cleanLink;
+  return compact;
 }
 
 export interface ShareLinkDragOptions {

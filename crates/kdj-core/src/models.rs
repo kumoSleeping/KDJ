@@ -887,6 +887,9 @@ pub struct Track {
     pub source_key: String,
     #[serde(default)]
     pub analyzed_at: Option<String>,
+    /// 文件系统记录的创建时间（Unix 秒）。不支持 birth time 时由查询排序回退到修改时间。
+    #[serde(default)]
+    pub file_created_at: Option<f64>,
     #[serde(default)]
     pub added_at: String,
     #[serde(default)]
@@ -896,6 +899,66 @@ pub struct Track {
     #[serde(default)]
     pub tags: Vec<String>,
     /// 所在目录（= path 的父目录）。前端文件夹树按它归位。
+    #[serde(default)]
+    pub folder: String,
+}
+
+/// 曲目表专用的轻量投影。
+///
+/// 曲库列表会长期持有成千上万条记录；把拍点、downbeat、Cue、标签和备注这些
+/// 详情字段一起塞进每一页，会同时放大 SQLite 解析、JSON 传输和 WebView 内存。
+/// 列表只拿这里的标量字段，真正选中或播放时再通过单曲接口读取完整 [`Track`]。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TrackSummary {
+    pub id: i64,
+    pub path: String,
+    pub filename: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub album: String,
+    #[serde(default)]
+    pub duration: Option<f64>,
+    #[serde(default)]
+    pub format: String,
+    #[serde(default)]
+    pub size: i64,
+    #[serde(default)]
+    pub bpm: Option<f64>,
+    #[serde(default)]
+    pub bpm_v2: bool,
+    #[serde(default)]
+    pub bpm_v3: bool,
+    #[serde(default)]
+    pub music_key: String,
+    #[serde(default)]
+    pub camelot: String,
+    #[serde(default)]
+    pub open_key: String,
+    #[serde(default)]
+    pub energy: Option<i64>,
+    #[serde(default)]
+    pub rms_db: Option<f64>,
+    #[serde(default)]
+    pub peak_db: Option<f64>,
+    #[serde(default)]
+    pub rating: i64,
+    #[serde(default = "default_local")]
+    pub source_platform: String,
+    #[serde(default)]
+    pub source_key: String,
+    #[serde(default)]
+    pub analyzed_at: Option<String>,
+    /// 文件系统记录的创建时间（Unix 秒）。
+    #[serde(default)]
+    pub file_created_at: Option<f64>,
+    #[serde(default)]
+    pub added_at: String,
+    #[serde(default)]
+    pub modified_at: String,
+    /// 所在目录（= path 的父目录）。前端文件夹范围和拖放仍需要它。
     #[serde(default)]
     pub folder: String,
 }
@@ -953,6 +1016,14 @@ pub struct StreamPlaylistTrackRemoveResponse {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TrackPage {
     pub items: Vec<Track>,
+    pub total: i64,
+    pub offset: i64,
+    pub limit: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TrackSummaryPage {
+    pub items: Vec<TrackSummary>,
     pub total: i64,
     pub offset: i64,
     pub limit: i64,

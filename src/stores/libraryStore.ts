@@ -28,15 +28,16 @@ import type {
   Track,
   TrackPatch,
   TrackPatchResult,
+  TrackSummary,
   WsEvent,
 } from "../types";
 
 /** "custom" = 文件夹清单里的手排顺序（拖动排序写进 .kdj/manifest.json）。 */
 export type TrackSort =
-  | "added_at" | "title" | "artist" | "album" | "bpm" | "camelot" | "energy" | "duration" | "rating" | "custom";
+  | "file_created_at" | "added_at" | "title" | "artist" | "album" | "bpm" | "camelot" | "energy" | "duration" | "rating" | "custom";
 export type SortOrder = "asc" | "desc";
-/** 入库序 = "没有显式排序"。cycleSort 用它判断有没有主键。 */
-const DEFAULT_SORT: TrackSort = "added_at";
+/** 文件创建顺序 = "没有显式排序"。cycleSort 用它判断有没有主键。 */
+const DEFAULT_SORT: TrackSort = "file_created_at";
 /** 「已分析」三态筛选：全部 / 只看已分析 / 只看未分析。 */
 export type AnalyzedFilter = "all" | "yes" | "no";
 
@@ -78,14 +79,14 @@ export const DEFAULT_FILTER: LibraryFilter = {
   // 它整棵子树里的曲目，做成开关只是把一个没人会关的选项摆在最显眼的位置。
   // 字段留着——后端 API 仍然收它。
   folderDeep: true,
-  sort: "added_at",
+  sort: "file_created_at",
   order: "desc",
   sort2: null,
   order2: "asc",
 };
 
 const TRACK_SORTS: readonly TrackSort[] = [
-  "added_at", "title", "artist", "album", "bpm", "camelot", "energy", "duration", "rating", "custom",
+  "file_created_at", "added_at", "title", "artist", "album", "bpm", "camelot", "energy", "duration", "rating", "custom",
 ];
 
 function restoredLibraryFilter(): LibraryFilter {
@@ -119,6 +120,11 @@ const FILTER_DEBOUNCE_MS = 250;
 let filterTimer: ReturnType<typeof setTimeout> | null = null;
 /** 请求序号：慢的旧响应回来时直接丢弃，避免覆盖新筛选的结果。 */
 let requestSeq = 0;
+/** 曲库事件与筛选输入使用不同计时器，后台分析不能取消用户刚输入的搜索。 */
+let libraryUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+const pendingLibraryUpdateIds = new Set<number>();
+/** 单曲详情的迟到响应不能覆盖用户后来选中的另一首。 */
+let selectedDetailRequestSeq = 0;
 
 function cancelPending(): void {
   if (filterTimer !== null) {
@@ -129,6 +135,98 @@ function cancelPending(): void {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function toTrackSummary(track: Track): TrackSummary {
+  return {
+    id: track.id,
+    path: track.path,
+    filename: track.filename,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    duration: track.duration,
+    format: track.format,
+    size: track.size,
+    bpm: track.bpm,
+    bpm_v2: track.bpm_v2,
+    bpm_v3: track.bpm_v3,
+    music_key: track.music_key,
+    camelot: track.camelot,
+    open_key: track.open_key,
+    energy: track.energy,
+    rms_db: track.rms_db,
+    peak_db: track.peak_db,
+    rating: track.rating,
+    source_platform: track.source_platform,
+    source_key: track.source_key,
+    analyzed_at: track.analyzed_at,
+    file_created_at: track.file_created_at,
+    added_at: track.added_at,
+    modified_at: track.modified_at,
+    folder: track.folder,
+  };
+}
+
+function summarySortValue(track: TrackSummary, key: TrackSort): string | number | null {
+  switch (key) {
+    case "title": return track.title;
+    case "artist": return track.artist;
+    case "album": return track.album;
+    case "bpm": return track.bpm;
+    case "camelot": {
+      const match = /^(\d{1,2})([AB])$/i.exec(track.camelot.trim());
+      return match ? Number(match[1]) * 2 + (match[2].toUpperCase() === "B" ? 1 : 0) : null;
+    }
+    case "energy": return track.energy;
+    case "duration": return track.duration;
+    case "rating": return track.rating;
+    case "file_created_at": return track.file_created_at;
+    case "added_at": return track.added_at;
+    case "custom": return null;
+  }
+}
+
+function compareSummaryValue(
+  left: string | number | null,
+  right: string | number | null,
+  order: SortOrder,
+): number {
+  const leftMissing = left === null;
+  const rightMissing = right === null;
+  if (leftMissing || rightMissing) {
+    if (leftMissing && rightMissing) return 0;
+    return leftMissing ? 1 : -1;
+  }
+  const compared = typeof left === "number" && typeof right === "number"
+    ? left - right
+    : String(left) < String(right)
+      ? -1
+      : String(left) > String(right)
+        ? 1
+        : 0;
+  return order === "asc" ? compared : -compared;
+}
+
+function sortTrackSummaries(items: TrackSummary[], filter: LibraryFilter): TrackSummary[] {
+  if (filter.sort === "custom") return items;
+  return items.sort((left, right) => {
+    const primary = compareSummaryValue(
+      summarySortValue(left, filter.sort),
+      summarySortValue(right, filter.sort),
+      filter.order,
+    );
+    if (primary !== 0) return primary;
+    if (filter.sort2) {
+      const secondary = compareSummaryValue(
+        summarySortValue(left, filter.sort2),
+        summarySortValue(right, filter.sort2),
+        filter.order2,
+      );
+      if (secondary !== 0) return secondary;
+    }
+    return right.id - left.id;
+  });
 }
 
 function folderTreeContains(nodes: FolderTree["roots"], path: string): boolean {
@@ -195,7 +293,7 @@ export interface LibraryClipboard {
 }
 
 export interface LibraryStore {
-  tracks: Track[];
+  tracks: TrackSummary[];
   total: number;
   loading: boolean;
   loadingMore: boolean;
@@ -231,6 +329,10 @@ export interface LibraryStore {
    */
   autoAnalyzeSuspended: boolean;
   refresh(): Promise<void>;
+  /** 按事件携带的 id 局部回填摘要，并用一个很小的尾部窗口保持已加载前缀完整。 */
+  refreshTrackSummaries(ids: number[]): Promise<void>;
+  /** 为当前选中项按需读取完整拍点、Cue、标签和备注。 */
+  ensureSelectedTrack(id?: number | null, force?: boolean): Promise<Track | null>;
   /** 连续翻页直到列表里出现该 id（或已到库底）。 */
   ensureTrackLoaded(id: number): Promise<void>;
   loadMore(): Promise<void>;
@@ -343,15 +445,23 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
     const keepCount = Math.max(PAGE_SIZE, get().tracks.length);
     set({ loading: true });
     try {
-      const items: Track[] = [];
+      const items: TrackSummary[] = [];
+      const seen = new Set<number>();
       let total = 0;
       while (items.length < keepCount) {
-        const page = await api.tracks(toQuery(get().filter, items.length));
+        const page = await api.tracks({
+          ...toQuery(get().filter, items.length),
+          // 摘要足够轻时直接恢复当前已加载深度，避免每 200 首重复一次 COUNT/排序。
+          limit: Math.min(10_000, Math.max(PAGE_SIZE, keepCount - items.length)),
+        });
         if (seq !== requestSeq) return;
         total = page.total;
         if (page.items.length === 0) break;
-        const seen = new Set(items.map((item) => item.id));
-        items.push(...page.items.filter((item) => !seen.has(item.id)));
+        for (const item of page.items) {
+          if (seen.has(item.id)) continue;
+          seen.add(item.id);
+          items.push(item);
+        }
         if (items.length >= total || page.items.length < PAGE_SIZE) break;
       }
       if (seq !== requestSeq) return;
@@ -359,9 +469,87 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
       // 一旦顺手清选中，用户看详情时会被反复踢出去。选中项落在页外时
       // selectSelectedTrack 自然返回 null，交给视图处理。
       set({ tracks: items, total, loading: false, error: "" });
+      if (get().selectedId !== null) void get().ensureSelectedTrack(get().selectedId, true);
     } catch (error) {
       if (seq !== requestSeq) return;
       set({ loading: false, error: errorText(error) });
+    }
+  },
+
+  async refreshTrackSummaries(ids) {
+    const uniqueIds = [...new Set(ids.filter((id) => Number.isFinite(id) && id > 0))];
+    if (uniqueIds.length === 0) return;
+    // 大批导入属于结构性变化；切成数十个增量请求反而比一次同步更重。
+    if (uniqueIds.length > 500) {
+      await get().refresh();
+      return;
+    }
+    const snapshot = get();
+    const filter = snapshot.filter;
+    // 手排顺序只存在文件夹清单里，前端不能从摘要字段重新推导。局部合并会把
+    // 被更新的行挪到末尾，因此这一种模式仍走一次轻量摘要刷新。
+    if (filter.sort === "custom") {
+      await get().refresh();
+      return;
+    }
+    const seq = requestSeq;
+    const loadedCount = snapshot.tracks.length;
+    if (loadedCount === 0) return;
+    const refillSize = Math.min(500, uniqueIds.length + 8);
+    const refillOffset = Math.max(0, loadedCount - refillSize);
+    try {
+      const filterQuery = toQuery(filter, 0);
+      const [updated, refill] = await Promise.all([
+        api.trackSummaries(uniqueIds, {
+          ...filterQuery,
+          limit: undefined,
+          offset: undefined,
+        }),
+        api.tracks({
+          ...toQuery(filter, refillOffset),
+          limit: refillSize,
+          offset: refillOffset,
+        }),
+      ]);
+      if (seq !== requestSeq || get().filter !== filter) return;
+      const requested = new Set(uniqueIds);
+      set((current) => {
+        if (current.filter !== filter) return {};
+        const merged = [
+          ...current.tracks.filter((track) => !requested.has(track.id)),
+          ...updated,
+          ...refill.items,
+        ];
+        const byId = new Map<number, TrackSummary>();
+        for (const track of merged) byId.set(track.id, track);
+        const targetLength = Math.min(loadedCount, refill.total);
+        return {
+          tracks: sortTrackSummaries([...byId.values()], filter).slice(0, targetLength),
+          total: refill.total,
+          error: "",
+        };
+      });
+      if (get().selectedId !== null && uniqueIds.includes(get().selectedId as number)) {
+        void get().ensureSelectedTrack(get().selectedId, true);
+      }
+    } catch (error) {
+      // 增量失败不清空现有列表；下一次用户筛选或结构性刷新会重新同步。
+      set({ error: errorText(error) });
+    }
+  },
+
+  async ensureSelectedTrack(id = get().selectedId, force = false) {
+    if (id === null) return null;
+    const cached = get().selectedTrack;
+    if (!force && cached?.id === id) return cached;
+    const seq = ++selectedDetailRequestSeq;
+    try {
+      const track = await api.track(id);
+      if (seq !== selectedDetailRequestSeq || get().selectedId !== id) return null;
+      set({ selectedTrack: track });
+      return track;
+    } catch {
+      return null;
     }
   },
 
@@ -515,13 +703,14 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   },
 
   select(id, mode = "replace") {
-    // 按 id 选中都发生在当前页里，页外暂存到这里就过期了
-    set({ selectedTrack: null });
     if (id === null) {
+      selectedDetailRequestSeq += 1;
       updateLocalWorkspaceSession({ selectedId: null });
-      set({ selectedId: null, selectedIds: [], selectionMode: false });
+      set({ selectedId: null, selectedIds: [], selectedTrack: null, selectionMode: false });
       return;
     }
+    // 摘要行不能冒充完整 Track；保留同一首已经取回的详情，换歌时再按需读取。
+    if (get().selectedTrack?.id !== id) set({ selectedTrack: null });
     const { selectedId, selectedIds, tracks } = get();
     if (mode === "toggle") {
       // Cmd/Ctrl 点：加进去或拿出来。锚点跟着最后动的那一条走。
@@ -530,6 +719,7 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
       const nextSelectedId = has ? (next[next.length - 1] ?? null) : id;
       updateLocalWorkspaceSession({ selectedId: nextSelectedId });
       set({ selectedIds: next, selectedId: nextSelectedId });
+      void get().ensureSelectedTrack(nextSelectedId);
       return;
     }
     if (mode === "range" && selectedId !== null) {
@@ -540,14 +730,17 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
         const [lo, hi] = from <= to ? [from, to] : [to, from];
         updateLocalWorkspaceSession({ selectedId: id });
         set({ selectedIds: tracks.slice(lo, hi + 1).map((track) => track.id), selectedId: id });
+        void get().ensureSelectedTrack(id);
         return;
       }
     }
     updateLocalWorkspaceSession({ selectedId: id });
     set({ selectedId: id, selectedIds: [id] });
+    void get().ensureSelectedTrack(id);
   },
 
   selectTrack(track) {
+    selectedDetailRequestSeq += 1;
     updateLocalWorkspaceSession({ selectedId: track.id });
     set({ selectedId: track.id, selectedIds: [track.id], selectedTrack: track });
   },
@@ -624,8 +817,8 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
       });
       await Promise.all([get().refresh(), get().refreshFolders(), get().refreshStats()]);
       if (restoredIds && restoredIds.length > 0) {
-        const restoredTrack = get().tracks.find((track) => track.id === restoredIds[0]) ?? null;
-        set({ selectedTrack: restoredTrack });
+        set({ selectedTrack: null });
+        void get().ensureSelectedTrack(restoredIds[0]);
       }
       const failures = Object.values(result.errors);
       if (failures.length > 0) {
@@ -719,7 +912,7 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   async updateTrack(id, patch) {
     const track = await api.patchTrack(id, patch);
     set({
-      tracks: get().tracks.map((item) => (item.id === id ? track : item)),
+      tracks: get().tracks.map((item) => (item.id === id ? toTrackSummary(track) : item)),
       selectedTrack: get().selectedTrack?.id === id ? track : get().selectedTrack,
     });
     return track;
@@ -728,7 +921,7 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   async writeTags(id) {
     const track = await api.writeTags(id);
     set({
-      tracks: get().tracks.map((item) => (item.id === id ? track : item)),
+      tracks: get().tracks.map((item) => (item.id === id ? toTrackSummary(track) : item)),
       selectedTrack: get().selectedTrack?.id === id ? track : get().selectedTrack,
     });
     return track;
@@ -737,7 +930,7 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   async setCover(id, file) {
     const track = await api.setCover(id, file);
     set({
-      tracks: get().tracks.map((item) => (item.id === id ? track : item)),
+      tracks: get().tracks.map((item) => (item.id === id ? toTrackSummary(track) : item)),
       selectedTrack: get().selectedTrack?.id === id ? track : get().selectedTrack,
     });
     return track;
@@ -746,7 +939,7 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
   async rereadTags(id) {
     const track = await api.rereadTags(id);
     set({
-      tracks: get().tracks.map((item) => (item.id === id ? track : item)),
+      tracks: get().tracks.map((item) => (item.id === id ? toTrackSummary(track) : item)),
       selectedTrack: get().selectedTrack?.id === id ? track : get().selectedTrack,
     });
     return track;
@@ -792,7 +985,7 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
             : (nextTracks[Math.min(focusIndex, nextTracks.length - 1)] ?? null);
         nextSelectedId = neighbor?.id ?? null;
         nextSelectedIds = neighbor ? [neighbor.id] : [];
-        nextSelectedTrack = neighbor;
+        nextSelectedTrack = null;
       } else if (nextSelectedId === null && nextSelectedIds.length > 0) {
         nextSelectedId = nextSelectedIds[nextSelectedIds.length - 1] ?? null;
       }
@@ -807,8 +1000,11 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
             ? null
             : nextSelectedTrack?.id === nextSelectedId
               ? nextSelectedTrack
-              : (nextTracks.find((track) => track.id === nextSelectedId) ?? null),
+              : null,
       });
+      if (nextSelectedId !== null && nextSelectedTrack?.id !== nextSelectedId) {
+        void get().ensureSelectedTrack(nextSelectedId);
+      }
       void get().refreshStats();
       void get().refreshFolders();
     }
@@ -882,12 +1078,13 @@ export const useLibraryStore = create<LibraryStore>()((set, get) => ({
         return;
       }
       case "library.updated": {
-        // 分析是一条一条回推的，直接 refresh 会打出一串请求；
-        // 借 setFilter 同一套防抖把连续事件合并成一次拉取。
-        cancelPending();
-        filterTimer = setTimeout(() => {
-          filterTimer = null;
-          void get().refresh();
+        for (const id of event.payload.track_ids) pendingLibraryUpdateIds.add(id);
+        if (libraryUpdateTimer !== null) clearTimeout(libraryUpdateTimer);
+        libraryUpdateTimer = setTimeout(() => {
+          libraryUpdateTimer = null;
+          const ids = [...pendingLibraryUpdateIds];
+          pendingLibraryUpdateIds.clear();
+          void get().refreshTrackSummaries(ids);
           void get().refreshStats();
         }, FILTER_DEBOUNCE_MS);
         return;
@@ -914,10 +1111,8 @@ export function selectAnalyzing(state: LibraryStore): boolean {
   return job !== null && (job.total === 0 || job.done < job.total);
 }
 
-/** 当前选中的曲目。优先取当前页的（最新），页外回落到 selectTrack 暂存的对象。 */
+/** 当前选中的完整曲目；列表摘要绝不冒充带拍点/Cue/标签的 Track。 */
 export function selectSelectedTrack(state: LibraryStore): Track | null {
   if (state.selectedId === null) return null;
-  const inPage = state.tracks.find((track) => track.id === state.selectedId);
-  if (inPage) return inPage;
   return state.selectedTrack?.id === state.selectedId ? state.selectedTrack : null;
 }

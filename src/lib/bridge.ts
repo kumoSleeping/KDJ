@@ -46,6 +46,14 @@ function silenceMediaForExit(): void {
       media.muted = true;
       media.volume = 0;
       media.pause();
+      // pause 不会取消 preload/Range；显式拆源，退出过程不再等待卡住的媒体管线。
+      if (typeof MediaStream !== "undefined" && media.srcObject instanceof MediaStream) {
+        for (const track of media.srcObject.getTracks()) track.stop();
+        media.srcObject = null;
+      }
+      media.removeAttribute("src");
+      for (const source of media.querySelectorAll("source")) source.removeAttribute("src");
+      media.load();
     }
   } catch {
     /* 拆页途中 DOM / 音频图可能已半死 */
@@ -165,8 +173,13 @@ async function createTauriBridge(): Promise<KdjBridge> {
             tauriInvoke<void>("start_native_file_drag", { paths, dragImage })
         : undefined,
     startLinkDrag: info.platform === "darwin"
-      ? ({ url, label: _label, text, dragImage }) =>
-          tauriInvoke<void>("start_native_link_drag", { url, text, dragImage })
+      ? ({ url, label: _label, text, dragImage, includeArtwork }) =>
+          tauriInvoke<void>("start_native_link_drag", {
+            url,
+            text,
+            dragImage,
+            includeArtwork,
+          })
       : undefined,
     writeShareClipboard: info.platform === "darwin"
       ? (options) => tauriInvoke<void>("write_share_clipboard", options)
@@ -186,6 +199,9 @@ async function createTauriBridge(): Promise<KdjBridge> {
     openExternal: (url: string) => tauriInvoke<void>("open_external", { url }),
     openSoundcloudOAuth: desktop
       ? (url: string) => tauriInvoke<void>("open_soundcloud_oauth_window", { url })
+      : undefined,
+    openSoundcloudWebLogin: desktop
+      ? () => tauriInvoke<void>("open_soundcloud_web_login_window")
       : undefined,
     // 检查也必须走 updater 本身，不能先问 GitHub releases/latest：Release 先建、
     // 三平台包后到的窗口里，后者会谎报"可更新"，真正安装时才发现 latest.json

@@ -1,4 +1,4 @@
-import type { SongSource, Track } from "../types";
+import type { SongSource, TrackSummary } from "../types";
 
 export const TRACK_DRAG_STATE_EVENT = "kd:track-drag-state";
 export const TRACK_TRASH_DROP_EVENT = "kd:track-trash-drop";
@@ -166,9 +166,9 @@ export interface SystemFileDragPayload {
  * 源曲目不在选区时只拖它，避免“点住一首却把旧选区一起带走”。
  */
 export function systemFileDragPayload(
-  tracks: readonly Track[],
+  tracks: readonly TrackSummary[],
   selectedIds: readonly number[],
-  source: Track,
+  source: TrackSummary,
 ): SystemFileDragPayload {
   const byId = new Map(tracks.map((track) => [track.id, track]));
   const ids = selectedIds.includes(source.id) ? selectedIds : [source.id];

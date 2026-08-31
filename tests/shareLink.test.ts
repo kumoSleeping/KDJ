@@ -184,7 +184,7 @@ test("malformed platform keys never become links", () => {
   assert.equal(platformShareLink("bilibili", "not-a-bvid"), null);
 });
 
-test("share text supports original, compact, and detailed modes", () => {
+test("more info keeps compact text and only adds the KDJ watermark", () => {
   const link = "https://y.music.163.com/m/song?id=347230";
   const info = { title: "海阔天空", artists: ["Beyond"], album: "乐与怒" };
 
@@ -196,7 +196,7 @@ test("share text supports original, compact, and detailed modes", () => {
   assert.equal(
     formatShareText(link, info, "more_info"),
     [
-      `歌曲：海阔天空 · 艺术家：Beyond · 专辑：乐与怒 · 来源：网易云音乐 · 链接：${link}`,
+      `海阔天空 - Beyond ${link}`,
       `Share from KDJ v${packageInfo.version}`,
     ].join("\n"),
   );
@@ -250,12 +250,12 @@ test("detailed sharing starts the clipboard write before artwork finishes", asyn
           write: async (items: ClipboardItem[]) => {
             calls.push("write");
             assert.equal(items.length, 2);
-            const image = items[0] as unknown as TestClipboardItem;
-            const copy = items[1] as unknown as TestClipboardItem;
-            assert.deepEqual(Object.keys(image.payload), ["image/png"]);
-            assert.equal(image.options?.presentationStyle, "attachment");
+            const copy = items[0] as unknown as TestClipboardItem;
+            const image = items[1] as unknown as TestClipboardItem;
             assert.deepEqual(Object.keys(copy.payload), ["text/html", "text/plain"]);
             assert.equal(copy.options?.presentationStyle, "inline");
+            assert.deepEqual(Object.keys(image.payload), ["image/png"]);
+            assert.equal(image.options?.presentationStyle, "attachment");
             await image.payload["image/png"];
           },
         },

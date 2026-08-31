@@ -4,7 +4,7 @@ import type { KdjBridge } from "../src/types";
 
 interface Calls {
   open: Array<{ bvid: string; page: number }>;
-  controls: string[];
+  controls: Array<{ action: string; value?: number }>;
   close: number;
 }
 
@@ -25,8 +25,8 @@ function installBridge(): Calls {
       duration: 212,
       hasError: false,
     }),
-    control: async (_bvid, _page, action) => {
-      calls.controls.push(action);
+    control: async (_bvid, _page, action, value) => {
+      calls.controls.push({ action, value });
     },
     close: async () => {
       calls.close += 1;
@@ -45,7 +45,11 @@ function installBridge(): Calls {
       addEventListener: events.addEventListener.bind(events),
       removeEventListener: events.removeEventListener.bind(events),
       dispatchEvent: events.dispatchEvent.bind(events),
-      setTimeout: globalThis.setTimeout.bind(globalThis),
+      setTimeout: ((callback: () => void, delay?: number) => {
+        const timer = globalThis.setTimeout(callback, delay);
+        timer.unref();
+        return timer;
+      }) as unknown as typeof window.setTimeout,
       clearTimeout: globalThis.clearTimeout.bind(globalThis),
     }),
     document: {
@@ -65,6 +69,7 @@ test("official Bilibili controller preserves bvid and zero-based page", async ()
     bvid: "BV1xx411c7mD",
     page: 2,
     muted: false,
+    volume: 0.4,
     bounds: { x: 10, y: 20, width: 640, height: 360 },
     onStatus: () => undefined,
     onError: (error) => assert.fail(error.message),
@@ -76,6 +81,10 @@ test("official Bilibili controller preserves bvid and zero-based page", async ()
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
   assert.deepEqual(calls.open, [{ bvid: "BV1xx411c7mD", page: 2 }]);
-  assert.deepEqual(calls.controls, ["play", "seek"]);
+  assert.deepEqual(calls.controls, [
+    { action: "volume", value: 0.4 },
+    { action: "play", value: undefined },
+    { action: "seek", value: 42 },
+  ]);
   assert.equal(calls.close, 1);
 });

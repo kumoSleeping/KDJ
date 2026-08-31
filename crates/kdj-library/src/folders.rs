@@ -338,7 +338,13 @@ fn norm(path: &Path) -> PathBuf {
 }
 
 fn within(child: &Path, parent: &Path) -> bool {
-    child == parent || child.starts_with(parent)
+    kdj_core::paths::is_within(parent, child)
+}
+
+fn is_root(path: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .any(|root| kdj_core::paths::paths_equivalent(root, path))
 }
 
 /// 确认 dest 在某个曲库根目录里（含根目录本身），返回归一化后的绝对路径。
@@ -377,7 +383,11 @@ pub fn resolve_roots(dirs: &[String]) -> Vec<PathBuf> {
             continue;
         }
         let path = norm(Path::new(item));
-        if path.is_dir() && !seen.contains(&path) {
+        if path.is_dir()
+            && !seen
+                .iter()
+                .any(|existing| kdj_core::paths::paths_equivalent(existing, &path))
+        {
             seen.push(path);
         }
     }
@@ -838,7 +848,7 @@ pub fn build_tree(dirs: &[String], track_paths: &[String]) -> FolderTree {
     for path in track_paths {
         if let Some(parent) = Path::new(path).parent() {
             *counts
-                .entry(parent.to_string_lossy().into_owned())
+                .entry(kdj_core::paths::path_identity(parent))
                 .or_insert(0) += 1;
         }
     }
@@ -874,7 +884,7 @@ fn walk(directory: &Path, counts: &HashMap<String, i64>, depth: usize) -> Folder
     }
 
     let direct = counts
-        .get(&directory.to_string_lossy().into_owned())
+        .get(&kdj_core::paths::path_identity(directory))
         .copied()
         .unwrap_or(0);
     FolderNode {
@@ -934,7 +944,7 @@ pub fn rename_folder(path: &Path, name: &str, roots: &[PathBuf]) -> Result<PathB
     let clean = validate_name(name)?;
     let source = ensure_inside(path, roots)?;
     anyhow::ensure!(
-        !roots.contains(&source),
+        !is_root(&source, roots),
         "曲库根目录不能在这里改名，去设置里改"
     );
     anyhow::ensure!(source.is_dir(), "文件夹不存在");
@@ -955,7 +965,7 @@ pub fn move_folder(
 ) -> Result<(PathBuf, PathBuf)> {
     let source = ensure_inside(source_path, roots)?;
     let parent = ensure_inside(dest_parent, roots)?;
-    anyhow::ensure!(!roots.contains(&source), "曲库根目录不能拖动，去设置里改");
+    anyhow::ensure!(!is_root(&source, roots), "曲库根目录不能拖动，去设置里改");
     anyhow::ensure!(source.is_dir(), "文件夹不存在");
     anyhow::ensure!(parent.is_dir(), "目标不是文件夹");
     anyhow::ensure!(!within(&parent, &source), "不能把文件夹拖进它自己里面");
@@ -1024,7 +1034,7 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
 pub fn delete_folder(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
     let target = ensure_inside(path, roots)?;
     anyhow::ensure!(
-        !roots.contains(&target),
+        !is_root(&target, roots),
         "曲库根目录不能在这里删除，去设置里移除"
     );
     anyhow::ensure!(target.is_dir(), "文件夹不存在");

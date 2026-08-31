@@ -458,10 +458,19 @@ pub async fn youtube_embed_control(
         return Err("YouTube 视频编号无效".into());
     }
     let operation = match action.as_str() {
-        "play" => "player.playVideo();",
-        "pause" => "player.pauseVideo();",
-        "mute" => "player.mute();",
-        "unmute" => "player.unMute();",
+        "play" => "player.playVideo();".to_string(),
+        "pause" => "player.pauseVideo();".to_string(),
+        "mute" => "player.mute();".to_string(),
+        "unmute" => "player.unMute();".to_string(),
+        "volume" => {
+            let target = value
+                .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 1.0)
+                .ok_or_else(|| "YouTube 播放器音量无效".to_string())?;
+            let percent = target * 100.0;
+            format!(
+                "player.setVolume({percent}); if ({target} <= 0) player.mute(); else player.unMute();"
+            )
+        }
         "seek" => {
             let target = value
                 .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 31_536_000.0)

@@ -131,13 +131,10 @@ function writeClipboardItems(
     // WebKit 要求 write 本身必须在点击手势的同步调用栈内发生，PNG
     // 可以作为 Promise 延后交付，不能先 await 封面再调 write。
     const png = loadPng();
-    // QQ for macOS 会预览 HTML data URL，却无法在发送时把它上传成图片。
-    // 把真实 PNG 放在第一个 pasteboard item，文字放在第二个 item，既让
-    // 接收端得到可上传的图片附件，也明确保证封面排在文字之前。
+    // 某些 WebView 仍会把多 item 折叠成第一项。富文本正文是不可丢的主载荷，
+    // 因此先放文字、再放真实 PNG；macOS Tauri 壳会在下方改走单项 RTFD，
+    // 支持富文本的接收端仍能一次拿到图片和文字。
     const pending = navigator.clipboard.write([
-      new ClipboardItem({
-        "image/png": png,
-      }, { presentationStyle: "attachment" }),
       new ClipboardItem({
         "text/html": Promise.resolve(new Blob(
           [buildShareClipboardTextHtml(text)],
@@ -145,6 +142,9 @@ function writeClipboardItems(
         )),
         "text/plain": Promise.resolve(new Blob([text], { type: "text/plain" })),
       }, { presentationStyle: "inline" }),
+      new ClipboardItem({
+        "image/png": png,
+      }, { presentationStyle: "attachment" }),
     ]);
     return pending.then(() => true, () => false);
   } catch {

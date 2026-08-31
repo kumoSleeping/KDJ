@@ -212,7 +212,7 @@ export function LibraryWorkRail({
       useLibraryStore.getState().setFilter({
         folder: "",
         q: "",
-        sort: "added_at",
+        sort: "file_created_at",
         order: "desc",
       });
       await waitLoading();

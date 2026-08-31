@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS tracks (
   added_at TEXT NOT NULL,
   modified_at TEXT NOT NULL,
   file_mtime REAL,
+  file_created_at REAL,
   analysis_error TEXT
 );
 CREATE TABLE IF NOT EXISTS playlists (
@@ -143,6 +144,8 @@ CREATE INDEX IF NOT EXISTS idx_tracks_camelot ON tracks(camelot);
 CREATE INDEX IF NOT EXISTS idx_tracks_bpm ON tracks(bpm);
 CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(path);
+CREATE INDEX IF NOT EXISTS idx_tracks_file_created_at
+  ON tracks(file_created_at DESC, file_mtime DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
 CREATE INDEX IF NOT EXISTS idx_playlists_name ON playlists(name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_playlist_items_position
@@ -190,6 +193,7 @@ const MIGRATION_COLUMNS: &[(&str, &str)] = &[
     ("source_key", "TEXT"),
     ("analyzed_at", "TEXT"),
     ("file_mtime", "REAL"),
+    ("file_created_at", "REAL"),
     ("analysis_error", "TEXT"),
 ];
 
@@ -316,8 +320,170 @@ impl Database {
 
         conn.execute_batch(INDEX_SQL).context("建索引失败")?;
         migrate_key_notations(&mut conn)?;
+        #[cfg(windows)]
+        repair_case_insensitive_path_duplicates(&mut conn, true)?;
         Ok(())
     }
+}
+
+/// Windows 文件系统通常把路径大小写视为同一位置；旧版数据库的 `UNIQUE(path)`
+/// 却是区分大小写的。用户重新选择 `d:\music` 后，历史 `D:\Music` 行会整批变成
+/// 「其他」，扫描还可能再插入一份。修复以最早的 id 为主记录，先合并所有不可重建
+/// 元数据和关系，再删除重复行；全部操作在一个事务内完成。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PathDuplicateRepairReport {
+    pub groups: usize,
+    pub removed_tracks: usize,
+}
+
+#[cfg(any(windows, test))]
+fn windows_path_identity_text(path: &str) -> String {
+    let mut key = path.replace('/', "\\");
+    if let Some(rest) = key.strip_prefix("\\\\?\\UNC\\") {
+        key = format!("\\\\{rest}");
+    } else if let Some(rest) = key.strip_prefix("\\\\?\\") {
+        key = rest.to_string();
+    }
+    key.to_lowercase()
+}
+
+#[cfg(any(windows, test))]
+fn repair_case_insensitive_path_duplicates(
+    conn: &mut rusqlite::Connection,
+    create_unique_index: bool,
+) -> Result<PathDuplicateRepairReport> {
+    use std::collections::BTreeMap;
+
+    const INDEX: &str = "idx_tracks_path_windows_nocase";
+    let index_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)",
+        [INDEX],
+        |row| row.get(0),
+    )?;
+    if index_exists {
+        return Ok(PathDuplicateRepairReport::default());
+    }
+
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare("SELECT id, path FROM tracks ORDER BY id")?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        rows
+    };
+    let mut groups: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    for (id, path) in rows {
+        groups
+            .entry(windows_path_identity_text(&path))
+            .or_default()
+            .push(id);
+    }
+
+    let tx = conn
+        .transaction()
+        .context("开始 Windows 重复路径修复事务失败")?;
+    let mut report = PathDuplicateRepairReport::default();
+    for ids in groups.values().filter(|ids| ids.len() > 1) {
+        report.groups += 1;
+        let target = ids[0];
+        for source in ids.iter().copied().skip(1) {
+            // 最早的行通常是升级前的原记录，人工评分/Cue/备注和已经跑完的分析都应
+            // 优先保留；只有目标为空、0、[] 或 NULL 时才从新扫描副本补值。
+            tx.execute(
+                "UPDATE tracks SET \
+                   filename = CASE WHEN TRIM(COALESCE(filename, '')) = '' THEN (SELECT filename FROM tracks WHERE id = ?1) ELSE filename END, \
+                   title = CASE WHEN TRIM(COALESCE(title, '')) = '' THEN (SELECT title FROM tracks WHERE id = ?1) ELSE title END, \
+                   artist = CASE WHEN TRIM(COALESCE(artist, '')) = '' THEN (SELECT artist FROM tracks WHERE id = ?1) ELSE artist END, \
+                   album = CASE WHEN TRIM(COALESCE(album, '')) = '' THEN (SELECT album FROM tracks WHERE id = ?1) ELSE album END, \
+                   genre = CASE WHEN TRIM(COALESCE(genre, '')) = '' THEN (SELECT genre FROM tracks WHERE id = ?1) ELSE genre END, \
+                   year = CASE WHEN TRIM(COALESCE(year, '')) = '' THEN (SELECT year FROM tracks WHERE id = ?1) ELSE year END, \
+                   duration = COALESCE(duration, (SELECT duration FROM tracks WHERE id = ?1)), \
+                   bitrate = COALESCE(bitrate, (SELECT bitrate FROM tracks WHERE id = ?1)), \
+                   samplerate = COALESCE(samplerate, (SELECT samplerate FROM tracks WHERE id = ?1)), \
+                   channels = COALESCE(channels, (SELECT channels FROM tracks WHERE id = ?1)), \
+                   format = CASE WHEN TRIM(COALESCE(format, '')) = '' THEN (SELECT format FROM tracks WHERE id = ?1) ELSE format END, \
+                   size = CASE WHEN COALESCE(size, 0) = 0 THEN (SELECT size FROM tracks WHERE id = ?1) ELSE size END, \
+                   bpm = COALESCE(bpm, (SELECT bpm FROM tracks WHERE id = ?1)), \
+                   bpm_confidence = COALESCE(bpm_confidence, (SELECT bpm_confidence FROM tracks WHERE id = ?1)), \
+                   first_beat = COALESCE(first_beat, (SELECT first_beat FROM tracks WHERE id = ?1)), \
+                   music_key = CASE WHEN TRIM(COALESCE(music_key, '')) = '' THEN (SELECT music_key FROM tracks WHERE id = ?1) ELSE music_key END, \
+                   camelot = CASE WHEN TRIM(COALESCE(camelot, '')) = '' THEN (SELECT camelot FROM tracks WHERE id = ?1) ELSE camelot END, \
+                   open_key = CASE WHEN TRIM(COALESCE(open_key, '')) = '' THEN (SELECT open_key FROM tracks WHERE id = ?1) ELSE open_key END, \
+                   key_confidence = COALESCE(key_confidence, (SELECT key_confidence FROM tracks WHERE id = ?1)), \
+                   energy = COALESCE(energy, (SELECT energy FROM tracks WHERE id = ?1)), \
+                   rms_db = COALESCE(rms_db, (SELECT rms_db FROM tracks WHERE id = ?1)), \
+                   peak_db = COALESCE(peak_db, (SELECT peak_db FROM tracks WHERE id = ?1)), \
+                   rating = MAX(COALESCE(rating, 0), COALESCE((SELECT rating FROM tracks WHERE id = ?1), 0)), \
+                   color = CASE WHEN TRIM(COALESCE(color, '')) = '' THEN (SELECT color FROM tracks WHERE id = ?1) ELSE color END, \
+                   comment = CASE WHEN TRIM(COALESCE(comment, '')) = '' THEN (SELECT comment FROM tracks WHERE id = ?1) ELSE comment END, \
+                   cue_ms = COALESCE(cue_ms, (SELECT cue_ms FROM tracks WHERE id = ?1)), \
+                   end_ms = COALESCE(end_ms, (SELECT end_ms FROM tracks WHERE id = ?1)), \
+                   cue_points_json = CASE WHEN TRIM(COALESCE(cue_points_json, '')) IN ('', '[]') THEN (SELECT cue_points_json FROM tracks WHERE id = ?1) ELSE cue_points_json END, \
+                   cue_points_managed = MAX(COALESCE(cue_points_managed, 0), COALESCE((SELECT cue_points_managed FROM tracks WHERE id = ?1), 0)), \
+                   source_platform = CASE WHEN TRIM(COALESCE(source_platform, '')) IN ('', 'local') THEN COALESCE((SELECT source_platform FROM tracks WHERE id = ?1), source_platform) ELSE source_platform END, \
+                   source_key = CASE WHEN TRIM(COALESCE(source_key, '')) = '' THEN (SELECT source_key FROM tracks WHERE id = ?1) ELSE source_key END, \
+                   analyzed_at = COALESCE(analyzed_at, (SELECT analyzed_at FROM tracks WHERE id = ?1)), \
+                   file_mtime = MAX(COALESCE(file_mtime, 0), COALESCE((SELECT file_mtime FROM tracks WHERE id = ?1), 0)), \
+                   file_created_at = CASE \
+                     WHEN COALESCE(file_created_at, 0) <= 0 THEN COALESCE((SELECT file_created_at FROM tracks WHERE id = ?1), file_created_at) \
+                     WHEN COALESCE((SELECT file_created_at FROM tracks WHERE id = ?1), 0) <= 0 THEN file_created_at \
+                     ELSE MIN(file_created_at, (SELECT file_created_at FROM tracks WHERE id = ?1)) END, \
+                   analysis_error = CASE WHEN TRIM(COALESCE(analysis_error, '')) = '' AND analyzed_at IS NULL THEN (SELECT analysis_error FROM tracks WHERE id = ?1) ELSE analysis_error END, \
+                   modified_at = MAX(modified_at, COALESCE((SELECT modified_at FROM tracks WHERE id = ?1), modified_at)) \
+                 WHERE id = ?2",
+                rusqlite::params![source, target],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO tags (track_id, tag) SELECT ?1, tag FROM tags WHERE track_id = ?2",
+                rusqlite::params![target, source],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO playlist_items (playlist_id, track_id, position) \
+                 SELECT playlist_id, ?1, position FROM playlist_items WHERE track_id = ?2",
+                rusqlite::params![target, source],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO waveform_assets \
+                 (track_id, profile, revision, file_mtime, generated_at, error) \
+                 SELECT ?1, profile, revision, file_mtime, generated_at, error \
+                 FROM waveform_assets WHERE track_id = ?2",
+                rusqlite::params![target, source],
+            )?;
+            for table in ["track_bpm_key_analysis_v2", "track_bpm_key_analysis_v3"] {
+                tx.execute(
+                    &format!(
+                        "INSERT OR IGNORE INTO {table} \
+                         (track_id, analyzer_revision, bpm, bpm_raw, bpm_confidence, first_beat, \
+                          beat_origin, beat_times_json, downbeat_origin, downbeats_json, \
+                          downbeat_confidence, music_key, key_short, camelot, open_key, \
+                          key_confidence, chroma_json, analyzed_at, analysis_error) \
+                         SELECT ?1, analyzer_revision, bpm, bpm_raw, bpm_confidence, first_beat, \
+                          beat_origin, beat_times_json, downbeat_origin, downbeats_json, \
+                          downbeat_confidence, music_key, key_short, camelot, open_key, \
+                          key_confidence, chroma_json, analyzed_at, analysis_error \
+                         FROM {table} WHERE track_id = ?2"
+                    ),
+                    rusqlite::params![target, source],
+                )?;
+            }
+            tx.execute("DELETE FROM tags WHERE track_id = ?", [source])?;
+            tx.execute("DELETE FROM playlist_items WHERE track_id = ?", [source])?;
+            tx.execute("DELETE FROM waveform_assets WHERE track_id = ?", [source])?;
+            for table in ["track_bpm_key_analysis_v2", "track_bpm_key_analysis_v3"] {
+                tx.execute(&format!("DELETE FROM {table} WHERE track_id = ?"), [source])?;
+            }
+            tx.execute("DELETE FROM tracks WHERE id = ?", [source])?;
+            report.removed_tracks += 1;
+        }
+    }
+    if create_unique_index {
+        tx.execute_batch(&format!(
+            "CREATE UNIQUE INDEX IF NOT EXISTS {INDEX} ON tracks(path COLLATE NOCASE)"
+        ))
+        .context("建立 Windows 路径唯一索引失败")?;
+    }
+    tx.commit().context("提交 Windows 重复路径修复失败")?;
+    Ok(report)
 }
 
 /// 旧库曾可能只保存自由文本 `music_key`。这里只补空的派生列，
@@ -444,9 +610,14 @@ fn prepare_journal_mode(path: &Path) -> Result<()> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DatabaseMergeReport {
     pub tracks: usize,
+    /// 当前已有同一路径时，从旧库补回的空字段数量；现有非空编辑从不覆盖。
+    pub field_values: usize,
     pub tags: usize,
     pub playlists: usize,
     pub playlist_items: usize,
+    pub waveform_assets: usize,
+    pub analysis_v2: usize,
+    pub analysis_v3: usize,
 }
 
 pub fn merge_legacy_database(canonical: &Path, legacy: &Path) -> Result<DatabaseMergeReport> {
@@ -500,12 +671,131 @@ pub fn merge_legacy_database(canonical: &Path, legacy: &Path) -> Result<Database
             &format!("INSERT OR IGNORE INTO tracks ({all}) SELECT {all} FROM legacy.tracks"),
             [],
         )?;
-        let without_id: Vec<String> = common.into_iter().filter(|name| name != "id").collect();
+        let without_id: Vec<String> = common
+            .iter()
+            .filter(|name| name.as_str() != "id")
+            .cloned()
+            .collect();
         let body = quoted(&without_id);
         report.tracks += tx.execute(
             &format!("INSERT OR IGNORE INTO tracks ({body}) SELECT {body} FROM legacy.tracks"),
             [],
         )?;
+
+        #[cfg(windows)]
+        const PATH_JOIN: &str = "source.path = tracks.path COLLATE NOCASE";
+        #[cfg(not(windows))]
+        const PATH_JOIN: &str = "source.path = tracks.path";
+        #[cfg(windows)]
+        const CURRENT_SOURCE_JOIN: &str = "current.path = source.path COLLATE NOCASE";
+        #[cfg(not(windows))]
+        const CURRENT_SOURCE_JOIN: &str = "current.path = source.path";
+        #[cfg(windows)]
+        const CURRENT_SOURCE_TRACK_JOIN: &str = "current.path = source_track.path COLLATE NOCASE";
+        #[cfg(not(windows))]
+        const CURRENT_SOURCE_TRACK_JOIN: &str = "current.path = source_track.path";
+
+        let has_column = |name: &str| common.iter().any(|column| column == name);
+        // 用户在新版本里已经重新添加/扫描过同一文件时，不能让 INSERT OR IGNORE
+        // 把旧评分、Cue 和分析一起丢掉。只补当前为空的格子，任何现有非空值都保留。
+        for name in [
+            "title",
+            "artist",
+            "album",
+            "genre",
+            "year",
+            "format",
+            "music_key",
+            "camelot",
+            "open_key",
+            "color",
+            "comment",
+            "source_key",
+            "analyzed_at",
+        ] {
+            if !has_column(name) {
+                continue;
+            }
+            let column = format!("\"{}\"", name.replace('"', "\"\""));
+            report.field_values += tx.execute(
+                &format!(
+                    "UPDATE tracks SET {column} = (SELECT source.{column} FROM legacy.tracks source \
+                     WHERE {PATH_JOIN} AND TRIM(COALESCE(source.{column}, '')) != '' LIMIT 1) \
+                     WHERE TRIM(COALESCE({column}, '')) = '' AND EXISTS \
+                     (SELECT 1 FROM legacy.tracks source WHERE {PATH_JOIN} \
+                      AND TRIM(COALESCE(source.{column}, '')) != '')"
+                ),
+                [],
+            )?;
+        }
+        for name in [
+            "duration",
+            "bitrate",
+            "samplerate",
+            "channels",
+            "size",
+            "bpm",
+            "bpm_confidence",
+            "first_beat",
+            "key_confidence",
+            "energy",
+            "rms_db",
+            "peak_db",
+            "cue_ms",
+            "end_ms",
+            "file_mtime",
+            "file_created_at",
+        ] {
+            if !has_column(name) {
+                continue;
+            }
+            let column = format!("\"{}\"", name.replace('"', "\"\""));
+            report.field_values += tx.execute(
+                &format!(
+                    "UPDATE tracks SET {column} = (SELECT source.{column} FROM legacy.tracks source \
+                     WHERE {PATH_JOIN} AND source.{column} IS NOT NULL LIMIT 1) \
+                     WHERE {column} IS NULL AND EXISTS \
+                     (SELECT 1 FROM legacy.tracks source WHERE {PATH_JOIN} \
+                      AND source.{column} IS NOT NULL)"
+                ),
+                [],
+            )?;
+        }
+        if has_column("rating") {
+            report.field_values += tx.execute(
+                &format!(
+                    "UPDATE tracks SET rating = (SELECT source.rating FROM legacy.tracks source \
+                     WHERE {PATH_JOIN} AND COALESCE(source.rating, 0) > 0 LIMIT 1) \
+                     WHERE COALESCE(rating, 0) = 0 AND EXISTS \
+                     (SELECT 1 FROM legacy.tracks source WHERE {PATH_JOIN} \
+                      AND COALESCE(source.rating, 0) > 0)"
+                ),
+                [],
+            )?;
+        }
+        if has_column("cue_points_json") {
+            report.field_values += tx.execute(
+                &format!(
+                    "UPDATE tracks SET cue_points_json = \
+                     (SELECT source.cue_points_json FROM legacy.tracks source WHERE {PATH_JOIN} \
+                      AND TRIM(COALESCE(source.cue_points_json, '')) NOT IN ('', '[]') LIMIT 1) \
+                     WHERE TRIM(COALESCE(cue_points_json, '')) IN ('', '[]') AND EXISTS \
+                     (SELECT 1 FROM legacy.tracks source WHERE {PATH_JOIN} \
+                      AND TRIM(COALESCE(source.cue_points_json, '')) NOT IN ('', '[]'))"
+                ),
+                [],
+            )?;
+        }
+        if has_column("cue_points_managed") {
+            report.field_values += tx.execute(
+                &format!(
+                    "UPDATE tracks SET cue_points_managed = 1 WHERE COALESCE(cue_points_managed, 0) = 0 \
+                     AND EXISTS (SELECT 1 FROM legacy.tracks source WHERE {PATH_JOIN} \
+                     AND COALESCE(source.cue_points_managed, 0) != 0)"
+                ),
+                [],
+            )?;
+        }
 
         let legacy_has = |table: &str| -> Result<bool> {
             let count: i64 = tx.query_row(
@@ -517,13 +807,63 @@ pub fn merge_legacy_database(canonical: &Path, legacy: &Path) -> Result<Database
         };
         if legacy_has("tags")? {
             report.tags = tx.execute(
-                "INSERT OR IGNORE INTO tags (track_id, tag) \
+                &format!(
+                    "INSERT OR IGNORE INTO tags (track_id, tag) \
                  SELECT current.id, source_tag.tag FROM legacy.tags source_tag \
                  JOIN legacy.tracks source ON source.id = source_tag.track_id \
-                 JOIN tracks current ON current.path = source.path",
+                 JOIN tracks current ON {CURRENT_SOURCE_JOIN}"
+                ),
                 [],
             )?;
         }
+
+        let merge_track_asset = |table: &str| -> Result<usize> {
+            if !legacy_has(table)? {
+                return Ok(0);
+            }
+            let table_columns = |schema: &str| -> Result<Vec<String>> {
+                let mut stmt = tx.prepare(&format!("PRAGMA {schema}.table_info({table})"))?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(rows)
+            };
+            let current_columns = table_columns("main")?;
+            let legacy_columns = table_columns("legacy")?;
+            let common_asset: Vec<String> = current_columns
+                .into_iter()
+                .filter(|name| name != "track_id" && legacy_columns.contains(name))
+                .collect();
+            if !legacy_columns.iter().any(|name| name == "track_id") {
+                return Ok(0);
+            }
+            let target_columns = if common_asset.is_empty() {
+                "track_id".to_string()
+            } else {
+                format!("track_id, {}", quoted(&common_asset))
+            };
+            let source_columns = common_asset
+                .iter()
+                .map(|name| format!("source_asset.\"{}\"", name.replace('"', "\"\"")))
+                .collect::<Vec<_>>();
+            let source_columns = if source_columns.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", source_columns.join(", "))
+            };
+            Ok(tx.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO {table} ({target_columns}) \
+                     SELECT current.id{source_columns} FROM legacy.{table} source_asset \
+                     JOIN legacy.tracks source_track ON source_track.id = source_asset.track_id \
+                     JOIN tracks current ON {CURRENT_SOURCE_TRACK_JOIN}"
+                ),
+                [],
+            )?)
+        };
+        report.waveform_assets = merge_track_asset("waveform_assets")?;
+        report.analysis_v2 = merge_track_asset("track_bpm_key_analysis_v2")?;
+        report.analysis_v3 = merge_track_asset("track_bpm_key_analysis_v3")?;
 
         if legacy_has("playlists")? && legacy_has("playlist_items")? {
             let source_playlists: Vec<(i64, String, String, String)> = {
@@ -555,12 +895,14 @@ pub fn merge_legacy_database(canonical: &Path, legacy: &Path) -> Result<Database
                     Err(err) => return Err(err.into()),
                 };
                 report.playlist_items += tx.execute(
-                    "INSERT OR IGNORE INTO playlist_items (playlist_id, track_id, position) \
+                    &format!(
+                        "INSERT OR IGNORE INTO playlist_items (playlist_id, track_id, position) \
                      SELECT ?, current.id, source_item.position \
                      FROM legacy.playlist_items source_item \
                      JOIN legacy.tracks source ON source.id = source_item.track_id \
-                     JOIN tracks current ON current.path = source.path \
-                     WHERE source_item.playlist_id = ?",
+                     JOIN tracks current ON {CURRENT_SOURCE_JOIN} \
+                     WHERE source_item.playlist_id = ?"
+                    ),
                     rusqlite::params![target_id, source_id],
                 )?;
             }
@@ -571,6 +913,36 @@ pub fn merge_legacy_database(canonical: &Path, legacy: &Path) -> Result<Database
 
     // DETACH 失败不应掩盖已经成功提交的结果；连接归还池时 SQLite 也会收掉 attach。
     let _ = conn.execute_batch("DETACH DATABASE legacy");
+    result
+}
+
+/// 合并后的硬校验：旧库每一条路径都必须能在当前库找到。Windows 按文件系统语义
+/// 忽略 ASCII 大小写；其他平台保留大小写敏感。返回仍缺失的路径数。
+pub fn missing_legacy_database_paths(canonical: &Path, legacy: &Path) -> Result<usize> {
+    anyhow::ensure!(canonical != legacy, "不能用同一个数据库做迁移校验");
+    anyhow::ensure!(legacy.is_file(), "旧数据库不存在：{}", legacy.display());
+    let database = Database::open(canonical)?;
+    let conn = database.conn()?;
+    conn.execute(
+        "ATTACH DATABASE ? AS legacy_verify",
+        [legacy.to_string_lossy().as_ref()],
+    )
+    .with_context(|| format!("挂载旧数据库做校验失败：{}", legacy.display()))?;
+    #[cfg(windows)]
+    const MATCH: &str = "current.path = source.path COLLATE NOCASE";
+    #[cfg(not(windows))]
+    const MATCH: &str = "current.path = source.path";
+    let result = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM legacy_verify.tracks source \
+                 WHERE NOT EXISTS (SELECT 1 FROM tracks current WHERE {MATCH})"
+            ),
+            [],
+            |row| row.get::<_, usize>(0),
+        )
+        .context("校验历史曲库合并结果失败");
+    let _ = conn.execute_batch("DETACH DATABASE legacy_verify");
     result
 }
 
@@ -616,22 +988,33 @@ mod tests {
         let db = Database::open(&path).unwrap();
         let conn = db.conn().unwrap();
         // 补齐之后新列可读，老数据还在
-        let (camelot, filename, cue_points, cue_points_managed): (
+        let (camelot, filename, cue_points, cue_points_managed, file_created_at): (
             Option<String>,
             String,
             String,
             bool,
+            Option<f64>,
         ) = conn
             .query_row(
-                "SELECT camelot, filename, cue_points_json, cue_points_managed FROM tracks",
+                "SELECT camelot, filename, cue_points_json, cue_points_managed, \
+                        file_created_at FROM tracks",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(camelot, None);
         assert_eq!(filename, "b.mp3");
         assert_eq!(cue_points, "[]");
         assert!(!cue_points_managed);
+        assert_eq!(file_created_at, None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -867,9 +1250,11 @@ mod tests {
             let db = Database::open(&current).unwrap();
             let conn = db.conn().unwrap();
             conn.execute(
-                "INSERT INTO tracks (id, path, filename, title, rating, added_at, modified_at) \
-                 VALUES (1, '/current.mp3', 'current.mp3', 'Current', 5, 'now', 'new'), \
-                        (2, '/shared.mp3', 'shared.mp3', 'New title', 4, 'now', 'new')",
+                "INSERT INTO tracks \
+                   (id, path, filename, title, artist, rating, comment, cue_points_json, added_at, modified_at) \
+                 VALUES \
+                   (1, '/current.mp3', 'current.mp3', 'Current', 'Current artist', 5, '', '[]', 'now', 'new'), \
+                   (2, '/shared.mp3', 'shared.mp3', 'New title', '', 4, 'current note', '[]', 'now', 'new')",
                 [],
             )
             .unwrap();
@@ -878,9 +1263,12 @@ mod tests {
             let db = Database::open(&legacy).unwrap();
             let conn = db.conn().unwrap();
             conn.execute(
-                "INSERT INTO tracks (id, path, filename, title, rating, added_at, modified_at) \
-                 VALUES (1, '/legacy-only.mp3', 'legacy.mp3', 'Legacy', 3, 'old', 'old'), \
-                        (2, '/shared.mp3', 'shared.mp3', 'Stale title', 1, 'old', 'old')",
+                "INSERT INTO tracks \
+                   (id, path, filename, title, artist, rating, comment, cue_points_json, added_at, modified_at) \
+                 VALUES \
+                   (1, '/legacy-only.mp3', 'legacy.mp3', 'Legacy', 'Legacy only artist', 3, '', '[]', 'old', 'old'), \
+                   (2, '/shared.mp3', 'shared.mp3', 'Stale title', 'Recovered artist', 1, \
+                    'stale note', '[{\"position_ms\":900}]', 'old', 'old')",
                 [],
             )
             .unwrap();
@@ -899,6 +1287,20 @@ mod tests {
                 [],
             )
             .unwrap();
+            conn.execute(
+                "INSERT INTO waveform_assets \
+                   (track_id, profile, revision, file_mtime, generated_at, error) \
+                 VALUES (2, 'overview', 1, 7, 'old', NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO track_bpm_key_analysis_v2 \
+                   (track_id, analyzer_revision, beat_times_json, downbeats_json, chroma_json, analyzed_at) \
+                 VALUES (2, 'legacy-v2', '[0.1]', '[]', '[]', 'old')",
+                [],
+            )
+            .unwrap();
         }
 
         let report = merge_legacy_database(&current, &legacy).unwrap();
@@ -906,20 +1308,64 @@ mod tests {
         assert_eq!(report.tags, 2);
         assert_eq!(report.playlists, 1);
         assert_eq!(report.playlist_items, 2);
+        assert!(report.field_values >= 2, "空艺人和 Cue 都应从旧记录补回");
+        assert_eq!(report.waveform_assets, 1);
+        assert_eq!(report.analysis_v2, 1);
 
         let db = Database::open(&current).unwrap();
         let conn = db.conn().unwrap();
-        let shared: (String, i64) = conn
+        let shared: (String, String, i64, String, String) = conn
             .query_row(
-                "SELECT title, rating FROM tracks WHERE path = '/shared.mp3'",
+                "SELECT title, artist, rating, comment, cue_points_json \
+                 FROM tracks WHERE path = '/shared.mp3'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(
             shared,
-            ("New title".into(), 4),
-            "当前库已有编辑绝不能被旧库盖掉"
+            (
+                "New title".into(),
+                "Recovered artist".into(),
+                4,
+                "current note".into(),
+                "[{\"position_ms\":900}]".into(),
+            ),
+            "当前非空编辑保留，只有当前空字段才从旧库补回"
+        );
+        let shared_id: i64 = conn
+            .query_row(
+                "SELECT id FROM tracks WHERE path = '/shared.mp3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT track_id FROM waveform_assets WHERE profile = 'overview'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            shared_id
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT track_id FROM track_bpm_key_analysis_v2 \
+                 WHERE analyzer_revision = 'legacy-v2'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            shared_id
         );
         let legacy_id: i64 = conn
             .query_row(
@@ -964,5 +1410,97 @@ mod tests {
         conn.execute(insert, []).unwrap();
         // 第二次必须被 UNIQUE 拦下（扫描线程并发撞到同一个文件时靠这个兜底）
         assert!(conn.execute(insert, []).is_err());
+    }
+
+    #[test]
+    fn windows_case_only_duplicates_merge_without_losing_user_data() {
+        // 直接建旧 schema：Windows 的正常 Database::open 已经会自动修复并建立
+        // NOCASE 唯一索引，届时第二条大小写重复路径本来就插不进去。
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        conn.execute_batch(INDEX_SQL).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tracks \
+               (id, path, filename, title, artist, rating, comment, cue_points_json, \
+                cue_points_managed, bpm, analyzed_at, added_at, modified_at) \
+             VALUES \
+               (1, 'D:\\Music\\Set\\A.mp3', 'A.mp3', 'Old title', '', 5, 'keep me', \
+                '[{\"position_ms\":1200}]', 1, 128.0, 'old-analysis', 'old', 'old'), \
+               (2, 'd:\\music\\set\\a.mp3', 'A.mp3', 'New scan title', 'Artist', 0, '', \
+                '[]', 0, NULL, NULL, 'new', 'new'); \
+             INSERT INTO tags (track_id, tag) VALUES (1, 'old-tag'), (2, 'new-tag'); \
+             INSERT INTO playlists (id, name, note, created_at) VALUES (1, 'Set', '', 'now'); \
+             INSERT INTO playlist_items (playlist_id, track_id, position) VALUES (1, 2, 7); \
+             INSERT INTO track_bpm_key_analysis_v2 \
+               (track_id, analyzer_revision, beat_times_json, downbeats_json, chroma_json, analyzed_at) \
+             VALUES (2, 'v2', '[]', '[]', '[]', 'now');",
+        )
+        .unwrap();
+
+        let report = repair_case_insensitive_path_duplicates(&mut conn, true).unwrap();
+        assert_eq!(
+            report,
+            PathDuplicateRepairReport {
+                groups: 1,
+                removed_tracks: 1
+            }
+        );
+        let combined: (String, String, i64, String, f64, String) = conn
+            .query_row(
+                "SELECT title, artist, rating, comment, bpm, cue_points_json FROM tracks",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(combined.0, "Old title", "较早记录的人工信息优先");
+        assert_eq!(combined.1, "Artist", "旧记录为空的字段从新扫描副本补齐");
+        assert_eq!(combined.2, 5);
+        assert_eq!(combined.3, "keep me");
+        assert_eq!(combined.4, 128.0);
+        assert_ne!(combined.5, "[]");
+        let tags: Vec<String> = conn
+            .prepare("SELECT tag FROM tags ORDER BY tag")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(tags, vec!["new-tag", "old-tag"]);
+        assert_eq!(
+            conn.query_row(
+                "SELECT track_id FROM playlist_items WHERE playlist_id = 1",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT track_id FROM track_bpm_key_analysis_v2",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
+            .unwrap(),
+            1
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO tracks (path, filename, added_at, modified_at) \
+                 VALUES ('D:\\MUSIC\\SET\\a.mp3', 'a.mp3', 'now', 'now')",
+                []
+            )
+            .is_err(),
+            "修复后唯一索引必须阻止同类重复再次出现"
+        );
     }
 }

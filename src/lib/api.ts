@@ -71,6 +71,7 @@ import type {
   TrackPage,
   TrackPatch,
   TrackPatchResult,
+  TrackSummary,
   VideoDownloadRequest,
   VideoInfo,
   BrowserCatalog,
@@ -728,6 +729,19 @@ async function preparePendingDownloads(onlyId?: string): Promise<void> {
   if (firstError) throw firstError;
 }
 
+/** 单击选择与双击播放会在同一拍请求同一条详情；只合并在途请求，不缓存完成值。 */
+const trackDetailRequests = new Map<number, Promise<Track>>();
+
+function requestTrackDetail(id: number): Promise<Track> {
+  const existing = trackDetailRequests.get(id);
+  if (existing) return existing;
+  const pending = request<Track>(`/library/tracks/${id}`).finally(() => {
+    if (trackDetailRequests.get(id) === pending) trackDetailRequests.delete(id);
+  });
+  trackDetailRequests.set(id, pending);
+  return pending;
+}
+
 export const api = {
   health: () => request<Health>("/health"),
   prewarmYtmPlayback,
@@ -878,8 +892,14 @@ export const api = {
     page = 0,
     track: "muxed" | "video" | "audio" = "muxed",
   ) => {
-    const { baseUrl } = bridge();
+    const currentBridge = bridge();
+    const { baseUrl } = currentBridge;
     const query = new URLSearchParams({ platform, bvid, page: String(page), track });
+    // Windows WebView2 对高码率 durl 的预读/Range 重连明显更敏感。预览只用于
+    // 识别素材，固定 720P；下载画质仍由 video_max_height 独立控制。
+    if (platform === "bilibili" && currentBridge.platform === "win32") {
+      query.set("max_height", "720");
+    }
     return authenticatedGetUrl(`${baseUrl}/api/video/preview?${query}`);
   },
 
@@ -891,7 +911,14 @@ export const api = {
     const suffix = query.toString();
     return request<TrackPage>(`/library/tracks${suffix ? `?${suffix}` : ""}`);
   },
-  track: (id: number) => request<Track>(`/library/tracks/${id}`),
+  trackSummaries: (
+    trackIds: number[],
+    params: Record<string, string | number | undefined> = {},
+  ) => post<TrackSummary[]>("/library/tracks/summaries", {
+    ...params,
+    track_ids: trackIds,
+  }),
+  track: (id: number) => requestTrackDetail(id),
   patchTrack: (id: number, patch: TrackPatch) =>
     request<TrackPatchResult>(`/library/tracks/${id}`, {
       method: "PATCH",
@@ -1081,9 +1108,12 @@ export const api = {
    * 封面响应带 `Cache-Control: max-age`，换过封面之后 URL 不变的话
    * 浏览器会一直拿缓存里那张旧图，用户看到的就是"换封面没反应"。
    */
-  coverUrl: (id: number, version?: number | string) => {
+  coverUrl: (id: number, version?: number | string, size?: number) => {
     const { baseUrl } = bridge();
-    const suffix = version === undefined || version === "" ? "" : `?v=${encodeURIComponent(version)}`;
+    const query = new URLSearchParams();
+    if (version !== undefined && version !== "") query.set("v", String(version));
+    if (size !== undefined) query.set("size", String(size));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
     return authenticatedGetUrl(`${baseUrl}/api/library/cover/${id}${suffix}`);
   },
 };

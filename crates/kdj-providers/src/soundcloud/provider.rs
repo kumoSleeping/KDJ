@@ -192,6 +192,19 @@ impl SoundCloudProvider {
         })
         .await
         .context("读取 SoundCloud 浏览器会话任务失败")??;
+        self.import_browser_session(session).await
+    }
+
+    /// 导入 KDJ 隔离登录窗口取得的 SoundCloud 网页会话。窗口本身只打开
+    /// `soundcloud.com`，凭证不经过前端；这里仍联网验证后才落盘。
+    pub async fn import_webview_session(&self, token: String, expires_at: i64) -> Result<()> {
+        self.ensure_enabled()?;
+        let session =
+            browser_session_from_token(token, expires_at, "KDJ · SoundCloud 登录窗口".into())?;
+        self.import_browser_session(session).await
+    }
+
+    async fn import_browser_session(&self, session: SoundCloudSession) -> Result<()> {
         let (status, profile) = self
             .authenticated_get_once(&session.access_token, "/me", &[], true)
             .await?;
@@ -1334,18 +1347,39 @@ fn browser_session_from_profile(
                 imported.imported_from
             )
         })?;
-    Ok(SoundCloudSession {
-        access_token: cookie.value,
-        refresh_token: String::new(),
-        expires_at: cookie
+    browser_session_from_token(
+        cookie.value,
+        cookie
             .expires
             .map(|expires| expires.min(i64::MAX as u64) as i64)
             .unwrap_or(0),
+        imported.imported_from,
+    )
+}
+
+fn browser_session_from_token(
+    token: String,
+    expires_at: i64,
+    imported_from: String,
+) -> Result<SoundCloudSession> {
+    let token = token.trim().to_string();
+    anyhow::ensure!(
+        !token.is_empty() && token.len() <= 4096,
+        "SoundCloud 登录窗口没有返回有效会话"
+    );
+    anyhow::ensure!(
+        expires_at <= 0 || expires_at > unix_now(),
+        "SoundCloud 登录窗口返回的会话已过期"
+    );
+    Ok(SoundCloudSession {
+        access_token: token,
+        refresh_token: String::new(),
+        expires_at,
         user_urn: String::new(),
         nickname: String::new(),
         avatar: String::new(),
         credential_kind: CREDENTIAL_BROWSER.into(),
-        imported_from: imported.imported_from,
+        imported_from,
     })
 }
 
@@ -1797,6 +1831,27 @@ mod tests {
         assert_eq!(session.credential_kind, CREDENTIAL_BROWSER);
         assert_eq!(session.imported_from, "Arc · Default");
         assert!(!oauth_session_needs_refresh(&session));
+    }
+
+    #[test]
+    fn isolated_webview_session_rejects_blank_or_expired_tokens() {
+        assert!(browser_session_from_token(String::new(), 0, "登录窗口".into()).is_err());
+        assert!(browser_session_from_token(
+            "expired-token".into(),
+            unix_now() - 1,
+            "登录窗口".into(),
+        )
+        .is_err());
+
+        let session = browser_session_from_token(
+            "  live-token  ".into(),
+            unix_now() + 600,
+            "登录窗口".into(),
+        )
+        .unwrap();
+        assert_eq!(session.access_token, "live-token");
+        assert_eq!(session.credential_kind, CREDENTIAL_BROWSER);
+        assert_eq!(session.imported_from, "登录窗口");
     }
 
     #[test]

@@ -95,7 +95,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-/** 采样率 / 来源 / 入库 / 路径——只读事实，挂在 Metadata 面板底部。 */
+/** 采样率 / 来源 / 文件创建 / 入库 / 路径——只读事实，挂在 Metadata 面板底部。 */
 function FileRows({ track }: { track: Track }) {
   return (
     <>
@@ -104,6 +104,7 @@ function FileRows({ track }: { track: Track }) {
         {track.channels ? ` · ${track.channels}ch` : ""}
       </Row>
       <Row label="来源">{track.source_platform || "local"}</Row>
+      <Row label="文件创建">{formatDate(track.file_created_at)}</Row>
       <Row label="入库">{formatDate(track.added_at)}</Row>
       <Row label="路径">
         <span className="kd-mono kd-faint" title={track.path}>

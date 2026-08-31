@@ -4,6 +4,7 @@ import { writeLocalStorageNow, writeLocalStorageSoon } from "./storageWrite";
 const STORAGE_KEY = "kd-workspace-session-v1";
 const MAX_TEXT = 4_096;
 const MAX_SCROLL = 1_000_000_000;
+const DEFAULT_LOCAL_SORT = "file_created_at";
 
 export type RestorableWorkspaceSource = "local" | "stream";
 
@@ -39,7 +40,7 @@ export const DEFAULT_WORKSPACE_SESSION: WorkspaceSession = {
   local: {
     folder: "",
     folderDeep: true,
-    sort: "added_at",
+    sort: DEFAULT_LOCAL_SORT,
     order: "desc",
     sort2: null,
     order2: "asc",
@@ -107,13 +108,16 @@ export function normalizeWorkspaceSession(value: unknown): WorkspaceSession {
   const source = root?.source === "stream"
     ? root.source
     : "local";
+  const storedSort = text(local?.sort, DEFAULT_LOCAL_SORT);
   return {
     version: 1,
     source,
     local: {
       folder: text(local?.folder),
       folderDeep: local?.folderDeep !== false,
-      sort: text(local?.sort, "added_at"),
+      // added_at 是旧版不可见的默认键，不是用户从列头选择的偏好。恢复旧会话时
+      // 一并迁移，否则升级后仍会继续把重新入库的老文件排到最前。
+      sort: storedSort === "added_at" ? DEFAULT_LOCAL_SORT : storedSort,
       order: local?.order === "asc" ? "asc" : "desc",
       sort2: typeof local?.sort2 === "string" ? text(local.sort2) || null : null,
       order2: local?.order2 === "desc" ? "desc" : "asc",

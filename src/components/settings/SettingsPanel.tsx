@@ -1067,7 +1067,7 @@ export function SettingsPanel() {
                   { id: "song_info", text: "包含信息" },
                   { id: "more_info", text: "更多信息" },
                 ]}
-                title="原链接仅分享网址；包含信息会附上歌曲名与艺术家；更多信息还会补充专辑、来源、Share from KDJ 版本水印和小尺寸缩略封面。"
+                title="原链接仅分享网址；包含信息会附上歌曲名与艺术家；更多信息沿用相同文字，并额外附上 Share from KDJ 版本水印和小尺寸缩略封面。"
                 onChange={setShareContentMode}
               />
             </div>

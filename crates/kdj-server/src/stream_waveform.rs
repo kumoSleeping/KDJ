@@ -79,12 +79,41 @@ pub struct StreamWaveformProgress {
     /// 缓存文件已经完整落盘；若 waveform 仍为空，表示格式不支持前缀解码或
     /// 完整解码失败，前端可停止轮询并继续用 analyser 的已播兜底。
     pub complete: bool,
-    /// 当前有一次波形解码在跑。路由层还会把 stream-cache 的网络写入状态合进来。
+    /// 当前缓存、波形或最终分析仍需要轮询。路由层还会合入 stream-cache 的真实
+    /// reservation 状态，以兼容进程刚恢复、协调器尚未观察到首段的窗口。
     pub active: bool,
+    /// 媒体缓存与波形解码是两条独立链路。保留 `active/complete` 给旧前端，同时
+    /// 用明确状态避免已经被删除的 partial 继续冒充“缓存中”。
+    pub cache_status: StreamCacheStatus,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cache_error: String,
+    pub waveform_status: StreamWaveformStatus,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub waveform_error: String,
     /// 完整音频分析与渐进波形共用同一份文件，但只在文件确认完整后启动。
     pub analysis_status: StreamAnalysisStatus,
     pub analysis: Option<AnalysisResult>,
     pub analysis_error: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamCacheStatus {
+    Waiting,
+    Caching,
+    Retrying,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamWaveformStatus {
+    Waiting,
+    Analyzing,
+    Partial,
+    Ready,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -105,6 +134,9 @@ struct StreamWaveformInner {
     /// 供前端去重使用的版本号必须跨 entry 的 clear/recreate 仍单调递增；否则
     /// 新缓存从 revision 0 开始时会被旧播放器会话的 revision 拒收。
     next_revision: u64,
+    /// 后台缓存序列跨 retry 的 reservation 生命周期；用于拒绝另一条调度链重复
+    /// 接管同一个 key，并确保最终失败只写一条活动日志。
+    next_cache_sequence: u64,
 }
 
 struct StreamWaveformEntry {
@@ -114,8 +146,13 @@ struct StreamWaveformEntry {
     total_bytes: u64,
     requested_until: Option<Instant>,
     complete: bool,
+    cache_status: StreamCacheStatus,
+    cache_error: String,
+    cache_sequence: u64,
     inflight: bool,
     complete_analyzed: bool,
+    waveform_complete: bool,
+    waveform_error: String,
     analysis_complete: bool,
     analysis: Option<AnalysisResult>,
     analysis_error: String,
@@ -149,8 +186,13 @@ impl Default for StreamWaveformEntry {
             total_bytes: 0,
             requested_until: None,
             complete: false,
+            cache_status: StreamCacheStatus::Waiting,
+            cache_error: String::new(),
+            cache_sequence: 0,
             inflight: false,
             complete_analyzed: false,
+            waveform_complete: false,
+            waveform_error: String::new(),
             analysis_complete: false,
             analysis: None,
             analysis_error: String::new(),
@@ -204,6 +246,7 @@ struct AnalyzeJob {
 
 struct AnalyzeJobResult {
     waveform: Option<(Waveform, f64)>,
+    waveform_error: String,
     analysis: Option<AnalysisResult>,
     analysis_error: String,
 }
@@ -272,6 +315,103 @@ impl StreamWaveformCoordinator {
             },
             ..Self::default()
         }
+    }
+
+    /// 一条后台缓存调度链在首次请求和两次 retry 之间持有这个逻辑序列。实际
+    /// StreamCacheWriter 每次失败都会释放 reservation，但新的播放请求不能趁
+    /// 退避窗口再启动第二条重试链。
+    pub(crate) fn begin_cache_sequence(&self, key: &str) -> Option<u64> {
+        let mut inner = self.inner.lock().expect("stream waveform state");
+        ensure_entry(&mut inner, key);
+        if inner
+            .entries
+            .get(key)
+            .is_some_and(|entry| entry.cache_sequence != 0)
+        {
+            return None;
+        }
+        let sequence = allocate_cache_sequence(&mut inner);
+        let epoch = allocate_epoch(&mut inner);
+        let entry = inner.entries.get_mut(key).expect("stream waveform entry");
+        reset_cache_backing(entry, epoch);
+        entry.cache_sequence = sequence;
+        entry.cache_status = StreamCacheStatus::Caching;
+        entry.cache_error.clear();
+        entry.waveform_error.clear();
+        entry.last_access = Instant::now();
+        Some(sequence)
+    }
+
+    /// writer 已经 Drop（partial 也随之删除）后同步撤销协调器里的旧路径和字节。
+    /// 波形、真实覆盖秒数与 revision 故意不动；下一份从 0 开始的 partial 只有
+    /// 覆盖不短于它时才会替换这些像素。
+    pub(crate) fn cache_attempt_failed(
+        &self,
+        key: &str,
+        sequence: u64,
+        error: String,
+        retrying: bool,
+    ) -> bool {
+        let mut inner = self.inner.lock().expect("stream waveform state");
+        if !inner
+            .entries
+            .get(key)
+            .is_some_and(|entry| entry.cache_sequence == sequence)
+        {
+            return false;
+        }
+        let epoch = allocate_epoch(&mut inner);
+        let entry = inner.entries.get_mut(key).expect("cache sequence entry");
+        reset_cache_backing(entry, epoch);
+        entry.cache_error = error;
+        entry.cache_status = if retrying {
+            StreamCacheStatus::Retrying
+        } else {
+            StreamCacheStatus::Failed
+        };
+        if !retrying {
+            entry.cache_sequence = 0;
+        }
+        entry.last_access = Instant::now();
+        true
+    }
+
+    /// 关闭持久缓存、播放器主动结束 Range 或 reservation 被清理都属于正常取消，
+    /// 只撤销已经失效的 backing，不写失败状态和活动日志。
+    pub(crate) fn cancel_cache_sequence(&self, key: &str, sequence: u64) {
+        let mut inner = self.inner.lock().expect("stream waveform state");
+        if !inner
+            .entries
+            .get(key)
+            .is_some_and(|entry| entry.cache_sequence == sequence)
+        {
+            return;
+        }
+        let epoch = allocate_epoch(&mut inner);
+        let entry = inner.entries.get_mut(key).expect("cache sequence entry");
+        reset_cache_backing(entry, epoch);
+        entry.cache_sequence = 0;
+        entry.cache_status = StreamCacheStatus::Waiting;
+        entry.cache_error.clear();
+        entry.last_access = Instant::now();
+    }
+
+    /// 播放响应内联缓存被主动截断时，writer 会正常删除 partial。这不是网络失败；
+    /// 仅当协调器仍指向同一路径且没有后台 retry 接管时清掉幽灵字节。
+    #[cfg(target_os = "android")]
+    pub(crate) fn discard_cache_path(&self, key: &str, path: &Path) {
+        let mut inner = self.inner.lock().expect("stream waveform state");
+        if !inner.entries.get(key).is_some_and(|entry| {
+            entry.cache_sequence == 0 && !entry.complete && entry.path.as_deref() == Some(path)
+        }) {
+            return;
+        }
+        let epoch = allocate_epoch(&mut inner);
+        let entry = inner.entries.get_mut(key).expect("cache path entry");
+        reset_cache_backing(entry, epoch);
+        entry.cache_status = StreamCacheStatus::Waiting;
+        entry.cache_error.clear();
+        entry.last_access = Instant::now();
     }
 
     /// 标记当前试听确实需要缓存波形，并返回现有快照。没有写入路径时只记请求：
@@ -401,8 +541,13 @@ impl StreamWaveformCoordinator {
                 entry.bytes = 0;
                 entry.total_bytes = media_total_bytes;
                 entry.complete = false;
+                entry.cache_status = StreamCacheStatus::Caching;
+                entry.cache_error.clear();
+                entry.cache_sequence = 0;
                 entry.inflight = false;
                 entry.complete_analyzed = false;
+                entry.waveform_complete = false;
+                entry.waveform_error.clear();
                 entry.analysis_complete = false;
                 entry.analysis = None;
                 entry.analysis_error.clear();
@@ -515,7 +660,12 @@ impl StreamWaveformCoordinator {
         entry.ephemeral_file = None;
         entry.inflight = false;
         entry.complete = false;
+        entry.cache_status = StreamCacheStatus::Waiting;
+        entry.cache_error.clear();
+        entry.cache_sequence = 0;
         entry.complete_analyzed = false;
+        entry.waveform_complete = false;
+        entry.waveform_error.clear();
         entry.analysis_complete = false;
         entry.analysis = None;
         entry.analysis_error.clear();
@@ -544,7 +694,11 @@ impl StreamWaveformCoordinator {
             entry.capture_file_bytes = bytes;
             entry.complete |= complete;
             if complete {
+                entry.cache_status = StreamCacheStatus::Ready;
+                entry.cache_error.clear();
                 entry.complete_analyzed = false;
+                entry.waveform_complete = false;
+                entry.waveform_error.clear();
                 entry.analysis_complete = false;
                 entry.analysis = None;
                 entry.analysis_error.clear();
@@ -552,6 +706,11 @@ impl StreamWaveformCoordinator {
             if closed {
                 entry.capture_open = false;
                 entry.capture_continuable = segment_valid && !entry.complete;
+                if !entry.complete {
+                    entry.cache_status = StreamCacheStatus::Waiting;
+                }
+            } else if !entry.complete {
+                entry.cache_status = StreamCacheStatus::Caching;
             }
             entry.last_access = Instant::now();
             let job = plan_job(key, entry);
@@ -660,7 +819,7 @@ impl StreamWaveformCoordinator {
                 {
                     continue;
                 }
-                if !entry.inflight && !entry.capture_open {
+                if !entry.inflight && !entry.capture_open && entry.cache_sequence == 0 {
                     inner.entries.remove(&key);
                 } else {
                     // finish_capture/finish_job 会在工作结束时再走一次过期裁剪。
@@ -715,6 +874,7 @@ impl StreamWaveformCoordinator {
             }
             let was_complete = entry.complete;
             let became_complete = complete && !entry.complete;
+            let preserve_retry_waveform = entry.cache_sequence != 0;
             entry.path = Some(path);
             entry.bytes = bytes;
             if total_bytes > 0 {
@@ -723,6 +883,14 @@ impl StreamWaveformCoordinator {
                 entry.total_bytes = bytes;
             }
             entry.complete = complete;
+            if complete {
+                entry.cache_status = StreamCacheStatus::Ready;
+                entry.cache_error.clear();
+                entry.cache_sequence = 0;
+            } else if entry.cache_status != StreamCacheStatus::Retrying {
+                entry.cache_status = StreamCacheStatus::Caching;
+                entry.cache_error.clear();
+            }
             entry.capture_open = false;
             entry.capture_file_bytes = 0;
             entry.capture_continuable = false;
@@ -732,7 +900,7 @@ impl StreamWaveformCoordinator {
             // 瞬间闪白；若完整 media 被清掉后换成新 partial，则必须清空旧快照，
             // 否则更短的新前缀会被“覆盖秒数不得倒退”的保护错误拒绝。
             let same_download_commit = path_changed && !was_complete && complete;
-            if path_changed && !same_download_commit {
+            if path_changed && !same_download_commit && !preserve_retry_waveform {
                 entry.waveform = None;
                 entry.covered_seconds = 0.0;
                 entry.revision = 0;
@@ -742,6 +910,8 @@ impl StreamWaveformCoordinator {
             }
             if path_changed || became_complete {
                 entry.complete_analyzed = false;
+                entry.waveform_complete = false;
+                entry.waveform_error.clear();
                 entry.analysis_complete = false;
             }
             // partial 原子改名为最终 media（或用户重试时换了一份 partial）后，旧
@@ -789,8 +959,7 @@ impl StreamWaveformCoordinator {
             // audio is live.
             let class = work_class_for_job(job.complete);
             let _permit = crate::jobs::acquire_scheduled_work(class);
-            let waveform = decode_cached_waveform(&job.path, job.complete)
-                .map(|(overview, covered)| (overview, covered));
+            let (waveform, waveform_error) = decode_cached_waveform(&job.path, job.complete);
             let (analysis, analysis_error) = if job.complete {
                 analyze_complete_stream(&job.path, job.analysis_duration)
             } else {
@@ -798,6 +967,7 @@ impl StreamWaveformCoordinator {
             };
             let result = AnalyzeJobResult {
                 waveform,
+                waveform_error,
                 analysis,
                 analysis_error,
             };
@@ -808,6 +978,9 @@ impl StreamWaveformCoordinator {
     fn finish_job(&self, job: AnalyzeJob, result: AnalyzeJobResult) {
         let analysis_warning = (job.complete && !result.analysis_error.is_empty())
             .then(|| result.analysis_error.clone());
+        let waveform_warning = (job.complete && !result.waveform_error.is_empty())
+            .then(|| result.waveform_error.clone());
+        let waveform_succeeded = result.waveform.is_some();
         let next = {
             let mut inner = self.inner.lock().expect("stream waveform state");
             let Some(current) = inner.entries.get(&job.key) else {
@@ -842,6 +1015,8 @@ impl StreamWaveformCoordinator {
                 // 即便格式不支持，完整文件也只尝试一次；否则前端每轮轮询都可能再开一
                 // 条昂贵的解码任务。
                 entry.complete_analyzed = true;
+                entry.waveform_complete = waveform_succeeded;
+                entry.waveform_error = result.waveform_error;
                 entry.analysis_complete = true;
                 entry.analysis = result.analysis;
                 entry.analysis_error = result.analysis_error;
@@ -861,6 +1036,9 @@ impl StreamWaveformCoordinator {
         };
         if let (Some(log), Some(detail)) = (&self.activity_log, analysis_warning) {
             log.record_analysis_warning("在线曲目分析异常", detail);
+        }
+        if let (Some(log), Some(detail)) = (&self.activity_log, waveform_warning) {
+            log.record_analysis_warning("在线曲目波形异常", detail);
         }
         if let Some(next) = next {
             self.spawn(next);
@@ -1043,6 +1221,17 @@ fn snapshot(entry: &StreamWaveformEntry) -> StreamWaveformProgress {
     } else {
         StreamAnalysisStatus::Waiting
     };
+    let waveform_status = if entry.waveform_complete {
+        StreamWaveformStatus::Ready
+    } else if entry.complete_analyzed && !entry.waveform_error.is_empty() {
+        StreamWaveformStatus::Failed
+    } else if entry.inflight || (entry.complete && !entry.complete_analyzed) {
+        StreamWaveformStatus::Analyzing
+    } else if entry.waveform.is_some() {
+        StreamWaveformStatus::Partial
+    } else {
+        StreamWaveformStatus::Waiting
+    };
     StreamWaveformProgress {
         waveform: entry.waveform.clone(),
         covered_seconds: entry.covered_seconds,
@@ -1055,7 +1244,15 @@ fn snapshot(entry: &StreamWaveformEntry) -> StreamWaveformProgress {
         // complete && !active 提前停止，永远只留在 90% 的旧波形。
         active: entry.inflight
             || entry.capture_open
+            || matches!(
+                entry.cache_status,
+                StreamCacheStatus::Caching | StreamCacheStatus::Retrying
+            )
             || (entry.complete && (!entry.complete_analyzed || !entry.analysis_complete)),
+        cache_status: entry.cache_status,
+        cache_error: entry.cache_error.clone(),
+        waveform_status,
+        waveform_error: entry.waveform_error.clone(),
         analysis_status,
         analysis: entry.analysis.clone(),
         analysis_error: entry.analysis_error.clone(),
@@ -1136,6 +1333,35 @@ fn allocate_revision(inner: &mut StreamWaveformInner) -> u64 {
     inner.next_revision
 }
 
+fn allocate_cache_sequence(inner: &mut StreamWaveformInner) -> u64 {
+    inner.next_cache_sequence = inner.next_cache_sequence.wrapping_add(1).max(1);
+    inner.next_cache_sequence
+}
+
+/// 撤销一份已经不存在或即将被删除的缓存 backing。这里特意不清 waveform、
+/// covered_seconds 和 revision：它们是已经成功解码出的事实，不依赖 partial
+/// 文件继续存在。新任务仍由 finish_job 的覆盖秒数保护决定是否替换。
+fn reset_cache_backing(entry: &mut StreamWaveformEntry, epoch: u64) {
+    entry.epoch = epoch;
+    entry.path = None;
+    entry.bytes = 0;
+    entry.complete = false;
+    entry.inflight = false;
+    entry.complete_analyzed = false;
+    entry.waveform_complete = false;
+    entry.waveform_error.clear();
+    entry.analysis_complete = false;
+    entry.analysis = None;
+    entry.analysis_error.clear();
+    entry.capture_open = false;
+    entry.capture_file_bytes = 0;
+    entry.capture_continuable = false;
+    entry.ephemeral_file = None;
+    entry.last_requested_path = None;
+    entry.last_requested_bytes = 0;
+    entry.last_analysis_started_at = None;
+}
+
 fn ensure_entry(inner: &mut StreamWaveformInner, key: &str) {
     if inner.entries.contains_key(key) {
         return;
@@ -1175,12 +1401,31 @@ async fn create_ephemeral_file(
     ))
 }
 
-fn decode_cached_waveform(path: &Path, complete: bool) -> Option<(Waveform, f64)> {
-    let decoded = kdj_analysis::decode::decode_audio_native(path, None).ok()?;
+fn decode_cached_waveform(path: &Path, complete: bool) -> (Option<(Waveform, f64)>, String) {
+    let decoded = match kdj_analysis::decode::decode_audio_native(path, None) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            return (
+                None,
+                if complete {
+                    format!("完整音频波形解码失败：{error}")
+                } else {
+                    String::new()
+                },
+            )
+        }
+    };
     let covered_seconds =
         ((decoded.samples.len() as f64 / decoded.sample_rate as f64) * 1000.0).round() / 1000.0;
     if covered_seconds <= 0.0 {
-        return None;
+        return (
+            None,
+            if complete {
+                "完整音频没有可用的波形样本".to_string()
+            } else {
+                String::new()
+            },
+        );
     }
     if !complete {
         // A growing media file is decoded repeatedly. Running the full semantic/inverse-FFT
@@ -1193,10 +1438,10 @@ fn decode_cached_waveform(path: &Path, complete: bool) -> Option<(Waveform, f64)
             crate::waveform::RELEASE_OVERVIEW_BUCKETS,
         );
         if overview.amp.is_empty() {
-            return None;
+            return (None, String::new());
         }
         overview.duration = covered_seconds;
-        return Some((overview, covered_seconds));
+        return (Some((overview, covered_seconds)), String::new());
     }
     // The complete online file needs one exact release overview for the bottom rail. Do not also
     // build/serialize the old 400-columns/sec full-song DJ asset: Manager now gets a six-second
@@ -1231,17 +1476,17 @@ fn decode_cached_waveform(path: &Path, complete: bool) -> Option<(Waveform, f64)
         &evidence,
     );
     if overview.amp.is_empty() {
-        return None;
+        return (None, "完整音频未能生成可用波形".to_string());
     }
     // 前端把渐进 overview 投影到整曲时长；这里保留真实可解码长度，不能把前缀
     // 拉伸成完整曲目。
     overview.duration = covered_seconds;
-    Some((overview, covered_seconds))
+    (Some((overview, covered_seconds)), String::new())
 }
 
 #[cfg(test)]
 fn decode_cached_prefix(path: &Path) -> Option<(Waveform, f64)> {
-    decode_cached_waveform(path, false)
+    decode_cached_waveform(path, false).0
 }
 
 fn analyze_complete_stream(path: &Path, duration_limit: f64) -> (Option<AnalysisResult>, String) {
@@ -1280,6 +1525,7 @@ fn trim_entries(
                 && entry.ephemeral_file.is_some()
                 && !entry.inflight
                 && !entry.capture_open
+                && entry.cache_sequence == 0
                 && entry.requested_until.is_none_or(|deadline| deadline <= now)
         })
         .map(|(key, _)| key.clone())
@@ -1299,7 +1545,10 @@ fn trim_entries(
         let Some(key) = entries
             .iter()
             .filter(|(key, entry)| {
-                protected != Some(key.as_str()) && !entry.inflight && !entry.capture_open
+                protected != Some(key.as_str())
+                    && !entry.inflight
+                    && !entry.capture_open
+                    && entry.cache_sequence == 0
             })
             .min_by_key(|(_, entry)| entry.last_access)
             .map(|(key, _)| key.clone())
@@ -1380,6 +1629,7 @@ mod tests {
     fn test_job_result() -> AnalyzeJobResult {
         AnalyzeJobResult {
             waveform: Some((test_waveform(), 1.0)),
+            waveform_error: String::new(),
             analysis: None,
             analysis_error: "test analysis omitted".to_string(),
         }
@@ -1396,6 +1646,197 @@ mod tests {
         assert_eq!(progress.cached_bytes, 3);
         assert_eq!(progress.total_bytes, 10);
         assert!(!progress.complete);
+    }
+
+    #[tokio::test]
+    async fn failed_partial_clears_ghost_bytes_but_keeps_the_real_waveform() {
+        let coordinator = StreamWaveformCoordinator::default();
+        let key = "ghost-cache";
+        let sequence = coordinator
+            .begin_cache_sequence(key)
+            .expect("start cache sequence");
+        coordinator.observe_with_total(
+            key.to_string(),
+            PathBuf::from("ghost.partial"),
+            2 * 1024 * 1024,
+            20 * 1024 * 1024,
+            false,
+        );
+        {
+            let mut inner = coordinator.inner.lock().unwrap();
+            let entry = inner.entries.get_mut(key).unwrap();
+            entry.waveform = Some(test_waveform());
+            entry.covered_seconds = 18.0;
+            entry.revision = 17;
+        }
+
+        assert!(coordinator.cache_attempt_failed(key, sequence, "range failed".into(), true,));
+        let retrying = coordinator.request(key.to_string());
+        assert_eq!(retrying.cached_bytes, 0);
+        assert_eq!(retrying.total_bytes, 20 * 1024 * 1024);
+        assert_eq!(retrying.cache_status, StreamCacheStatus::Retrying);
+        assert_eq!(retrying.waveform_status, StreamWaveformStatus::Partial);
+        assert_eq!(retrying.covered_seconds, 18.0);
+        assert_eq!(retrying.revision, 17);
+        assert!(retrying.waveform.is_some());
+
+        assert!(coordinator.cache_attempt_failed(
+            key,
+            sequence,
+            "range failed again".into(),
+            false,
+        ));
+        let failed = coordinator.request(key.to_string());
+        assert_eq!(failed.cached_bytes, 0);
+        assert_eq!(failed.cache_status, StreamCacheStatus::Failed);
+        assert!(!failed.active);
+        assert!(failed.waveform.is_some());
+        let duplicate =
+            coordinator.cache_attempt_failed(key, sequence, "late duplicate".into(), false);
+        assert!(
+            !duplicate,
+            "a completed sequence cannot publish a second terminal failure"
+        );
+    }
+
+    #[test]
+    fn retry_waveform_never_regresses_to_a_shorter_prefix() {
+        let coordinator = StreamWaveformCoordinator::default();
+        let key = "retry-coverage";
+        let sequence = coordinator.begin_cache_sequence(key).unwrap();
+        coordinator.observe_with_total(
+            key.to_string(),
+            PathBuf::from("first.partial"),
+            FIRST_ANALYSIS_BYTES,
+            FIRST_ANALYSIS_BYTES * 4,
+            false,
+        );
+        {
+            let mut inner = coordinator.inner.lock().unwrap();
+            inner.next_revision = 4;
+            let entry = inner.entries.get_mut(key).unwrap();
+            entry.waveform = Some(test_waveform());
+            entry.covered_seconds = 10.0;
+            entry.revision = 4;
+        }
+        assert!(coordinator.cache_attempt_failed(key, sequence, "retry".into(), true,));
+        let retry_path = PathBuf::from("retry.partial");
+        coordinator.observe_with_total(
+            key.to_string(),
+            retry_path.clone(),
+            FIRST_ANALYSIS_BYTES,
+            FIRST_ANALYSIS_BYTES * 4,
+            false,
+        );
+        let epoch = coordinator.inner.lock().unwrap().entries[key].epoch;
+        coordinator.finish_job(
+            AnalyzeJob {
+                key: key.to_string(),
+                path: retry_path.clone(),
+                epoch,
+                complete: false,
+                analysis_duration: DEFAULT_STREAM_ANALYSIS_DURATION_SECONDS,
+                _ephemeral_file: None,
+            },
+            AnalyzeJobResult {
+                waveform: Some((test_waveform(), 5.0)),
+                waveform_error: String::new(),
+                analysis: None,
+                analysis_error: String::new(),
+            },
+        );
+        let shorter = snapshot(&coordinator.inner.lock().unwrap().entries[key]);
+        assert_eq!(shorter.covered_seconds, 10.0);
+        assert_eq!(shorter.revision, 4);
+
+        coordinator.finish_job(
+            AnalyzeJob {
+                key: key.to_string(),
+                path: retry_path,
+                epoch,
+                complete: false,
+                analysis_duration: DEFAULT_STREAM_ANALYSIS_DURATION_SECONDS,
+                _ephemeral_file: None,
+            },
+            AnalyzeJobResult {
+                waveform: Some((test_waveform(), 12.0)),
+                waveform_error: String::new(),
+                analysis: None,
+                analysis_error: String::new(),
+            },
+        );
+        let longer = snapshot(&coordinator.inner.lock().unwrap().entries[key]);
+        assert_eq!(longer.covered_seconds, 12.0);
+        assert!(longer.revision > 4);
+    }
+
+    #[tokio::test]
+    async fn complete_cache_can_report_waveform_failure_without_erasing_partial_pixels() {
+        let coordinator = StreamWaveformCoordinator::default();
+        let key = "complete-waveform-failure";
+        let sequence = coordinator.begin_cache_sequence(key).unwrap();
+        coordinator.observe_with_total(
+            key.to_string(),
+            PathBuf::from("complete.partial"),
+            FIRST_ANALYSIS_BYTES,
+            FIRST_ANALYSIS_BYTES * 2,
+            false,
+        );
+        {
+            let mut inner = coordinator.inner.lock().unwrap();
+            let entry = inner.entries.get_mut(key).unwrap();
+            entry.waveform = Some(test_waveform());
+            entry.covered_seconds = 10.0;
+            entry.revision = 8;
+            assert_eq!(entry.cache_sequence, sequence);
+        }
+        let final_path = PathBuf::from("complete.media");
+        coordinator.observe(
+            key.to_string(),
+            final_path.clone(),
+            FIRST_ANALYSIS_BYTES * 2,
+            true,
+        );
+        let epoch = coordinator.inner.lock().unwrap().entries[key].epoch;
+        coordinator.finish_job(
+            AnalyzeJob {
+                key: key.to_string(),
+                path: final_path,
+                epoch,
+                complete: true,
+                analysis_duration: DEFAULT_STREAM_ANALYSIS_DURATION_SECONDS,
+                _ephemeral_file: None,
+            },
+            AnalyzeJobResult {
+                waveform: None,
+                waveform_error: "decode failed".into(),
+                analysis: None,
+                analysis_error: "analysis failed".into(),
+            },
+        );
+        let progress = coordinator.request(key.to_string());
+        assert_eq!(progress.cache_status, StreamCacheStatus::Ready);
+        assert_eq!(progress.waveform_status, StreamWaveformStatus::Failed);
+        assert_eq!(progress.covered_seconds, 10.0);
+        assert_eq!(progress.revision, 8);
+        assert!(progress.waveform.is_some());
+        assert!(!progress.active);
+    }
+
+    #[test]
+    fn closed_session_prefix_is_partial_and_waiting_not_still_analyzing() {
+        let entry = StreamWaveformEntry {
+            waveform: Some(test_waveform()),
+            covered_seconds: 1.0,
+            cache_status: StreamCacheStatus::Waiting,
+            capture_open: false,
+            inflight: false,
+            ..Default::default()
+        };
+        let progress = snapshot(&entry);
+        assert_eq!(progress.cache_status, StreamCacheStatus::Waiting);
+        assert_eq!(progress.waveform_status, StreamWaveformStatus::Partial);
+        assert!(!progress.active);
     }
 
     fn capture_plan(

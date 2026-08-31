@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "本地应用窗口的最小权限集；外部 SoundCloud OAuth 窗口不匹配任何 capability，因此不能调用 IPC。歌词窗口需要 core:event 订阅原生播放器状态；dialog/opener 的前端 JS API保持不可用，避免把任意路径打开能力暴露给页面。",
+  "description": "本地应用窗口的最小权限集；外部 SoundCloud 登录窗口不匹配任何 capability，因此不能调用 IPC。歌词窗口需要 core:event 订阅原生播放器状态；dialog/opener 的前端 JS API保持不可用，避免把任意路径打开能力暴露给页面。",
   "windows": ["main", "lyrics-overlay"],
   "permissions": [
     "core:event:allow-emit",

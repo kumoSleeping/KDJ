@@ -20,7 +20,7 @@ import {
   type PredictionPolicySnapshot,
 } from "./nextCandidatePolicy";
 import { isStreamTrack, streamNextTrack, streamTrackById } from "./streamTrack";
-import type { HarmonicMatch, Track } from "../types";
+import type { HarmonicMatch, Track, TrackSummary } from "../types";
 
 /** 本次运行放过的曲目。刷新页面即清空——这是有意的，见文件头。 */
 const played = new Set<number>();
@@ -28,11 +28,11 @@ const played = new Set<number>();
 /** 本次运行已经探过的封面；随机候选反复撞到同一首时不重复请求图片。 */
 const coverAvailability = new Map<string, Promise<boolean>>();
 
-async function hasCover(track: Track): Promise<boolean> {
+async function hasCover(track: TrackSummary): Promise<boolean> {
   const key = `${track.id}:${track.modified_at}`;
   let pending = coverAvailability.get(key);
   if (!pending) {
-    pending = fetch(api.coverUrl(track.id, track.modified_at))
+    pending = fetch(api.coverUrl(track.id, track.modified_at, 64))
       .then((response) => {
         void response.body?.cancel();
         return response.ok && (response.headers.get("content-type") ?? "").startsWith("image/");
@@ -106,15 +106,26 @@ export async function trackById(id: number): Promise<Track | null> {
   const stream = streamTrackById(id);
   if (stream) return stream;
   if (id < 0) return null;
-  const inPage = useLibraryStore.getState().tracks.find((track) => track.id === id) ?? null;
+  const cached = useLibraryStore.getState().selectedTrack;
   try {
     // Deck memory/history only stores ids, so this boundary must fetch the authoritative row.
     // An in-page object can predate a v2 BPM analysis and still contain BPM/Key while missing
     // first_beat; reusing it makes the restored second Deck lose its grid and disables SYNC.
     return await api.track(id);
   } catch {
-    // 后端短暂不可用时，页内对象仍比完全丢掉历史/唱盘更有用。
-    return inPage;
+    // 摘要没有拍点/Cue，不能冒充可播放的完整 Track。
+    return cached?.id === id ? cached : null;
+  }
+}
+
+async function detailFor(summary: TrackSummary | null | undefined): Promise<Track | null> {
+  if (!summary) return null;
+  const cached = useLibraryStore.getState().selectedTrack;
+  if (cached?.id === summary.id) return cached;
+  try {
+    return await api.track(summary.id);
+  } catch {
+    return null;
   }
 }
 
@@ -145,14 +156,14 @@ function normalizeTitle(raw: string): string {
  * 一份写了 remixer、一份是空的，比上去反而漏判。空名字一律当不同——
  * 两首都没名字的时候拿空串相等去判，会把整批未命名文件当成同一首。
  */
-function sameSong(a: Track, b: Track): boolean {
+function sameSong(a: TrackSummary, b: TrackSummary): boolean {
   const left = normalizeTitle(a.title || a.filename);
   const right = normalizeTitle(b.title || b.filename);
   return left.length > 0 && left === right;
 }
 
 /** 曲目是否落在接歌范围指定的文件夹（含子目录）内。 */
-function trackInFolderScope(track: Track, folder: string): boolean {
+function trackInFolderScope(track: TrackSummary, folder: string): boolean {
   const normalized = folder.trim().replace(/\/+$/, "");
   if (!normalized) return true;
   const trackFolder = track.folder?.trim() ?? "";
@@ -336,7 +347,7 @@ async function firstInOrder(folder: string): Promise<Track | null> {
   const { sort, order } = useLibraryStore.getState().filter;
   try {
     const page = await api.tracks({ folder, sort, order, limit: 1, offset: 0 });
-    return page.items[0] ?? null;
+    return await detailFor(page.items[0]);
   } catch {
     return null;
   }
@@ -347,15 +358,15 @@ async function nextInOrder(current: Track, folder: string): Promise<Track | null
   if (state.filter.folder === folder) {
     const index = state.tracks.findIndex((item) => item.id === current.id);
     if (index !== -1) {
-      if (index + 1 < state.tracks.length) return state.tracks[index + 1];
+      if (index + 1 < state.tracks.length) return await detailFor(state.tracks[index + 1]);
       if (state.tracks.length < state.total) {
         // 正好放到已加载分页的末尾：把下一页拉进来接着放
         await state.loadMore();
         const after = useLibraryStore.getState().tracks;
-        return after[index + 1] ?? after[0] ?? null;
+        return await detailFor(after[index + 1] ?? after[0]);
       }
       const first = state.tracks[0];
-      return first && first.id !== current.id ? first : null;
+      return first && first.id !== current.id ? await detailFor(first) : null;
     }
   }
 
@@ -367,18 +378,20 @@ async function nextInOrder(current: Track, folder: string): Promise<Track | null
       const page = await api.tracks({ folder, sort, order, limit: pageSize, offset });
       const index = page.items.findIndex((item) => item.id === current.id);
       if (index !== -1) {
-        if (index + 1 < page.items.length) return page.items[index + 1];
+        if (index + 1 < page.items.length) return await detailFor(page.items[index + 1]);
         if (offset + page.items.length < page.total) {
           const next = await api.tracks({ folder, sort, order, limit: 1, offset: offset + index + 1 });
-          return next.items[0] ?? null;
+          return await detailFor(next.items[0]);
         }
         const first = await api.tracks({ folder, sort, order, limit: 1, offset: 0 });
-        return first.items[0] && first.items[0].id !== current.id ? first.items[0] : null;
+        return first.items[0] && first.items[0].id !== current.id
+          ? await detailFor(first.items[0])
+          : null;
       }
       // 整个范围都翻完了还没找到（比如正放的这首不属于这个文件夹）：
       // 没有"它的下一首"可言，从范围的第一首开始
       if (offset + pageSize >= page.total) {
-        return page.items.find((item) => item.id !== current.id) ?? null;
+        return await detailFor(page.items.find((item) => item.id !== current.id));
       }
     }
   } catch {
@@ -402,8 +415,8 @@ async function randomPick(
   try {
     const probe = await api.tracks({ folder, limit: 1, offset: 0 });
     if (probe.total <= 1) return null;
-    let fallback: Track | null = null;
-    const fresh: Track[] = [];
+    let fallback: TrackSummary | null = null;
+    const fresh: TrackSummary[] = [];
     const seen = new Set<number>();
     for (let attempt = 0; attempt < 8 && fresh.length < 4; attempt++) {
       const offset = Math.floor(Math.random() * probe.total);
@@ -418,9 +431,9 @@ async function randomPick(
       if (!played.has(candidate.id) && !sameSong(current, candidate)) fresh.push(candidate);
       fallback = candidate;
     }
-    if (!fresh.length) return fallback;
+    if (!fresh.length) return await detailFor(fallback);
     const withCover = await Promise.all(fresh.map(hasCover));
-    return fresh[withCover.findIndex(Boolean)] ?? fresh[0];
+    return await detailFor(fresh[withCover.findIndex(Boolean)] ?? fresh[0]);
   } catch {
     return null;
   }

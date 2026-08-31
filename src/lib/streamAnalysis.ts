@@ -21,6 +21,28 @@ const snapshots = new Map<number, StreamAnalysisSnapshot>();
 const signatures = new Map<number, string>();
 const listeners = new Map<number, Set<() => void>>();
 
+/** 新协议的 retry/failed 是权威状态；字段缺失时保持旧后端的 active/complete
+ * 轮询策略。返回 null 表示释放当前 token 的分析租约。 */
+export function streamAnalysisPollDelay(
+  progress: StreamWaveformProgress,
+  allEnded: boolean,
+  activeDelay: number,
+  idleDelay: number,
+): number | null {
+  if (!progress.enabled) return null;
+  if (progress.cache_status === "failed" || progress.waveform_status === "failed") return null;
+  if (
+    progress.cache_status === "retrying"
+    || progress.cache_status === "caching"
+    || progress.waveform_status === "analyzing"
+  ) {
+    return activeDelay;
+  }
+  if (progress.complete && !progress.active) return null;
+  if (allEnded && !progress.active) return null;
+  return progress.active ? activeDelay : idleDelay;
+}
+
 function touch(trackId: number, snapshot: StreamAnalysisSnapshot): void {
   snapshots.delete(trackId);
   snapshots.set(trackId, snapshot);

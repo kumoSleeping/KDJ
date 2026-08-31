@@ -60,7 +60,9 @@ test("lyrics visibility, local-video mode, and local-video open state persist in
 
 test("local detail mode suspends the exact floating source instead of destroying it", async () => {
   installBrowserStorage();
-  const { videoPipHostLifecycle } = await import("../src/lib/videoPip");
+  const { networkVideoOwnsTransport, videoPipHostLifecycle } = await import(
+    "../src/lib/videoPip"
+  );
   const local = {
     source: "local" as const,
     trackId: 42,
@@ -82,4 +84,31 @@ test("local detail mode suspends the exact floating source instead of destroying
   assert.equal(videoPipHostLifecycle(network, true, "panel"), "present");
   assert.equal(videoPipHostLifecycle(local, false, "float"), "stop");
   assert.equal(videoPipHostLifecycle(null, true, "float"), "stop");
+  assert.equal(networkVideoOwnsTransport(network, true, false), true);
+  assert.equal(networkVideoOwnsTransport(network, true, true), false);
+  assert.equal(networkVideoOwnsTransport(local, true, false), false);
+});
+
+test("a new preview and clear both reset terminal failure state", async () => {
+  installBrowserStorage();
+  const { useVideoPip } = await import("../src/lib/videoPip");
+  const preview = {
+    source: "network" as const,
+    platform: "bilibili" as const,
+    bvid: "BV1test",
+    page: 1,
+    title: "Preview",
+    author: "Uploader",
+  };
+
+  useVideoPip.getState().setSession(preview);
+  useVideoPip.getState().setFailed(true);
+  assert.equal(useVideoPip.getState().failed, true);
+
+  useVideoPip.getState().setSession(preview);
+  assert.equal(useVideoPip.getState().failed, false);
+
+  useVideoPip.getState().setFailed(true);
+  useVideoPip.getState().clear();
+  assert.equal(useVideoPip.getState().failed, false);
 });

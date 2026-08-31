@@ -7,7 +7,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use kdj_playback::{PlaybackCommand, PlaybackCoordinator, PlaybackPhase, PlaybackSnapshot};
@@ -44,14 +44,14 @@ pub struct DesktopMediaSession {
 impl DesktopMediaSession {
     pub fn spawn(
         app: AppHandle,
-        coordinator: Arc<OnceLock<Arc<PlaybackCoordinator>>>,
+        coordinator: Arc<OnceLock<Weak<PlaybackCoordinator>>>,
     ) -> Result<Self, String> {
         let mut controls = MediaControls::new(platform_config(&app)?)
             .map_err(|error| format!("创建系统媒体控制失败：{error}"))?;
         let event_app = app.clone();
         controls
             .attach(move |event| {
-                handle_remote_event(&event_app, coordinator.get().cloned(), event);
+                handle_remote_event(&event_app, coordinator.get().and_then(Weak::upgrade), event);
             })
             .map_err(|error| format!("注册系统媒体控制失败：{error}"))?;
         Ok(Self {
@@ -156,7 +156,7 @@ fn handle_remote_event(
                 let _ = window.set_focus();
             }
         }
-        MediaControlEvent::Quit => app.exit(0),
+        MediaControlEvent::Quit => crate::request_desktop_exit(app),
         MediaControlEvent::OpenUri(_) => {}
         event => {
             let Some(coordinator) = coordinator else {

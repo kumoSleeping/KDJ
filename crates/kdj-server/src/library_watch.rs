@@ -319,7 +319,7 @@ fn reconcile_batch(
         let known_ids: HashSet<i64> = library
             .file_index()?
             .into_values()
-            .map(|(id, _, _)| id)
+            .map(|(id, _, _, _)| id)
             .collect();
         let raw: Vec<String> = scan_paths
             .iter()

@@ -149,11 +149,61 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     out
 }
 
+/// 持久化路径的“同一个文件”身份键。
+///
+/// Windows 的 NTFS 通常不区分盘符和目录名大小写，但 `PathBuf`、`HashMap<String, _>`
+/// 与 SQLite 的 `UNIQUE(TEXT)` 默认都区分。旧记录是 `D:\Music\a.mp3`、原生选择器
+/// 后来返回 `d:\music\a.mp3` 时，如果直接比较字符串，就会重复入库，并把旧记录整批
+/// 算进侧栏「其他」。身份键只用于比较/去重；数据库和界面仍保留原始路径的大小写。
+pub fn path_identity(path: &Path) -> String {
+    path_identity_with_semantics(path, cfg!(windows))
+}
+
+fn path_identity_with_semantics(path: &Path, windows_semantics: bool) -> String {
+    let normalized = normalize_path(path).to_string_lossy().into_owned();
+    if !windows_semantics {
+        return normalized;
+    }
+
+    // Windows API 同时接受 `/` 与 `\`。统一分隔符后再折叠大小写，避免同一条路径
+    // 只因选择器/旧扫描器的字符串风格不同而拥有两个身份。
+    let mut key = normalized.replace('/', "\\");
+    if let Some(rest) = key.strip_prefix("\\\\?\\UNC\\") {
+        key = format!("\\\\{rest}");
+    } else if let Some(rest) = key.strip_prefix("\\\\?\\") {
+        key = rest.to_string();
+    }
+    key.to_lowercase()
+}
+
+/// 两条路径是否指向同一个词法位置。不会访问磁盘或解析符号链接。
+pub fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    path_identity(left) == path_identity(right)
+}
+
 /// `child` 是否落在 `root` 之内（含相等）。词法比较，调用方要先各自 normalize。
 pub fn is_within(root: &Path, child: &Path) -> bool {
-    let root = normalize_path(root);
-    let child = normalize_path(child);
-    child == root || child.starts_with(&root)
+    is_within_with_semantics(root, child, cfg!(windows))
+}
+
+fn is_within_with_semantics(root: &Path, child: &Path, windows_semantics: bool) -> bool {
+    if !windows_semantics {
+        let root = normalize_path(root);
+        let child = normalize_path(child);
+        return child == root || child.starts_with(&root);
+    }
+
+    let root = path_identity_with_semantics(root, true);
+    let child = path_identity_with_semantics(child, true);
+    if child == root {
+        return true;
+    }
+    let prefix = if root.ends_with('\\') {
+        root
+    } else {
+        format!("{root}\\")
+    };
+    child.starts_with(&prefix)
 }
 
 /// 包含性检查的完整版：先词法归一，再对**已存在的最近祖先**做 realpath，
@@ -270,6 +320,23 @@ mod tests {
         assert!(!is_within(
             Path::new("/lib/set"),
             Path::new("/lib/set2/a.mp3")
+        ));
+    }
+
+    #[test]
+    fn windows_identity_ignores_case_and_separator_style() {
+        let upper = path_identity_with_semantics(Path::new("D:/Music/Set/A.mp3"), true);
+        let lower = path_identity_with_semantics(Path::new("d:/music/set/a.mp3"), true);
+        assert_eq!(upper, lower);
+        assert!(is_within_with_semantics(
+            Path::new("D:/Music"),
+            Path::new("d:/music/Set/A.mp3"),
+            true
+        ));
+        assert!(!is_within_with_semantics(
+            Path::new("D:/Music"),
+            Path::new("d:/Music-Backup/A.mp3"),
+            true
         ));
     }
 

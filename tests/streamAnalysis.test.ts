@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   recordStreamAnalysisProgress,
+  streamAnalysisPollDelay,
   streamAnalysisSnapshot,
   trackWithStreamAnalysis,
 } from "../src/lib/streamAnalysis";
@@ -10,6 +11,10 @@ import {
   trackWithStreamCue,
   updateStreamCue,
 } from "../src/lib/streamCue";
+import {
+  recordStreamCacheProgress,
+  streamCacheProgressSnapshot,
+} from "../src/lib/streamCacheProgress";
 import { beatGridMarkers } from "../src/lib/performanceCues";
 import type { StreamAnalysisResult, StreamWaveformProgress, Track } from "../src/types";
 
@@ -21,6 +26,67 @@ const emptyProgress = {
   complete: false,
   active: true,
 } satisfies StreamWaveformProgress;
+
+test("cache retry keeps polling while terminal failure releases the lease", () => {
+  assert.equal(streamAnalysisPollDelay({
+    ...emptyProgress,
+    active: false,
+    cache_status: "retrying",
+    waveform_status: "partial",
+  }, false, 750, 3_000), 750);
+  assert.equal(streamAnalysisPollDelay({
+    ...emptyProgress,
+    active: false,
+    cache_status: "failed",
+    waveform_status: "partial",
+  }, false, 750, 3_000), null);
+  assert.equal(streamAnalysisPollDelay({
+    ...emptyProgress,
+    complete: true,
+    active: false,
+    cache_status: "ready",
+    waveform_status: "failed",
+  }, false, 750, 3_000), null);
+});
+
+test("old waveform progress keeps the compatible polling policy", () => {
+  assert.equal(streamAnalysisPollDelay(emptyProgress, false, 750, 3_000), 750);
+  assert.equal(streamAnalysisPollDelay({
+    ...emptyProgress,
+    active: false,
+  }, false, 750, 3_000), 3_000);
+  assert.equal(streamAnalysisPollDelay({
+    ...emptyProgress,
+    complete: true,
+    active: false,
+  }, false, 750, 3_000), null);
+});
+
+test("failed cache snapshots clear ghost bytes but retain partial waveform state", () => {
+  const trackId = -98_761;
+  recordStreamCacheProgress(trackId, {
+    ...emptyProgress,
+    cached_bytes: 2 * 1024 * 1024,
+    total_bytes: 20 * 1024 * 1024,
+    cache_status: "retrying",
+    waveform_status: "partial",
+  });
+  assert.equal(streamCacheProgressSnapshot(trackId).cacheStatus, "retrying");
+
+  recordStreamCacheProgress(trackId, {
+    ...emptyProgress,
+    active: false,
+    cached_bytes: 0,
+    total_bytes: 20 * 1024 * 1024,
+    cache_status: "failed",
+    cache_error: "range failed",
+    waveform_status: "partial",
+  });
+  const failed = streamCacheProgressSnapshot(trackId);
+  assert.equal(failed.cachedBytes, 0);
+  assert.equal(failed.cacheStatus, "failed");
+  assert.equal(failed.waveformStatus, "partial");
+});
 
 const result = {
   duration: 180,

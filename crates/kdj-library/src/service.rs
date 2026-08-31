@@ -6,12 +6,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(not(any(target_os = "macos", target_os = "android", target_os = "ios")))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use kdj_analysis::engine::AnalysisResult;
 use kdj_core::models::{
     HarmonicMatch, HarmonicRelation, LibraryStats, LocalPlaylist, LocalPlaylistPatch, Track,
-    TrackPage, TrackPatch,
+    TrackPage, TrackPatch, TrackSummary, TrackSummaryPage,
 };
 use kdj_providers::tags::{read_tags, write_cover, write_metadata, MetadataEdit, TrackTags};
 use rusqlite::types::Value as SqlValue;
@@ -211,6 +212,11 @@ fn effective_bpm_key_column(column: &str) -> String {
 
 fn sort_column(key: &str) -> String {
     match key {
+        "file_created_at" => "COALESCE(tracks.file_created_at, tracks.file_mtime, \
+                              CAST(strftime('%s', tracks.added_at) AS REAL))"
+            .into(),
+        "added_at" => "tracks.added_at".into(),
+        "id" => "tracks.id".into(),
         "modified_at" => "tracks.modified_at".into(),
         "analyzed_at" => "tracks.analyzed_at".into(),
         "title" => "tracks.title".into(),
@@ -233,8 +239,43 @@ fn sort_column(key: &str) -> String {
                  + (CASE WHEN UPPER(SUBSTR(({camelot}), -1)) = 'B' THEN 1 ELSE 0 END) END)"
             )
         }
-        _ => "tracks.added_at".into(),
+        _ => "COALESCE(tracks.file_created_at, tracks.file_mtime, \
+                       CAST(strftime('%s', tracks.added_at) AS REAL))"
+            .into(),
     }
+}
+
+/// 曲目表只需要标量摘要。这里直接投影 V3 → V2 → V1 的有效 BPM/Key，避免先构造
+/// 完整 Track、再为每一行解析可能有数千个元素的拍点 JSON。
+fn track_summary_select() -> String {
+    let bpm = effective_bpm_key_column("bpm");
+    let music_key = effective_bpm_key_column("music_key");
+    let camelot = effective_bpm_key_column("camelot");
+    let open_key = effective_bpm_key_column("open_key");
+    format!(
+        "tracks.id AS id, tracks.path AS path, tracks.filename AS filename, \
+         tracks.title AS title, tracks.artist AS artist, tracks.album AS album, \
+         tracks.duration AS duration, tracks.format AS format, tracks.size AS size, \
+         ({bpm}) AS effective_bpm, \
+         EXISTS(SELECT 1 FROM track_bpm_key_analysis_v3 summary_v3 \
+           WHERE summary_v3.track_id = tracks.id \
+             AND summary_v3.analyzer_revision = '{BPM_KEY_V3_REVISION}' \
+             AND summary_v3.bpm IS NOT NULL) AS bpm_v3, \
+         (NOT EXISTS(SELECT 1 FROM track_bpm_key_analysis_v3 summary_v3 \
+            WHERE summary_v3.track_id = tracks.id \
+              AND summary_v3.analyzer_revision = '{BPM_KEY_V3_REVISION}' \
+              AND summary_v3.bpm IS NOT NULL) \
+          AND EXISTS(SELECT 1 FROM track_bpm_key_analysis_v2 summary_v2 \
+            WHERE summary_v2.track_id = tracks.id AND summary_v2.bpm IS NOT NULL)) AS bpm_v2, \
+         ({music_key}) AS effective_music_key, ({camelot}) AS effective_camelot, \
+         ({open_key}) AS effective_open_key, tracks.energy AS energy, \
+         tracks.rms_db AS rms_db, tracks.peak_db AS peak_db, tracks.rating AS rating, \
+         tracks.source_platform AS source_platform, tracks.source_key AS source_key, \
+         tracks.analyzed_at AS analyzed_at, tracks.added_at AS added_at, \
+         COALESCE(tracks.file_created_at, tracks.file_mtime, \
+           CAST(strftime('%s', tracks.added_at) AS REAL)) AS file_created_at, \
+         tracks.modified_at AS modified_at"
+    )
 }
 
 /// LIKE 通配符转义。用户搜 "50%" 不该变成匹配一切。
@@ -309,7 +350,26 @@ struct FileSnapshot {
     key_path: String,
     file_path: PathBuf,
     mtime: f64,
+    created_at: Option<f64>,
     size: i64,
+}
+
+fn system_time_seconds(time: SystemTime) -> Option<f64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs_f64())
+}
+
+/// 一次 metadata() 同时取修改时间和 birth time。并非所有文件系统都支持
+/// created()；这种情况下退回 mtime，仍比会被重新入库重置的 added_at 稳定。
+pub(crate) fn metadata_file_times(meta: &std::fs::Metadata) -> (f64, Option<f64>) {
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(system_time_seconds)
+        .unwrap_or(0.0);
+    let created_at = meta.created().ok().and_then(system_time_seconds);
+    (mtime, created_at)
 }
 
 impl FileSnapshot {
@@ -318,16 +378,12 @@ impl FileSnapshot {
         let file_path = PathBuf::from(&key_path);
         let meta =
             std::fs::metadata(&file_path).with_context(|| format!("无法读取文件: {key_path}"))?;
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs_f64())
-            .unwrap_or(0.0);
+        let (mtime, created_at) = metadata_file_times(&meta);
         Ok(Self {
             key_path,
             file_path,
             mtime,
+            created_at,
             size: meta.len() as i64,
         })
     }
@@ -374,6 +430,7 @@ impl PreparedFile {
 struct ExistingFile {
     id: i64,
     mtime: Option<f64>,
+    created_at: Option<f64>,
     size: i64,
     source_platform: String,
     source_key: String,
@@ -390,25 +447,48 @@ impl ExistingFile {
 }
 
 fn existing_file(conn: &Connection, key_path: &str) -> Result<Option<ExistingFile>> {
+    #[cfg(windows)]
+    const PATH_MATCH: &str = "path = ? COLLATE NOCASE";
+    #[cfg(not(windows))]
+    const PATH_MATCH: &str = "path = ?";
     conn.query_row(
-        "SELECT id, file_mtime, COALESCE(size, 0), COALESCE(source_platform, ''), \
+        &format!("SELECT id, file_mtime, file_created_at, COALESCE(size, 0), COALESCE(source_platform, ''), \
          COALESCE(source_key, ''), \
          (COALESCE(artist, '') = '' AND COALESCE(album, '') = '') \
-         FROM tracks WHERE path = ?",
+         FROM tracks WHERE {PATH_MATCH} ORDER BY id LIMIT 1"),
         [key_path],
         |row| {
             Ok(ExistingFile {
                 id: row.get(0)?,
                 mtime: row.get(1)?,
-                size: row.get(2)?,
-                source_platform: row.get(3)?,
-                source_key: row.get(4)?,
-                tags_missing: row.get(5)?,
+                created_at: row.get(2)?,
+                size: row.get(3)?,
+                source_platform: row.get(4)?,
+                source_key: row.get(5)?,
+                tags_missing: row.get(6)?,
             })
         },
     )
     .optional()
     .map_err(Into::into)
+}
+
+fn sync_file_created_at(
+    conn: &Connection,
+    track_id: i64,
+    known_created_at: Option<f64>,
+    created_at: Option<f64>,
+) -> Result<()> {
+    if let Some(created_at) = created_at.filter(|value| *value > 0.0) {
+        let changed = known_created_at.map_or(true, |known| (known - created_at).abs() >= 1e-6);
+        if changed {
+            conn.execute(
+                "UPDATE tracks SET file_created_at = ? WHERE id = ?",
+                rusqlite::params![created_at, track_id],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn touch_source(
@@ -443,6 +523,17 @@ fn touch_source(
 
 pub struct LibraryService {
     db: Database,
+}
+
+/// 媒体端点所需的最小数据库投影；读取封面或音频路径不应顺带解析整条分析详情。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackMediaSource {
+    pub id: i64,
+    pub path: String,
+    pub duration: Option<f64>,
+    pub format: String,
+    pub modified_at: String,
+    pub file_mtime: f64,
 }
 
 /// 曲库数据库中可重建的基础分析缓存占用。
@@ -665,6 +756,138 @@ impl LibraryService {
         (clause, params)
     }
 
+    /// 面向曲目表的轻量查询。筛选、排序和分页语义与 [`Self::list_tracks`] 完全一致，
+    /// 但响应不包含详情专用的大数组和标签集合。
+    pub fn list_track_summaries(&self, query: &TrackQuery) -> Result<TrackSummaryPage> {
+        let conn = self.db.conn()?;
+        let (clause, params) = self.build_where(query);
+        let limit = if query.limit == 0 {
+            200
+        } else {
+            // 摘要不含拍点/Cue/标签，允许一次恢复整个一万首已加载窗口；这比重复
+            // 50 次 COUNT + ORDER BY + JSON 往返更轻，也不改变前端的连续列表体验。
+            query.limit.clamp(1, 10_000)
+        };
+        let offset = query.offset.max(0);
+        let total: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM tracks{clause}"),
+            rusqlite::params_from_iter(params.iter()),
+            |row| row.get(0),
+        )?;
+
+        let sort_key = query.sort.trim().to_lowercase();
+        let folder = query.folder.trim().trim_end_matches('/');
+        let projection = track_summary_select();
+
+        if sort_key == "custom" && !folder.is_empty() && !query.folder_deep {
+            let mut stmt = conn.prepare(&format!("SELECT {projection} FROM tracks{clause}"))?;
+            let mut rows: Vec<TrackSummary> = stmt
+                .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                    Ok(row_to_track_summary(row))
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+            let listed = crate::folders::read_manifest_order(Path::new(folder));
+            let position: HashMap<&str, usize> = listed
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (name.as_str(), index))
+                .collect();
+            let tail = position.len();
+            rows.sort_by(|a, b| {
+                let pa = position.get(a.filename.as_str()).copied().unwrap_or(tail);
+                let pb = position.get(b.filename.as_str()).copied().unwrap_or(tail);
+                pa.cmp(&pb)
+                    .then_with(|| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()))
+            });
+            return Ok(TrackSummaryPage {
+                items: rows
+                    .into_iter()
+                    .skip(offset as usize)
+                    .take(limit as usize)
+                    .collect(),
+                total,
+                offset,
+                limit,
+            });
+        }
+
+        let column = sort_column(&sort_key);
+        let direction = order_direction(&query.order);
+        let secondary = {
+            let key = query.sort2.trim();
+            if key.is_empty() || key == sort_key {
+                String::new()
+            } else {
+                let col2 = sort_column(key);
+                let dir2 = order_direction(&query.order2);
+                format!(" ({col2}) IS NULL, ({col2}) {dir2},")
+            }
+        };
+        let sql = format!(
+            "SELECT {projection} FROM tracks{clause} \
+             ORDER BY ({column}) IS NULL, ({column}) {direction},{secondary} \
+             tracks.id DESC LIMIT ? OFFSET ?"
+        );
+        let mut all_params = params;
+        all_params.push(SqlValue::Integer(limit));
+        all_params.push(SqlValue::Integer(offset));
+        let mut stmt = conn.prepare(&sql)?;
+        let items = stmt
+            .query_map(rusqlite::params_from_iter(all_params.iter()), |row| {
+                Ok(row_to_track_summary(row))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(TrackSummaryPage {
+            items,
+            total,
+            offset,
+            limit,
+        })
+    }
+
+    /// 按事件携带的 id 批量读取最新摘要。不存在的 id 不返回，前端据此移除已删行。
+    pub fn track_summaries(
+        &self,
+        query: &TrackQuery,
+        track_ids: &[i64],
+    ) -> Result<Vec<TrackSummary>> {
+        if track_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.db.conn()?;
+        let projection = track_summary_select();
+        let (clause, filter_params) = self.build_where(query);
+        let mut summaries = Vec::new();
+        let mut unique = HashSet::new();
+        let ids: Vec<i64> = track_ids
+            .iter()
+            .copied()
+            .filter(|id| *id > 0 && unique.insert(*id))
+            .collect();
+        for chunk in ids.chunks(900) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let conjunction = if clause.is_empty() {
+                " WHERE "
+            } else {
+                " AND "
+            };
+            let sql = format!(
+                "SELECT {projection} FROM tracks{clause}{conjunction}tracks.id IN ({placeholders})"
+            );
+            let mut params = filter_params.clone();
+            params.extend(chunk.iter().copied().map(SqlValue::Integer));
+            let mut stmt = conn.prepare(&sql)?;
+            summaries.extend(
+                stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                    Ok(row_to_track_summary(row))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+            );
+        }
+        summaries.sort_by_key(|track| track.id);
+        Ok(summaries)
+    }
+
     pub fn list_tracks(&self, query: &TrackQuery) -> Result<TrackPage> {
         let conn = self.db.conn()?;
         let (clause, params) = self.build_where(query);
@@ -777,6 +1000,28 @@ impl LibraryService {
             .attach_tags(&conn, self.apply_bpm_key_analysis(&conn, vec![track])?)?
             .into_iter()
             .next())
+    }
+
+    pub fn media_source(&self, track_id: i64) -> Result<Option<TrackMediaSource>> {
+        let conn = self.db.conn()?;
+        conn.query_row(
+            "SELECT id, path, duration, COALESCE(format, ''), modified_at, \
+                    COALESCE(file_mtime, 0) \
+             FROM tracks WHERE id = ?",
+            [track_id],
+            |row| {
+                Ok(TrackMediaSource {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    duration: row.get(2)?,
+                    format: row.get(3)?,
+                    modified_at: row.get(4)?,
+                    file_mtime: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn get_by_path(&self, path: &Path) -> Result<Option<Track>> {
@@ -1409,15 +1654,10 @@ impl LibraryService {
                 row.get(0)
             })?;
         let meta = std::fs::metadata(&path).with_context(|| format!("无法读取文件: {path}"))?;
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
+        let (mtime, created_at) = metadata_file_times(&meta);
         conn.execute(
-            "UPDATE tracks SET file_mtime = ?, size = ? WHERE id = ?",
-            rusqlite::params![mtime, meta.len() as i64, track_id],
+            "UPDATE tracks SET file_mtime = ?, file_created_at = ?, size = ? WHERE id = ?",
+            rusqlite::params![mtime, created_at, meta.len() as i64, track_id],
         )?;
         Ok(())
     }
@@ -1647,10 +1887,10 @@ impl LibraryService {
                     rms_db, peak_db, rating, color, comment, cue_ms, end_ms,
                     cue_points_json, cue_points_managed,
                     source_platform, source_key, analyzed_at, added_at, modified_at,
-                    analysis_error
+                    file_created_at, analysis_error
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )",
                 rusqlite::params![
                     track.id,
@@ -1689,6 +1929,7 @@ impl LibraryService {
                     track.analyzed_at,
                     track.added_at,
                     track.modified_at,
+                    track.file_created_at,
                     track.analysis_error,
                 ],
             )?;
@@ -1765,6 +2006,7 @@ impl LibraryService {
             // 逼它落到下面的重读分支——覆盖规则"只在读到非空值时才盖"在那边，
             // 所以真没标签的文件重读之后也只是原地踏步，不会被清掉别的字段。
             if existing.unchanged(&snapshot) {
+                sync_file_created_at(&conn, existing.id, existing.created_at, snapshot.created_at)?;
                 // 唯一例外：来源信息是调用方带进来的（下载完成时补登记），
                 // 文件没变也要认，否则重复下载的曲目会一直挂着 local
                 touch_source(
@@ -1836,6 +2078,12 @@ impl LibraryService {
             .as_ref()
             .filter(|row| row.unchanged(&prepared.snapshot))
         {
+            sync_file_created_at(
+                conn,
+                existing.id,
+                existing.created_at,
+                prepared.snapshot.created_at,
+            )?;
             touch_source(
                 conn,
                 existing.id,
@@ -1853,9 +2101,9 @@ impl LibraryService {
             let inserted = conn.execute(
                 "INSERT INTO tracks (path, filename, title, artist, album, genre, year,\
                  duration, bitrate, samplerate, channels, format, size,\
-                 source_platform, source_key, added_at, modified_at, file_mtime,\
+                 source_platform, source_key, added_at, modified_at, file_mtime, file_created_at,\
                  rating, analysis_error)\
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '')",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '')",
                 rusqlite::params![
                     snapshot.key_path,
                     prepared.filename,
@@ -1879,6 +2127,7 @@ impl LibraryService {
                     prepared.now,
                     prepared.now,
                     snapshot.mtime,
+                    snapshot.created_at,
                 ],
             );
             return match inserted {
@@ -1886,7 +2135,11 @@ impl LibraryService {
                 // 两个扫描线程同时撞到同一个文件：UNIQUE(path) 拦下后回读即可
                 Err(_) => conn
                     .query_row(
-                        "SELECT id FROM tracks WHERE path = ?",
+                        if cfg!(windows) {
+                            "SELECT id FROM tracks WHERE path = ? COLLATE NOCASE ORDER BY id LIMIT 1"
+                        } else {
+                            "SELECT id FROM tracks WHERE path = ? ORDER BY id LIMIT 1"
+                        },
                         [&snapshot.key_path],
                         |row| row.get(0),
                     )
@@ -1901,12 +2154,17 @@ impl LibraryService {
             "filename = ?",
             "size = ?",
             "file_mtime = ?",
+            "file_created_at = ?",
             "modified_at = ?",
         ];
         let mut values: Vec<SqlValue> = vec![
             SqlValue::Text(prepared.filename),
             SqlValue::Integer(snapshot.size),
             SqlValue::Real(snapshot.mtime),
+            snapshot
+                .created_at
+                .map(SqlValue::Real)
+                .unwrap_or(SqlValue::Null),
             SqlValue::Text(prepared.now),
         ];
         for (assignment, value) in [
@@ -2938,19 +3196,20 @@ impl LibraryService {
         Ok(())
     }
 
-    /// path → (id, file_mtime, 标签可疑地空)。扫描前一次性拉出来做增量比对，
+    /// path → (id, file_mtime, file_created_at, 标签可疑地空)。扫描前一次性拉出来做增量比对，
     /// 比每个文件查一次库快一个数量级。
     ///
-    /// 第三个布尔是给增量跳过用的例外：艺人和专辑**双双为空**的行多半是
+    /// 最后的布尔是给增量跳过用的例外：艺人和专辑**双双为空**的行多半是
     /// 早年入库时读标签失败留下的（文件里其实有），mtime 又恰好没变，
     /// 光靠"文件动过才重读"永远修不好——所以这种行不许走快路径。
     /// 真没标签的文件会因此每次扫描都被多读一遍标签，代价是每个文件几毫秒，
     /// 换来的是坏行自动愈合，不用用户挨个点「重读标签」。
-    pub fn file_index(&self) -> Result<HashMap<String, (i64, f64, bool)>> {
+    pub fn file_index(&self) -> Result<HashMap<String, (i64, f64, Option<f64>, bool)>> {
         let conn = self.db.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, path, file_mtime, \
-             (COALESCE(artist, '') = '' AND COALESCE(album, '') = '') FROM tracks",
+            "SELECT id, path, file_mtime, file_created_at, \
+             (COALESCE(artist, '') = '' AND COALESCE(album, '') = '') \
+             FROM tracks ORDER BY id",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -2958,11 +3217,44 @@ impl LibraryService {
                 (
                     row.get::<_, i64>(0)?,
                     row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
-                    row.get::<_, bool>(3)?,
+                    row.get::<_, Option<f64>>(3)?,
+                    row.get::<_, bool>(4)?,
                 ),
             ))
         })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        let mut index = HashMap::new();
+        for row in rows {
+            let (path, value) = row?;
+            // Windows 旧版可能已经因盘符/目录大小写不同写入重复行。修复迁移会合并它们；
+            // 在迁移前或数据库被外部工具改过时，扫描仍应优先复用最早的原记录。
+            index
+                .entry(kdj_core::paths::path_identity(Path::new(&path)))
+                .or_insert(value);
+        }
+        Ok(index)
+    }
+
+    /// 扫描已经为每个文件做过 metadata()；老库只需把同一次读取拿到的 birth time
+    /// 批量补进来，无需重读标签，也不能为一万首歌逐条开事务。
+    pub(crate) fn sync_file_created_times(&self, updates: &[(i64, f64)]) -> Result<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction().context("开始批量校正文件创建时间失败")?;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE tracks SET file_created_at = ? \
+                 WHERE id = ? AND (file_created_at IS NULL OR ABS(file_created_at - ?) >= 0.000001)",
+            )?;
+            for &(track_id, created_at) in updates {
+                if track_id > 0 && created_at.is_finite() && created_at > 0.0 {
+                    stmt.execute(rusqlite::params![created_at, track_id, created_at])?;
+                }
+            }
+        }
+        tx.commit().context("提交文件创建时间校正失败")?;
+        Ok(())
     }
 }
 
@@ -2973,6 +3265,56 @@ fn text(row: &Row, name: &str) -> String {
         .ok()
         .flatten()
         .unwrap_or_default()
+}
+
+fn row_to_track_summary(row: &Row) -> TrackSummary {
+    let path = text(row, "path");
+    TrackSummary {
+        id: row.get("id").unwrap_or(0),
+        folder: Path::new(&path)
+            .parent()
+            .map(|parent| parent.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        filename: text(row, "filename"),
+        title: text(row, "title"),
+        artist: text(row, "artist"),
+        album: text(row, "album"),
+        duration: row.get("duration").ok().flatten(),
+        format: text(row, "format"),
+        size: row
+            .get::<_, Option<i64>>("size")
+            .ok()
+            .flatten()
+            .unwrap_or(0),
+        bpm: row.get("effective_bpm").ok().flatten(),
+        bpm_v2: row.get("bpm_v2").unwrap_or(false),
+        bpm_v3: row.get("bpm_v3").unwrap_or(false),
+        music_key: text(row, "effective_music_key"),
+        camelot: text(row, "effective_camelot").to_uppercase(),
+        open_key: text(row, "effective_open_key"),
+        energy: row.get("energy").ok().flatten(),
+        rms_db: row.get("rms_db").ok().flatten(),
+        peak_db: row.get("peak_db").ok().flatten(),
+        rating: row
+            .get::<_, Option<i64>>("rating")
+            .ok()
+            .flatten()
+            .unwrap_or(0),
+        source_platform: {
+            let value = text(row, "source_platform");
+            if value.is_empty() {
+                "local".to_string()
+            } else {
+                value
+            }
+        },
+        source_key: text(row, "source_key"),
+        analyzed_at: row.get("analyzed_at").ok().flatten(),
+        added_at: text(row, "added_at"),
+        file_created_at: row.get::<_, Option<f64>>("file_created_at").ok().flatten(),
+        modified_at: text(row, "modified_at"),
+        path,
+    }
 }
 
 fn row_to_track(row: &Row) -> Track {
@@ -3042,6 +3384,11 @@ fn row_to_track(row: &Row) -> Track {
         source_key: text(row, "source_key"),
         analyzed_at: row.get::<_, Option<String>>("analyzed_at").ok().flatten(),
         added_at: text(row, "added_at"),
+        file_created_at: row
+            .get::<_, Option<f64>>("file_created_at")
+            .ok()
+            .flatten()
+            .or_else(|| row.get::<_, Option<f64>>("file_mtime").ok().flatten()),
         modified_at: text(row, "modified_at"),
         analysis_error: text(row, "analysis_error"),
         tags: Vec::new(),
@@ -3512,6 +3859,224 @@ mod tests {
             .unwrap();
         assert_eq!(todo.total, 1);
         assert!(paths(&todo)[0].ends_with("b.mp3"));
+    }
+
+    #[test]
+    fn default_order_uses_filesystem_creation_time_not_reimport_time() {
+        let service = service();
+        let recovered_old = insert(
+            &service,
+            Row {
+                path: "/lib/recovered-old.mp3",
+                ..Default::default()
+            },
+        );
+        let genuinely_new = insert(
+            &service,
+            Row {
+                path: "/lib/genuinely-new.mp3",
+                ..Default::default()
+            },
+        );
+        let conn = service.db().conn().unwrap();
+        conn.execute(
+            "UPDATE tracks SET file_created_at = 100, added_at = '2099-01-01T00:00:00Z' \
+             WHERE id = ?",
+            [recovered_old],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE tracks SET file_created_at = 200, added_at = '2020-01-01T00:00:00Z' \
+             WHERE id = ?",
+            [genuinely_new],
+        )
+        .unwrap();
+        drop(conn);
+
+        let default_page = service
+            .list_track_summaries(&TrackQuery {
+                limit: 200,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            default_page
+                .items
+                .iter()
+                .map(|track| track.id)
+                .collect::<Vec<_>>(),
+            vec![genuinely_new, recovered_old],
+            "重新入库得到的新 added_at 不得把旧文件顶到前面"
+        );
+
+        let added_page = service
+            .list_track_summaries(&TrackQuery {
+                sort: "added_at".into(),
+                order: "desc".into(),
+                limit: 200,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(added_page.items[0].id, recovered_old, "旧排序仍可显式使用");
+    }
+
+    #[test]
+    fn summary_query_keeps_detail_payloads_out_and_uses_effective_analysis() {
+        let service = service();
+        let id = insert(
+            &service,
+            Row {
+                path: "/lib/summary.mp3",
+                title: "Summary",
+                bpm: Some(90.0),
+                ..Default::default()
+            },
+        );
+        let conn = service.db().conn().unwrap();
+        conn.execute(
+            "UPDATE tracks SET comment = 'detail only', cue_points_json = \
+             '[{\"id\":1,\"hot_cue\":null,\"start_ms\":1000,\"end_ms\":null,\
+               \"color_index\":null,\"color\":\"\",\"comment\":\"\",\"active_loop\":false}]' \
+             WHERE id = ?",
+            [id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tags (track_id, tag) VALUES (?, 'detail-tag')",
+            [id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO track_bpm_key_analysis_v3 (
+               track_id, analyzer_revision, bpm, beat_times_json, downbeats_json,
+               music_key, camelot, open_key, chroma_json, analyzed_at
+             ) VALUES (?, ?, 128.0, '[0.1,0.6,1.1]', '[0.1]',
+               'A minor', '8A', '1m', '[]', 'now')",
+            rusqlite::params![id, BPM_KEY_V3_REVISION],
+        )
+        .unwrap();
+        drop(conn);
+
+        let page = service
+            .list_track_summaries(&TrackQuery {
+                limit: 200,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        let summary = &page.items[0];
+        assert_eq!(summary.bpm, Some(128.0));
+        assert!(summary.bpm_v3);
+        assert_eq!(summary.camelot, "8A");
+        let json = serde_json::to_value(summary).unwrap();
+        for detail_key in ["beat_times", "downbeats", "cue_points", "tags", "comment"] {
+            assert!(
+                json.get(detail_key).is_none(),
+                "摘要泄漏详情字段：{detail_key}"
+            );
+        }
+
+        let detail = service.get(id).unwrap().unwrap();
+        assert_eq!(detail.beat_times, vec![0.1, 0.6, 1.1]);
+        assert_eq!(detail.tags, vec!["detail-tag"]);
+        assert_eq!(detail.cue_points.len(), 1);
+        assert_eq!(detail.comment, "detail only");
+    }
+
+    #[test]
+    fn incremental_summaries_obey_the_active_filter_and_skip_missing_ids() {
+        let service = service();
+        let done = insert(
+            &service,
+            Row {
+                path: "/lib/done.mp3",
+                analyzed: true,
+                ..Default::default()
+            },
+        );
+        let pending = insert(
+            &service,
+            Row {
+                path: "/lib/pending.mp3",
+                ..Default::default()
+            },
+        );
+        let summaries = service
+            .track_summaries(
+                &TrackQuery {
+                    analyzed: Some(false),
+                    ..Default::default()
+                },
+                &[done, pending, 999_999],
+            )
+            .unwrap();
+        assert_eq!(
+            summaries.iter().map(|track| track.id).collect::<Vec<_>>(),
+            vec![pending]
+        );
+    }
+
+    #[test]
+    fn default_sort_uses_file_creation_time_and_falls_back_to_mtime() {
+        let service = service();
+        let newest_file = insert(
+            &service,
+            Row {
+                path: "/lib/newest-file.mp3",
+                ..Default::default()
+            },
+        );
+        let no_birth_time = insert(
+            &service,
+            Row {
+                path: "/lib/no-birth-time.mp3",
+                ..Default::default()
+            },
+        );
+        // 模拟用户在配置丢失后最后才重新扫到的一首老文件：id/入库顺序最新，
+        // 但文件创建时间最早，因此不能被顶到列表最前。
+        let readded_old_file = insert(
+            &service,
+            Row {
+                path: "/lib/readded-old-file.mp3",
+                ..Default::default()
+            },
+        );
+        let conn = service.db().conn().unwrap();
+        conn.execute(
+            "UPDATE tracks SET file_created_at = 300, file_mtime = 310 WHERE id = ?",
+            [newest_file],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE tracks SET file_created_at = NULL, file_mtime = 200 WHERE id = ?",
+            [no_birth_time],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE tracks SET file_created_at = 100, file_mtime = 999 WHERE id = ?",
+            [readded_old_file],
+        )
+        .unwrap();
+        drop(conn);
+
+        let page = service
+            .list_track_summaries(&TrackQuery {
+                limit: 200,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|track| track.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/lib/newest-file.mp3",
+                "/lib/no-birth-time.mp3",
+                "/lib/readded-old-file.mp3",
+            ]
+        );
     }
 
     #[test]
@@ -4332,7 +4897,7 @@ mod tests {
         // file_index 必须把这行标成可疑，扫描才知道别跳它。库里只有这一条。
         let index = service.file_index().unwrap();
         assert_eq!(index.len(), 1);
-        let (_, _, suspect) = *index.values().next().unwrap();
+        let (_, _, _, suspect) = *index.values().next().unwrap();
         assert!(suspect, "艺人+专辑双空的行要被标成可疑");
 
         // 文件没动过（mtime/size 全对得上），一次普通 upsert 也要能治好

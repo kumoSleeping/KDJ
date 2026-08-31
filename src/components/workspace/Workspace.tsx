@@ -315,6 +315,7 @@ export function Workspace() {
   const selectedIds = useLibraryStore((state) => state.selectedIds);
   const selected = useLibraryStore(selectSelectedTrack);
   const loadMore = useLibraryStore((state) => state.loadMore);
+  const loadMoreTracks = useCallback(() => { void loadMore(); }, [loadMore]);
   const select = useLibraryStore((state) => state.select);
   const refreshStats = useLibraryStore((state) => state.refreshStats);
   const refresh = useLibraryStore((state) => state.refresh);
@@ -1365,12 +1366,13 @@ export function Workspace() {
         openLyricsPanel();
         const track =
           (targetId != null && currentPlaying?.id === targetId ? currentPlaying : null) ??
-          (targetId != null
-            ? useLibraryStore.getState().tracks.find((item) => item.id === targetId)
-            : null) ??
           selectSelectedTrack(useLibraryStore.getState()) ??
           getPlayingTrack();
-        void ensureLyrics(track);
+        if (track) {
+          void ensureLyrics(track);
+        } else if (targetId != null) {
+          void api.track(targetId).then(ensureLyrics).catch(() => undefined);
+        }
       } else {
         showTrackDetail();
       }
@@ -1384,8 +1386,7 @@ export function Workspace() {
         // 选择先于 300ms 的单击/双击判定发生。先写这次导航目标，再更新外部列表
         // store；即使外部 store 同步触发渲染，未固定详情也不会过渡到正在播放页。
         const library = useLibraryStore.getState();
-        const selectedTarget = library.tracks.find((track) => track.id === id)
-          ?? (library.selectedTrack?.id === id ? library.selectedTrack : null);
+        const selectedTarget = library.selectedTrack?.id === id ? library.selectedTrack : null;
         asideTrackSnapshotRef.current = selectedTarget;
         setAsideTrackId(id);
       }
@@ -2666,7 +2667,7 @@ export function Workspace() {
                     onSort={sortBy}
                     sort2={filter.sort2}
                     order2={filter.order2}
-                    onScrollEnd={() => void loadMore()}
+                    onScrollEnd={loadMoreTracks}
                   />
                 </div>
 

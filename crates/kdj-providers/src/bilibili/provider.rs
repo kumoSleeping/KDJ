@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -44,12 +44,209 @@ const QR_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 
 /// 拖一次进度条就是一串 Range 请求，每个都重新 view+playurl 的话，
 /// 正好凑成最容易被风控的形状（短时间高频打接口）。
 const PREVIEW_URL_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// WebView 预览宁可尽快换 CDN，也不能沿用下载任务的 30 秒静默等待。首包和
+/// 相邻媒体块超过这个时间没有到达，就把当前节点标坏，让本次/下一次 Range
+/// 请求从 B 站返回的 backupUrl 继续。
+const PREVIEW_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const FAVORITE_FOLDER_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_FAVORITE_FOLDER_CACHES: usize = 16;
 
 /// 预览的清晰度档位（qn=64 → 720P）。预览回答的是"是不是要找的那支片子"，
 /// 不是拿来审画质的；档位越高首帧越慢。
 const PREVIEW_QN: i64 = 64;
+
+type PreviewUrlKey = (String, usize, i64);
+
+#[derive(Clone)]
+struct PreviewUrlCacheEntry {
+    urls: Vec<String>,
+    active: usize,
+    born: Instant,
+}
+
+impl PreviewUrlCacheEntry {
+    fn ordered_candidates(&self) -> Vec<(usize, String)> {
+        if self.urls.is_empty() {
+            return Vec::new();
+        }
+        let active = self.active.min(self.urls.len() - 1);
+        (0..self.urls.len())
+            .map(|offset| {
+                let index = (active + offset) % self.urls.len();
+                (index, self.urls[index].clone())
+            })
+            .collect()
+    }
+}
+
+async fn send_preview_request(
+    http: reqwest::Client,
+    cookies: String,
+    url: String,
+    range: Option<String>,
+) -> Result<reqwest::Response> {
+    let mut builder = http
+        .get(&url)
+        .header(reqwest::header::REFERER, "https://www.bilibili.com/")
+        .header(reqwest::header::USER_AGENT, USER_AGENT);
+    if !cookies.is_empty() {
+        builder = builder.header(reqwest::header::COOKIE, cookies);
+    }
+    if let Some(range) = range {
+        builder = builder.header(reqwest::header::RANGE, range);
+    }
+    builder.send().await.context("哔哩哔哩预览流请求失败")
+}
+
+fn requested_range_start(range: &str) -> Option<u64> {
+    let value = range.trim().strip_prefix("bytes=")?;
+    if value.contains(',') {
+        return None;
+    }
+    value.split_once('-')?.0.trim().parse().ok()
+}
+
+fn content_range_start(value: &str) -> Option<u64> {
+    value
+        .trim()
+        .strip_prefix("bytes ")?
+        .split_once('-')?
+        .0
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn validate_preview_range(range: Option<&str>, response: &reqwest::Response) -> Result<()> {
+    let Some(expected) = range.and_then(requested_range_start) else {
+        return Ok(());
+    };
+    // RFC 9110 允许服务器忽略从 0 开始的 Range 并返回完整实体。非零 seek 若也
+    // 返回 200，WebView 会把文件头当成目标片段，随后反复重试并卡死。
+    if expected == 0 && response.status() == reqwest::StatusCode::OK {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        response.status() == reqwest::StatusCode::PARTIAL_CONTENT,
+        "哔哩哔哩预览 CDN 忽略了 Range 请求"
+    );
+    let actual = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(content_range_start)
+        .context("哔哩哔哩预览 CDN 返回了无效的 Content-Range")?;
+    anyhow::ensure!(
+        actual == expected,
+        "哔哩哔哩预览 CDN 返回了错误的 Range 起点"
+    );
+    Ok(())
+}
+
+fn mark_preview_candidate_active(
+    cache: &Arc<Mutex<HashMap<PreviewUrlKey, PreviewUrlCacheEntry>>>,
+    key: &PreviewUrlKey,
+    candidate_index: usize,
+) {
+    let mut cache = cache.lock().unwrap();
+    if let Some(entry) = cache.get_mut(key) {
+        if candidate_index < entry.urls.len() {
+            entry.active = candidate_index;
+        }
+    }
+}
+
+fn mark_preview_candidate_failed(
+    cache: &Arc<Mutex<HashMap<PreviewUrlKey, PreviewUrlCacheEntry>>>,
+    key: &PreviewUrlKey,
+    candidate_index: usize,
+) {
+    let mut cache = cache.lock().unwrap();
+    if let Some(entry) = cache.get_mut(key) {
+        if !entry.urls.is_empty() && candidate_index < entry.urls.len() {
+            entry.active = (candidate_index + 1) % entry.urls.len();
+        }
+    }
+}
+
+fn timeout_preview_body(
+    body: futures_util::stream::BoxStream<'static, reqwest::Result<bytes::Bytes>>,
+    cache: Arc<Mutex<HashMap<PreviewUrlKey, PreviewUrlCacheEntry>>>,
+    key: PreviewUrlKey,
+    candidate_index: usize,
+    expected_remaining: Option<u64>,
+) -> futures_util::stream::BoxStream<'static, std::io::Result<bytes::Bytes>> {
+    futures_util::stream::unfold(
+        (body, cache, key, candidate_index, expected_remaining, false),
+        |(mut body, cache, key, candidate_index, mut remaining, finished)| async move {
+            if finished {
+                return None;
+            }
+            match tokio::time::timeout(PREVIEW_READ_TIMEOUT, body.next()).await {
+                Ok(Some(Ok(chunk))) => {
+                    if let Some(left) = remaining.as_mut() {
+                        *left = left.saturating_sub(chunk.len() as u64);
+                    }
+                    Some((
+                        Ok(chunk),
+                        (body, cache, key, candidate_index, remaining, false),
+                    ))
+                }
+                Ok(None) if remaining.unwrap_or(0) == 0 => None,
+                Ok(None) => {
+                    mark_preview_candidate_failed(&cache, &key, candidate_index);
+                    tracing::warn!(
+                        bvid = %key.0,
+                        page = key.1,
+                        qn = key.2,
+                        candidate = candidate_index,
+                        "B站预览 CDN 提前结束媒体流"
+                    );
+                    Some((
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "B站预览 CDN 提前结束媒体流",
+                        )),
+                        (body, cache, key, candidate_index, remaining, true),
+                    ))
+                }
+                Ok(Some(Err(error))) => {
+                    mark_preview_candidate_failed(&cache, &key, candidate_index);
+                    tracing::warn!(
+                        bvid = %key.0,
+                        page = key.1,
+                        qn = key.2,
+                        candidate = candidate_index,
+                        %error,
+                        "B站预览 CDN 读取失败"
+                    );
+                    Some((
+                        Err(std::io::Error::other(error)),
+                        (body, cache, key, candidate_index, remaining, true),
+                    ))
+                }
+                Err(_) => {
+                    mark_preview_candidate_failed(&cache, &key, candidate_index);
+                    tracing::warn!(
+                        bvid = %key.0,
+                        page = key.1,
+                        qn = key.2,
+                        candidate = candidate_index,
+                        "B站预览 CDN 读取超时"
+                    );
+                    Some((
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "B站预览 CDN 读取超时",
+                        )),
+                        (body, cache, key, candidate_index, remaining, true),
+                    ))
+                }
+            }
+        },
+    )
+    .boxed()
+}
 
 struct FavoriteFolderCache {
     title: String,
@@ -75,8 +272,9 @@ pub struct BilibiliProvider {
     ctx: ProviderContext,
     client: BiliClient,
     qr_sessions: Mutex<HashMap<String, (String, Instant)>>,
-    /// (bvid, 分P, qn) → (直链, 解析时刻)。见 `PREVIEW_URL_TTL`。
-    preview_urls: Mutex<HashMap<(String, usize, i64), (String, Instant)>>,
+    /// (bvid, 分P, qn) → (主链 + backupUrl, 当前优选节点, 解析时刻)。
+    /// 流已交给 axum 后仍可能读失败，因此用 Arc 让响应体也能把坏节点移到队尾。
+    preview_urls: Arc<Mutex<HashMap<PreviewUrlKey, PreviewUrlCacheEntry>>>,
     /// 多个 Range 首包同时到达时，只有第一个可以执行 view + playurl。
     preview_resolve: tokio::sync::Mutex<()>,
     /// 收藏夹按需扩展；同一歌单后续翻页只补未读取的 B 站页，不从第 1 页重来。
@@ -91,7 +289,7 @@ impl BilibiliProvider {
             client: BiliClient::new(&session_dir)?,
             ctx,
             qr_sessions: Mutex::new(HashMap::new()),
-            preview_urls: Mutex::new(HashMap::new()),
+            preview_urls: Arc::new(Mutex::new(HashMap::new())),
             preview_resolve: tokio::sync::Mutex::new(()),
             favorite_folders: tokio::sync::Mutex::new(HashMap::new()),
         })
@@ -171,25 +369,39 @@ impl BilibiliProvider {
     }
 
     async fn preview_url_for_qn(&self, bvid: &str, page_index: usize, qn: i64) -> Result<String> {
+        let (_, candidates) = self.preview_candidates_for_qn(bvid, page_index, qn).await?;
+        candidates
+            .into_iter()
+            .next()
+            .map(|(_, url)| url)
+            .context("哔哩哔哩没有返回可用的预览直链")
+    }
+
+    async fn preview_candidates_for_qn(
+        &self,
+        bvid: &str,
+        page_index: usize,
+        qn: i64,
+    ) -> Result<(PreviewUrlKey, Vec<(usize, String)>)> {
         let key = (bvid.to_string(), page_index, qn);
-        if let Some(url) = {
+        if let Some(candidates) = {
             let cache = self.preview_urls.lock().unwrap();
             cache
                 .get(&key)
-                .filter(|(_, born)| born.elapsed() < PREVIEW_URL_TTL)
-                .map(|(url, _)| url.clone())
+                .filter(|entry| entry.born.elapsed() < PREVIEW_URL_TTL)
+                .map(PreviewUrlCacheEntry::ordered_candidates)
         } {
-            return Ok(url);
+            return Ok((key, candidates));
         }
         let _resolve = self.preview_resolve.lock().await;
-        if let Some(url) = {
+        if let Some(candidates) = {
             let cache = self.preview_urls.lock().unwrap();
             cache
                 .get(&key)
-                .filter(|(_, born)| born.elapsed() < PREVIEW_URL_TTL)
-                .map(|(url, _)| url.clone())
+                .filter(|entry| entry.born.elapsed() < PREVIEW_URL_TTL)
+                .map(PreviewUrlCacheEntry::ordered_candidates)
         } {
-            return Ok(url);
+            return Ok((key, candidates));
         }
         let info = self.client.view(bvid).await?;
         let pages: Vec<Value> = info
@@ -200,25 +412,34 @@ impl BilibiliProvider {
         let index = page_index.min(pages.len().saturating_sub(1));
         let cid = cid_at(&info, &pages, index);
         let playurl = self.client.playurl(bvid, cid, qn, false).await?;
-        let PlayUrlData::Single { url, .. } = streams::parse_playurl(&playurl) else {
+        let PlayUrlData::Single {
+            url, backup_urls, ..
+        } = streams::parse_playurl(&playurl)
+        else {
             bail!("哔哩哔哩没有返回可直接播放的预览流");
         };
-        ensure_media_url(&url).await?;
+        let mut urls = Vec::with_capacity(1 + backup_urls.len());
+        for candidate in std::iter::once(url).chain(backup_urls) {
+            if urls.iter().any(|existing| existing == &candidate) {
+                continue;
+            }
+            match ensure_media_url(&candidate).await {
+                Ok(()) => urls.push(candidate),
+                Err(error) => tracing::warn!(%error, "忽略不安全的 B站预览备用地址"),
+            }
+        }
+        anyhow::ensure!(!urls.is_empty(), "哔哩哔哩没有返回可用的预览直链");
+        let entry = PreviewUrlCacheEntry {
+            urls,
+            active: 0,
+            born: Instant::now(),
+        };
+        let candidates = entry.ordered_candidates();
         let mut cache = self.preview_urls.lock().unwrap();
         // 顺手清掉过期的：预览是"搜一批、点着看"的用法，不清会越攒越多
-        cache.retain(|_, (_, born)| born.elapsed() <= PREVIEW_URL_TTL);
-        cache.insert(key, (url.clone(), Instant::now()));
-        Ok(url)
-    }
-
-    async fn preview_url_at_height(
-        &self,
-        bvid: &str,
-        page_index: usize,
-        max_height: i64,
-    ) -> Result<String> {
-        self.preview_url_for_qn(bvid, page_index, super::qn_for_height(max_height))
-            .await
+        cache.retain(|_, entry| entry.born.elapsed() <= PREVIEW_URL_TTL);
+        cache.insert(key.clone(), entry);
+        Ok((key, candidates))
     }
 
     /// 自动音频对齐给 ffmpeg 使用的预览源。URL 仍由同一套缓存/过期刷新逻辑
@@ -283,53 +504,117 @@ impl BilibiliProvider {
     ) -> Result<VideoPreviewStream> {
         let bvid = normalize_bvid(bvid);
         anyhow::ensure!(!bvid.is_empty(), "BV 号格式不正确");
-        let cookies = self.client.cookie_header();
-        let send = |url: String, range: Option<String>| {
-            let http = self.client.http().clone();
-            let cookies = cookies.clone();
-            async move {
-                let mut builder = http
-                    .get(&url)
-                    .header(reqwest::header::REFERER, "https://www.bilibili.com/")
-                    .header(reqwest::header::USER_AGENT, USER_AGENT);
-                if !cookies.is_empty() {
-                    builder = builder.header(reqwest::header::COOKIE, cookies);
-                }
-                if let Some(range) = range {
-                    builder = builder.header(reqwest::header::RANGE, range);
-                }
-                builder.send().await.context("哔哩哔哩预览流请求失败")
-            }
-        };
-
-        let url = if max_height > 0 {
-            self.preview_url_at_height(&bvid, page_index, max_height)
-                .await?
+        let qn = if max_height > 0 {
+            super::preview_qn_for_height(max_height)
         } else {
-            self.preview_url(&bvid, page_index).await?
+            PREVIEW_QN
         };
-        let mut response = send(url, range.map(str::to_string)).await?;
-        if matches!(response.status().as_u16(), 403 | 410 | 412) {
-            // 直链签名过期（缓存的太老 / 出口 IP 变了）：重解析一次再试，
-            // 别把一个能自愈的状况直接甩给前端当播放失败
-            self.preview_urls
-                .lock()
-                .unwrap()
-                .retain(|(cached_bvid, cached_page, _), _| {
-                    cached_bvid != &bvid || *cached_page != page_index
-                });
-            let fresh = if max_height > 0 {
-                self.preview_url_at_height(&bvid, page_index, max_height)
-                    .await?
-            } else {
-                self.preview_url(&bvid, page_index).await?
-            };
-            response = send(fresh, range.map(str::to_string)).await?;
-        }
+        let range = range.map(str::to_string);
+        let mut refreshed = false;
+        let (key, candidate_index, response, first_chunk) = loop {
+            let (key, candidates) = self
+                .preview_candidates_for_qn(&bvid, page_index, qn)
+                .await?;
+            let mut last_error = None;
+            let mut refresh_signed_url = false;
+            let mut opened = None;
+            for (candidate_index, url) in candidates {
+                let sent = tokio::time::timeout(
+                    PREVIEW_READ_TIMEOUT,
+                    send_preview_request(
+                        self.client.http().clone(),
+                        self.client.cookie_header(),
+                        url,
+                        range.clone(),
+                    ),
+                )
+                .await;
+                let mut candidate = match sent {
+                    Ok(Ok(response)) => response,
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            bvid = %key.0,
+                            page = key.1,
+                            qn = key.2,
+                            candidate = candidate_index,
+                            %error,
+                            "B站预览 CDN 请求失败，尝试备用节点"
+                        );
+                        last_error = Some(error);
+                        mark_preview_candidate_failed(&self.preview_urls, &key, candidate_index);
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            bvid = %key.0,
+                            page = key.1,
+                            qn = key.2,
+                            candidate = candidate_index,
+                            "B站预览 CDN 首包超时，尝试备用节点"
+                        );
+                        last_error = Some(anyhow::anyhow!("哔哩哔哩预览 CDN 首包超时"));
+                        mark_preview_candidate_failed(&self.preview_urls, &key, candidate_index);
+                        continue;
+                    }
+                };
+                let status = candidate.status();
+                if !status.is_success() {
+                    tracing::warn!(
+                        bvid = %key.0,
+                        page = key.1,
+                        qn = key.2,
+                        candidate = candidate_index,
+                        status = status.as_u16(),
+                        "B站预览 CDN 返回错误，尝试备用节点"
+                    );
+                    refresh_signed_url |= matches!(status.as_u16(), 403 | 410 | 412);
+                    last_error = Some(anyhow::anyhow!(
+                        "哔哩哔哩预览流返回 HTTP {}",
+                        status.as_u16()
+                    ));
+                    mark_preview_candidate_failed(&self.preview_urls, &key, candidate_index);
+                    continue;
+                }
+                if let Err(error) = validate_preview_range(range.as_deref(), &candidate) {
+                    last_error = Some(error);
+                    mark_preview_candidate_failed(&self.preview_urls, &key, candidate_index);
+                    continue;
+                }
+                let first = match tokio::time::timeout(PREVIEW_READ_TIMEOUT, candidate.chunk())
+                    .await
+                {
+                    Ok(Ok(Some(chunk))) if !chunk.is_empty() => chunk,
+                    Ok(Ok(_)) => {
+                        last_error = Some(anyhow::anyhow!("哔哩哔哩预览 CDN 返回了空媒体流"));
+                        mark_preview_candidate_failed(&self.preview_urls, &key, candidate_index);
+                        continue;
+                    }
+                    Ok(Err(error)) => {
+                        last_error = Some(error.into());
+                        mark_preview_candidate_failed(&self.preview_urls, &key, candidate_index);
+                        continue;
+                    }
+                    Err(_) => {
+                        last_error = Some(anyhow::anyhow!("哔哩哔哩预览 CDN 首个媒体块超时"));
+                        mark_preview_candidate_failed(&self.preview_urls, &key, candidate_index);
+                        continue;
+                    }
+                };
+                mark_preview_candidate_active(&self.preview_urls, &key, candidate_index);
+                opened = Some((key.clone(), candidate_index, candidate, first));
+                break;
+            }
+            if let Some(opened) = opened {
+                break opened;
+            }
+            if refresh_signed_url && !refreshed {
+                self.preview_urls.lock().unwrap().remove(&key);
+                refreshed = true;
+                continue;
+            }
+            return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("哔哩哔哩没有可用的预览 CDN")));
+        };
         let status = response.status();
-        if !status.is_success() {
-            bail!("哔哩哔哩预览流返回 HTTP {}", status.as_u16());
-        }
         let upstream_content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -349,9 +634,17 @@ impl BilibiliProvider {
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
         let content_length = response.content_length();
-        let body = response
-            .bytes_stream()
-            .map(|chunk| chunk.map_err(std::io::Error::other))
+        let expected_remaining =
+            content_length.map(|length| length.saturating_sub(first_chunk.len() as u64));
+        let remainder = timeout_preview_body(
+            response.bytes_stream().boxed(),
+            Arc::clone(&self.preview_urls),
+            key,
+            candidate_index,
+            expected_remaining,
+        );
+        let body = futures_util::stream::once(async move { Ok(first_chunk) })
+            .chain(remainder)
             .boxed();
         Ok(VideoPreviewStream {
             status: status.as_u16(),
@@ -1377,6 +1670,44 @@ const _: fn(&MediaStream) = |_| {};
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn preview_cache_rotates_failed_cdn_to_the_back() {
+        let key = ("BV1preview".to_string(), 0, 64);
+        let cache = Arc::new(Mutex::new(HashMap::from([(
+            key.clone(),
+            PreviewUrlCacheEntry {
+                urls: vec!["primary".into(), "backup-a".into(), "backup-b".into()],
+                active: 0,
+                born: Instant::now(),
+            },
+        )])));
+        mark_preview_candidate_failed(&cache, &key, 0);
+        let ordered = cache
+            .lock()
+            .unwrap()
+            .get(&key)
+            .unwrap()
+            .ordered_candidates();
+        assert_eq!(
+            ordered,
+            vec![
+                (1, "backup-a".into()),
+                (2, "backup-b".into()),
+                (0, "primary".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn preview_range_parsers_reject_ambiguous_ranges() {
+        assert_eq!(requested_range_start("bytes=0-"), Some(0));
+        assert_eq!(requested_range_start("bytes=4096-8191"), Some(4096));
+        assert_eq!(requested_range_start("bytes=-4096"), None);
+        assert_eq!(requested_range_start("bytes=0-1,4-5"), None);
+        assert_eq!(content_range_start("bytes 4096-8191/10000"), Some(4096));
+        assert_eq!(content_range_start("invalid"), None);
+    }
 
     #[test]
     fn single_page_titles_are_left_alone() {

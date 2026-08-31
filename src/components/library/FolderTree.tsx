@@ -1521,10 +1521,10 @@ export function FolderTree({
             if (hasTextSelectionWithin(event.currentTarget)) return;
             if (selectFolderRow(event, node)) return;
             // 进文件夹默认按手排顺序看（set 是按演出顺序排的）；
-            // 回到全库时手排没有意义，还原成默认的按入库时间。
+            // 回到全库时手排没有意义，还原成默认的文件创建顺序。
             setFilter(
               active && !isMidiBrowseActivate()
-                ? { folder: "", sort: "added_at", order: "desc" }
+                ? { folder: "", sort: "file_created_at", order: "desc" }
                 : { folder: node.path, sort: "custom" },
             );
             if (!active) importPending(node);
@@ -1740,7 +1740,7 @@ export function FolderTree({
       onPointerDown={(event) => beginRootPointerReorder(event, ALL_TRACKS_ROOT_ID)}
       onClick={() => {
         setSelectedFolders(new Set());
-        setFilter({ folder: "", sort: "added_at", order: "desc" });
+        setFilter({ folder: "", sort: "file_created_at", order: "desc" });
         onNavigate?.();
       }}
       onContextMenu={(event) => {
@@ -1806,7 +1806,7 @@ export function FolderTree({
       title="不在曲库目录里的曲目 · 拖动调整侧栏顺序"
       onPointerDown={(event) => beginRootPointerReorder(event, OUTSIDE_ROOT_ID)}
       onClick={() => {
-        setFilter({ folder: OUTSIDE_FOLDER, sort: "added_at", order: "desc" });
+        setFilter({ folder: OUTSIDE_FOLDER, sort: "file_created_at", order: "desc" });
         onNavigate?.();
       }}
     >

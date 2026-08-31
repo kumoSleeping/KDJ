@@ -523,6 +523,7 @@ export function makeSongStreamTrack(
     source_platform: source.platform,
     source_key: source.key,
     analyzed_at: null,
+    file_created_at: null,
     added_at: now,
     modified_at: now,
     analysis_error: "",

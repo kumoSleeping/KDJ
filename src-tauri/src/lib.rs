@@ -20,6 +20,8 @@ mod bilibili_embed;
 #[cfg(desktop)]
 pub mod cli;
 #[cfg(desktop)]
+mod data_recovery;
+#[cfg(desktop)]
 mod desktop_media;
 /// 桌面 + Android 共用 playback_* 命令；iOS 仍走 native-audio 插件。
 #[cfg(any(desktop, target_os = "android"))]
@@ -38,6 +40,8 @@ pub use cli::Launch;
 
 #[cfg(desktop)]
 static NO_GUI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(desktop)]
+static EXIT_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(desktop)]
 pub fn set_no_gui(value: bool) {
@@ -46,6 +50,23 @@ pub fn set_no_gui(value: bool) {
 
 #[cfg(desktop)]
 struct RuntimeDir(PathBuf);
+
+#[cfg(desktop)]
+struct ServerTask(Mutex<Option<tokio::task::JoinHandle<()>>>);
+
+#[cfg(desktop)]
+impl ServerTask {
+    fn shutdown(&self) {
+        if let Some(task) = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            task.abort();
+        }
+    }
+}
 
 #[cfg(desktop)]
 const MAIN_WINDOW_STATE_FILE: &str = "main-window-state.json";
@@ -412,6 +433,7 @@ async fn start_native_link_drag(
     url: String,
     text: Option<String>,
     drag_image: Option<String>,
+    include_artwork: Option<bool>,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -435,23 +457,40 @@ async fn start_native_link_drag(
                 bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.starts_with(&[0xff, 0xd8, 0xff])
             })
             .unwrap_or_else(|| include_bytes!("../icons/128x128.png").to_vec());
+        let include_artwork = include_artwork.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
         let pending = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
         let main_thread_pending = std::sync::Arc::clone(&pending);
         app.run_on_main_thread(move || {
+            let rtfd = if include_artwork {
+                match share_clipboard::build_share_rtfd(&share_text, &preview) {
+                    Ok(rich) => Some(rich),
+                    Err(error) => {
+                        tracing::warn!(%error, "无法为系统链接拖动准备图文载荷，退回 URL/纯文本");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             let url_bytes = url.into_bytes();
             let text_bytes = share_text.into_bytes();
+            let mut data_types = vec!["public.url".into(), "public.utf8-plain-text".into()];
+            if rtfd.is_some() {
+                data_types.insert(0, share_clipboard::SHARE_RTFD_DRAG_TYPE.into());
+            }
             let drop_pending = std::sync::Arc::clone(&main_thread_pending);
             let started = drag::start_drag(
                 &window,
                 drag::DragItem::Data {
                     provider: Box::new(move |data_type| match data_type {
+                        share_clipboard::SHARE_RTFD_DRAG_TYPE => rtfd.as_ref().cloned(),
                         "public.url" => Some(url_bytes.clone()),
                         "public.utf8-plain-text" => Some(text_bytes.clone()),
                         _ => None,
                     }),
-                    types: vec!["public.url".into(), "public.utf8-plain-text".into()],
+                    types: data_types,
                 },
                 drag::Image::Raw(preview),
                 move |result, cursor| {
@@ -485,7 +524,7 @@ async fn start_native_link_drag(
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, window, url, text, drag_image);
+        let _ = (app, window, url, text, drag_image, include_artwork);
         Err("当前桌面系统由浏览器原生链接拖动接管".into())
     }
 }
@@ -858,6 +897,259 @@ fn open_soundcloud_oauth_window(app: tauri::AppHandle, url: String) -> Result<()
     Ok(())
 }
 
+#[cfg(desktop)]
+const SOUNDCLOUD_WEB_LOGIN_WINDOW: &str = "soundcloud-web-login";
+#[cfg(desktop)]
+const SOUNDCLOUD_WEB_LOGIN_EVENT: &str = "soundcloud-web-login://result";
+
+#[cfg(desktop)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SoundCloudWebSession {
+    access_token: String,
+    expires_at: i64,
+}
+
+#[cfg(desktop)]
+fn domain_matches(host: &str, domain: &str) -> bool {
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
+/// 登录窗口没有地址栏，因此顶层导航只允许 SoundCloud 与它明确支持的身份提供商。
+/// 远端窗口不匹配任何 Tauri capability，即使页面被攻破也不能调用 KDJ IPC。
+#[cfg(desktop)]
+fn soundcloud_web_login_navigation_allowed(url: &tauri::Url) -> bool {
+    if url.scheme() == "about" && url.path() == "blank" {
+        return true;
+    }
+    if url.scheme() != "https" {
+        return false;
+    }
+    url.host_str().is_some_and(|host| {
+        ["soundcloud.com", "google.com", "facebook.com", "apple.com"]
+            .iter()
+            .any(|domain| domain_matches(host, domain))
+    })
+}
+
+#[cfg(desktop)]
+fn soundcloud_web_session(
+    cookies: &[tauri::webview::Cookie<'static>],
+) -> Option<SoundCloudWebSession> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(i64::MAX as u64) as i64;
+    cookies
+        .iter()
+        .filter(|cookie| cookie.name() == "oauth_token" && !cookie.value().trim().is_empty())
+        .filter(|cookie| {
+            cookie
+                .domain()
+                .map(|domain| domain_matches(domain.trim_start_matches('.'), "soundcloud.com"))
+                .unwrap_or(false)
+        })
+        .filter_map(|cookie| {
+            let expires_at = match cookie.expires_datetime() {
+                Some(expires) => {
+                    let expires_at = expires.unix_timestamp();
+                    if expires_at <= now {
+                        return None;
+                    }
+                    expires_at
+                }
+                None => 0,
+            };
+            Some(SoundCloudWebSession {
+                access_token: cookie.value().trim().to_string(),
+                expires_at,
+            })
+        })
+        .max_by_key(|session| {
+            if session.expires_at <= 0 {
+                i64::MAX
+            } else {
+                session.expires_at
+            }
+        })
+}
+
+#[cfg(desktop)]
+fn soundcloud_web_login_request(
+    client: &reqwest::Client,
+    endpoint: &str,
+    auth_token: &str,
+    session: &SoundCloudWebSession,
+) -> reqwest::RequestBuilder {
+    client
+        .post(endpoint)
+        .bearer_auth(auth_token)
+        .json(&serde_json::json!({
+            "access_token": session.access_token,
+            "expires_at": session.expires_at,
+        }))
+}
+
+#[cfg(desktop)]
+async fn soundcloud_web_login_response(response: reqwest::Response) -> Result<(), String> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let text = response.text().await.unwrap_or_default();
+    let detail = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("detail")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+    Err(format!(
+        "SoundCloud 登录失败：{}",
+        detail.chars().take(320).collect::<String>()
+    ))
+}
+
+#[cfg(desktop)]
+fn finish_soundcloud_web_login(
+    app: &tauri::AppHandle,
+    completed: &std::sync::atomic::AtomicBool,
+    status: &'static str,
+    message: String,
+) {
+    use std::sync::atomic::Ordering;
+
+    if completed.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let _ = app.emit(
+        SOUNDCLOUD_WEB_LOGIN_EVENT,
+        SoundCloudOAuthWindowResult { status, message },
+    );
+    if let Some(window) = app.get_webview_window(SOUNDCLOUD_WEB_LOGIN_WINDOW) {
+        let _ = window.close();
+    }
+}
+
+/// Windows Chromium 130+ 会用 App-Bound Encryption 保护 Cookie。KDJ 不再要求
+/// 整个播放器提权去绕过它，而是在一次性 WebView 中打开真正的 soundcloud.com；
+/// 登录产生的 `oauth_token` 由原生 cookie manager 读取并直接交给本机后端验证。
+#[cfg(desktop)]
+#[tauri::command]
+fn open_soundcloud_web_login_window(app: tauri::AppHandle) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    if let Some(existing) = app.get_webview_window(SOUNDCLOUD_WEB_LOGIN_WINDOW) {
+        let _ = existing.show();
+        existing
+            .set_focus()
+            .map_err(|error| format!("聚焦 SoundCloud 登录窗口失败：{error}"))?;
+        return Ok(());
+    }
+
+    let login_url =
+        tauri::Url::parse("https://soundcloud.com/signin?redirect_url=%2Fyou%2Flibrary")
+            .map_err(|error| format!("构建 SoundCloud 登录地址失败：{error}"))?;
+    let cookie_url = tauri::Url::parse("https://soundcloud.com/")
+        .map_err(|error| format!("构建 SoundCloud 会话地址失败：{error}"))?;
+    let (base_url, auth_token) = {
+        let bridge = app.state::<Bridge>();
+        (bridge.base_url.clone(), bridge.auth_token.clone())
+    };
+    let completed = Arc::new(AtomicBool::new(false));
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        SOUNDCLOUD_WEB_LOGIN_WINDOW,
+        tauri::WebviewUrl::External(login_url),
+    )
+    .title("SoundCloud 登录 · soundcloud.com")
+    .inner_size(520.0, 720.0)
+    .min_inner_size(360.0, 520.0)
+    .center()
+    .resizable(true)
+    // 登录凭证只在这个窗口的生命周期内存在；验证后的最小会话由 provider 单独保存。
+    .incognito(true)
+    .on_navigation(soundcloud_web_login_navigation_allowed)
+    .build()
+    .map_err(|error| format!("打开 SoundCloud 登录窗口失败：{error}"))?;
+
+    let app_on_close = app.clone();
+    let completed_on_close = Arc::clone(&completed);
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::CloseRequested { .. })
+            && !completed_on_close.swap(true, Ordering::SeqCst)
+        {
+            let _ = app_on_close.emit(
+                SOUNDCLOUD_WEB_LOGIN_EVENT,
+                SoundCloudOAuthWindowResult {
+                    status: "cancelled",
+                    message: "已取消 SoundCloud 登录".into(),
+                },
+            );
+        }
+    });
+
+    let app_on_poll = app.clone();
+    let completed_on_poll = Arc::clone(&completed);
+    tauri::async_runtime::spawn(async move {
+        let endpoint = format!("{base_url}/api/accounts/soundcloud/login/webview");
+        let client = reqwest::Client::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10 * 60);
+        loop {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            if completed_on_poll.load(Ordering::SeqCst) {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                finish_soundcloud_web_login(
+                    &app_on_poll,
+                    &completed_on_poll,
+                    "error",
+                    "SoundCloud 登录已超时，请重试".into(),
+                );
+                return;
+            }
+            let Some(window) = app_on_poll.get_webview_window(SOUNDCLOUD_WEB_LOGIN_WINDOW) else {
+                return;
+            };
+            // Windows WebView2 的 cookie API 不能从同步 command/event handler 调用；
+            // 此轮询运行在 Tauri 异步线程上，再由 dispatcher 安全切回 UI 线程。
+            let Ok(cookies) = window.cookies_for_url(cookie_url.clone()) else {
+                continue;
+            };
+            let Some(session) = soundcloud_web_session(&cookies) else {
+                continue;
+            };
+            let result =
+                match soundcloud_web_login_request(&client, &endpoint, &auth_token, &session)
+                    .send()
+                    .await
+                {
+                    Ok(response) => soundcloud_web_login_response(response).await,
+                    Err(error) => Err(format!("处理 SoundCloud 登录失败：{error}")),
+                };
+            match result {
+                Ok(()) => finish_soundcloud_web_login(
+                    &app_on_poll,
+                    &completed_on_poll,
+                    "done",
+                    String::new(),
+                ),
+                Err(message) => {
+                    finish_soundcloud_web_login(&app_on_poll, &completed_on_poll, "error", message)
+                }
+            }
+            return;
+        }
+    });
+
+    Ok(())
+}
+
 /// 桌面检查必须直接问 updater 清单，而不是只问 GitHub 最新 Release。
 /// Release 是先建空壳、各平台包后上传的；只有 updater.check() 找得到当前
 /// OS/架构/安装格式对应的签名包，按钮才应该告诉用户「可以更新」。
@@ -1122,6 +1414,42 @@ fn mobile_library_roots(app: &tauri::AppHandle) -> Vec<String> {
 }
 
 /// 自绘标题栏的窗口动作。`maximize` 是切换；`drag` 用于 Overlay 顶栏拖动。
+#[cfg(desktop)]
+fn shutdown_desktop_runtime(app: &tauri::AppHandle) {
+    if let Some(player) = app.try_state::<desktop_player::DesktopPlayerHandle>() {
+        player.shutdown();
+    }
+    if let Some(server) = app.try_state::<ServerTask>() {
+        server.shutdown();
+    }
+    if let Some(dir) = app.try_state::<RuntimeDir>() {
+        cli::remove_runtime(&dir.0);
+    }
+}
+
+/// 用户已经明确要求退出后，先同步保存状态并释放媒体/HTTP 资源。Windows 的
+/// WebView2 偶尔会在媒体管线异常后拖住正常析构；原生看门狗保证这次退出不会再次
+/// 变成“窗口点不掉”。正常退出会在看门狗触发前结束进程。
+#[cfg(desktop)]
+pub(crate) fn request_desktop_exit(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+
+    if EXIT_STARTED.swap(true, Ordering::SeqCst) {
+        app.exit(0);
+        return;
+    }
+    capture_main_window_state(app);
+    persist_main_window_state(app);
+    shutdown_desktop_runtime(app);
+    let _ = std::thread::Builder::new()
+        .name("kdj-exit-watchdog".into())
+        .spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            std::process::exit(0);
+        });
+    app.exit(0);
+}
+
 #[tauri::command]
 fn window_control(
     _window: tauri::Window,
@@ -1139,11 +1467,9 @@ fn window_control(
             },
             "close" => {
                 if _window.label() == "main" {
-                    capture_main_window_state(&_app);
-                    persist_main_window_state(&_app);
                     // 主窗口就是当前桌面应用的生命周期：关闭时连同播放、分析和
                     // 其他辅助窗口一起直接结束，不再无状态栏地驻留后台。
-                    _app.exit(0);
+                    request_desktop_exit(&_app);
                     return Ok(());
                 }
                 _window.close()
@@ -1774,156 +2100,7 @@ fn harden_session_permissions(data_dir: &Path) {
 #[cfg(not(unix))]
 fn harden_session_permissions(_data_dir: &Path) {}
 
-/// 把旧应用数据逐项迁移到新的 KDJ 数据目录。
-///
-/// 不能只迁移 settings.json：曲库数据库、封面和 providers 的 sessions 都是
-/// 用户数据。运行期的规范数据库名始终由 `DB_FILENAME` 决定；历史上出现过的
-/// `kdj.db` / `kumodeck.db` 都映射到它，WAL/SHM 必须同步。
-fn migrate_legacy_data(current: &Path, legacy: &Path, force: bool) -> anyhow::Result<bool> {
-    if !legacy.exists() {
-        return Ok(false);
-    }
-    std::fs::create_dir_all(current)?;
-    let mut copied = false;
-
-    fn copy_tree(source: &Path, root: &Path, copied: &mut bool, force: bool) -> anyhow::Result<()> {
-        for entry in std::fs::read_dir(source)? {
-            let entry = entry?;
-            let source_path = entry.path();
-            let file_name = entry.file_name();
-            let name = file_name.to_string_lossy();
-            // 同一个旧目录同时有两种名字时，规范名那份优先；否则 read_dir 顺序
-            // 会决定最后覆盖成哪一库。那正是升级后“少几首歌”的来源。
-            if name.starts_with("kdj.db") && source.join(kdj_core::config::DB_FILENAME).is_file() {
-                continue;
-            }
-            let target_name = match name.as_ref() {
-                "kdj.db" | "kumodeck.db" => kdj_core::config::DB_FILENAME.to_string(),
-                "kdj.db-wal" | "kumodeck.db-wal" => {
-                    format!("{}-wal", kdj_core::config::DB_FILENAME)
-                }
-                "kdj.db-shm" | "kumodeck.db-shm" => {
-                    format!("{}-shm", kdj_core::config::DB_FILENAME)
-                }
-                _ => name.to_string(),
-            };
-            let target_path = root.join(target_name);
-            if source_path.is_dir() {
-                std::fs::create_dir_all(&target_path)?;
-                copy_tree(&source_path, &target_path, copied, force)?;
-                continue;
-            }
-            let source_size = std::fs::metadata(&source_path)?.len();
-            let target_size = std::fs::metadata(&target_path)
-                .map(|meta| meta.len())
-                .unwrap_or(0);
-            // 目标已经有更新的数据时不覆盖；首次启动的空数据库/默认设置则由旧数据补齐。
-            if force || !target_path.exists() || source_size > target_size {
-                // 错误版本可能已在新目录写过少量数据。旧数据优先恢复，但覆盖前
-                // 给每个现有文件留一份副本，任何迁移判断失误都能人工找回。
-                if force && target_path.exists() {
-                    let backup_name = format!(
-                        "{}.before-legacy-migration",
-                        target_path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                    );
-                    let backup = target_path.with_file_name(backup_name);
-                    if !backup.exists() {
-                        std::fs::copy(&target_path, backup)?;
-                    }
-                }
-                std::fs::copy(&source_path, &target_path)?;
-                *copied = true;
-            }
-        }
-        Ok(())
-    }
-
-    copy_tree(legacy, current, &mut copied, force)?;
-    Ok(copied)
-}
-
 const DB_ALIAS_MERGE_MARKER: &str = ".kdj-db-alias-merged-v1";
-const RETIRED_LABS_SESSION_MIGRATION_MARKER: &str = ".retired-labs-sessions-migrated-v1";
-
-/// Labs 曾是默认开发入口，因独立 bundle identifier 把登录态写进了
-/// `com.kdj.app.labs/data/sessions`。Labs 退役后只把正式目录缺少的会话补回来：
-///
-/// - 已存在的正式会话永不覆盖，避免旧凭证压掉更新凭证；
-/// - 只迁移普通文件，不跟随符号链接；
-/// - 成功扫描后写一次性标记，避免用户主动退出后旧会话在下次启动被复活。
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn migrate_retired_labs_sessions(current: &Path, retired_labs: &Path) -> anyhow::Result<usize> {
-    use std::io::{Read as _, Write as _};
-
-    let marker = current.join(RETIRED_LABS_SESSION_MIGRATION_MARKER);
-    if marker.is_file() {
-        return Ok(0);
-    }
-
-    let source_dir = retired_labs.join("sessions");
-    match std::fs::symlink_metadata(&source_dir) {
-        Ok(metadata) if metadata.file_type().is_dir() => {}
-        Ok(_) => return Ok(0),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error.into()),
-    }
-
-    let target_dir = current.join("sessions");
-    std::fs::create_dir_all(&target_dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&target_dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-
-    let mut copied = 0usize;
-    for entry in std::fs::read_dir(&source_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let target = target_dir.join(entry.file_name());
-
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut output = match options.open(&target) {
-            Ok(output) => output,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
-        };
-
-        let copy_result = (|| -> std::io::Result<()> {
-            let mut input = std::fs::File::open(entry.path())?;
-            let mut buffer = [0u8; 16 * 1024];
-            loop {
-                let read = input.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                output.write_all(&buffer[..read])?;
-            }
-            output.sync_all()
-        })();
-        if let Err(error) = copy_result {
-            drop(output);
-            let _ = std::fs::remove_file(&target);
-            return Err(error.into());
-        }
-        copied += 1;
-    }
-
-    std::fs::create_dir_all(current)?;
-    std::fs::write(&marker, format!("migrated {copied}\n"))?;
-    Ok(copied)
-}
 
 /// 修复曾发布过的分叉布局：迁移器写了 `kdj.db`，运行期却继续打开
 /// `kumodeck.db`。合并只补当前库没有的 path，绝不覆盖评分、备注和 Cue 等现有编辑。
@@ -1980,41 +2157,28 @@ fn default_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
             .map(Path::to_path_buf)
             .ok_or_else(|| anyhow::anyhow!("拿不到配置目录的父目录"))?;
 
-        // 旧版本实际使用过 kumodeck，也有一版迁移代码预期 kdj；两处都认，
-        // 但不会把当前 com.kdj.app/data 当成旧目录再次拷贝。
+        // 历史版本同时出现过 Electron productName、Tauri identifier、正式版/Labs
+        // 等目录名。恢复器按真实内容合并、按路径身份去重，不把 Labs 当成唯一解释。
         let legacy_candidates = [
             base.join("kumodeck").join("data"),
+            base.join("KumoDeck").join("data"),
             base.join("kdj").join("data"),
+            base.join("KDJ").join("data"),
+            base.join("com.kumodeck.app").join("data"),
+            base.join("com.kdj.app.labs").join("data"),
         ];
-        let retired_labs = base.join("com.kdj.app.labs").join("data");
-        for historical in legacy_candidates
-            .iter()
-            .chain(std::iter::once(&retired_labs))
-        {
+        for historical in &legacy_candidates {
             harden_session_permissions(historical);
         }
-        let current_has_sessions = current.join("sessions").exists();
-        let marker = current.join(".legacy-data-migrated");
-        for legacy in legacy_candidates {
-            let legacy_has_database = has_file_bytes(&legacy.join("kumodeck.db"))
-                || has_file_bytes(&legacy.join("kdj.db"));
-            let legacy_has_sessions = legacy.join("sessions").exists();
-            if legacy_has_database
-                && !marker.exists()
-                && (!current_has_sessions || legacy_has_sessions)
-            {
-                // 当前目录可能已经被错误版本创建过空库，首次发现旧会话时以旧数据为准，
-                // 强制整体替换数据库及 WAL，避免新旧 WAL 混在一起造成 SQLite 不一致。
-                if migrate_legacy_data(&current, &legacy, true)? {
-                    std::fs::write(&marker, b"migrated\n")?;
-                    eprintln!("KDJ: 已从 {} 迁移曲库、封面和登录凭证", legacy.display());
-                }
-                break;
-            }
+        let report = data_recovery::recover_desktop_data(&current, &legacy_candidates);
+        if report.sources > 0 {
+            eprintln!(
+                "KDJ: 历史数据自愈完成：sources={} databases={} sessions={} settings={} files={}",
+                report.sources, report.databases, report.sessions, report.settings, report.files
+            );
         }
-        let restored_sessions = migrate_retired_labs_sessions(&current, &retired_labs)?;
-        if restored_sessions > 0 {
-            eprintln!("KDJ: 已从退役 Labs 补回 {restored_sessions} 份缺失的登录凭证");
+        for error in report.errors {
+            eprintln!("KDJ: 历史数据自愈将在下次重试：{error}");
         }
         harden_session_permissions(&current);
         reconcile_database_alias(&current);
@@ -2075,11 +2239,21 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
     // 端口传 0 让内核挑：Electron 版是先 listen(0) 探一个再关掉再交给 Python，
     // 那中间有一段「探到的端口被别人抢走」的竞态窗口，这里直接没有。
     let config = Arc::new(AppConfig::create(data_dir, download_dir, 0));
+    #[cfg(desktop)]
+    match data_recovery::repair_library_roots(&config) {
+        Ok(restored) if restored > 0 => {
+            eprintln!("KDJ: 已从现有曲库记录补回 {restored} 个曲库文件夹");
+        }
+        Ok(_) => {}
+        Err(error) => eprintln!("KDJ: 曲库文件夹自愈失败，将在下次启动重试：{error:#}"),
+    }
     // show() 前要用这份主题垫原生底色，否则浅色用户会先看到配置默认底闪一下。
     let theme = config.to_settings().theme;
     let data_dir_for_runtime = config.data_dir.clone();
-    let (port, auth_token, media_token, activity_log, _serve_task, control_rx) =
+    let (port, auth_token, media_token, activity_log, serve_task, control_rx) =
         tauri::async_runtime::block_on(kdj_server::serve(config.clone()))?;
+    #[cfg(desktop)]
+    data_recovery::finalize_recovery_cleanup(&data_dir_for_runtime);
     let base_url = format!("http://127.0.0.1:{port}");
     let auth_token = auth_token.expose().to_string();
     let media_token = media_token.expose().to_string();
@@ -2091,6 +2265,7 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
             tracing::warn!("写 runtime.json 失败：{err:#}");
         }
         app.manage(RuntimeDir(data_dir_for_runtime.clone()));
+        app.manage(ServerTask(Mutex::new(Some(serve_task))));
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
             let mut rx = control_rx;
@@ -2104,8 +2279,7 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
                         }
                     }
                     kdj_server::state::UiControl::Quit => {
-                        cli::remove_runtime(&data_dir_for_runtime);
-                        handle.exit(0);
+                        request_desktop_exit(&handle);
                     }
                 }
             }
@@ -2113,6 +2287,7 @@ fn start_server(app: &tauri::AppHandle) -> anyhow::Result<(Bridge, kdj_core::The
     }
     #[cfg(not(desktop))]
     {
+        let _ = serve_task;
         let _ = control_rx;
         let _ = data_dir_for_runtime;
     }
@@ -2380,6 +2555,7 @@ pub fn run() {
         save_login_qr,
         open_external,
         open_soundcloud_oauth_window,
+        open_soundcloud_web_login_window,
         check_desktop_update,
         get_update_progress,
         apply_update,
@@ -2460,9 +2636,7 @@ pub fn run() {
                 capture_main_window_state(window.app_handle());
             }
             tauri::WindowEvent::CloseRequested { .. } => {
-                capture_main_window_state(window.app_handle());
-                persist_main_window_state(window.app_handle());
-                window.app_handle().exit(0);
+                request_desktop_exit(window.app_handle());
             }
             _ => {}
         }
@@ -2477,9 +2651,7 @@ pub fn run() {
             if let tauri::RunEvent::ExitRequested { .. } = &event {
                 capture_main_window_state(app_handle);
                 persist_main_window_state(app_handle);
-                if let Some(dir) = app_handle.try_state::<RuntimeDir>() {
-                    cli::remove_runtime(&dir.0);
-                }
+                shutdown_desktop_runtime(app_handle);
             }
             let _ = (app_handle, event);
         });
@@ -2499,72 +2671,16 @@ mod tests {
 
     use base64::Engine as _;
 
-    #[cfg(desktop)]
-    use super::soundcloud_oauth_callback_request;
     use super::{
         clamp_desktop_lyrics_coordinates, clamp_main_window_state, decode_png_data_url,
-        harden_session_permissions, load_main_window_state, migrate_retired_labs_sessions,
-        write_main_window_state, Bridge, DesktopMonitorBounds, MainWindowState,
-        MAIN_WINDOW_STATE_FILE, MAIN_WINDOW_STATE_VERSION, RETIRED_LABS_SESSION_MIGRATION_MARKER,
+        harden_session_permissions, load_main_window_state, write_main_window_state, Bridge,
+        DesktopMonitorBounds, MainWindowState, MAIN_WINDOW_STATE_FILE, MAIN_WINDOW_STATE_VERSION,
     };
-
-    #[test]
-    fn retired_labs_only_restores_missing_sessions_once() {
-        let root = std::env::temp_dir().join(format!(
-            "kdj-retired-labs-sessions-{}-{:016x}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        let current = root.join("com.kdj.app/data");
-        let retired = root.join("com.kdj.app.labs/data");
-        let current_sessions = current.join("sessions");
-        let retired_sessions = retired.join("sessions");
-        std::fs::create_dir_all(&current_sessions).unwrap();
-        std::fs::create_dir_all(&retired_sessions).unwrap();
-        std::fs::write(current_sessions.join("qqmusic.json"), b"current-newer").unwrap();
-        std::fs::write(retired_sessions.join("qqmusic.json"), b"labs-older").unwrap();
-        std::fs::write(retired_sessions.join("netease.json"), b"labs-recent").unwrap();
-        std::fs::create_dir(retired_sessions.join("not-a-session-file")).unwrap();
-
-        let copied = migrate_retired_labs_sessions(&current, &retired).unwrap();
-
-        assert_eq!(copied, 1);
-        assert_eq!(
-            std::fs::read(current_sessions.join("qqmusic.json")).unwrap(),
-            b"current-newer"
-        );
-        assert_eq!(
-            std::fs::read(current_sessions.join("netease.json")).unwrap(),
-            b"labs-recent"
-        );
-        assert!(current
-            .join(RETIRED_LABS_SESSION_MIGRATION_MARKER)
-            .is_file());
-
-        // 一次性标记很重要：用户之后主动退出（会删除会话文件）时，旧 Labs
-        // 凭证不能在下次启动时再次出现。
-        std::fs::remove_file(current_sessions.join("netease.json")).unwrap();
-        std::fs::write(retired_sessions.join("netease.json"), b"must-not-return").unwrap();
-        assert_eq!(
-            migrate_retired_labs_sessions(&current, &retired).unwrap(),
-            0
-        );
-        assert!(!current_sessions.join("netease.json").exists());
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            assert_eq!(
-                std::fs::metadata(&current_sessions)
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o700
-            );
-        }
-        let _ = std::fs::remove_dir_all(root);
-    }
+    #[cfg(desktop)]
+    use super::{
+        soundcloud_oauth_callback_request, soundcloud_web_login_navigation_allowed,
+        soundcloud_web_login_request, soundcloud_web_session, SoundCloudWebSession,
+    };
 
     #[cfg(desktop)]
     #[test]
@@ -2576,6 +2692,61 @@ mod tests {
             "control-secret",
             "oauth-state",
             "authorization-code",
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .unwrap(),
+            "Bearer control-secret"
+        );
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn soundcloud_web_login_only_accepts_expected_navigation_hosts() {
+        assert!(soundcloud_web_login_navigation_allowed(
+            &tauri::Url::parse("https://soundcloud.com/signin").unwrap()
+        ));
+        assert!(soundcloud_web_login_navigation_allowed(
+            &tauri::Url::parse("https://accounts.google.com/o/oauth2/auth").unwrap()
+        ));
+        assert!(!soundcloud_web_login_navigation_allowed(
+            &tauri::Url::parse("http://soundcloud.com/signin").unwrap()
+        ));
+        assert!(!soundcloud_web_login_navigation_allowed(
+            &tauri::Url::parse("https://soundcloud.com.evil.example/signin").unwrap()
+        ));
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn soundcloud_web_login_selects_a_live_scoped_cookie() {
+        let future = tauri::webview::Cookie::build(("oauth_token", "web-token"))
+            .domain(".soundcloud.com")
+            .build();
+        let unrelated = tauri::webview::Cookie::build(("oauth_token", "other-token"))
+            .domain("example.com")
+            .build();
+        let session = soundcloud_web_session(&[unrelated, future]).unwrap();
+        assert_eq!(session.access_token, "web-token");
+        assert_eq!(session.expires_at, 0);
+    }
+
+    #[cfg(desktop)]
+    #[test]
+    fn soundcloud_web_login_request_carries_the_control_bearer() {
+        kdj_core::ensure_rustls_ring();
+        let request = soundcloud_web_login_request(
+            &reqwest::Client::new(),
+            "http://127.0.0.1:5274/api/accounts/soundcloud/login/webview",
+            "control-secret",
+            &SoundCloudWebSession {
+                access_token: "web-token".into(),
+                expires_at: 123,
+            },
         )
         .build()
         .unwrap();

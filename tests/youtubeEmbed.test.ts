@@ -5,7 +5,7 @@ import type { KdjBridge } from "../src/types";
 interface Calls {
   open: number;
   status: number;
-  controls: string[];
+  controls: Array<{ action: string; value?: number }>;
   close: number;
 }
 
@@ -31,8 +31,8 @@ function installBridge(options: { failOpen?: boolean } = {}): Calls {
         hasError: false,
       };
     },
-    control: async (_videoId, action) => {
-      calls.controls.push(action);
+    control: async (_videoId, action, value) => {
+      calls.controls.push({ action, value });
     },
     close: async () => {
       calls.close += 1;
@@ -51,7 +51,11 @@ function installBridge(options: { failOpen?: boolean } = {}): Calls {
       addEventListener: events.addEventListener.bind(events),
       removeEventListener: events.removeEventListener.bind(events),
       dispatchEvent: events.dispatchEvent.bind(events),
-      setTimeout: globalThis.setTimeout.bind(globalThis),
+      setTimeout: ((callback: () => void, delay?: number) => {
+        const timer = globalThis.setTimeout(callback, delay);
+        timer.unref();
+        return timer;
+      }) as unknown as typeof window.setTimeout,
       clearTimeout: globalThis.clearTimeout.bind(globalThis),
     }),
     document: {
@@ -71,6 +75,7 @@ test("official YouTube controller opens one isolated path and sends one play", a
   const controller = new YoutubeEmbedController({
     videoId: "dQw4w9WgXcQ",
     muted: false,
+    volume: 0.4,
     bounds: { x: 10, y: 20, width: 640, height: 360 },
     onStatus: (status) => statuses.push(status.duration),
     onError: (error) => assert.fail(error.message),
@@ -81,7 +86,10 @@ test("official YouTube controller opens one isolated path and sends one play", a
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
   assert.equal(calls.open, 1);
   assert.equal(calls.status, 1);
-  assert.deepEqual(calls.controls, ["play"]);
+  assert.deepEqual(calls.controls, [
+    { action: "volume", value: 0.4 },
+    { action: "play", value: undefined },
+  ]);
   assert.deepEqual(statuses, [212]);
   assert.equal(calls.close, 1);
 });
@@ -92,6 +100,7 @@ test("official YouTube navigation failure is visible and is not retried", async 
   const controller = new YoutubeEmbedController({
     videoId: "aqz-KE-bpKQ",
     muted: true,
+    volume: 0.4,
     bounds: { x: 10, y: 20, width: 640, height: 360 },
     onStatus: () => undefined,
     onError: () => undefined,

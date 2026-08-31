@@ -38,6 +38,15 @@ export function videoPipHostLifecycle(
   return "present";
 }
 
+/** A terminally failed network preview must release the global transport back to audio. */
+export function networkVideoOwnsTransport(
+  session: VideoPipSession | null,
+  active: boolean,
+  failed: boolean,
+): boolean {
+  return active && !failed && session?.source === "network";
+}
+
 /** 默认浮动小窗；底栏按钮只在这两态之间切换。 */
 export const VIDEO_PREVIEW_MODES: VideoPreviewMode[] = ["float", "panel"];
 
@@ -129,6 +138,7 @@ function rememberLocalPresentation(session: VideoPipSession | null): void {
 interface VideoPipState {
   mode: VideoPreviewMode;
   active: boolean;
+  failed: boolean;
   systemPip: boolean;
   playing: boolean;
   position: number;
@@ -138,6 +148,7 @@ interface VideoPipState {
   setMode(mode: VideoPreviewMode): void;
   cycleMode(): VideoPreviewMode;
   setSession(session: VideoPipSession | null): void;
+  setFailed(on: boolean): void;
   setSystemPip(on: boolean): void;
   setPlaying(on: boolean): void;
   setPosition(sec: number): void;
@@ -176,6 +187,7 @@ export function toggleVideoPip(): void {
 export const useVideoPip = create<VideoPipState>((set, get) => ({
   mode: readMode(),
   active: false,
+  failed: false,
   systemPip: false,
   playing: false,
   position: 0,
@@ -197,12 +209,16 @@ export const useVideoPip = create<VideoPipState>((set, get) => ({
     set({
       session,
       active: session !== null,
+      failed: false,
       error: "",
       position: 0,
       duration: 0,
       playing: false,
       systemPip: false,
     });
+  },
+  setFailed(on) {
+    set({ failed: on });
   },
   setSystemPip(on) {
     set({ systemPip: on });
@@ -223,6 +239,7 @@ export const useVideoPip = create<VideoPipState>((set, get) => ({
     rememberLocalPresentation(null);
     set({
       active: false,
+      failed: false,
       systemPip: false,
       playing: false,
       position: 0,

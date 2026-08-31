@@ -29,7 +29,7 @@ import { isOutsideFolder } from "./outsideFolder";
 import { isStreamTrack } from "./streamTrack";
 import { runtimePlayer } from "./unifiedPlayer";
 import { resolveAutoAnalysisMode } from "./autoAnalysisMode";
-import type { AutoAnalysisMode, Track } from "../types";
+import type { AutoAnalysisMode, Track, TrackSummary } from "../types";
 
 /**
  * 选中触发分析的去抖。按住方向键划过一列表曲目时，每一下都发请求
@@ -207,7 +207,7 @@ async function analyzeSelection(): Promise<void> {
   if (anchorId === null) return;
 
   const anchor = state.tracks.findIndex((track) => track.id === anchorId);
-  const candidates: Track[] = [];
+  const candidates: TrackSummary[] = [];
   if (anchor >= 0) {
     candidates.push(state.tracks[anchor]);
     for (let distance = 1; candidates.length < batchLimit; distance += 1) {
@@ -285,7 +285,7 @@ function viewportIds(limit: number): number[] {
   const body = box?.querySelector("tbody");
   if (!box || !body) return [];
   const { tracks } = useLibraryStore.getState();
-  const byId = new Map<number, Track>();
+  const byId = new Map<number, TrackSummary>();
   for (const track of tracks) byId.set(track.id, track);
 
   const view = box.getBoundingClientRect();

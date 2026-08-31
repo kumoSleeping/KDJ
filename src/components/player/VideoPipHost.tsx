@@ -30,6 +30,8 @@ import {
   type AudioFocusDetail,
 } from "../../lib/audioFocus";
 import { formatDuration } from "../../lib/format";
+import { previewGain, useCrossfade } from "../../lib/crossfade";
+import { useMasterVolume } from "../../lib/masterVolume";
 import {
   LocalVideoSynchronizer,
   VideoSeekEchoGuard,
@@ -80,6 +82,13 @@ const YOUTUBE_MIN_W = 360;
 const YOUTUBE_HEADER_H = 28;
 const YOUTUBE_RESIZE_FOOTER_H = 8;
 const YOUTUBE_EXTRA_H = YOUTUBE_HEADER_H + YOUTUBE_RESIZE_FOOTER_H;
+const NETWORK_VIDEO_START_TIMEOUT_MS = 15_000;
+const NETWORK_VIDEO_STALL_TIMEOUT_MS = 12_000;
+
+function currentNetworkVolume(): number {
+  const { coplay, x } = useCrossfade.getState();
+  return useMasterVolume.getState().volume * previewGain(coplay, x);
+}
 
 type ResizeEdge = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 
@@ -216,6 +225,7 @@ interface PlatformEmbedController {
   play(): Promise<void>;
   pause(): Promise<void>;
   seek(position: number): Promise<void>;
+  setVolume(volume: number): Promise<void>;
   setBounds(bounds: YoutubeEmbedBounds): Promise<void>;
   dispose(): void;
 }
@@ -292,6 +302,9 @@ export function VideoPipHost() {
   const desiredPlayingRef = useRef(false);
   const pendingScrubRef = useRef<number | null>(null);
   const nativeVideoSeekTimerRef = useRef(0);
+  const networkVideoWatchdogRef = useRef(0);
+  const networkRetryRef = useRef({ key: "", count: 0 });
+  const focusedPreviewKeyRef = useRef<string | null>(null);
   const localSynchronizerRef = useRef<LocalVideoSynchronizer | null>(null);
   const videoSeekEchoGuardRef = useRef<VideoSeekEchoGuard | null>(null);
   const videoTransportEchoGuardRef = useRef<VideoTransportEchoGuard | null>(null);
@@ -332,6 +345,10 @@ export function VideoPipHost() {
   const duration = useVideoPip((state) => state.duration);
   const error = useVideoPip((state) => state.error);
   const session = useVideoPip((state) => state.session);
+  const masterVolume = useMasterVolume((state) => state.volume);
+  const coplay = useCrossfade((state) => state.coplay);
+  const fadeX = useCrossfade((state) => state.x);
+  const networkVolume = masterVolume * previewGain(coplay, fadeX);
   const onlinePlayerPreference = useAppStore((state) => {
     if (session?.source !== "network") return "kdj";
     return session.platform === "youtube"
@@ -411,6 +428,25 @@ export function VideoPipHost() {
     setPlatformFallbackSessionKey(null);
   }, [session ? sessionKey(session) : "", onlinePlayerPreference]);
   const activeVideo = localSwap.activeVideo;
+
+  const commitPreviewAudioFocus = (sessionKeyValue: string) => {
+    if (focusedPreviewKeyRef.current === sessionKeyValue) return;
+    focusedPreviewKeyRef.current = sessionKeyValue;
+    announceAudioFocus("preview");
+  };
+
+  const clearPreviewAudioFocus = () => {
+    focusedPreviewKeyRef.current = null;
+  };
+
+  useEffect(() => {
+    if (session?.source !== "network") return;
+    for (const video of localSwap.videoRefs.current) {
+      if (video) video.volume = networkVolume;
+    }
+    void youtubeEmbedRef.current?.setVolume(networkVolume).catch(() => undefined);
+  }, [networkVolume, session?.source, localSwap.videoRefs]);
+
   const systemPipTarget = useCallback(() => {
     const source = activeVideo();
     const webkitEnvironment =
@@ -547,6 +583,14 @@ export function VideoPipHost() {
       videoSeekEchoGuardRef.current?.clear();
       videoTransportEchoGuardRef.current?.clear();
       window.clearTimeout(nativeVideoSeekTimerRef.current);
+      window.clearTimeout(networkVideoWatchdogRef.current);
+      for (const video of localSwap.videoRefs.current) {
+        if (!video) continue;
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      }
+      focusedPreviewKeyRef.current = null;
     },
     [],
   );
@@ -567,6 +611,9 @@ export function VideoPipHost() {
     youtubeReadyKeyRef.current = null;
     youtubeAutoPlayKeyRef.current = null;
     window.clearTimeout(nativeVideoSeekTimerRef.current);
+    window.clearTimeout(networkVideoWatchdogRef.current);
+    networkVideoWatchdogRef.current = 0;
+    clearPreviewAudioFocus();
     videoSeekEchoGuardRef.current?.clear();
     const video = activeVideo();
     localSynchronizerRef.current?.reset(video);
@@ -586,11 +633,87 @@ export function VideoPipHost() {
     useVideoPip.getState().setPlaying(false);
   };
 
+  const failNetworkHost = (video: HTMLVideoElement, message: string) => {
+    const pip = useVideoPip.getState();
+    const current = pip.session;
+    if (current?.source !== "network" || activeVideo() !== video) return;
+    const currentKey = `${sessionKey(current)}:kdj`;
+    const retry = networkRetryRef.current;
+    if (retry.key !== currentKey) {
+      retry.key = currentKey;
+      retry.count = 0;
+    }
+    // B站代理会在读流失败时把当前 CDN 移到队尾。重新建立同一个 loopback URL
+    // 就会命中下一个 backupUrl；最多自动重试两次，避免坏网络下无限循环。
+    if (current.platform === "bilibili" && retry.count < 2) {
+      retry.count += 1;
+      window.clearTimeout(networkVideoWatchdogRef.current);
+      networkVideoWatchdogRef.current = 0;
+      clearPreviewAudioFocus();
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      loadedKeyRef.current = currentKey;
+      pip.setPlaying(false);
+      pip.setError("正在切换 B站备用线路…");
+      window.setTimeout(() => {
+        if (
+          !desiredPlayingRef.current ||
+          useVideoPip.getState().session !== current ||
+          activeVideo() !== video
+        ) {
+          return;
+        }
+        video.volume = currentNetworkVolume();
+        video.src = mediaUrl(current);
+        video.load();
+        armNetworkVideoWatchdog(
+          video,
+          currentKey,
+          NETWORK_VIDEO_START_TIMEOUT_MS,
+          "B站备用线路启动超时",
+        );
+        void video.play().catch((reason: unknown) => {
+          if (reason instanceof DOMException && reason.name === "AbortError") return;
+          failNetworkHost(
+            video,
+            `B站备用线路播放失败：${reason instanceof Error ? reason.message : String(reason)}`,
+          );
+        });
+      }, 0);
+      return;
+    }
+    stopHost();
+    const latest = useVideoPip.getState();
+    latest.setError(message);
+    latest.setFailed(true);
+  };
+
+  const armNetworkVideoWatchdog = (
+    video: HTMLVideoElement,
+    sessionKeyValue: string,
+    timeoutMs: number,
+    message: string,
+  ) => {
+    window.clearTimeout(networkVideoWatchdogRef.current);
+    networkVideoWatchdogRef.current = window.setTimeout(() => {
+      networkVideoWatchdogRef.current = 0;
+      if (
+        desiredPlayingRef.current &&
+        loadedKeyRef.current === sessionKeyValue &&
+        activeVideo() === video
+      ) {
+        failNetworkHost(video, message);
+      }
+    }, timeoutMs);
+  };
+
   const suspendLocalHost = (next: Extract<VideoPipSession, { source: "local" }>) => {
     const nextKey = `${sessionKey(next)}:kdj`;
     // A panel-first session has no local source to retain. A source left by another session must
     // still be torn down; only the exact local session receives the non-destructive suspension.
     if (!hasLoadedSessionSource(loadedKeyRef.current, nextKey, next)) {
+      networkRetryRef.current = { key: nextKey, count: 0 };
       stopHost();
       return;
     }
@@ -668,6 +791,11 @@ export function VideoPipHost() {
             pip.setPosition(status.position);
             pip.setDuration(status.duration);
             pip.setPlaying(status.playing || status.buffering);
+            if (status.playing) {
+              commitPreviewAudioFocus(nextKey);
+            } else if (!status.buffering) {
+              clearPreviewAudioFocus();
+            }
             if (status.ended) desiredPlayingRef.current = false;
           },
           onError: (reason: Error) => {
@@ -680,12 +808,14 @@ export function VideoPipHost() {
           ? new YoutubeEmbedController({
               videoId: next.bvid,
               muted: import.meta.env.DEV && import.meta.env.VITE_KDJ_YOUTUBE_E2E === "1",
+              volume: currentNetworkVolume(),
               ...callbacks,
             })
           : new BilibiliEmbedController({
               bvid: next.bvid,
               page: next.page,
               muted: false,
+              volume: currentNetworkVolume(),
               ...callbacks,
             });
         youtubeEmbedRef.current = controller;
@@ -704,7 +834,6 @@ export function VideoPipHost() {
               youtubeAutoPlayKeyRef.current !== nextKey
             ) {
               youtubeAutoPlayKeyRef.current = nextKey;
-              announceAudioFocus("preview");
               void controller.play().catch((reason: unknown) => {
                 if (youtubeEmbedRef.current !== controller) return;
                 useVideoPip.getState().setPlaying(false);
@@ -724,13 +853,13 @@ export function VideoPipHost() {
       const controller = youtubeEmbedRef.current;
       if (!controller || youtubeReadyKeyRef.current !== nextKey) return;
       if (!shouldPlay) {
+        clearPreviewAudioFocus();
         void controller.pause().catch(() => undefined);
         useVideoPip.getState().setPlaying(false);
         return;
       }
       if (youtubeAutoPlayKeyRef.current !== nextKey) {
         youtubeAutoPlayKeyRef.current = nextKey;
-        announceAudioFocus("preview");
         void controller.play().catch((reason: unknown) => {
           useVideoPip.getState().setPlaying(false);
           useVideoPip
@@ -743,6 +872,7 @@ export function VideoPipHost() {
     let video = activeVideo();
     if (!video) return;
     video.muted = next.source === "local";
+    if (next.source === "network") video.volume = currentNetworkVolume();
     if (!hasLoadedSessionSource(loadedKeyRef.current, nextKey, next)) {
       localSynchronizerRef.current?.reset(video);
       compatRetryKeyRef.current = null;
@@ -778,22 +908,27 @@ export function VideoPipHost() {
               ) {
                 return;
               }
-              announceAudioFocus("preview");
+              armNetworkVideoWatchdog(
+                playingVideo,
+                nextKey,
+                NETWORK_VIDEO_START_TIMEOUT_MS,
+                "视频预览启动超时，已停止加载",
+              );
               void playingVideo.play().catch((reason: unknown) => {
                 if (youtubePreviewRef.current !== controller) return;
-                useVideoPip.getState().setPlaying(false);
-                useVideoPip
-                  .getState()
-                  .setError(reason instanceof Error ? reason.message : String(reason));
+                failNetworkHost(
+                  playingVideo,
+                  `视频预览启动失败：${reason instanceof Error ? reason.message : String(reason)}`,
+                );
               });
             })
             .catch((reason: unknown) => {
               if (youtubePreviewRef.current !== controller) return;
               if (reason instanceof DOMException && reason.name === "AbortError") return;
-              useVideoPip.getState().setPlaying(false);
-              useVideoPip
-                .getState()
-                .setError(reason instanceof Error ? reason.message : String(reason));
+              failNetworkHost(
+                playingVideo,
+                `视频预览加载失败：${reason instanceof Error ? reason.message : String(reason)}`,
+              );
             });
           return;
         }
@@ -826,8 +961,15 @@ export function VideoPipHost() {
       useVideoPip.getState().setPlaying(false);
       return;
     }
-    if (next.source === "network") announceAudioFocus("preview");
     const playingVideo = video;
+    if (next.source === "network") {
+      armNetworkVideoWatchdog(
+        playingVideo,
+        nextKey,
+        NETWORK_VIDEO_START_TIMEOUT_MS,
+        "视频预览启动超时，已停止加载",
+      );
+    }
     void playingVideo.play().catch((reason: unknown) => {
       if (!desiredPlayingRef.current) return;
       if (reason instanceof DOMException && reason.name === "AbortError") return;
@@ -862,6 +1004,13 @@ export function VideoPipHost() {
           });
         return;
       }
+      if (next.source === "network") {
+        failNetworkHost(
+          playingVideo,
+          `视频预览启动失败：${reason instanceof Error ? reason.message : String(reason)}`,
+        );
+        return;
+      }
       useVideoPip.getState().setPlaying(false);
       useVideoPip
         .getState()
@@ -882,6 +1031,7 @@ export function VideoPipHost() {
       const detail = (event as CustomEvent<VideoPreviewRequest>).detail;
       if (!detail?.bvid) return;
       const pip = useVideoPip.getState();
+      networkRetryRef.current = { key: "", count: 0 };
       desiredPlayingRef.current = true;
       pip.setSession({
         source: "network",
@@ -1087,18 +1237,26 @@ export function VideoPipHost() {
       const current = useVideoPip.getState().session;
       const pip = useVideoPip.getState();
       if (!current || !pip.active) return;
+      if (current.source === "network" && pip.failed) {
+        networkRetryRef.current = { key: "", count: 0 };
+        desiredPlayingRef.current = true;
+        pip.setFailed(false);
+        pip.setError("");
+        ensureHostPlaying(current);
+        return;
+      }
       if (shouldUsePlatformPlayer(current)) {
         const controller = youtubeEmbedRef.current;
         if (!controller) return;
         if (pip.playing) {
           desiredPlayingRef.current = false;
+          clearPreviewAudioFocus();
           pip.setPlaying(false);
           void controller.pause().catch((reason: unknown) => {
             pip.setError(reason instanceof Error ? reason.message : String(reason));
           });
         } else {
           desiredPlayingRef.current = true;
-          announceAudioFocus("preview");
           void controller.play().catch((reason: unknown) => {
             pip.setPlaying(false);
             pip.setError(reason instanceof Error ? reason.message : String(reason));
@@ -1272,7 +1430,6 @@ export function VideoPipHost() {
         pip.setPlaying(true);
         return;
       }
-      if (pip.session?.source === "network") announceAudioFocus("preview");
       // 普通 play 多数来自 PlayerBar 同步或首次装载，不得反向再控制播放器。
       // 只有系统 PiP 原生控件的动作没有我们的 click 入口，需要在这里回传。
       if (pip.systemPip && !desiredPlayingRef.current) {
@@ -1288,11 +1445,31 @@ export function VideoPipHost() {
       }
       pip.setPlaying(true);
     };
+    const onPlaying = () => {
+      if (!stillActive()) return;
+      const pip = useVideoPip.getState();
+      if (pip.session?.source !== "network") return;
+      pip.setError("");
+      const activeKey = loadedKeyRef.current;
+      if (!activeKey) return;
+      commitPreviewAudioFocus(activeKey);
+      armNetworkVideoWatchdog(
+        video,
+        activeKey,
+        NETWORK_VIDEO_STALL_TIMEOUT_MS,
+        "视频预览长时间没有输出，已停止加载",
+      );
+    };
     const onPause = () => {
       const programmatic = videoTransportEchoGuardRef.current?.consume(video, "pause") ?? false;
       if (!stillActive()) return;
       const pip = useVideoPip.getState();
       pip.setPlaying(false);
+      if (pip.session?.source === "network") {
+        window.clearTimeout(networkVideoWatchdogRef.current);
+        networkVideoWatchdogRef.current = 0;
+        clearPreviewAudioFocus();
+      }
       if (programmatic) return;
       if (pip.systemPip) {
         // 系统小窗里的暂停来自原生控件；尊重它，不做后台自动恢复。
@@ -1322,7 +1499,38 @@ export function VideoPipHost() {
     };
     const onTime = () => {
       if (stillActive() && !localSwap.isHoldingPosition()) {
-        useVideoPip.getState().setPosition(video.currentTime);
+        const pip = useVideoPip.getState();
+        pip.setPosition(video.currentTime);
+        const activeKey = loadedKeyRef.current;
+        if (
+          pip.session?.source === "network" &&
+          desiredPlayingRef.current &&
+          activeKey
+        ) {
+          armNetworkVideoWatchdog(
+            video,
+            activeKey,
+            NETWORK_VIDEO_STALL_TIMEOUT_MS,
+            "视频预览长时间没有输出，已停止加载",
+          );
+        }
+      }
+    };
+    const onWaiting = () => {
+      const pip = useVideoPip.getState();
+      const activeKey = loadedKeyRef.current;
+      if (
+        stillActive() &&
+        pip.session?.source === "network" &&
+        desiredPlayingRef.current &&
+        activeKey
+      ) {
+        armNetworkVideoWatchdog(
+          video,
+          activeKey,
+          NETWORK_VIDEO_STALL_TIMEOUT_MS,
+          "视频预览缓冲超时，已停止加载",
+        );
       }
     };
     const onSeeked = () => {
@@ -1362,10 +1570,18 @@ export function VideoPipHost() {
       }
     };
     const onEnded = () => {
-      if (stillActive()) useVideoPip.getState().setPlaying(false);
+      if (!stillActive()) return;
+      window.clearTimeout(networkVideoWatchdogRef.current);
+      networkVideoWatchdogRef.current = 0;
+      clearPreviewAudioFocus();
+      useVideoPip.getState().setPlaying(false);
     };
     const onError = () => {
       if (!stillActive()) return;
+      if (useVideoPip.getState().session?.source === "network") {
+        failNetworkHost(video, "视频预览加载失败，已停止网络请求");
+        return;
+      }
       useVideoPip.getState().setPlaying(false);
       useVideoPip.getState().setError("视频预览加载失败");
     };
@@ -1373,7 +1589,10 @@ export function VideoPipHost() {
     video.addEventListener("leavepictureinpicture", onLeave);
     video.addEventListener("webkitpresentationmodechanged", onWebKitPresentation);
     video.addEventListener("play", onPlay);
+    video.addEventListener("playing", onPlaying);
     video.addEventListener("pause", onPause);
+    video.addEventListener("waiting", onWaiting);
+    video.addEventListener("stalled", onWaiting);
     video.addEventListener("timeupdate", onTime);
     video.addEventListener("seeked", onSeeked);
     video.addEventListener("loadedmetadata", onMeta);
@@ -1384,7 +1603,10 @@ export function VideoPipHost() {
       video.removeEventListener("leavepictureinpicture", onLeave);
       video.removeEventListener("webkitpresentationmodechanged", onWebKitPresentation);
       video.removeEventListener("play", onPlay);
+      video.removeEventListener("playing", onPlaying);
       video.removeEventListener("pause", onPause);
+      video.removeEventListener("waiting", onWaiting);
+      video.removeEventListener("stalled", onWaiting);
       video.removeEventListener("timeupdate", onTime);
       video.removeEventListener("seeked", onSeeked);
       video.removeEventListener("loadedmetadata", onMeta);
@@ -1656,7 +1878,7 @@ export function VideoPipHost() {
             data-active={localSwap.activeSlot === 0 ? "true" : undefined}
             crossOrigin="anonymous"
             playsInline
-            preload="auto"
+            preload={isLocal ? "auto" : "metadata"}
             muted={isLocal}
           />
           <video
@@ -1666,7 +1888,7 @@ export function VideoPipHost() {
             data-active={localSwap.activeSlot === 1 ? "true" : undefined}
             crossOrigin="anonymous"
             playsInline
-            preload="auto"
+            preload={isLocal ? "auto" : "none"}
             muted
           />
           <canvas ref={pipCanvasRef} className="kd-pip-compositor" aria-hidden="true" />

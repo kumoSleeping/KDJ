@@ -17,7 +17,7 @@ import { isTrackDrag, readTrackDragIds, claimActiveTrackDragIds } from "../../li
 import { selectSelectedTrack, useLibraryStore } from "../../stores/libraryStore";
 import { useAppStore } from "../../stores/appStore";
 import { useDownloadStore } from "../../stores/downloadStore";
-import type { DownloadTask, Quality, Track, VideoInfo } from "../../types";
+import type { DownloadTask, Quality, TrackSummary, VideoInfo } from "../../types";
 
 const VIDEO_HEIGHTS = [2160, 1440, 1080, 720, 480, 360];
 const AUDIO_QUALITIES: Quality[] = ["flac", "320", "128"];
@@ -95,7 +95,7 @@ export function QueueRowConfig({
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [trackQuery, setTrackQuery] = useState("");
-  const [trackHits, setTrackHits] = useState<Track[]>([]);
+  const [trackHits, setTrackHits] = useState<TrackSummary[]>([]);
   const [searching, setSearching] = useState(false);
   const [dropHot, setDropHot] = useState(false);
 
@@ -211,7 +211,7 @@ export function QueueRowConfig({
     }
   };
 
-  const bindTrack = (track: Track) => {
+  const bindTrack = (track: TrackSummary) => {
     if (!videoDraft) return;
     patchVideoDraft(task.id, {
       offsetMode: "bound",

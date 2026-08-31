@@ -5,6 +5,11 @@ export interface StreamCacheProgressSnapshot {
   totalBytes: number;
   complete: boolean;
   active: boolean;
+  cacheStatus: NonNullable<StreamWaveformProgress["cache_status"]>;
+  cacheError: string;
+  waveformStatus: NonNullable<StreamWaveformProgress["waveform_status"]>;
+  waveformError: string;
+  explicitStatus: boolean;
   updatedAt: number;
 }
 
@@ -13,6 +18,11 @@ const EMPTY_SNAPSHOT: StreamCacheProgressSnapshot = Object.freeze({
   totalBytes: 0,
   complete: false,
   active: false,
+  cacheStatus: "waiting",
+  cacheError: "",
+  waveformStatus: "waiting",
+  waveformError: "",
+  explicitStatus: false,
   updatedAt: 0,
 });
 
@@ -45,6 +55,15 @@ export function recordStreamCacheProgress(
     totalBytes,
     complete: progress.complete,
     active: progress.active,
+    cacheStatus: progress.cache_status
+      ?? (progress.complete ? "ready" : progress.active ? "caching" : "waiting"),
+    cacheError: progress.cache_error ?? "",
+    waveformStatus: progress.waveform_status
+      ?? (progress.complete
+        ? progress.waveform ? "ready" : "failed"
+        : progress.active ? "analyzing" : progress.waveform ? "partial" : "waiting"),
+    waveformError: progress.waveform_error ?? "",
+    explicitStatus: progress.cache_status !== undefined || progress.waveform_status !== undefined,
     updatedAt: Date.now(),
   };
   const previous = snapshots.get(trackId);
@@ -53,7 +72,12 @@ export function recordStreamCacheProgress(
     previous.cachedBytes === next.cachedBytes &&
     previous.totalBytes === next.totalBytes &&
     previous.complete === next.complete &&
-    previous.active === next.active
+    previous.active === next.active &&
+    previous.cacheStatus === next.cacheStatus &&
+    previous.cacheError === next.cacheError &&
+    previous.waveformStatus === next.waveformStatus &&
+    previous.waveformError === next.waveformError &&
+    previous.explicitStatus === next.explicitStatus
   ) {
     return;
   }

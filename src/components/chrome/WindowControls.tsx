@@ -50,7 +50,16 @@ export function WindowControls() {
         data-close="true"
         aria-label="关闭"
         title="关闭"
-        onClick={() => window.kdj?.windowControl("close")}
+        onPointerDown={(event) => {
+          // WebView 媒体线程异常时 click 可能排在手势尾部迟迟不来；按下即把退出
+          // 请求交给 Rust。键盘激活没有 pointerdown，仍由下面的 click 兜底。
+          if (event.button !== 0) return;
+          event.preventDefault();
+          window.kdj?.windowControl("close");
+        }}
+        onClick={(event) => {
+          if (event.detail === 0) window.kdj?.windowControl("close");
+        }}
       >
         <X size={14} strokeWidth={2} aria-hidden="true" />
       </button>

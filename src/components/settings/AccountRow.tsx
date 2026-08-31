@@ -176,11 +176,13 @@ export function AccountRow({
   onToggleSource(): void;
 }) {
   const setAccount = useAppStore((state) => state.setAccount);
+  const refreshAccounts = useAppStore((state) => state.refreshAccounts);
   const openSettingsPanel = useAppStore((state) => state.openSettingsPanel);
   const [busy, setBusy] = useState(false);
   const [qrBusy, setQrBusy] = useState(false);
   const [oauthBusy, setOauthBusy] = useState(false);
   const [youtubeBusy, setYoutubeBusy] = useState(false);
+  const [webLoginBusy, setWebLoginBusy] = useState(false);
   const [youtubeLoginOpen, setYoutubeLoginOpen] = useState(false);
   const [youtubeAdvancedOpen, setYoutubeAdvancedOpen] = useState(false);
   const [youtubeCatalog, setYoutubeCatalog] = useState<BrowserCatalog | null>(null);
@@ -195,6 +197,7 @@ export function AccountRow({
   const [qrState, setQrState] = useState<QrStateValue | null>(null);
   const qrGenerationRef = useRef(0);
   const oauthUnlistenRef = useRef<UnlistenFn | null>(null);
+  const webLoginUnlistenRef = useRef<UnlistenFn | null>(null);
   /** 退出失败就贴在这一行自己底下：状态还写着"已登录"，得说清楚为什么。 */
   const [notice, setNotice] = useState("");
 
@@ -204,6 +207,8 @@ export function AccountRow({
     (account.platform === "youtube" || account.platform === "ytm") && browserAccount;
   const soundcloudAccount = account.platform === "soundcloud";
   const browserMobile = ["android", "ios"].includes(String(getBridge().platform));
+  const soundcloudWebLoginAvailable =
+    soundcloudAccount && Boolean(getBridge().openSoundcloudWebLogin);
   const stateLabel = browserAccount
     ? account.state === "valid"
       ? account.credential_kind === "ytm_oauth"
@@ -228,6 +233,8 @@ export function AccountRow({
       qrGenerationRef.current += 1;
       oauthUnlistenRef.current?.();
       oauthUnlistenRef.current = null;
+      webLoginUnlistenRef.current?.();
+      webLoginUnlistenRef.current = null;
     },
     [],
   );
@@ -494,6 +501,49 @@ export function AccountRow({
     }
   };
 
+  const openSoundcloudWebLogin = async () => {
+    if (!sourceEnabled) {
+      setNotice("请先开启 SoundCloud 搜索与下载，再连接账号。");
+      return;
+    }
+    const bridge = getBridge();
+    if (!bridge.openSoundcloudWebLogin) {
+      setNotice("当前系统没有可用的 SoundCloud 登录窗口。");
+      return;
+    }
+    const generation = ++qrGenerationRef.current;
+    setWebLoginBusy(true);
+    setNotice("");
+    try {
+      const unlisten = await listen<SoundCloudOAuthWindowResult>(
+        "soundcloud-web-login://result",
+        (event) => {
+          if (generation !== qrGenerationRef.current) return;
+          webLoginUnlistenRef.current?.();
+          webLoginUnlistenRef.current = null;
+          setWebLoginBusy(false);
+          if (event.payload.status === "done") {
+            setYoutubeLoginOpen(false);
+            void refreshAccounts();
+          } else {
+            setNotice(event.payload.message || "SoundCloud 登录未完成");
+          }
+        },
+      );
+      webLoginUnlistenRef.current = unlisten;
+      await bridge.openSoundcloudWebLogin();
+    } catch (error) {
+      if (generation === qrGenerationRef.current) {
+        webLoginUnlistenRef.current?.();
+        webLoginUnlistenRef.current = null;
+        setWebLoginBusy(false);
+        setNotice(
+          `打开 SoundCloud 登录失败：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  };
+
   const toggleYoutubeLogin = () => {
     if (youtubeLoginOpen) {
       setYoutubeLoginOpen(false);
@@ -639,18 +689,6 @@ export function AccountRow({
           </span>
         ) : loggedIn ? (
           <>
-            {soundcloudAccount && account.credential_kind !== "oauth" && (
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={oauthBusy}
-                title="官方 OAuth 才能修改 SoundCloud 收藏和歌单"
-                onClick={() => void oauthLogin()}
-              >
-                {oauthBusy && <LoaderCircle size={13} className="kd-spin" />}
-                {oauthBusy ? "等待授权" : "改用 OAuth"}
-              </Button>
-            )}
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => void logout()}>
               退出
             </Button>
@@ -668,11 +706,11 @@ export function AccountRow({
           <Button
             size="sm"
             variant={youtubeLoginOpen ? "ghost" : "primary"}
-            disabled={youtubeBusy}
+            disabled={youtubeBusy || webLoginBusy}
             onClick={toggleYoutubeLogin}
           >
-            {youtubeBusy && <LoaderCircle size={13} className="kd-spin" />}
-            {youtubeLoginOpen ? "取消" : "连接"}
+            {(youtubeBusy || webLoginBusy) && <LoaderCircle size={13} className="kd-spin" />}
+            {webLoginBusy ? "等待登录" : youtubeLoginOpen ? "取消" : "连接"}
           </Button>
         ) : savedPath ? (
           <Button
@@ -706,6 +744,29 @@ export function AccountRow({
             padding: "0 0 0.45rem 2.4rem",
           }}
         >
+          {soundcloudWebLoginAvailable && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.35rem",
+                minHeight: "1.8rem",
+              }}
+            >
+              <small className="kd-faint" style={{ minWidth: "5.4rem" }}>
+                WebView 登录
+              </small>
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={webLoginBusy}
+                onClick={() => void openSoundcloudWebLogin()}
+              >
+                {webLoginBusy && <LoaderCircle size={13} className="kd-spin" />}
+                {webLoginBusy ? "等待登录" : "打开登录窗口"}
+              </Button>
+            </div>
+          )}
           {youtubeBusy && !youtubeCatalog && (
             <span className="kd-faint" style={{ fontSize: "var(--kd-size-xs)" }}>
               正在查找浏览器…
@@ -713,10 +774,15 @@ export function AccountRow({
           )}
           {youtubeCatalog && youtubeCatalog.browsers.length > 0 && (
             <>
+              {soundcloudAccount && (
+                <small className="kd-faint" style={{ lineHeight: 1.35 }}>
+                  直接连接浏览器
+                </small>
+              )}
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "minmax(0, 5.4rem) minmax(0, 7.1rem) auto auto",
+                  gridTemplateColumns: "minmax(0, 4.8rem) minmax(0, 5.5rem) auto auto",
                   alignItems: "center",
                   gap: "0.25rem",
                   maxWidth: "18rem",
@@ -727,7 +793,7 @@ export function AccountRow({
                   aria-label="浏览器"
                   title="浏览器"
                   value={youtubeBrowser}
-                  disabled={youtubeBusy}
+                  disabled={youtubeBusy || webLoginBusy}
                   onChange={(event) => {
                     const browser = youtubeCatalog.browsers.find(
                       (candidate) => candidate.id === event.currentTarget.value,
@@ -747,7 +813,7 @@ export function AccountRow({
                   aria-label="浏览器 Profile"
                   title="Profile"
                   value={youtubeProfile}
-                  disabled={youtubeBusy}
+                  disabled={youtubeBusy || webLoginBusy}
                   onChange={(event) => setYoutubeProfile(event.currentTarget.value)}
                 >
                   {selectedYoutubeBrowser?.profiles.map((profile) => (
@@ -762,7 +828,7 @@ export function AccountRow({
                   iconOnly
                   aria-label="重新检测浏览器"
                   title="重新检测浏览器"
-                  disabled={youtubeBusy}
+                  disabled={youtubeBusy || webLoginBusy}
                   onClick={() => void detectYoutubeBrowsers()}
                 >
                   <RefreshCw size={13} />
@@ -770,11 +836,13 @@ export function AccountRow({
                 <Button
                   size="sm"
                   variant="primary"
-                  disabled={youtubeBusy || !youtubeBrowser || !youtubeProfile}
+                  disabled={
+                    youtubeBusy || webLoginBusy || !youtubeBrowser || !youtubeProfile
+                  }
                   onClick={() => void importYoutubeBrowser()}
                 >
                   {youtubeBusy && <LoaderCircle size={13} className="kd-spin" />}
-                  连接
+                  {soundcloudAccount ? "尝试连接" : "连接"}
                 </Button>
               </div>
               <small className="kd-faint" style={{ lineHeight: 1.35 }}>
@@ -782,22 +850,6 @@ export function AccountRow({
                   ? "读取所选 Profile 的 SoundCloud 登录状态，不读取密码。"
                   : `只连接 ${account.label}；不会改变另一个 YouTube 来源的登录状态。`}
               </small>
-              {soundcloudAccount && (
-                <div>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={oauthBusy}
-                    onClick={() => void oauthLogin()}
-                  >
-                    {oauthBusy && <LoaderCircle size={13} className="kd-spin" />}
-                    {oauthBusy ? "等待授权" : "使用官方 OAuth 登录"}
-                  </Button>
-                  <small className="kd-faint" style={{ marginLeft: "0.35rem" }}>
-                    支持修改收藏和本人歌单
-                  </small>
-                </div>
-              )}
               {selectedYoutubeProfile?.requires_elevation && (
                 <small style={{ color: "var(--kd-warn)", lineHeight: 1.35 }}>
                   此 Windows Profile 使用应用绑定加密；请以管理员运行，或改用 Firefox。

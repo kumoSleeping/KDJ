@@ -1,4 +1,4 @@
-import { cloneElement, useCallback, useEffect, useRef, useState } from "react";
+import { cloneElement, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   BarChart3,
@@ -65,7 +65,7 @@ import {
 } from "../../lib/folderDrop";
 import { resolveLibraryPasteOp } from "../../lib/libraryPaste";
 import { isOutsideFolder } from "../../lib/outsideFolder";
-import { DASH, formatBpm, formatDuration, isVideoTrack, thumbUrl } from "../../lib/format";
+import { DASH, formatBpm, formatDate, formatDuration, isVideoTrack, thumbUrl } from "../../lib/format";
 import { playClickForLayout, useTrackClickPrefs } from "../../lib/trackClickPrefs";
 import type { LayoutMode } from "../../lib/useLayoutMode";
 import { shouldHandleWorkspaceDelete } from "../../lib/workspacePanes";
@@ -82,7 +82,7 @@ import {
   type TrackSort,
 } from "../../stores/libraryStore";
 import type { DownloadTask } from "../../types";
-import type { FileDisposalMode, KeyNotation, Track } from "../../types";
+import type { FileDisposalMode, KeyNotation, TrackSummary } from "../../types";
 import { playTrack } from "../../lib/playTrack";
 import {
   beginColumnPointerReorder,
@@ -200,6 +200,7 @@ const COLUMNS: Column[] = [
   { id: "energy", label: "响度", width: "3.8rem", key: "energy" },
   { id: "duration", label: "时长", width: "4rem", align: "num", key: "duration" },
   { id: null, label: "格式", width: "3.4rem", key: "format" },
+  { id: "file_created_at", label: "文件创建", width: "8.5rem", key: "file_created_at" },
   { id: "rating", label: "评分", width: "4.2rem", key: "rating" },
 ];
 
@@ -226,6 +227,7 @@ const COLUMN_MIN_WIDTH: Record<string, string> = {
   energy: "2.8rem",
   duration: "2.8rem",
   format: "2.6rem",
+  file_created_at: "6.5rem",
   rating: "3rem",
 };
 
@@ -245,7 +247,7 @@ function loadColumnPrefs(): ColumnPrefs {
 }
 
 export interface TrackTableProps {
-  tracks: Track[];
+  tracks: TrackSummary[];
   total: number;
   loading: boolean;
   /**
@@ -290,7 +292,7 @@ export interface TrackTableProps {
 function TrackCoverThumb({
   track,
 }: {
-  track: Track;
+  track: TrackSummary;
 }) {
   const [attempt, setAttempt] = useState(0);
   const [videoCover, setVideoCover] = useState("");
@@ -308,7 +310,7 @@ function TrackCoverThumb({
     let objectUrl = "";
     setVideoCover("");
 
-    void fetch(api.coverUrl(track.id, `${track.modified_at}-${attempt}`), {
+    void fetch(api.coverUrl(track.id, `${track.modified_at}-${attempt}`, 64), {
       signal: controller.signal,
       cache: "no-store",
     })
@@ -342,7 +344,7 @@ function TrackCoverThumb({
       {isVideo ? (
         videoCover ? <img key={videoCover} src={videoCover} alt="" draggable={false} /> : null
       ) : (
-        <CoverImage src={api.coverUrl(track.id, track.modified_at)} loading="lazy" />
+        <CoverImage src={api.coverUrl(track.id, track.modified_at, 64)} loading="lazy" />
       )}
     </span>
   );
@@ -354,7 +356,7 @@ const systemDragPreviewCache = new Map<string, Promise<string>>();
  * 系统拖拽的图片必须在离开 WebView 前准备好。指针按下时就从本地封面路由预取，
  * 并裁成固定方形，避免高分辨率封面在 Finder / Explorer 下变成巨大的拖拽浮图。
  */
-function systemDragPreview(track: Track): Promise<string> {
+function systemDragPreview(track: TrackSummary): Promise<string> {
   const cacheKey = `${track.id}:${track.modified_at}`;
   const cached = systemDragPreviewCache.get(cacheKey);
   if (cached) return cached;
@@ -372,7 +374,7 @@ function systemDragPreview(track: Track): Promise<string> {
 const localTrackShareLinkCache = new Map<string, Promise<string | null>>();
 const resolvedLocalTrackShareLinks = new Map<string, string | null>();
 
-function localTrackShareCacheKey(track: Track): string {
+function localTrackShareCacheKey(track: TrackSummary): string {
   const query = isVideoTrack(track.format)
     ? bilibiliVideoShareSearchQuery(track)
     : trackShareSearchQuery(track);
@@ -380,7 +382,7 @@ function localTrackShareCacheKey(track: Track): string {
 }
 
 /** 旧本地曲目走严格同名匹配；B 站多 P 视频按 KDJ 固定文件名还原父标题。 */
-function resolveLocalTrackShareLink(track: Track): Promise<string | null> {
+function resolveLocalTrackShareLink(track: TrackSummary): Promise<string | null> {
   const direct = trackShareLink(track);
   if (direct) return Promise.resolve(direct);
   const video = isVideoTrack(track.format);
@@ -419,9 +421,10 @@ function resolveLocalTrackShareLink(track: Track): Promise<string | null> {
 
 /** 每列的单元格。列可以被拖排 / 隐藏（见 COLUMN_PREFS_KEY），所以按 key 取，不写死顺序。 */
 function trackCell(
-  track: Track,
+  track: TrackSummary,
   key: string,
   keyNotation: KeyNotation,
+  loadArtwork: boolean,
   selectionControl?: React.ReactNode,
   onRate?: (rating: number) => void,
 ) {
@@ -432,7 +435,7 @@ function trackCell(
           {selectionControl}
           {/* lazy：一页 200 行，只在滚到眼前时请求。视频首帧由 TrackCoverThumb
               在服务短暂重启或抽帧排队时重试，不能一次失败就永久变成灰格。 */}
-          <TrackCoverThumb track={track} />
+          {loadArtwork ? <TrackCoverThumb track={track} /> : <span className="kd-thumb" aria-hidden="true" />}
           {/* 媒介类型是这首本地文件的附属信息，排在封面后、标题前。 */}
           {isVideoTrack(track.format) && (
             <span className="kd-video-mark" title="视频" role="img" aria-label="视频">
@@ -486,6 +489,12 @@ function trackCell(
           {track.format.toUpperCase() || DASH}
         </td>
       );
+    case "file_created_at":
+      return (
+        <td key={key} data-col="file_created_at" className="kd-mono kd-muted">
+          {formatDate(track.file_created_at)}
+        </td>
+      );
     case "rating":
       return (
         <td key={key} data-col="rating">
@@ -496,6 +505,73 @@ function trackCell(
       return null;
   }
 }
+
+interface TrackCellsProps {
+  track: TrackSummary;
+  displayIndex: number;
+  showIndex: boolean;
+  columns: readonly Column[];
+  keyNotation: KeyNotation;
+  loadArtwork: boolean;
+  selectionMode: boolean;
+  selected: boolean;
+  onToggle(id: number): void;
+  onRate(id: number, rating: number): void;
+}
+
+/**
+ * 滚动时父表每帧只改变窗口位置；仍在窗口里的行内容完全相同。把单元格树单独
+ * memo 后，封面、能量条和评分控件不会因为 scrollTop 变化而跟着重复执行。
+ */
+const TrackCells = memo(function TrackCells({
+  track,
+  displayIndex,
+  showIndex,
+  columns,
+  keyNotation,
+  loadArtwork,
+  selectionMode,
+  selected,
+  onToggle,
+  onRate,
+}: TrackCellsProps) {
+  return (
+    <>
+      {showIndex ? <td data-col="index">{displayIndex}</td> : null}
+      {columns.map((column) => {
+        const cell = trackCell(
+          track,
+          column.key,
+          keyNotation,
+          loadArtwork,
+          column.key === "title" && selectionMode ? (
+            <button
+              type="button"
+              className="kd-row-select"
+              aria-label={selected ? "取消选择" : "选择曲目"}
+              aria-pressed={selected}
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggle(track.id);
+              }}
+            >
+              <Check size={9} />
+            </button>
+          ) : undefined,
+          column.key === "rating" ? (rating) => onRate(track.id, rating) : undefined,
+        ) as React.ReactElement<React.TdHTMLAttributes<HTMLTableCellElement>>;
+        return cloneElement(
+          cell,
+          { draggable: false },
+          <span className="kd-track-drag-surface" draggable={false}>
+            {cell.props.children}
+          </span>,
+        );
+      })}
+      <td className="kd-table-fill" aria-hidden="true" />
+    </>
+  );
+});
 
 /** 鼠标事件 → 多选语义。Mac 用 Cmd，其它平台用 Ctrl，两个都认。 */
 function selectMode(event: React.MouseEvent): SelectMode {
@@ -557,7 +633,7 @@ function PendingStateMark({ task }: { task: DownloadTask }) {
 }
 
 /** 当前文件夹下载任务的即时反馈；文件实际入库后由正式曲目行替代。 */
-function isPendingForFolder(task: DownloadTask, filterFolder: string, tracks: Track[]): boolean {
+function isPendingForFolder(task: DownloadTask, filterFolder: string, tracks: TrackSummary[]): boolean {
   const dest = task.dest_dir?.trim() || "";
   if (!dest) return false;
   const folder = filterFolder.trim();
@@ -573,7 +649,7 @@ function isPendingForFolder(task: DownloadTask, filterFolder: string, tracks: Tr
   return !tracks.some((track) => track.id === task.track_id);
 }
 
-export function TrackTable({
+export const TrackTable = memo(function TrackTable({
   tracks,
   total,
   loading,
@@ -601,15 +677,20 @@ export function TrackTable({
   const narrowPlay = useTrackClickPrefs((state) => state.narrowPlay);
   const localExternalDragMode = usePlaybackPrefs((state) => state.localExternalDragMode);
   const shareContentMode = useSharePrefs((state) => state.contentMode);
-  const selectedSameNamePlatforms = normalizeSearchPlatforms(settings?.search_platforms)
-    .filter((platform) => isPlatformEnabled(settings, platform));
-  const sameNameSearchPlatforms = selectedSameNamePlatforms.length > 0
-    ? selectedSameNamePlatforms
-    : normalizeEnabledPlatforms(settings?.enabled_platforms);
-  const formatTrackShareText = (track: Track, link: string) => formatShareText(
-    link,
-    { title: track.title || track.filename, artists: track.artist, album: track.album },
-    shareContentMode,
+  const sameNameSearchPlatforms = useMemo(() => {
+    const selectedPlatforms = normalizeSearchPlatforms(settings?.search_platforms)
+      .filter((platform) => isPlatformEnabled(settings, platform));
+    return selectedPlatforms.length > 0
+      ? selectedPlatforms
+      : normalizeEnabledPlatforms(settings?.enabled_platforms);
+  }, [settings]);
+  const formatTrackShareText = useCallback(
+    (track: TrackSummary, link: string) => formatShareText(
+      link,
+      { title: track.title || track.filename, artists: track.artist, album: track.album },
+      shareContentMode,
+    ),
+    [shareContentMode],
   );
   const htmlExternalLinkDrag =
     localExternalDragMode === "share_link"
@@ -621,13 +702,22 @@ export function TrackTable({
   const undoLast = useLibraryStore((state) => state.undoLast);
   const undoName = undo.op === "copy" ? "复制" : undo.op === "delete" ? "删除" : "移动";
   const updateTrack = useLibraryStore((state) => state.updateTrack);
+  const toggleTrackSelection = useCallback(
+    (id: number) => onSelect(id, "toggle"),
+    [onSelect],
+  );
+  const rateTrack = useCallback(
+    (id: number, rating: number) => { void updateTrack(id, { rating }); },
+    [updateTrack],
+  );
   const selectionMode = useLibraryStore((state) => state.selectionMode);
   const setSelectionMode = useLibraryStore((state) => state.setSelectionMode);
   const downloadTasks = useDownloadStore((state) => state.list);
-  const pendingDownloads = downloadTasks.filter((task) =>
-    isPendingForFolder(task, filterFolder, tracks),
+  const pendingDownloads = useMemo(
+    () => downloadTasks.filter((task) => isPendingForFolder(task, filterFolder, tracks)),
+    [downloadTasks, filterFolder, tracks],
   );
-  const selected = new Set(selectedIds);
+  const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
   const pressTimerRef = useRef<number | null>(null);
   const suppressClickRef = useRef<number | null>(null);
   /**
@@ -663,7 +753,7 @@ export function TrackTable({
    */
   const backendPlatform = useAppStore((state) => state.health?.platform ?? "");
   const trashSupported = backendPlatform !== "android" && backendPlatform !== "ios";
-  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; track: Track } | null>(null);
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; track: TrackSummary } | null>(null);
   const [menuShareResolution, setMenuShareResolution] = useState<{
     cacheKey: string;
     link: string | null;
@@ -685,6 +775,7 @@ export function TrackTable({
       htmlExternalDragScrollUnlockRef.current?.();
       resizeObserverRef.current?.disconnect();
       if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
+      if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
     },
     [],
   );
@@ -692,7 +783,7 @@ export function TrackTable({
   /** 触屏长按整行后启动系统文件拖动；明显纵向移动时优先让列表滚动。 */
   const beginTrackSystemFileDrag = (
     event: React.PointerEvent<HTMLTableRowElement>,
-    track: Track,
+    track: TrackSummary,
   ): boolean => {
     const startFileDrag = window.kdj?.startFileDrag;
     const startLinkDrag = window.kdj?.startLinkDrag;
@@ -766,6 +857,7 @@ export function TrackTable({
               label: track.title || track.filename,
               text: formatTrackShareText(track, link),
               dragImage: preview || undefined,
+              includeArtwork: shareContentMode === "more_info",
             });
             setNotice("");
             return;
@@ -802,7 +894,7 @@ export function TrackTable({
    * 本地曲目不用 WebKit 的原生 draggable：它经常把按住移动解释成框选/多选，
    * 或只发 dragstart 不发 drop。这里直接跟踪指针，松手时按坐标命中文件夹。
    */
-  const beginTrackPointerDrag = (event: React.PointerEvent<HTMLTableRowElement>, track: Track) => {
+  const beginTrackPointerDrag = (event: React.PointerEvent<HTMLTableRowElement>, track: TrackSummary) => {
     if (event.pointerType !== "mouse" || event.button !== 0) return;
     if ((event.target as HTMLElement).closest("button, input, select, textarea, a, label")) return;
     // Windows 的 URL 数据拖放交给 WebView2 原生 HTML5 链路；文件与 macOS 链接仍用
@@ -969,6 +1061,7 @@ export function TrackTable({
               label: track.title || track.filename,
               text: formatTrackShareText(track, link),
               dragImage: preview || undefined,
+              includeArtwork: shareContentMode === "more_info",
             });
             setNotice("");
             return;
@@ -1077,7 +1170,7 @@ export function TrackTable({
     if (pressTimerRef.current !== null) window.clearTimeout(pressTimerRef.current);
     pressTimerRef.current = null;
   };
-  const beginLongPress = (track: Track, x: number, y: number) => {
+  const beginLongPress = (track: TrackSummary, x: number, y: number) => {
     cancelPress();
     pressTimerRef.current = window.setTimeout(() => {
       setRowMenu({ x, y, track });
@@ -1128,7 +1221,7 @@ export function TrackTable({
   const rowSameNameQuery = rowMenu && !isVideoTrack(rowMenu.track.format)
     ? trackShareSearchQuery(rowMenu.track)
     : "";
-  const copyTrackShareLink = async (track: Track, link: string | null) => {
+  const copyTrackShareLink = async (track: TrackSummary, link: string | null) => {
     setRowMenu(null);
     if (!link) return;
     await copyShareContent(
@@ -1137,8 +1230,15 @@ export function TrackTable({
       () => api.coverBlob(track.id),
     );
   };
-  const playFromTable = (track: Track) => {
-    playTrack(track);
+  const playFromTable = (track: TrackSummary) => {
+    const cached = useLibraryStore.getState().selectedTrack;
+    if (cached?.id === track.id) {
+      playTrack(cached);
+      return;
+    }
+    void api.track(track.id)
+      .then((detail) => playTrack(detail))
+      .catch((error: unknown) => setNotice(`无法读取曲目：${(error as Error).message}`));
   };
 
   const deleteWithNotice = (ids: number[], file: FileDisposalMode) => {
@@ -1205,11 +1305,15 @@ export function TrackTable({
   const scrollRestoreDoneRef = useRef(restoredScrollTopRef.current <= 0);
   /** 虚拟滚动需要的滚动位置/视口高度；一帧最多重算一次（见 onScroll）。 */
   const [view, setView] = useState({ top: 0, height: 0 });
+  const [fastScrolling, setFastScrolling] = useState(false);
   const [rowH, setRowH] = useState(FALLBACK_ROW_H);
   const rowHRef = useRef(FALLBACK_ROW_H);
   /** 横向滚动不能进入虚拟列表更新链；否则拖底部横滚条时每帧重渲染整张可视表。 */
   const scrollTopRef = useRef(0);
   const scrollRafRef = useRef(0);
+  const scrollSampleRef = useRef({ top: 0, at: 0 });
+  const fastScrollingRef = useRef(false);
+  const scrollIdleTimerRef = useRef<number | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   /** 滚动容器 ref：身份必须稳定（见 JSX 处的注释）。值没变就不 setState，
       否则 ResizeObserver 的初次回调会和自己触发的重渲染互相喂食。 */
@@ -1396,14 +1500,19 @@ export function TrackTable({
     window.addEventListener("pointercancel", onEnd);
   };
 
-  const orderedColumns = orderByPrefs(COLUMNS, colPrefs.order);
-  const colIds = orderedColumns.map((column) => column.key);
-  const configuredVisibleColumns = orderedColumns.filter(
-    (column) => !colPrefs.hidden.includes(column.key),
+  const orderedColumns = useMemo(
+    () => orderByPrefs(COLUMNS, colPrefs.order),
+    [colPrefs.order],
   );
-  const visibleColumns = fitWidth
-    ? fitDjTrackColumns(configuredVisibleColumns)
-    : configuredVisibleColumns;
+  const colIds = useMemo(() => orderedColumns.map((column) => column.key), [orderedColumns]);
+  const configuredVisibleColumns = useMemo(
+    () => orderedColumns.filter((column) => !colPrefs.hidden.includes(column.key)),
+    [colPrefs.hidden, orderedColumns],
+  );
+  const visibleColumns = useMemo(
+    () => fitWidth ? fitDjTrackColumns(configuredVisibleColumns) : configuredVisibleColumns,
+    [configuredVisibleColumns, fitWidth],
+  );
   /** 只有曲库行需要序号列；纯待下载占位时不占左侧空白。 */
   const showIndexCol = tracks.length > 0;
   const indexWidth = fitWidth ? "10%" : widthFor(INDEX_COL_KEY, INDEX_DEFAULT_WIDTH);
@@ -1441,8 +1550,10 @@ export function TrackTable({
   });
   // 占位行上方还有若干「待下载」行，算窗口时先把它们的高度扣掉。
   const pendingH = pendingDownloads.length * rowH;
-  // 上下各多渲染约一屏：快速滚动时新行已经在 DOM 里，不会闪空白。
-  const overscan = Math.max(10, Math.ceil(view.height / rowH));
+  // 慢滚保留一屏余量；高速扫列表时缩成少量行并暂停封面，避免离屏 I/O 追着滚轮跑。
+  const overscan = fastScrolling
+    ? Math.max(4, Math.ceil(view.height / rowH / 6))
+    : Math.max(10, Math.ceil(view.height / rowH));
   const winStart =
     view.height > 0 ? Math.max(0, Math.floor((view.top - pendingH) / rowH) - overscan) : 0;
   const winEnd =
@@ -1505,6 +1616,25 @@ export function TrackTable({
           scrollRafRef.current = 0;
           const node = scrollerRef.current;
           if (!node) return;
+          const now = performance.now();
+          const previous = scrollSampleRef.current;
+          const elapsed = Math.max(1, now - previous.at);
+          const velocity = previous.at > 0 ? Math.abs(node.scrollTop - previous.top) / elapsed : 0;
+          scrollSampleRef.current = { top: node.scrollTop, at: now };
+          if (velocity > 0.8) {
+            if (!fastScrollingRef.current) {
+              fastScrollingRef.current = true;
+              setFastScrolling(true);
+            }
+            if (scrollIdleTimerRef.current !== null) {
+              window.clearTimeout(scrollIdleTimerRef.current);
+            }
+            scrollIdleTimerRef.current = window.setTimeout(() => {
+              scrollIdleTimerRef.current = null;
+              fastScrollingRef.current = false;
+              setFastScrolling(false);
+            }, 140);
+          }
           const next = { top: node.scrollTop, height: node.clientHeight };
           setView((current) =>
             current.top === next.top && current.height === next.height ? current : next,
@@ -1816,44 +1946,18 @@ export function TrackTable({
                 setRowMenu({ x: event.clientX, y: event.clientY, track });
               }}
             >
-              {showIndexCol ? <td data-col="index">{winStart + index + 1}</td> : null}
-              {visibleColumns.map((column) => {
-                const cell = trackCell(
-                  track,
-                  column.key,
-                  keyNotation,
-                  column.key === "title" && selectionMode ? (
-                    <button
-                      type="button"
-                      className="kd-row-select"
-                      aria-label={selected.has(track.id) ? "取消选择" : "选择曲目"}
-                      aria-pressed={selected.has(track.id)}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onSelect(track.id, "toggle");
-                      }}
-                    >
-                      <Check size={9} />
-                    </button>
-                  ) : undefined,
-                  column.key === "rating"
-                    ? (rating) => {
-                        void updateTrack(track.id, { rating });
-                      }
-                    : undefined,
-                ) as React.ReactElement<React.TdHTMLAttributes<HTMLTableCellElement>>;
-                // 普通 span 是 WebKit 最稳定的拖动源。让它铺满格子，避免只有封面
-                // 那十几个像素能拖；td + tr 则作为旧版 WebKit 的冗余兜底。
-                const dragSurface = (
-                  <span className="kd-track-drag-surface" draggable={false}>
-                    {cell.props.children}
-                  </span>
-                );
-                return cloneElement(cell, {
-                  draggable: false,
-                }, dragSurface);
-              })}
-              <td className="kd-table-fill" aria-hidden="true" />
+              <TrackCells
+                track={track}
+                displayIndex={winStart + index + 1}
+                showIndex={showIndexCol}
+                columns={visibleColumns}
+                keyNotation={keyNotation}
+                loadArtwork={!fastScrolling}
+                selectionMode={selectionMode}
+                selected={selected.has(track.id)}
+                onToggle={toggleTrackSelection}
+                onRate={rateTrack}
+              />
             </tr>
           ))}
           {winEnd < tracks.length && (
@@ -2074,4 +2178,4 @@ export function TrackTable({
       )}
     </div>
   );
-}
+});

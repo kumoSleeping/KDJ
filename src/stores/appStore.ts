@@ -423,6 +423,9 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     if (!current) return Promise.resolve();
     persistedSettings ??= current;
     const next: Settings = { ...current, ...patch };
+    const accountContextChanged =
+      Object.prototype.hasOwnProperty.call(patch, "enabled_platforms") ||
+      Object.prototype.hasOwnProperty.call(patch, "soundcloud_enabled");
     const intent = ++settingsIntent;
     settingsPending += 1;
     // 先本地生效（主题切换要立刻看到），失败再回滚
@@ -441,6 +444,20 @@ export const useAppStore = create<AppStore>()((set, get) => ({
             void import("../lib/mediaActions").then(({ resumePendingDownloadPreparations }) =>
               resumePendingDownloadPreparations(),
             );
+          }
+          // provider 的“已启用/未启用”说明来自后端 live context。下载源开关保存后
+          // 立即重读本地快照，避免开关已经显示“开”，账号行还残留“未启用”。
+          if (accountContextChanged) {
+            try {
+              const accounts = await api.cachedAccounts();
+              if (intent === settingsIntent) {
+                set({ accounts, accountsError: "" });
+              }
+            } catch (error) {
+              if (intent === settingsIntent) {
+                set({ accountsError: `账号状态刷新失败：${errorText(error)}` });
+              }
+            }
           }
         }
       } catch (error) {

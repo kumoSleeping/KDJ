@@ -120,31 +120,57 @@ export function OnlineTrackCacheFacts({
   if (streamTrackId < 0) {
     const cacheSize = cache.cachedBytes > 0 ? formatBytes(cache.cachedBytes) : "";
     const totalSize = cache.totalBytes > cache.cachedBytes ? formatBytes(cache.totalBytes) : "";
+    const cacheFailed = cache.cacheStatus === "failed";
+    const cacheRetrying = cache.cacheStatus === "retrying";
+    const cacheReady = cache.cacheStatus === "ready" || cache.complete;
+    const cacheRunning = cache.cacheStatus === "caching"
+      || (!cache.explicitStatus && cache.active && cache.cacheStatus === "waiting");
     facts.push({
       key: "media-cache",
-      text: cache.complete
+      text: cacheFailed
+        ? "缓存失败"
+        : cacheRetrying
+          ? "缓存重试中"
+          : cacheReady
         ? `缓存 ${cacheSize || "完成"}`
-        : cache.active
+        : cacheRunning
           ? cacheSize
             ? `缓存 ${cacheSize}${totalSize ? ` / ${totalSize}` : ""}`
             : "缓存中"
           : cacheSize
             ? `缓存 ${cacheSize}`
             : "缓存未开始",
-      state: cache.complete ? "done" : cache.active ? "running" : "waiting",
+      state: cacheFailed
+        ? "failed"
+        : cacheReady
+          ? "done"
+          : cacheRetrying || cacheRunning
+            ? "running"
+            : "waiting",
     });
   } else {
     facts.push({ key: "media-cache", text: "缓存未开始", state: "waiting" });
   }
 
-  if (waveformUsage.bytes > 0) {
-    const done = waveformUsage.ratio >= 0.999;
+  const explicitWaveformFailure = cache.explicitStatus && cache.waveformStatus === "failed";
+  if (waveformUsage.bytes > 0 || explicitWaveformFailure) {
+    const failed = explicitWaveformFailure;
+    const done = cache.explicitStatus
+      ? cache.waveformStatus === "ready"
+        || (cache.complete && waveformUsage.ratio >= 0.999 && !failed)
+      : waveformUsage.ratio >= 0.999;
+    const running = cache.explicitStatus ? cache.waveformStatus === "analyzing" : !done;
+    const usage = waveformUsage.bytes > 0
+      ? done
+        ? `波形 ${formatBytes(waveformUsage.bytes)}`
+        : `波形 ${formatBytes(waveformUsage.bytes)} · ${Math.round(waveformUsage.ratio * 100)}%`
+      : "波形";
     facts.push({
       key: "waveform-cache",
-      text: done
-        ? `波形 ${formatBytes(waveformUsage.bytes)}`
-        : `波形 ${formatBytes(waveformUsage.bytes)} · ${Math.round(waveformUsage.ratio * 100)}%`,
-      state: done ? "done" : "running",
+      text: failed
+        ? waveformUsage.bytes > 0 ? `${usage} · 失败` : "波形失败"
+        : usage,
+      state: failed ? "failed" : done ? "done" : running ? "running" : "waiting",
     });
   }
   const task = selectOnlineProgressTask(

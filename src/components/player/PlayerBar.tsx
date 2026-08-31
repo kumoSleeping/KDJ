@@ -97,6 +97,7 @@ import {
 import { playSongPreview } from "../../lib/songPreview";
 import { enqueueMediaDownloads } from "../../lib/mediaActions";
 import {
+  networkVideoOwnsTransport,
   rememberedLocalVideoTrackId,
   requestLocalVideo,
   seekVideoPip,
@@ -114,7 +115,10 @@ import {
   ARROW_KEY_LIST_STEP_EVENT,
   type ArrowKeyListStepDetail,
 } from "../../lib/arrowKeyControl";
-import { recordStreamAnalysisProgress } from "../../lib/streamAnalysis";
+import {
+  recordStreamAnalysisProgress,
+  streamAnalysisPollDelay,
+} from "../../lib/streamAnalysis";
 import { recordStreamCacheProgress } from "../../lib/streamCacheProgress";
 import { updateStreamCue } from "../../lib/streamCue";
 import {
@@ -173,6 +177,7 @@ import {
 import { LyricsHost } from "./LyricsHost";
 import { nextLoadedDeckIndex, performanceLoadDeckIndex } from "../../lib/performanceCues";
 import { readLocalStorage, writeLocalStorageSoon } from "../../lib/storageWrite";
+import { useMasterVolume } from "../../lib/masterVolume";
 import {
   playerVolumeMeterClipping,
   playerVolumeMeterLevel,
@@ -187,7 +192,7 @@ const STREAM_WAVEFORM_FOREGROUND_MS = 66;
 const STREAM_WAVEFORM_BACKGROUND_MS = 250;
 /** 后端缓存波形只在当前在线曲目上短轮询；它不触发第二个媒体下载。 */
 const STREAM_CACHE_WAVEFORM_POLL_MS = 750;
-/** 缓存尚未预约/暂时失败时保持低频观察；切歌或媒体结束后自然收掉。 */
+/** 缓存尚未预约时保持低频观察；明确的 failed 终态会直接释放轮询租约。 */
 const STREAM_CACHE_WAVEFORM_IDLE_POLL_MS = 3_000;
 /** macOS/Windows 可能同时从原生媒体会话和 WebView 报告同一次媒体键。 */
 const SYSTEM_MEDIA_DEDUPE_MS = 180;
@@ -204,6 +209,7 @@ interface StreamAnalysisPollSession {
   timer: number | null;
   inflight: boolean;
   disposed: boolean;
+  terminal: boolean;
   lastRevision: number;
 }
 
@@ -252,6 +258,7 @@ function subscribeStreamAnalysisPoll(
       timer: null,
       inflight: false,
       disposed: false,
+      terminal: false,
       lastRevision: -1,
     };
     streamAnalysisPollers.set(track.id, session);
@@ -294,17 +301,14 @@ function subscribeStreamAnalysisPoll(
           session!.lastRevision = progress.revision;
         }
         const allEnded = [...session!.subscribers].every((item) => item.ended());
-        if (
-          progress.enabled
-          && !(progress.complete && !progress.active)
-          && !(allEnded && !progress.active)
-        ) {
-          schedule(
-            progress.active
-              ? STREAM_CACHE_WAVEFORM_POLL_MS
-              : STREAM_CACHE_WAVEFORM_IDLE_POLL_MS,
-          );
-        }
+        const delay = streamAnalysisPollDelay(
+          progress,
+          allEnded,
+          STREAM_CACHE_WAVEFORM_POLL_MS,
+          STREAM_CACHE_WAVEFORM_IDLE_POLL_MS,
+        );
+        session!.terminal = delay === null;
+        if (delay !== null) schedule(delay);
       })
       .catch(() => {
         // A transient token/proxy miss must not permanently sever a Deck's analysis lease.
@@ -314,7 +318,7 @@ function subscribeStreamAnalysisPoll(
         session!.inflight = false;
       });
   };
-  if (session.timer === null && !session.inflight) poll();
+  if (session.timer === null && !session.inflight && !session.terminal) poll();
 
   return () => {
     session!.subscribers.delete(subscriber);
@@ -614,6 +618,7 @@ export function PlayerBar() {
   const canDesktopLyrics = Boolean(window.kdj?.desktopLyrics);
   const pipMode = useVideoPip((state) => state.mode);
   const pipActive = useVideoPip((state) => state.active);
+  const pipFailed = useVideoPip((state) => state.failed);
   const pipSystem = useVideoPip((state) => state.systemPip);
   const pipSession = useVideoPip((state) => state.session);
   const pipPosition = useVideoPip((state) => state.position);
@@ -758,12 +763,8 @@ export function PlayerBar() {
   const [performanceDeckStates, setPerformanceDeckStates] = useState(
     () => playerRuntime.state().decks,
   );
-  const [playerVolume, setPlayerVolume] = useState(() => {
-    const raw = readLocalStorage("kd-player-volume");
-    if (raw === null) return 1;
-    const saved = Number(raw);
-    return Number.isFinite(saved) ? Math.min(1, Math.max(0, saved)) : 1;
-  });
+  const playerVolume = useMasterVolume((state) => state.volume);
+  const setSharedMasterVolume = useMasterVolume((state) => state.setVolume);
   const playerVolumeRef = useRef(playerVolume);
   const playerVolumeMeterRef = useRef<HTMLSpanElement | null>(null);
   /**
@@ -777,11 +778,11 @@ export function PlayerBar() {
   const setMasterVolume = useCallback((rawVolume: number) => {
     const volume = Number.isFinite(rawVolume) ? Math.min(1, Math.max(0, rawVolume)) : 0;
     playerVolumeRef.current = volume;
-    setPlayerVolume(volume);
+    setSharedMasterVolume(volume);
     const effective = volume * deckGain(useCrossfade.getState().coplay, useCrossfade.getState().x);
     if (nativePlayer) void nativePlayer.setVolume(effective);
     else djEngine.setVolume(effective);
-  }, [nativePlayer]);
+  }, [nativePlayer, setSharedMasterVolume]);
   const [position, setPosition] = useState(() =>
     track &&
     track.id < 0 &&
@@ -2222,7 +2223,6 @@ export function PlayerBar() {
   // 底栏推子是持久化 MASTER 音量；协同播放时再与等功率交叉推子相乘。
   useEffect(() => {
     playerVolumeRef.current = playerVolume;
-    writeLocalStorageSoon("kd-player-volume", String(playerVolume), 1_000);
     // 用户音量与协同交叉推子相乘；移动端直接落到系统 player，桌面两台 deck
     // 一起设，接歌中途也保持一致。
     const effective = playerVolume * deckGain(coplay, fadeX);
@@ -2439,9 +2439,8 @@ export function PlayerBar() {
       playbackIntentRef.current += 1;
       nativeDjGenerationRef.current += 1;
       nativeDjBusyRef.current = false;
-      // 不能只改 React 状态再等 effect：网络视频会在同一个点击栈里立刻 play,
-      // 此时原生 CPAL 唱盘尚未收到暂停，WebKit 可能卡在起播阶段。这里同步发出
-      // 真实 transport 暂停，并让随后的 effect 只负责对账。
+      // 预览只会在 `playing`（已有媒体帧输出）后取得焦点。这里仍要同步发出真实
+      // transport 暂停，不能只改 React 状态等下一帧，否则两路声音会短暂重叠。
       transportHandledRef.current = true;
       if (nativePlayer) {
         void nativePlayer.pause().catch((error: unknown) => {
@@ -3105,7 +3104,7 @@ export function PlayerBar() {
    */
   const toggleTransport = useCallback(() => {
     const pip = useVideoPip.getState();
-    if (pip.active && pip.session?.source === "network") {
+    if (networkVideoOwnsTransport(pip.session, pip.active, pip.failed)) {
       toggleVideoPip();
       return;
     }
@@ -3188,8 +3187,13 @@ export function PlayerBar() {
       }
 
       const pip = useVideoPip.getState();
-      const currentlyPlaying =
-        pip.active && pip.session?.source === "network" ? pip.playing : playingRef.current;
+      const currentlyPlaying = networkVideoOwnsTransport(
+        pip.session,
+        pip.active,
+        pip.failed,
+      )
+        ? pip.playing
+        : playingRef.current;
       const requestedPlaying =
         action === "play" ? true : action === "pause" ? false : !currentlyPlaying;
       // Windows SMTC 会按当前状态发出明确的 Play/Pause。重复的同态命令不是 toggle，
@@ -3261,7 +3265,7 @@ export function PlayerBar() {
   /** 相对跳转：网络预览走 PiP 事件，曲库曲目走 SEEK_EVENT（和点波形同一条路）。 */
   const seekBy = useCallback((delta: number) => {
     const pip = useVideoPip.getState();
-    if (pip.active && pip.session?.source === "network") {
+    if (networkVideoOwnsTransport(pip.session, pip.active, pip.failed)) {
       const total = pip.duration;
       const next =
         total > 0
@@ -3675,6 +3679,7 @@ export function PlayerBar() {
   const pipDriving =
     pipActive &&
     Boolean(pipSession) &&
+    !(pipFailed && pipSession?.source === "network") &&
     !(pipSession?.source === "local" && pipMode === "panel");
   const titleText = pipDriving && pipSession
     ? pipSession.title || "视频预览"

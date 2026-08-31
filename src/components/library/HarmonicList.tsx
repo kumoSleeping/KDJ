@@ -303,7 +303,7 @@ export function HarmonicList({ track, onSelect }: HarmonicListProps) {
               }}
             >
               <CoverImage
-                src={api.coverUrl(match.track.id, match.track.modified_at)}
+                src={api.coverUrl(match.track.id, match.track.modified_at, 64)}
                 loading="lazy"
               />
             </span>

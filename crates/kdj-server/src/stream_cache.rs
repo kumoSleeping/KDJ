@@ -879,8 +879,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(writer.write_chunk(b"abc").await.unwrap());
+        let partial = writer.partial_path().to_path_buf();
         assert!(!writer.finish().await.unwrap());
         drop(writer);
+        assert!(!partial.exists(), "invalid partial is deleted immediately");
 
         assert!(cache
             .lookup(&root, &key, &source, Quality::Q128)

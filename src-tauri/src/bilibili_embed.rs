@@ -459,10 +459,16 @@ pub async fn bilibili_embed_control(
         return Err("B站视频编号无效".into());
     }
     let operation = match action.as_str() {
-        "play" => "void video.play();",
-        "pause" => "video.pause();",
-        "mute" => "video.muted = true;",
-        "unmute" => "video.muted = false;",
+        "play" => "void video.play();".to_string(),
+        "pause" => "video.pause();".to_string(),
+        "mute" => "video.muted = true;".to_string(),
+        "unmute" => "video.muted = false;".to_string(),
+        "volume" => {
+            let target = value
+                .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 1.0)
+                .ok_or_else(|| "B站播放器音量无效".to_string())?;
+            format!("video.volume = {target}; video.muted = {target} <= 0;")
+        }
         "seek" => {
             let target = value
                 .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 31_536_000.0)
